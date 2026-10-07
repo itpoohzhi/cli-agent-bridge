@@ -61,8 +61,16 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 | `DROID_DSH_BRIDGE_IMAGE_PROBE` | — | `1` — включить `probe`-модели изображений (**только для копии моста**, не для боевого запуска) |
 | `DROID_LAUNCHER` | `~/.config/factory-launch/droid-cli.sh` | канонический лончер droid |
 | `DROID_DSH_BRIDGE_RECEIPT_REQUIRED` | `1` | допуск образа droid по receipt (`workspace/state/droid-binary-receipt.json`) на каждом spawn; `0` — только стенд/разработка |
-| `DROID_DSH_BRIDGE_INSTR_LIMIT` | `60000` | предел блока agent-instructions в запросе, Б (REQ-003): больше — 400 `REQ003_SIZE_EXCEEDED` до spawn/add |
-| `DROID_BRIDGE_MAX_RPC_LINE_BYTES` / `_MAX_STDERR_BYTES` / `_MAX_INBOX_BYTES` / `_MAX_TURN_TEXT_BYTES` / `_MAX_CHATS` | 16 МиБ / 64 КиБ / 64 МиБ / 32 МиБ / 4096 | байтовые бюджеты RPC-строки, stderr, очереди событий, text/thinking хода и индекса чатов (превышение — 502, процесс/слот возвращаются) |
+| `DROID_DSH_BRIDGE_INSTR_LIMIT` | `60000` | жёсткий предел блока agent-instructions формы «только канон» (KB/DW), Б (REQ-003): больше — 400 `REQ003_SIZE_EXCEEDED` до spawn/add |
+| `DROID_DSH_BRIDGE_INSTR_MARGIN` | `2048` | запас для остальных блоков (WA/AB и т.п.): допустимый блок = `maxBytes` профиля − запас (при неизвестном `maxBytes` — 106496) |
+| `DROID_DSH_BRIDGE_GUARD_TICK` | `30` | период автоматического контура b_guard внутри моста, с |
+| `DROID_DSH_BRIDGE_PROFILES_DIR` / `DROID_DSH_BRIDGE_CANON` | `~/.dsh/profiles` / `~/Мой диск/Context/AGENTS.md` | профили DSH и канон, которые проверяет контур (только чтение) |
+| `DROID_BRIDGE_MAX_RPC_LINE_BYTES` / `_MAX_STDERR_BYTES` / `_MAX_INBOX_BYTES` / `_MAX_TURN_TEXT_BYTES` / `_MAX_CHATS` | 8 МиБ / 64 КиБ / 4 МиБ / 10 МиБ / 4096 | байтовые бюджеты RPC-строки, stderr, очереди событий (каждая запись учитывается минимум 64 Б), text/thinking хода (дельта и итог одного блока считаются один раз) и индекса чатов (превышение — 502 `proxy_error`, процесс/слот возвращаются) |
+
+Доставка ответа клиенту идёт срезами по 64 КиБ (JSON — с точным `Content-Length` без полной копии
+экранированного текста, SSE — несколькими событиями), поэтому потолок памяти определяет бюджет хода
+(10 МиБ), а не размер ответа; отдельный spool ответа на диск не используется: текст ограничен бюджетом
+хода, а ENOSPC при spool картинок даёт 502 `proxy_error` (новых публичных кодов, в том числе 507, нет).
 
 Модель и `reasoning_effort` берутся из запроса (effort передаётся как `-r`;
 модель по умолчанию — каталог/env). Секретов в коде нет: только окружение.
@@ -132,6 +140,9 @@ Admission: резерв байт по заявленному `Content-Length` п
 
 - `GET /health` и `/v1/health` — без авторизации, ровно 7 ключей: `ok`,
   `transport`, `model`, `active`, `max_concurrent`, `tool_emulation`, `uptime_s`.
+  `ok=false`, если допуск образа обязателен (`RECEIPT_REQUIRED`), а receipt отсутствует/не проходит проверку
+  (ни один ход не будет обслужен); состояние контура b_guard в `/health` не выводится (контракт 7 ключей), оно
+  видно только в журнале (`instr_guard_alert`).
 - `GET /v1/models` и `/models` (с авторизацией) — `{"object":"list","data":[…6…]}`,
   первым `default_model`; запись `{"id","object":"model","owned_by":"factory-droid",
   "created":0,"context_length":…}`.
@@ -151,7 +162,11 @@ Admission: резерв байт по заявленному `Content-Length` п
 Служебные строки вне строгих форматов: `session_rpc chat=<hash8> key=<1|0>
 path=<hot|restore|rebase|cold|ephemeral> gen=<n> sid=<sid8|->` (по ходу),
 `instr_guard sections=<N> omitted=<пути|-> bytes=<B>` (первый запрос нового чата),
-`restore_integrity …` (повтор служебных блоков после load -> санитация).
+`restore_integrity …` (повтор служебных блоков после load -> санитация),
+`instr_guard_alert state=<unsafe|unknown> reasons=… max_bytes=…` (контур b_guard: смена состояния профиля/канона),
+`guard_state state=ok max_bytes=…`, `instr_gate_alert guard=unsafe refused=<0|1> bytes=… limit=…` (гейт при
+небезопасном профиле), `droid_receipt_invalid err=…` (старт без валидного receipt),
+`session_rpc leader_exited_pipe_held pid=… rc=…` (лидер вышел, потомок держит pipe: группа добивается).
 
 ## Запуск и проверка
 
@@ -191,7 +206,7 @@ ACK `add_user_message` мгновенный и не завершает ход, �
 image-путь (таксономия C-10, лимиты, права 0700/0600, очистка, fail-closed proof),
 журнал, а также `tests/test_rpc_*.py` (дельта истории, изоляция чатов, title, idle-реап
 и restore того же SID, cap/вытеснение, таймауты, метаданные, остановка, дрейф droid)
-и `tests/test_b_guard.py`. Идентификаторы обязательств `TM-NNN` — в именах методов
+`tests/test_rpc_rework.py` / `tests/test_rpc_cycle3.py` (регрессии замечаний совета cycle-2/cycle-3: гейт и контур b_guard, ошибки записи состояния, изоляция ходов, бюджеты и доставка срезами, receipt schema 2, группы процессов, реапер, права каталогов) и `tests/test_b_guard.py`. Идентификаторы обязательств `TM-NNN` — в именах методов
 (`-k tm001`) и docstring. `tests/baseline_inventory.json` — сопоставление 92 baseline-тестов
 с текущими. Файлы — только во временных каталогах.
 
@@ -216,8 +231,30 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
   на SID, затем свежая generation; после load — проверка целостности служебных блоков).
 - **Допуск образа (AD-010).** Мост запускает droid только как `DROID_BIN=<образ из receipt>`:
   `tools/droid_image.py` копирует глобальный бинарь в `workspace/runtime/droid-image/<sha256>/droid`
-  (0500) и пишет receipt; на каждом spawn receipt читается заново, нет/не совпал sha — 503
-  `launcher_unavailable`. Глобальный `~/.local/bin/droid` образ не меняет.
+  (0500), в изолированных `runtime/probe-home`/`probe-cwd` выполняет реальные пробы (spawn с чтением
+  `factoryProtocolVersion` и model read-back, update — `list_tools` → отключение всех → read-back
+  `settings_updated`, load — `load_session` того же SID вторым процессом) и только после них атомарно пишет
+  receipt **schema 2**: `image_path`, `image_sha256`, `protocol` (`api_version`, `protocol_version`),
+  `tools_policy` (`disabled_tool_ids` + digest), `settings_profile` (профиль безопасных настроек + digest),
+  `probes`. На каждом spawn receipt читается заново: нет/schema≠2/sha образа не совпал/digest компонента
+  не сошёлся/проба не `ok` — 503 `launcher_unavailable`; живой `factoryProtocolVersion` обязан совпасть с
+  квалифицированным, а каталог `list_tools` живого процесса — с `tools_policy` (иначе 502 до `add_user_message`).
+  Глобальный `~/.local/bin/droid` образ не меняет. Каталоги `state`/`runtime` внутри workspace принудительно
+  приводятся к 0700 (чужой владелец — отказ старта), недоступный каталог состояния — отказ старта с сообщением.
+- **Состояние чата и ошибки записи.** Перед `add_user_message` на диск пишется PENDING; сбой записи
+  (ENOSPC, расхождение `rec_rev`) — 502 `proxy_error` без `add_user_message`, чат DIRTY. Сбой записи commit
+  READY после хода — успех клиенту не выдаётся (502), процесс закрывается, чат DIRTY: на диске остаётся
+  PENDING, после рестарта старый SID не продолжается, следующий ход — новая generation с replay. Слоты L/P/T
+  освобождаются при любом исходе, в том числе при сбое Popen/запуска потоков/конструктора хода.
+- **Изоляция ходов.** `turnId` реального droid присутствует только у `agent_turn_completed` и равен id
+  user-сообщения хода (у ассистентских сообщений он же — `parentId`). Терминал без `turnId`, с неизвестным
+  или уже завершённым `turnId` ход не завершает; сообщения и дельты прежних ходов отбрасываются и не продлевают
+  watchdog тишины. Набор завершённых turnId не вытесняется: при превышении 65536 процесс заменяется на границе
+  хода (`retired` → новая generation).
+- **Процессы и группы.** Дети — лидеры своих групп (`start_new_session`); закрытие всегда сигналит собственную
+  группу независимо от состояния лидера. Если лидер вышел, а потомок держит pipe, сторож лидера публикует EOF и
+  добивает группу (`leader_exited_pipe_held`). Эфемерные сессии (без ключа/title/images) закрываются SIGTERM без
+  ожидания `close_session`. Реапер перепроверяет idle/busy/waiters/идентичность процесса уже под арендой чата.
 - **Запись в stdin ребёнка** идёт срезами с дедлайном (`DROID_BRIDGE_RPC_CALL_TIMEOUT_S` охватывает и
   запись) и отменой; зависший (не читающий) ребёнок не держит interrupt и shutdown — они не ждут
   пишущий лок, дальше SIGTERM/SIGKILL.
@@ -259,6 +296,22 @@ KB > 60 000 Б (`REQ003_SIZE_EXCEEDED`, строгий режим включён
 только читает установленные профили DSH (`maxBytes` плагина agent-instructions) и прогоняет
 ту же проверку; профили утилита не правит — применение `maxBytes=106496` остаётся шагом владельца.
 
+### Автоматический контур и гейт REQ-003 в мосте
+
+Мост сам запускает проверку b_guard (`check_installed`: профили `DROID_DSH_BRIDGE_PROFILES_DIR`, канон
+`DROID_DSH_BRIDGE_CANON`) на старте и каждые `DROID_DSH_BRIDGE_GUARD_TICK` с в фоновом потоке, без ручного CLI.
+Состояния: `ok`; `unsafe` (`CANON_LOST`, `DUPLICATE_RETURNED`, `REQ003_SIZE_EXCEEDED` на профиле, нечитаемый
+`maxBytes`); `unknown` (профилей нет). Смена состояния — строка `instr_guard_alert` в журнале; рестарт-петель нет.
+
+Гейт входящих запросов (до spawn/`add_user_message`) проверяет **все** блоки agent-instructions во **всём**
+тексте user-сообщений (маркер не ограничен началом сообщения):
+
+- блок формы «только канон» (все секции — копии канона: KB/DW) — не больше 60 000 Б, иначе 400 `REQ003_SIZE_EXCEEDED`;
+- прочие блоки (WA/AB и т.п.) — не больше `maxBytes` профиля минус запас (по умолчанию 106496 − 2048), а не 60 000;
+- при `unsafe` (выбранный вариант RW-001: управляемый отказ + alert, а не немой 400 по размеру) **новые** чаты
+  с блоком получают 400 `REQ003_SIZE_EXCEEDED` с пояснением про охранник и строкой `instr_gate_alert`;
+  живые чаты (есть SID/запись) и запросы без блока продолжают обслуживаться. Новых кодов ошибок нет.
+
 ## Подключение к DSH
 
 Провайдер `droid-bridge` в `~/.dsh/profiles/desktop/cordis.patch.yml` и
@@ -267,6 +320,28 @@ KB > 60 000 Б (`REQ003_SIZE_EXCEEDED`, строгий режим включён
 `supportsDeveloperRole: false`, `maxTokensField: max_tokens`,
 `supportsReasoningEffort: true`. Список моделей в профилях — дословно из
 `fleet.json` (6 моделей, только dev-уровни effort); сверка — `fleet_check.py`.
+
+## Развёртывание (порядок обязателен)
+
+Каждый шаг — предусловие следующего; без шагов 1–2 каждый spawn даёт 503 `launcher_unavailable`
+(`/health` при этом `ok:false`, в журнале на старте `droid_receipt_invalid`).
+
+1. `/usr/bin/python3 tools/droid_image.py [--source <путь к droid>]` — копия образа (0500) в
+   `workspace/runtime/droid-image/<sha256>/`, реальные пробы (spawn / update / load), receipt schema 2.
+   Exit 3 — проба провалена, receipt не записан.
+2. Проверить receipt: `workspace/state/droid-binary-receipt.json` (`schema: 2`, все `probes: ok`,
+   `protocol.protocol_version` = версия установленного droid).
+3. `/usr/bin/python3 tools/b_guard.py --profiles` — обязательно exit 0 (канон на месте, дубль не возвращается,
+   KB-блок ≤ 60 000 Б). На профиле `maxBytes=262144` (блок ~111 114 Б) будет exit 2.
+4. Владелец применяет `maxBytes=106496` в профилях DSH (утилита и мост профили не правят).
+5. Рестарт моста (на старте в журнале не должно быть `droid_receipt_invalid` и `instr_guard_alert`;
+   `guard_state state=ok`).
+6. Проба: `/health` → `ok:true`, затем один ход из KB-cwd на копии моста (порт 9892, не боевой 9882) — без 400.
+
+Откат: вернуть предыдущий коммит и перезапустить мост (`launchctl kickstart`). Прежний код принимает только
+receipt `schema: 1`, поэтому перед откатом нужно перезаписать receipt прежней версией `tools/droid_image.py`
+(на стенде — `DROID_DSH_BRIDGE_RECEIPT_REQUIRED=0`). Формат записей чатов в `workspace/state` (`schema: 1`)
+не менялся; сомнительные записи прежний код перестраивает из истории запроса (history-fallback).
 
 ## Деплой
 
