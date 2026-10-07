@@ -604,7 +604,7 @@ class TestPersistenceAndShutdown(RpcCase):
     def test_tm015_child_env_private_dirs_and_no_secrets_in_log_or_state(self):
         """TM-015: ключ моста вырезан, FACTORY_API_KEY унаследован и не в лог/state; права 0700/0600; sweep не трогает state."""
         saved = {k: os.environ.get(k) for k in ("FACTORY_API_KEY", "DROID_DSH_BRIDGE_KEY")}
-        os.environ["FACTORY_API_KEY"] = "fk-TEST-NOT-REAL-0123456789"
+        os.environ["FACTORY_API_KEY"] = "TESTFACTORYKEY-NOT-REAL-0123456789"
         os.environ["DROID_DSH_BRIDGE_KEY"] = "bridge-secret-value-xyz"
         try:
             with self.capture_logs() as lines:
@@ -617,16 +617,16 @@ class TestPersistenceAndShutdown(RpcCase):
                 else:
                     os.environ[key] = value
         spawn = self.hub.spawns()[0]
-        self.assertEqual(spawn["factory_api_key"], "fk-TEST-NOT-REAL-0123456789")
+        self.assertEqual(spawn["factory_api_key"], "TESTFACTORYKEY-NOT-REAL-0123456789")
         self.assertFalse(spawn["bridge_key_in_env"])
         joined = "\n".join(lines)
-        self.assertNotIn("fk-TEST-NOT-REAL", joined)
+        self.assertNotIn("TESTFACTORYKEY-NOT-REAL", joined)
         self.assertNotIn("bridge-secret-value-xyz", joined)
         state_dir = server.WORKSPACE / "state"
         for path in state_dir.rglob("*"):
             if path.is_file():
                 text = path.read_text(encoding="utf-8")
-                self.assertNotIn("fk-TEST-NOT-REAL", text)
+                self.assertNotIn("TESTFACTORYKEY-NOT-REAL", text)
                 self.assertNotIn("bridge-secret-value-xyz", text)
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             else:
