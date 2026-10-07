@@ -3,18 +3,20 @@
 OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`droid exec`) с
 эмуляцией OpenAI function calling (tool_emulation). Порт **9882**.
 
-- Один запрос `/v1/chat/completions` = один headless-ход
-  `droid exec -o stream-json -m <model> --cwd <workspace> --tag droid-dsh-bridge -f <prompt_file> -r <effort>`
-  через канонический лончер `~/.config/factory-launch/droid-cli.sh` (egress-пиннинг;
-  голый droid-бинарь не используется — бьёт в WAF Factory; fallback на него удалён).
+- Один запрос `/v1/chat/completions` = один ход в долгоживущем процессе
+  `droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc`
+  (по процессу на keyed-чат, см. «RPC-режим») через канонический лончер
+  `~/.config/factory-launch/droid-cli.sh` (egress-пиннинг; голый droid-бинарь не
+  используется — бьёт в WAF Factory; fallback на него удалён).
 - Модели и уровни effort — из каталога `fleet.json` (6 моделей Droid-флота,
   только dev-контекст): sonnet-5-5, gemini-3.8-flash, grok-4.7,
   deepseek-v4.1-flash, gpt-6.1-sol, glm-5.3.
 - `model`/`reasoning_effort` валидируются строго **до** SSE: не из каталога —
   HTTP 400 `model_not_allowed` / `unsupported_reasoning_effort`; никаких
   clamp, алиасов и silent fallback. `-r` передаётся всегда (из запроса либо
-  `default_effort` модели). Флаги `--auto` / `--skip-permissions-unsafe` не
-  передаются никогда.
+  `default_effort` модели). Автономность и effort задаются параметрами RPC
+  (`autonomyLevel`, `reasoningEffort`); `--skip-permissions-unsafe` не
+  используется никогда.
 - `tools` в запросе → в промпт добавляется протокол
   `<tool_call>{"name":…,"arguments":{…}}</tool_call>` и схемы инструментов;
   потоковые блоки переводятся в `delta.tool_calls` + `finish_reason:"tool_calls"`,
@@ -35,9 +37,12 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 - `tests/` — stdlib `unittest` (см. «Тесты»).
 - `start.sh` — запуск: читает ключ из окружения или `~/.dsh/.env`
   (строка `DROID_DSH_BRIDGE_KEY=…`), затем `exec /usr/bin/python3 server.py`.
-- `workspace/` — cwd для droid-процессов и промпт-файлы `prompt-<hex>.txt`
-  (удаляются после хода); для image-запросов — per-run каталоги `img-<uuid32>`
-  (0700, файлы 0600), удаляются при любом исходе.
+- `tools/b_guard.py` — офлайн-охранник бюджета agent-instructions (см. «B: охранник»).
+- `workspace/` — cwd для droid-процессов; `workspace/state/` — метаданные чатов
+  (`conversations.v1/chats/<2hex>/<sha256>.json`, 0600/0700, только хеши) и
+  `children.json`; `workspace/runtime/factory-home` — чистый Factory home детей;
+  для image-запросов — per-run каталоги `img-<uuid32>` (0700, файлы 0600),
+  удаляются при любом исходе. Свипер трогает только `prompt-*`/`img-*`.
 
 ## Env
 
@@ -48,7 +53,8 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 | `DROID_DSH_BRIDGE_KEY` | — (обязателен) | ключ авторизации (Bearer / x-api-key) |
 | `FACTORY_API_KEY` | — | headless-вход `droid exec` без интерактивного логина; `start.sh` читает из `~/.zshenv` |
 | `DROID_DSH_BRIDGE_MODEL` | `default_model` каталога | модель по умолчанию (обязана быть в каталоге) |
-| `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | параллельных droid-процессов |
+| `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | cap процессов droid (resident, стартующие, title, закрывающиеся) и одновременных ходов |
+| `DROID_DSH_BRIDGE_IDLE_SECONDS` | `2700` | idle-гашение процесса чата, с (SID и файлы остаются, следующий ход — `load_session`) |
 | `DROID_DSH_BRIDGE_QUEUE_TIMEOUT` | `900` | ожидание слота, с |
 | `DROID_DSH_BRIDGE_KEEPALIVE` | `15` | keepalive SSE, с |
 | `DROID_DSH_BRIDGE_FLEET` | `<каталог моста>/fleet.json` | путь к каталогу флота |
@@ -133,11 +139,16 @@ Admission: резерв байт по заявленному `Content-Length` п
 ## Журнал
 
 `logs/` (JSON-строки stdout launchd). Формат ключевых строк:
-`exec model=<id> effort=<lvl> effort_source=<request|default> prompt_bytes=… [images=…] <tag>`,
+`exec model=<id> effort=<lvl> effort_source=<request|default> autonomy=<lvl> autonomy_source=<request|default> prompt_bytes=… [images=…] <tag>`,
+`usage sess=<sid8|-> raw=<in>/<out> rep=<in>/<out> resumed=<0|1> turns=<n>`,
 `done model=<id> rc=<n> state=<s> … <tag>`,
 `reject reason=<тип> model=<id каталога|unknown> model_len=<n> client=<ip:port>`.
 Тела запросов, ключи, base64 и пути хранилища в журнал не попадают; в строке
 `reject` — только каталожный id (или `unknown`) и длина клиентской строки.
+Служебные строки вне строгих форматов: `session_rpc chat=<hash8> key=<1|0>
+path=<hot|restore|rebase|cold|ephemeral> gen=<n> sid=<sid8|->` (по ходу),
+`instr_guard sections=<N> omitted=<пути|-> bytes=<B>` (первый запрос нового чата),
+`restore_integrity …` (повтор служебных блоков после load -> санитация).
 
 ## Запуск и проверка
 
@@ -169,12 +180,67 @@ cd ~/.dsh/bridges/droid-bridge
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests -v
 ```
 
-84 теста: каталог и его классы I/II/III, строгая валидация model/effort, argv
-(один `-m`/`-r`, без `--auto`), framing/413/admission, tool emulation, ретраи,
-sweep, image-путь (таксономия C-10, лимиты, права 0700/0600, очистка,
-fail-closed proof), журнал. Тесты не ходят в сеть и к droid: `Run` подменяется
-фейком, а argv/раскладка проверяются на локальной заглушке лончера; файлы — только
-во временных каталогах.
+Набор — stdlib `unittest`, без сети и без реального droid. Процесс droid в тестах —
+**настоящий subprocess** `tests/fake_droid.py` (stream-jsonrpc по stdin/stdout:
+ACK `add_user_message` мгновенный и не завершает ход, нотификации, retract,
+сбои), лончер подставляется через `DROID_LAUNCHER`. Покрыто: каталог (классы I/II),
+строгая валидация model/effort, framing/413/admission, tool emulation, ретраи,
+image-путь (таксономия C-10, лимиты, права 0700/0600, очистка, fail-closed proof),
+журнал, а также `tests/test_rpc_*.py` (дельта истории, изоляция чатов, title, idle-реап
+и restore того же SID, cap/вытеснение, таймауты, метаданные, остановка, дрейф droid)
+и `tests/test_b_guard.py`. Идентификаторы обязательств `TM-NNN` — в именах методов
+(`-k tm001`) и docstring. `tests/baseline_inventory.json` — сопоставление 92 baseline-тестов
+с текущими. Файлы — только во временных каталогах.
+
+## RPC-режим (долгоживущий droid на чат)
+
+- **Ключ чата** — `prompt_cache_key` запроса; в argv/путь не попадает, идентичность —
+  `sha256(namespace + ключ)`. Без ключа (или с невалидным — нового 400 нет), для
+  title-запросов (определяются по структуре: system-инструкция, 2 messages, без tools,
+  `max_tokens=64`) и для запросов с изображениями — эфемерная чистая сессия с replay
+  истории запроса под общим cap процессов.
+- **Дельта истории.** DSH-запрос — авторитетная история. Мост хранит хеш-цепочку
+  потреблённого префикса и проекцию выданных assistant-сообщений; префикс совпал —
+  в RPC уходит только непросмотренный суффикс (все сообщения кроме последнего с
+  `skipAgentLoop:true`, последнее запускает один цикл). Расхождение, форк, правка,
+  компакция, смена system/tools/cwd, недоставленный ход — новая generation:
+  `initialize_session` + replay всей истории запроса. Fuzzy-сопоставления нет.
+- **Ресурсы и порядок** `L → P → T`: аренда чата (одновременные запросы одного ключа
+  идут по очереди), ёмкость процессов `P` (cap 4, FIFO-очередь 900 с с keepalive 15 с,
+  вытеснение только idle по LRU: SIGTERM → waitpid 2 с → SIGKILL) и разрешение хода `T`.
+- **Idle** `DROID_DSH_BRIDGE_IDLE_SECONDS` (2700 с): процесс закрывается штатно, SID и
+  метаданные остаются; следующий ход — `load_session` того же SID (не больше 5 restore
+  на SID, затем свежая generation; после load — проверка целостности служебных блоков).
+- **Безопасность ребёнка.** Чистый Factory home (`FACTORY_HOME_OVERRIDE`),
+  `disableBuiltinSkills`, `autoRejectPermissionRequests`, нативные tools отключаются по
+  актуальному `list_tools` (ошибка — fail-closed, ход не начинается); model/effort/autonomy
+  сверяются read-back, подмена модели — 502 `droid_error`; ключ моста вырезан из env.
+- **Вывод хода** удерживается до `agent_turn_completed`; `llm_retry` и
+  `assistant_message_retracted` удаляют только незакоммиченное; usage — из
+  `tokenUsage` терминального события по ходу (не кумулятив). Таймауты: первое событие 90 с,
+  ход 1800 с (абсолютный), тишина без событий текущего хода 120 с (interrupt),
+  keepalive 15 с. После неудачного хода чат инвалидируется (повтор строится из истории
+  запроса, а не повтором user в старую сессию).
+- **Остановка.** SIGTERM: приём прекращается, активные прерываются, дети закрываются
+  параллельно в пределах 4,5 с, затем SIGKILL только собственных PGID; при SIGKILL
+  родителя дети завершаются по EOF stdin; на старте добиваются только собственные
+  осиротевшие дети (PID + start-signature из `workspace/state/children.json`).
+  `flock` на `workspace/state/.writer.lock` не пускает второй экземпляр.
+
+## B: охранник бюджета инструкций (`tools/b_guard.py`)
+
+Офлайн (stdlib, читает только размеры файлов): расчёт блока agent-instructions по
+формуле `279 + 32·N_секций + Σбайт` (+ метка при omitted/truncated), классы
+`ALL/UG_OMITTED/TRUNCATED`.
+
+```bash
+/usr/bin/python3 tools/b_guard.py --self-test                 # границы zone-F (KB/AB/WA)
+/usr/bin/python3 tools/b_guard.py --check --maxbytes 106496   # прогноз, запасы, рекомендуемый maxBytes
+```
+
+Коды выхода `--check`: 0 — оба запаса ≥ 4096 Б, 1 — запас меньше, 2 — канон теряется
+в каком-либо cwd (`CANON_LOST`) или дубль возвращается в KB (`DUPLICATE_RETURNED`).
+Профили DSH утилита не правит и не читает (`--profiles` в dev-копии не реализован).
 
 ## Подключение к DSH
 
