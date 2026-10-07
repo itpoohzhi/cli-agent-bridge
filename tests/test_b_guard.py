@@ -2,10 +2,12 @@
 и TM-018 (коды выхода, граница 60 000 Б, рост/выход канона из окна, рекомендуемый maxBytes).
 
 Расчётные тесты работают на чистых размерах (снимок zone-F: канон 55 417 Б), без доступа
-к боевым файлам. Единственный «живой» тест запускает `main(["--check", ...])` в подпроцессе
+к боевым файлам. CLI-тесты (RW-003/RW-004/RW-002) строят снимок из временных файлов и патчат
+пути по умолчанию. Единственный «живой» тест запускает `main(["--check", ...])` в подпроцессе
 на реальных путях и пропускается только если этих путей на машине нет.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -13,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -42,6 +45,74 @@ def snapshot_files(canon=CANON):
 
 def with_ug(files, canon=CANON):
     return [bg.make_user_global(canon)] + list(files)
+
+
+def body_text(size, ch="a", line=120):
+    """ASCII-текст ровно `size` Б со строками по `line` символов (переводы строк экранируются в JSON)."""
+    if not line:
+        return ch * size
+    chunk = (ch * (line - 1) + "\n")
+    return (chunk * (size // line + 1))[:size]
+
+
+def build_snapshot_fs(root, canon=CANON, canon_line=120):
+    """Снимок zone-F на временных файлах: канон, KB (симлинк на канон), WA, AB, DW; возвращает пути."""
+    ctx = root / "ctx"
+    ctx.mkdir()
+    canon_path = ctx / "AGENTS.md"
+    canon_path.write_text(body_text(canon, "c", canon_line), encoding="utf-8")
+    cwds = {}
+    for label in ("KB", "WA", "AB", "DW"):
+        d = root / label.lower()
+        d.mkdir()
+        (d / ".git").mkdir()
+        cwds[label] = d
+    (cwds["KB"] / "AGENTS.md").symlink_to(canon_path)
+    (cwds["WA"] / "AGENTS.md").write_text(body_text(23245, "w"), encoding="utf-8")
+    (cwds["WA"] / "CLAUDE.md").write_text(body_text(478, "v"), encoding="utf-8")
+    (cwds["AB"] / "AGENTS.md").write_text(body_text(37520, "a"), encoding="utf-8")
+    (cwds["AB"] / "CLAUDE.md").write_text(body_text(448, "b"), encoding="utf-8")
+    return {"canon": canon_path, "cwds": cwds}
+
+
+def run_cli_snapshot(fs, argv):
+    """`bg.main` на снимке: пути по умолчанию и KB-метка REQ-003 патчатся на временные каталоги."""
+    cwds = fs["cwds"]
+    default = tuple((label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW"))
+    out = io.StringIO()
+    with mock.patch.object(bg, "KB_CWD", str(cwds["KB"])), mock.patch.object(bg, "DEFAULT_CWDS", default):
+        with redirect_stdout(out), redirect_stderr(out):
+            code = bg.main(list(argv) + ["--canon", str(fs["canon"])])
+    return code, out.getvalue()
+
+
+# Эталонная сериализация строки журнала: написана вручную, независимо от b_guard (golden).
+GOLDEN_HEAD = ("<system-reminder>\nThe following workspace instructions may be relevant to your work. "
+               "Use them as guidance when applicable. More specific instructions take precedence over "
+               "broader ones. They do not override system, developer, or direct user instructions.\n\n")
+
+
+def golden_journal_line(sections, maxbytes, marker=""):
+    """Эталон: block = head + [marker\\n\\n] + секции + \\n + </system-reminder>; событие - JSON без пробелов + \\n."""
+    parts = ["Instructions from: %s\n\n%s" % (d, t) for d, t in sections]
+    block = GOLDEN_HEAD + (marker + "\n\n" if marker else "") + "\n\n".join(parts) + "\n</system-reminder>"
+    identity = ('{"projectRoot":"","projectRootMarkers":[".git"],"maxBytes":%d,"maxSourceBytes":1048576,'
+                '"instructionFileCandidates":["AGENTS.md","CLAUDE.md"],'
+                '"localInstructionFileCandidates":["AGENTS.local.md","CLAUDE.local.md"]}' % maxbytes)
+    changes = []
+    for d, t in sections:
+        scope_dir, _, name = d.rpartition("/")
+        if d == "~/.dsh/AGENTS.md":
+            scope_dir = "user-global"
+        changes.append({"action": "set", "scope": (scope_dir or ".") + "\u0000" + name, "path": d,
+                        "digest": hashlib.sha1(t.encode("utf-8")).hexdigest()})
+    event = {"type": "user/message", "seq": 10, "time": 1791393991696,
+             "data": {"content": [{"type": "text", "text": block}],
+                      "source": {"kind": "agent-instructions", "form": "instructions", "baseline": True,
+                                 "baselineIdentity": identity, "changes": changes},
+                      "role": "user", "id": "c3321a3c-6a0a-4d8e-8137-1dfd672f33fe"},
+             "surfaceOp": "append"}
+    return block, json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 class TestTm017Model(unittest.TestCase):
@@ -149,6 +220,231 @@ class TestTm017Model(unittest.TestCase):
             self.assertEqual(bg.main(["--self-test"]), 0)
 
 
+class TestRw003ContentKeyAndExactLine(unittest.TestCase):
+    """RW-003: ключ содержимого вместо realpath и точный расчёт строки журнала."""
+
+    def test_rw003_identical_content_two_files_collapse(self):
+        """RW-003: два РАЗНЫХ файла с одинаковым содержимым в одном каталоге схлопываются в одну секцию; ключ - sha256."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            data = ("одинаковое содержимое\n" * 40).encode("utf-8")
+            (repo / "AGENTS.md").write_bytes(data)
+            (repo / "CLAUDE.md").write_bytes(data)
+            entries, ok = bg.collect_cwd_entries(str(repo), "/nonexistent-canon")
+            self.assertTrue(ok)
+            self.assertEqual(len(entries), 2)
+            self.assertEqual({e.content_key for e in entries}, {hashlib.sha256(data).hexdigest()})
+            kept = bg.dedupe_entries(entries)
+            self.assertEqual([e.display for e in kept], ["AGENTS.md"])
+            one = bg.render_plan(kept, 10**6)
+            self.assertEqual(one.kept, ["AGENTS.md"])
+            self.assertEqual(one.block_bytes, bg.FRAME_BASE + bg.section_bytes("AGENTS.md", len(data)))
+
+    def test_rw003_same_file_two_names_and_different_content(self):
+        """RW-003: один файл под двумя именами схлопывается; файлы с разным содержимым - нет."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            (repo / "AGENTS.md").write_bytes(b"x" * 50)
+            (repo / "CLAUDE.md").symlink_to(repo / "AGENTS.md")
+            entries, _ = bg.collect_cwd_entries(str(repo), "/nonexistent-canon")
+            self.assertEqual(len(bg.dedupe_entries(entries)), 1)
+            (repo / "CLAUDE.md").unlink()
+            (repo / "CLAUDE.md").write_bytes(b"y" * 50)  # тот же размер, другое содержимое
+            entries, _ = bg.collect_cwd_entries(str(repo), "/nonexistent-canon")
+            self.assertEqual(len(bg.dedupe_entries(entries)), 2)
+
+    def test_rw003_exact_line_golden_quotes_newlines_long_path(self):
+        """RW-003: содержимое с кавычками, переводами строк, обратным слешем, кириллицей и длинный display path -
+        прогноз строки журнала равен длине эталонной сериализации, а не константной надбавке."""
+        long_dir = "/".join(["очень-длинный-каталог-%02d" % i for i in range(6)])
+        displays = ["../" + long_dir + "/AGENTS.md", "sub/CLAUDE.md"]
+        texts = ['Строка "в кавычках"\nвторая\tстрока с \\ слешем\n' * 30, 'b"b\n' * 200]
+        sections = list(zip(displays, texts))
+        block, line = golden_journal_line(sections, 106496)
+        got = bg.exact_journal_line_bytes(sections, 106496)
+        self.assertEqual(got, len(line.encode("utf-8")))
+        self.assertEqual(bg.render_block_text(sections), block)
+        # Модель размера блока совпадает с реальным рендером.
+        entries = [bg.FileEntry(d, len(t.encode("utf-8")), False, ".", None, False) for d, t in sections]
+        self.assertEqual(len(block.encode("utf-8")), bg._block(entries, ""))
+        # Это не «блок + константа»: экранирование и пути дают другое число.
+        self.assertNotEqual(got, len(block.encode("utf-8")) + 1225)
+        # Тот же набор с коротким путём дешевле ровно на прирост путей в заголовке/path/scope.
+        short = bg.exact_journal_line_bytes([("a/AGENTS.md", texts[0]), sections[1]], 106496)
+        self.assertLess(short, got)
+
+    def test_rw003_exact_line_with_marker(self):
+        """RW-003: метка бюджета входит в блок и строку (UG_OMITTED)."""
+        marker = bg.marker_text(106496, [bg.UG_DISPLAY], None)
+        sections = [("AGENTS.md", "тело\n\"q\"\n" * 10)]
+        block, line = golden_journal_line(sections, 106496, marker)
+        self.assertEqual(bg.exact_journal_line_bytes(sections, 106496, marker), len(line.encode("utf-8")))
+        self.assertEqual(len(block.encode("utf-8")),
+                         bg._block([bg.FileEntry("AGENTS.md", len(sections[0][1].encode("utf-8")))], marker))
+
+    def test_rw003_evaluate_uses_exact_line_when_texts_known(self):
+        """RW-003: evaluate при известных текстах считает строку журнала точно (exact), иначе - оценкой по размерам."""
+        canon_text = body_text(55000, "c")
+        canon_size = len(canon_text.encode("utf-8"))
+        files = {"KB": [bg.FileEntry("AGENTS.md", canon_size, True, "/k", "h", False)]}
+        texts = {"KB": {"AGENTS.md": canon_text}}
+        res = bg.evaluate(canon_size, files, 106496, ("KB",), texts=texts, canon_text=canon_text)
+        marker = bg.marker_text(106496, [bg.UG_DISPLAY], None)
+        want = bg.exact_journal_line_bytes([("AGENTS.md", canon_text)], 106496, marker)
+        self.assertEqual(res.line_estimates["KB"], (want, True))
+        est = bg.evaluate(canon_size, files, 106496, ("KB",))
+        self.assertFalse(est.line_estimates["KB"][1])
+        # Оценка по размерам - тот же порядок величины, что и точный расчёт (запасной вариант).
+        self.assertLess(abs(est.line_estimates["KB"][0] - want), 0.05 * want)
+
+
+class TestRw004StrictCli(unittest.TestCase):
+    """RW-004: strict_req003 включён в рабочем CLI, граница 60 000 Б строгая."""
+
+    def test_rw004_block_boundary_reason_basis_block(self):
+        """RW-004: причина basis=block - при блоке KB 60 001 (strict: exit 2), но не при ровно 60 000
+        (строка журнала при этом всё равно длиннее блока на обёртку - её граница проверяется в CLI-тесте ниже)."""
+        marker = bg.marker_text(106496, [bg.UG_DISPLAY], None)
+        fixed = bg.FRAME_BASE + bg.section_bytes("AGENTS.md", 0) + len(marker.encode("utf-8")) + bg.MARKER_TAIL_BYTES
+
+        def run(block):
+            size = block - fixed
+            files = {"KB": [bg.FileEntry("AGENTS.md", size, True, "/k", "h", False)]}
+            res = bg.evaluate(size, files, 106496, ("KB",), strict_req003=True)
+            self.assertEqual(res.renders["KB"].block_bytes, block)
+            return res
+
+        self.assertEqual([r for r in run(60000).reasons if "basis=block" in r], [])
+        over = run(60001)
+        self.assertTrue([r for r in over.reasons if "basis=block" in r], over.reasons)
+        self.assertEqual(over.exit_code, 2)
+
+    def test_rw004_cli_line_boundary_60000_60001(self):
+        """RW-004: CLI на временных файлах - точная строка журнала ровно 60 000 Б не даёт REQ003_SIZE_EXCEEDED
+        (exit 1: запас строки 0 < 2048), 60 001 - REQ003_SIZE_EXCEEDED и exit 2."""
+        marker = bg.marker_text(106496, [bg.UG_DISPLAY], None)
+        base = bg.exact_journal_line_bytes([("AGENTS.md", "")], 106496, marker)
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp), canon=60000 - base, canon_line=0)
+            code, text = run_cli_snapshot(fs, ["--check", "--maxbytes", "106496"])
+            self.assertIn("line_est=60000", text)
+            self.assertNotIn("REQ003_SIZE_EXCEEDED", text)
+            self.assertEqual(code, 1, text)
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp), canon=60001 - base, canon_line=0)
+            code, text = run_cli_snapshot(fs, ["--check", "--maxbytes", "106496"])
+            self.assertIn("line_est=60001", text)
+            self.assertIn("REQ003_SIZE_EXCEEDED cwd=KB", text)
+            self.assertEqual(code, 2, text)
+
+    def test_rw004_snapshot_cli_exit0(self):
+        """RW-004: снимок zone-F на временных файлах при 106 496 - exit 0 (одна копия канона, REQ-003 в норме)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp))
+            code, text = run_cli_snapshot(fs, ["--check", "--maxbytes", "106496"])
+            self.assertEqual(code, 0, text)
+            self.assertIn("line_mode=exact", text)
+
+
+PROFILE_YML = """# Your patch layer
+# (в) agent-instructions.maxBytes: 65536 -> 999 (комментарий, не значение)
+- id: preset-minimal
+  config:
+    plugins:
+      - id: agent-instructions
+        config:
+          maxBytes: 1
+- id: preset-standard
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: standard
+    plugins:
+      - id: persona
+        config:
+          prefix: x
+      - id: agent-instructions
+        name: '@deepseek-ai/dsh-agent-instructions'
+        config:
+          maxBytes: %d
+      - id: tool-bash
+- id: other
+  config:
+    maxBytes: 7
+"""
+
+
+def write_profile(root, name, maxbytes, text=None):
+    d = Path(root) / name
+    d.mkdir(parents=True)
+    (d / "cordis.patch.yml").write_text(text if text is not None else PROFILE_YML % maxbytes, encoding="utf-8")
+
+
+class TestRw002Profiles(unittest.TestCase):
+    """RW-002 (b_guard): режим --profiles читает установленные профили (read-only) и проверяет их maxBytes."""
+
+    def test_rw002_parse_maxbytes_preset_standard_only(self):
+        """RW-002: maxBytes берётся из agent-instructions внутри preset-standard, комментарии и другие пресеты игнорируются."""
+        self.assertEqual(bg.parse_profile_maxbytes(PROFILE_YML % 106496), 106496)
+        self.assertIsNone(bg.parse_profile_maxbytes("[]\n"))
+
+    def test_rw002_profile_106496_exit0(self):
+        """RW-002: профиль с maxBytes=106496 на снимке - exit 0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp))
+            write_profile(Path(tmp) / "profiles", "web", 106496)
+            code, text = run_cli_snapshot(fs, ["--profiles", "--profiles-dir", str(Path(tmp) / "profiles")])
+            self.assertEqual(code, 0, text)
+            self.assertIn("profile=web", text)
+            self.assertIn("maxBytes=106496", text)
+
+    def test_rw002_profile_262144_duplicate_exit2(self):
+        """RW-002: профиль с maxBytes=262144 - канон возвращается дважды, DUPLICATE_RETURNED и exit 2."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp))
+            write_profile(Path(tmp) / "profiles", "web", 262144)
+            code, text = run_cli_snapshot(fs, ["--profiles", "--profiles-dir", str(Path(tmp) / "profiles")])
+            self.assertEqual(code, 2, text)
+            self.assertIn("DUPLICATE_RETURNED cwd=KB", text)
+
+    def test_rw002_worst_profile_wins_and_bak_skipped(self):
+        """RW-002: несколько профилей - итог по худшему; каталоги резервных копий (.bak) пропускаются."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp))
+            prof = Path(tmp) / "profiles"
+            write_profile(prof, "desktop", 106496)
+            write_profile(prof, "web", 262144)
+            write_profile(prof, "web.bak-1", 106496)
+            code, text = run_cli_snapshot(fs, ["--profiles", "--profiles-dir", str(prof)])
+            self.assertEqual(code, 2, text)
+            self.assertIn("profile=desktop", text)
+            self.assertNotIn("web.bak", text)
+
+    def test_rw002_missing_dir_or_maxbytes_exit2(self):
+        """RW-002: нет каталога профилей / нет maxBytes - понятное сообщение и exit 2."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp))
+            code, text = run_cli_snapshot(fs, ["--profiles", "--profiles-dir", str(Path(tmp) / "absent")])
+            self.assertEqual(code, 2)
+            self.assertIn("профили не найдены", text)
+            write_profile(Path(tmp) / "empty", "headless", 0, text="[]\n")
+            code, text = run_cli_snapshot(fs, ["--profiles", "--profiles-dir", str(Path(tmp) / "empty")])
+            self.assertEqual(code, 2)
+            self.assertIn("maxBytes не найден", text)
+
+    def test_rw002_default_profiles_dir_is_home_dsh(self):
+        """RW-002: каталог профилей по умолчанию - ~/.dsh/profiles (через expanduser); FU-008: боевые пути тоже от ~."""
+        self.assertEqual(bg.PROFILES_DIR, os.path.expanduser("~/.dsh/profiles"))
+        self.assertEqual(bg.CANON_PATH, os.path.expanduser("~/Мой диск/Context/AGENTS.md"))
+        self.assertEqual(bg.KB_CWD, os.path.expanduser("~/Мой диск/Работа/Sber/knowledge-base"))
+        self.assertEqual(bg.AB_CWD, os.path.expanduser("~/Мой диск/Workshop/aibunker-workshop"))
+        self.assertEqual(bg.WA_CWD, os.path.expanduser("~/src/saluteeye/gigabus/gigawebaccess/webaccess"))
+        self.assertEqual(bg.DW_CWD, os.path.expanduser("~/Documents/deepseek-harness/default-workspace"))
+
+
 class TestTm018Guard(unittest.TestCase):
     """TM-018: коды выхода 0/1/2, граница 60 000 Б, рост канона, рекомендуемый maxBytes."""
 
@@ -179,13 +475,19 @@ class TestTm018Guard(unittest.TestCase):
         self.assertEqual(up.exit_code, 1)
         self.assertTrue(any(r.startswith("LOW_MARGIN_UPPER") for r in up.reasons))
 
-    def test_tm018_canon_growth_to_ceiling_exit_le1(self):
-        """TM-018: рост канона до потолка 40 000 симв. (~63 600 Б) при 106 496 - exit <= 1; блок KB > 60 000 даёт REQ003_SIZE_EXCEEDED."""
+    def test_tm018_canon_growth_to_ceiling_exit2_at_cli(self):
+        """TM-018/RW-004: рост канона до потолка (~63 600 Б) - чистый evaluate без strict даёт 1, а рабочий CLI
+        (run_check/main на реальных временных файлах в KB-cwd) - ровно exit 2 с REQ003_SIZE_EXCEEDED."""
         res = self.run_eval(canon=CANON_NOW_CEILING)
-        self.assertLessEqual(res.exit_code, 1)
+        self.assertEqual(res.exit_code, 1)  # чистая функция: strict_req003 по умолчанию выключен
         self.assertTrue(any(r.startswith("REQ003_SIZE_EXCEEDED") for r in res.reasons))
         strict = bg.evaluate(CANON_NOW_CEILING, snapshot_files(CANON_NOW_CEILING), 106496, ("KB",), True)
         self.assertEqual(strict.exit_code, 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            fs = build_snapshot_fs(Path(tmp), canon=CANON_NOW_CEILING)
+            code, text = run_cli_snapshot(fs, ["--check", "--maxbytes", "106496"])
+            self.assertEqual(code, 2, text)
+            self.assertIn("REQ003_SIZE_EXCEEDED cwd=KB", text)
 
     def test_tm018_canon_out_of_window_exit2(self):
         """TM-018: канон вне окна - слишком большой (CANON_LOST в AB) и слишком малый (DUPLICATE_RETURNED в KB) дают exit 2."""
@@ -205,14 +507,6 @@ class TestTm018Guard(unittest.TestCase):
         self.assertGreaterEqual(res.window_high - res.recommended, 4096)
         self.assertIsNone(bg.recommend_maxbytes(100, 50))  # пустое окно
         self.assertEqual(bg.recommend_maxbytes(100, 5000), 2550)  # нет кратного - середина
-
-    def test_tm018_profiles_not_implemented(self):
-        """TM-018: --profiles в dev-копии не реализован - понятное сообщение и exit 2, профили не читаются."""
-        err = io.StringIO()
-        with redirect_stderr(err):
-            code = bg.main(["--profiles"])
-        self.assertEqual(code, 2)
-        self.assertIn("not implemented in dev copy", err.getvalue())
 
     def test_tm018_check_missing_cwd_does_not_fail(self):
         """TM-018: несуществующий cwd отмечается «cwd отсутствует», проверка не падает (только канон в запросе)."""

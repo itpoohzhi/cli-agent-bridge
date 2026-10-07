@@ -9,9 +9,12 @@
 где она дублируется, и не трогает cwd без дубля. Окно зависит от размеров четырёх файлов
 (канон и проектные файлы AB/WA), поэтому размеры надо проверять машинно - этот инструмент.
 
-Что читает. ТОЛЬКО размеры (os.stat/os.lstat/os.path.realpath). Содержимое реальных
-AGENTS.md/CLAUDE.md не открывается: канон нельзя утечь ни в лог, ни в диагностику.
-Профили DSH не читаются и не пишутся (режим `--profiles` в dev-копии не реализован).
+Что читает. Файлы проектных AGENTS.md/CLAUDE.md и канон читаются целиком в память ровно для
+двух целей: sha256 содержимого (ключ дедупа внутри каталога, F-314) и точный расчёт длины
+строки журнала (RW-003). Содержимое нигде не печатается и не логируется: наружу выходят только
+размеры, числа и пути. Профили DSH читает только режим `--profiles` и только для чтения
+(`<profiles-dir>/<профиль>/cordis.patch.yml`, из него берётся одно число - maxBytes
+плагина agent-instructions внутри `preset-standard`); ничего не пишется и не меняется.
 
 Модель рендера (zone-F, F-706, откалибрована по F-703/F-707/F-709, точна до байта):
     block = 272 + Σ_секций (23 + len(display_path) + размер_файла) [+ метка]
@@ -32,10 +35,16 @@ F-708: короткий CLAUDE.md после отброшенного AGENTS.md 
 граница UTF-8 может быть меньше на 1-3 Б, F-707); дедупликация только внутри одного каталога
 по содержимому (F-314) - user-global и проектный файл НЕ схлопываются.
 
-Метрики REQ-003 не смешиваются: block_bytes - длина текста блока (её считает этот
-инструмент), journal_line_bytes - длина JSON-строки события в session.v4.jsonl
-(`journal_line_bytes_est`; для прогноза запаса к блоку добавляется калиброванная обёртка
-JOURNAL_WRAPPER_EST из F-712). Оба числа - ОЦЕНКА по размерам, не оракул приёмки.
+Метрики REQ-003 не смешиваются: block_bytes - длина текста блока (модель по размерам),
+journal_line_bytes - длина JSON-строки события в session.v4.jsonl вместе с переводом строки.
+Строка считается по реальной сериализации: `render_block_text` строит блок (рамка + секции
+`Instructions from: <display>` + тело + метка), `render_journal_line` оборачивает его в событие
+`user/message` (поля type/seq/time/data{content,source{baselineIdentity,changes},role,id}/surfaceOp)
+и делает json.dumps - поэтому экранирование (кавычки, переводы строк, слеши), длина display paths и
+маркер бюджета учитываются точно (`exact_journal_line_bytes`). Режим точного расчёта включается,
+когда содержимое прочитано (`--check` и `--profiles` читают его для хеша); при отсутствии текстов
+остаётся запасная оценка по размерам (`journal_line_bytes_fallback`: обёртка из реального рендера
+плюс доля на экранирование ESCAPE_RATIO). Оба числа - прогноз, не оракул приёмки.
 
 Окно и запасы (`evaluate`):
     L (нижняя граница) = макс. по cwd размер блока, который обязан влезть целиком вместе с
@@ -50,26 +59,38 @@ JOURNAL_WRAPPER_EST из F-712). Оба числа - ОЦЕНКА по разм�
 106 496 = 104 КиБ - значение, измеренное клиентом DSH в F-709). Если подходящего кратного
 нет - берётся середина окна, округлённая вниз.
 
-Коды выхода `--check`: 0 - оба запаса >= 4096 Б и оценка запаса строки журнала до 60 000 Б
-в KB >= 2048 Б; 1 - запас меньше порога (или блок/строка KB > 60 000 Б: причина
-REQ003_SIZE_EXCEEDED, в этой dev-копии это предупреждение, `strict_req003=True` поднимает
-до 2 - как в AD-006 дельта-4); 2 - канон теряется в каком-либо cwd (CANON_LOST) или дубль
-возвращается (DUPLICATE_RETURNED). Граница 60 000 Б строгая: 60 000 проходит, 60 001 нет.
+Коды выхода `--check` и `--profiles`: 0 - оба запаса >= 4096 Б и запас строки журнала до
+60 000 Б в KB >= 2048 Б; 1 - запас меньше порога; 2 - канон теряется в каком-либо cwd
+(CANON_LOST), дубль возвращается (DUPLICATE_RETURNED) или блок/строка KB > 60 000 Б
+(REQ003_SIZE_EXCEEDED: в рабочем CLI `run_check` всегда вызывает evaluate со
+`strict_req003=True`, AD-006 дельта-4; чистая функция `evaluate` по умолчанию остаётся
+нестрогой и даёт 1). Граница 60 000 Б строгая: 60 000 проходит, 60 001 нет.
+
+Режим `--profiles [--profiles-dir PATH]` (по умолчанию `~/.dsh/profiles`): для каждого профиля
+с `cordis.patch.yml` (каталоги `*.bak*` пропускаются) читает maxBytes и прогоняет ту же проверку,
+что `--check`, на реальных cwd; итог - худший код по профилям. Нет каталога/профилей/maxBytes -
+сообщение и exit 2.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
+import posixpath
+import re
 import sys
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-CANON_PATH = "/Users/aazhiry1/Мой диск/Context/AGENTS.md"
-KB_CWD = "/Users/aazhiry1/Мой диск/Работа/Sber/knowledge-base"
-WA_CWD = "/Users/aazhiry1/src/saluteeye/gigabus/gigawebaccess/webaccess"
-AB_CWD = "/Users/aazhiry1/Мой диск/Workshop/aibunker-workshop"
-DW_CWD = "/Users/aazhiry1/Documents/deepseek-harness/default-workspace"
+CANON_PATH = os.path.expanduser("~/Мой диск/Context/AGENTS.md")
+KB_CWD = os.path.expanduser("~/Мой диск/Работа/Sber/knowledge-base")
+WA_CWD = os.path.expanduser("~/src/saluteeye/gigabus/gigawebaccess/webaccess")
+AB_CWD = os.path.expanduser("~/Мой диск/Workshop/aibunker-workshop")
+DW_CWD = os.path.expanduser("~/Documents/deepseek-harness/default-workspace")
+PROFILES_DIR = os.path.expanduser("~/.dsh/profiles")
+PROFILE_FILE = "cordis.patch.yml"
 DEFAULT_CWDS: Tuple[Tuple[str, str], ...] = (
     ("KB", KB_CWD),
     ("WA", WA_CWD),
@@ -89,7 +110,20 @@ BLOCK_LIMIT = 60000  # REQ-003, граница строгая: <= 60000 прох
 DEFAULT_MAXBYTES = 106496
 MARGIN_MIN = 4096
 LINE_MARGIN_MIN = 2048
-JOURNAL_WRAPPER_EST = 1225  # F-712: строка журнала KB (57 015) - блок (55 790)
+
+# Реальный рендер блока и события журнала (снято с живого session.v4.jsonl, RW-003):
+# block = HEAD + [метка + "\n\n"] + "\n\n".join(секции) + "\n" + TAIL, где секция =
+# "Instructions from: <display>\n\n<тело>"; длина совпадает с моделью FRAME_BASE/SECTION_FIXED.
+BLOCK_HEAD = ("<system-reminder>\nThe following workspace instructions may be relevant to your work. "
+              "Use them as guidance when applicable. More specific instructions take precedence over "
+              "broader ones. They do not override system, developer, or direct user instructions.\n\n")
+BLOCK_TAIL = "</system-reminder>"
+SECTION_HEADER = "Instructions from: "
+JOURNAL_SEQ = 10  # номер события (поле seq) - в обёртке занимает 2-3 символа
+JOURNAL_TIME = 1791393991696  # мс с эпохи, 13 цифр
+JOURNAL_ID = "c3321a3c-6a0a-4d8e-8137-1dfd672f33fe"  # uuid события, 36 символов
+MAX_SOURCE_BYTES = 1048576  # maxSourceBytes в baselineIdentity (7 цифр в живой строке)
+ESCAPE_RATIO = 0.0125  # запасной вариант: доля JSON-экранирования текста блока (переводы строк, кавычки)
 ALIGN = 4096
 
 # Имена кандидатов. `.local`-варианты - предположение (F-313: «затем .local»), точные
@@ -109,7 +143,7 @@ CLASS_TRUNCATED = "TRUNCATED"
 
 
 class FileEntry(NamedTuple):
-    """Файл-кандидат: только размер и метаданные идентичности, без содержимого."""
+    """Файл-кандидат: размер и метаданные идентичности (content_key - sha256 содержимого), без самого текста."""
 
     display: str
     size: int
@@ -143,6 +177,7 @@ class Result(NamedTuple):
     window_high: Optional[int] = None
     renders: Optional[Dict[str, RenderResult]] = None
     line_margin: Optional[int] = None
+    line_estimates: Optional[Dict[str, Tuple[int, bool]]] = None  # cwd -> (байт строки журнала, точный ли расчёт)
 
 
 def make_user_global(canon_size: int) -> FileEntry:
@@ -261,21 +296,105 @@ def journal_line_bytes_est(text: str) -> int:
     return len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
 
 
+def render_block_text(sections: Sequence[Tuple[str, str]], marker: str = "") -> str:
+    """Реальный текст блока: рамка + (метка) + секции `Instructions from: <display>` + тело.
+
+    `sections` - (display path, текст файла) в порядке рендера. Длина в байтах равна модели
+    `_block` (272 + Σ(23 + len(display) + размер) + метка + 2). Пустой набор без метки - пустой блок.
+    """
+    if not sections and not marker:
+        return ""
+    body = "\n\n".join("%s%s\n\n%s" % (SECTION_HEADER, display, text) for display, text in sections)
+    return BLOCK_HEAD + (marker + "\n\n" if marker else "") + body + "\n" + BLOCK_TAIL
+
+
+def _change_entry(display: str, text: str) -> Dict[str, str]:
+    """Запись changes события: scope = каталог NUL имя, path = display, digest = sha1 содержимого."""
+    if display == UG_DISPLAY:
+        directory, name = "user-global", posixpath.basename(display)
+    else:
+        directory, name = posixpath.dirname(display) or ".", posixpath.basename(display)
+    return {"action": "set", "scope": directory + "\u0000" + name, "path": display,
+            "digest": hashlib.sha1(text.encode("utf-8")).hexdigest()}
+
+
+def _baseline_identity(maxbytes: int) -> str:
+    """Строка baselineIdentity события (внутри JSON экранируется ещё раз, это и считается)."""
+    return json.dumps({
+        "projectRoot": "", "projectRootMarkers": [PROJECT_ROOT_MARKER], "maxBytes": maxbytes,
+        "maxSourceBytes": MAX_SOURCE_BYTES,
+        "instructionFileCandidates": list(CANDIDATE_NAMES[:2]),
+        "localInstructionFileCandidates": list(CANDIDATE_NAMES[2:]),
+    }, separators=(",", ":"))
+
+
+def render_journal_line(block_text: str, sections: Sequence[Tuple[str, str]], maxbytes: int) -> str:
+    """Строка session.v4.jsonl с событием agent-instructions: компактный json.dumps + перевод строки."""
+    event = {
+        "type": "user/message", "seq": JOURNAL_SEQ, "time": JOURNAL_TIME,
+        "data": {
+            "content": [{"type": "text", "text": block_text}],
+            "source": {"kind": "agent-instructions", "form": "instructions", "baseline": True,
+                       "baselineIdentity": _baseline_identity(maxbytes),
+                       "changes": [_change_entry(d, t) for d, t in sections]},
+            "role": "user", "id": JOURNAL_ID,
+        },
+        "surfaceOp": "append",
+    }
+    return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def exact_journal_line_bytes(sections: Sequence[Tuple[str, str]], maxbytes: int, marker: str = "") -> int:
+    """Точная длина строки журнала (UTF-8) по реальным текстам файлов: блок -> событие -> json.dumps."""
+    block = render_block_text(sections, marker)
+    return len(render_journal_line(block, sections, maxbytes).encode("utf-8"))
+
+
+def journal_line_bytes_fallback(block_bytes: int, displays: Sequence[str], maxbytes: int) -> int:
+    """Запасная оценка строки без текстов (только размеры): обёртка события из реального рендера
+    с пустым телом (display paths входят в text, path и scope) плюс доля ESCAPE_RATIO на экранирование."""
+    wrapper = len(render_journal_line("", [(d, "") for d in displays], maxbytes).encode("utf-8"))
+    return wrapper + block_bytes + int(math.ceil(block_bytes * ESCAPE_RATIO))
+
+
+def _line_estimate(rend: RenderResult, cwd_texts: Optional[Dict[str, str]], canon_text: Optional[str],
+                   maxbytes: int) -> Tuple[int, bool]:
+    """Длина строки журнала для рендера: точная (по текстам) или запасная оценка по размерам."""
+    sections: List[Tuple[str, str]] = []
+    for display in rend.kept:
+        if display == UG_DISPLAY:
+            text = canon_text
+        else:
+            text = (cwd_texts or {}).get(display)
+        if text is None:
+            return journal_line_bytes_fallback(rend.block_bytes, rend.kept, maxbytes), False
+        if rend.truncated is not None and display == rend.truncated[0]:
+            text = text.encode("utf-8")[:rend.truncated[2]].decode("utf-8", "ignore")
+        sections.append((display, text))
+    return exact_journal_line_bytes(sections, maxbytes, rend.marker), True
+
+
 def evaluate(
     canon_size: int,
     cwd_files: Dict[str, Sequence[FileEntry]],
     maxbytes: int,
     req003_cwds: Sequence[str] = (),
     strict_req003: bool = False,
+    texts: Optional[Dict[str, Dict[str, str]]] = None,
+    canon_text: Optional[str] = None,
 ) -> Result:
     """Чистая оценка окна maxBytes без файловой системы.
 
     `cwd_files` - метка cwd -> проектные файлы в порядке рендера (user-global добавляется
     здесь). `req003_cwds` - метки cwd, для которых действует ограничение 60 000 Б (по
     решению владельца REQ-003 принимается только в KB: для WA/AB условие недостижимо, F-724).
+    `texts` (метка cwd -> display -> текст файла) и `canon_text` включают точный расчёт строки
+    журнала; нет текста хотя бы одной оставленной секции - запасная оценка по размерам.
+    `strict_req003` поднимает REQ003_SIZE_EXCEEDED до exit 2 (рабочий CLI всегда включает его).
     """
     reasons: List[str] = []
     renders: Dict[str, RenderResult] = {}
+    line_estimates: Dict[str, Tuple[int, bool]] = {}
     lowers: List[int] = []
     uppers: List[int] = []
     severe = False
@@ -285,6 +404,7 @@ def evaluate(
         entries = dedupe_entries([ug] + list(files))
         rend = render_plan(entries, maxbytes)
         renders[label] = rend
+        line_estimates[label] = _line_estimate(rend, texts.get(label) if texts else None, canon_text, maxbytes)
         full = _block(entries, "")
         if rend.canon_copies == 0:
             reasons.append("CANON_LOST cwd=%s: канон не попал в запрос (класс %s, omitted=%s)"
@@ -309,7 +429,7 @@ def evaluate(
         rend = renders.get(label)
         if rend is None:
             continue
-        line_est = rend.block_bytes + JOURNAL_WRAPPER_EST
+        line_est = line_estimates[label][0]
         margin = BLOCK_LIMIT - line_est
         line_margin = margin if line_margin is None else min(line_margin, margin)
         if not block_within_limit(rend.block_bytes):
@@ -339,7 +459,7 @@ def evaluate(
     exit_code = 2 if severe else (1 if warn else 0)
     return Result(exit_code, reasons, lower_margin, upper_margin,
                   recommend_maxbytes(window_low, window_high), window_low, window_high,
-                  renders, line_margin)
+                  renders, line_margin, line_estimates)
 
 
 def recommend_maxbytes(window_low: int, window_high: Optional[int]) -> Optional[int]:
@@ -375,12 +495,16 @@ def _find_project_root(cwd: str) -> str:
         cur = parent
 
 
-def collect_cwd_entries(cwd: str, canon_real: str) -> Tuple[List[FileEntry], bool]:
-    """Проектные файлы цепочки root -> cwd по размерам; (список, cwd существует).
+def collect_cwd_entries(cwd: str, canon_real: str,
+                        texts_out: Optional[Dict[str, str]] = None) -> Tuple[List[FileEntry], bool]:
+    """Проектные файлы цепочки root -> cwd; (список, cwd существует).
 
-    Размер берётся через os.stat (симлинк следуется, как у клиента), идентичность - через
-    realpath: симлинк на канон помечается is_canon, а один файл под двумя именами в одном
-    каталоге схлопывается дедупом. Содержимое не читается.
+    Файл читается один раз: размер - длина содержимого (симлинк следуется, как у клиента),
+    `content_key` - sha256 содержимого (RW-003): два разных файла с одинаковым текстом и один файл
+    под двумя именами в одном каталоге схлопываются `dedupe_entries`. Симлинк на канон помечается
+    is_canon по realpath. Содержимое наружу не отдаётся и не печатается; `texts_out`
+    (display -> текст) заполняется только по просьбе вызывающего для точного расчёта строки журнала.
+    Нечитаемый файл получает ключ None (не схлопывается) и размер из os.stat.
     """
     if not os.path.isdir(cwd):
         return [], False
@@ -411,7 +535,16 @@ def collect_cwd_entries(cwd: str, canon_real: str) -> Tuple[List[FileEntry], boo
                 continue
             real = os.path.realpath(path)
             display = os.path.relpath(path, real_cwd).replace(os.sep, "/")
-            out.append(FileEntry(display, st.st_size, real == canon_real, directory, real, False))
+            size, key = st.st_size, None
+            try:
+                with open(path, "rb") as handle:
+                    data = handle.read()
+                size, key = len(data), hashlib.sha256(data).hexdigest()
+                if texts_out is not None:
+                    texts_out[display] = data.decode("utf-8", "replace")
+            except OSError:
+                pass
+            out.append(FileEntry(display, size, real == canon_real, directory, key, False))
     return out, True
 
 
@@ -508,24 +641,38 @@ def _fmt_margin(value: Optional[int]) -> str:
 
 
 def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -> int:
-    """Читает размеры, печатает прогноз по каждому cwd, запасы и причины; возвращает код выхода."""
+    """Читает файлы, печатает прогноз по каждому cwd, запасы и причины; возвращает код выхода.
+
+    REQ-003 строгий (strict_req003=True): превышение 60 000 Б блока/строки KB даёт exit 2.
+    """
     try:
         canon_size = os.stat(canon_path).st_size
     except FileNotFoundError:
         _say("CANON_LOST: канон не найден: %s" % canon_path)
         return 2
     canon_real = os.path.realpath(canon_path)
+    canon_text: Optional[str] = None
+    try:
+        with open(canon_path, "rb") as handle:
+            canon_bytes = handle.read()
+        canon_size = len(canon_bytes)
+        canon_text = canon_bytes.decode("utf-8", "replace")
+    except OSError:
+        pass
     _say("mode=PLANNED maxbytes=%d canon=%s size=%d" % (maxbytes, canon_path, canon_size))
     cwd_files: Dict[str, Sequence[FileEntry]] = {}
+    texts: Dict[str, Dict[str, str]] = {}
     exists: Dict[str, bool] = {}
     paths: Dict[str, str] = {}
     for label, path in cwds:
-        files, ok = collect_cwd_entries(path, canon_real)
+        texts[label] = {}
+        files, ok = collect_cwd_entries(path, canon_real, texts[label])
         cwd_files[label] = files
         exists[label] = ok
         paths[label] = path
     req_labels = [label for label, path in cwds if path == KB_CWD]
-    res = evaluate(canon_size, cwd_files, maxbytes, req_labels)
+    res = evaluate(canon_size, cwd_files, maxbytes, req_labels, strict_req003=True,
+                   texts=texts, canon_text=canon_text)
     for label, _path in cwds:
         rend = (res.renders or {})[label]
         files = cwd_files[label]
@@ -533,12 +680,12 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
         note = "" if exists[label] else " [cwd отсутствует]"
         canon_state = "present" if rend.canon_copies >= 1 else "LOST"
         dup_state = "RETURNED" if rend.canon_copies >= 2 else "absent"
-        line_est = rend.block_bytes + JOURNAL_WRAPPER_EST
+        line_est, exact = (res.line_estimates or {})[label]
         _say("cwd[%s] %s%s" % (label, paths[label], note))
         _say("  files: %s" % listing)
-        _say("  forecast block=%d class=%s sections=%d omitted=%s line_est=%d canon=%s dup=%s"
+        _say("  forecast block=%d class=%s sections=%d omitted=%s line_est=%d line_mode=%s canon=%s dup=%s"
               % (rend.block_bytes, rend.cls, len(rend.kept), ",".join(rend.omitted) or "-",
-                 line_est, canon_state, dup_state))
+                 line_est, "exact" if exact else "size-estimate", canon_state, dup_state))
     _say("window=[%d..%s] maxbytes=%d" % (res.window_low, _fmt_margin(res.window_high), maxbytes))
     _say("lower_margin=%d upper_margin=%s line_margin=%s"
           % (res.lower_margin, _fmt_margin(res.upper_margin), _fmt_margin(res.line_margin)))
@@ -547,9 +694,74 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
         for reason in res.reasons:
             _say("reason: %s" % reason)
     else:
-        _say("OK: канон сохраняется везде, дубль в KB отсутствует; mode=PLANNED (профили не читались)")
+        _say("OK: канон сохраняется везде, дубль в KB отсутствует; mode=PLANNED")
     _say("exit=%d" % res.exit_code)
     return res.exit_code
+
+
+def parse_profile_maxbytes(text: str) -> Optional[int]:
+    """maxBytes плагина agent-instructions внутри пресета `preset-standard` (YAML-патч профиля DSH).
+
+    Построчный разбор без YAML-библиотеки: пресет - элемент верхнего уровня `- id: preset-standard`,
+    плагин - `- id: agent-instructions` глубже, значение - первая строка `maxBytes: <число>` после него
+    в пределах пресета. Комментарии и другие пресеты игнорируются; не найдено - None.
+    """
+    in_preset = False
+    in_plugin = False
+    for line in text.splitlines():
+        if re.match(r"^- id:", line):
+            in_preset = re.match(r"^- id:\s*preset-standard\s*$", line) is not None
+            in_plugin = False
+            continue
+        if not in_preset:
+            continue
+        if re.match(r"^\s+- id:", line):
+            in_plugin = re.match(r"^\s+- id:\s*agent-instructions\s*$", line) is not None
+            continue
+        if in_plugin:
+            found = re.match(r"^\s+maxBytes:\s*(\d+)\s*$", line)
+            if found:
+                return int(found.group(1))
+    return None
+
+
+def find_profiles(profiles_dir: str) -> List[Tuple[str, str, Optional[int]]]:
+    """Установленные профили: (имя, путь к cordis.patch.yml, maxBytes или None). Только чтение.
+
+    Каталоги резервных копий (`*.bak*`) и каталоги без `cordis.patch.yml` пропускаются.
+    Печатаются только имя, путь и число; остальное содержимое профиля не выводится.
+    """
+    if not os.path.isdir(profiles_dir):
+        return []
+    found: List[Tuple[str, str, Optional[int]]] = []
+    for name in sorted(os.listdir(profiles_dir)):
+        path = os.path.join(profiles_dir, name, PROFILE_FILE)
+        if ".bak" in name or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                found.append((name, path, parse_profile_maxbytes(handle.read())))
+        except OSError:
+            found.append((name, path, None))
+    return found
+
+
+def run_profiles(profiles_dir: str, cwds: Sequence[Tuple[str, str]], canon_path: str) -> int:
+    """Проверка установленных профилей: на каждом maxBytes - тот же прогноз, что и `--check`; итог - худший код."""
+    profiles = find_profiles(profiles_dir)
+    if not profiles:
+        _say("профили не найдены: %s (ожидается <профиль>/%s)" % (profiles_dir, PROFILE_FILE))
+        return 2
+    worst = 0
+    for name, path, maxbytes in profiles:
+        if maxbytes is None:
+            _say("profile=%s path=%s: maxBytes не найден (preset-standard / agent-instructions)" % (name, path))
+            worst = 2
+            continue
+        _say("profile=%s path=%s maxBytes=%d" % (name, path, maxbytes))
+        worst = max(worst, run_check(maxbytes, cwds, canon_path))
+    _say("profiles exit=%d" % worst)
+    return worst
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -558,21 +770,20 @@ def build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--self-test", action="store_true", help="сверить модель с границами zone-F")
     mode.add_argument("--check", action="store_true", help="прогноз по реальным размерам файлов (stat)")
-    mode.add_argument("--profiles", action="store_true", help="чтение установленных профилей (не в dev-копии)")
+    mode.add_argument("--profiles", action="store_true",
+                      help="прочитать maxBytes установленных профилей DSH (только чтение) и проверить каждый")
     parser.add_argument("--maxbytes", type=int, default=DEFAULT_MAXBYTES, help="планируемый maxBytes")
     parser.add_argument("--cwd", action="append", default=None, metavar="PATH", help="cwd для проверки (повторяемый)")
     parser.add_argument("--canon", default=CANON_PATH, help="путь канона (для тестов)")
+    parser.add_argument("--profiles-dir", default=PROFILES_DIR, metavar="PATH",
+                        help="каталог профилей DSH для --profiles (по умолчанию ~/.dsh/profiles)")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Точка входа: 0 - успех, 1 - мало запаса, 2 - потеря канона/дубль/не реализовано."""
+    """Точка входа: 0 - успех, 1 - мало запаса, 2 - потеря канона/дубль/превышение REQ-003/профили не найдены."""
     _safe_stdout()
     args = build_parser().parse_args(list(argv) if argv is not None else None)
-    if args.profiles:
-        _say("--profiles: not implemented in dev copy (профили DSH читать запрещено в этом проходе)",
-             sys.stderr)
-        return 2
     if args.self_test:
         fails = self_test()
         for item in fails:
@@ -585,6 +796,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cwds = [(known.get(p, os.path.basename(p.rstrip("/")) or p), p) for p in args.cwd]
     else:
         cwds = list(DEFAULT_CWDS)
+    if args.profiles:
+        return run_profiles(args.profiles_dir, cwds, args.canon)
     return run_check(args.maxbytes, cwds, args.canon)
 
 
