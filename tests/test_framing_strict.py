@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import BridgeCase, FakeRun  # noqa: E402
+from bridge_testlib import BridgeCase  # noqa: E402
 
 VALID = json.dumps({"model": "claude-sonnet-5-5",
                     "messages": [{"role": "user", "content": "framing probe"}]}).encode()
@@ -17,14 +17,16 @@ VALID = json.dumps({"model": "claude-sonnet-5-5",
 
 class TestFraming(BridgeCase):
     def _case(self, raw, want_code, want_type, half_close=False, want_count=1):
-        before = len(FakeRun.instances)
+        before = len(self.hub.spawns())
         buf, closed = self._raw_exchange(raw, half_close=half_close)
         code, typ, count = self._raw_parse(buf)
         self.assertEqual(code, want_code)
         self.assertEqual(typ, want_type)
         self.assertEqual(count, want_count)
         self.assertTrue(closed, "сервер обязан закрыть соединение при отказе")
-        self.assertEqual(len(FakeRun.instances), before, "отказ обязан быть до запуска")
+        # Отказ обязан быть до claim состояния/spawn/initialize/add (а не «до конструктора Run»).
+        self.assertEqual(len(self.hub.spawns()), before, "отказ обязан быть до запуска")
+        self.assertEqual(self.hub.rpcs(), [])
 
     def test_invalid_content_length(self):
         for value in ("-1", "abc", "12 34", "0x10", ""):

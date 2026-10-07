@@ -3,6 +3,7 @@
 import base64
 import copy
 import json
+import os
 import sys
 import time
 import unittest
@@ -13,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from bridge_testlib import (  # noqa: E402
-    BridgeCase, FakeRun, BoomRun, JPEG_MAGIC, GIF_MAGIC, WEBP_MAGIC,
+    BridgeCase, JPEG_MAGIC, GIF_MAGIC, WEBP_MAGIC,
     find_model, image_part, image_url_part, make_png, make_sig, make_proof,
     text_part,
 )
@@ -57,6 +58,11 @@ class ImageCase(BridgeCase):
 
 
 class TestImagePositive(ImageCase):
+    """Картинки идут в эфемерную RPC-сессию: проверяем фактический ввод и раскладку temp-файлов."""
+
+    def _image_dir_prefix(self):
+        return os.path.realpath(str(server.WORKSPACE)) + "/img-"
+
     def test_two_images_history_prompt_and_layout(self):
         server.IMAGE_PROBE = True
         self.probe_stand()
@@ -66,21 +72,32 @@ class TestImagePositive(ImageCase):
             {"role": "assistant", "content": "ok"},
             user_message([image_part(second), text_part("second")]),
         ]
-        status, _ = self._post({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
-                                "messages": messages})
+        with self.capture_logs() as lines:
+            status, _ = self._post({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
+                                    "messages": messages})
         self.assertEqual(status, 200)
-        run = FakeRun.instances[-1]
-        snapshot = run.img_snapshot
-        self.assertEqual(snapshot["dir_mode"], "0o700")
-        self.assertEqual(snapshot["files"], {"img-1.png": "0o600", "img-2.png": "0o600"})
-        self.assertEqual(run.img_stats, (2, len(first) + len(second), "image/png,image/png"))
-        self.assertTrue(str(run.img_dir).startswith(str(server.WORKSPACE) + "/img-"))
-        self.assertIn("[user]\nfirst\n[image 1]", run.prompt)
-        self.assertIn("[user]\n[image 2]\nsecond", run.prompt)
-        self.assertIn("- [image 1] ./img-1.png (image/png, %d bytes)" % len(first), run.prompt)
-        self.assertIn("- [image 2] ./img-2.png (image/png, %d bytes)" % len(second), run.prompt)
-        self.assertIn("[attachments]", run.prompt)
-        self.assertIn("Open each image with the Read tool on exactly these paths", run.prompt)
+        spawn = self.hub.spawns()[-1]
+        self.assertEqual(spawn["cwd_mode"], "0o700")
+        self.assertEqual(spawn["cwd_files"], {"img-1.png": "0o600", "img-2.png": "0o600"})
+        self.assertTrue(spawn["cwd"].startswith(self._image_dir_prefix()))
+        execs = [ln for ln in lines if ln.startswith("exec model=")]
+        self.assertIn(" images=2 image_bytes=%d image_types=image/png,image/png"
+                      % (len(first) + len(second)), execs[0])
+        texts = self.hub.sent_texts()
+        self.assertEqual(len(texts), 3)  # история replay-ится по сообщениям, цикл запускает последнее
+        self.assertEqual(texts[0], "first\n[image 1]")
+        self.assertEqual(texts[1], "ok")
+        self.assertTrue(texts[2].startswith("[image 2]\nsecond"))
+        self.assertIn("- [image 1] ./img-1.png (image/png, %d bytes)" % len(first), texts[2])
+        self.assertIn("- [image 2] ./img-2.png (image/png, %d bytes)" % len(second), texts[2])
+        self.assertIn("[attachments]", texts[2])
+        self.assertIn("Open each image with the Read tool on exactly these paths", texts[2])
+        self.assertTrue(self.hub.rpcs("droid.add_user_message")[0]["params"]["skipAgentLoop"])
+        self.assertNotIn("skipAgentLoop", self.hub.rpcs("droid.add_user_message")[2]["params"])
+        # Read остаётся доступным (нужен для чтения вложений), остальные нативные tools отключены.
+        disabled = self.hub.rpcs("droid.update_session_settings")[0]["params"]["disabledToolIds"]
+        self.assertNotIn("Read", disabled)
+        self.assertIn("Execute", disabled)
         self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
 
     def test_sixteen_images_at_the_limit(self):
@@ -90,11 +107,12 @@ class TestImagePositive(ImageCase):
         status, _ = self._post({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
                                 "messages": [user_message(parts)]})
         self.assertEqual(status, 200)
-        run = FakeRun.instances[-1]
-        self.assertEqual(len(run.img_snapshot["files"]), 16)
+        spawn = self.hub.spawns()[-1]
+        self.assertEqual(len(spawn["cwd_files"]), 16)
+        prompt = self.hub.sent_texts()[-1]
         for index in range(1, 17):
-            self.assertIn("- [image %d] ./img-%d.png (image/png," % (index, index), run.prompt)
-        self.assertEqual(run.prompt.count("[image 1]"), 2)  # маркер и строка manifest
+            self.assertIn("- [image %d] ./img-%d.png (image/png," % (index, index), prompt)
+        self.assertEqual(prompt.count("[image 1]"), 2)  # маркер и строка manifest
 
     def test_image_only_message_is_not_pong(self):
         server.IMAGE_PROBE = True
@@ -102,20 +120,23 @@ class TestImagePositive(ImageCase):
         status, _ = self._post({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
                                 "messages": [user_message([image_part(make_png(64))])]})
         self.assertEqual(status, 200)
-        prompt = FakeRun.instances[-1].prompt
+        prompt = self.hub.sent_texts()[-1]
         self.assertNotIn("Reply with exactly: PONG", prompt)
-        self.assertIn("[user]\n[image 1]", prompt)
+        self.assertTrue(prompt.startswith("[image 1]"))
 
     def test_unknown_non_image_parts_are_skipped(self):
         server.IMAGE_PROBE = True
         self.probe_stand()
-        status, _ = self._post({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
-                                "messages": [user_message([
-                                    text_part("hello"),
-                                    {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
-                                ])]})
+        with self.capture_logs() as lines:
+            status, _ = self._post({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
+                                    "messages": [user_message([
+                                        text_part("hello"),
+                                        {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+                                    ])]})
         self.assertEqual(status, 200)
-        self.assertIsNone(FakeRun.instances[-1].img_stats)
+        execs = [ln for ln in lines if ln.startswith("exec model=")]
+        self.assertNotIn(" images=", execs[0])
+        self.assertEqual(self.hub.sent_texts(), ["hello"])
 
     def test_tools_get_read_exception_with_attachments(self):
         server.IMAGE_PROBE = True
@@ -128,10 +149,9 @@ class TestImagePositive(ImageCase):
                                 "messages": [user_message([text_part("weather?"),
                                                            image_part(make_png(64))])]})
         self.assertEqual(status, 200)
-        prompt = FakeRun.instances[-1].prompt
-        self.assertIn("except Read on the attachment files listed under [attachments].",
-                      prompt)
-        self.assertIn("[attachments]", prompt)
+        system = self.hub.inits()[-1]["params"]["systemPrompt"]
+        self.assertIn("except Read on the attachment files listed under [attachments].", system)
+        self.assertIn("[attachments]", self.hub.sent_texts()[-1])
 
 
 class TestImageRejections(ImageCase):
@@ -139,14 +159,14 @@ class TestImageRejections(ImageCase):
         server.IMAGE_PROBE = True
         for model, expected in (("gemini-3.8-flash", "image_input_not_supported"),
                                 ("glm-5.3", "image_input_not_supported")):
-            before = len(FakeRun.instances)
+            before = len(self.hub.spawns())
             status, body = self._post_json({"model": model, "reasoning_effort":
                                             "max" if model == "glm-5.3" else "high",
                                             "messages": [user_message(
                                                 [text_part("x"), image_part(make_png(64))])]})
             self.assertEqual(status, 400, model)
             self.assertEqual(body["error"]["type"], expected)
-            self.assertEqual(len(FakeRun.instances), before)
+            self.assertEqual(len(self.hub.spawns()), before)
 
     def test_taxonomy(self):
         server.IMAGE_PROBE = True
@@ -170,12 +190,12 @@ class TestImageRejections(ImageCase):
             ("unsupported_image_type", image_part(make_sig(GIF_MAGIC, 64), "image/gif")),
         ]
         for expected, part in cases:
-            before = len(FakeRun.instances)
+            before = len(self.hub.spawns())
             status, body = self._post_json({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
                                             "messages": [user_message([text_part("x"), part])]})
             self.assertEqual(status, 400, expected)
             self.assertEqual(body["error"]["type"], expected)
-            self.assertEqual(len(FakeRun.instances), before)
+            self.assertEqual(len(self.hub.spawns()), before)
         for role in ("assistant", "system", "tool"):
             messages = [user_message([text_part("hi")]),
                         {"role": role, "content": [image_part(png)]}]
@@ -224,28 +244,30 @@ class TestImageCleanup(ImageCase):
         self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
 
     def test_cleanup_after_exception(self):
+        # Сбой запуска (лончер умирает сразу): 502 и ни одного каталога картинок.
         server.IMAGE_PROBE = True
         self.probe_stand()
-        real_run = server.Run
-        server.Run = BoomRun
-        try:
-            status, _ = self._post_json({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
-                                         "messages": [user_message([image_part(make_png(64))])]})
-        finally:
-            server.Run = real_run
+        broken = Path(self._tmp.name) / "broken-launcher"
+        broken.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        broken.chmod(0o755)
+        server.LAUNCHER = str(broken)
+        status, _ = self._post_json({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
+                                     "messages": [user_message([image_part(make_png(64))])]})
         self.assertEqual(status, 502)
         self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
 
     def test_cleanup_after_retries(self):
         server.IMAGE_PROBE = True
         self.probe_stand()
-        FakeRun.scripts = [[("stderr", "Exec failed"), ("done", (1, ""))] for _ in range(3)]
+        self.hub.legacy([[("stderr", "Exec failed"), ("done", (1, ""))] for _ in range(3)])
         status, _ = self._post_json({"model": "claude-sonnet-5-5", "reasoning_effort": "high",
                                      "messages": [user_message([image_part(make_png(64))])]})
         self.assertEqual(status, 502)
-        self.assertEqual(len(FakeRun.instances), 3)
-        for run in FakeRun.instances:
-            self.assertTrue(run.img_snapshot["files"])
+        self.assertEqual(len(self.hub.admissions()), 3)
+        spawns = self.hub.spawns()
+        self.assertEqual(len(spawns), 3)
+        for spawn in spawns:  # temp-файлы жили до последней попытки
+            self.assertEqual(spawn["cwd_files"], {"img-1.png": "0o600"})
         self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
 
     def test_cleanup_after_client_gone(self):
@@ -267,7 +289,9 @@ class TestImageCleanup(ImageCase):
         while time.time() < deadline and list(server.WORKSPACE.glob("img-*")):
             time.sleep(0.1)
         self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
-        self.assertEqual(len(FakeRun.instances), 1)
+        # Клиент ушёл раньше хода: ход не доходит до модели, процесс не остаётся.
+        self.assertLessEqual(len(self.hub.spawns()), 1)
+        self.assertEqual(len(self.hub.admissions()), 0)
 
 
 class TestProofFailClosed(ImageCase):
@@ -280,7 +304,7 @@ class TestProofFailClosed(ImageCase):
         binary, _ = self.confirmed_stand()
         status, _ = self.request("deepseek-v4.1-flash", "max")
         self.assertEqual(status, 200)
-        self.assertEqual(len(FakeRun.instances), 1)
+        self.assertEqual(len(self.hub.admissions()), 1)
         binary.write_bytes(b"other-binary-content")
         with self.capture_logs() as lines:
             status, body = self.request("deepseek-v4.1-flash", "max")

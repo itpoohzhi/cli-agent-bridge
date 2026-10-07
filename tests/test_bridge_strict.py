@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from bridge_testlib import (  # noqa: E402
-    BridgeCase, FakeRun, chat_body, find_model, load_raw_fleet, make_proof,
+    BridgeCase, chat_body, find_model, load_raw_fleet, make_proof,
 )
 
 REJECT_STRICT = re.compile(
@@ -27,6 +27,7 @@ REJECT_STRICT = re.compile(
 
 EXEC_LINE = re.compile(
     r"^exec model=(?P<model>\S+) effort=(?P<effort>\S+) effort_source=(?P<source>\S+) "
+    r"autonomy=(?P<autonomy>\S+) autonomy_source=(?P<autonomy_source>\S+) "
     r"prompt_bytes=(?P<bytes>\d+) (?P<tag>client=\S+ ua=.*)$")
 DONE_LINE = re.compile(r"^done model=\S+ rc=\d+ state=\S+ .*client=\S+ ua=.*$")
 
@@ -156,36 +157,56 @@ class TestCatalogClassI(unittest.TestCase):
 
 
 class TestEffortAndModel(BridgeCase):
-    """C-02: строгая валидация model/effort до запуска, без клампов и алиасов."""
+    """C-02: строгая валидация model/effort до запуска, без клампов и алиасов.
+
+    Проверяются фактические параметры RPC initialize_session и исходы в строке
+    `exec`; форма конструктора процесса не тестируется (TM-016).
+    """
+
+    def _post_logged(self, body):
+        """POST и (параметры последней initialize_session, effort_source, autonomy_source)."""
+        with self.capture_logs() as lines:
+            status, _ = self._post(body)
+        execs = [m for m in (EXEC_LINE.match(ln) for ln in lines) if m]
+        init = self.hub.inits()[-1]["params"] if self.hub.inits() else None
+        source = execs[-1].group("source") if execs else None
+        autonomy_source = execs[-1].group("autonomy_source") if execs else None
+        return status, init, source, autonomy_source
 
     def test_defaults_when_model_and_effort_absent(self):
         for payload in ({}, {"model": None, "reasoning_effort": None},
                         {"model": "", "reasoning_effort": ""},
                         {"model": "   ", "reasoning_effort": "   "}):
-            FakeRun.scripts = []
-            status, _ = self._post(chat_body(**payload))
+            status, init, source, _ = self._post_logged(chat_body(**payload))
             self.assertEqual(status, 200)
-            run = FakeRun.instances[-1]
-            self.assertEqual(run.model, "claude-sonnet-5-5")
-            self.assertEqual(run.effort, "high")
-            self.assertEqual(run.effort_source, "default")
+            self.assertEqual(init["modelId"], "claude-sonnet-5-5")
+            self.assertEqual(init["reasoningEffort"], "high")
+            self.assertEqual(source, "default")
 
     def test_allowed_efforts_accepted(self):
+        # Уровни — строго из fleet.json (sonnet-5-5: только high; xhigh в каталоге нет).
         wanted = {
-            "claude-sonnet-5-5": ["high", "xhigh"],
+            "claude-sonnet-5-5": ["high"],
             "gemini-3.8-flash": ["high"],
             "grok-4.7": ["high"],
             "deepseek-v4.1-flash": ["high", "max"],
-            "gpt-6.1-sol": ["high", "max"],
+            "gpt-6.1-sol": ["high"],
             "glm-5.3": ["max"],
         }
         for model, efforts in wanted.items():
+            self.assertEqual(server.FLEET["models"][model]["efforts"], efforts, model)
             for effort in efforts:
-                status, _ = self._post(chat_body(model=model, effort=effort))
+                status, init, source, _ = self._post_logged(chat_body(model=model, effort=effort))
                 self.assertEqual(status, 200, (model, effort))
-                run = FakeRun.instances[-1]
-                self.assertEqual(run.effort, effort)
-                self.assertEqual(run.effort_source, "request")
+                self.assertEqual(init["modelId"], model)
+                self.assertEqual(init["reasoningEffort"], effort)
+                self.assertEqual(source, "request")
+        # За пределами каталога — отказ до spawn (xhigh для sonnet недопустим).
+        before = len(self.hub.spawns())
+        status, body = self._post_json(chat_body(model="claude-sonnet-5-5", effort="xhigh"))
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
+        self.assertEqual(len(self.hub.spawns()), before)
 
     def test_judge_levels_and_outside_rejected(self):
         cases = [
@@ -200,11 +221,11 @@ class TestEffortAndModel(BridgeCase):
             ("claude-sonnet-5-5", "max\n"),
         ]
         for model, effort in cases:
-            before = len(FakeRun.instances)
+            before = len(self.hub.spawns())
             status, body = self._post_json(chat_body(model=model, effort=effort))
             self.assertEqual(status, 400, (model, effort))
             self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
-            self.assertEqual(len(FakeRun.instances), before)
+            self.assertEqual(len(self.hub.spawns()), before)
         for bad in (5, ["high"], {"level": "high"}, True):
             status, body = self._post_json(chat_body(model="claude-sonnet-5-5", effort=bad))
             self.assertEqual(status, 400)
@@ -215,53 +236,51 @@ class TestEffortAndModel(BridgeCase):
                  "x\nexec model=claude-sonnet-5-5 effort=high effort_source=request",
                  "sk-SECRET-0123456789abcdef", "A" * 5000]
         for model in cases:
-            before = len(FakeRun.instances)
+            before = len(self.hub.spawns())
             status, body = self._post_json(chat_body(model=model))
             self.assertEqual(status, 400, model[:20])
             self.assertEqual(body["error"]["type"], "model_not_allowed")
-            self.assertEqual(len(FakeRun.instances), before)
+            self.assertEqual(len(self.hub.spawns()), before)
         for bad in (5, ["claude-sonnet-5-5"], {"id": "claude-sonnet-5-5"}, True):
             status, body = self._post_json(chat_body(model=bad))
             self.assertEqual(status, 400)
             self.assertEqual(body["error"]["type"], "model_not_allowed")
 
     def test_model_and_effort_are_stripped(self):
-        status, _ = self._post(chat_body(model=" claude-sonnet-5-5 ", effort=" high "))
+        status, init, source, _ = self._post_logged(
+            chat_body(model=" claude-sonnet-5-5 ", effort=" high "))
         self.assertEqual(status, 200)
-        run = FakeRun.instances[-1]
-        self.assertEqual(run.model, "claude-sonnet-5-5")
-        self.assertEqual(run.effort, "high")
-        self.assertEqual(run.effort_source, "request")
+        self.assertEqual(init["modelId"], "claude-sonnet-5-5")
+        self.assertEqual(init["reasoningEffort"], "high")
+        self.assertEqual(source, "request")
 
     def test_autonomy_default_is_high(self):
-        status, _ = self._post(chat_body(model="claude-sonnet-5-5"))
+        status, init, _, autonomy_source = self._post_logged(chat_body(model="claude-sonnet-5-5"))
         self.assertEqual(status, 200)
-        run = FakeRun.instances[-1]
-        self.assertEqual(run.autonomy, "high")
-        self.assertEqual(run.autonomy_source, "default")
+        self.assertEqual(init["autonomyLevel"], "high")
+        self.assertEqual(autonomy_source, "default")
 
     def test_autonomy_levels_accepted(self):
         for level in ("low", "medium", "high", "off"):
-            status, _ = self._post(chat_body(model="deepseek-v4.1-flash",
-                                             effort="max", autonomy=level))
+            status, init, _, autonomy_source = self._post_logged(
+                chat_body(model="deepseek-v4.1-flash", effort="max", autonomy=level))
             self.assertEqual(status, 200, level)
-            run = FakeRun.instances[-1]
-            self.assertEqual(run.autonomy, level)
-            self.assertEqual(run.autonomy_source, "request")
-        status, _ = self._post(chat_body(model="gemini-3.8-flash", autonomy=" low "))
+            self.assertEqual(init["autonomyLevel"], level)  # off задаётся RPC, не опущенным флагом
+            self.assertEqual(autonomy_source, "request")
+        status, init, _, autonomy_source = self._post_logged(
+            chat_body(model="gemini-3.8-flash", autonomy=" low "))
         self.assertEqual(status, 200)
-        run = FakeRun.instances[-1]
-        self.assertEqual(run.autonomy, "low")
-        self.assertEqual(run.autonomy_source, "request")
+        self.assertEqual(init["autonomyLevel"], "low")
+        self.assertEqual(autonomy_source, "request")
 
     def test_autonomy_bad_rejected(self):
         for bad in ("ultra", "HIGH", "none", "skip", "high\nx"):
-            before = len(FakeRun.instances)
+            before = len(self.hub.spawns())
             status, body = self._post_json(chat_body(model="claude-sonnet-5-5",
                                                     autonomy=bad))
             self.assertEqual(status, 400, bad)
             self.assertEqual(body["error"]["type"], "unsupported_autonomy")
-            self.assertEqual(len(FakeRun.instances), before)
+            self.assertEqual(len(self.hub.spawns()), before)
         for bad in (5, ["high"], {"level": "high"}, True):
             status, body = self._post_json(chat_body(model="claude-sonnet-5-5",
                                                     autonomy=bad))
@@ -269,12 +288,12 @@ class TestEffortAndModel(BridgeCase):
             self.assertEqual(body["error"]["type"], "unsupported_autonomy")
 
     def test_reasoning_object_rejected(self):
-        before = len(FakeRun.instances)
+        before = len(self.hub.spawns())
         status, body = self._post_json(chat_body(model="claude-sonnet-5-5",
                                                  reasoning={"effort": "high"}))
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "unsupported_parameter")
-        self.assertEqual(len(FakeRun.instances), before)
+        self.assertEqual(len(self.hub.spawns()), before)
 
     def test_stream_with_bad_effort_is_plain_json_400(self):
         status, raw = self._post(chat_body(model="claude-sonnet-5-5", effort="max", stream=True))
@@ -285,12 +304,12 @@ class TestEffortAndModel(BridgeCase):
 
     def test_launcher_missing_gives_503_and_no_spawn(self):
         server.LAUNCHER = str(Path(self._tmp.name) / "no-such-launcher.sh")
-        before = len(FakeRun.instances)
+        before = len(self.hub.spawns())
         status, body = self._post_json(chat_body(model="claude-sonnet-5-5"))
         self.assertEqual(status, 503)
         self.assertEqual(body["error"]["type"], "launcher_unavailable")
         self.assertEqual(body["error"]["code"], 503)
-        self.assertEqual(len(FakeRun.instances), before)
+        self.assertEqual(len(self.hub.spawns()), before)
 
 
 class TestHealthAndModels(BridgeCase):
@@ -362,7 +381,7 @@ class TestAdmissionBudget(BridgeCase):
         self.assertEqual(status, 503)
         self.assertEqual(body["error"]["type"], "overloaded")
         self.assertEqual(body["error"]["code"], 503)
-        self.assertEqual(len(FakeRun.instances), 0)
+        self.assertEqual(len(self.hub.spawns()), 0)
         self.assertTrue(any("reject reason=overloaded model=unknown" in ln for ln in lines))
         self.assertEqual(server._budget._used, 0)  # резерв снят в любом исходе
 

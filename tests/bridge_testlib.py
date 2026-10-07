@@ -1,14 +1,15 @@
 """Общая библиотека тестов моста droid-bridge (не собирается как тесты).
 
-Фейковый Run, базовый HTTP-класс на свободном порту и сборщики запросов к
-image-пути. Сеть — только петлевой сокет тестового сервера; droid и лончер
-не вызываются (кроме отдельного теста с локальной заглушкой лончера в tmp).
+Фейковый droid (настоящий subprocess со stream-jsonrpc, tests/fake_droid.py) и
+его хаб, базовый HTTP-класс на свободном порту и сборщики запросов к image-пути.
+Сеть — только петлевой сокет тестового сервера; реальный droid не вызывается.
 """
 
 import base64
 import copy
 import http.client
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -105,86 +106,127 @@ def make_proof(binary_path, efforts_proven, impl_version=1, method="workspace-re
     }
 
 
-class FakeRun:
-    """Заглушка Run: сценарии событий раздаются по одному на попытку."""
-
-    scripts = []
-    instances = []
-
-    def __init__(self, prompt, model, effort, effort_source,
-                 autonomy, autonomy_source, cwd, tag,
-                 img_dir=None, img_stats=None, sess_sid=""):
-        self.sess_sid = sess_sid
-        self.prompt = prompt
-        self.model = model
-        self.effort = effort
-        self.effort_source = effort_source
-        self.autonomy = autonomy
-        self.autonomy_source = autonomy_source
-        self.cwd = cwd
-        self.tag = tag
-        self.img_dir = img_dir
-        self.img_stats = img_stats
-        self.img_snapshot = self._snapshot(img_dir)
-        self.events = list(type(self).scripts.pop(0)) if type(self).scripts else [
-            ("text", "PONG"), ("result", {"finalText": "", "usage": {}}), ("done", (0, ""))]
-        self.q = server.queue.Queue()
-        self.err_box = [""]
-        self.proc = types.SimpleNamespace(pid=-1, poll=lambda: 0,
-                                          stdout=None, stderr=None)
-        self.got_event = False
-        self.started = time.monotonic()
-        self.closed = False
-        for ev in self.events:
-            if ev[0] == "stderr":  # ("stderr", text) -> err_box, как дренаж stderr
-                self.err_box.append(ev[1])
-            else:
-                self.q.put(ev)
-        type(self).instances.append(self)
-
-    @staticmethod
-    def _snapshot(img_dir):
-        if img_dir is None:
-            return None
-        path = Path(img_dir)
-        snapshot = {"dir": str(path), "dir_mode": "", "files": {}}
-        if path.exists():
-            snapshot["dir_mode"] = oct(path.stat().st_mode & 0o777)
-            for item in sorted(path.iterdir()):
-                snapshot["files"][item.name] = oct(item.stat().st_mode & 0o777)
-        return snapshot
-
-    def close(self):
-        self.closed = True
+FAKE_DROID = Path(__file__).resolve().parent / "fake_droid.py"
 
 
-class BoomRun(FakeRun):
-    """Run, падающий на старте (исключение при создании процесса)."""
+def legacy_scenario(events):
+    """Старый сценарий FakeRun (text/reasoning/result/stderr/done) -> сценарий fake_droid."""
+    steps = []
+    usage = {}
+    silent = not events
+    for ev in events:
+        kind = ev[0]
+        if kind == "text":
+            steps.append({"op": "text", "text": ev[1]})
+        elif kind == "reasoning":
+            steps.append({"op": "thinking", "text": ev[1]})
+        elif kind == "result":
+            raw = (ev[1] or {}).get("usage") or {}
+            usage = {"inputTokens": raw.get("input_tokens", 0), "outputTokens": raw.get("output_tokens", 0)}
+        elif kind == "stderr":
+            steps.append({"op": "exit", "rc": 1, "stderr": ev[1]})
+        elif kind == "done" and ev[1][0] != 0 and not any(s["op"] == "exit" for s in steps):
+            steps.append({"op": "exit", "rc": ev[1][0]})
+    if silent:
+        steps.append({"op": "hang"})
+    return {"steps": steps, "usage": usage}
 
-    def __init__(self, *args, **kwargs):
-        raise OSError("boom")
+
+class FakeDroidHub:
+    """Каталог управления fake_droid: конфиг, очередь сценариев, журнал процессов."""
+
+    def __init__(self, base):
+        self.base = Path(base)
+        self.base.mkdir(parents=True, exist_ok=True)
+        self.config = {}
+        self.launcher = self.base / "fake-launcher"
+        self.launcher.write_text(
+            "#!%s\nimport sys\nsys.path.insert(0, %r)\nimport fake_droid\nfake_droid.main(sys.argv[1:])\n"
+            % (sys.executable, str(FAKE_DROID.parent)), encoding="utf-8")
+        self.launcher.chmod(0o755)
+        self._flush()
+
+    def _flush(self):
+        (self.base / "config.json").write_text(json.dumps(self.config), encoding="utf-8")
+
+    def configure(self, **cfg):
+        self.config.update(cfg)
+        self._flush()
+
+    def script(self, scenarios):
+        """Добавить сценарии ходов (по одному на запущенный цикл, глобально по очереди)."""
+        self.config.setdefault("scenarios", []).extend(scenarios)
+        self._flush()
+
+    def legacy(self, scripts):
+        self.script([legacy_scenario(ev) for ev in scripts])
+
+    def records(self):
+        path = self.base / "log.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def spawns(self):
+        return [r for r in self.records() if r["ev"] == "spawn"]
+
+    def rpcs(self, method=None):
+        return [r for r in self.records() if r["ev"] == "rpc" and (method is None or r["method"] == method)]
+
+    def admissions(self):
+        """Принятые циклы agent loop (add_user_message без skipAgentLoop): аналог Run.instances."""
+        return [r for r in self.rpcs("droid.add_user_message") if not r["params"].get("skipAgentLoop")]
+
+    def inits(self):
+        return self.rpcs("droid.initialize_session")
+
+    def sent_texts(self):
+        return [r["params"].get("text", "") for r in self.rpcs("droid.add_user_message")]
+
+    def exits(self):
+        return [r for r in self.records() if r["ev"] == "exit"]
+
+
+def wait_until(predicate, timeout=10.0, step=0.05):
+    """Ждать условие (закрытие процессов асинхронно)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(step)
+    return predicate()
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class BridgeCase(unittest.TestCase):
     """Сервер на свободном порту с подменённым Run и временным workspace."""
 
     def setUp(self):
-        FakeRun.scripts = []
-        FakeRun.instances = []
-        self._real_run = server.Run
-        self._real_key = server.AUTH_KEY
-        self._real_workspace = server.WORKSPACE
-        self._real_fleet = server.FLEET
-        self._real_probe = server.IMAGE_PROBE
-        self._real_launcher = server.LAUNCHER
-        self._real_budget = server._budget
-        self._real_model_id = server.MODEL_ID
-        server.Run = FakeRun
-        server.AUTH_KEY = "test-key"
+        self._saved = {name: getattr(server, name) for name in (
+            "AUTH_KEY", "WORKSPACE", "FLEET", "IMAGE_PROBE", "LAUNCHER", "_budget", "MODEL_ID",
+            "_sleep", "INTERRUPT_GRACE_S", "RPC_CALL_TIMEOUT_S", "SILENCE_WATCHDOG_S",
+            "FIRST_TOKEN_TIMEOUT_S", "TIMEOUT_S", "_clock", "IDLE_SECONDS")}
+        self._env_fake = os.environ.get("FAKE_DROID_DIR")
         self._tmp = tempfile.TemporaryDirectory()
+        self.hub = FakeDroidHub(Path(self._tmp.name) / "fake")
+        os.environ["FAKE_DROID_DIR"] = str(self.hub.base)
+        server.LAUNCHER = str(self.hub.launcher)
+        server.AUTH_KEY = "test-key"
         server.WORKSPACE = Path(self._tmp.name) / "workspace"
         server.WORKSPACE.mkdir(parents=True, exist_ok=True)
         server._budget = None
+        server._sleep = lambda _seconds: None  # ретраи 2/4 с — без реального ожидания
+        server.INTERRUPT_GRACE_S = 1.0
+        server._reset_rpc_state()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
@@ -193,14 +235,13 @@ class BridgeCase(unittest.TestCase):
     def tearDown(self):
         self.httpd.shutdown()
         self.httpd.server_close()
-        server.Run = self._real_run
-        server.AUTH_KEY = self._real_key
-        server.WORKSPACE = self._real_workspace
-        server.FLEET = self._real_fleet
-        server.IMAGE_PROBE = self._real_probe
-        server.LAUNCHER = self._real_launcher
-        server._budget = self._real_budget
-        server.MODEL_ID = self._real_model_id
+        server._reset_rpc_state()
+        for name, value in self._saved.items():
+            setattr(server, name, value)
+        if self._env_fake is None:
+            os.environ.pop("FAKE_DROID_DIR", None)
+        else:
+            os.environ["FAKE_DROID_DIR"] = self._env_fake
         self._tmp.cleanup()
 
     # -- helpers ----------------------------------------------------------------
