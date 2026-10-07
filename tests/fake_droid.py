@@ -14,7 +14,11 @@
 
 Сценарий хода — список шагов {"op": ...} либо словарь {"steps": [...], "reason": ...,
 "usage": {...}, "late": true}. Шаги: text, thinking, retry, retract, error, sleep, hang,
-exit, garbage, foreign_terminal, stale_terminal, big_line, flood, notify.
+exit, garbage, foreign_terminal, stale_terminal, unknown_terminal, empty_terminal, stale_message,
+stale_delta, empty_msgs, orphan_child, big_line, flood, notify.
+Протокол как у реального droid: turnId есть ТОЛЬКО у agent_turn_completed и равен id user-сообщения
+(create_message с requestId), запустившего ход; у ассистентских сообщений parentId == turnId;
+каждый кадр несёт factoryProtocolVersion (конфиг protocol_version, по умолчанию PROTOCOL).
 Конфиг: stall_after=N — перестать читать stdin после N строк (завис); omit_autonomy,
 omit_disabled_ids, raw_tools, echo_flags/flags_override — искажение read-back.
 """
@@ -31,6 +35,7 @@ import time
 import uuid
 
 API = "1.0.0"
+PROTOCOL = "1.246.0"
 DEFAULT_TOOLS = ["Read", "Execute", "Edit", "web_search"]
 # Фиктивный ключ тестового окружения (bridge_testlib подставляет его вместо реального).
 TEST_FACTORY_KEY = "bridge-test-factory-key-not-real"
@@ -50,6 +55,9 @@ class Fake:
         self.seq = 0
         self.eof = False
         self.prev_turn_id = ""
+        self.cur_turn = ""
+        self.prev_mids: list = []
+        self.protocol = self.config().get("protocol_version") or PROTOCOL
         self.log({"ev": "spawn", "argv": argv, "cwd": os.getcwd(), **self._env_facts()})
 
     # -- журнал и конфиг -------------------------------------------------------
@@ -110,6 +118,7 @@ class Fake:
 
     # -- вывод -----------------------------------------------------------------
     def emit(self, obj: dict) -> None:
+        obj.setdefault("factoryProtocolVersion", self.protocol)
         data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
         with self.out_lock:
             sys.stdout.buffer.write(data)
@@ -271,7 +280,10 @@ class Fake:
             self.respond(rid, {})
         role = params.get("role") or "user"
         self.seq += 1
-        message = {"id": f"u{self.seq}", "role": role, "content": [{"type": "text", "text": params.get("text", "")}]}
+        skip_loop = bool(params.get("skipAgentLoop"))
+        # Id user-сообщения, запускающего ход, == turnId терминала (как у реального droid).
+        self.cur_turn = "" if skip_loop else "turn-" + uuid.uuid4().hex[:8]
+        message = {"id": self.cur_turn or f"u{self.seq}", "role": role, "content": [{"type": "text", "text": params.get("text", "")}]}
         self.messages.append(message)
         self.save()
         skip = bool(params.get("skipAgentLoop"))
@@ -321,11 +333,12 @@ class Fake:
         steps = scenario.get("steps") or []
         reason = scenario.get("reason", "completed")
         usage = scenario.get("usage") or {"inputTokens": 10, "outputTokens": 5}
-        turn_id = "turn-" + uuid.uuid4().hex[:8]
+        turn_id = self.cur_turn or "turn-" + uuid.uuid4().hex[:8]
         started = time.monotonic()
         last_mid = ""
         pending_thinking = ""
         cancelled = False
+        made_mids: list = []
         self.notify("droid_working_state_changed", newState="thinking")
         for step in steps:
             if self.interrupted():
@@ -348,10 +361,11 @@ class Fake:
                 else:
                     self.notify("assistant_text_complete", messageId=mid)
                 blocks.append({"type": "text", "text": text})
-                msg = {"id": mid, "role": "assistant", "content": blocks}
+                msg = {"id": mid, "role": "assistant", "content": blocks, "parentId": turn_id}
                 self.messages.append(msg)
                 self.notify("create_message", message=msg, messageId=mid)
                 last_mid = mid
+                made_mids.append(mid)
                 if step.get("pause"):
                     if self.pause(float(step["pause"])):
                         cancelled = True
@@ -364,7 +378,8 @@ class Fake:
                 self.notify("thinking_text_delta", messageId=mid, textDelta=text)
                 self.notify("thinking_text_complete", messageId=mid, text=text, durationMs=5)
                 if step.get("alone"):
-                    msg = {"id": mid, "role": "assistant", "content": [{"type": "thinking", "thinking": text}]}
+                    msg = {"id": mid, "role": "assistant", "parentId": turn_id,
+                           "content": [{"type": "thinking", "thinking": text}]}
                     self.notify("create_message", message=msg, messageId=mid)
                     last_mid = mid
                     pending_thinking = ""
@@ -398,6 +413,35 @@ class Fake:
                 # Запоздавший terminal ПРЕЖНЕГО хода (его turnId), пришедший после arming текущего.
                 self.notify("agent_turn_completed", reason="completed", turnId=self.prev_turn_id,
                             tokenUsage={"inputTokens": 777, "outputTokens": 777})
+            elif op == "unknown_terminal":
+                # terminal с turnId, которого мост не запускал: ход он завершать не вправе.
+                self.notify("agent_turn_completed", reason="completed", turnId="turn-unknown",
+                            tokenUsage={"inputTokens": 888, "outputTokens": 888})
+            elif op == "empty_terminal":
+                self.notify("agent_turn_completed", reason="completed",
+                            tokenUsage={"inputTokens": 888, "outputTokens": 888})
+            elif op == "stale_message":
+                # Ассистентское сообщение ПРЕЖНЕГО хода (его id и parentId), пришедшее после arming.
+                mid = self.prev_mids[-1] if self.prev_mids else "m-old"
+                old = {"id": mid, "role": "assistant", "parentId": self.prev_turn_id,
+                       "content": [{"type": "text", "text": step.get("text", "STALE")}]}
+                self.notify("create_message", message=old, messageId=mid)
+            elif op == "stale_delta":
+                mid = self.prev_mids[-1] if self.prev_mids else "m-old"
+                self.notify("assistant_text_delta", messageId=mid, blockIndex=0,
+                            textDelta=step.get("text", "STALE"))
+            elif op == "empty_msgs":
+                for index in range(int(step.get("count", 10))):
+                    mid = f"e{index}"
+                    self.notify("create_message", messageId=mid, message={
+                        "id": mid, "role": "assistant", "parentId": turn_id, "content": []})
+            elif op == "orphan_child":
+                # Лидер завершается, потомок в той же группе держит stdout/stderr (RW-010).
+                import subprocess
+                child = subprocess.Popen(["sleep", str(step.get("seconds", 300))])
+                self.log({"ev": "orphan", "child_pid": child.pid})
+                self.log({"ev": "exit", "reason": "orphan_child", "rc": 0})
+                os._exit(int(step.get("rc", 0)))
             elif op == "big_line":
                 self.raw("{" + '"pad":"' + "A" * int(step.get("bytes", 1000)) + '"}')
             elif op == "flood":
@@ -419,6 +463,7 @@ class Fake:
                     durationMs=int((time.monotonic() - started) * 1000))
         self.notify("droid_working_state_changed", newState="idle")
         self.prev_turn_id = turn_id
+        self.prev_mids = made_mids or self.prev_mids
         if scenario.get("late"):
             # Запоздавшие события прежнего хода: не должны засчитываться следующему.
             self.pause(float(scenario["late"]))

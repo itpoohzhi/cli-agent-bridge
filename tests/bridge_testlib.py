@@ -133,6 +133,23 @@ def legacy_scenario(events):
     return {"steps": steps, "usage": usage}
 
 
+def make_receipt(image_path, digest, **override):
+    """Receipt schema 2 для fake_droid (протокол по умолчанию fake): тесты ломают по одному компоненту."""
+    import fake_droid
+    ids = list(fake_droid.DEFAULT_TOOLS)
+    receipt = {
+        "schema": server.RECEIPT_SCHEMA, "image_path": str(image_path), "image_sha256": digest,
+        "protocol": {"api_version": server.RPC_API_VERSION, "protocol_version": fake_droid.PROTOCOL},
+        "tools_policy": {"policy": server.TOOLS_POLICY, "disabled_tool_ids": sorted(ids),
+                         "digest": server.tools_policy_digest(ids)},
+        "settings_profile": {"profile": dict(server.SETTINGS_PROFILE),
+                             "digest": server.settings_profile_digest()},
+        "probes": {name: "ok" for name in server.RECEIPT_PROBES},
+    }
+    receipt.update(override)
+    return receipt
+
+
 class FakeDroidHub:
     """Каталог управления fake_droid: конфиг, очередь сценариев, журнал процессов."""
 
@@ -222,7 +239,9 @@ class BridgeCase(unittest.TestCase):
             "_sleep", "INTERRUPT_GRACE_S", "RPC_CALL_TIMEOUT_S", "SILENCE_WATCHDOG_S",
             "FIRST_TOKEN_TIMEOUT_S", "TIMEOUT_S", "_clock", "IDLE_SECONDS", "RECEIPT_REQUIRED",
             "MAX_RPC_LINE_BYTES", "MAX_STDERR_BYTES", "MAX_INBOX_BYTES", "MAX_TURN_TEXT_BYTES",
-            "MAX_CHATS", "MAX_CONCURRENT", "INSTR_BLOCK_LIMIT")}
+            "MAX_CHATS", "MAX_CONCURRENT", "INSTR_BLOCK_LIMIT", "FINISHED_TURNS_KEEP",
+            "DELIVERY_CHUNK_BYTES", "ENTRY_OVERHEAD_BYTES", "GUARD", "GUARD_PROFILES_DIR", "GUARD_CANON",
+            "INSTR_NONKB_MARGIN")}
         # Реальный FACTORY_API_KEY рабочего окружения в тестах не используется: подставляем
         # фиктивный sentinel; восстановление через addCleanup срабатывает и при падении теста.
         self._env_factory_key = os.environ.get("FACTORY_API_KEY")
@@ -237,6 +256,12 @@ class BridgeCase(unittest.TestCase):
         server.WORKSPACE = Path(self._tmp.name) / "workspace"
         server.WORKSPACE.mkdir(parents=True, exist_ok=True)
         server._budget = None
+        # Охранник B: реальные профили/канон владельца в тестах не читаются (пустые пути под tmp).
+        if hasattr(server, "InstructionGuard"):
+            server.GUARD = server.InstructionGuard()
+            server.GUARD_PROFILES_DIR = str(Path(self._tmp.name) / "profiles-none")
+            server.GUARD_CANON = str(Path(self._tmp.name) / "canon-none.md")
+            server._canon_cache.update(key=None, digest="")
         server.RECEIPT_REQUIRED = False  # receipt квалификации образа: отдельные тесты RW-007 включают
         server._sleep = lambda _seconds: None  # ретраи 2/4 с — без реального ожидания
         server.INTERRUPT_GRACE_S = 1.0

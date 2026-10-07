@@ -699,6 +699,29 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
     return res.exit_code
 
 
+def check_installed(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -> Optional[Result]:
+    """Тот же прогноз, что `run_check`, но без печати (для автоматического контура моста).
+
+    None - канон не найден (CANON_LOST). REQ-003 строгий, как в рабочем CLI. Файлы читаются только для
+    хеша и точной длины строки журнала; содержимое наружу не отдаётся.
+    """
+    try:
+        with open(canon_path, "rb") as handle:
+            canon_bytes = handle.read()
+    except OSError:
+        return None
+    canon_text = canon_bytes.decode("utf-8", "replace")
+    canon_real = os.path.realpath(canon_path)
+    cwd_files: Dict[str, Sequence[FileEntry]] = {}
+    texts: Dict[str, Dict[str, str]] = {}
+    for label, path in cwds:
+        texts[label] = {}
+        cwd_files[label], _ = collect_cwd_entries(path, canon_real, texts[label])
+    req_labels = [label for label, path in cwds if path == KB_CWD]
+    return evaluate(len(canon_bytes), cwd_files, maxbytes, req_labels, strict_req003=True,
+                    texts=texts, canon_text=canon_text)
+
+
 def parse_profile_maxbytes(text: str) -> Optional[int]:
     """maxBytes плагина agent-instructions внутри пресета `preset-standard` (YAML-патч профиля DSH).
 

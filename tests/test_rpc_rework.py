@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import pid_alive, wait_until  # noqa: E402
+from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402
 from rpc_testlib import FakeClock, RpcCase  # noqa: E402
 from test_images_strict import ImageCase  # noqa: E402
 
@@ -261,8 +261,8 @@ class TestDroidReceipt(RpcCase):
         image = image_dir / "droid"
         image.write_bytes(content)
         image.chmod(0o500)
-        server._atomic_write(server._receipt_path(), json.dumps({
-            "schema": 1, "image_path": str(image), "image_sha256": digest}).encode())
+        server._atomic_write(server._receipt_path(), json.dumps(
+            make_receipt(image, digest)).encode())
         return image, digest
 
     def _ask(self):
@@ -302,18 +302,18 @@ class TestDroidImageTool(RpcCase):
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
         import droid_image
         source = Path(self._tmp.name) / "global-droid"
-        source.write_bytes(b"global-droid-binary")
+        source.write_bytes(self.hub.launcher.read_bytes())  # fake_droid отвечает на пробы как настоящий
         source.chmod(0o755)
         receipt = droid_image.install_image(source, server.WORKSPACE)
         image = Path(receipt["image_path"])
         self.assertEqual(oct(image.stat().st_mode & 0o777), "0o500")
         self.assertEqual(oct(image.parent.stat().st_mode & 0o777), "0o700")
-        self.assertEqual(receipt["image_sha256"], hashlib.sha256(b"global-droid-binary").hexdigest())
-        self.assertEqual(source.read_bytes(), b"global-droid-binary")  # глобальный бинарь не тронут
+        self.assertEqual(receipt["image_sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertEqual(source.read_bytes(), self.hub.launcher.read_bytes())  # глобальный бинарь не тронут
         server.RECEIPT_REQUIRED = True
         status, _ = self._post_json(dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 200)
-        self.assertEqual(self.hub.spawns()[0]["droid_bin"], os.path.realpath(str(image)))
+        self.assertEqual(self.hub.spawns()[-1]["droid_bin"], os.path.realpath(str(image)))  # [0] — зонд квалификации
 
 
 class TestByteBudgets(RpcCase):
@@ -390,10 +390,10 @@ class TestByteBudgets(RpcCase):
 
 
 class TestSpoolEnospc(ImageCase):
-    """RW-008: ENOSPC при spool картинок — предусмотренная ошибка 507, ресурсы возвращены."""
+    """RW-008/RW-004: ENOSPC при spool картинок — штатный 502 proxy_error (без новых кодов), ресурсы возвращены."""
 
     def test_rw008_enospc_on_image_spool_gives_507_and_frees_resources(self):
-        """RW-008: write_bytes картинки -> OSError(ENOSPC): 507 insufficient_storage, lease/слот/каталог свободны."""
+        """RW-008/RW-004: write_bytes картинки -> OSError(ENOSPC): 502 proxy_error (новых кодов нет), lease/слот/каталог свободны."""
         from bridge_testlib import image_part, make_png, text_part
         server.IMAGE_PROBE = True
         self.probe_stand()
@@ -411,8 +411,8 @@ class TestSpoolEnospc(ImageCase):
                 "messages": [{"role": "user", "content": [text_part("look"), image_part(make_png(64))]}]})
         finally:
             Path.write_bytes = real
-        self.assertEqual(status, 507)
-        self.assertEqual(body["error"]["type"], "insufficient_storage")
+        self.assertEqual(status, 502)
+        self.assertEqual(body["error"]["type"], "proxy_error")
         self.assertEqual(self.hub.spawns(), [])
         self.assertEqual([p for p in server.WORKSPACE.glob("img-*")], [])
         self.assertTrue(server._slots.acquire(blocking=False))
@@ -520,30 +520,66 @@ class TestRpcWriteDeadline(RpcCase):
 
 
 class TestInstructionBudget(RpcCase):
-    """RW-002: размер блока agent-instructions > 60 000 Б запрещает spawn/add до add_user_message."""
+    """RW-002/RW-001: предел блока agent-instructions проверяется до spawn/add_user_message.
 
-    @staticmethod
-    def block(size):
-        head = "Instructions from: /x/AGENTS.md\n"
-        return head + "a" * (size - len(head.encode()))
+    Форма «только канон» (KB/DW) — жёстко 60 000 Б; прочие блоки — maxBytes профиля минус запас.
+    """
 
-    def _ask(self, size):
+    HEAD = "Instructions from: /x/AGENTS.md\n"
+
+    def canon_block(self, size):
+        """Блок ровно `size` Б из одной секции с копией канона (канон записывается в GUARD_CANON)."""
+        body = "k" * (size - len(self.HEAD.encode()))
+        Path(server.GUARD_CANON).write_text(body + "\n", encoding="utf-8")
+        server._canon_cache.update(key=None, digest="")
+        return self.HEAD + body
+
+    def other_block(self, size):
+        return self.HEAD + "a" * (size - len(self.HEAD.encode()))
+
+    def _ask(self, *blocks):
         return self._post_json(dict(BODY, prompt_cache_key="chat-instr",
-                                    messages=[msg("hello"), msg(self.block(size))]))
+                                    messages=[msg("hello")] + [msg(b) for b in blocks]))
 
-    def test_rw002_oversized_block_rejected_before_spawn(self):
-        """RW-002: 60 001 Б -> 400 REQ003_SIZE_EXCEEDED, ни spawn, ни add_user_message."""
-        status, body = self._ask(60001)
-        self.assertEqual(status, 400)
+    def _refused(self, status, body):
+        self.assertEqual(status, 400, body)
         self.assertEqual(body["error"]["type"], "REQ003_SIZE_EXCEEDED")
         self.assertEqual(self.hub.spawns(), [])
         self.assertEqual(self.hub.rpcs("droid.add_user_message"), [])
 
+    def test_rw002_oversized_block_rejected_before_spawn(self):
+        """RW-002: канон-блок 60 001 Б -> 400 REQ003_SIZE_EXCEEDED, ни spawn, ни add_user_message."""
+        self._refused(*self._ask(self.canon_block(60001)))
+
     def test_rw002_exact_limit_passes(self):
-        """RW-002: ровно 60 000 Б проходит."""
-        status, _ = self._ask(60000)
+        """RW-002: канон-блок ровно 60 000 Б проходит."""
+        status, _ = self._ask(self.canon_block(60000))
         self.assertEqual(status, 200)
         self.assertEqual(len(self.hub.spawns()), 1)
+
+    def test_rw002_non_canon_block_is_limited_by_maxbytes_minus_margin(self):
+        """RW-001: блок не из канона: предел maxBytes(106496) − запас; 60 001 Б проходит, на 1 Б больше предела — 400."""
+        limit = server.b_guard.DEFAULT_MAXBYTES - server.INSTR_NONKB_MARGIN
+        self.assertEqual(self._ask(self.other_block(60001))[0], 200)
+        status, body = self._post_json(dict(BODY, prompt_cache_key="chat-instr-2",
+                                            messages=[msg("hello"), msg(self.other_block(limit + 1))]))
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body["error"]["type"], "REQ003_SIZE_EXCEEDED")
+        self.assertEqual(self._post_json(dict(BODY, prompt_cache_key="chat-instr-3",
+                                              messages=[msg("hello"), msg(self.other_block(limit))]))[0], 200)
+
+    def test_rw002_small_first_block_does_not_hide_oversized_second(self):
+        """RW-002: маленький первый блок и второй 60 001 Б: проверяются ВСЕ блоки, а не первый."""
+        small = self.other_block(2000)
+        big = self.canon_block(60001)
+        self._refused(*self._ask(small, big))
+
+    def test_rw002_marker_beyond_first_4096_bytes_is_found(self):
+        """RW-002: маркер дальше 4096 Б от начала user-сообщения всё равно ловится."""
+        block = self.canon_block(60001)
+        status, body = self._post_json(dict(BODY, prompt_cache_key="chat-instr",
+                                            messages=[msg("p" * 5000 + "\n" + block)]))
+        self._refused(status, body)
 
 
 if __name__ == "__main__":

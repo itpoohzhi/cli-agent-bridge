@@ -455,7 +455,7 @@ class TestPersistenceAndShutdown(RpcCase):
         self.assertEqual(len(self.hub.rpcs("droid.load_session")), 1)
 
     def test_tm012_write_failure_and_rec_rev_conflict_mark_chat_dirty(self):
-        """TM-012: ошибка записи/расхождение rec_rev -> чат DIRTY, ответ клиенту без изменений."""
+        """TM-012/RW-005: сбой записи PENDING/расхождение rec_rev -> 502 до add_user_message, чат DIRTY, replay."""
         chat = self.conv("chat-write")
         chat.ask("q0")
         real = server._atomic_write
@@ -464,22 +464,30 @@ class TestPersistenceAndShutdown(RpcCase):
             raise OSError(28, "No space left on device")
 
         server._atomic_write = failing
+        adds = len(self.hub.rpcs("droid.add_user_message"))
         try:
             status, body = chat.ask("q1")
         finally:
             server._atomic_write = real
-        self.assertEqual(status, 200)  # таксономия ответа не меняется
+        self.assertEqual(status, 502)  # без записи PENDING ход не начинается
+        self.assertEqual(body["error"]["type"], "proxy_error")
+        self.assertEqual(len(self.hub.rpcs("droid.add_user_message")), adds)
         self.assertEqual(self.chat_of("chat-write").state, "DIRTY")
+        chat.msgs.pop()  # клиент повторяет запрос
         inits = len(self.hub.inits())
         self.assertEqual(chat.ask("q2")[0], 200)  # DIRTY -> rebase из истории запроса
         self.assertEqual(len(self.hub.inits()), inits + 1)
-        # Расхождение rec_rev (второй писатель): commit отклонён, слияния нет.
+        # Расхождение rec_rev (второй писатель): запись отклонена, слияния нет, ход не начат.
         state = self.chat_of("chat-write")
         record = server._record_path(state.key_hash)
         data = json.loads(record.read_text(encoding="utf-8"))
         data["rec_rev"] += 10
         record.write_text(json.dumps(data), encoding="utf-8")
-        self.assertEqual(chat.ask("q3")[0], 200)
+        adds = len(self.hub.rpcs("droid.add_user_message"))
+        status, body = chat.ask("q3")
+        self.assertEqual(status, 502)
+        self.assertEqual(body["error"]["type"], "proxy_error")
+        self.assertEqual(len(self.hub.rpcs("droid.add_user_message")), adds)
         self.assertEqual(state.state, "DIRTY")
 
     def test_tm012_writer_lock_rejects_second_bridge_instance(self):
