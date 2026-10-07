@@ -1,0 +1,202 @@
+{
+  "schema_version": 2,
+  "catalogue": "droid-bridge-fleet",
+  "default_model": "claude-sonnet-5-5",
+  "policy_ref": {
+    "path": "~/Мой диск/Context/models.md",
+    "sha256": "3f719d2e51e5de8dcf9bfac286f7688653952a0989e0b20c6c9073d71f5edb3a",
+    "reviewed_at": "2026-10-06T12:28:22+03:00",
+    "snapshot": "architecture/receipts/architect-03-h12-live-policy-snapshot.md",
+    "historical_refs": [
+      "e471ac8c3a0a74933166d897b8a09eaa151d887104a30518f749f70ac40262cb (Architect-02; full bytes unproved)",
+      "d90ea36b5b718755b44ff4a6d46d70bbe9a7bf4a4287597b4622b3e30fb8c503",
+      "a2e99d8992ab5873f2d0550cbb112c02a46f1022ba9049d3f27834e17eced67d",
+      "161203e3ec7b6037d52786eb791c640d42d8bcd55ba74d00c14bc3960272c141 (H5)",
+      "d8ab62dc33faf953449e8b0329ed546a892ad12e5e1120e476bc44589120a9bc (H6)",
+      "b70733cc20e2f2bfb0a2e365ad0145da51867f8f1a49e49c670460b9ba9c503d (H7)",
+      "2b7a85a1a7489aed1ca061351e9a9a3ceeacc2d953506f3fd22c18d48f81d06c (H8)",
+      "f1f131a6d2f562cd06c12c86aba878071c68a61e54d401798dbfd916190c8462 (H9)",
+      "e1163ed9c5ce1639a0395b1164760ab01f625169c7ff04788283cc4fff0826a2 (H10)",
+      "2af320189e5eaafbbade42364a57c4089dbf44101145c8f5ddfa71e323832077 (H11)"
+    ]
+  },
+  "technical_ref": {
+    "droid_version": "0.233.0",
+    "droid_binary_sha256": "0e0bf625f7c45ade78fb5e11efcccaf4bcd00d53414e8e82b76c62969d0c1e34",
+    "efforts_path": "~/.hermes/droid-cli-proxy/model-efforts.json",
+    "droid_binary_path": "~/.local/bin/droid"
+  },
+  "image_limits": {
+    "max_images": 16,
+    "max_image_bytes": 20971520,
+    "max_total_image_bytes": 20971520,
+    "max_body_bytes": 33554432,
+    "types": [
+      "image/png"
+    ]
+  },
+  "admission": {
+    "max_http_connections": 32,
+    "max_inflight_body_bytes": 67108864,
+    "overload_error": {
+      "http": 503,
+      "type": "overloaded"
+    },
+    "oversize_error": {
+      "http": 413,
+      "type": "payload_too_large"
+    },
+    "note": "резерв байт по заявленному Content-Length ДО чтения тела; семафор исполнения (4) и TCP backlog лимитами HTTP-обработчиков и памяти не считаются"
+  },
+  "models": [
+    {
+      "id": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5 (Droid)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        26,
+        88,
+        390,
+        407,
+        435
+      ]
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash (Droid)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        100,
+        142,
+        174,
+        431
+      ]
+    },
+    {
+      "id": "grok-4.7",
+      "name": "Grok 4.7 (Droid)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 256000,
+      "max_tokens": 32768,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        116,
+        396,
+        708
+      ]
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "name": "DeepSeek V4.1 Flash (Droid)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 384000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        106,
+        394,
+        432
+      ]
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1 Sol (Droid)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 272000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        111,
+        398,
+        406,
+        436
+      ]
+    },
+    {
+      "id": "glm-5.3",
+      "name": "GLM-5.3 (Droid)",
+      "efforts": [
+        "max"
+      ],
+      "default_effort": "max",
+      "context_window": 1000000,
+      "max_tokens": 131072,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        397,
+        708,
+        784
+      ]
+    }
+  ]
+}
