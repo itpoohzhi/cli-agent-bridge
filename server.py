@@ -40,6 +40,7 @@ from __future__ import annotations
 import base64
 import binascii
 import collections
+import fcntl
 import hashlib
 import json
 import os
@@ -1103,6 +1104,20 @@ def _atomic_write(path: Path, data: bytes) -> None:
         os.close(dir_fd)
 
 
+def acquire_writer_lock() -> Any:
+    """flock на state/.writer.lock: второй экземпляр моста реестр не пишет (None — занято)."""
+    path = _state_dir() / ".writer.lock"
+    _mkdir_private(path.parent)
+    handle = open(path, "a+")
+    os.chmod(path, 0o600)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 class RpcProcess:
     """Один долгоживущий `droid exec` в режиме stream-jsonrpc.
 
@@ -1238,6 +1253,10 @@ class RpcProcess:
                 self.proc.stdin.write(data)
                 self.proc.stdin.flush()
             except (OSError, ValueError) as exc:
+                # Процесс, умерший на старте, рвёт канал: это смерть процесса (EOF), а не
+                # ошибка протокола — иначе таксономия зависела бы от гонки с читателем.
+                if self._wait(0.5):
+                    raise RpcEof(int(self.proc.returncode or 1))
                 raise RpcError(f"droid stdin closed: {exc!r}")
 
     def _respond(self, rid: Any, result: Any = None, error: Any = None) -> None:
@@ -2102,11 +2121,15 @@ class Run:
 
     def _on_notif(self, params: Any) -> bool:
         """True — получен terminal ТЕКУЩЕГО хода (события опубликованы)."""
-        if not isinstance(params, dict) or params.get("sessionId") != self.sid:
-            self._quarantined += 1  # чужая/устаревшая сессия в карантин
+        if not isinstance(params, dict):
             return False
         note = params.get("notification")
         if not isinstance(note, dict):
+            return False
+        # sessionId в реальном droid лежит в params (часть событий — внутри notification).
+        got_sid = params.get("sessionId") or note.get("sessionId")
+        if got_sid and got_sid != self.sid:
+            self._quarantined += 1  # чужая/устаревшая сессия в карантин
             return False
         ntype = note.get("type")
         mid = str(note.get("messageId") or "")
@@ -2505,6 +2528,7 @@ class Handler(BaseHTTPRequestHandler):
         chat_held = False
         poll_state = {"last_ka": 0.0}
         run = None
+        open_attempt = None
         committed_turns = 0
         try:
             try:
@@ -2591,6 +2615,7 @@ class Handler(BaseHTTPRequestHandler):
                      f"path={plan['path']} gen={(chat.generation if chat else 0)} "
                      f"sid={plan['sid'][:8] or '-'}")
                 run = Run(plan, chat.proc if plan["path"] == "hot" else None, holds_slot)
+                open_attempt = (plan, run)
                 try:
                     out = self._execute(run, on_text, on_reasoning, on_tool_call,
                                         keepalive, ctx["emulate_tools"])
@@ -2601,6 +2626,7 @@ class Handler(BaseHTTPRequestHandler):
                         _slots.release()
                 ok = bool(run.ok and out.get("state") == "done" and out.get("rc") == 0)
                 committed_turns = _finish_attempt(chat, plan, run, out, ok, cfg, rpc["items"])
+                open_attempt = None
                 if ok:
                     break
                 delivered = bool(out.get("text") or out.get("tool_calls"))
@@ -2625,6 +2651,9 @@ class Handler(BaseHTTPRequestHandler):
             _log(f"usage sess={sess8} raw={raw_in}/{raw_out} "
                  f"rep={raw_in}/{raw_out} resumed={1 if hot else 0} turns={rep_turns}")
         finally:
+            if open_attempt is not None:
+                # Исключение посреди хода: чат инвалидируется, процесс не остаётся «в середине хода».
+                _finish_attempt(chat, open_attempt[0], open_attempt[1], {}, False, cfg, rpc["items"])
             if img_dir is not None:
                 shutil.rmtree(str(img_dir), ignore_errors=True)
             if chat_held:
@@ -3048,6 +3077,10 @@ def main() -> None:
         raise SystemExit(1)
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
     WORKSPACE.mkdir(parents=True, exist_ok=True)
+    writer_lock = acquire_writer_lock()
+    if writer_lock is None:
+        sys.stderr.write("another bridge instance holds the state writer lock; refusing to start\n")
+        raise SystemExit(1)
     _sweep_workspace()
     reconcile_children()
     REGISTRY.start_reaper()

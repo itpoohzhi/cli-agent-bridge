@@ -14,7 +14,7 @@
 
 Сценарий хода — список шагов {"op": ...} либо словарь {"steps": [...], "reason": ...,
 "usage": {...}, "late": true}. Шаги: text, thinking, retry, retract, error, sleep, hang,
-exit, garbage, foreign_terminal.
+exit, garbage, foreign_terminal, notify.
 """
 
 from __future__ import annotations
@@ -118,11 +118,13 @@ class Fake:
             msg["result"] = result if result is not None else {}
         self.emit(msg)
 
-    def notify(self, ntype: str, sid=None, **fields) -> None:
+    def notify(self, ntype: str, sid=None, with_sid: bool = True, **fields) -> None:
+        # Как у реального droid: settings_updated приходит БЕЗ sessionId в params (F-206, p2.jsonl).
+        params = {"notification": dict({"type": ntype}, **fields)}
+        if with_sid:
+            params["sessionId"] = sid if sid is not None else self.sid
         self.emit({"type": "notification", "jsonrpc": "2.0", "factoryApiVersion": API,
-                   "method": "droid.session_notification",
-                   "params": {"sessionId": sid if sid is not None else self.sid,
-                              "notification": dict({"type": ntype}, **fields)}})
+                   "method": "droid.session_notification", "params": params})
 
     # -- сессии ------------------------------------------------------------------
     def _session_path(self, sid: str) -> str:
@@ -169,7 +171,7 @@ class Fake:
             }
             self.messages = [self._service_message("<system-reminder>\nAvailable subagents: none\n</system-reminder>")]
             self.save()
-            self.notify("settings_updated", settings=self.public_settings())
+            self.notify("settings_updated", with_sid=False, settings=self.public_settings())
             self.respond(rid, {"sessionId": self.sid, "settings": self.public_settings(),
                                "session": {"messages": list(self.messages)}})
         elif method == "droid.load_session":
@@ -208,7 +210,7 @@ class Fake:
             self.save()
             self.respond(rid, {})
             if not cfg.get("no_readback"):
-                self.notify("settings_updated", settings=self.public_settings())
+                self.notify("settings_updated", with_sid=False, settings=self.public_settings())
         elif method == "droid.add_user_message":
             self.add_message(rid, params, cfg)
         elif method == "droid.interrupt_session":
@@ -238,7 +240,7 @@ class Fake:
         self.save()
         skip = bool(params.get("skipAgentLoop"))
         if not skip:
-            self.notify("droid_working_state_changed", state="streaming_assistant_message")
+            self.notify("droid_working_state_changed", newState="streaming_assistant_message")
         self.notify("create_message", message=message, requestId=rid, messageId=message["id"])
         if cfg.get("dup_ack") and not skip:
             self.respond(rid, {})
@@ -288,7 +290,7 @@ class Fake:
         last_mid = ""
         pending_thinking = ""
         cancelled = False
-        self.notify("droid_working_state_changed", state="thinking")
+        self.notify("droid_working_state_changed", newState="thinking")
         for step in steps:
             if self.interrupted():
                 cancelled = True
@@ -352,6 +354,8 @@ class Fake:
                     sys.stderr.flush()
                 self.log({"ev": "exit", "reason": "scenario", "rc": step.get("rc", 1)})
                 os._exit(int(step.get("rc", 1)))
+            elif op == "notify":
+                self.notify(step["type"], **(step.get("fields") or {}))
             elif op == "garbage":
                 self.raw("{this is not json")
             elif op == "foreign_terminal":
@@ -367,7 +371,7 @@ class Fake:
         self.notify("agent_turn_completed", reason=reason, turnId=turn_id,
                     tokenUsage=dict(usage), cumulativeTokenUsage=dict(self.cumulative),
                     durationMs=int((time.monotonic() - started) * 1000))
-        self.notify("droid_working_state_changed", state="idle")
+        self.notify("droid_working_state_changed", newState="idle")
         if scenario.get("late"):
             # Запоздавшие события прежнего хода: не должны засчитываться следующему.
             self.pause(float(scenario["late"]))

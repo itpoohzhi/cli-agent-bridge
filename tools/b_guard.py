@@ -491,6 +491,11 @@ def self_test() -> List[str]:
 # ---------------------------------------------------------------- CLI
 
 
+def _say(message: str, stream=None) -> None:
+    """Вывод CLI в stdout/stderr (встроенная печать в проекте не используется)."""
+    (stream or sys.stdout).write(message + "\n")
+
+
 def _safe_stdout() -> None:
     """Не падать на не-UTF-8 локали: пути кириллические, печатаем с заменой."""
     reconf = getattr(sys.stdout, "reconfigure", None)
@@ -507,10 +512,10 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
     try:
         canon_size = os.stat(canon_path).st_size
     except FileNotFoundError:
-        print("CANON_LOST: канон не найден: %s" % canon_path)
+        _say("CANON_LOST: канон не найден: %s" % canon_path)
         return 2
     canon_real = os.path.realpath(canon_path)
-    print("mode=PLANNED maxbytes=%d canon=%s size=%d" % (maxbytes, canon_path, canon_size))
+    _say("mode=PLANNED maxbytes=%d canon=%s size=%d" % (maxbytes, canon_path, canon_size))
     cwd_files: Dict[str, Sequence[FileEntry]] = {}
     exists: Dict[str, bool] = {}
     paths: Dict[str, str] = {}
@@ -529,21 +534,21 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
         canon_state = "present" if rend.canon_copies >= 1 else "LOST"
         dup_state = "RETURNED" if rend.canon_copies >= 2 else "absent"
         line_est = rend.block_bytes + JOURNAL_WRAPPER_EST
-        print("cwd[%s] %s%s" % (label, paths[label], note))
-        print("  files: %s" % listing)
-        print("  forecast block=%d class=%s sections=%d omitted=%s line_est=%d canon=%s dup=%s"
+        _say("cwd[%s] %s%s" % (label, paths[label], note))
+        _say("  files: %s" % listing)
+        _say("  forecast block=%d class=%s sections=%d omitted=%s line_est=%d canon=%s dup=%s"
               % (rend.block_bytes, rend.cls, len(rend.kept), ",".join(rend.omitted) or "-",
                  line_est, canon_state, dup_state))
-    print("window=[%d..%s] maxbytes=%d" % (res.window_low, _fmt_margin(res.window_high), maxbytes))
-    print("lower_margin=%d upper_margin=%s line_margin=%s"
+    _say("window=[%d..%s] maxbytes=%d" % (res.window_low, _fmt_margin(res.window_high), maxbytes))
+    _say("lower_margin=%d upper_margin=%s line_margin=%s"
           % (res.lower_margin, _fmt_margin(res.upper_margin), _fmt_margin(res.line_margin)))
-    print("recommended_maxbytes=%s" % _fmt_margin(res.recommended))
+    _say("recommended_maxbytes=%s" % _fmt_margin(res.recommended))
     if res.reasons:
         for reason in res.reasons:
-            print("reason: %s" % reason)
+            _say("reason: %s" % reason)
     else:
-        print("OK: канон сохраняется везде, дубль в KB отсутствует; mode=PLANNED (профили не читались)")
-    print("exit=%d" % res.exit_code)
+        _say("OK: канон сохраняется везде, дубль в KB отсутствует; mode=PLANNED (профили не читались)")
+    _say("exit=%d" % res.exit_code)
     return res.exit_code
 
 
@@ -565,14 +570,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _safe_stdout()
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if args.profiles:
-        print("--profiles: not implemented in dev copy (профили DSH читать запрещено в этом проходе)",
-              file=sys.stderr)
+        _say("--profiles: not implemented in dev copy (профили DSH читать запрещено в этом проходе)",
+             sys.stderr)
         return 2
     if args.self_test:
         fails = self_test()
         for item in fails:
-            print("SELF-TEST FAIL: %s" % item)
-        print("self-test: %s" % ("FAIL (%d)" % len(fails) if fails else "OK"))
+            _say("SELF-TEST FAIL: %s" % item)
+        _say("self-test: %s" % ("FAIL (%d)" % len(fails) if fails else "OK"))
         return 1 if fails else 0
     if args.cwd:
         # Известные пути получают свои метки (KB включает ограничение REQ-003), прочие - basename.
