@@ -159,6 +159,20 @@ class Fake:
                 sys.stderr.write(str(cfg.get("exit_stderr") or "") + "\n")
                 sys.stderr.flush()
                 os._exit(int(cfg["exit_on_init"]))
+            # Строгая схема как у реального droid: tags — список объектов, строки отвергаются.
+            tags = params.get("tags")
+            if tags is not None:
+                if not isinstance(tags, list):
+                    self.respond(rid, error={"code": -32602, "message":
+                        "Invalid request for droid.initialize_session: params.tags: Expected array"})
+                    return
+                for i, tag in enumerate(tags):
+                    if not isinstance(tag, dict):
+                        got = "string" if isinstance(tag, str) else type(tag).__name__
+                        self.respond(rid, error={"code": -32602, "message":
+                            f"Invalid request for droid.initialize_session: params.tags.{i}: "
+                            f"Expected object, received {got}"})
+                        return
             time.sleep(float(cfg.get("init_delay") or 0))
             if cfg.get("bad_init"):
                 self.respond(rid, {"settings": {}})

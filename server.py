@@ -1955,7 +1955,7 @@ class Run:
             "machineId": "droid-bridge", "cwd": plan["work_dir"], "modelId": model,
             "reasoningEffort": effort, "autonomyLevel": autonomy, "interactionMode": "auto",
             "title": plan["title"], "disableBuiltinSkills": True,
-            "autoRejectPermissionRequests": True, "tags": ["droid-dsh-bridge"],
+            "autoRejectPermissionRequests": True,
         }
         if plan["system"]:
             params["systemPrompt"] = plan["system"]
