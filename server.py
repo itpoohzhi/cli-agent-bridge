@@ -82,13 +82,9 @@ TOOL_CALL_CLOSE = "</tool_call>"
 
 # Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
-# Уровни автономности даунстрим-исполнителя (`droid exec --auto`): дефолт HIGH —
-# максимум; OFF = флаг `--auto` опущен (read-only режим droid, Reviewer-пути).
-AUTONOMY_LEVELS = ("low", "medium", "high")
-AUTONOMY_OFF = "off"
-AUTONOMY_DEFAULT = "high"
-# Уровни автономности даунстрим-исполнителя (`droid exec --auto`): дефолт HIGH —
-# максимум; OFF = флаг `--auto` опущен (read-only режим droid, Reviewer-пути).
+# Уровни автономности даунстрим-исполнителя: передаются в `autonomyLevel` RPC
+# (`initialize_session`/`update_session_settings`) и сверяются read-back; дефолт high,
+# `off` — read-only режим droid (Reviewer-пути).
 AUTONOMY_LEVELS = ("low", "medium", "high")
 AUTONOMY_OFF = "off"
 AUTONOMY_DEFAULT = "high"
@@ -338,6 +334,23 @@ TITLE_SYSTEM_PREFIX = ("Create a concise title for an AI coding-assistant sessio
 TITLE_USER_PREFIX = "Generate the session title from this JSON array of human messages:"
 TITLE_MAX_TOKENS = 64
 RPC_API_VERSION = "1.0.0"
+# Допуск Droid-бинаря (AD-010, RW-007): spawn только по receipt квалификации неизменяемого
+# образа; `DROID_DSH_BRIDGE_RECEIPT_REQUIRED=0` отключает gate (только стенд/разработка).
+RECEIPT_REQUIRED = os.environ.get("DROID_DSH_BRIDGE_RECEIPT_REQUIRED", "1") != "0"
+# Байтовые бюджеты (AD-011/TM-020, RW-008): превышение — предусмотренная ошибка, процесс и
+# слот возвращаются. Значения подбираются env; в тестах подменяются малыми.
+MAX_RPC_LINE_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_RPC_LINE_BYTES", str(16 << 20)))
+MAX_STDERR_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_STDERR_BYTES", str(64 << 10)))
+MAX_INBOX_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_INBOX_BYTES", str(64 << 20)))
+MAX_TURN_TEXT_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_TURN_TEXT_BYTES", str(32 << 20)))
+MAX_CHATS = int(os.environ.get("DROID_BRIDGE_MAX_CHATS", "4096"))
+# Предел блока agent-instructions (REQ-003): больше — отказ до spawn/add (строгая граница).
+INSTR_BLOCK_LIMIT = int(os.environ.get("DROID_DSH_BRIDGE_INSTR_LIMIT", "60000"))
+# Срез ожидания записи в stdin ребёнка: проверка отмены/закрытия между срезами.
+RPC_WRITE_SLICE_S = 0.1
+# Бюджет коротких служебных записей (interrupt/close/ответ на запрос разрешения).
+RPC_SHORT_WRITE_S = 0.5
+FINISHED_TURNS_KEEP = 256
 
 _clock = time.monotonic
 _sleep = time.sleep
@@ -413,10 +426,48 @@ class LauncherUnavailable(Exception):
 
 
 def _launcher() -> str:
-    """Канонический лончер обязателен; запасного пути на голый бинарь нет."""
+    """Канонический лончер обязателен; запасного пути на голый бинарь нет.
+
+    Вместе с лончером проверяется допуск образа droid по receipt (RW-007): функция
+    вызывается на каждом spawn, поэтому отсутствие/расхождение receipt запрещает запуск.
+    """
     if os.path.isfile(LAUNCHER) and os.access(LAUNCHER, os.X_OK):
+        _droid_image()
         return LAUNCHER
     raise LauncherUnavailable(LAUNCHER)
+
+
+def _receipt_path() -> Path:
+    """Receipt квалификации образа droid (пишет DEP-09 `tools/droid_image.py`)."""
+    return _state_dir() / "droid-binary-receipt.json"
+
+
+def _droid_image() -> str:
+    """Путь квалифицированного образа из receipt ('' — gate выключен) либо LauncherUnavailable.
+
+    Receipt читается заново на каждом вызове. Образ обязан лежать в
+    workspace/runtime/droid-image/ и совпадать с image_sha256; глобальный бинарь из
+    унаследованного окружения не используется (DROID_BIN ребёнку задаётся этим путём).
+    """
+    if not RECEIPT_REQUIRED:
+        return ""
+    try:
+        rec = json.loads(_receipt_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise LauncherUnavailable("droid receipt missing or unreadable")
+    if not isinstance(rec, dict) or rec.get("schema") != 1:
+        raise LauncherUnavailable("droid receipt malformed")
+    image, digest = rec.get("image_path"), rec.get("image_sha256")
+    if not isinstance(image, str) or not image or not isinstance(digest, str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise LauncherUnavailable("droid receipt malformed")
+    real = os.path.realpath(image)
+    root = os.path.realpath(str(WORKSPACE / "runtime" / "droid-image"))
+    if not real.startswith(root + os.sep) or not os.path.isfile(real) or not os.access(real, os.X_OK):
+        raise LauncherUnavailable("droid image outside runtime/droid-image or not executable")
+    if _file_sha256(real) != digest:
+        raise LauncherUnavailable("droid image sha256 does not match receipt")
+    return real
 
 
 def _file_sha256(path: str) -> str:
@@ -939,15 +990,14 @@ def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
     with _active_lock:
         procs = list(_rpc_procs.values())
     deadline = time.monotonic() + grace
-    for proc in procs:
-        if proc.busy:
-            proc.interrupt_quietly()
     threads = []
     for proc in procs:
+        # interrupt и закрытие — в потоке процесса: зависшая запись одного ребёнка не
+        # задерживает остальных и не съедает общий грейс (RW-011).
         thread = threading.Thread(
-            target=proc.close,
-            kwargs={"mode": "graceful", "graceful_wait": grace * 0.45,
-                    "term_wait": grace * 0.2, "kill_wait": grace * 0.15},
+            target=_shutdown_one,
+            args=(proc, {"mode": "graceful", "graceful_wait": grace * 0.45,
+                         "term_wait": grace * 0.2, "kill_wait": grace * 0.15}),
             daemon=True)
         thread.start()
         threads.append(thread)
@@ -956,6 +1006,13 @@ def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
     for proc in procs:
         proc.force_kill()
     return len(procs)
+
+
+def _shutdown_one(proc: "RpcProcess", close_kwargs: dict) -> None:
+    """Остановка одного ребёнка: interrupt (не блокируется записью), затем закрытие."""
+    if proc.busy:
+        proc.interrupt_quietly()
+    proc.close(**close_kwargs)
 
 
 def _kill_all(*_: Any) -> None:
@@ -979,6 +1036,10 @@ class RpcEof(RpcError):
 
 class RpcTimeout(RpcError):
     """Нет ответа на служебный запрос за RPC_CALL_TIMEOUT_S."""
+
+
+class RpcWriteBusy(RpcError):
+    """Запись в stdin занята другим писателем: interrupt/close не ждут её (RW-011)."""
 
 
 class ModelMismatch(Exception):
@@ -1136,8 +1197,14 @@ class RpcProcess:
         self.inbox: queue.Queue = queue.Queue()
         self.err_box: list = []
         self.server_requests = 0
+        self.inbox_bytes = 0
+        self.overflowed = False
+        self.finished_turns: collections.OrderedDict = collections.OrderedDict()
+        self._inbox_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._id_lock = threading.Lock()
         self._close_lock = threading.Lock()
+        self._stdin_closing = False
         self._next_id = 0
         try:
             launcher = _launcher()
@@ -1148,7 +1215,15 @@ class RpcProcess:
                 cmd, cwd=work_dir, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, env=_child_env())
+            # Запись в stdin идёт срезами с дедлайном/отменой (select): fd неблокирующий.
+            os.set_blocking(self.proc.stdin.fileno(), False)
         except BaseException:
+            proc = getattr(self, "proc", None)
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
             if holds_slot:
                 self.holds_slot = False
                 pool.release()
@@ -1166,14 +1241,42 @@ class RpcProcess:
 
     # -- чтение ----------------------------------------------------------------
     def _drain_stderr(self) -> None:
+        """Читает stderr до конца (pipe не встаёт), но хранит не больше MAX_STDERR_BYTES."""
+        kept = bytearray()
+        dropped = 0
         try:
-            self.err_box.append(_clean_err((self.proc.stderr.read() or b"").decode("utf-8", "replace")))
+            while True:
+                chunk = self.proc.stderr.read1(65536)
+                if not chunk:
+                    break
+                room = max(0, MAX_STDERR_BYTES - len(kept))
+                kept += chunk[:room]
+                dropped += len(chunk) - min(room, len(chunk))
         except (OSError, ValueError) as exc:
             self.err_box.append(f"stderr unreadable: {exc!r}")
+            return
+        text = _clean_err(bytes(kept).decode("utf-8", "replace"))
+        if dropped:
+            text += f"\n[stderr truncated: {dropped} bytes dropped]"
+        self.err_box.append(text)
 
     def _read(self) -> None:
+        limit = MAX_RPC_LINE_BYTES
         try:
-            for raw in iter(self.proc.stdout.readline, b""):
+            while True:
+                raw = self.proc.stdout.readline(limit + 1)
+                if not raw:
+                    break
+                if len(raw) > limit and not raw.endswith(b"\n"):
+                    # Строка длиннее лимита: хвост читаем и выбрасываем, ход завершится ошибкой.
+                    total = len(raw)
+                    while True:
+                        part = self.proc.stdout.readline(1 << 20)
+                        total += len(part)
+                        if not part or part.endswith(b"\n"):
+                            break
+                    self.inbox.put(("oversize", f"rpc line of {total} bytes exceeds limit {limit}"))
+                    continue
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("{"):
                     continue  # шум лончера/preflight, как и раньше
@@ -1185,7 +1288,7 @@ class RpcProcess:
                 if not isinstance(msg, dict):
                     self.inbox.put(("bad_json", line[:200]))
                     continue
-                self._on_message(msg)
+                self._on_message(msg, len(raw))
         except (OSError, ValueError) as exc:
             self.inbox.put(("pump_error", repr(exc)))
         rc = self.proc.wait()
@@ -1193,11 +1296,25 @@ class RpcProcess:
         self.dead = True
         self.inbox.put(("eof", rc))
 
-    def _on_message(self, msg: dict) -> None:
+    def _put(self, kind: str, payload: Any, size: int) -> None:
+        """Положить событие в inbox с учётом байтового бюджета; переполнение — одно событие overflow."""
+        with self._inbox_lock:
+            if self.overflowed:
+                return
+            if self.inbox_bytes + size > MAX_INBOX_BYTES:
+                self.overflowed = True
+                self.inbox.put(("overflow", f"rpc inbox exceeds limit {MAX_INBOX_BYTES} bytes"))
+                return
+            self.inbox_bytes += size
+        self.inbox.put((kind, payload, size))
+
+    def _on_message(self, msg: dict, size: int | None = None) -> None:
+        if size is None:
+            size = len(json.dumps(msg, ensure_ascii=False))
         method = msg.get("method")
         if method is None:
             if "id" in msg and ("result" in msg or "error" in msg):
-                self.inbox.put(("resp", msg))
+                self._put("resp", msg, size)
             return
         if msg.get("id") is not None:
             # Серверные запросы (разрешения): ответ отрицательный, ход не виснет.
@@ -1210,7 +1327,19 @@ class RpcProcess:
         if method == "droid.session_notification":
             params = msg.get("params")
             if isinstance(params, dict):
-                self.inbox.put(("notif", params))
+                self._put("notif", params, size)
+
+    def _taken(self, event: tuple) -> None:
+        """Событие вынуто из inbox: вернуть его байты в бюджет."""
+        if len(event) > 2:
+            with self._inbox_lock:
+                self.inbox_bytes = max(0, self.inbox_bytes - int(event[2]))
+
+    def note_turn(self, turn_id: str) -> None:
+        """Запомнить turnId завершённого хода (ограниченный список): его terminal больше не засчитывается."""
+        self.finished_turns[turn_id] = True
+        while len(self.finished_turns) > FINISHED_TURNS_KEEP:
+            self.finished_turns.popitem(last=False)
 
     def next_event(self, timeout: float) -> Any:
         """Следующее событие inbox или None; EOF липкий (виден всем потребителям)."""
@@ -1218,6 +1347,7 @@ class RpcProcess:
             event = self.inbox.get(timeout=timeout)
         except queue.Empty:
             return None
+        self._taken(event)
         if event[0] == "eof":
             self.eof_rc = event[1]
             self.inbox.put(event)
@@ -1231,10 +1361,15 @@ class RpcProcess:
                 event = self.inbox.get_nowait()
             except queue.Empty:
                 return dropped
+            self._taken(event)
             if event[0] == "eof":
                 self.eof_rc = event[1]
                 self.inbox.put(event)
                 return dropped
+            if event[0] == "notif":
+                note = (event[1] or {}).get("notification") if isinstance(event[1], dict) else None
+                if isinstance(note, dict) and note.get("type") == "agent_turn_completed" and note.get("turnId"):
+                    self.note_turn(str(note["turnId"]))  # запоздавший terminal: его повтор не засчитаем
             dropped += 1
 
     # -- запись ----------------------------------------------------------------
@@ -1242,22 +1377,49 @@ class RpcProcess:
         return not self.dead and not self.closed and self.proc.poll() is None
 
     def new_id(self) -> str:
-        with self._write_lock:
+        with self._id_lock:
             self._next_id += 1
             return f"r{self._next_id}"
 
-    def _write(self, obj: dict) -> None:
+    def _write(self, obj: dict, deadline: float | None = None,
+               cancel: threading.Event | None = None, block: bool = True) -> None:
+        """Записать одну строку в stdin ребёнка срезами: дедлайн и отмена прерывают запись.
+
+        Если ребёнок перестал читать (pipe полон), запись не висит бессрочно: по дедлайну
+        RpcTimeout, по отмене _Cancelled, при закрытии stdin RpcError. block=False —
+        interrupt/close не ждут пишущий лок (RpcWriteBusy), чтобы не зависеть от чужой записи.
+        """
         data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-        with self._write_lock:
-            try:
-                self.proc.stdin.write(data)
-                self.proc.stdin.flush()
-            except (OSError, ValueError) as exc:
-                # Процесс, умерший на старте, рвёт канал: это смерть процесса (EOF), а не
-                # ошибка протокола — иначе таксономия зависела бы от гонки с читателем.
-                if self._wait(0.5):
-                    raise RpcEof(int(self.proc.returncode or 1))
-                raise RpcError(f"droid stdin closed: {exc!r}")
+        if not self._write_lock.acquire(blocking=block):
+            raise RpcWriteBusy("droid stdin write is busy")
+        try:
+            view = memoryview(data)
+            sent = 0
+            while sent < len(data):
+                if self._stdin_closing:
+                    raise RpcError("droid stdin closed")
+                if cancel is not None and cancel.is_set():
+                    raise _Cancelled()
+                now = time.monotonic()
+                if deadline is not None and now >= deadline:
+                    raise RpcTimeout("write to droid stdin blocked: child does not read")
+                wait = RPC_WRITE_SLICE_S if deadline is None else max(0.0, min(RPC_WRITE_SLICE_S, deadline - now))
+                try:
+                    fd = self.proc.stdin.fileno()
+                    _, writable, _ = select.select([], [fd], [], wait)
+                    if not writable:
+                        continue
+                    sent += os.write(fd, view[sent:])
+                except BlockingIOError:
+                    continue
+                except (OSError, ValueError) as exc:
+                    # Процесс, умерший на старте, рвёт канал: это смерть процесса (EOF), а не
+                    # ошибка протокола — иначе таксономия зависела бы от гонки с читателем.
+                    if self._wait(0.5):
+                        raise RpcEof(int(self.proc.returncode or 1))
+                    raise RpcError(f"droid stdin closed: {exc!r}")
+        finally:
+            self._write_lock.release()
 
     def _respond(self, rid: Any, result: Any = None, error: Any = None) -> None:
         msg = {"type": "response", "jsonrpc": "2.0", "factoryApiVersion": RPC_API_VERSION, "id": rid}
@@ -1266,28 +1428,36 @@ class RpcProcess:
         else:
             msg["result"] = result if result is not None else {}
         try:
-            self._write(msg)
+            self._write(msg, deadline=time.monotonic() + RPC_SHORT_WRITE_S * 10)
         except RpcError as exc:
             _log(f"session_rpc respond_failed pid={self.pid} err={_err_summary(exc, 80)!r}")
 
-    def notify(self, method: str, params: dict, rid: str | None = None) -> str:
+    def notify(self, method: str, params: dict, rid: str | None = None,
+               deadline: float | None = None, cancel: threading.Event | None = None,
+               block: bool = True) -> str:
         """Запрос без ожидания ответа (interrupt, close_session)."""
         rid = rid or self.new_id()
         self._write({"type": "request", "jsonrpc": "2.0", "factoryApiVersion": RPC_API_VERSION,
-                     "id": rid, "method": method, "params": params})
+                     "id": rid, "method": method, "params": params},
+                    deadline=deadline, cancel=cancel, block=block)
         return rid
 
     def interrupt_quietly(self) -> None:
+        """interrupt без ожидания записи: занятый/зависший pipe -> пропуск (дальше kill-путь)."""
         try:
-            self.notify("droid.interrupt_session", {})
+            self.notify("droid.interrupt_session", {},
+                        deadline=time.monotonic() + RPC_SHORT_WRITE_S, block=False)
         except RpcError as exc:
             _log(f"session_rpc interrupt_failed pid={self.pid} err={_err_summary(exc, 80)!r}")
 
     def call(self, method: str, params: dict, cancel: threading.Event | None = None,
              timeout: float | None = None, rid: str | None = None) -> tuple:
-        """Запрос и ожидание ответа с тем же id -> (result, нотификации за это время)."""
-        rid = self.notify(method, params, rid)
+        """Запрос и ожидание ответа с тем же id -> (result, нотификации за это время).
+
+        Дедлайн охватывает и фазу записи запроса, и ожидание ответа.
+        """
         end = time.monotonic() + (RPC_CALL_TIMEOUT_S if timeout is None else timeout)
+        rid = self.notify(method, params, rid, deadline=end, cancel=cancel)
         stash: list = []
         while True:
             if cancel is not None and cancel.is_set():
@@ -1349,12 +1519,16 @@ class RpcProcess:
                 return
             self.closed = True
         if mode == "graceful" and self.proc.poll() is None:
+            graceful = True
             try:
-                self.notify("droid.close_session", {"reason": "bridge"})
+                self.notify("droid.close_session", {"reason": "bridge"},
+                            deadline=time.monotonic() + RPC_SHORT_WRITE_S, block=False)
             except RpcError as exc:
+                graceful = False  # запись зависла/процесс умер: штатного закрытия не будет -> сразу TERM
                 _log(f"session_rpc close_session_failed pid={self.pid} err={_err_summary(exc, 80)!r}")
             self._close_stdin()
-            self._wait(graceful_wait)
+            if graceful:
+                self._wait(graceful_wait)
         if self.proc.poll() is None:
             self._signal(signal.SIGTERM)
             self._wait(term_wait)
@@ -1379,14 +1553,22 @@ class RpcProcess:
             self.pool.release()
 
     def _close_stdin(self) -> None:
+        """Закрыть stdin под пишущим локом: писатель выходит за срез, fd не переиспользуется на лету."""
+        self._stdin_closing = True
+        got = self._write_lock.acquire(timeout=1.0)
         try:
             self.proc.stdin.close()
         except OSError as exc:
             _log(f"session_rpc stdin_close_failed pid={self.pid} err={_err_summary(exc, 80)!r}")
+        finally:
+            if got:
+                self._write_lock.release()
 
 
 def _child_env() -> dict:
-    """Окружение ребёнка: как _launch_env + чистый Factory home (AD-010).
+    """Окружение ребёнка: как _launch_env + чистый Factory home и образ из receipt (AD-010).
+
+    Сбой подготовки home — исключение (spawn не выполняется), молчаливого продолжения нет.
 
     Ключ моста вырезан в _launch_env; FACTORY_API_KEY наследуется (в лог и state
     не попадает). Чистый home не даёт хукам/персональным skills владельца
@@ -1396,10 +1578,15 @@ def _child_env() -> dict:
     home = WORKSPACE / "runtime" / "factory-home"
     try:
         _mkdir_private(home)
-        env["FACTORY_HOME_OVERRIDE"] = str(home)
     except OSError as exc:
+        # Без чистого home ребёнок увидел бы персональные hooks/skills владельца: запуск запрещён.
         _log(f"session_rpc factory_home_unavailable err={_err_summary(exc, 80)!r}")
+        raise
+    env["FACTORY_HOME_OVERRIDE"] = str(home)
     env["DROID_AUTO"] = "off"
+    image = _droid_image()
+    if image:
+        env["DROID_BIN"] = image  # исполняется образ из receipt, а не унаследованный глобальный бинарь
     return env
 
 
@@ -1465,6 +1652,7 @@ class Chat:
         self.key_hash = key_hash
         self.lock = threading.Lock()  # аренда чата L (single-flight на ключ)
         self.waiters = 0
+        self.refs = 0  # держатели ссылки на объект чата (запросы между get и release): индекс не вытесняет
         self.proc: RpcProcess | None = None
         self.sid = ""
         self.generation = 0
@@ -1484,13 +1672,31 @@ def _record_path(key_hash: str) -> Path:
     return _state_dir() / "conversations.v1" / "chats" / key_hash[:2] / f"{key_hash}.json"
 
 
+_RECORD_STR_FIELDS = ("key_hash", "sid", "state", "head", "cfg", "model", "effort", "autonomy")
+_RECORD_INT_FIELDS = ("generation", "rec_rev", "n", "droid_real", "restore_count")
+
+
+def _record_valid(rec: dict) -> bool:
+    """Обязательные поля записи чата и их типы (число — не bool; счётчики неотрицательные)."""
+    for name in _RECORD_STR_FIELDS:
+        if not isinstance(rec.get(name), str):
+            return False
+    for name in _RECORD_INT_FIELDS:
+        value = rec.get(name)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return False
+        if value < (-1 if name == "droid_real" else 0):
+            return False
+    return True
+
+
 def _read_record(path: Path) -> dict | None:
-    """Запись чата или None, если файла нет/он повреждён (тогда — history-fallback)."""
+    """Запись чата или None, если файла нет/она повреждена/не проходит валидацию (history-fallback)."""
     try:
         rec = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(rec, dict) or rec.get("schema") != 1:
+    if not isinstance(rec, dict) or rec.get("schema") != 1 or not _record_valid(rec):
         return None
     return rec
 
@@ -1567,7 +1773,7 @@ def _persist_chat(chat: Chat) -> None:
         return
     try:
         _write_record(chat, "READY" if chat.state in ("READY", "PERSISTED") else chat.state)
-    except (OSError, StateConflict) as exc:
+    except (OSError, StateConflict, ValueError, TypeError) as exc:
         chat.state = "DIRTY"
         _log(f"session_rpc chat={chat.key_hash[:8]} persist_failed err={_err_summary(exc, 120)!r}")
 
@@ -1581,13 +1787,32 @@ class ChatRegistry:
         self._reaper: threading.Thread | None = None
 
     def get(self, key_hash: str) -> Chat:
+        """Чат по хешу ключа (создаёт/читает запись); вызывающий обязан вернуть его через release()."""
         with self.lock:
             chat = self.chats.get(key_hash)
             if chat is None:
+                self._evict_index()
                 chat = Chat(key_hash)
                 _load_record(chat)
                 self.chats[key_hash] = chat
+            chat.refs += 1
             return chat
+
+    def release(self, chat: Chat) -> None:
+        with self.lock:
+            chat.refs = max(0, chat.refs - 1)
+
+    def _evict_index(self) -> None:
+        """Индекс не растёт без границы: вытесняются чаты без процесса/ссылок/ожидающих (запись остаётся на диске)."""
+        if len(self.chats) < MAX_CHATS:
+            return
+        idle = sorted((c for c in self.chats.values()
+                       if c.proc is None and c.refs == 0 and c.waiters == 0 and not c.lock.locked()),
+                      key=lambda c: c.last_used)
+        for chat in idle:
+            if len(self.chats) < MAX_CHATS:
+                break
+            del self.chats[chat.key_hash]
 
     def add_waiter(self, chat: Chat) -> None:
         with self.lock:
@@ -1864,6 +2089,8 @@ class Run:
         self.interrupted = False
         self._msgs: dict = {}
         self._order: list = []
+        self._counted: set = set()  # id сообщений, уже учтённых в droid_real (дубли/retraction)
+        self._acc_bytes = 0  # накопленный text/thinking хода (бюджет MAX_TURN_TEXT_BYTES)
         self._last_error = ""
         self._quarantined = 0
         self.thread = threading.Thread(target=self._work, daemon=True)
@@ -1917,8 +2144,8 @@ class Run:
             assert proc is not None
             proc.drain_stale()
             try:
-                if proc.dead:
-                    raise _NeedRebase()
+                if proc.dead or proc.overflowed:
+                    raise _NeedRebase()  # процесс умер или его очередь событий переполнялась в простое
                 self._sync_settings(proc, plan["settings"])
             except _NeedRebase:
                 self._rebase(proc)
@@ -1945,8 +2172,22 @@ class Run:
         if got != (model, effort):
             raise ModelMismatch(f"droid substituted model/effort: wanted {model}/{effort}, got {got[0]}/{got[1]}")
         level = settings.get("autonomyLevel")
-        if level is not None and level != autonomy:
+        if not isinstance(level, str) or not level:
+            raise RpcError("settings read-back: autonomyLevel missing")
+        if level != autonomy:
             raise ModelMismatch(f"droid autonomy mismatch: wanted {autonomy}, got {level}")
+        self._check_flags(settings)
+
+    @staticmethod
+    def _check_flags(settings: dict) -> None:
+        """disableBuiltinSkills/autoRejectPermissionRequests: если droid их сообщает, они обязаны быть true.
+
+        Реальный droid (протокол 1.248) эти поля в settings не возвращает, поэтому отсутствие
+        не отказ; присутствующее расхождение — fail-closed.
+        """
+        for flag in ("disableBuiltinSkills", "autoRejectPermissionRequests"):
+            if flag in settings and settings[flag] is not True:
+                raise RpcError(f"settings read-back: {flag} is {settings[flag]!r}, expected true")
 
     def _initialize(self, proc: RpcProcess) -> None:
         plan = self.plan
@@ -1974,18 +2215,24 @@ class Run:
         """Нативные tools отключаются по АКТУАЛЬНОМУ list_tools (новые id тоже); сбой — fail-closed."""
         result, _ = proc.call("droid.list_tools", {}, self.cancel)
         tools = result.get("tools")
-        if not isinstance(tools, list) or not all(isinstance(t, dict) for t in tools):
+        if (not isinstance(tools, list) or not tools
+                or not all(isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"] for t in tools)):
             raise RpcError("list_tools: invalid catalogue")
-        ids = [str(t["id"]) for t in tools if isinstance(t.get("id"), str) and t.get("id")]
+        ids = [t["id"] for t in tools]
         keep = set(self.plan.get("keep_tools") or ())
         ids = [i for i in ids if i not in keep]
         if not ids:
             return
         _, stash = proc.call("droid.update_session_settings", {"disabledToolIds": ids}, self.cancel)
         updated = self._wait_settings_updated(proc, stash)
-        disabled = updated.get("disabledToolIds") if isinstance(updated, dict) else None
-        if isinstance(disabled, list) and not set(ids).issubset(set(map(str, disabled))):
+        if updated is None:
+            raise RpcError("native tools: settings_updated read-back not received")
+        disabled = updated.get("disabledToolIds")
+        if not isinstance(disabled, list):
+            raise RpcError("native tools: disabledToolIds missing in read-back")
+        if not set(ids).issubset(set(map(str, disabled))):
             raise RpcError("native tools were not disabled (read-back mismatch)")
+        self._check_flags(updated)
 
     def _wait_settings_updated(self, proc: RpcProcess, stash: list, timeout: float = 2.0) -> Any:
         """settings из нотификации settings_updated (read-back) или None, если не пришла."""
@@ -2052,7 +2299,7 @@ class Run:
         settings = result.get("settings")
         self.plan["current_settings"] = (
             settings.get("modelId"), settings.get("reasoningEffort"),
-            settings.get("autonomyLevel", plan["settings"][2])) if isinstance(settings, dict) else ("", "", "")
+            settings.get("autonomyLevel") or "") if isinstance(settings, dict) else ("", "", "")
         self._disable_native_tools(proc)
         try:
             self._sync_settings(proc, plan["settings"])
@@ -2137,7 +2384,11 @@ class Run:
             message = note.get("message") if isinstance(note.get("message"), dict) else {}
             role = message.get("role")
             if not _is_service_message(message):
-                self.droid_real += 1
+                counted_id = mid or str(message.get("id") or "")
+                if not counted_id or counted_id not in self._counted:
+                    self.droid_real += 1
+                    if counted_id:
+                        self._counted.add(counted_id)
             if role == "user" and note.get("requestId") == self.turn_req_id and self.turn_req_id:
                 self.armed = True
                 self._progress()
@@ -2146,32 +2397,56 @@ class Run:
                 slot = self._slot_for(mid) if mid else None
                 if slot is not None and not slot["text"]:
                     slot["text"] = _message_text(message)
+                    self._account(slot["text"])
                 self._progress()
             return False
         if not self.armed:
             return False  # запоздавшее событие прежнего хода
         self._progress()
         if ntype == "assistant_text_delta" and mid:
-            self._slot_for(mid)["text"] += str(note.get("textDelta") or "")
+            delta = str(note.get("textDelta") or "")
+            self._account(delta)
+            self._slot_for(mid)["text"] += delta
         elif ntype == "assistant_text_complete" and mid:
             if isinstance(note.get("text"), str):
+                self._account(note["text"])
                 self._slot_for(mid)["text"] = note["text"]
             else:
                 self._slot_for(mid)
         elif ntype == "thinking_text_delta" and mid:
-            self._slot_for(mid)["thinking"] += str(note.get("textDelta") or "")
+            delta = str(note.get("textDelta") or "")
+            self._account(delta)
+            self._slot_for(mid)["thinking"] += delta
         elif ntype == "thinking_text_complete" and mid:
             if isinstance(note.get("text"), str):
+                self._account(note["text"])
                 self._slot_for(mid)["thinking"] = note["text"]
         elif ntype == "assistant_message_retracted" and mid:
             self._msgs.pop(mid, None)
             if mid in self._order:
                 self._order.remove(mid)
+            if mid in self._counted:
+                # Сообщение удалено из истории droid: счётчик согласуется с его историей.
+                self._counted.discard(mid)
+                self.droid_real -= 1
         elif ntype == "error":
             self._last_error = str(note.get("message") or note.get("errorType") or "droid error")[:300]
         elif ntype == "agent_turn_completed":
+            turn_id = str(note.get("turnId") or "")
+            if turn_id and self.proc is not None:
+                if turn_id in self.proc.finished_turns:
+                    # terminal уже завершённого хода (запоздавший повтор): текущий ход не завершает.
+                    self._quarantined += 1
+                    return False
+                self.proc.note_turn(turn_id)
             return self._terminal(note)
         return False
+
+    def _account(self, text: str) -> None:
+        """Бюджет накопления text/thinking хода: сверх лимита — RpcError (ход завершается ошибкой)."""
+        self._acc_bytes += len(text.encode("utf-8"))
+        if self._acc_bytes > MAX_TURN_TEXT_BYTES:
+            raise RpcError(f"turn output exceeds limit {MAX_TURN_TEXT_BYTES} bytes")
 
     def _terminal(self, note: dict) -> bool:
         reason = str(note.get("reason") or "")
@@ -2252,12 +2527,14 @@ def _finish_attempt(chat: Chat | None, plan: dict, run: Run, out: dict, ok: bool
     if not ok:
         # Недоставленный/неполный ход: user мог попасть в контекст droid -> только
         # свежая generation; процесс закрывается (слот возвращается после waitpid).
-        if chat is not None:
-            chat.proc = None
-            chat.state = "DIRTY"
-            _persist_chat(chat)
-        if proc is not None:
-            _close_async(proc, "term")
+        try:
+            if chat is not None:
+                chat.proc = None
+                chat.state = "DIRTY"
+                _persist_chat(chat)
+        finally:
+            if proc is not None:
+                _close_async(proc, "term")
         return 0
     if chat is None:
         if proc is not None:
@@ -2347,11 +2624,14 @@ class Handler(BaseHTTPRequestHandler):
              f"model_len={int(model_len)} client={self._client_tag()}")
 
     def _reject(self, code: int, reason: str, message: str,
-                model: str = "unknown", model_len: int = 0) -> None:
-        """Отказ (до SSE): строка `reject …` в журнал и общий формат ошибки."""
+                model: str = "unknown", model_len: int = 0, err_type: str = "") -> None:
+        """Отказ (до SSE): строка `reject …` в журнал и общий формат ошибки.
+
+        err_type — публичный тип ошибки, если он отличается от строки журнала (REQ003_SIZE_EXCEEDED).
+        """
         self._log_reject(reason, model, model_len)
         self.close_connection = True
-        self._send(code, {"error": {"message": message, "type": reason, "code": int(code)}})
+        self._send(code, {"error": {"message": message, "type": err_type or reason, "code": int(code)}})
 
     def _acquire_slot(self, keepalive):
         """Ждём слот семафора до QUEUE_TIMEOUT_S, попутно keepalive и проверка клиента."""
@@ -2368,23 +2648,23 @@ class Handler(BaseHTTPRequestHandler):
                     return "client_gone"
         return ""
 
-    def _execute(self, run: Run, on_text, on_reasoning, on_tool_call,
-                 keepalive, emulate_tools: bool) -> dict:
+    def _execute(self, run: Run, keepalive, emulate_tools: bool) -> dict:
         """Гнать ход до конца; сквозной таймаут TIMEOUT_S на весь ход.
 
-        on_text/on_reasoning/on_tool_call/keepalive возвращают False, если клиент ушёл.
-        Размышления идут мимо ToolCallParser — сразу в on_reasoning.
-        При emulate_tools текстовый поток проходит через ToolCallParser: блоки
-        <tool_call> выделяются как вызовы, остальное — как content.
+        Клиенту во время вычисления пишется только keepalive (False — клиент ушёл). Вывод
+        НЕ доставляется здесь: он копится в out["events"] (content/reasoning/tool_call по
+        порядку) и уходит клиенту отдельным этапом после освобождения T/L и checkpoint
+        (RW-009). Размышления идут мимо ToolCallParser. При emulate_tools текстовый поток
+        проходит через ToolCallParser: блоки <tool_call> выделяются как вызовы.
         Превышение deadline -> kill группы (в run.close()), state=timeout.
         """
         pieces = []
+        events: list = []
         tool_calls: list = []
         usage = {}
         result_ev = {}
         last_ka = time.monotonic()
         deadline = time.monotonic() + TIMEOUT_S
-        gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
             return {"rc": rc, "text": "".join(pieces), "usage": usage,
@@ -2392,18 +2672,15 @@ class Handler(BaseHTTPRequestHandler):
                     "session_id": result_ev.get("session_id") or "",
                     "duration_ms": result_ev.get("duration_ms"),
                     "num_turns": result_ev.get("num_turns"),
-                    "tool_calls": tool_calls}
+                    "tool_calls": tool_calls, "events": events}
 
         def add_content(text: str) -> None:
-            if gone[0] or not text:
+            if not text:
                 return
             pieces.append(text)
-            if not on_text(text):
-                gone[0] = True
+            events.append(("content", text))
 
         def add_call(call: dict) -> None:
-            if gone[0]:
-                return
             entry = {
                 "index": len(tool_calls),
                 "id": "call_" + uuid.uuid4().hex[:24],
@@ -2414,8 +2691,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             }
             tool_calls.append(entry)
-            if not on_tool_call(entry):
-                gone[0] = True
+            events.append(("tool_call", entry))
 
         parser = ToolCallParser(add_content, add_call) if emulate_tools else None
 
@@ -2449,12 +2725,8 @@ class Handler(BaseHTTPRequestHandler):
                     parser.feed(delta)
                 else:
                     add_content(delta)
-                if gone[0]:
-                    return state("client_gone", 1)
             elif kind == "reasoning":
-                if not on_reasoning(str(payload)):
-                    gone[0] = True
-                    return state("client_gone", 1)
+                events.append(("reasoning", str(payload)))
             elif kind == "result":
                 result_ev = payload
                 usage = payload.get("usage") or {}
@@ -2475,8 +2747,6 @@ class Handler(BaseHTTPRequestHandler):
                         parser.finish()
                     else:
                         add_content(final_text)
-                if gone[0]:
-                    return state("client_gone", 1)
                 time.sleep(0.05)
                 return state("done", rc, "".join(run.err_box))
 
@@ -2513,10 +2783,14 @@ class Handler(BaseHTTPRequestHandler):
             # HTTP-ответ отдаст _serve_json/_serve_sse: в SSE заголовки уже ушли.
             self._log_reject("overloaded", ctx["model"], ctx["model_len"])
         return {"state": reason, "rc": 1, "text": "", "usage": {}, "result": {},
-                "err": "", "tool_calls": []}
+                "err": "", "tool_calls": [], "events": []}
 
-    def _run_once(self, ctx: dict, on_text, on_reasoning, on_tool_call, keepalive) -> dict:
-        """Ход запроса: порядок ресурсов L -> P -> T, до 3 попыток при транзиентном сбое."""
+    def _run_once(self, ctx: dict, keepalive) -> dict:
+        """Ход запроса: порядок ресурсов L -> P -> T, до 3 попыток при транзиентном сбое.
+
+        Возвращает итог с буфером вывода (out["events"]); к моменту возврата T/L уже освобождены
+        и checkpoint записан — клиенту вывод отдаёт вызывающая ветка (RW-009).
+        """
         model = ctx["model"]
         effort = ctx["effort"]
         autonomy = ctx["autonomy"]
@@ -2537,7 +2811,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Гонка с удалением лончера: ответ отдаёт вызывающая ветка.
                 self._log_reject("launcher_unavailable", model, ctx["model_len"])
                 return {"state": "launcher_unavailable", "rc": 1, "text": "",
-                        "usage": {}, "result": {}, "err": "", "tool_calls": []}
+                        "usage": {}, "result": {}, "err": "", "tool_calls": [], "events": []}
             if ctx["route"] == "keyed":
                 chat = REGISTRY.get(ctx["key_hash"])
                 reason = self._acquire_chat(chat, keepalive, poll_state)
@@ -2547,20 +2821,26 @@ class Handler(BaseHTTPRequestHandler):
             images = ctx.get("images") or []
             if images:
                 img_dir = WORKSPACE / ("img-" + uuid.uuid4().hex)
-                img_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.chmod(img_dir, 0o700)
-                except OSError:
-                    pass
                 total_bytes = 0
-                for image in images:
-                    target = img_dir / image["name"]
-                    target.write_bytes(image["data"])
+                try:
+                    img_dir.mkdir(parents=True, exist_ok=True)
                     try:
-                        os.chmod(target, 0o600)
+                        os.chmod(img_dir, 0o700)
                     except OSError:
                         pass
-                    total_bytes += len(image["data"])
+                    for image in images:
+                        target = img_dir / image["name"]
+                        target.write_bytes(image["data"])
+                        try:
+                            os.chmod(target, 0o600)
+                        except OSError:
+                            pass
+                        total_bytes += len(image["data"])
+                except OSError as exc:
+                    # ENOSPC и пр. при spool картинок: предусмотренная ошибка (507), каталог чистится в finally.
+                    _log(f"spool_error err={_err_summary(exc, 120)!r}")
+                    return {"state": "spool_error", "rc": 1, "text": "", "usage": {}, "result": {},
+                            "err": "", "tool_calls": [], "events": []}
                 img_stats = (len(images), total_bytes,
                              ",".join(image["mime"] for image in images))
             else:
@@ -2607,7 +2887,7 @@ class Handler(BaseHTTPRequestHandler):
                     # Отпечаток ожидающего хода ДО add: после падения моста — только replay.
                     try:
                         _write_record(chat, "PENDING")
-                    except (OSError, StateConflict) as exc:
+                    except (OSError, StateConflict, ValueError, TypeError) as exc:
                         chat.state = "DIRTY"
                         _log(f"session_rpc chat={chat.key_hash[:8]} persist_failed "
                              f"err={_err_summary(exc, 120)!r}")
@@ -2617,8 +2897,7 @@ class Handler(BaseHTTPRequestHandler):
                 run = Run(plan, chat.proc if plan["path"] == "hot" else None, holds_slot)
                 open_attempt = (plan, run)
                 try:
-                    out = self._execute(run, on_text, on_reasoning, on_tool_call,
-                                        keepalive, ctx["emulate_tools"])
+                    out = self._execute(run, keepalive, ctx["emulate_tools"])
                 finally:
                     try:
                         run.close()
@@ -2658,6 +2937,8 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.rmtree(str(img_dir), ignore_errors=True)
             if chat_held:
                 chat.lock.release()
+            if chat is not None:
+                REGISTRY.release(chat)
         if out.get("state") != "client_gone":
             _last_ok[0] = time.monotonic() if (out.get("state") == "done" and out.get("rc") == 0) else 0.0
         _log(f"done model={model} rc={out['rc']} state={out['state']} "
@@ -2684,6 +2965,9 @@ class Handler(BaseHTTPRequestHandler):
                     "type": "launcher_unavailable", "code": 503}
         if st == "client_gone":
             return {"message": "client gone", "type": "client_gone", "code": 499}
+        if st == "spool_error":
+            return {"message": "bridge storage is full or unavailable",
+                    "type": "insufficient_storage", "code": 507}
         if st == "pump_error":
             return {"message": "bridge reader failed", "detail": str(out.get("err"))[:500],
                     "type": "proxy_error", "code": 502}
@@ -2818,8 +3102,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._reject(400, "unsupported_reasoning_effort",
                              "reasoning_effort must be a string", model_id, model_len)
                 return
-            # (9a) autonomy: low|medium|high -> `--auto`; "off" -> без флага
-            # (read-only droid, Reviewer-пути); дефолт high (максимум).
+            # (9a) autonomy: low|medium|high|off -> `autonomyLevel` RPC
+            # (off — read-only droid, Reviewer-пути); дефолт high (максимум).
             raw_autonomy = req.get("autonomy")
             if raw_autonomy is None:
                 autonomy = AUTONOMY_DEFAULT
@@ -2886,11 +3170,18 @@ class Handler(BaseHTTPRequestHandler):
                 route = "keyed"
             else:
                 route = "nokey"
+            instr = _instr_scan(messages) if route != "title" else (0, "-", 0)
+            if instr[2] > INSTR_BLOCK_LIMIT:
+                # REQ-003: блок agent-instructions сверх предела не доходит ни до spawn, ни до add.
+                self._reject(400, "req003_size_exceeded",
+                             f"agent-instructions block {instr[2]} bytes exceeds {INSTR_BLOCK_LIMIT}",
+                             model_id, model_len, err_type="REQ003_SIZE_EXCEEDED")
+                return
             ctx = {
                 "route": route,
                 "key_hash": _key_hash(raw_key) if (route == "keyed") else "",
                 "rpc": transcript,
-                "instr": _instr_scan(messages) if route in ("keyed", "nokey") else (0, "-", 0),
+                "instr": instr if route in ("keyed", "nokey") else (0, "-", 0),
                 "model": model_id,
                 "model_len": model_len,
                 "effort": effort,
@@ -2913,8 +3204,17 @@ class Handler(BaseHTTPRequestHandler):
             if reserved and budget is not None:
                 budget.release(reserved)
 
+    def _send_parts(self, code: int, parts: list) -> None:
+        """Ответ JSON из готовых кусков: Content-Length по сумме, без склейки в один буфер."""
+        self.send_response(int(code))
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(sum(len(part) for part in parts)))
+        self.end_headers()
+        for part in parts:
+            self.wfile.write(part)
+
     def _serve_json(self, ctx: dict) -> None:
-        out = self._run_once(ctx, lambda _v: True, lambda _v: True, lambda _e: True, None)
+        out = self._run_once(ctx, None)
         if out.get("state") == "client_gone":
             return
         err = self._error_body(out)
@@ -2922,12 +3222,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
-        message = {"role": "assistant", "content": out["text"]}
+        # content сериализуется отдельно и вставляется на место метки: большой текст не
+        # проходит через дополнительный dict -> dumps -> encode.
+        marker = "@@content-" + uuid.uuid4().hex + "@@"
+        message = {"role": "assistant", "content": marker}
         finish = "stop"
         if out.get("tool_calls"):
             message["tool_calls"] = out["tool_calls"]
             finish = "tool_calls"
-        self._send(200, {
+        shell = json.dumps({
             "id": f"chatcmpl-droid-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
             "created": int(time.time()), "model": ctx["model"],
             "choices": [{"index": 0, "message": message, "finish_reason": finish}],
@@ -2936,7 +3239,10 @@ class Handler(BaseHTTPRequestHandler):
                 "completion_tokens": usage.get("output_tokens", 0),
                 "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             },
-        })
+        }, ensure_ascii=False)
+        head, tail = shell.split(json.dumps(marker), 1)
+        content = json.dumps(out["text"], ensure_ascii=False).encode("utf-8")
+        self._send_parts(200, [head.encode("utf-8"), content, tail.encode("utf-8")])
 
     def _serve_sse(self, ctx: dict) -> None:
         completion_id = f"chatcmpl-droid-{uuid.uuid4().hex[:12]}"
@@ -2960,26 +3266,29 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
             }, ensure_ascii=False) + "\n\n"
 
-        def on_text(value: str) -> bool:
-            return self._emit(chunk({"content": value}))
-
-        def on_reasoning(value: str) -> bool:
-            return self._emit(chunk({"reasoning_content": value}))
-
-        def on_tool_call(entry: dict) -> bool:
-            return self._emit(chunk({"tool_calls": [entry]}))
-
         def keepalive() -> bool:
             return self._emit(": keepalive\n\n")
 
         if not self._emit(chunk({"role": "assistant", "content": ""})):
             return
-        out = self._run_once(ctx, on_text, on_reasoning, on_tool_call, keepalive)
+        out = self._run_once(ctx, keepalive)
         if out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return
         err = self._error_body(out)
         if err is None:
+            # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
+            # здесь ни на что, кроме самого ответа, не влияет.
+            for kind, value in out.get("events") or []:
+                if kind == "content":
+                    delivered = self._emit(chunk({"content": value}))
+                elif kind == "reasoning":
+                    delivered = self._emit(chunk({"reasoning_content": value}))
+                else:
+                    delivered = self._emit(chunk({"tool_calls": [value]}))
+                if not delivered:
+                    _log("client gone during delivery; turn already committed")
+                    return
             finish = "tool_calls" if out.get("tool_calls") else "stop"
             self._emit(chunk({}, finish))
             # Harness считает tok/s и % контекста только из usage в потоке
@@ -3083,6 +3392,12 @@ def main() -> None:
         raise SystemExit(1)
     _sweep_workspace()
     reconcile_children()
+    if RECEIPT_REQUIRED:
+        try:
+            _droid_image()
+        except LauncherUnavailable as exc:
+            _log(f"droid_receipt_invalid err={_err_summary(exc, 120)!r}: spawn disabled until "
+                 f"tools/droid_image.py writes a valid receipt")
     REGISTRY.start_reaper()
     _log(f"fleet_sha256={FLEET['sha256']} models={len(FLEET['order'])}")
     for mid in FLEET["order"]:

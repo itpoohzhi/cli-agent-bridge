@@ -603,8 +603,10 @@ class TestPersistenceAndShutdown(RpcCase):
 
     def test_tm015_child_env_private_dirs_and_no_secrets_in_log_or_state(self):
         """TM-015: ключ моста вырезан, FACTORY_API_KEY унаследован и не в лог/state; права 0700/0600; sweep не трогает state."""
-        saved = {k: os.environ.get(k) for k in ("FACTORY_API_KEY", "DROID_DSH_BRIDGE_KEY")}
+        saved = {k: os.environ.get(k) for k in ("FACTORY_API_KEY", "DROID_DSH_BRIDGE_KEY",
+                                                 "FAKE_DROID_EXPECT_KEY")}
         os.environ["FACTORY_API_KEY"] = "TESTFACTORYKEY-NOT-REAL-0123456789"
+        os.environ["FAKE_DROID_EXPECT_KEY"] = "TESTFACTORYKEY-NOT-REAL-0123456789"
         os.environ["DROID_DSH_BRIDGE_KEY"] = "bridge-secret-value-xyz"
         try:
             with self.capture_logs() as lines:
@@ -617,7 +619,9 @@ class TestPersistenceAndShutdown(RpcCase):
                 else:
                     os.environ[key] = value
         spawn = self.hub.spawns()[0]
-        self.assertEqual(spawn["factory_api_key"], "TESTFACTORYKEY-NOT-REAL-0123456789")
+        self.assertTrue(spawn["factory_api_key_present"])
+        self.assertTrue(spawn["factory_api_key_expected"])  # значение сверено в fake, в журнал не пишется
+        self.assertNotIn("TESTFACTORYKEY-NOT-REAL", json.dumps(spawn))
         self.assertFalse(spawn["bridge_key_in_env"])
         joined = "\n".join(lines)
         self.assertNotIn("TESTFACTORYKEY-NOT-REAL", joined)

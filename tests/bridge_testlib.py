@@ -106,6 +106,8 @@ def make_proof(binary_path, efforts_proven, impl_version=1, method="workspace-re
 
 
 FAKE_DROID = Path(__file__).resolve().parent / "fake_droid.py"
+TEST_FACTORY_KEY = "bridge-test-factory-key-not-real"  # то же значение, что ждёт fake_droid
+_MISSING = object()
 
 
 def legacy_scenario(events):
@@ -215,10 +217,17 @@ class BridgeCase(unittest.TestCase):
     """Сервер на свободном порту с подменённым Run и временным workspace."""
 
     def setUp(self):
-        self._saved = {name: getattr(server, name) for name in (
+        self._saved = {name: getattr(server, name, _MISSING) for name in (
             "AUTH_KEY", "WORKSPACE", "FLEET", "IMAGE_PROBE", "LAUNCHER", "_budget", "MODEL_ID",
             "_sleep", "INTERRUPT_GRACE_S", "RPC_CALL_TIMEOUT_S", "SILENCE_WATCHDOG_S",
-            "FIRST_TOKEN_TIMEOUT_S", "TIMEOUT_S", "_clock", "IDLE_SECONDS")}
+            "FIRST_TOKEN_TIMEOUT_S", "TIMEOUT_S", "_clock", "IDLE_SECONDS", "RECEIPT_REQUIRED",
+            "MAX_RPC_LINE_BYTES", "MAX_STDERR_BYTES", "MAX_INBOX_BYTES", "MAX_TURN_TEXT_BYTES",
+            "MAX_CHATS", "MAX_CONCURRENT", "INSTR_BLOCK_LIMIT")}
+        # Реальный FACTORY_API_KEY рабочего окружения в тестах не используется: подставляем
+        # фиктивный sentinel; восстановление через addCleanup срабатывает и при падении теста.
+        self._env_factory_key = os.environ.get("FACTORY_API_KEY")
+        self.addCleanup(self._restore_factory_key)
+        os.environ["FACTORY_API_KEY"] = TEST_FACTORY_KEY
         self._env_fake = os.environ.get("FAKE_DROID_DIR")
         self._tmp = tempfile.TemporaryDirectory()
         self.hub = FakeDroidHub(Path(self._tmp.name) / "fake")
@@ -228,6 +237,7 @@ class BridgeCase(unittest.TestCase):
         server.WORKSPACE = Path(self._tmp.name) / "workspace"
         server.WORKSPACE.mkdir(parents=True, exist_ok=True)
         server._budget = None
+        server.RECEIPT_REQUIRED = False  # receipt квалификации образа: отдельные тесты RW-007 включают
         server._sleep = lambda _seconds: None  # ретраи 2/4 с — без реального ожидания
         server.INTERRUPT_GRACE_S = 1.0
         server._reset_rpc_state()
@@ -241,12 +251,22 @@ class BridgeCase(unittest.TestCase):
         self.httpd.server_close()
         server._reset_rpc_state()
         for name, value in self._saved.items():
-            setattr(server, name, value)
+            if value is _MISSING:
+                if hasattr(server, name):
+                    delattr(server, name)
+            else:
+                setattr(server, name, value)
         if self._env_fake is None:
             os.environ.pop("FAKE_DROID_DIR", None)
         else:
             os.environ["FAKE_DROID_DIR"] = self._env_fake
         self._tmp.cleanup()
+
+    def _restore_factory_key(self):
+        if self._env_factory_key is None:
+            os.environ.pop("FACTORY_API_KEY", None)
+        else:
+            os.environ["FACTORY_API_KEY"] = self._env_factory_key
 
     # -- helpers ----------------------------------------------------------------
     def _post(self, body: dict, timeout: float = 60.0):

@@ -60,6 +60,9 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 | `DROID_DSH_BRIDGE_FLEET` | `<каталог моста>/fleet.json` | путь к каталогу флота |
 | `DROID_DSH_BRIDGE_IMAGE_PROBE` | — | `1` — включить `probe`-модели изображений (**только для копии моста**, не для боевого запуска) |
 | `DROID_LAUNCHER` | `~/.config/factory-launch/droid-cli.sh` | канонический лончер droid |
+| `DROID_DSH_BRIDGE_RECEIPT_REQUIRED` | `1` | допуск образа droid по receipt (`workspace/state/droid-binary-receipt.json`) на каждом spawn; `0` — только стенд/разработка |
+| `DROID_DSH_BRIDGE_INSTR_LIMIT` | `60000` | предел блока agent-instructions в запросе, Б (REQ-003): больше — 400 `REQ003_SIZE_EXCEEDED` до spawn/add |
+| `DROID_BRIDGE_MAX_RPC_LINE_BYTES` / `_MAX_STDERR_BYTES` / `_MAX_INBOX_BYTES` / `_MAX_TURN_TEXT_BYTES` / `_MAX_CHATS` | 16 МиБ / 64 КиБ / 64 МиБ / 32 МиБ / 4096 | байтовые бюджеты RPC-строки, stderr, очереди событий, text/thinking хода и индекса чатов (превышение — 502, процесс/слот возвращаются) |
 
 Модель и `reasoning_effort` берутся из запроса (effort передаётся как `-r`;
 модель по умолчанию — каталог/env). Секретов в коде нет: только окружение.
@@ -211,10 +214,22 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
 - **Idle** `DROID_DSH_BRIDGE_IDLE_SECONDS` (2700 с): процесс закрывается штатно, SID и
   метаданные остаются; следующий ход — `load_session` того же SID (не больше 5 restore
   на SID, затем свежая generation; после load — проверка целостности служебных блоков).
-- **Безопасность ребёнка.** Чистый Factory home (`FACTORY_HOME_OVERRIDE`),
+- **Допуск образа (AD-010).** Мост запускает droid только как `DROID_BIN=<образ из receipt>`:
+  `tools/droid_image.py` копирует глобальный бинарь в `workspace/runtime/droid-image/<sha256>/droid`
+  (0500) и пишет receipt; на каждом spawn receipt читается заново, нет/не совпал sha — 503
+  `launcher_unavailable`. Глобальный `~/.local/bin/droid` образ не меняет.
+- **Запись в stdin ребёнка** идёт срезами с дедлайном (`DROID_BRIDGE_RPC_CALL_TIMEOUT_S` охватывает и
+  запись) и отменой; зависший (не читающий) ребёнок не держит interrupt и shutdown — они не ждут
+  пишущий лок, дальше SIGTERM/SIGKILL.
+- **Доставка отдельно от вычисления.** `_execute` только копит вывод; T и L освобождаются после
+  terminal и checkpoint, SSE/JSON уходят клиенту после — медленный клиент не блокирует следующий ход.
+- **Безопасность ребёнка.** Чистый Factory home (`FACTORY_HOME_OVERRIDE`; ошибка подготовки — отказ spawn),
   `disableBuiltinSkills`, `autoRejectPermissionRequests`, нативные tools отключаются по
-  актуальному `list_tools` (ошибка — fail-closed, ход не начинается); model/effort/autonomy
-  сверяются read-back, подмена модели — 502 `droid_error`; ключ моста вырезан из env.
+  актуальному `list_tools` (ошибка, пустой/невалидный каталог, нет `settings_updated`,
+  `disabledToolIds` или `autonomyLevel` — fail-closed, ход не начинается); model/effort/autonomy
+  сверяются read-back, подмена модели — 502 `droid_error`; `disableBuiltinSkills` и
+  `autoRejectPermissionRequests` сверяются, если droid их сообщает (реальный 1.248 не сообщает);
+  ключ моста вырезан из env.
 - **Вывод хода** удерживается до `agent_turn_completed`; `llm_retry` и
   `assistant_message_retracted` удаляют только незакоммиченное; usage — из
   `tokenUsage` терминального события по ходу (не кумулятив). Таймауты: первое событие 90 с,
@@ -239,8 +254,10 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
 ```
 
 Коды выхода `--check`: 0 — оба запаса ≥ 4096 Б, 1 — запас меньше, 2 — канон теряется
-в каком-либо cwd (`CANON_LOST`) или дубль возвращается в KB (`DUPLICATE_RETURNED`).
-Профили DSH утилита не правит и не читает (`--profiles` в dev-копии не реализован).
+в каком-либо cwd (`CANON_LOST`), дубль возвращается в KB (`DUPLICATE_RETURNED`) или блок/строка
+KB > 60 000 Б (`REQ003_SIZE_EXCEEDED`, строгий режим включён в CLI). `--profiles [--profiles-dir PATH]`
+только читает установленные профили DSH (`maxBytes` плагина agent-instructions) и прогоняет
+ту же проверку; профили утилита не правит — применение `maxBytes=106496` остаётся шагом владельца.
 
 ## Подключение к DSH
 

@@ -14,7 +14,9 @@
 
 Сценарий хода — список шагов {"op": ...} либо словарь {"steps": [...], "reason": ...,
 "usage": {...}, "late": true}. Шаги: text, thinking, retry, retract, error, sleep, hang,
-exit, garbage, foreign_terminal, notify.
+exit, garbage, foreign_terminal, stale_terminal, big_line, flood, notify.
+Конфиг: stall_after=N — перестать читать stdin после N строк (завис); omit_autonomy,
+omit_disabled_ids, raw_tools, echo_flags/flags_override — искажение read-back.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ import uuid
 
 API = "1.0.0"
 DEFAULT_TOOLS = ["Read", "Execute", "Edit", "web_search"]
+# Фиктивный ключ тестового окружения (bridge_testlib подставляет его вместо реального).
+TEST_FACTORY_KEY = "bridge-test-factory-key-not-real"
 
 
 class Fake:
@@ -45,6 +49,7 @@ class Fake:
         self.cumulative = {"inputTokens": 0, "outputTokens": 0}
         self.seq = 0
         self.eof = False
+        self.prev_turn_id = ""
         self.log({"ev": "spawn", "argv": argv, "cwd": os.getcwd(), **self._env_facts()})
 
     # -- журнал и конфиг -------------------------------------------------------
@@ -59,10 +64,15 @@ class Fake:
         return {
             "cwd_mode": oct(os.stat(cwd).st_mode & 0o777), "cwd_files": files,
             "bridge_key_in_env": "DROID_DSH_BRIDGE_KEY" in os.environ,
-            "factory_api_key": os.environ.get("FACTORY_API_KEY", ""),
+            # Значение ключа в журнал НЕ пишется: только факт наличия и совпадение с ожидаемым
+            # (FAKE_DROID_EXPECT_KEY либо тестовый sentinel).
+            "factory_api_key_present": bool(os.environ.get("FACTORY_API_KEY")),
+            "factory_api_key_expected": os.environ.get("FACTORY_API_KEY", "") == (
+                os.environ.get("FAKE_DROID_EXPECT_KEY") or TEST_FACTORY_KEY),
             "factory_home": home,
             "factory_home_mode": oct(os.stat(home).st_mode & 0o777) if home and os.path.isdir(home) else "",
             "droid_auto": os.environ.get("DROID_AUTO", ""),
+            "droid_bin": os.environ.get("DROID_BIN", ""),
             "env_names": sorted(os.environ),
         }
 
@@ -141,6 +151,15 @@ class Fake:
     def public_settings(self) -> dict:
         shown = dict(self.settings)
         shown["modelId"] = self._model()
+        cfg = self.config()
+        if cfg.get("omit_autonomy"):
+            shown.pop("autonomyLevel", None)
+        if cfg.get("omit_disabled_ids"):
+            shown.pop("disabledToolIds", None)
+        if cfg.get("echo_flags"):
+            # Реальный droid эти флаги в settings не сообщает; режим нужен для проверки расхождения.
+            shown.update({"disableBuiltinSkills": True, "autoRejectPermissionRequests": True})
+            shown.update(cfg.get("flags_override") or {})
         return shown
 
     def _service_message(self, text: str) -> dict:
@@ -211,6 +230,9 @@ class Fake:
         elif method == "droid.list_tools":
             if cfg.get("list_tools_error"):
                 self.respond(rid, error={"code": -32603, "message": "list_tools failed"})
+                return
+            if cfg.get("raw_tools") is not None:
+                self.respond(rid, {"tools": cfg["raw_tools"]})
                 return
             tools = cfg.get("tools") if cfg.get("tools") is not None else DEFAULT_TOOLS
             self.respond(rid, {"tools": [{"id": t} for t in tools]})
@@ -372,6 +394,16 @@ class Fake:
                 self.notify(step["type"], **(step.get("fields") or {}))
             elif op == "garbage":
                 self.raw("{this is not json")
+            elif op == "stale_terminal":
+                # Запоздавший terminal ПРЕЖНЕГО хода (его turnId), пришедший после arming текущего.
+                self.notify("agent_turn_completed", reason="completed", turnId=self.prev_turn_id,
+                            tokenUsage={"inputTokens": 777, "outputTokens": 777})
+            elif op == "big_line":
+                self.raw("{" + '"pad":"' + "A" * int(step.get("bytes", 1000)) + '"}')
+            elif op == "flood":
+                chunk = "F" * int(step.get("size", 1000))
+                for _ in range(int(step.get("count", 10))):
+                    self.notify("assistant_text_delta", messageId="flood", blockIndex=0, textDelta=chunk)
             elif op == "foreign_terminal":
                 self.notify("agent_turn_completed", sid="sid-foreign", reason="completed", turnId="x",
                             tokenUsage={"inputTokens": 999, "outputTokens": 999})
@@ -386,6 +418,7 @@ class Fake:
                     tokenUsage=dict(usage), cumulativeTokenUsage=dict(self.cumulative),
                     durationMs=int((time.monotonic() - started) * 1000))
         self.notify("droid_working_state_changed", newState="idle")
+        self.prev_turn_id = turn_id
         if scenario.get("late"):
             # Запоздавшие события прежнего хода: не должны засчитываться следующему.
             self.pause(float(scenario["late"]))
@@ -395,7 +428,17 @@ class Fake:
 
     # -- основной цикл -------------------------------------------------------------
     def _read_stdin(self) -> None:
-        for raw in iter(sys.stdin.buffer.readline, b""):
+        stall_after = self.config().get("stall_after")
+        count = 0
+        while True:
+            if stall_after is not None and count >= int(stall_after):
+                # Ребёнок «завис»: stdin больше не читается, pipe заполняется записью моста.
+                while True:
+                    time.sleep(3600)
+            raw = sys.stdin.buffer.readline()
+            if not raw:
+                break
+            count += 1
             try:
                 req = json.loads(raw.decode("utf-8"))
             except ValueError:
