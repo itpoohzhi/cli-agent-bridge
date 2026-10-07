@@ -15,7 +15,6 @@ import sys
 import tempfile
 import threading
 import time
-import types
 import unittest
 
 from contextlib import contextmanager
@@ -155,7 +154,12 @@ class FakeDroidHub:
 
     def script(self, scenarios):
         """Добавить сценарии ходов (по одному на запущенный цикл, глобально по очереди)."""
-        self.config.setdefault("scenarios", []).extend(scenarios)
+        scripted = self.config.setdefault("scenarios", [])
+        counter = self.base / "turn.counter"
+        claimed = int(counter.read_text() or 0) if counter.exists() else 0
+        while len(scripted) < claimed:  # ходы без сценария уже взяли значение по умолчанию
+            scripted.append(None)
+        scripted.extend(scenarios)
         self._flush()
 
     def legacy(self, scripts):
