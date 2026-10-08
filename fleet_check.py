@@ -103,14 +103,37 @@ def expand(path):
     return os.path.expanduser(str(path))
 
 
+def droid_scope(cat):
+    """Копия каталога только с моделями droid: droid-проверки (efforts, профили, live) не про Muse."""
+    scoped = dict(cat)
+    scoped["models"] = [
+        m for m in cat.get("models") or [] if m.get("backend", "droid") == "droid"
+    ]
+    return scoped
+
+
 def check_catalogue(cat, report):
     """(1) C-01: структурные инварианты каталога; класс III — здесь."""
     errs = []
     if not isinstance(cat, dict):
         report.add("catalogue", ["каталог не является JSON-объектом"])
         return
-    if cat.get("schema_version") != 2:
-        errs.append("schema_version != 2")
+    schema = cat.get("schema_version")
+    if schema not in (2, 3):
+        errs.append("schema_version не 2 и не 3")
+    backends = cat.get("backends")
+    if schema == 3:
+        if not isinstance(backends, dict) or not backends:
+            errs.append("backends: пустой или не объект (schema 3)")
+            backends = {}
+        for bid, entry in backends.items():
+            if not isinstance(entry, dict) or entry.get("kind") not in (
+                "droid",
+                "muse",
+            ):
+                errs.append("backend_kind_unknown: %s" % bid)
+    elif backends is not None:
+        errs.append("backends_in_schema_2")
     models = cat.get("models")
     if not isinstance(models, list) or not models:
         errs.append("models: пустой или не список")
@@ -133,6 +156,8 @@ def check_catalogue(cat, report):
             errs.append("efforts_invalid (дубли): " + mid)
         if model.get("default_effort") not in efforts:
             errs.append("default_effort_invalid: %s" % mid)
+        if schema == 3 and model.get("backend") not in (backends or {}):
+            errs.append("model_backend_unknown: %s (%r)" % (mid, model.get("backend")))
         if (
             not isinstance(model.get("context_window"), int)
             or model.get("context_window") <= 0
@@ -788,6 +813,9 @@ def main(argv=None):
         cat = {}
     else:
         check_catalogue(cat, report)
+        cat = droid_scope(
+            cat
+        )  # дальше — проверки Droid-флота и профилей DSH (Muse — вне их области)
         check_policy(cat, args.policy, report)
         check_efforts(cat, args.efforts, report)
         profiles = {}

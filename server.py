@@ -64,6 +64,8 @@ from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))  # пакеты core/ и adapters/ рядом с server.py
 import b_guard  # noqa: E402  - охранник B: автоматический контур профилей DSH (RW-003)
 from receipt_schema import (  # noqa: E402
     RECEIPT_PROBES,
@@ -73,6 +75,28 @@ from receipt_schema import (  # noqa: E402
     TOOLS_POLICY,
     settings_profile_digest,
     tools_policy_digest,
+)
+
+from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
+from core.backend_adapter import AdapterRegistry  # noqa: E402
+from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
+    TOOL_CALL_CLOSE,
+    TOOL_CALL_OPEN,
+    ToolCallParser,
+    _attachments_section,
+    _flatten_content,
+    _messages_to_prompt,
+    _normalize_arguments,
+    _normalize_tool_call,
+    _parse_tool_call_block,
+    _render_content,
+    _render_message,
+    _render_tool_call,
+    _strip_code_fence,
+    _tool_choice_name,
+    _tool_choice_none,
+    _tools_section,
+    finalize_turn,
 )
 
 HOME = Path.home()
@@ -98,8 +122,6 @@ FIRST_TOKEN_TIMEOUT_S = float(
 )
 # Окно после успешного хода, в котором лончеру передаётся DROID_SKIP_PREFLIGHT=1.
 PREFLIGHT_SKIP_WINDOW_S = 120.0
-TOOL_CALL_OPEN = "<tool_call>"
-TOOL_CALL_CLOSE = "</tool_call>"
 
 # Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
@@ -179,12 +201,114 @@ def _validate_proof(model_id: str, images: dict, method: str, efforts: list) -> 
         raise FleetViolation("confirmed_efforts_proven_invalid", model_id)
 
 
+_FLEET_TOP_KEYS = frozenset(
+    {
+        "schema_version",
+        "catalogue",
+        "default_model",
+        "policy_ref",
+        "technical_ref",
+        "image_limits",
+        "admission",
+        "backends",
+        "models",
+    }
+)
+_FLEET_BACKEND_KEYS = frozenset(
+    {
+        "kind",
+        "enabled",
+        "required",
+        "owned_by",
+        "max_concurrent",
+        "wrapper",
+        "technical_ref",
+        "transport",
+        "tool_policy",
+        "proxy_port",
+    }
+)
+_FLEET_MODEL_KEYS = frozenset(
+    {
+        "id",
+        "backend",
+        "name",
+        "efforts",
+        "default_effort",
+        "context_window",
+        "max_tokens",
+        "input",
+        "images",
+        "policy_lines",
+    }
+)
+# schema 2 = единственный неявный бэкенд droid (поведение прежнее, откат конфигурации без смены кода).
+_IMPLICIT_DROID_BACKEND = {
+    "kind": "droid",
+    "enabled": True,
+    "required": True,
+    "owned_by": "factory-droid",
+    "max_concurrent": 4,
+}
+
+
+def _build_backends(data: dict, schema: int) -> tuple:
+    """Секция `backends` каталога (класс I) -> ({id: нормализованная запись}, порядок id).
+
+    schema 2: секции нет (её появление — отказ), неявный бэкенд droid. schema 3: словарь
+    `id -> запись`; kind только из реестра в коде (`ADAPTER_KINDS`), неизвестные ключи — отказ
+    (в schema 2 их молча отбрасывали бы, и старый код опубликовал бы модель Muse как droid).
+    """
+    if schema == 2:
+        if "backends" in data:
+            raise FleetViolation("backends_in_schema_2", "-")
+        return {"droid": dict(_IMPLICIT_DROID_BACKEND)}, ["droid"]
+    if set(data) - _FLEET_TOP_KEYS:
+        raise FleetViolation("fleet_key_unknown", "-")
+    raw = data.get("backends")
+    if not isinstance(raw, dict) or not raw:
+        raise FleetViolation("backends_invalid", "-")
+    backends: dict = {}
+    for backend_id, entry in raw.items():
+        if (
+            not isinstance(backend_id, str)
+            or not backend_id
+            or not isinstance(entry, dict)
+        ):
+            raise FleetViolation("backend_invalid", str(backend_id))
+        if set(entry) - _FLEET_BACKEND_KEYS:
+            raise FleetViolation("backend_key_unknown", backend_id)
+        kind = entry.get("kind")
+        if not isinstance(kind, str) or kind not in ADAPTER_KINDS:
+            raise FleetViolation("backend_kind_unknown", backend_id)
+        flags = {}
+        for flag, default in (("enabled", True), ("required", False)):
+            value = entry.get(flag, default)
+            if not isinstance(value, bool):
+                raise FleetViolation("backend_invalid", backend_id)
+            flags[flag] = value
+        cap = entry.get("max_concurrent", 1)
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            raise FleetViolation("backend_max_concurrent_invalid", backend_id)
+        owned_by = entry.get("owned_by", backend_id)
+        if not isinstance(owned_by, str) or not owned_by:
+            raise FleetViolation("backend_invalid", backend_id)
+        normalized = {k: v for k, v in entry.items() if k not in flags}
+        normalized.update(flags, kind=kind, owned_by=owned_by, max_concurrent=cap)
+        backends[backend_id] = normalized
+    if not any(b["enabled"] for b in backends.values()):
+        raise FleetViolation("backends_none_enabled", "-")
+    return backends, list(backends)
+
+
 def _build_catalog(data: Any) -> dict:
     """Проверить каталог (C-01, класс I) и вернуть нормализованный словарь."""
     if not isinstance(data, dict):
         raise FleetViolation("fleet_unreadable", "-")
-    if data.get("schema_version") != 2:
+    schema = data.get("schema_version")
+    if isinstance(schema, bool) or schema not in (2, 3):
         raise FleetViolation("schema_version_invalid", "-")
+    backends, backend_order = _build_backends(data, schema)
     limits = data.get("image_limits")
     if not isinstance(limits, dict):
         raise FleetViolation("limits_invalid", "-")
@@ -217,14 +341,24 @@ def _build_catalog(data: Any) -> dict:
         raise FleetViolation("models_invalid", "-")
     models = {}
     order = []
+    seen: set = set()
     for item in raw_models:
         if not isinstance(item, dict):
             raise FleetViolation("model_invalid", "-")
         mid = item.get("id")
         if not isinstance(mid, str) or not mid:
             raise FleetViolation("model_invalid", "-")
-        if mid in models:
+        if mid in seen:
             raise FleetViolation("duplicate_id", mid)
+        seen.add(mid)
+        if schema == 3:
+            if set(item) - _FLEET_MODEL_KEYS:
+                raise FleetViolation("model_key_unknown", mid)
+            backend_id = item.get("backend")
+            if not isinstance(backend_id, str) or backend_id not in backends:
+                raise FleetViolation("model_backend_unknown", mid)
+        else:
+            backend_id = "droid"
         efforts = item.get("efforts")
         if (
             not isinstance(efforts, list)
@@ -274,8 +408,11 @@ def _build_catalog(data: Any) -> dict:
         method = images.get("method")
         if method is not None and method not in IMPLEMENTED_METHODS:
             raise FleetViolation("method_not_implemented", mid)
+        if not backends[backend_id]["enabled"]:
+            continue  # модели выключенного бэкенда проверены, но не публикуются
         models[mid] = {
             "id": mid,
+            "backend": backend_id,
             "name": str(item.get("name") or mid),
             "efforts": [str(e) for e in efforts],
             "default_effort": str(item["default_effort"]),
@@ -301,6 +438,8 @@ def _build_catalog(data: Any) -> dict:
         "schema_version": data.get("schema_version"),
         "catalogue": str(data.get("catalogue") or ""),
         "default_model": default_model,
+        "backends": backends,
+        "backend_order": backend_order,
         "order": order,
         "models": models,
         "image_limits": {
@@ -356,6 +495,11 @@ except FleetViolation as violation:
     raise SystemExit(1)
 
 MODEL_ID = ENV_MODEL or FLEET["default_model"]
+# Реестр адаптеров включённых бэкендов (ADR 0002): каталог читается лениво, чтобы подмена FLEET
+# стендом тестов действовала и на маршрутизацию; хост адаптеров — этот модуль.
+BACKENDS = AdapterRegistry.from_fleet(
+    FLEET, ADAPTER_KINDS, lambda: FLEET, sys.modules[__name__]
+)
 
 # Токеноподобные последовательности: длинные (>=24) и явные Factory-ключи `fk-`
 # любой длины — короткий ключ иначе проходил мимо маскировщика в журнал.
@@ -696,355 +840,6 @@ def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
     return handler.headers.get("x-api-key", "") == AUTH_KEY or hdr.strip() == AUTH_KEY
 
 
-def _flatten_content(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and "text" in item:
-                parts.append(str(item["text"]))
-        return "\n".join(p for p in parts if p)
-    return str(content)
-
-
-def _render_content(content: Any, counter: list) -> str:
-    """Содержимое сообщения -> текст; на месте изображений маркер `[image N]`.
-
-    Нумерация сквозная по порядку появления во всей истории. Неизвестные
-    НЕ-image части (например input_audio) молча пропускаются, как раньше.
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if item.get("type") == "image_url":
-                    counter[0] += 1
-                    parts.append(f"[image {counter[0]}]")
-                elif "text" in item and item.get("text") is not None:
-                    parts.append(str(item["text"]))
-        return "\n".join(p for p in parts if p)
-    return str(content)
-
-
-def _normalize_arguments(value: Any) -> dict | None:
-    """arguments -> JSON-объект; None, если значение задано, но объектом не является.
-
-    None отличает невалидные аргументы (строку-не-JSON, список, число, null) от
-    отсутствия ключа: вызывающий код не вправе молча подменять их на пустой словарь
-    и запускать инструмент с пустыми аргументами.
-    """
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if text:
-            try:
-                parsed = json.loads(text)
-            except ValueError:
-                return None
-            if isinstance(parsed, dict):
-                return parsed
-    return None
-
-
-def _normalize_tool_call(item: Any) -> dict:
-    """Один OpenAI tool_call -> {"id", "name", "arguments"}.
-
-    id сохраняется, чтобы результат [tool result <id>] однозначно сопоставлялся
-    с конкретным вызовом при нескольких одинаковых инструментах.
-    """
-    if not isinstance(item, dict):
-        return {"id": "", "name": "", "arguments": {}}
-    fn = item.get("function") if isinstance(item.get("function"), dict) else {}
-    name = fn.get("name") or item.get("name") or ""
-    args = fn.get("arguments")
-    if args is None:
-        args = item.get("arguments")
-    normalized = _normalize_arguments(args)
-    return {
-        "id": str(item.get("id") or ""),
-        "name": str(name),
-        "arguments": normalized if normalized is not None else {},
-    }
-
-
-def _render_tool_call(item: Any) -> str:
-    """Историю вызова рендерим тем же блоком, что просим от модели."""
-    payload = json.dumps(_normalize_tool_call(item), ensure_ascii=False)
-    return f"{TOOL_CALL_OPEN}{payload}{TOOL_CALL_CLOSE}"
-
-
-def _tool_choice_none(tool_choice: Any) -> bool:
-    """tool_choice:"none" — инструменты не предлагаем вовсе."""
-    return isinstance(tool_choice, str) and tool_choice.strip().lower() == "none"
-
-
-def _tool_choice_name(tool_choice: Any) -> str:
-    """Имя обязательного инструмента из tool_choice ("" — без принуждения)."""
-    if not isinstance(tool_choice, dict):
-        return ""
-    fn = (
-        tool_choice.get("function")
-        if isinstance(tool_choice.get("function"), dict)
-        else {}
-    )
-    name = fn.get("name") or tool_choice.get("name") or ""
-    return str(name) if name else ""
-
-
-def _tools_section(tools: list, tool_choice: Any, has_attachments: bool = False) -> str:
-    """Английская секция протокола и схем инструментов для промпта."""
-    lines = [
-        "[system]",
-        "# Tool calling protocol",
-        "You may call the external tools listed below.",
-        "When you need a tool, output ONLY blocks exactly in this form:",
-        f'{TOOL_CALL_OPEN}{{"name": "<tool_name>", "arguments": {{<json>}}}}{TOOL_CALL_CLOSE}',
-        "You may output several such blocks in a row. Do not narrate around them.",
-        "Tool results arrive later as lines like [tool result <id>] with the result text.",
-        "If no tool is needed, reply normally in plain text.",
-        "Never attempt to use built-in tools; the only tools available are the ones listed here.",
-    ]
-    if has_attachments:
-        lines[-1] += ", except Read on the attachment files listed under [attachments]."
-    if tool_choice == "required":
-        lines.append("You MUST call at least one tool now.")
-    else:
-        forced = _tool_choice_name(tool_choice)
-        if forced:
-            lines.append(f'You MUST call the tool "{forced}" now.')
-    lines.append("")
-    lines.append("Available tools:")
-    for item in tools:
-        fn = item.get("function") if isinstance(item.get("function"), dict) else item
-        if not isinstance(fn, dict):
-            continue
-        name = str(fn.get("name") or "")
-        desc = str(fn.get("description") or "")
-        params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
-        lines.append(f"- {name}: {desc}")
-        lines.append("  parameters: " + json.dumps(params, ensure_ascii=False))
-    return "\n".join(lines)
-
-
-def _render_message(msg: Any, counter: list) -> str:
-    """Одно сообщение истории -> текстовый блок (с рендером tool-вызовов/результатов)."""
-    if not isinstance(msg, dict):
-        return ""
-    role = str(msg.get("role") or "user")
-    if role == "tool":
-        call_id = str(msg.get("tool_call_id") or msg.get("id") or "")
-        name = str(msg.get("name") or "")
-        text = _render_content(msg.get("content"), counter)
-        header = f"[tool result {call_id}]"
-        if name:
-            header += f" ({name})"
-        return f"{header}\n{text}" if text.strip() else header
-    text = _render_content(msg.get("content"), counter)
-    if role == "assistant":
-        parts = []
-        if text.strip():
-            parts.append(text)
-        calls = msg.get("tool_calls")
-        if isinstance(calls, list):
-            parts.extend(_render_tool_call(tc) for tc in calls)
-        body = "\n".join(p for p in parts if p)
-        return f"[assistant]\n{body}" if body.strip() else ""
-    if text.strip():
-        return f"[{role}]\n{text}"
-    return ""
-
-
-def _attachments_section(images: list) -> str:
-    """Хвост промпта метода workspace-read (эталон — kit/mkprompt.py)."""
-    lines = [
-        "[attachments]",
-        "This request includes %d image(s) as local files in the working directory. "
-        "The markers [image N] in the conversation refer to them in order."
-        % len(images),
-    ]
-    for index, image in enumerate(images, 1):
-        lines.append(
-            "- [image %d] ./%s (%s, %d bytes)"
-            % (index, image["name"], image["mime"], len(image["data"]))
-        )
-    lines.append(
-        "Open each image with the Read tool on exactly these paths before answering about it "
-        "(Read is the only built-in tool you may use, and only on these files). Do not claim to "
-        "see an image you have not opened. If an image cannot be opened, say so explicitly "
-        "instead of guessing."
-    )
-    return "\n".join(lines)
-
-
-def _messages_to_prompt(
-    messages: list,
-    tools: list | None = None,
-    tool_choice: Any = None,
-    images: list | None = None,
-) -> str:
-    """Собрать единый текстовый промпт; при наличии tools — с секцией протокола.
-
-    При наличии изображений в конец добавляется секция [attachments], а строка
-    протокола инструментов получает исключение для Read (C-09).
-    """
-    tools = tools or []
-    counter = [0]
-    blocks = []
-    for msg in messages:
-        rendered = _render_message(msg, counter)
-        if rendered:
-            blocks.append(rendered)
-    head = []
-    if tools and not _tool_choice_none(tool_choice):
-        head.append(_tools_section(tools, tool_choice, bool(images)))
-    text = "\n\n".join(head + blocks).strip() or "Reply with exactly: PONG"
-    if images:
-        text = text + "\n\n" + _attachments_section(images)
-    return text
-
-
-def _strip_code_fence(text: str) -> str:
-    """Снять обёртку ```…``` (в т.ч. ```json) вокруг JSON внутри блока."""
-    body = text.strip()
-    if body.startswith("```"):
-        newline = body.find("\n")
-        body = body[newline + 1 :] if newline != -1 else body[3:]
-    if body.rstrip().endswith("```"):
-        body = body.rstrip()[:-3]
-    return body.strip()
-
-
-def _parse_tool_call_block(inner: str) -> dict | None:
-    """Содержимое блока -> {"name","arguments"}; None, если блок невалиден.
-
-    Отсутствие ключа arguments — допустимый вызов с {}; присутствующее, но
-    не-объектное значение (строка-не-JSON, список, число, null) — вызов
-    отклоняем, чтобы не запускать инструмент с пустыми аргументами.
-    """
-    try:
-        obj = json.loads(_strip_code_fence(inner))
-    except ValueError:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    if "arguments" not in obj:
-        arguments: dict = {}
-    else:
-        arguments = _normalize_arguments(obj.get("arguments"))
-        if arguments is None:
-            return None
-    return {"name": name.strip(), "arguments": arguments}
-
-
-class ToolCallParser:
-    """Поток текстовых дельт -> content и завершённые вызовы инструментов.
-
-    Тег <tool_call> может прийти разорванным между дельтами: хвост, который может
-    оказаться началом тега, удерживается и не уходит в content до разрешения.
-    """
-
-    def __init__(self, on_content, on_tool_call):
-        self._buf = ""
-        self._on_content = on_content
-        self._on_tool_call = on_tool_call
-
-    def feed(self, text: str) -> None:
-        self._buf += text
-        self._drain(final=False)
-
-    def finish(self) -> None:
-        self._drain(final=True)
-
-    def _drain(self, final: bool) -> None:
-        while True:
-            start = self._buf.find(TOOL_CALL_OPEN)
-            if start == -1:
-                if final:
-                    self._flush_all()
-                    return
-                keep = self._pending_prefix()
-                if keep:
-                    self._emit(self._buf[:-keep])
-                    self._buf = self._buf[-keep:]
-                else:
-                    self._flush_all()
-                return
-            if start > 0:
-                self._emit(self._buf[:start])
-                self._buf = self._buf[start:]
-            end = self._find_close_outside_string(len(TOOL_CALL_OPEN))
-            if end == -1:
-                if final:
-                    self._flush_all()  # незакрытый/невалидный блок отдаём текстом
-                return
-            inner = self._buf[len(TOOL_CALL_OPEN) : end]
-            self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
-            call = _parse_tool_call_block(inner)
-            if call is None:
-                self._emit(TOOL_CALL_OPEN + inner + TOOL_CALL_CLOSE)
-            else:
-                self._on_tool_call(call)
-
-    def _find_close_outside_string(self, start: int) -> int:
-        """Позиция `</tool_call>` вне строковых литералов JSON, или -1.
-
-        Закрывающий тег внутри JSON-строки (например значение аргумента содержит
-        `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
-        строку не закрывают.
-        """
-        index = start
-        length = len(self._buf)
-        in_string = False
-        escaped = False
-        while index < length:
-            char = self._buf[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-            elif char == '"':
-                in_string = True
-            elif self._buf.startswith(TOOL_CALL_CLOSE, index):
-                return index
-            index += 1
-        return -1
-
-    def _pending_prefix(self) -> int:
-        """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
-        limit = min(len(TOOL_CALL_OPEN) - 1, len(self._buf))
-        for length in range(limit, 0, -1):
-            if self._buf[-length:] == TOOL_CALL_OPEN[:length]:
-                return length
-        return 0
-
-    def _emit(self, text: str) -> None:
-        if text:
-            self._on_content(text)
-
-    def _flush_all(self) -> None:
-        if self._buf:
-            text, self._buf = self._buf, ""
-            self._on_content(text)
-
-
 class ImageReject(Exception):
     """Отказ image-пути с типом из таксономии C-10."""
 
@@ -1240,6 +1035,8 @@ def _shutdown_one(proc: "RpcProcess", close_kwargs: dict) -> None:
 def _kill_all(*_: Any) -> None:
     """SIGTERM/SIGINT моста: graceful-закрытие детей (общий грейс 4,5 с) и выход."""
     closed = shutdown_all()
+    # Остальные бэкенды: droid уже закрыт выше (его adapter.shutdown() — тот же shutdown_all).
+    BACKENDS.shutdown(exclude=("droid",))
     _log(f"shutdown: closed {closed} child process group(s)")
     os._exit(0)
 
@@ -4417,9 +4214,10 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _error_body(out: dict) -> Any:
         st = out.get("state")
+        label = str(out.get("backend_kind") or "droid")  # имя бинарника в тексте ошибки
         if st == "timeout":
             return {
-                "message": f"droid exec timed out after {TIMEOUT_S}s",
+                "message": f"{label} exec timed out after {TIMEOUT_S}s",
                 "type": "timeout",
                 "code": 504,
             }
@@ -4470,9 +4268,16 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "droid_error",
                 "code": 502,
             }
+        if st == "backend_error":
+            return {
+                "message": f"{label} exec failed rc={out.get('rc')}",
+                "detail": str(out.get("err"))[:500],
+                "type": "proxy_error",
+                "code": 502,
+            }
         if out.get("rc") != 0 or not (out.get("text") or out.get("tool_calls")):
             return {
-                "message": f"droid exec exited rc={out.get('rc')}",
+                "message": f"{label} exec exited rc={out.get('rc')}",
                 "detail": str(out.get("err"))[:500],
                 "type": "proxy_error",
                 "code": 502,
@@ -4496,17 +4301,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
-            with _active_lock:
-                active = len(_active)
-            # Контракт из семи ключей прежний; невалидный receipt (spawn невозможен) виден как ok=false (RW-015).
+            # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
+            # бэкендам (droid: невалидный receipt = spawn невозможен -> ok=false, RW-015),
+            # active и max_concurrent суммируются по включённым бэкендам.
+            required = [a for a in BACKENDS.adapters() if a.required]
             self._send(
                 200,
                 {
-                    "ok": _receipt_state() != "invalid",
+                    "ok": all(a.is_healthy() for a in required),
                     "transport": "droid-exec",
                     "model": MODEL_ID,
-                    "active": active,
-                    "max_concurrent": MAX_CONCURRENT,
+                    "active": BACKENDS.active_total(),
+                    "max_concurrent": BACKENDS.max_concurrent_total(),
                     "tool_emulation": True,
                     "uptime_s": int(time.time() - _started),
                 },
@@ -4525,15 +4331,19 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path in ("/v1/models", "/models"):
-            data = []
+            # Объединение моделей всех активных адаптеров; порядок — как в fleet.json, модель по умолчанию первой.
+            published = {m["id"]: (a, m) for a, m in BACKENDS.models()}
             order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
+            data = []
             for mid in order:
-                model = FLEET["models"][mid]
+                if mid not in published:
+                    continue
+                adapter, model = published[mid]
                 data.append(
                     {
                         "id": mid,
                         "object": "model",
-                        "owned_by": "factory-droid",
+                        "owned_by": adapter.owned_by,
                         "created": 0,
                         "context_length": model["context_window"],
                     }
@@ -4739,14 +4549,18 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
-            # (12) лончер: проверка до SSE и до любого запуска.
-            try:
-                _launcher()
-            except LauncherUnavailable:
+            # (12) бэкенд модели: допуск/лончер проверяются до SSE и до любого запуска.
+            adapter = BACKENDS.get(model["backend"])
+            ok, why = (
+                (False, "backend_disabled") if adapter is None else adapter.preflight()
+            )
+            if not ok:
                 self._reject(
                     503,
                     "launcher_unavailable",
-                    "canonical launcher is missing or not executable",
+                    "canonical launcher is missing or not executable"
+                    if why == "launcher_unavailable"
+                    else f"backend {model['backend']} is unavailable: {why}",
                     model_id,
                     model_len,
                 )
@@ -4788,58 +4602,10 @@ class Handler(BaseHTTPRequestHandler):
                 route = "keyed"
             else:
                 route = "nokey"
-            in_kb = _in_kb_cwd(cwd)
-            try:
-                blocks = _instr_blocks(messages, in_kb) if route != "title" else []
-                instr = _instr_scan(messages, in_kb) if blocks else (0, "-", 0)
-            except CanonPersistError:
-                # Код из базовой таксономии (503 launcher_unavailable): ход без подтверждённой истории канона не идёт.
-                self._reject(
-                    503,
-                    "launcher_unavailable",
-                    "canon history is not persisted: request refused before launch",
-                    model_id,
-                    model_len,
-                )
-                return
-            guard_state, guard_reasons, guard_max = GUARD.snapshot()
-            over = _instr_violation(blocks, guard_max)
-            if guard_state == "unsafe" and blocks:
-                # Профиль DSH небезопасен (alert уже в журнале): размер не режем немым 400, а явно
-                # отказываем только НОВЫМ чатам; живые чаты (есть SID/запись) продолжают.
-                refuse = not _chat_known(route, raw_key)
-                if refuse or over is not None:
-                    top = over or (
-                        instr[2],
-                        _instr_limit(max(blocks, key=lambda b: b["bytes"]), guard_max),
-                    )
-                    _log(
-                        f"instr_gate_alert guard=unsafe refused={int(refuse)} bytes={top[0]} limit={top[1]}"
-                    )
-                if refuse:
-                    # Код из базовой таксономии отказов (503 launcher_unavailable), клиенты DSH нового кода не знают.
-                    self._reject(
-                        503,
-                        "launcher_unavailable",
-                        "instruction guard is unsafe ("
-                        + "; ".join(guard_reasons)[:200]
-                        + "): new chats are refused until the DSH profile is fixed",
-                        model_id,
-                        model_len,
-                    )
-                    return
-            elif over is not None:
-                # REQ-003: блок agent-instructions сверх применимого предела не доходит ни до spawn, ни до add.
-                _log(
-                    f"instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes={over[0]} limit={over[1]}"
-                )
-                self._reject(
-                    503,
-                    "launcher_unavailable",
-                    f"agent-instructions block {over[0]} bytes exceeds {over[1]}: request refused before launch",
-                    model_id,
-                    model_len,
-                )
+            instr = self._prompt_guard(
+                messages, route, raw_key, cwd, model_id, model_len
+            )
+            if instr is None:
                 return
             ctx = {
                 "route": route,
@@ -4849,6 +4615,7 @@ class Handler(BaseHTTPRequestHandler):
                 "rpc": transcript,
                 "instr": instr if route in ("keyed", "nokey") else (0, "-", 0),
                 "model": model_id,
+                "backend": model["backend"],
                 "model_len": model_len,
                 "effort": effort,
                 "effort_source": effort_source,
@@ -4874,8 +4641,108 @@ class Handler(BaseHTTPRequestHandler):
             _DELIVERY_BUDGET.release(self._delivery_reserved)
             self._delivery_reserved = 0
 
+    def _prompt_guard(
+        self,
+        messages: list,
+        route: str,
+        raw_key: Any,
+        cwd: str,
+        model_id: str,
+        model_len: int,
+    ) -> Any:
+        """Фасадный контур b_guard / REQ-003 для ВСЕХ бэкендов: до выбора процесса и до адаптера.
+
+        Блок agent-instructions — свойство клиента DSH, а не бинарника, поэтому гард общий и
+        отключению per-backend не подлежит (fail-closed). Возвращает сводку `instr` либо None,
+        если отказ уже отправлен клиенту.
+        """
+        in_kb = _in_kb_cwd(cwd)
+        try:
+            blocks = _instr_blocks(messages, in_kb) if route != "title" else []
+            instr = _instr_scan(messages, in_kb) if blocks else (0, "-", 0)
+        except CanonPersistError:
+            # Код из базовой таксономии (503 launcher_unavailable): ход без подтверждённой истории канона не идёт.
+            self._reject(
+                503,
+                "launcher_unavailable",
+                "canon history is not persisted: request refused before launch",
+                model_id,
+                model_len,
+            )
+            return None
+        guard_state, guard_reasons, guard_max = GUARD.snapshot()
+        over = _instr_violation(blocks, guard_max)
+        if guard_state == "unsafe" and blocks:
+            # Профиль DSH небезопасен (alert уже в журнале): размер не режем немым 400, а явно
+            # отказываем только НОВЫМ чатам; живые чаты (есть SID/запись) продолжают.
+            refuse = not _chat_known(route, raw_key)
+            if refuse or over is not None:
+                top = over or (
+                    instr[2],
+                    _instr_limit(max(blocks, key=lambda b: b["bytes"]), guard_max),
+                )
+                _log(
+                    f"instr_gate_alert guard=unsafe refused={int(refuse)} bytes={top[0]} limit={top[1]}"
+                )
+            if refuse:
+                # Код из базовой таксономии отказов (503 launcher_unavailable), клиенты DSH нового кода не знают.
+                self._reject(
+                    503,
+                    "launcher_unavailable",
+                    "instruction guard is unsafe ("
+                    + "; ".join(guard_reasons)[:200]
+                    + "): new chats are refused until the DSH profile is fixed",
+                    model_id,
+                    model_len,
+                )
+                return None
+        elif over is not None:
+            # REQ-003: блок agent-instructions сверх применимого предела не доходит ни до spawn, ни до add.
+            _log(
+                f"instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes={over[0]} limit={over[1]}"
+            )
+            self._reject(
+                503,
+                "launcher_unavailable",
+                f"agent-instructions block {over[0]} bytes exceeds {over[1]}: request refused before launch",
+                model_id,
+                model_len,
+            )
+            return None
+        return instr
+
+    def _dispatch(self, ctx: dict, keepalive) -> dict:
+        """Ход через адаптер бэкенда модели; общий разбор `<tool_call>` и итог в формате фасада."""
+        adapter = BACKENDS.get(ctx["backend"])
+        if adapter is None:
+            return {
+                "state": "launcher_unavailable",
+                "rc": 1,
+                "text": "",
+                "usage": {},
+                "result": {},
+                "err": "",
+                "tool_calls": [],
+                "events": [],
+            }
+        ctx["handler"] = self
+        ctx["keepalive"] = keepalive
+        ctx["client_gone"] = lambda: _client_gone(self.connection)
+        t0 = time.monotonic()
+        out = finalize_turn(adapter.execute_turn(ctx, None), ctx["emulate_tools"])
+        out.setdefault("backend_kind", adapter.kind)
+        if (
+            adapter.kind != "droid"
+        ):  # droid-путь пишет свои done/usage строки в _run_once
+            _log(
+                f"done model={ctx['model']} backend={adapter.id} rc={out.get('rc')} "
+                f"state={out.get('state')} out_bytes={len(str(out.get('text') or '').encode())} "
+                f"wall_s={time.monotonic() - t0:.1f} err={_err_summary(out.get('err'))!r} {ctx['tag']}"
+            )
+        return out
+
     def _serve_json(self, ctx: dict) -> None:
-        out = self._run_once(ctx, None)
+        out = self._dispatch(ctx, None)
         if out.get("state") == "client_gone":
             return
         err = self._error_body(out) or self._reserve_delivery(out)
@@ -5002,7 +4869,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self._emit(chunk({"role": "assistant", "content": ""})):
             return
-        out = self._run_once(ctx, keepalive)
+        out = self._dispatch(ctx, keepalive)
         if out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return

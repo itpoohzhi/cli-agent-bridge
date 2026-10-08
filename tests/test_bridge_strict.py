@@ -78,9 +78,9 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "claude-sonnet-5-5")
-        self.assertEqual(len(catalog["order"]), 6)
+        self.assertEqual(len(catalog["order"]), 8)  # 6 droid + 2 muse (schema 3)
         self.assertEqual(
-            server._build_catalog(copy.deepcopy(self.data))["schema_version"], 2
+            server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
 
     def test_broken_file_refuses_start(self):
@@ -376,7 +376,7 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        self.assertEqual(len(body["data"]), 6)
+        self.assertEqual(len(body["data"]), 8)  # объединение моделей droid и muse
         self.assertEqual(body["data"][0]["id"], "claude-sonnet-5-5")
         for entry in body["data"]:
             self.assertEqual(
