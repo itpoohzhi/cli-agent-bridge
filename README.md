@@ -25,9 +25,13 @@ or script that speaks the OpenAI protocol.
   path), with a `hot | restore | rebase | cold` lifecycle: a follow-up request
   with the same key resumes the same session instead of cold-starting.
   Idle eviction is tunable via `DROID_DSH_BRIDGE_IDLE_SECONDS` (default 2700 s).
-- **Streaming + thinking out of the box** — SSE `stream: true` completions and
+- **Streaming-compatible delivery + thinking** — `stream: true` and
   non-streaming calls alike; the backend's thinking trace is translated into
-  `reasoning_content`, tool blocks into `delta.tool_calls`.
+  `reasoning_content`, tool blocks into `delta.tool_calls`. Honest caveat: the
+  SSE framing is currently buffered, not live — the full turn executes first
+  (keepalive comments hold the connection), then content / reasoning / tool
+  events flush as chunks, followed by a usage chunk and `[DONE]`. Any OpenAI
+  client consumes it, but tokens don't trickle in real time.
 - **Explicit reasoning and autonomy control** — per-request `reasoning_effort`
   (validated against the catalog, always forwarded) and a top-level
   `autonomy` switch (`low | medium | high | off`, default `high`) for how much
