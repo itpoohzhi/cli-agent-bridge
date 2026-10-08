@@ -15,7 +15,7 @@
 Сценарий хода — список шагов {"op": ...} либо словарь {"steps": [...], "reason": ...,
 "usage": {...}, "late": true}. Шаги: text, thinking, retry, retract, error, sleep, hang,
 exit, garbage, foreign_terminal, stale_terminal, unknown_terminal, empty_terminal, stale_message,
-stale_delta, ghost_message, ghost_delta, struct_flood, deep_nesting, empty_msgs, orphan_child, big_line, flood,
+stale_delta, ghost_message, ghost_delta, struct_flood, num_flood, deep_nesting, empty_msgs, orphan_child, big_line, flood,
 notify. Конфиг ack_after_turn — ACK add_user_message уходит после terminal хода.
 Протокол как у реального droid: turnId есть ТОЛЬКО у agent_turn_completed и равен id user-сообщения
 (create_message с requestId), запустившего ход; у ассистентских сообщений parentId == turnId;
@@ -445,6 +445,9 @@ class Fake:
             elif op == "struct_flood":
                 # Одна строка из миллионов пустых JSON-объектов: структурная нагрузка на json.loads (RW-014).
                 self.raw('{"pad":[' + ",".join(["{}"] * int(step.get("count", 1000))) + "]}")
+            elif op == "num_flood":
+                # Строка из миллионов чисел: скобок мало, запятых много (структурная нагрузка без `{`, RW-010).
+                self.raw('{"pad":[' + ",".join(["1"] * int(step.get("count", 1000))) + "]}")
             elif op == "deep_nesting":
                 depth = int(step.get("depth", 3000))
                 self.raw('{"pad":' + "[" * depth + "]" * depth + "}")

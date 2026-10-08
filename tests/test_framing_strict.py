@@ -8,7 +8,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import server  # noqa: E402
 from bridge_testlib import BridgeCase  # noqa: E402
 
 VALID = json.dumps({"model": "claude-sonnet-5-5",

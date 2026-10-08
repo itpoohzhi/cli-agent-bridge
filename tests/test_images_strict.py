@@ -1,7 +1,5 @@
 """Тесты image-пути моста (C-08…C-11): таксономия C-10, лимиты, хранение, proof."""
 
-import base64
-import copy
 import json
 import os
 import sys

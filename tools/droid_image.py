@@ -124,7 +124,8 @@ class _Rpc:
         self.inbox: queue.Queue = queue.Queue()
         self.protocol = ""
         self._next = 0
-        threading.Thread(target=self._read, daemon=True).start()
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
 
     def _read(self) -> None:
         for raw in self.proc.stdout:
@@ -204,6 +205,13 @@ class _Rpc:
             self.proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
+        # stdout закрывается явно (иначе ResourceWarning: unclosed file); читатель после убийства группы видит EOF.
+        self._reader.join(timeout=1.0)
+        if not self._reader.is_alive():
+            try:
+                self.proc.stdout.close()
+            except OSError:
+                pass
 
 
 def run_probes(image: Path, workspace: Path) -> dict:

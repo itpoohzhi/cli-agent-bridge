@@ -43,6 +43,7 @@ import collections
 import fcntl
 import functools
 import hashlib
+import itertools
 import json
 import os
 import queue
@@ -352,13 +353,19 @@ MAX_STDERR_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_STDERR_BYTES", str(64 <<
 # ограничена MAX_INBOX_BYTES + одной строкой.
 MAX_INBOX_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_INBOX_BYTES", str(4 << 20)))
 MAX_TURN_TEXT_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_TURN_TEXT_BYTES", str(10 << 20)))
-# Структурный предел строки RPC: число `{`/`[` вне строк. Строка из миллионов пустых объектов укладывается
-# в MAX_RPC_LINE_BYTES, но json.loads раздул бы её в сотни МиБ объектов (RW-014): отклоняется до разбора.
+# Структурный предел строки RPC: число `{`/`[`/`,`/`:` вне строк. Строка из миллионов пустых объектов или
+# чисел укладывается в MAX_RPC_LINE_BYTES, но json.loads раздул бы её в сотни МиБ объектов (RW-014, RW-010):
+# отклоняется до разбора.
 MAX_JSON_STRUCT_TOKENS = int(os.environ.get("DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS", str(200_000)))
 # Условная стоимость записи/слота в бюджетах: поток пустых сообщений тоже упирается в лимит.
 ENTRY_OVERHEAD_BYTES = 64
+# Предел длины id сообщения в карантине событий (RW-009): длиннее — ошибка хода (id удерживается в памяти).
+MAX_HELD_MID_CHARS = 1024
 # Кусок вывода при сериализации ответа клиенту (JSON/SSE выдаются порциями, без второй полной копии).
 DELIVERY_CHUNK_BYTES = 64 << 10
+# Общий бюджет памяти готовых ответов, удерживаемых до конца выдачи клиенту (RW-011): T/L к этому
+# моменту свободны, а медленные клиенты держат `out`. Исчерпан — 502 proxy_error.
+MAX_DELIVERY_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_DELIVERY_BYTES", str(256 << 20)))
 MAX_CHATS = int(os.environ.get("DROID_BRIDGE_MAX_CHATS", "4096"))
 # Предел блока agent-instructions (REQ-003): больше — отказ до spawn/add (строгая граница).
 INSTR_BLOCK_LIMIT = int(os.environ.get("DROID_DSH_BRIDGE_INSTR_LIMIT", "60000"))
@@ -1068,7 +1075,9 @@ def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
         try:
             thread.start()
         except RuntimeError:
-            continue  # поток не создан: этого ребёнка добивает force_kill ниже, остальные закрываются как обычно
+            # поток не создан: ребёнок закрывается здесь же (слот P и реестры), force_kill ниже — страховка (RW-008)
+            _shutdown_one(proc, {"mode": "term", "term_wait": grace * 0.2, "kill_wait": grace * 0.15})
+            continue
         threads.append(thread)
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
@@ -1277,12 +1286,16 @@ _JSON_STRING = re.compile(rb'"(?:[^"\\]|\\.)*"', re.DOTALL)
 
 
 def _struct_flood(raw: bytes) -> bool:
-    """Строка содержит больше MAX_JSON_STRUCT_TOKENS открывающих `{`/`[` вне строковых литералов."""
+    """Строка содержит больше MAX_JSON_STRUCT_TOKENS токенов `{`, `[`, `,`, `:` вне строковых литералов (RW-010)."""
     limit = MAX_JSON_STRUCT_TOKENS
-    if raw.count(b"{") + raw.count(b"[") <= limit:
+    if _struct_tokens(raw) <= limit:
         return False  # быстрый путь: верхняя оценка уже в пределах
-    bare = _JSON_STRING.sub(b'""', raw)
-    return bare.count(b"{") + bare.count(b"[") > limit
+    return _struct_tokens(_JSON_STRING.sub(b'""', raw)) > limit
+
+
+def _struct_tokens(raw: bytes) -> int:
+    """Число структурных токенов: массив из миллионов чисел содержит мало скобок, но много запятых."""
+    return raw.count(b"{") + raw.count(b"[") + raw.count(b",") + raw.count(b":")
 
 
 class RpcProcess:
@@ -1761,19 +1774,21 @@ class RpcProcess:
         _children_update(remove_pid=self.pid)
         self._reader.join(timeout=1.0)
         self._err_reader.join(timeout=1.0)
-        for stream, reader in ((self.proc.stdout, self._reader), (self.proc.stderr, self._err_reader)):
-            if stream is None:
-                continue
-            if reader.is_alive():
-                # Читатель всё ещё блокирован на pipe (его держит чужой потомок вне группы):
-                # close() BufferedReader ждал бы его лок, поэтому закрываем в фоне, слот не задерживаем.
-                _log(f"session_rpc pipe_reader_blocked pid={self.pid}: closing stream in background")
-                threading.Thread(target=self._close_stream, args=(stream,), daemon=True).start()
-            else:
-                self._close_stream(stream)
-        if self.holds_slot and not keep_slot:
-            self.holds_slot = False
-            self.pool.release()
+        try:
+            for stream, reader in ((self.proc.stdout, self._reader), (self.proc.stderr, self._err_reader)):
+                if stream is None:
+                    continue
+                if reader.is_alive():
+                    # Читатель всё ещё блокирован на pipe (его держит чужой потомок вне группы):
+                    # close() BufferedReader ждал бы его лок, поэтому закрываем в фоне, слот не задерживаем.
+                    _log(f"session_rpc pipe_reader_blocked pid={self.pid}: closing stream in background")
+                    threading.Thread(target=self._close_stream, args=(stream,), daemon=True).start()
+                else:
+                    self._close_stream(stream)
+        finally:  # отказ создать фоновый поток (RuntimeError) не должен оставить слот P занятым (RW-008)
+            if self.holds_slot and not keep_slot:
+                self.holds_slot = False
+                self.pool.release()
 
     def _close_stream(self, stream: Any) -> None:
         try:
@@ -2314,8 +2329,41 @@ def _is_title_request(messages: list, tools: list, req: dict) -> bool:
 
 _SECTION_RE = re.compile(r"^Instructions from: (.*)$", re.M)
 _canon_cache: dict = {"key": None, "digest": ""}
-# Дайджесты канонов, виденных процессом: блок со старой копией канона остаётся KB-формой и после правки канона.
-_canon_seen: collections.deque = collections.deque(maxlen=8)
+# Дайджесты канонов, виденных мостом: блок со старой копией канона остаётся KB-формой и после правки канона
+# и после рестарта (state/canon_seen.json, RW-014). Упорядоченное множество; предел — страховка от разрастания файла.
+_canon_seen: dict = {}
+_canon_seen_lock = threading.Lock()
+CANON_SEEN_KEEP = 256
+
+
+def _canon_seen_path() -> Path:
+    return _state_dir() / "canon_seen.json"
+
+
+def _canon_seen_load() -> None:
+    """Загрузить дайджесты канонов прошлых запусков (старт моста); нечитаемый файл — пустая история."""
+    try:
+        data = json.loads(_canon_seen_path().read_text("utf-8"))
+    except (OSError, ValueError):
+        return
+    with _canon_seen_lock:
+        for digest in data if isinstance(data, list) else []:
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                _canon_seen[digest] = None
+
+
+def _canon_seen_add(digest: str) -> None:
+    """Запомнить дайджест канона и сохранить историю на диск (0600, атомарно); сбой записи — только журнал."""
+    with _canon_seen_lock:
+        if digest in _canon_seen:
+            return
+        _canon_seen[digest] = None
+        while len(_canon_seen) > CANON_SEEN_KEEP:
+            del _canon_seen[next(iter(_canon_seen))]
+        try:
+            _atomic_write(_canon_seen_path(), json.dumps(list(_canon_seen)).encode("utf-8"))
+        except OSError as exc:
+            _log(f"canon_seen_persist_failed err={_err_summary(exc, 80)!r}")
 
 
 def _canon_digest() -> str:
@@ -2331,8 +2379,7 @@ def _canon_digest() -> str:
         return ""
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     _canon_cache.update(key=key, digest=digest)
-    if digest not in _canon_seen:
-        _canon_seen.append(digest)
+    _canon_seen_add(digest)
     return digest
 
 
@@ -2415,6 +2462,19 @@ def _text_slices(text: str):
     step = max(1, int(DELIVERY_CHUNK_BYTES) // 4)
     for start in range(0, len(text), step):
         yield text[start:start + step]
+
+
+def _utf8_len(text: str) -> int:
+    """Длина UTF-8 без второй полной копии текста (срезами)."""
+    return sum(len(piece.encode("utf-8")) for piece in _text_slices(text))
+
+
+def _delivery_size(out: dict) -> int:
+    """Память, удерживаемая готовым ответом до конца выдачи: объединённый текст, события и аргументы вызовов."""
+    size = _utf8_len(out.get("text") or "")
+    for kind, value in out.get("events") or []:
+        size += _utf8_len(value) if kind in ("content", "reasoning") else _utf8_len(value["function"]["arguments"])
+    return size
 
 
 def _escape_json_piece(piece: str) -> bytes:
@@ -2902,6 +2962,9 @@ class Run:
             if self.proc is not None:
                 self.proc.note_turn(str(note.get("turnId")), self._order)
             return self._terminal(note)
+        if ntype in self._MID_EVENTS and not mid:
+            self._quarantined += 1  # событие сообщения без messageId не подтверждено: ни прогресса, ни вывода (RW-007)
+            return False
         if mid and self._is_foreign_mid(mid):
             self._quarantined += 1
             return False
@@ -2947,8 +3010,10 @@ class Run:
             self._progress()
 
     @staticmethod
-    def _held_size(note: dict) -> int:
-        return ENTRY_OVERHEAD_BYTES + len(str(note.get("textDelta") or note.get("text") or "").encode("utf-8"))
+    def _held_size(mid: str, kept: dict) -> int:
+        """Реальный размер удерживаемой записи: id сообщения, дельта и полный текст + накладные расходы."""
+        payload = len(kept["textDelta"].encode("utf-8")) + len((kept["text"] or "").encode("utf-8"))
+        return ENTRY_OVERHEAD_BYTES + len(mid.encode("utf-8")) + payload
 
     def _hold(self, mid: str, ntype: str, note: dict) -> None:
         if ntype.endswith("_complete") and isinstance(note.get("text"), str):
@@ -2961,11 +3026,15 @@ class Run:
                 else:
                     kept.append(entry)
             self._held[mid] = kept
-        size = self._held_size(note)
+        if len(mid) > MAX_HELD_MID_CHARS:
+            raise RpcError(f"message id exceeds {MAX_HELD_MID_CHARS} chars")
+        # Сохраняются только поля, нужные _apply: остальной note (произвольные поля сервера) не удерживается.
+        kept = {"textDelta": str(note.get("textDelta") or ""), "text": note["text"] if isinstance(note.get("text"), str) else None}
+        size = self._held_size(mid, kept)
         self._held_bytes += size
         if self._acc_bytes + self._held_bytes > MAX_TURN_TEXT_BYTES:
             raise RpcError(f"turn output exceeds limit {MAX_TURN_TEXT_BYTES} bytes")
-        self._held.setdefault(mid, []).append((ntype, note, size))
+        self._held.setdefault(mid, []).append((ntype, kept, size))
 
     def _release_held(self, mid: str, apply: bool = True) -> None:
         """События mid, пришедшие раньше его create_message: применить (сообщение подтверждено) либо выбросить."""
@@ -3223,9 +3292,13 @@ class _ByteBudget:
             self._used = max(0, self._used - int(amount))
 
 
+_DELIVERY_BUDGET = _ByteBudget(MAX_DELIVERY_BYTES)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
+    _delivery_reserved = 0  # байты, взятые в _DELIVERY_BUDGET текущим запросом (RW-011)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
@@ -3437,6 +3510,8 @@ class Handler(BaseHTTPRequestHandler):
         run = None
         open_attempt = None
         committed_turns = 0
+        cfg = ""  # заданы до ветвлений: finally видит их и при раннем исключении (RW-004)
+        rpc = ctx["rpc"]
         try:
             try:
                 _launcher()
@@ -3663,6 +3738,16 @@ class Handler(BaseHTTPRequestHandler):
         if out.get("rc") != 0 or not (out.get("text") or out.get("tool_calls")):
             return {"message": f"droid exec exited rc={out.get('rc')}",
                     "detail": str(out.get("err"))[:500], "type": "proxy_error", "code": 502}
+        return None
+
+    def _reserve_delivery(self, out: dict) -> Any:
+        """Резерв памяти ответа до выдачи (RW-011): None — взят, иначе тело ошибки 502 proxy_error."""
+        size = _delivery_size(out)
+        if not _DELIVERY_BUDGET.reserve(size):
+            _log(f"delivery_budget_exhausted bytes={size}")
+            return {"message": "bridge overloaded: delivery memory budget exhausted",
+                    "type": "proxy_error", "code": 502}
+        self._delivery_reserved = size
         return None
 
     # ---- HTTP --------------------------------------------------------------------
@@ -3909,23 +3994,32 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if reserved and budget is not None:
                 budget.release(reserved)
+            _DELIVERY_BUDGET.release(self._delivery_reserved)
+            self._delivery_reserved = 0
 
     def _serve_json(self, ctx: dict) -> None:
         out = self._run_once(ctx, None)
         if out.get("state") == "client_gone":
             return
-        err = self._error_body(out)
+        err = self._error_body(out) or self._reserve_delivery(out)
         if err is not None:
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
-        # content сериализуется отдельно и вставляется на место метки: большой текст не
-        # проходит через дополнительный dict -> dumps -> encode.
+        # content и arguments вызовов сериализуются отдельно и вставляются на место меток: большой текст
+        # не проходит через дополнительный dict -> dumps -> encode (RW-012).
         marker = "@@content-" + uuid.uuid4().hex + "@@"
-        message = {"role": "assistant", "content": marker}
+        message: dict = {"role": "assistant", "content": marker}
         finish = "stop"
+        arg_markers: list = []
+        values = [out["text"]]
         if out.get("tool_calls"):
-            message["tool_calls"] = out["tool_calls"]
+            calls = []
+            for call in out["tool_calls"]:
+                arg_markers.append("@@args-" + uuid.uuid4().hex + "@@")
+                values.append(call["function"]["arguments"])
+                calls.append(dict(call, function=dict(call["function"], arguments=arg_markers[-1])))
+            message["tool_calls"] = calls
             finish = "tool_calls"
         shell = json.dumps({
             "id": f"chatcmpl-droid-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
@@ -3937,21 +4031,41 @@ class Handler(BaseHTTPRequestHandler):
                 "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             },
         }, ensure_ascii=False)
-        head, tail = shell.split(json.dumps(marker), 1)
-        text = out["text"]
+        segments = []
+        rest = shell
+        for mark in [marker] + arg_markers:
+            head, rest = rest.split(json.dumps(mark), 1)
+            segments.append(head.encode("utf-8"))
+        segments.append(rest.encode("utf-8"))
         # Content-Length считается проходом по срезам, тело пишется вторым проходом: целиком
         # экранированная копия текста (до MAX_TURN_TEXT_BYTES) в памяти не строится.
-        total = len(head.encode("utf-8")) + 2 + len(tail.encode("utf-8"))
-        for piece in _text_slices(text):
-            total += len(_escape_json_piece(piece))
+        total = sum(len(seg) for seg in segments) + 2 * len(values)
+        for value in values:
+            for piece in _text_slices(value):
+                total += len(_escape_json_piece(piece))
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(total))
         self.end_headers()
-        self.wfile.write(head.encode("utf-8") + b'"')
-        for piece in _text_slices(text):
-            self.wfile.write(_escape_json_piece(piece))
-        self.wfile.write(b'"' + tail.encode("utf-8"))
+        for index, value in enumerate(values):
+            self.wfile.write(segments[index] + b'"')
+            for piece in _text_slices(value):
+                self.wfile.write(_escape_json_piece(piece))
+            self.wfile.write(b'"')
+        self.wfile.write(segments[-1])
+
+    def _emit_tool_call(self, chunk: Any, call: dict) -> bool:
+        """Вызов инструмента одним кадром; arguments больше среза — фрагментами (OpenAI-стриминг, RW-012)."""
+        slices = _text_slices(call["function"]["arguments"])
+        first_piece = next(slices, "")
+        second_piece = next(slices, None)
+        if second_piece is None:
+            return self._emit(chunk({"tool_calls": [call]}))
+        first = dict(call, function=dict(call["function"], arguments=first_piece))
+        if not self._emit(chunk({"tool_calls": [first]})):
+            return False
+        return all(self._emit(chunk({"tool_calls": [{"index": call["index"], "function": {"arguments": piece}}]}))
+                   for piece in itertools.chain([second_piece], slices))
 
     def _serve_sse(self, ctx: dict) -> None:
         completion_id = f"chatcmpl-droid-{uuid.uuid4().hex[:12]}"
@@ -3984,7 +4098,7 @@ class Handler(BaseHTTPRequestHandler):
         if out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return
-        err = self._error_body(out)
+        err = self._error_body(out) or self._reserve_delivery(out)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет.
@@ -3995,7 +4109,7 @@ class Handler(BaseHTTPRequestHandler):
                     delivered = all(self._emit(chunk({field: piece})) for piece in _text_slices(value)) \
                         if value else self._emit(chunk({field: value}))
                 else:
-                    delivered = self._emit(chunk({"tool_calls": [value]}))
+                    delivered = self._emit_tool_call(chunk, value)
                 if not delivered:
                     _log("client gone during delivery; turn already committed")
                     return
@@ -4113,6 +4227,7 @@ def main() -> None:
         except LauncherUnavailable as exc:
             _log(f"droid_receipt_invalid err={_err_summary(exc, 120)!r}: spawn disabled until "
                  f"tools/droid_image.py writes a valid receipt (see README, section Deployment)")
+    _canon_seen_load()
     GUARD.check_once()
     GUARD.start()
     REGISTRY.start_reaper()

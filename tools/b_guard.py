@@ -751,13 +751,16 @@ def parse_profile_maxbytes(text: str) -> Optional[int]:
 
     Построчный разбор без YAML-библиотеки: пресет - элемент верхнего уровня `- id: preset-standard`,
     плагин - `- id: agent-instructions` глубже, значение - единственная строка `maxBytes: <число>`
-    пресета. Комментарии и другие пресеты игнорируются. Неоднозначность (повтор пресета или плагина,
-    второй maxBytes в любом месте пресета, maxBytes вне плагина, нечисловое значение) и отсутствие
+    пресета. Комментарии и другие пресеты игнорируются; ключи могут быть в кавычках. Принимается только
+    точный путь `agent-instructions -> config -> maxBytes` (прямой потомок `config` плагина). Неоднозначность
+    (повтор пресета, плагина или `config`, второй maxBytes в любом месте пресета, maxBytes вне этого пути
+    - в другом плагине, на другой глубине, вложенный `config.extra.maxBytes`, нечисловое значение) и отсутствие
     значения - None: охранник считает такой профиль нечитаемым, а не берёт первое попавшееся число.
     """
     in_preset = False
     in_plugin = False
-    presets = plugins = 0
+    presets = plugins = configs = 0
+    plugin_indent = config_indent = child_indent = -1
     hits: List[Tuple[str, bool]] = []
     for line in text.splitlines():
         if re.match(r"^- id:", line):
@@ -768,13 +771,28 @@ def parse_profile_maxbytes(text: str) -> Optional[int]:
         if not in_preset:
             continue
         if re.match(r"^\s+- id:", line):
-            in_plugin = re.match(r"^\s+- id:\s*agent-instructions\s*$", line) is not None
+            in_plugin = re.match(r"^\s+- id:\s*[\"']?agent-instructions[\"']?\s*$", line) is not None
             plugins += in_plugin
+            plugin_indent = len(line) - len(line.lstrip())
+            config_indent = child_indent = -1
             continue
-        found = re.match(r"^\s+maxBytes:\s*(.*?)\s*$", line)
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if in_plugin and indent == plugin_indent + 2 and re.match(r"^[\"']?config[\"']?\s*:\s*$", stripped):
+            configs += 1
+            config_indent, child_indent = indent, -1
+            continue
+        if config_indent >= 0 and indent <= config_indent:
+            config_indent = child_indent = -1  # блок config закрыт
+        if config_indent >= 0 and child_indent < 0:
+            child_indent = indent
+        found = re.match(r"^[\"']?maxBytes[\"']?\s*:\s*(.*?)\s*$", stripped)
         if found:
-            hits.append((found.group(1), in_plugin))
-    if presets != 1 or plugins != 1 or len(hits) != 1 or not hits[0][1] or not (hits[0][0].isascii() and hits[0][0].isdigit()):
+            hits.append((found.group(1), in_plugin and configs == 1 and indent == child_indent))
+    if (presets != 1 or plugins != 1 or configs != 1 or len(hits) != 1 or not hits[0][1]
+            or not (hits[0][0].isascii() and hits[0][0].isdigit())):
         return None
     return int(hits[0][0])
 

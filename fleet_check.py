@@ -15,7 +15,6 @@ policy_ref.sha256, (3) efforts ⊆ model-efforts.json и ровно dev-конт
 """
 
 import argparse
-import copy
 import hashlib
 import json
 import os
