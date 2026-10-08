@@ -43,18 +43,34 @@ def user_create(with_ids=True):
 
 
 def asst_create(mid, parent, text="T"):
-    return note("create_message", messageId=mid, message={
-        "id": mid, "role": "assistant", "parentId": parent, "content": [{"type": "text", "text": text}]})
+    return note(
+        "create_message",
+        messageId=mid,
+        message={
+            "id": mid,
+            "role": "assistant",
+            "parentId": parent,
+            "content": [{"type": "text", "text": text}],
+        },
+    )
 
 
 def terminal(turn_id="turn-1"):
-    return note("agent_turn_completed", turnId=turn_id, reason="completed",
-                tokenUsage={"inputTokens": 1, "outputTokens": 1})
+    return note(
+        "agent_turn_completed",
+        turnId=turn_id,
+        reason="completed",
+        tokenUsage={"inputTokens": 1, "outputTokens": 1},
+    )
 
 
 def stub_proc():
-    return types.SimpleNamespace(finished_turns=set(), finished_mids=set(), err_box=[],
-                                 note_turn=lambda *_a, **_k: None)
+    return types.SimpleNamespace(
+        finished_turns=set(),
+        finished_mids=set(),
+        err_box=[],
+        note_turn=lambda *_a, **_k: None,
+    )
 
 
 class RunCase(RpcCase):
@@ -93,18 +109,24 @@ class TestUnknownEvents(RunCase):
                 self.assertFalse(run._on_notif(user_create()))
                 progress = run.last_progress
                 real = run.droid_real
-                for event in (note("assistant_text_delta", messageId="ghost", textDelta="GHOST"),
-                              note("assistant_text_complete", messageId="ghost", text="GHOST"),
-                              note("thinking_text_delta", messageId="ghost-t", textDelta="GHOST"),
-                              asst_create("ghost-m", "turn-ghost", "GHOST"),
-                              asst_create("ghost-e", "", "GHOST")):
+                for event in (
+                    note("assistant_text_delta", messageId="ghost", textDelta="GHOST"),
+                    note("assistant_text_complete", messageId="ghost", text="GHOST"),
+                    note("thinking_text_delta", messageId="ghost-t", textDelta="GHOST"),
+                    asst_create("ghost-m", "turn-ghost", "GHOST"),
+                    asst_create("ghost-e", "", "GHOST"),
+                ):
                     self.assertFalse(run._on_notif(event))
                 self.assertEqual(run._msgs, {})
                 self.assertEqual(run.last_progress, progress)
                 self.assertEqual(run.droid_real, real)
                 run._on_notif(asst_create("m1", "turn-1", "OWN"))
                 self.assertTrue(run._on_notif(terminal()))
-                texts = [value for kind, value in self.drain(run) if kind in ("text", "reasoning")]
+                texts = [
+                    value
+                    for kind, value in self.drain(run)
+                    if kind in ("text", "reasoning")
+                ]
                 self.assertEqual(texts, ["OWN"])
 
     def test_rw005_own_deltas_before_create_are_promoted_once(self):
@@ -115,7 +137,9 @@ class TestUnknownEvents(RunCase):
         run._on_notif(note("assistant_text_delta", messageId="m1", textDelta="N"))
         self.assertEqual(run._msgs, {})
         run._on_notif(asst_create("m1", "turn-1", "OWN"))
-        run._on_notif(asst_create("m2", "m1", "NEXT"))  # цепочка parent -> собственное сообщение
+        run._on_notif(
+            asst_create("m2", "m1", "NEXT")
+        )  # цепочка parent -> собственное сообщение
         self.assertTrue(run._on_notif(terminal()))
         texts = [value for kind, value in self.drain(run) if kind == "text"]
         self.assertEqual(texts, ["OWN", "NEXT"])
@@ -157,10 +181,19 @@ class TestUnknownEventsLive(RpcCase):
         """RW-005: после idle->restore ghost-message и ghost-delta не попадают в ответ и не меняют usage."""
         clock = FakeClock(1000.0)
         server._clock = clock
-        self.hub.script([{"steps": [{"op": "text", "text": "A0"}]},
-                         {"steps": [{"op": "ghost_message"}, {"op": "ghost_delta"},
-                                    {"op": "text", "text": "A1"}],
-                          "usage": {"inputTokens": 21, "outputTokens": 2}}])
+        self.hub.script(
+            [
+                {"steps": [{"op": "text", "text": "A0"}]},
+                {
+                    "steps": [
+                        {"op": "ghost_message"},
+                        {"op": "ghost_delta"},
+                        {"op": "text", "text": "A1"},
+                    ],
+                    "usage": {"inputTokens": 21, "outputTokens": 2},
+                },
+            ]
+        )
         chat = self.conv("chat-ghost")
         self.assertEqual(chat.ask("q0")[0], 200)
         clock.advance(2700)
@@ -195,9 +228,13 @@ class TestHistoryCounter(RunCase):
         """RW-007: два хода, поздний create_message, idle, load_session: тот же SID, без HISTORY_MISMATCH."""
         clock = FakeClock(1000.0)
         server._clock = clock
-        self.hub.script([{"steps": [{"op": "text", "text": "A0"}]},
-                         {"steps": [{"op": "stale_message"}, {"op": "text", "text": "A1"}]},
-                         {"steps": [{"op": "text", "text": "A2"}]}])
+        self.hub.script(
+            [
+                {"steps": [{"op": "text", "text": "A0"}]},
+                {"steps": [{"op": "stale_message"}, {"op": "text", "text": "A1"}]},
+                {"steps": [{"op": "text", "text": "A2"}]},
+            ]
+        )
         chat = self.conv("chat-hist")
         self.assertEqual(chat.ask("q0")[0], 200)
         self.assertEqual(chat.ask("q1")[0], 200)
@@ -276,9 +313,18 @@ class TestCloseFallback(RpcCase):
         def boom(*_args, **_kwargs):
             raise RuntimeError("execute failed")
 
-        with mock.patch.object(server.Handler, "_execute", boom), \
-                mock.patch.object(server, "_finish_attempt", side_effect=OSError("disk")):
-            post_safely(self, dict(BODY, prompt_cache_key="chat-chain", messages=chat.msgs + [msg("q1")]))
+        with (
+            mock.patch.object(server.Handler, "_execute", boom),
+            mock.patch.object(server, "_finish_attempt", side_effect=OSError("disk")),
+        ):
+            post_safely(
+                self,
+                dict(
+                    BODY,
+                    prompt_cache_key="chat-chain",
+                    messages=chat.msgs + [msg("q1")],
+                ),
+            )
         self.assertFalse(state.lock.locked())
         self.assertEqual(state.refs, 0)
 
@@ -294,12 +340,18 @@ class TestKbScope(GuardCase):
 
     def _ask_block(self, key, block, cwd=None):
         extra = {"extra_body": {"cwd": cwd}} if cwd else {}
-        return self._post_json(dict(BODY, prompt_cache_key=key, messages=[msg("hello"), msg(block)], **extra))
+        return self._post_json(
+            dict(
+                BODY, prompt_cache_key=key, messages=[msg("hello"), msg(block)], **extra
+            )
+        )
 
     def test_rw009_old_kb_block_stays_limited_after_canon_change(self):
         """RW-009: канон изменён после создания чата: старый KB-блок 61000 Б всё равно отклоняется."""
         block = self._canon_block(61000)
-        self.assertEqual(self._ask_block("chat-kb-1", block)[0], 503)  # канон-форма: предел 60000
+        self.assertEqual(
+            self._ask_block("chat-kb-1", block)[0], 503
+        )  # канон-форма: предел 60000
         Path(server.GUARD_CANON).write_text("new safe canon\n", encoding="utf-8")
         server._canon_cache.update(key=None, digest="")
         status, body = self._ask_block("chat-kb-2", block)
@@ -336,7 +388,16 @@ class TestStructuralJsonFlood(RpcCase):
     def test_rw014_struct_flood_rejected_before_parse(self):
         """RW-014: 400 000 пустых объектов в одной строке: json.loads не вызван, ход -> 502 proxy_error."""
         server.MAX_JSON_STRUCT_TOKENS = 50_000
-        self.hub.script([{"steps": [{"op": "struct_flood", "count": 400_000}, {"op": "text", "text": "late"}]}])
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {"op": "struct_flood", "count": 400_000},
+                        {"op": "text", "text": "late"},
+                    ]
+                }
+            ]
+        )
         seen = self._loads_spy()
         status, body = self._post_json(dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 502, body)
@@ -348,7 +409,16 @@ class TestStructuralJsonFlood(RpcCase):
         """RW-014: вложенность 150 000 уровней (ниже структурного предела): RecursionError не роняет читателя, ход -> 502 быстро (не по таймауту)."""
         server.SILENCE_WATCHDOG_S = 30.0
         server.FIRST_TOKEN_TIMEOUT_S = 30.0
-        self.hub.script([{"steps": [{"op": "deep_nesting", "depth": 150_000}, {"op": "text", "text": "late"}]}])
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {"op": "deep_nesting", "depth": 150_000},
+                        {"op": "text", "text": "late"},
+                    ]
+                }
+            ]
+        )
         started = time.monotonic()
         status, body = self._post_json(dict(BODY, messages=[msg("hi")]), timeout=40)
         self.assertEqual(status, 502, body)
@@ -360,6 +430,7 @@ class TestChmodSpool(ImageCase):
 
     def _ask_with_failing_chmod(self, stream):
         from bridge_testlib import image_part, make_png, text_part
+
         server.IMAGE_PROBE = True
         self.probe_stand()
         real = os.chmod
@@ -369,8 +440,17 @@ class TestChmodSpool(ImageCase):
                 raise OSError(1, "Operation not permitted")
             return real(path, mode, *args, **kwargs)
 
-        body = {"model": "claude-sonnet-5-5", "prompt_cache_key": "chat-img", "stream": stream,
-                "messages": [{"role": "user", "content": [text_part("look"), image_part(make_png(64))]}]}
+        body = {
+            "model": "claude-sonnet-5-5",
+            "prompt_cache_key": "chat-img",
+            "stream": stream,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [text_part("look"), image_part(make_png(64))],
+                }
+            ],
+        }
         with mock.patch.object(os, "chmod", failing):
             return self._post(body)
 
@@ -413,17 +493,28 @@ class TestRefusalTaxonomy(GuardCase):
     def test_rw018_block_over_limit_gives_baseline_503_and_internal_alert(self):
         """RW-018: блок > предела -> 503 launcher_unavailable (не 400/REQ003 на проводе), до spawn/add, alert в журнале."""
         block = HEAD + "a" * 61000
-        Path(server.GUARD_CANON).write_text(block[len(HEAD):] + "\n", encoding="utf-8")
+        Path(server.GUARD_CANON).write_text(block[len(HEAD) :] + "\n", encoding="utf-8")
         server._canon_cache.update(key=None, digest="")
         with self.capture_logs() as lines:
-            status, body = self._post_json(dict(BODY, prompt_cache_key="chat-tax",
-                                                messages=[msg("hello"), msg(block)]))
+            status, body = self._post_json(
+                dict(
+                    BODY,
+                    prompt_cache_key="chat-tax",
+                    messages=[msg("hello"), msg(block)],
+                )
+            )
         self.assertEqual(status, 503, body)
         self.assertEqual(body["error"]["type"], "launcher_unavailable")
         self.assertNotIn("REQ003", json.dumps(body))
         self.assertEqual(self.hub.spawns(), [])
         self.assertEqual(self.hub.rpcs("droid.add_user_message"), [])
-        self.assertTrue(any("REQ003_SIZE_EXCEEDED" in ln for ln in lines if ln.startswith("instr_gate_alert ")))
+        self.assertTrue(
+            any(
+                "REQ003_SIZE_EXCEEDED" in ln
+                for ln in lines
+                if ln.startswith("instr_gate_alert ")
+            )
+        )
 
 
 class TestPendingBeforeAdd(RpcCase):
@@ -440,7 +531,9 @@ class TestPendingBeforeAdd(RpcCase):
 
         server._atomic_write = failing
         try:
-            status, body = self._post_json(dict(BODY, prompt_cache_key="chat-new", messages=[msg("hi")]))
+            status, body = self._post_json(
+                dict(BODY, prompt_cache_key="chat-new", messages=[msg("hi")])
+            )
         finally:
             server._atomic_write = real
         self.assertEqual(status, 502, body)
@@ -458,14 +551,20 @@ class TestPendingBeforeAdd(RpcCase):
         real = server.Run._send_items
 
         def spy(run, proc, items):
-            record = server._read_record(server._record_path(server._key_hash("chat-order")))
+            record = server._read_record(
+                server._record_path(server._key_hash("chat-order"))
+            )
             seen["state"] = record["state"] if record else None
             seen["sid"] = record["sid"] if record else None
             return real(run, proc, items)
 
         with mock.patch.object(server.Run, "_send_items", spy):
-            self.assertEqual(self._post_json(dict(BODY, prompt_cache_key="chat-order",
-                                                  messages=[msg("hi")]))[0], 200)
+            self.assertEqual(
+                self._post_json(
+                    dict(BODY, prompt_cache_key="chat-order", messages=[msg("hi")])
+                )[0],
+                200,
+            )
         self.assertEqual(seen["state"], "PENDING")
         self.assertTrue(seen["sid"])
 
@@ -476,13 +575,20 @@ class TestGuardWarnings(GuardCase):
     def test_rw021_profiles_lost_after_ok_turns_unsafe_and_refuses_new_chats(self):
         """RW-021: ok -> каталог профилей удалён -> unsafe; новый чат с блоком отклонён, живой продолжает."""
         import shutil
+
         self.write_profile(106496)
         self.assertEqual(server.GUARD.check_once(), "ok")
         self.assertEqual(self.block_ask("chat-live")[0], 200)
         shutil.rmtree(self.profiles)
         with self.capture_logs() as lines:
             self.assertEqual(server.GUARD.check_once(), "unsafe")
-        self.assertTrue(any("PROFILES_LOST" in ln for ln in lines if ln.startswith("instr_guard_alert ")))
+        self.assertTrue(
+            any(
+                "PROFILES_LOST" in ln
+                for ln in lines
+                if ln.startswith("instr_guard_alert ")
+            )
+        )
         self.assertEqual(self.block_ask("chat-live")[0], 200)
         status, body = self.block_ask("chat-brand-new")
         self.assertEqual(status, 503, body)
@@ -494,8 +600,13 @@ class TestGuardWarnings(GuardCase):
     def test_rw022_warning_thresholds_are_journaled_without_refusal(self):
         """RW-022: exit 1 (LOW_MARGIN_*, LINE_ORACLE_RISK) -> alert в журнале, состояние ok, трафик идёт."""
         self.write_profile(106496)
-        warn = types.SimpleNamespace(exit_code=1, reasons=[
-            "LOW_MARGIN_LOWER: запас снизу 10 Б < 2048", "LINE_ORACLE_RISK cwd=KB: запас строки 0 Б < 2048"])
+        warn = types.SimpleNamespace(
+            exit_code=1,
+            reasons=[
+                "LOW_MARGIN_LOWER: запас снизу 10 Б < 2048",
+                "LINE_ORACLE_RISK cwd=KB: запас строки 0 Б < 2048",
+            ],
+        )
         with mock.patch.object(server.b_guard, "check_installed", return_value=warn):
             with self.capture_logs() as lines:
                 self.assertEqual(server.GUARD.check_once(), "ok")
@@ -511,7 +622,9 @@ class TestGuardWarnings(GuardCase):
         self.write_profile(106496)
         with self.capture_logs() as lines:
             server.GUARD.check_once()
-        self.assertEqual([ln for ln in lines if ln.startswith("instr_guard_alert ")], [])
+        self.assertEqual(
+            [ln for ln in lines if ln.startswith("instr_guard_alert ")], []
+        )
 
 
 class TestTerminalBeforeAck(RpcCase):
@@ -522,7 +635,9 @@ class TestTerminalBeforeAck(RpcCase):
         self.hub.configure(ack_after_turn=True)
         self.hub.script([{"steps": [{"op": "text", "text": "ONCE"}]}])
         started = time.monotonic()
-        status, body = self._post_json(dict(BODY, prompt_cache_key="chat-ack", messages=[msg("hi")]))
+        status, body = self._post_json(
+            dict(BODY, prompt_cache_key="chat-ack", messages=[msg("hi")])
+        )
         self.assertEqual(status, 200, body)
         self.assertEqual(body["choices"][0]["message"]["content"], "ONCE")
         self.assertEqual(self.hub.rpcs("droid.interrupt_session"), [])

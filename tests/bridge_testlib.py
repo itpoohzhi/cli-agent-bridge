@@ -25,14 +25,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get current weather",
-        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
-    },
-}]
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    }
+]
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 JPEG_MAGIC = b"\xff\xd8\xff\xe0"
@@ -66,8 +71,11 @@ def image_url_part(url):
 
 
 def chat_body(model=None, effort=None, content=None, messages=None, **extra):
-    body = {"messages": messages if messages is not None else [
-        {"role": "user", "content": content if content is not None else "hi"}]}
+    body = {
+        "messages": messages
+        if messages is not None
+        else [{"role": "user", "content": content if content is not None else "hi"}]
+    }
     if model is not None:
         body["model"] = model
     if effort is not None:
@@ -88,9 +96,16 @@ def find_model(data, model_id):
     raise KeyError(model_id)
 
 
-def make_proof(binary_path, efforts_proven, impl_version=1, method="workspace-read",
-               formats=("image/png",), droid_version="0.0.0-test"):
+def make_proof(
+    binary_path,
+    efforts_proven,
+    impl_version=1,
+    method="workspace-read",
+    formats=("image/png",),
+    droid_version="0.0.0-test",
+):
     import hashlib
+
     digest = hashlib.sha256(Path(binary_path).read_bytes()).hexdigest()
     return {
         "droid_version": droid_version,
@@ -106,7 +121,9 @@ def make_proof(binary_path, efforts_proven, impl_version=1, method="workspace-re
 
 
 FAKE_DROID = Path(__file__).resolve().parent / "fake_droid.py"
-TEST_FACTORY_KEY = "bridge-test-factory-key-not-real"  # то же значение, что ждёт fake_droid
+TEST_FACTORY_KEY = (
+    "bridge-test-factory-key-not-real"  # то же значение, что ждёт fake_droid
+)
 _MISSING = object()
 
 
@@ -123,10 +140,17 @@ def legacy_scenario(events):
             steps.append({"op": "thinking", "text": ev[1]})
         elif kind == "result":
             raw = (ev[1] or {}).get("usage") or {}
-            usage = {"inputTokens": raw.get("input_tokens", 0), "outputTokens": raw.get("output_tokens", 0)}
+            usage = {
+                "inputTokens": raw.get("input_tokens", 0),
+                "outputTokens": raw.get("output_tokens", 0),
+            }
         elif kind == "stderr":
             steps.append({"op": "exit", "rc": 1, "stderr": ev[1]})
-        elif kind == "done" and ev[1][0] != 0 and not any(s["op"] == "exit" for s in steps):
+        elif (
+            kind == "done"
+            and ev[1][0] != 0
+            and not any(s["op"] == "exit" for s in steps)
+        ):
             steps.append({"op": "exit", "rc": ev[1][0]})
     if silent:
         steps.append({"op": "hang"})
@@ -136,14 +160,25 @@ def legacy_scenario(events):
 def make_receipt(image_path, digest, **override):
     """Receipt schema 2 для fake_droid (протокол по умолчанию fake): тесты ломают по одному компоненту."""
     import fake_droid
+
     ids = list(fake_droid.DEFAULT_TOOLS)
     receipt = {
-        "schema": server.RECEIPT_SCHEMA, "image_path": str(image_path), "image_sha256": digest,
-        "protocol": {"api_version": server.RPC_API_VERSION, "protocol_version": fake_droid.PROTOCOL},
-        "tools_policy": {"policy": server.TOOLS_POLICY, "disabled_tool_ids": sorted(ids),
-                         "digest": server.tools_policy_digest(ids)},
-        "settings_profile": {"profile": dict(server.SETTINGS_PROFILE),
-                             "digest": server.settings_profile_digest()},
+        "schema": server.RECEIPT_SCHEMA,
+        "image_path": str(image_path),
+        "image_sha256": digest,
+        "protocol": {
+            "api_version": server.RPC_API_VERSION,
+            "protocol_version": fake_droid.PROTOCOL,
+        },
+        "tools_policy": {
+            "policy": server.TOOLS_POLICY,
+            "disabled_tool_ids": sorted(ids),
+            "digest": server.tools_policy_digest(ids),
+        },
+        "settings_profile": {
+            "profile": dict(server.SETTINGS_PROFILE),
+            "digest": server.settings_profile_digest(),
+        },
         "probes": {name: "ok" for name in server.RECEIPT_PROBES},
     }
     receipt.update(override)
@@ -160,12 +195,16 @@ class FakeDroidHub:
         self.launcher = self.base / "fake-launcher"
         self.launcher.write_text(
             "#!%s\nimport sys\nsys.path.insert(0, %r)\nimport fake_droid\nfake_droid.main(sys.argv[1:])\n"
-            % (sys.executable, str(FAKE_DROID.parent)), encoding="utf-8")
+            % (sys.executable, str(FAKE_DROID.parent)),
+            encoding="utf-8",
+        )
         self.launcher.chmod(0o755)
         self._flush()
 
     def _flush(self):
-        (self.base / "config.json").write_text(json.dumps(self.config), encoding="utf-8")
+        (self.base / "config.json").write_text(
+            json.dumps(self.config), encoding="utf-8"
+        )
 
     def configure(self, **cfg):
         self.config.update(cfg)
@@ -176,7 +215,9 @@ class FakeDroidHub:
         scripted = self.config.setdefault("scenarios", [])
         counter = self.base / "turn.counter"
         claimed = int(counter.read_text() or 0) if counter.exists() else 0
-        while len(scripted) < claimed:  # ходы без сценария уже взяли значение по умолчанию
+        while (
+            len(scripted) < claimed
+        ):  # ходы без сценария уже взяли значение по умолчанию
             scripted.append(None)
         scripted.extend(scenarios)
         self._flush()
@@ -188,23 +229,37 @@ class FakeDroidHub:
         path = self.base / "log.jsonl"
         if not path.exists():
             return []
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
     def spawns(self):
         return [r for r in self.records() if r["ev"] == "spawn"]
 
     def rpcs(self, method=None):
-        return [r for r in self.records() if r["ev"] == "rpc" and (method is None or r["method"] == method)]
+        return [
+            r
+            for r in self.records()
+            if r["ev"] == "rpc" and (method is None or r["method"] == method)
+        ]
 
     def admissions(self):
         """Принятые циклы agent loop (add_user_message без skipAgentLoop): аналог Run.instances."""
-        return [r for r in self.rpcs("droid.add_user_message") if not r["params"].get("skipAgentLoop")]
+        return [
+            r
+            for r in self.rpcs("droid.add_user_message")
+            if not r["params"].get("skipAgentLoop")
+        ]
 
     def inits(self):
         return self.rpcs("droid.initialize_session")
 
     def sent_texts(self):
-        return [r["params"].get("text", "") for r in self.rpcs("droid.add_user_message")]
+        return [
+            r["params"].get("text", "") for r in self.rpcs("droid.add_user_message")
+        ]
 
     def exits(self):
         return [r for r in self.records() if r["ev"] == "exit"]
@@ -234,14 +289,42 @@ class BridgeCase(unittest.TestCase):
     """Сервер на свободном порту с подменённым Run и временным workspace."""
 
     def setUp(self):
-        self._saved = {name: getattr(server, name, _MISSING) for name in (
-            "AUTH_KEY", "WORKSPACE", "FLEET", "IMAGE_PROBE", "LAUNCHER", "_budget", "MODEL_ID",
-            "_sleep", "INTERRUPT_GRACE_S", "RPC_CALL_TIMEOUT_S", "SILENCE_WATCHDOG_S",
-            "FIRST_TOKEN_TIMEOUT_S", "TIMEOUT_S", "_clock", "IDLE_SECONDS", "RECEIPT_REQUIRED",
-            "MAX_RPC_LINE_BYTES", "MAX_STDERR_BYTES", "MAX_INBOX_BYTES", "MAX_TURN_TEXT_BYTES",
-            "MAX_CHATS", "MAX_CONCURRENT", "INSTR_BLOCK_LIMIT", "FINISHED_TURNS_KEEP",
-            "DELIVERY_CHUNK_BYTES", "ENTRY_OVERHEAD_BYTES", "GUARD", "GUARD_PROFILES_DIR", "GUARD_CANON",
-            "INSTR_NONKB_MARGIN", "MAX_JSON_STRUCT_TOKENS")}
+        self._saved = {
+            name: getattr(server, name, _MISSING)
+            for name in (
+                "AUTH_KEY",
+                "WORKSPACE",
+                "FLEET",
+                "IMAGE_PROBE",
+                "LAUNCHER",
+                "_budget",
+                "MODEL_ID",
+                "_sleep",
+                "INTERRUPT_GRACE_S",
+                "RPC_CALL_TIMEOUT_S",
+                "SILENCE_WATCHDOG_S",
+                "FIRST_TOKEN_TIMEOUT_S",
+                "TIMEOUT_S",
+                "_clock",
+                "IDLE_SECONDS",
+                "RECEIPT_REQUIRED",
+                "MAX_RPC_LINE_BYTES",
+                "MAX_STDERR_BYTES",
+                "MAX_INBOX_BYTES",
+                "MAX_TURN_TEXT_BYTES",
+                "MAX_CHATS",
+                "MAX_CONCURRENT",
+                "INSTR_BLOCK_LIMIT",
+                "FINISHED_TURNS_KEEP",
+                "DELIVERY_CHUNK_BYTES",
+                "ENTRY_OVERHEAD_BYTES",
+                "GUARD",
+                "GUARD_PROFILES_DIR",
+                "GUARD_CANON",
+                "INSTR_NONKB_MARGIN",
+                "MAX_JSON_STRUCT_TOKENS",
+            )
+        }
         server._canon_seen.clear()
         # Реальный FACTORY_API_KEY рабочего окружения в тестах не используется: подставляем
         # фиктивный sentinel; восстановление через addCleanup срабатывает и при падении теста.
@@ -263,7 +346,9 @@ class BridgeCase(unittest.TestCase):
             server.GUARD_PROFILES_DIR = str(Path(self._tmp.name) / "profiles-none")
             server.GUARD_CANON = str(Path(self._tmp.name) / "canon-none.md")
             server._canon_cache.update(key=None, digest="")
-        server.RECEIPT_REQUIRED = False  # receipt квалификации образа: отдельные тесты RW-007 включают
+        server.RECEIPT_REQUIRED = (
+            False  # receipt квалификации образа: отдельные тесты RW-007 включают
+        )
         server._sleep = lambda _seconds: None  # ретраи 2/4 с — без реального ожидания
         server.INTERRUPT_GRACE_S = 1.0
         server._reset_rpc_state()
@@ -298,10 +383,15 @@ class BridgeCase(unittest.TestCase):
     def _post(self, body: dict, timeout: float = 60.0):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
-            conn.request("POST", "/v1/chat/completions",
-                         body=json.dumps(body),
-                         headers={"Authorization": "Bearer test-key",
-                                  "Content-Type": "application/json"})
+            conn.request(
+                "POST",
+                "/v1/chat/completions",
+                body=json.dumps(body),
+                headers={
+                    "Authorization": "Bearer test-key",
+                    "Content-Type": "application/json",
+                },
+            )
             resp = conn.getresponse()
             raw = resp.read().decode("utf-8")
             return resp.status, raw
@@ -351,9 +441,14 @@ class BridgeCase(unittest.TestCase):
             sock.close()
 
     @staticmethod
-    def _raw_request(body: bytes = b"", cl="auto", extra=(), auth=True, path="/v1/chat/completions"):
-        headers = [f"POST {path} HTTP/1.1", "Host: 127.0.0.1",
-                   "Content-Type: application/json"]
+    def _raw_request(
+        body: bytes = b"", cl="auto", extra=(), auth=True, path="/v1/chat/completions"
+    ):
+        headers = [
+            f"POST {path} HTTP/1.1",
+            "Host: 127.0.0.1",
+            "Content-Type: application/json",
+        ]
         if auth:
             headers.append("Authorization: Bearer test-key")
         if cl == "auto":
@@ -372,8 +467,13 @@ class BridgeCase(unittest.TestCase):
         if b"\r\n\r\n" in buf:
             body = buf.split(b"\r\n\r\n", 1)[1]
             try:
-                err = json.loads(body.decode("utf-8", "replace").split("HTTP/1.1")[0])["error"]
-                if sorted(err) == ["code", "message", "type"] and err.get("code") == code:
+                err = json.loads(body.decode("utf-8", "replace").split("HTTP/1.1")[0])[
+                    "error"
+                ]
+                if (
+                    sorted(err) == ["code", "message", "type"]
+                    and err.get("code") == code
+                ):
                     typ = err.get("type", "-")
                 else:
                     typ = "BADFORM"

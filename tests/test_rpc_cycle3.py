@@ -32,10 +32,14 @@ HEAD = "Instructions from: /x/AGENTS.md\n"
 
 
 def _ask(case, key, *texts, **extra):
-    return post_safely(case, dict(BODY, prompt_cache_key=key, messages=[msg(t) for t in texts], **extra))
+    return post_safely(
+        case,
+        dict(BODY, prompt_cache_key=key, messages=[msg(t) for t in texts], **extra),
+    )
 
 
 # -- RW-001/002/003: гейт блока инструкций и автоматический контур b_guard ----------------------------------
+
 
 class GuardCase(RpcCase):
     """Профили/канон/cwd во временном каталоге; реальные ~/.dsh и Google Drive не читаются."""
@@ -44,6 +48,7 @@ class GuardCase(RpcCase):
         super().setUp()
         import b_guard
         from test_b_guard import build_snapshot_fs
+
         self.bg = b_guard
         self.root = Path(self._tmp.name) / "guard"
         self.root.mkdir()
@@ -51,10 +56,14 @@ class GuardCase(RpcCase):
         cwds = self.fs["cwds"]
         default = tuple((label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW"))
         user_global = self.root / "user-global-AGENTS.md"
-        user_global.symlink_to(self.fs["canon"])  # как на стенде владельца: ~/.dsh/AGENTS.md -> канон
-        for patcher in (mock.patch.object(b_guard, "KB_CWD", str(cwds["KB"])),
-                        mock.patch.object(b_guard, "UG_PATH", str(user_global)),
-                        mock.patch.object(b_guard, "DEFAULT_CWDS", default)):
+        user_global.symlink_to(
+            self.fs["canon"]
+        )  # как на стенде владельца: ~/.dsh/AGENTS.md -> канон
+        for patcher in (
+            mock.patch.object(b_guard, "KB_CWD", str(cwds["KB"])),
+            mock.patch.object(b_guard, "UG_PATH", str(user_global)),
+            mock.patch.object(b_guard, "DEFAULT_CWDS", default),
+        ):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.profiles = self.root / "profiles"
@@ -64,9 +73,12 @@ class GuardCase(RpcCase):
 
     def write_profile(self, maxbytes, name="web"):
         from test_b_guard import PROFILE_YML
+
         target = self.profiles / name
         target.mkdir(parents=True, exist_ok=True)
-        (target / "cordis.patch.yml").write_text(PROFILE_YML % maxbytes, encoding="utf-8")
+        (target / "cordis.patch.yml").write_text(
+            PROFILE_YML % maxbytes, encoding="utf-8"
+        )
 
     def block_ask(self, key, body="инструкции"):
         return _ask(self, key, "hello", HEAD + body)
@@ -96,7 +108,13 @@ class TestGuardLoop(GuardCase):
         self.fs["canon"].unlink()
         with self.capture_logs() as lines:
             self.assertEqual(server.GUARD.check_once(), "unsafe")
-        self.assertTrue(any("CANON_LOST" in ln for ln in lines if ln.startswith("instr_guard_alert ")))
+        self.assertTrue(
+            any(
+                "CANON_LOST" in ln
+                for ln in lines
+                if ln.startswith("instr_guard_alert ")
+            )
+        )
 
     def test_rw003_maxbytes_drift_detected_by_background_loop_without_cli(self):
         """RW-003: профиль изменён уже после старта -> фоновый поток находит дрейф и пишет alert сам."""
@@ -108,13 +126,17 @@ class TestGuardLoop(GuardCase):
             self.assertEqual(server.GUARD.snapshot()[0], "ok")
             server.GUARD.start()
             self.write_profile(262144)
-            self.assertTrue(wait_until(lambda: server.GUARD.snapshot()[0] == "unsafe", timeout=5))
+            self.assertTrue(
+                wait_until(lambda: server.GUARD.snapshot()[0] == "unsafe", timeout=5)
+            )
         self.assertTrue(any(ln.startswith("instr_guard_alert ") for ln in lines))
 
     def test_rw003_unreadable_maxbytes_is_unsafe(self):
         """RW-003: профиль без читаемого maxBytes -> unsafe (fail-closed), а не молчаливый ok."""
         self.write_profile(106496)
-        (self.profiles / "web" / "cordis.patch.yml").write_text("[]\n", encoding="utf-8")
+        (self.profiles / "web" / "cordis.patch.yml").write_text(
+            "[]\n", encoding="utf-8"
+        )
         self.assertEqual(server.GUARD.check_once(), "unsafe")
 
 
@@ -142,8 +164,19 @@ class TestGuardGate(GuardCase):
         self.write_profile(262144)
         server.GUARD.check_once()
         self.assertEqual(server.GUARD.snapshot()[0], "unsafe")
-        status, _ = post_safely(self, dict(BODY, prompt_cache_key="chat-live", messages=[
-            msg("hello"), msg(HEAD + "инструкции"), msg("PONG", "assistant"), msg("second")]))
+        status, _ = post_safely(
+            self,
+            dict(
+                BODY,
+                prompt_cache_key="chat-live",
+                messages=[
+                    msg("hello"),
+                    msg(HEAD + "инструкции"),
+                    msg("PONG", "assistant"),
+                    msg("second"),
+                ],
+            ),
+        )
         self.assertEqual(status, 200)
         self.assertEqual(_ask(self, "chat-plain", "no block")[0], 200)
 
@@ -160,7 +193,9 @@ class TestGuardGate(GuardCase):
         self.write_profile(106496)
         server.GUARD.check_once()
         canon_text = self.fs["canon"].read_text(encoding="utf-8")
-        status, body = _ask(self, "chat-kb", "hello", HEAD + canon_text + "\n" + HEAD + canon_text)
+        status, body = _ask(
+            self, "chat-kb", "hello", HEAD + canon_text + "\n" + HEAD + canon_text
+        )
         self.assertEqual(status, 503, body)
         self.assertEqual(body["error"]["type"], "launcher_unavailable")
         self.assertEqual(self.hub.spawns(), [])
@@ -199,9 +234,11 @@ class TestInstructionScan(RpcCase):
 
 # -- RW-004: ENOSPC на spool картинок -> 502 для JSON и SSE -------------------------------------------------
 
+
 class TestSpoolEnospcBothModes(ImageCase):
     def _enospc(self, stream):
         from bridge_testlib import image_part, make_png, text_part
+
         server.IMAGE_PROBE = True
         self.probe_stand()
         real = Path.write_bytes
@@ -211,8 +248,17 @@ class TestSpoolEnospcBothModes(ImageCase):
                 raise OSError(28, "No space left on device")
             return real(self_path, data)
 
-        body = {"model": "claude-sonnet-5-5", "prompt_cache_key": "chat-img", "stream": stream,
-                "messages": [{"role": "user", "content": [text_part("look"), image_part(make_png(64))]}]}
+        body = {
+            "model": "claude-sonnet-5-5",
+            "prompt_cache_key": "chat-img",
+            "stream": stream,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [text_part("look"), image_part(make_png(64))],
+                }
+            ],
+        }
         Path.write_bytes = full_disk
         try:
             if stream:
@@ -233,7 +279,9 @@ class TestSpoolEnospcBothModes(ImageCase):
     def test_rw004_enospc_sse_gives_502_not_507(self):
         """RW-004: ENOSPC (SSE) -> кадр ошибки proxy_error/502 (как у прочих отказов потока), без 507/insufficient_storage."""
         status, text = self._enospc(True)
-        self.assertEqual(status, 200)  # заголовки SSE уже отправлены: ошибка идёт кадром потока
+        self.assertEqual(
+            status, 200
+        )  # заголовки SSE уже отправлены: ошибка идёт кадром потока
         self.assertIn('"type": "proxy_error"', text)
         self.assertIn('"code": 502', text)
         self.assertNotIn("insufficient_storage", text)
@@ -241,19 +289,23 @@ class TestSpoolEnospcBothModes(ImageCase):
     def test_rw004_no_507_anywhere_in_sources(self):
         """RW-004: в server.py и tests нет кода 507 и insufficient_storage (кроме этого теста)."""
         import re
+
         root = Path(__file__).resolve().parent.parent
         pattern = re.compile(r"\b507\b|insufficient_storage")
         hits = []
         for path in [root / "server.py"] + sorted((root / "tests").glob("*.py")):
             if path.name == "test_rpc_cycle3.py":
                 continue
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
                 if pattern.search(line):
                     hits.append(f"{path.name}:{number}")
         self.assertEqual(hits, [])
 
 
 # -- RW-005: ошибки записи состояния чата -------------------------------------------------------------------
+
 
 class TestPersistFailures(RpcCase):
     @staticmethod
@@ -333,35 +385,57 @@ class TestPersistFailures(RpcCase):
 
 # -- RW-006: терминалы/сообщения чужих и неизвестных ходов -------------------------------------------------
 
+
 class TestTurnIsolation(RpcCase):
     def _two_turns(self, second_steps, key="chat-iso"):
-        self.hub.script([{"steps": [{"op": "text", "text": "A0"}]},
-                         {"steps": second_steps, "usage": {"inputTokens": 21, "outputTokens": 2}}])
+        self.hub.script(
+            [
+                {"steps": [{"op": "text", "text": "A0"}]},
+                {
+                    "steps": second_steps,
+                    "usage": {"inputTokens": 21, "outputTokens": 2},
+                },
+            ]
+        )
         chat = self.conv(key)
         self.assertEqual(chat.ask("q0")[0], 200)
         return chat.ask("q1")
 
     def test_rw006_unknown_turn_id_terminal_does_not_finish_turn(self):
         """RW-006: terminal с неизвестным turnId игнорируется: ответ и usage — собственные."""
-        status, body = self._two_turns([{"op": "unknown_terminal"}, {"op": "sleep", "s": 0.3},
-                                        {"op": "text", "text": "A1"}])
+        status, body = self._two_turns(
+            [
+                {"op": "unknown_terminal"},
+                {"op": "sleep", "s": 0.3},
+                {"op": "text", "text": "A1"},
+            ]
+        )
         self.assertEqual(status, 200)
         self.assertEqual(body["choices"][0]["message"]["content"], "A1")
         self.assertEqual(body["usage"]["prompt_tokens"], 21)
 
     def test_rw006_empty_turn_id_terminal_does_not_finish_turn(self):
         """RW-006: terminal без turnId (пустой) ход не завершает."""
-        status, body = self._two_turns([{"op": "empty_terminal"}, {"op": "sleep", "s": 0.3},
-                                        {"op": "text", "text": "A1"}])
+        status, body = self._two_turns(
+            [
+                {"op": "empty_terminal"},
+                {"op": "sleep", "s": 0.3},
+                {"op": "text", "text": "A1"},
+            ]
+        )
         self.assertEqual(status, 200)
         self.assertEqual(body["choices"][0]["message"]["content"], "A1")
         self.assertEqual(body["usage"]["prompt_tokens"], 21)
 
     def test_rw006_stale_message_and_delta_of_previous_turn_are_dropped(self):
         """RW-006: сообщение и дельта прежнего хода (его mid/parentId) не попадают в ответ нового."""
-        status, body = self._two_turns([{"op": "stale_message", "text": "STALE-MSG"},
-                                        {"op": "stale_delta", "text": "STALE-DELTA"},
-                                        {"op": "text", "text": "A1"}])
+        status, body = self._two_turns(
+            [
+                {"op": "stale_message", "text": "STALE-MSG"},
+                {"op": "stale_delta", "text": "STALE-DELTA"},
+                {"op": "text", "text": "A1"},
+            ]
+        )
         self.assertEqual(status, 200)
         self.assertEqual(body["choices"][0]["message"]["content"], "A1")
 
@@ -370,7 +444,10 @@ class TestTurnIsolation(RpcCase):
         server.SILENCE_WATCHDOG_S = 0.8
         steps = []
         for _ in range(8):
-            steps += [{"op": "sleep", "s": 0.25}, {"op": "stale_message", "text": "STALE"}]
+            steps += [
+                {"op": "sleep", "s": 0.25},
+                {"op": "stale_message", "text": "STALE"},
+            ]
         steps.append({"op": "hang"})
         started = time.monotonic()
         status, body = self._two_turns(steps)
@@ -392,6 +469,7 @@ class TestTurnIsolation(RpcCase):
 
 # -- RW-007/008: байтовые бюджеты и доставка кусками --------------------------------------------------------
 
+
 class TestBudgetsCycle3(RpcCase):
     def test_rw007_default_limits_are_8_4_10_mib(self):
         """RW-007: значения по умолчанию: строка RPC 8 МиБ, inbox 4 МиБ, текст хода 10 МиБ."""
@@ -404,7 +482,10 @@ class TestBudgetsCycle3(RpcCase):
         server.MAX_INBOX_BYTES = 100_000
         proc = server.RpcProcess(str(server.WORKSPACE), server.POOL, False)
         try:
-            tiny = {"method": "droid.session_notification", "params": {"notification": {"type": "x"}}}
+            tiny = {
+                "method": "droid.session_notification",
+                "params": {"notification": {"type": "x"}},
+            }
             for _ in range(20_000):
                 proc._on_message(dict(tiny))
             kinds = []
@@ -421,7 +502,16 @@ class TestBudgetsCycle3(RpcCase):
     def test_rw007_empty_message_flood_is_charged_against_turn_budget(self):
         """RW-007: поток пустых сообщений ассистента не копится бесплатно: бюджет хода -> 502 limit."""
         server.MAX_TURN_TEXT_BYTES = 20_000
-        self.hub.script([{"steps": [{"op": "empty_msgs", "count": 3000}, {"op": "text", "text": "tail"}]}])
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {"op": "empty_msgs", "count": 3000},
+                        {"op": "text", "text": "tail"},
+                    ]
+                }
+            ]
+        )
         status, body = post_safely(self, dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 502, body)
         self.assertIn("limit", json.dumps(body))
@@ -431,7 +521,9 @@ class TestBudgetsCycle3(RpcCase):
         """RW-008: delta + complete(text) одного блока стоит N байт, а не 2N: ход на 0,6 лимита проходит."""
         n = 100_000
         server.MAX_TURN_TEXT_BYTES = int(n * 1.5)
-        self.hub.script([{"steps": [{"op": "text", "text": "x" * n, "complete_with_text": True}]}])
+        self.hub.script(
+            [{"steps": [{"op": "text", "text": "x" * n, "complete_with_text": True}]}]
+        )
         status, body = post_safely(self, dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 200, body)
         self.assertEqual(len(body["choices"][0]["message"]["content"]), n)
@@ -439,7 +531,7 @@ class TestBudgetsCycle3(RpcCase):
     def test_rw007_large_response_is_delivered_in_slices_json_and_sse(self):
         """RW-007: большой ответ уходит срезами (экранирование по кускам), содержимое и Content-Length целы."""
         server.DELIVERY_CHUNK_BYTES = 4096
-        text = ("Привет \"мир\"\n" * 40_000)
+        text = 'Привет "мир"\n' * 40_000
         sizes = []
         real = getattr(server, "_escape_json_piece", None)
 
@@ -448,8 +540,13 @@ class TestBudgetsCycle3(RpcCase):
             return real(piece)
 
         server._escape_json_piece = spy
-        self.addCleanup(lambda: setattr(server, "_escape_json_piece", real) if real else delattr(
-            server, "_escape_json_piece"))
+        self.addCleanup(
+            lambda: (
+                setattr(server, "_escape_json_piece", real)
+                if real
+                else delattr(server, "_escape_json_piece")
+            )
+        )
         self.hub.script([{"steps": [{"op": "text", "text": text}]}] * 2)
         status, body = post_safely(self, dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 200)
@@ -458,15 +555,31 @@ class TestBudgetsCycle3(RpcCase):
         self.assertLessEqual(max(sizes), 4096 // 4)
         status, stream = self._post(dict(BODY, stream=True, messages=[msg("hi")]))
         self.assertEqual(status, 200)
-        pieces = [json.loads(line[6:]) for line in stream.splitlines()
-                  if line.startswith("data: {")]
-        joined = "".join(p["choices"][0]["delta"].get("content", "") for p in pieces if p.get("choices"))
+        pieces = [
+            json.loads(line[6:])
+            for line in stream.splitlines()
+            if line.startswith("data: {")
+        ]
+        joined = "".join(
+            p["choices"][0]["delta"].get("content", "")
+            for p in pieces
+            if p.get("choices")
+        )
         self.assertEqual(joined, text)
-        self.assertGreater(len([p for p in pieces if p.get("choices")
-                                and p["choices"][0]["delta"].get("content")]), 5)
+        self.assertGreater(
+            len(
+                [
+                    p
+                    for p in pieces
+                    if p.get("choices") and p["choices"][0]["delta"].get("content")
+                ]
+            ),
+            5,
+        )
 
 
 # -- RW-009: receipt как набор компонентов ------------------------------------------------------------------
+
 
 class TestReceiptComponents(RpcCase):
     def setUp(self):
@@ -482,8 +595,10 @@ class TestReceiptComponents(RpcCase):
         if not image.exists():
             image.write_bytes(content)
             image.chmod(0o500)
-        server._atomic_write(server._receipt_path(), json.dumps(
-            make_receipt(image, digest, **override)).encode())
+        server._atomic_write(
+            server._receipt_path(),
+            json.dumps(make_receipt(image, digest, **override)).encode(),
+        )
 
     def ask(self):
         return post_safely(self, dict(BODY, messages=[msg("hi")]))
@@ -514,14 +629,24 @@ class TestReceiptComponents(RpcCase):
     def test_rw009_tools_policy_digest_mismatch_is_refused(self):
         """RW-009: digest tools_policy не соответствует набору id -> spawn запрещён."""
         ids = ["Read"]
-        self._refused_at_spawn(tools_policy={"policy": server.TOOLS_POLICY, "disabled_tool_ids": ids,
-                                             "digest": "0" * 64})
+        self._refused_at_spawn(
+            tools_policy={
+                "policy": server.TOOLS_POLICY,
+                "disabled_tool_ids": ids,
+                "digest": "0" * 64,
+            }
+        )
 
     def test_rw009_settings_profile_drift_is_refused(self):
         """RW-009: профиль безопасных настроек в receipt отличается от кода моста -> spawn запрещён."""
         profile = dict(server.SETTINGS_PROFILE)
         profile["autonomyLevel"] = "off"
-        self._refused_at_spawn(settings_profile={"profile": profile, "digest": server.settings_profile_digest()})
+        self._refused_at_spawn(
+            settings_profile={
+                "profile": profile,
+                "digest": server.settings_profile_digest(),
+            }
+        )
 
     def test_rw009_failed_probe_is_refused(self):
         """RW-009: любая проба не ok -> receipt не считается квалификацией."""
@@ -532,7 +657,13 @@ class TestReceiptComponents(RpcCase):
     def test_rw009_live_protocol_version_mismatch_stops_before_add(self):
         """RW-009: живой droid говорит другой protocolVersion, чем в receipt -> 502, add_user_message нет."""
         import fake_droid
-        self.install(protocol={"api_version": server.RPC_API_VERSION, "protocol_version": "9.9.9"})
+
+        self.install(
+            protocol={
+                "api_version": server.RPC_API_VERSION,
+                "protocol_version": "9.9.9",
+            }
+        )
         self.assertNotEqual(fake_droid.PROTOCOL, "9.9.9")
         status, body = self.ask()
         self.assertEqual(status, 502, body)
@@ -542,7 +673,9 @@ class TestReceiptComponents(RpcCase):
     def test_rw009_live_tools_catalogue_drift_stops_before_add(self):
         """RW-009: каталог tools живого droid шире квалифицированного -> 502, add_user_message нет."""
         self.install()
-        self.hub.configure(tools=["Read", "Execute", "Edit", "web_search", "BrandNewTool"])
+        self.hub.configure(
+            tools=["Read", "Execute", "Edit", "web_search", "BrandNewTool"]
+        )
         status, body = self.ask()
         self.assertEqual(status, 502, body)
         self.assertEqual(self.hub.rpcs("droid.add_user_message"), [])
@@ -555,6 +688,7 @@ class TestDroidImageProbes(RpcCase):
     def setUp(self):
         super().setUp()
         import droid_image
+
         self.tool = droid_image
         self.source = Path(self._tmp.name) / "global-droid"
         self.source.write_bytes(self.hub.launcher.read_bytes())
@@ -565,9 +699,13 @@ class TestDroidImageProbes(RpcCase):
         receipt = self.tool.install_image(self.source, server.WORKSPACE)
         self.assertEqual(receipt["schema"], server.RECEIPT_SCHEMA)
         self.assertTrue(receipt["protocol"]["protocol_version"])
-        self.assertEqual(receipt["settings_profile"]["digest"], server.settings_profile_digest())
-        self.assertEqual(sorted(receipt["tools_policy"]["disabled_tool_ids"]), sorted(
-            __import__("fake_droid").DEFAULT_TOOLS))
+        self.assertEqual(
+            receipt["settings_profile"]["digest"], server.settings_profile_digest()
+        )
+        self.assertEqual(
+            sorted(receipt["tools_policy"]["disabled_tool_ids"]),
+            sorted(__import__("fake_droid").DEFAULT_TOOLS),
+        )
         self.assertEqual(set(receipt["probes"]), set(server.RECEIPT_PROBES))
         self.assertTrue(all(v == "ok" for v in receipt["probes"].values()))
 
@@ -581,6 +719,7 @@ class TestDroidImageProbes(RpcCase):
 
 # -- RW-010: группа процессов ------------------------------------------------------------------------------
 
+
 class TestProcessGroup(RpcCase):
     def test_rw010_orphan_holding_pipes_is_killed_with_the_group(self):
         """RW-010: лидер вышел, потомок держит pipe -> закрытие убивает группу, слот возвращается."""
@@ -588,11 +727,15 @@ class TestProcessGroup(RpcCase):
         orphans = []
         try:
             status, _ = post_safely(self, dict(BODY, messages=[msg("hi")]), timeout=40)
-            orphans = [r["child_pid"] for r in self.hub.records() if r.get("ev") == "orphan"]
+            orphans = [
+                r["child_pid"] for r in self.hub.records() if r.get("ev") == "orphan"
+            ]
             self.assertEqual(status, 502)
             self.assertTrue(orphans)
             for pid in orphans:
-                self.assertTrue(self.wait_gone(pid, timeout=10), f"осиротевший потомок {pid} жив")
+                self.assertTrue(
+                    self.wait_gone(pid, timeout=10), f"осиротевший потомок {pid} жив"
+                )
             self.assertTrue(no_leaks(self))
             self.assertTrue(wait_until(lambda: server.POOL.used == 0))
         finally:
@@ -604,6 +747,7 @@ class TestProcessGroup(RpcCase):
 
 
 # -- RW-011: реапер ----------------------------------------------------------------------------------------
+
 
 class _HookLock:
     """Замок чата: перед захватом исполняет hook (имитация хода, проскочившего между снимком и claim)."""
@@ -676,6 +820,7 @@ class TestReaperRace(RpcCase):
 
 # -- RW-012/013: ресурсы при сбоях и эфемерные сессии -----------------------------------------------------
 
+
 class TestSetupFailures(RpcCase):
     def test_rw012_popen_failure_returns_all_resources(self):
         """RW-012: Popen бросает OSError -> ответ без обрыва, слоты P/T свободны, процессов нет."""
@@ -703,7 +848,9 @@ class TestSetupFailures(RpcCase):
             return real_start(thread)
 
         with mock.patch.object(threading.Thread, "start", start):
-            status, body = post_safely(self, dict(BODY, prompt_cache_key="chat-nothread", messages=[msg("hi")]))
+            status, body = post_safely(
+                self, dict(BODY, prompt_cache_key="chat-nothread", messages=[msg("hi")])
+            )
         self.assertEqual(status, 502, body)
         self.assertTrue(no_leaks(self))
         state = server.REGISTRY.chats.get(server._key_hash("chat-nothread"))
@@ -711,8 +858,13 @@ class TestSetupFailures(RpcCase):
             self.assertFalse(state.lock.locked())
         self.assertTrue(server._slots.acquire(blocking=False))
         server._slots.release()
-        self.assertEqual(post_safely(self, dict(BODY, prompt_cache_key="chat-nothread",
-                                                messages=[msg("again")]))[0], 200)
+        self.assertEqual(
+            post_safely(
+                self,
+                dict(BODY, prompt_cache_key="chat-nothread", messages=[msg("again")]),
+            )[0],
+            200,
+        )
 
     def test_rw012_reader_thread_start_failure_kills_spawned_child_and_frees_slot(self):
         """RW-012: потоки чтения не стартовали после Popen -> ребёнок убит, реестры и слот P чисты, ответ 502."""
@@ -731,11 +883,15 @@ class TestSetupFailures(RpcCase):
             spawned.append(proc.pid)
             return proc
 
-        with mock.patch.object(threading.Thread, "start", start), \
-                mock.patch.object(server.subprocess, "Popen", tracking):
+        with (
+            mock.patch.object(threading.Thread, "start", start),
+            mock.patch.object(server.subprocess, "Popen", tracking),
+        ):
             status, body = post_safely(self, dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 502, body)
-        self.assertGreaterEqual(len(spawned), 1)  # мост может повторить попытку: каждый порождённый ребёнок убит
+        self.assertGreaterEqual(
+            len(spawned), 1
+        )  # мост может повторить попытку: каждый порождённый ребёнок убит
         for pid in spawned:
             self.assertTrue(self.wait_gone(pid, timeout=5), pid)
         self.assertTrue(no_leaks(self))
@@ -750,7 +906,9 @@ class TestSetupFailures(RpcCase):
             raise OSError("init failed")
 
         with mock.patch.object(server.Run, "__init__", broken):
-            status, body = post_safely(self, dict(BODY, prompt_cache_key="chat-initfail", messages=[msg("hi")]))
+            status, body = post_safely(
+                self, dict(BODY, prompt_cache_key="chat-initfail", messages=[msg("hi")])
+            )
         self.assertEqual(status, 502, body)
         self.assertTrue(no_leaks(self))
         self.assertTrue(server._slots.acquire(blocking=False))
@@ -767,10 +925,13 @@ class TestEphemeralClose(RpcCase):
         self.assertEqual(status, 200)
         self.assertTrue(wait_until(lambda: server.POOL.used == 0, timeout=3))
         self.assertLess(time.monotonic() - started, 4.0)
-        self.assertEqual([e for e in self.hub.exits() if e["reason"] == "close_session"], [])
+        self.assertEqual(
+            [e for e in self.hub.exits() if e["reason"] == "close_session"], []
+        )
 
 
 # -- RW-014: права каталогов -------------------------------------------------------------------------------
+
 
 class TestPrivateDirs(RpcCase):
     def test_rw014_existing_loose_state_dirs_are_tightened_to_0700(self):
@@ -787,6 +948,7 @@ class TestPrivateDirs(RpcCase):
     def test_rw014_droid_image_tool_tightens_existing_chain(self):
         """RW-014: droid_image.py ужесточает заранее созданную цепочку runtime/droid-image до 0700."""
         import droid_image
+
         source = Path(self._tmp.name) / "global-droid"
         source.write_bytes(self.hub.launcher.read_bytes())
         source.chmod(0o755)
@@ -796,11 +958,16 @@ class TestPrivateDirs(RpcCase):
             path.chmod(0o755)
         receipt = droid_image.install_image(source, server.WORKSPACE)
         for rel in ("runtime", "runtime/droid-image"):
-            self.assertEqual(stat.S_IMODE((server.WORKSPACE / rel).stat().st_mode), 0o700, rel)
-        self.assertEqual(stat.S_IMODE(Path(receipt["image_path"]).parent.stat().st_mode), 0o700)
+            self.assertEqual(
+                stat.S_IMODE((server.WORKSPACE / rel).stat().st_mode), 0o700, rel
+            )
+        self.assertEqual(
+            stat.S_IMODE(Path(receipt["image_path"]).parent.stat().st_mode), 0o700
+        )
 
 
 # -- RW-015: /health отражает допуск образа ----------------------------------------------------------------
+
 
 class TestHealthReceipt(RpcCase):
     def test_rw015_health_keeps_seven_keys_and_reflects_receipt(self):
@@ -825,7 +992,9 @@ class TestHealthReceipt(RpcCase):
         image = image_dir / "droid"
         image.write_bytes(content)
         image.chmod(0o500)
-        server._atomic_write(server._receipt_path(), json.dumps(make_receipt(image, digest)).encode())
+        server._atomic_write(
+            server._receipt_path(), json.dumps(make_receipt(image, digest)).encode()
+        )
         self.assertEqual(server._receipt_state(), "ok")
         self.assertTrue(self.health()["ok"])
 
@@ -841,9 +1010,11 @@ class TestStartup(GuardCase):
             return None
 
     def _run_main(self):
-        with mock.patch.object(server, "Server", self._NoServe), \
-                mock.patch.object(server.signal, "signal"), \
-                mock.patch.object(server.GUARD, "start") as started:
+        with (
+            mock.patch.object(server, "Server", self._NoServe),
+            mock.patch.object(server.signal, "signal"),
+            mock.patch.object(server.GUARD, "start") as started,
+        ):
             server.main()
         return started
 
@@ -853,7 +1024,12 @@ class TestStartup(GuardCase):
         with self.capture_logs() as lines:
             started = self._run_main()
         started.assert_called_once()
-        self.assertTrue(any(ln.startswith("instr_guard_alert ") and "DUPLICATE_RETURNED" in ln for ln in lines))
+        self.assertTrue(
+            any(
+                ln.startswith("instr_guard_alert ") and "DUPLICATE_RETURNED" in ln
+                for ln in lines
+            )
+        )
 
     def test_rw015_start_logs_invalid_receipt_pointing_to_readme(self):
         """RW-015: RECEIPT_REQUIRED без receipt -> старт с понятным alert (ссылка на README), без трассировки."""
@@ -874,7 +1050,12 @@ class TestStartup(GuardCase):
             with self.assertRaises(SystemExit) as caught:
                 self._run_main()
         self.assertEqual(caught.exception.code, 1)
-        self.assertTrue(any("state directory is not usable" in str(c.args[0]) for c in err.call_args_list))
+        self.assertTrue(
+            any(
+                "state directory is not usable" in str(c.args[0])
+                for c in err.call_args_list
+            )
+        )
 
 
 if __name__ == "__main__":

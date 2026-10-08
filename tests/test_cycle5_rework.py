@@ -26,11 +26,20 @@ from bridge_testlib import TOOLS, FakeDroidHub, wait_until  # noqa: E402
 from rpc_testlib import RpcCase  # noqa: E402
 from test_b_guard import PROFILE_YML  # noqa: E402
 from test_rpc_cycle3 import GuardCase  # noqa: E402
-from test_rpc_cycle4 import HEAD, RunCase, _inject_start_failure, asst_create, note, terminal, user_create  # noqa: E402
+from test_rpc_cycle4 import (  # noqa: E402
+    HEAD,
+    RunCase,
+    _inject_start_failure,
+    asst_create,
+    note,
+    terminal,
+    user_create,
+)
 from test_rpc_rework import BODY, msg, no_leaks  # noqa: E402
 
 
 # -- RW-005: droid_image закрывает stdout дочернего процесса --------------------------------------------------
+
 
 class TestRw005ImageRpcClose(unittest.TestCase):
     """RW-005: _Rpc.close() закрывает pipe stdout и останавливает читателя (иначе ResourceWarning/утечка fd)."""
@@ -49,11 +58,17 @@ class TestRw005ImageRpcClose(unittest.TestCase):
 
 # -- RW-007: событие сообщения без messageId -------------------------------------------------------------------
 
+
 class TestRw007EmptyMessageId(RunCase):
     """RW-007: delta/complete/retract без messageId в карантин: ни прогресса, ни слота, ни вывода."""
 
-    EVENTS = ("assistant_text_delta", "assistant_text_complete", "thinking_text_delta",
-              "thinking_text_complete", "assistant_message_retracted")
+    EVENTS = (
+        "assistant_text_delta",
+        "assistant_text_complete",
+        "thinking_text_delta",
+        "thinking_text_complete",
+        "assistant_message_retracted",
+    )
 
     def test_rw007_events_without_message_id_are_quarantined(self):
         """RW-007: отсутствующий и пустой messageId не меняют прогресс, слоты и held; счётчик карантина растёт."""
@@ -85,6 +100,7 @@ class TestRw007EmptyMessageId(RunCase):
 
 # -- RW-008: возврат ресурсов при сбое запуска фонового потока --------------------------------------------------
 
+
 class TestRw008ResourceFinalization(RpcCase):
     """RW-008: слот P и реестры возвращаются, даже если фоновый поток закрытия не создан."""
 
@@ -101,10 +117,13 @@ class TestRw008ResourceFinalization(RpcCase):
                 stream.close()
 
         self.addCleanup(cleanup)
-        proc._reader = types.SimpleNamespace(join=lambda timeout=None: None, is_alive=lambda: True)
+        proc._reader = types.SimpleNamespace(
+            join=lambda timeout=None: None, is_alive=lambda: True
+        )
         _inject_start_failure(self, {server.RpcProcess._close_stream})
-        with self.assertRaises(RuntimeError):
-            proc.close(mode="term")
+        proc.close(
+            mode="term"
+        )  # RuntimeError фонового закрытия не выходит из close() (RW-007 Cycle 5)
         self.assertFalse(proc.holds_slot)
         self.assertEqual(server.POOL.used, 0)
         self.assertNotIn(proc.pid, server._rpc_procs)
@@ -126,6 +145,7 @@ class TestRw008ResourceFinalization(RpcCase):
 
 # -- RW-009: бюджет карантина событий -------------------------------------------------------------------------
 
+
 class TestRw009QuarantineBudget(RunCase):
     """RW-009: удерживаемые до create_message события учитываются по реальному размеру и не копят чужие поля."""
 
@@ -134,24 +154,44 @@ class TestRw009QuarantineBudget(RunCase):
         run = self.make_run()
         run._on_notif(user_create())
         with mock.patch.object(server, "MAX_HELD_MID_CHARS", 64):
-            run._on_notif(note("assistant_text_delta", messageId="m" * 64, textDelta="x"))
+            run._on_notif(
+                note("assistant_text_delta", messageId="m" * 64, textDelta="x")
+            )
             self.assertIn("m" * 64, run._held)
             with self.assertRaises(server.RpcError):
-                run._on_notif(note("assistant_text_delta", messageId="m" * 65, textDelta="x"))
+                run._on_notif(
+                    note("assistant_text_delta", messageId="m" * 65, textDelta="x")
+                )
         self.assertNotIn("m" * 65, run._held)
 
     def test_rw009_held_entry_keeps_only_needed_fields_and_counts_id(self):
         """RW-009: в held лежат только textDelta/text; размер = накладные + id + дельта + текст."""
         run = self.make_run()
         run._on_notif(user_create())
-        run._on_notif(note("assistant_text_delta", messageId="mid-1", textDelta="abc", junk="J" * 10_000))
+        run._on_notif(
+            note(
+                "assistant_text_delta",
+                messageId="mid-1",
+                textDelta="abc",
+                junk="J" * 10_000,
+            )
+        )
         ((ntype, kept, size),) = run._held["mid-1"]
         self.assertEqual(ntype, "assistant_text_delta")
         self.assertEqual(kept, {"textDelta": "abc", "text": None})
         self.assertEqual(size, server.ENTRY_OVERHEAD_BYTES + len("mid-1") + 3)
         self.assertEqual(run._held_bytes, size)
-        run._on_notif(note("assistant_text_complete", messageId="mid-1", text="abcdef", junk="J" * 10_000))
-        self.assertEqual(run._held_bytes, server.ENTRY_OVERHEAD_BYTES + len("mid-1") + 6)
+        run._on_notif(
+            note(
+                "assistant_text_complete",
+                messageId="mid-1",
+                text="abcdef",
+                junk="J" * 10_000,
+            )
+        )
+        self.assertEqual(
+            run._held_bytes, server.ENTRY_OVERHEAD_BYTES + len("mid-1") + 6
+        )
 
     def test_rw009_flood_of_long_unique_ids_hits_turn_budget_fast(self):
         """RW-009: поток событий с длинными уникальными id упирается в бюджет хода по их реальному размеру."""
@@ -162,7 +202,13 @@ class TestRw009QuarantineBudget(RunCase):
         with self.assertRaises(server.RpcError):
             for index in range(2000):
                 sent += 1
-                run._on_notif(note("assistant_text_delta", messageId="%d-" % index + "i" * 500, textDelta=""))
+                run._on_notif(
+                    note(
+                        "assistant_text_delta",
+                        messageId="%d-" % index + "i" * 500,
+                        textDelta="",
+                    )
+                )
         self.assertLessEqual(sent, 20_000 // 500 + 2)
 
     def test_rw009_released_hold_returns_bytes(self):
@@ -180,6 +226,7 @@ class TestRw009QuarantineBudget(RunCase):
 
 
 # -- RW-010: структурные токены строки RPC ---------------------------------------------------------------------
+
 
 class TestRw010StructTokens(unittest.TestCase):
     """RW-010: предел структурных токенов считает `{`, `[`, `,`, `:` вне строк, а не только скобки."""
@@ -208,8 +255,12 @@ class TestRw010StructTokens(unittest.TestCase):
         """RW-010: ровно предел - допустимо, предел + 1 - отказ."""
         with mock.patch.object(server, "MAX_JSON_STRUCT_TOKENS", 10):
             self.assertEqual(server._struct_tokens(b"[1,1,1,1,1]"), 5)
-            self.assertFalse(server._struct_flood(b"[" + b",".join([b"1"] * 10) + b"]"))  # 1 + 9 = 10
-            self.assertTrue(server._struct_flood(b"[" + b",".join([b"1"] * 11) + b"]"))  # 1 + 10 = 11
+            self.assertFalse(
+                server._struct_flood(b"[" + b",".join([b"1"] * 10) + b"]")
+            )  # 1 + 9 = 10
+            self.assertTrue(
+                server._struct_flood(b"[" + b",".join([b"1"] * 11) + b"]")
+            )  # 1 + 10 = 11
 
 
 class TestRw010StructTokensLive(RpcCase):
@@ -218,7 +269,16 @@ class TestRw010StructTokensLive(RpcCase):
     def test_rw010_number_flood_rejected_before_parse(self):
         """RW-010: 400 000 чисел в одной строке: json.loads не вызван, ход -> 502 proxy_error."""
         server.MAX_JSON_STRUCT_TOKENS = 50_000
-        self.hub.script([{"steps": [{"op": "num_flood", "count": 400_000}, {"op": "text", "text": "late"}]}])
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {"op": "num_flood", "count": 400_000},
+                        {"op": "text", "text": "late"},
+                    ]
+                }
+            ]
+        )
         real = json.loads
         big = []
 
@@ -237,6 +297,7 @@ class TestRw010StructTokensLive(RpcCase):
 
 # -- RW-011: бюджет памяти готовых ответов ---------------------------------------------------------------------
 
+
 class TestRw011DeliveryBudget(RpcCase):
     """RW-011: готовый ответ резервирует память до конца выдачи; исчерпан бюджет - 502 proxy_error."""
 
@@ -253,10 +314,20 @@ class TestRw011DeliveryBudget(RpcCase):
         return budget
 
     def test_rw011_delivery_size_counts_text_events_and_arguments(self):
-        """RW-011: размер = объединённый текст + события content/reasoning + аргументы вызовов (UTF-8)."""
-        out = {"text": "ab", "events": [("content", "héllo"), ("reasoning", "r"),
-                                        ("tool_call", {"function": {"arguments": "{}"}})]}
-        self.assertEqual(server._delivery_size(out), 2 + 6 + 1 + 2)
+        """RW-011/RW-008: размер = удерживаемая память CPython: текст + события content/reasoning + аргументы вызовов."""
+        out = {
+            "text": "ab",
+            "events": [
+                ("content", "héllo"),
+                ("reasoning", "r"),
+                ("tool_call", {"function": {"arguments": "{}"}}),
+            ],
+        }
+        held = sys.getsizeof
+        self.assertEqual(
+            server._delivery_size(out),
+            held("ab") + held("héllo") + held("r") + held("{}"),
+        )
         self.assertEqual(server._delivery_size({"text": "", "events": []}), 0)
 
     def test_rw011_json_over_budget_gives_502_and_releases(self):
@@ -296,6 +367,7 @@ class TestRw011DeliveryBudget(RpcCase):
 
 # -- RW-012: аргументы вызовов выдаются срезами -----------------------------------------------------------------
 
+
 class TestRw012ToolArgumentsStreaming(RpcCase):
     """RW-012: большие arguments tool_call выдаются срезами (JSON - без второй копии, SSE - фрагментами)."""
 
@@ -304,9 +376,26 @@ class TestRw012ToolArgumentsStreaming(RpcCase):
     def setUp(self):
         super().setUp()
         server.DELIVERY_CHUNK_BYTES = 64
-        call = json.dumps({"name": "get_weather", "arguments": {"city": self.CITY}}, ensure_ascii=False)
-        self.hub.script([{"steps": [{"op": "text", "text": "pre " + server.TOOL_CALL_OPEN + call
-                                     + server.TOOL_CALL_CLOSE}]}] * 2)
+        call = json.dumps(
+            {"name": "get_weather", "arguments": {"city": self.CITY}},
+            ensure_ascii=False,
+        )
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {
+                            "op": "text",
+                            "text": "pre "
+                            + server.TOOL_CALL_OPEN
+                            + call
+                            + server.TOOL_CALL_CLOSE,
+                        }
+                    ]
+                }
+            ]
+            * 2
+        )
         self.expected = json.dumps({"city": self.CITY}, ensure_ascii=False)
         self.assertGreater(len(self.expected.encode()), 64 * 4)
 
@@ -324,7 +413,9 @@ class TestRw012ToolArgumentsStreaming(RpcCase):
 
     def test_rw012_sse_arguments_arrive_in_fragments_and_reassemble(self):
         """RW-012: SSE: первый кадр с id и именем, остальные - фрагменты arguments; склейка равна оригиналу."""
-        status, stream = self._post(dict(BODY, stream=True, tools=TOOLS, messages=[msg("w")]))
+        status, stream = self._post(
+            dict(BODY, stream=True, tools=TOOLS, messages=[msg("w")])
+        )
         self.assertEqual(status, 200)
         frames = []
         for line in stream.splitlines():
@@ -338,38 +429,59 @@ class TestRw012ToolArgumentsStreaming(RpcCase):
         for frame in frames[1:]:
             self.assertNotIn("id", frame)
             self.assertEqual(frame["index"], frames[0]["index"])
-        self.assertEqual("".join(f["function"]["arguments"] for f in frames), self.expected)
+        self.assertEqual(
+            "".join(f["function"]["arguments"] for f in frames), self.expected
+        )
         self.assertIn('"finish_reason": "tool_calls"', stream)
 
 
 # -- RW-013: точный YAML-путь config.maxBytes -------------------------------------------------------------------
+
 
 class TestRw013ProfilePath(unittest.TestCase):
     """RW-013: maxBytes принимается только по пути agent-instructions -> config -> maxBytes."""
 
     @staticmethod
     def preset(plugin_lines):
-        return ("- id: preset-standard\n  config:\n    id: standard\n    plugins:\n      - id: persona\n"
-                "      - id: agent-instructions\n" + plugin_lines + "      - id: tool-bash\n")
+        return (
+            "- id: preset-standard\n  config:\n    id: standard\n    plugins:\n      - id: persona\n"
+            "      - id: agent-instructions\n"
+            + plugin_lines
+            + "      - id: tool-bash\n"
+        )
 
     def parse(self, plugin_lines):
         return bg.parse_profile_maxbytes(self.preset(plugin_lines))
 
     def test_rw013_exact_path_is_accepted(self):
         """RW-013: контроль: прямой потомок config плагина (в том числе после соседних ключей) читается."""
-        self.assertEqual(self.parse("        config:\n          maxBytes: 106496\n"), 106496)
-        self.assertEqual(self.parse("        config:\n          prefix: x\n          maxBytes: 4096\n"), 4096)
+        self.assertEqual(
+            self.parse("        config:\n          maxBytes: 106496\n"), 106496
+        )
+        self.assertEqual(
+            self.parse(
+                "        config:\n          prefix: x\n          maxBytes: 4096\n"
+            ),
+            4096,
+        )
         self.assertEqual(bg.parse_profile_maxbytes(PROFILE_YML % 106496), 106496)
 
     def test_rw013_quoted_keys_are_accepted(self):
         """RW-013: ключи и id в кавычках разбираются тем же путём."""
-        text = ("- id: preset-standard\n  config:\n    plugins:\n      - id: \"agent-instructions\"\n"
-                "        \"config\":\n          'maxBytes': 106496\n")
+        text = (
+            '- id: preset-standard\n  config:\n    plugins:\n      - id: "agent-instructions"\n'
+            "        \"config\":\n          'maxBytes': 106496\n"
+        )
         self.assertEqual(bg.parse_profile_maxbytes(text), 106496)
 
     def test_rw013_comments_and_blank_lines_do_not_break_block(self):
         """RW-013: комментарии и пустые строки внутри config не закрывают блок и не считаются потомками."""
-        self.assertEqual(self.parse("        config:\n# c\n\n          # note\n          maxBytes: 7\n"), 7)
+        self.assertEqual(
+            self.parse(
+                "        config:\n# c\n\n          # note\n          maxBytes: 7\n"
+            ),
+            7,
+        )
 
     def test_rw013_maxbytes_without_config_is_unreadable(self):
         """RW-013: maxBytes прямо под плагином (мимо config) - None."""
@@ -377,29 +489,46 @@ class TestRw013ProfilePath(unittest.TestCase):
 
     def test_rw013_nested_maxbytes_is_unreadable(self):
         """RW-013: config.extra.maxBytes и maxBytes глубже первого потомка - None."""
-        self.assertIsNone(self.parse("        config:\n          extra:\n            maxBytes: 5\n"))
-        self.assertIsNone(self.parse("        config:\n          mode: a\n            maxBytes: 5\n"))
+        self.assertIsNone(
+            self.parse("        config:\n          extra:\n            maxBytes: 5\n")
+        )
+        self.assertIsNone(
+            self.parse("        config:\n          mode: a\n            maxBytes: 5\n")
+        )
 
     def test_rw013_maxbytes_after_config_closed_is_unreadable(self):
         """RW-013: maxBytes на уровне config после закрытия блока (соседний ключ плагина) - None."""
-        self.assertIsNone(self.parse("        config:\n          prefix: x\n        maxBytes: 5\n"))
+        self.assertIsNone(
+            self.parse("        config:\n          prefix: x\n        maxBytes: 5\n")
+        )
 
     def test_rw013_duplicate_config_is_unreadable(self):
         """RW-013: второй config у плагина - None, даже с одинаковым значением."""
-        self.assertIsNone(self.parse("        config:\n          maxBytes: 5\n        config:\n          x: 1\n"))
+        self.assertIsNone(
+            self.parse(
+                "        config:\n          maxBytes: 5\n        config:\n          x: 1\n"
+            )
+        )
 
     def test_rw013_duplicate_maxbytes_is_unreadable(self):
         """RW-013: два maxBytes в config (в том числе с разными кавычками) - None."""
-        self.assertIsNone(self.parse("        config:\n          maxBytes: 5\n          \"maxBytes\": 6\n"))
+        self.assertIsNone(
+            self.parse(
+                '        config:\n          maxBytes: 5\n          "maxBytes": 6\n'
+            )
+        )
 
     def test_rw013_non_numeric_value_is_unreadable(self):
         """RW-013: нечисловое и отрицательное значение - None."""
         for value in ("abc", "-1", "5 # c", "''", ""):
             with self.subTest(value=value):
-                self.assertIsNone(self.parse("        config:\n          maxBytes: %s\n" % value))
+                self.assertIsNone(
+                    self.parse("        config:\n          maxBytes: %s\n" % value)
+                )
 
 
 # -- RW-014: история виденных канонов переживает рестарт ---------------------------------------------------------
+
 
 class TestRw014CanonSeenPersistence(GuardCase):
     """RW-014: дайджесты виденных канонов хранятся в state/canon_seen.json: блок со старой копией остаётся KB-формой."""
@@ -454,16 +583,22 @@ class TestRw014CanonSeenPersistence(GuardCase):
         with mock.patch.object(server, "CANON_SEEN_KEEP", 3):
             digests = [self.set_canon("canon %d" % i) for i in range(5)]
         self.assertEqual(list(server._canon_seen), digests[2:])
-        self.assertEqual(json.loads(server._canon_seen_path().read_text("utf-8")), digests[2:])
+        self.assertEqual(
+            json.loads(server._canon_seen_path().read_text("utf-8")), digests[2:]
+        )
 
-    def test_rw014_persist_failure_does_not_break_digest(self):
-        """RW-014: сбой записи истории только в журнал: дайджест канона возвращается, память обновлена."""
-        with mock.patch.object(server, "_atomic_write", side_effect=OSError(28, "No space left")):
+    def test_rw014_persist_failure_is_fail_closed(self):
+        """RW-014/RW-011: сбой записи истории - CanonPersistError, запись в памяти откатана, журнал содержит причину."""
+        with mock.patch.object(
+            server, "_atomic_write", side_effect=OSError(28, "No space left")
+        ):
             with self.capture_logs() as lines:
-                digest = self.set_canon("canon enospc")
-        self.assertTrue(digest)
-        self.assertIn(digest, server._canon_seen)
-        self.assertTrue(any(ln.startswith("canon_seen_persist_failed") for ln in lines), lines)
+                with self.assertRaises(server.CanonPersistError):
+                    self.set_canon("canon enospc")
+        self.assertEqual(dict(server._canon_seen), {})
+        self.assertTrue(
+            any(ln.startswith("canon_seen_persist_failed") for ln in lines), lines
+        )
 
     def test_rw014_gate_keeps_old_block_limited_after_restart(self):
         """RW-014: после рестарта старый KB-блок 61000 Б всё ещё отклоняется предельной проверкой 60000 Б."""
@@ -475,8 +610,13 @@ class TestRw014CanonSeenPersistence(GuardCase):
         server._canon_cache.update(key=None, digest="")
         server._canon_seen_load()
         block = HEAD + body
-        status, answer = self._post_json(dict(BODY, prompt_cache_key="chat-restart",
-                                              messages=[msg("hello"), msg(block)]))
+        status, answer = self._post_json(
+            dict(
+                BODY,
+                prompt_cache_key="chat-restart",
+                messages=[msg("hello"), msg(block)],
+            )
+        )
         self.assertEqual(status, 503, answer)
         self.assertEqual(self.hub.spawns(), [])
 

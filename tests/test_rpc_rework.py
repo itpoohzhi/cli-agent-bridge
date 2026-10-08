@@ -40,7 +40,9 @@ def post_safely(case, body, timeout=60.0):
 
 def no_leaks(case):
     """Процессы/слоты/билеты возвращены: P == число живых процессов."""
-    return wait_until(lambda: server.POOL.used == len(server._rpc_procs) and not server.POOL.queue)
+    return wait_until(
+        lambda: server.POOL.used == len(server._rpc_procs) and not server.POOL.queue
+    )
 
 
 class TestTagsSchema(RpcCase):
@@ -51,16 +53,25 @@ class TestTagsSchema(RpcCase):
         status, _ = self.conv("chat-tags").ask("hi")
         self.assertEqual(status, 200)
         tags = self.hub.inits()[0]["params"].get("tags")
-        self.assertTrue(tags is None or (isinstance(tags, list) and all(isinstance(t, dict) for t in tags)))
+        self.assertTrue(
+            tags is None
+            or (isinstance(tags, list) and all(isinstance(t, dict) for t in tags))
+        )
 
     def test_rw015_fake_rejects_string_tags_like_real_droid(self):
         """RW-015: fake_droid строго валидирует tags: строка в списке -> JSON-RPC error про tags."""
         proc = server.RpcProcess(str(server.WORKSPACE), server.POOL, False)
         try:
             with self.assertRaises(server.RpcError) as caught:
-                proc.call("droid.initialize_session", {
-                    "machineId": "t", "cwd": str(server.WORKSPACE), "modelId": "m",
-                    "tags": ["droid-dsh-bridge"]})
+                proc.call(
+                    "droid.initialize_session",
+                    {
+                        "machineId": "t",
+                        "cwd": str(server.WORKSPACE),
+                        "modelId": "m",
+                        "tags": ["droid-dsh-bridge"],
+                    },
+                )
             self.assertIn("tags", str(caught.exception))
         finally:
             proc.close(mode="term")
@@ -75,7 +86,9 @@ class TestSecretsScrub(RpcCase):
         self._pre = os.environ.get("FACTORY_API_KEY")
         os.environ["FACTORY_API_KEY"] = self.CANARY
         self.addCleanup(self._restore)
-        self.addCleanup(self._check_restored)  # выполнится после cleanup общего setUp (LIFO)
+        self.addCleanup(
+            self._check_restored
+        )  # выполнится после cleanup общего setUp (LIFO)
         super().setUp()
 
     def _restore(self):
@@ -95,8 +108,11 @@ class TestSecretsScrub(RpcCase):
         spawn = self.hub.spawns()[0]
         self.assertTrue(spawn["factory_api_key_present"])
         self.assertTrue(spawn["factory_api_key_expected"])
-        leaks = [str(p) for p in Path(self._tmp.name).rglob("*")
-                 if p.is_file() and self.CANARY.encode() in p.read_bytes()]
+        leaks = [
+            str(p)
+            for p in Path(self._tmp.name).rglob("*")
+            if p.is_file() and self.CANARY.encode() in p.read_bytes()
+        ]
         self.assertEqual(leaks, [])
 
     def test_rw014_env_restored_even_when_test_body_fails(self):
@@ -111,11 +127,15 @@ class TestTurnIdFilter(RpcCase):
 
     def test_rw013_stale_terminal_after_arming_is_ignored(self):
         """RW-013: stale terminal (turnId прошлого хода) во время финального add: ход не завершён, usage/output свои."""
-        self.hub.script([
-            {"steps": [{"op": "text", "text": "A0"}]},
-            {"steps": [{"op": "stale_terminal"}, {"op": "text", "text": "A1"}],
-             "usage": {"inputTokens": 21, "outputTokens": 2}},
-        ])
+        self.hub.script(
+            [
+                {"steps": [{"op": "text", "text": "A0"}]},
+                {
+                    "steps": [{"op": "stale_terminal"}, {"op": "text", "text": "A1"}],
+                    "usage": {"inputTokens": 21, "outputTokens": 2},
+                },
+            ]
+        )
         chat = self.conv("chat-stale")
         self.assertEqual(chat.ask("q0")[0], 200)
         status, body = chat.ask("q1")
@@ -131,16 +151,30 @@ class TestRetractionCounter(RpcCase):
         """RW-012: draft -> retract -> final -> реапер -> restore: тот же SID, load вместо init, только суффикс."""
         clock = FakeClock(1000.0)
         server._clock = clock
-        self.hub.script([{"steps": [{"op": "text", "text": "draft"}, {"op": "retry"},
-                                    {"op": "retract"}, {"op": "text", "text": "final"}]}])
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {"op": "text", "text": "draft"},
+                        {"op": "retry"},
+                        {"op": "retract"},
+                        {"op": "text", "text": "final"},
+                    ]
+                }
+            ]
+        )
         chat = self.conv("chat-retract")
         status, body = chat.ask("q0")
         self.assertEqual(status, 200)
         self.assertEqual(body["choices"][0]["message"]["content"], "final")
         state = self.chat_of("chat-retract")
         sid = state.sid
-        saved = json.loads((self.hub.base / "sessions" / f"{sid}.json").read_text(encoding="utf-8"))
-        real_in_droid = sum(1 for m in saved["messages"] if not server._is_service_message(m))
+        saved = json.loads(
+            (self.hub.base / "sessions" / f"{sid}.json").read_text(encoding="utf-8")
+        )
+        real_in_droid = sum(
+            1 for m in saved["messages"] if not server._is_service_message(m)
+        )
         self.assertEqual(state.droid_real, real_in_droid)
         clock.advance(2700)
         self.assertEqual(server.REGISTRY.reap_once(), [state.key_hash[:8]])
@@ -175,11 +209,18 @@ class TestRecordValidation(RpcCase):
                 mutate(rec)
                 record.write_text(json.dumps(rec), encoding="utf-8")
                 inits = len(self.hub.inits())
-                status, _ = post_safely(self, dict(BODY, prompt_cache_key=key, messages=chat.msgs + [msg("q1")]))
+                status, _ = post_safely(
+                    self,
+                    dict(BODY, prompt_cache_key=key, messages=chat.msgs + [msg("q1")]),
+                )
                 self.assertEqual(status, 200)
-                self.assertEqual(len(self.hub.inits()), inits + 1)  # replay из истории, без load
+                self.assertEqual(
+                    len(self.hub.inits()), inits + 1
+                )  # replay из истории, без load
                 self.assertEqual(self.chat_of(key).state, "READY")
-                self.assertIsNotNone(server._read_record(record))  # повреждённая запись заменена
+                self.assertIsNotNone(
+                    server._read_record(record)
+                )  # повреждённая запись заменена
                 self.assertTrue(no_leaks(self))
 
 
@@ -216,8 +257,14 @@ class TestSettingsFailClosed(RpcCase):
         "no_disabled_ids": {"omit_disabled_ids": True},
         "tools_without_ids": {"raw_tools": [{"name": "Read"}, {"name": "Execute"}]},
         "empty_catalogue": {"raw_tools": []},
-        "skills_mismatch": {"echo_flags": True, "flags_override": {"disableBuiltinSkills": False}},
-        "autoreject_mismatch": {"echo_flags": True, "flags_override": {"autoRejectPermissionRequests": False}},
+        "skills_mismatch": {
+            "echo_flags": True,
+            "flags_override": {"disableBuiltinSkills": False},
+        },
+        "autoreject_mismatch": {
+            "echo_flags": True,
+            "flags_override": {"autoRejectPermissionRequests": False},
+        },
     }
 
     def test_rw005_each_scenario_raises_rpc_error_before_add_user_message(self):
@@ -261,8 +308,9 @@ class TestDroidReceipt(RpcCase):
         image = image_dir / "droid"
         image.write_bytes(content)
         image.chmod(0o500)
-        server._atomic_write(server._receipt_path(), json.dumps(
-            make_receipt(image, digest)).encode())
+        server._atomic_write(
+            server._receipt_path(), json.dumps(make_receipt(image, digest)).encode()
+        )
         return image, digest
 
     def _ask(self):
@@ -291,7 +339,9 @@ class TestDroidReceipt(RpcCase):
         os.environ["DROID_BIN"] = "/usr/local/bin/droid-global-updated"
         status, _ = self._ask()
         self.assertEqual(status, 200)
-        self.assertEqual(self.hub.spawns()[0]["droid_bin"], os.path.realpath(str(image)))
+        self.assertEqual(
+            self.hub.spawns()[0]["droid_bin"], os.path.realpath(str(image))
+        )
 
 
 class TestDroidImageTool(RpcCase):
@@ -301,19 +351,28 @@ class TestDroidImageTool(RpcCase):
         """RW-007: образ 0500 в каталоге 0700, receipt атомарный; мост запускает его как DROID_BIN."""
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
         import droid_image
+
         source = Path(self._tmp.name) / "global-droid"
-        source.write_bytes(self.hub.launcher.read_bytes())  # fake_droid отвечает на пробы как настоящий
+        source.write_bytes(
+            self.hub.launcher.read_bytes()
+        )  # fake_droid отвечает на пробы как настоящий
         source.chmod(0o755)
         receipt = droid_image.install_image(source, server.WORKSPACE)
         image = Path(receipt["image_path"])
         self.assertEqual(oct(image.stat().st_mode & 0o777), "0o500")
         self.assertEqual(oct(image.parent.stat().st_mode & 0o777), "0o700")
-        self.assertEqual(receipt["image_sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
-        self.assertEqual(source.read_bytes(), self.hub.launcher.read_bytes())  # глобальный бинарь не тронут
+        self.assertEqual(
+            receipt["image_sha256"], hashlib.sha256(source.read_bytes()).hexdigest()
+        )
+        self.assertEqual(
+            source.read_bytes(), self.hub.launcher.read_bytes()
+        )  # глобальный бинарь не тронут
         server.RECEIPT_REQUIRED = True
         status, _ = self._post_json(dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 200)
-        self.assertEqual(self.hub.spawns()[-1]["droid_bin"], os.path.realpath(str(image)))  # [0] — зонд квалификации
+        self.assertEqual(
+            self.hub.spawns()[-1]["droid_bin"], os.path.realpath(str(image))
+        )  # [0] — зонд квалификации
 
 
 class TestByteBudgets(RpcCase):
@@ -322,20 +381,39 @@ class TestByteBudgets(RpcCase):
     def test_rw008_oversized_rpc_line_is_rejected_and_resources_returned(self):
         """RW-008: строка RPC больше лимита -> 502, процесс закрыт, слот/билет возвращены."""
         server.MAX_RPC_LINE_BYTES = 50_000
-        self.hub.script([{"steps": [{"op": "big_line", "bytes": 200_000}, {"op": "text", "text": "late"}]}])
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {"op": "big_line", "bytes": 200_000},
+                        {"op": "text", "text": "late"},
+                    ]
+                }
+            ]
+        )
         status, body = self._post_json(dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
         pid = self.hub.spawns()[0]["pid"]
         self.assertTrue(self.wait_gone(pid))
         self.assertTrue(no_leaks(self))
-        self.assertTrue(wait_until(lambda: server.POOL.used == 0))  # слот возвращается после waitpid
+        self.assertTrue(
+            wait_until(lambda: server.POOL.used == 0)
+        )  # слот возвращается после waitpid
 
     def test_rw008_turn_text_accumulation_is_capped(self):
         """RW-008: накопление text хода сверх лимита -> предусмотренная ошибка, не OOM."""
         server.MAX_TURN_TEXT_BYTES = 100_000
-        self.hub.script([{"steps": [{"op": "flood", "count": 50, "size": 10_000},
-                                    {"op": "text", "text": "tail"}]}])
+        self.hub.script(
+            [
+                {
+                    "steps": [
+                        {"op": "flood", "count": 50, "size": 10_000},
+                        {"op": "text", "text": "tail"},
+                    ]
+                }
+            ]
+        )
         status, body = self._post_json(dict(BODY, messages=[msg("hi")]))
         self.assertEqual(status, 502)
         self.assertIn("limit", json.dumps(body))
@@ -348,7 +426,10 @@ class TestByteBudgets(RpcCase):
         proc = server.RpcProcess(str(server.WORKSPACE), server.POOL, False)
         try:
             with self.assertRaises(server.RpcEof):
-                proc.call("droid.initialize_session", {"machineId": "t", "cwd": str(server.WORKSPACE)})
+                proc.call(
+                    "droid.initialize_session",
+                    {"machineId": "t", "cwd": str(server.WORKSPACE)},
+                )
             self.assertTrue(wait_until(lambda: proc.err_box))
             self.assertLessEqual(sum(len(part) for part in proc.err_box), 10_000 + 200)
         finally:
@@ -359,8 +440,10 @@ class TestByteBudgets(RpcCase):
         server.MAX_INBOX_BYTES = 200_000
         proc = server.RpcProcess(str(server.WORKSPACE), server.POOL, False)
         try:
-            big = {"method": "droid.session_notification",
-                   "params": {"notification": {"type": "x", "pad": "A" * 100_000}}}
+            big = {
+                "method": "droid.session_notification",
+                "params": {"notification": {"type": "x", "pad": "A" * 100_000}},
+            }
             for _ in range(50):
                 proc._on_message(dict(big))
             kinds = []
@@ -392,9 +475,12 @@ class TestByteBudgets(RpcCase):
 class TestSpoolEnospc(ImageCase):
     """RW-008/RW-004: ENOSPC при spool картинок — штатный 502 proxy_error (без новых кодов), ресурсы возвращены."""
 
-    def test_rw008_enospc_on_image_spool_gives_502_proxy_error_and_frees_resources(self):
+    def test_rw008_enospc_on_image_spool_gives_502_proxy_error_and_frees_resources(
+        self,
+    ):
         """RW-008/RW-004: write_bytes картинки -> OSError(ENOSPC): 502 proxy_error (новых кодов нет), lease/слот/каталог свободны."""
         from bridge_testlib import image_part, make_png, text_part
+
         server.IMAGE_PROBE = True
         self.probe_stand()
         real = Path.write_bytes
@@ -406,9 +492,19 @@ class TestSpoolEnospc(ImageCase):
 
         Path.write_bytes = full_disk
         try:
-            status, body = post_safely(self, {
-                "model": "claude-sonnet-5-5", "prompt_cache_key": "chat-img",
-                "messages": [{"role": "user", "content": [text_part("look"), image_part(make_png(64))]}]})
+            status, body = post_safely(
+                self,
+                {
+                    "model": "claude-sonnet-5-5",
+                    "prompt_cache_key": "chat-img",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [text_part("look"), image_part(make_png(64))],
+                        }
+                    ],
+                },
+            )
         finally:
             Path.write_bytes = real
         self.assertEqual(status, 502)
@@ -427,8 +523,9 @@ class TestDeliveryDecoupled(RpcCase):
         sock = socket.socket()
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
         sock.connect(("127.0.0.1", self.port))
-        payload = json.dumps(dict(BODY, stream=True, prompt_cache_key=key,
-                                  messages=[msg("go " + key)])).encode()
+        payload = json.dumps(
+            dict(BODY, stream=True, prompt_cache_key=key, messages=[msg("go " + key)])
+        ).encode()
         sock.sendall(self._raw_request(payload))
         return sock
 
@@ -436,19 +533,44 @@ class TestDeliveryDecoupled(RpcCase):
         """RW-009: 4 медленных клиента завершили вычисление; 5-й запрос и повторный ход ключа A идут без ожидания."""
         server.MAX_CONCURRENT = 4
         big = "X" * 3_000_000
-        self.hub.script([{"steps": [{"op": "text", "text": big}]}] * 4
-                        + [{"steps": [{"op": "text", "text": "FIFTH"}]},
-                           {"steps": [{"op": "text", "text": "A-AGAIN"}]}])
+        self.hub.script(
+            [{"steps": [{"op": "text", "text": big}]}] * 4
+            + [
+                {"steps": [{"op": "text", "text": "FIFTH"}]},
+                {"steps": [{"op": "text", "text": "A-AGAIN"}]},
+            ]
+        )
         socks = [self._slow_client(f"slow-{i}") for i in range(4)]
         try:
-            self.assertTrue(wait_until(lambda: len(self.hub.admissions()) >= 4, timeout=30))
-            time.sleep(1.0)  # вычисление закончено, сервер застрял на записи в закрытое окно клиента
+            self.assertTrue(
+                wait_until(lambda: len(self.hub.admissions()) >= 4, timeout=30)
+            )
+            time.sleep(
+                1.0
+            )  # вычисление закончено, сервер застрял на записи в закрытое окно клиента
             result = {}
-            fifth = threading.Thread(target=lambda: result.update(
-                fifth=post_safely(self, dict(BODY, prompt_cache_key="fifth", messages=[msg("five")]), 40)))
-            again = threading.Thread(target=lambda: result.update(
-                again=post_safely(self, dict(BODY, prompt_cache_key="slow-0",
-                                             messages=[msg("other history")]), 40)))
+            fifth = threading.Thread(
+                target=lambda: result.update(
+                    fifth=post_safely(
+                        self,
+                        dict(BODY, prompt_cache_key="fifth", messages=[msg("five")]),
+                        40,
+                    )
+                )
+            )
+            again = threading.Thread(
+                target=lambda: result.update(
+                    again=post_safely(
+                        self,
+                        dict(
+                            BODY,
+                            prompt_cache_key="slow-0",
+                            messages=[msg("other history")],
+                        ),
+                        40,
+                    )
+                )
+            )
             fifth.start()
             again.start()
             fifth.join(45)
@@ -460,8 +582,14 @@ class TestDeliveryDecoupled(RpcCase):
             for sock in socks:
                 sock.close()
         # Обрыв доставки не меняет checkpoint: чаты не DIRTY.
-        self.assertTrue(wait_until(lambda: all(
-            self.chat_of(f"slow-{i}").state in ("READY", "PERSISTED") for i in range(1, 4))))
+        self.assertTrue(
+            wait_until(
+                lambda: all(
+                    self.chat_of(f"slow-{i}").state in ("READY", "PERSISTED")
+                    for i in range(1, 4)
+                )
+            )
+        )
         self.assertTrue(no_leaks(self))
 
 
@@ -473,7 +601,9 @@ class TestRpcWriteDeadline(RpcCase):
     def _stalled_request(self, results):
         self.hub.configure(stall_after=0)
         body = dict(BODY, messages=[msg(self.BIG, "system"), msg("hi")])
-        thread = threading.Thread(target=lambda: results.update(r=post_safely(self, body, 60)), daemon=True)
+        thread = threading.Thread(
+            target=lambda: results.update(r=post_safely(self, body, 60)), daemon=True
+        )
         thread.start()
         self.assertTrue(wait_until(lambda: len(self.hub.spawns()) == 1, timeout=15))
         time.sleep(0.5)
@@ -538,8 +668,13 @@ class TestInstructionBudget(RpcCase):
         return self.HEAD + "a" * (size - len(self.HEAD.encode()))
 
     def _ask(self, *blocks):
-        return self._post_json(dict(BODY, prompt_cache_key="chat-instr",
-                                    messages=[msg("hello")] + [msg(b) for b in blocks]))
+        return self._post_json(
+            dict(
+                BODY,
+                prompt_cache_key="chat-instr",
+                messages=[msg("hello")] + [msg(b) for b in blocks],
+            )
+        )
 
     def _refused(self, status, body):
         self.assertEqual(status, 503, body)
@@ -561,12 +696,25 @@ class TestInstructionBudget(RpcCase):
         """RW-001: блок не из канона: предел maxBytes(106496) − запас; 60 001 Б проходит, на 1 Б больше предела — 503."""
         limit = server.b_guard.DEFAULT_MAXBYTES - server.INSTR_NONKB_MARGIN
         self.assertEqual(self._ask(self.other_block(60001))[0], 200)
-        status, body = self._post_json(dict(BODY, prompt_cache_key="chat-instr-2",
-                                            messages=[msg("hello"), msg(self.other_block(limit + 1))]))
+        status, body = self._post_json(
+            dict(
+                BODY,
+                prompt_cache_key="chat-instr-2",
+                messages=[msg("hello"), msg(self.other_block(limit + 1))],
+            )
+        )
         self.assertEqual(status, 503, body)
         self.assertEqual(body["error"]["type"], "launcher_unavailable")
-        self.assertEqual(self._post_json(dict(BODY, prompt_cache_key="chat-instr-3",
-                                              messages=[msg("hello"), msg(self.other_block(limit))]))[0], 200)
+        self.assertEqual(
+            self._post_json(
+                dict(
+                    BODY,
+                    prompt_cache_key="chat-instr-3",
+                    messages=[msg("hello"), msg(self.other_block(limit))],
+                )
+            )[0],
+            200,
+        )
 
     def test_rw002_small_first_block_does_not_hide_oversized_second(self):
         """RW-002: маленький первый блок и второй 60 001 Б: проверяются ВСЕ блоки, а не первый."""
@@ -577,8 +725,13 @@ class TestInstructionBudget(RpcCase):
     def test_rw002_marker_beyond_first_4096_bytes_is_found(self):
         """RW-002: маркер дальше 4096 Б от начала user-сообщения всё равно ловится."""
         block = self.canon_block(60001)
-        status, body = self._post_json(dict(BODY, prompt_cache_key="chat-instr",
-                                            messages=[msg("p" * 5000 + "\n" + block)]))
+        status, body = self._post_json(
+            dict(
+                BODY,
+                prompt_cache_key="chat-instr",
+                messages=[msg("p" * 5000 + "\n" + block)],
+            )
+        )
         self._refused(status, body)
 
 

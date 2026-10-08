@@ -25,6 +25,13 @@
 - `/health.ok` равен `false`, если допуск образа обязателен, а receipt невалиден (набор из 7 ключей не менялся).
 
 ### Fixed
+- Замечания Совета Cycle 5: счёт истории моста исключает user-вставки с пустым `content` (корень `HISTORY_MISMATCH droid=5
+  bridge=8` после idle); `DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS` по умолчанию 50000 (счёт `{ [ , :` до `json.loads`);
+  сбой `Thread.start` не выходит из `close()`, сбой закрытия одного ребёнка не прерывает `shutdown_all` и финальный
+  `force_kill`; бюджет доставки считает память CPython (обе копии текста), а не UTF-8; `b_guard` отклоняет повтор `config`
+  в любой форме (flow/quoted); сбой записи `canon_seen.json` — fail-closed (503 `launcher_unavailable`, без записи в памяти);
+  типизация дельты (`basedpyright`: новых ошибок нет, 3 baseline перечислены в README); `droid_image` закрывает stdin/stdout
+  и в фоне закрывает stdout при живом читателе; тест-харнесс закрывает handle `.writer.lock`.
 - Cycle-4 (RW-005…RW-023): события неизвестных id/parent не создают слот и не попадают в ответ на путях cold/hot/restore;
   терминал не принимается, пока неизвестен id user-сообщения хода; поздний `create_message` завершённого сообщения не меняет
   счётчик истории; сбой `Thread.start` при закрытии процесса закрывает его синхронно; цепочка освобождения L/T/P независима по

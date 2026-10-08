@@ -17,17 +17,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from bridge_testlib import (  # noqa: E402
-    BridgeCase, chat_body, find_model, load_raw_fleet, make_proof,
+    BridgeCase,
+    chat_body,
+    find_model,
+    load_raw_fleet,
+    make_proof,
 )
 
 REJECT_STRICT = re.compile(
     r"^reject reason=[a-z0-9_]+ model=(claude-sonnet-5-5|gemini-3\.8-flash|grok-4\.7|"
-    r"deepseek-v4\.1-flash|gpt-6\.1-sol|glm-5\.3|unknown) model_len=[0-9]+ client=[0-9a-f.:]+$")
+    r"deepseek-v4\.1-flash|gpt-6\.1-sol|glm-5\.3|unknown) model_len=[0-9]+ client=[0-9a-f.:]+$"
+)
 
 EXEC_LINE = re.compile(
     r"^exec model=(?P<model>\S+) effort=(?P<effort>\S+) effort_source=(?P<source>\S+) "
     r"autonomy=(?P<autonomy>\S+) autonomy_source=(?P<autonomy_source>\S+) "
-    r"prompt_bytes=(?P<bytes>\d+) (?P<tag>client=\S+ ua=.*)$")
+    r"prompt_bytes=(?P<bytes>\d+) (?P<tag>client=\S+ ua=.*)$"
+)
 DONE_LINE = re.compile(r"^done model=\S+ rc=\d+ state=\S+ .*client=\S+ ua=.*$")
 
 
@@ -64,7 +70,8 @@ class TestCatalogClassI(unittest.TestCase):
         item["images"]["status"] = "confirmed"
         item["images"]["method"] = "workspace-read"
         item["images"]["proof"] = make_proof(
-            binary, efforts_proven if efforts_proven is not None else item["efforts"])
+            binary, efforts_proven if efforts_proven is not None else item["efforts"]
+        )
         self.data["technical_ref"]["droid_binary_path"] = str(binary)
         return item
 
@@ -72,7 +79,9 @@ class TestCatalogClassI(unittest.TestCase):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "claude-sonnet-5-5")
         self.assertEqual(len(catalog["order"]), 6)
-        self.assertEqual(server._build_catalog(copy.deepcopy(self.data))["schema_version"], 2)
+        self.assertEqual(
+            server._build_catalog(copy.deepcopy(self.data))["schema_version"], 2
+        )
 
     def test_broken_file_refuses_start(self):
         broken = Path(self._tmp.name) / "fleet.json"
@@ -133,10 +142,16 @@ class TestCatalogClassI(unittest.TestCase):
 
     def test_confirmed_partial_efforts_proven_starts(self):
         # Класс II: неполный proof — не отказ старта (деградируют только непокрытые effort).
-        item = self._bind_confirmed(model_id="deepseek-v4.1-flash", efforts_proven=["high"])
+        item = self._bind_confirmed(
+            model_id="deepseek-v4.1-flash", efforts_proven=["high"]
+        )
         catalog = server._build_catalog(self.data)
-        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["images"]["proof"]["efforts_proven"],
-                         ["high"])
+        self.assertEqual(
+            catalog["models"]["deepseek-v4.1-flash"]["images"]["proof"][
+                "efforts_proven"
+            ],
+            ["high"],
+        )
         self.assertEqual(item["images"]["status"], "confirmed")
 
     def test_probe_without_flag(self):
@@ -173,9 +188,12 @@ class TestEffortAndModel(BridgeCase):
         return status, init, source, autonomy_source
 
     def test_defaults_when_model_and_effort_absent(self):
-        for payload in ({}, {"model": None, "reasoning_effort": None},
-                        {"model": "", "reasoning_effort": ""},
-                        {"model": "   ", "reasoning_effort": "   "}):
+        for payload in (
+            {},
+            {"model": None, "reasoning_effort": None},
+            {"model": "", "reasoning_effort": ""},
+            {"model": "   ", "reasoning_effort": "   "},
+        ):
             status, init, source, _ = self._post_logged(chat_body(**payload))
             self.assertEqual(status, 200)
             self.assertEqual(init["modelId"], "claude-sonnet-5-5")
@@ -195,14 +213,18 @@ class TestEffortAndModel(BridgeCase):
         for model, efforts in wanted.items():
             self.assertEqual(server.FLEET["models"][model]["efforts"], efforts, model)
             for effort in efforts:
-                status, init, source, _ = self._post_logged(chat_body(model=model, effort=effort))
+                status, init, source, _ = self._post_logged(
+                    chat_body(model=model, effort=effort)
+                )
                 self.assertEqual(status, 200, (model, effort))
                 self.assertEqual(init["modelId"], model)
                 self.assertEqual(init["reasoningEffort"], effort)
                 self.assertEqual(source, "request")
         # За пределами каталога — отказ до spawn (xhigh для sonnet недопустим).
         before = len(self.hub.spawns())
-        status, body = self._post_json(chat_body(model="claude-sonnet-5-5", effort="xhigh"))
+        status, body = self._post_json(
+            chat_body(model="claude-sonnet-5-5", effort="xhigh")
+        )
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
         self.assertEqual(len(self.hub.spawns()), before)
@@ -226,14 +248,21 @@ class TestEffortAndModel(BridgeCase):
             self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
             self.assertEqual(len(self.hub.spawns()), before)
         for bad in (5, ["high"], {"level": "high"}, True):
-            status, body = self._post_json(chat_body(model="claude-sonnet-5-5", effort=bad))
+            status, body = self._post_json(
+                chat_body(model="claude-sonnet-5-5", effort=bad)
+            )
             self.assertEqual(status, 400)
             self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
 
     def test_models_outside_fleet_rejected(self):
-        cases = ["Claude-Sonnet-5-5", "kimi-k3", "claude-opus-5-5",
-                 "x\nexec model=claude-sonnet-5-5 effort=high effort_source=request",
-                 "sk-SECRET-0123456789abcdef", "A" * 5000]
+        cases = [
+            "Claude-Sonnet-5-5",
+            "kimi-k3",
+            "claude-opus-5-5",
+            "x\nexec model=claude-sonnet-5-5 effort=high effort_source=request",
+            "sk-SECRET-0123456789abcdef",
+            "A" * 5000,
+        ]
         for model in cases:
             before = len(self.hub.spawns())
             status, body = self._post_json(chat_body(model=model))
@@ -247,14 +276,17 @@ class TestEffortAndModel(BridgeCase):
 
     def test_model_and_effort_are_stripped(self):
         status, init, source, _ = self._post_logged(
-            chat_body(model=" claude-sonnet-5-5 ", effort=" high "))
+            chat_body(model=" claude-sonnet-5-5 ", effort=" high ")
+        )
         self.assertEqual(status, 200)
         self.assertEqual(init["modelId"], "claude-sonnet-5-5")
         self.assertEqual(init["reasoningEffort"], "high")
         self.assertEqual(source, "request")
 
     def test_autonomy_default_is_high(self):
-        status, init, _, autonomy_source = self._post_logged(chat_body(model="claude-sonnet-5-5"))
+        status, init, _, autonomy_source = self._post_logged(
+            chat_body(model="claude-sonnet-5-5")
+        )
         self.assertEqual(status, 200)
         self.assertEqual(init["autonomyLevel"], "high")
         self.assertEqual(autonomy_source, "default")
@@ -262,12 +294,16 @@ class TestEffortAndModel(BridgeCase):
     def test_autonomy_levels_accepted(self):
         for level in ("low", "medium", "high", "off"):
             status, init, _, autonomy_source = self._post_logged(
-                chat_body(model="deepseek-v4.1-flash", effort="max", autonomy=level))
+                chat_body(model="deepseek-v4.1-flash", effort="max", autonomy=level)
+            )
             self.assertEqual(status, 200, level)
-            self.assertEqual(init["autonomyLevel"], level)  # off задаётся RPC, не опущенным флагом
+            self.assertEqual(
+                init["autonomyLevel"], level
+            )  # off задаётся RPC, не опущенным флагом
             self.assertEqual(autonomy_source, "request")
         status, init, _, autonomy_source = self._post_logged(
-            chat_body(model="gemini-3.8-flash", autonomy=" low "))
+            chat_body(model="gemini-3.8-flash", autonomy=" low ")
+        )
         self.assertEqual(status, 200)
         self.assertEqual(init["autonomyLevel"], "low")
         self.assertEqual(autonomy_source, "request")
@@ -275,27 +311,32 @@ class TestEffortAndModel(BridgeCase):
     def test_autonomy_bad_rejected(self):
         for bad in ("ultra", "HIGH", "none", "skip", "high\nx"):
             before = len(self.hub.spawns())
-            status, body = self._post_json(chat_body(model="claude-sonnet-5-5",
-                                                    autonomy=bad))
+            status, body = self._post_json(
+                chat_body(model="claude-sonnet-5-5", autonomy=bad)
+            )
             self.assertEqual(status, 400, bad)
             self.assertEqual(body["error"]["type"], "unsupported_autonomy")
             self.assertEqual(len(self.hub.spawns()), before)
         for bad in (5, ["high"], {"level": "high"}, True):
-            status, body = self._post_json(chat_body(model="claude-sonnet-5-5",
-                                                    autonomy=bad))
+            status, body = self._post_json(
+                chat_body(model="claude-sonnet-5-5", autonomy=bad)
+            )
             self.assertEqual(status, 400)
             self.assertEqual(body["error"]["type"], "unsupported_autonomy")
 
     def test_reasoning_object_rejected(self):
         before = len(self.hub.spawns())
-        status, body = self._post_json(chat_body(model="claude-sonnet-5-5",
-                                                 reasoning={"effort": "high"}))
+        status, body = self._post_json(
+            chat_body(model="claude-sonnet-5-5", reasoning={"effort": "high"})
+        )
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "unsupported_parameter")
         self.assertEqual(len(self.hub.spawns()), before)
 
     def test_stream_with_bad_effort_is_plain_json_400(self):
-        status, raw = self._post(chat_body(model="claude-sonnet-5-5", effort="max", stream=True))
+        status, raw = self._post(
+            chat_body(model="claude-sonnet-5-5", effort="max", stream=True)
+        )
         self.assertEqual(status, 400)
         body = json.loads(raw)
         self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
@@ -315,8 +356,20 @@ class TestHealthAndModels(BridgeCase):
     def test_health_exactly_seven_keys(self):
         status, body = self._get("/health")
         self.assertEqual(status, 200)
-        self.assertEqual(sorted(body), sorted(["ok", "transport", "model", "active",
-                                               "max_concurrent", "tool_emulation", "uptime_s"]))
+        self.assertEqual(
+            sorted(body),
+            sorted(
+                [
+                    "ok",
+                    "transport",
+                    "model",
+                    "active",
+                    "max_concurrent",
+                    "tool_emulation",
+                    "uptime_s",
+                ]
+            ),
+        )
         self.assertNotIn("default_auto", body)
 
     def test_models_list(self):
@@ -326,8 +379,10 @@ class TestHealthAndModels(BridgeCase):
         self.assertEqual(len(body["data"]), 6)
         self.assertEqual(body["data"][0]["id"], "claude-sonnet-5-5")
         for entry in body["data"]:
-            self.assertEqual(sorted(entry), sorted(["id", "object", "owned_by", "created",
-                                                    "context_length"]))
+            self.assertEqual(
+                sorted(entry),
+                sorted(["id", "object", "owned_by", "created", "context_length"]),
+            )
         self.assertNotIn("claude-opus-5-5", [e["id"] for e in body["data"]])
         status, _ = self._get("/v1/models", auth=False)
         self.assertEqual(status, 401)
@@ -348,7 +403,9 @@ class TestJournal(BridgeCase):
         self.assertNotIn("--auto", "\n".join(lines))
         joined = "\n".join(lines)
         self.assertNotIn(str(server.WORKSPACE), joined)
-        self.assertNotIn(execs[0].group("tag").split("ua=")[0].replace("client=", "").strip(), "")
+        self.assertNotIn(
+            execs[0].group("tag").split("ua=")[0].replace("client=", "").strip(), ""
+        )
         self.assertIn("client=127.0.0.1", execs[0].group("tag"))
 
     def test_reject_line_strict_format_and_no_client_string(self):
@@ -361,7 +418,9 @@ class TestJournal(BridgeCase):
         self.assertTrue(REJECT_STRICT.match(rejects[0]), rejects[0])
         self.assertEqual(len([ln for ln in lines if ln.startswith("exec model=")]), 0)
         joined = "\n".join(lines)
-        self.assertNotIn("exec model=claude-sonnet-5-5 effort=high", joined.replace(rejects[0], ""))
+        self.assertNotIn(
+            "exec model=claude-sonnet-5-5 effort=high", joined.replace(rejects[0], "")
+        )
         self.assertNotIn("x\n", joined)
 
     def test_model_len_reported_for_untrusted_model(self):
@@ -376,12 +435,16 @@ class TestAdmissionBudget(BridgeCase):
     def test_budget_exhausted_gives_503_before_body(self):
         server._budget = server._ByteBudget(64)
         with self.capture_logs() as lines:
-            status, body = self._post_json(chat_body(model="claude-sonnet-5-5", content="x" * 200))
+            status, body = self._post_json(
+                chat_body(model="claude-sonnet-5-5", content="x" * 200)
+            )
         self.assertEqual(status, 503)
         self.assertEqual(body["error"]["type"], "overloaded")
         self.assertEqual(body["error"]["code"], 503)
         self.assertEqual(len(self.hub.spawns()), 0)
-        self.assertTrue(any("reject reason=overloaded model=unknown" in ln for ln in lines))
+        self.assertTrue(
+            any("reject reason=overloaded model=unknown" in ln for ln in lines)
+        )
         self.assertEqual(server._budget._used, 0)  # резерв снят в любом исходе
 
     def test_budget_unit(self):

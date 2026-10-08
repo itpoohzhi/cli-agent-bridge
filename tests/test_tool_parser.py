@@ -16,14 +16,19 @@ from server import (  # noqa: E402
     _tools_section,
 )
 
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get current weather",
-        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
-    },
-}]
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    }
+]
 
 
 class Collector:
@@ -52,36 +57,55 @@ class TestToolCallParser(unittest.TestCase):
         c = Collector()
         p = ToolCallParser(c.on_content, c.on_call)
         p.feed("Pre text ")
-        p.feed(TOOL_CALL_OPEN[:5])            # разрыв прямо внутри тега
+        p.feed(TOOL_CALL_OPEN[:5])  # разрыв прямо внутри тега
         p.feed(TOOL_CALL_OPEN[5:])
         p.feed('{"name": "get_we')
         p.feed('ather", "arguments": {"city": "Berlin"}}')
         p.feed(TOOL_CALL_CLOSE)
         p.finish()
         self.assertEqual("".join(c.content), "Pre text ")
-        self.assertEqual(c.calls, [{"name": "get_weather", "arguments": {"city": "Berlin"}}])
+        self.assertEqual(
+            c.calls, [{"name": "get_weather", "arguments": {"city": "Berlin"}}]
+        )
 
     def test_multiple_calls_in_row(self):
         c = Collector()
         p = ToolCallParser(c.on_content, c.on_call)
-        p.feed(TOOL_CALL_OPEN + '{"name": "a", "arguments": {}}' + TOOL_CALL_CLOSE
-               + TOOL_CALL_OPEN + '{"name": "b"}' + TOOL_CALL_CLOSE)
+        p.feed(
+            TOOL_CALL_OPEN
+            + '{"name": "a", "arguments": {}}'
+            + TOOL_CALL_CLOSE
+            + TOOL_CALL_OPEN
+            + '{"name": "b"}'
+            + TOOL_CALL_CLOSE
+        )
         p.finish()
-        self.assertEqual(c.calls, [{"name": "a", "arguments": {}}, {"name": "b", "arguments": {}}])
+        self.assertEqual(
+            c.calls, [{"name": "a", "arguments": {}}, {"name": "b", "arguments": {}}]
+        )
         self.assertEqual("".join(c.content), "")
 
     def test_close_tag_inside_string_is_not_boundary(self):
         c = Collector()
         p = ToolCallParser(c.on_content, c.on_call)
-        payload = json.dumps({"name": "t", "arguments": {"text": "x " + TOOL_CALL_CLOSE + " y"}})
+        payload = json.dumps(
+            {"name": "t", "arguments": {"text": "x " + TOOL_CALL_CLOSE + " y"}}
+        )
         p.feed(TOOL_CALL_OPEN + payload + TOOL_CALL_CLOSE)
         p.finish()
-        self.assertEqual(c.calls, [{"name": "t", "arguments": {"text": "x " + TOOL_CALL_CLOSE + " y"}}])
+        self.assertEqual(
+            c.calls,
+            [{"name": "t", "arguments": {"text": "x " + TOOL_CALL_CLOSE + " y"}}],
+        )
 
     def test_escaped_quote_does_not_end_string(self):
         c = Collector()
         p = ToolCallParser(c.on_content, c.on_call)
-        p.feed(TOOL_CALL_OPEN + '{"name": "t", "arguments": {"q": "a\\"b"}}' + TOOL_CALL_CLOSE)
+        p.feed(
+            TOOL_CALL_OPEN
+            + '{"name": "t", "arguments": {"q": "a\\"b"}}'
+            + TOOL_CALL_CLOSE
+        )
         p.finish()
         self.assertEqual(c.calls, [{"name": "t", "arguments": {"q": 'a"b'}}])
 
@@ -113,13 +137,15 @@ class TestToolCallParser(unittest.TestCase):
 
     def test_non_object_arguments_rejected(self):
         self.assertIsNone(_parse_tool_call_block('{"name": "t", "arguments": "[1,2]"}'))
-        self.assertEqual(_parse_tool_call_block('{"name": "t"}'),
-                         {"name": "t", "arguments": {}})
+        self.assertEqual(
+            _parse_tool_call_block('{"name": "t"}'), {"name": "t", "arguments": {}}
+        )
 
     def test_code_fence_stripped(self):
         inner = "```json\n" + '{"name": "t", "arguments": {"a": 1}}' + "\n```"
-        self.assertEqual(_parse_tool_call_block(inner),
-                         {"name": "t", "arguments": {"a": 1}})
+        self.assertEqual(
+            _parse_tool_call_block(inner), {"name": "t", "arguments": {"a": 1}}
+        )
 
 
 class TestToolsSection(unittest.TestCase):
@@ -127,20 +153,27 @@ class TestToolsSection(unittest.TestCase):
         section = _tools_section(TOOLS, None)
         self.assertIn("# Tool calling protocol", section)
         self.assertIn(
-            TOOL_CALL_OPEN + '{"name": "<tool_name>", "arguments": {<json>}}' + TOOL_CALL_CLOSE,
-            section)
+            TOOL_CALL_OPEN
+            + '{"name": "<tool_name>", "arguments": {<json>}}'
+            + TOOL_CALL_CLOSE,
+            section,
+        )
         self.assertIn("- get_weather: Get current weather", section)
         self.assertIn('"city"', section)
         self.assertNotIn("You MUST", section)
 
     def test_tool_choice_required(self):
-        self.assertIn("You MUST call at least one tool now.",
-                      _tools_section(TOOLS, "required"))
+        self.assertIn(
+            "You MUST call at least one tool now.", _tools_section(TOOLS, "required")
+        )
 
     def test_forced_function(self):
-        self.assertIn('You MUST call the tool "get_weather" now.',
-                      _tools_section(TOOLS, {"type": "function",
-                                             "function": {"name": "get_weather"}}))
+        self.assertIn(
+            'You MUST call the tool "get_weather" now.',
+            _tools_section(
+                TOOLS, {"type": "function", "function": {"name": "get_weather"}}
+            ),
+        )
 
 
 class TestPromptRendering(unittest.TestCase):
@@ -148,12 +181,26 @@ class TestPromptRendering(unittest.TestCase):
         prompt = _messages_to_prompt(
             [
                 {"role": "user", "content": "Weather?"},
-                {"role": "assistant", "content": "",
-                 "tool_calls": [{"id": "call_1", "type": "function",
-                                 "function": {"name": "get_weather",
-                                              "arguments": "{\"city\": \"Berlin\"}"}}]},
-                {"role": "tool", "tool_call_id": "call_1", "name": "get_weather",
-                 "content": "18C, rain"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "Berlin"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "get_weather",
+                    "content": "18C, rain",
+                },
             ],
             TOOLS,
         )

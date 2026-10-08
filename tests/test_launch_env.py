@@ -22,8 +22,9 @@ class TestLaunchEnv(unittest.TestCase):
     """`_launch_env()` как единственная точка формирования окружения потомка."""
 
     def setUp(self):
-        self._env = {k: os.environ.get(k) for k in
-                     ("FACTORY_API_KEY", "DROID_DSH_BRIDGE_KEY")}
+        self._env = {
+            k: os.environ.get(k) for k in ("FACTORY_API_KEY", "DROID_DSH_BRIDGE_KEY")
+        }
 
     def tearDown(self):
         for key, value in self._env.items():

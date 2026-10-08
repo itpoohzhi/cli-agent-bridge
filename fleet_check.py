@@ -60,8 +60,11 @@ class Loader(yaml.SafeLoader):
 for _prefix in ("tag:yaml.org,2002:js", "!"):
     Loader.add_multi_constructor(
         _prefix,
-        lambda loader, suffix, node: ("js", loader.construct_scalar(node))
-        if isinstance(node, yaml.ScalarNode) else ("js", None),
+        lambda loader, suffix, node: (
+            ("js", loader.construct_scalar(node))
+            if isinstance(node, yaml.ScalarNode)
+            else ("js", None)
+        ),
     )
 
 
@@ -74,8 +77,9 @@ class Report:
         errors = [str(e) for e in errors]
         if errors:
             self.ok = False
-        self.checks.append({"name": name, "ok": not errors, "errors": errors,
-                            "details": details or {}})
+        self.checks.append(
+            {"name": name, "ok": not errors, "errors": errors, "details": details or {}}
+        )
 
     def fail(self, name, message):
         self.add(name, [message])
@@ -129,7 +133,10 @@ def check_catalogue(cat, report):
             errs.append("efforts_invalid (дубли): " + mid)
         if model.get("default_effort") not in efforts:
             errs.append("default_effort_invalid: %s" % mid)
-        if not isinstance(model.get("context_window"), int) or model.get("context_window") <= 0:
+        if (
+            not isinstance(model.get("context_window"), int)
+            or model.get("context_window") <= 0
+        ):
             errs.append("context_window_invalid: " + mid)
         if not isinstance(model.get("max_tokens"), int) or model.get("max_tokens") <= 0:
             errs.append("max_tokens_invalid: " + mid)
@@ -141,18 +148,29 @@ def check_catalogue(cat, report):
         if status not in STATUSES:
             errs.append("status_invalid: %s (%r)" % (mid, status))
             continue
-        if images.get("cli_registry") == "explicit_unsupported" and status != "unsupported":
-            errs.append("status_inconsistent (explicit_unsupported != unsupported): " + mid)
+        if (
+            images.get("cli_registry") == "explicit_unsupported"
+            and status != "unsupported"
+        ):
+            errs.append(
+                "status_inconsistent (explicit_unsupported != unsupported): " + mid
+            )
         input_list = model.get("input")
         if status in ("unsupported", "unverified"):
             if images.get("method") is not None:
-                errs.append("status_inconsistent (method != null при %s): %s" % (status, mid))
+                errs.append(
+                    "status_inconsistent (method != null при %s): %s" % (status, mid)
+                )
             if input_list != ["text"]:
-                errs.append("status_inconsistent (input != [text] при %s): %s" % (status, mid))
+                errs.append(
+                    "status_inconsistent (input != [text] при %s): %s" % (status, mid)
+                )
         if status in ("probe", "confirmed"):
             if images.get("method") not in METHOD_IMPL_VERSIONS:
-                errs.append("confirmed_method_missing/метод не реализован: %s (%r)"
-                            % (mid, images.get("method")))
+                errs.append(
+                    "confirmed_method_missing/метод не реализован: %s (%r)"
+                    % (mid, images.get("method"))
+                )
             if "image" not in (input_list or []):
                 errs.append("confirmed_input_missing: " + mid)
         if status == "confirmed":
@@ -173,12 +191,20 @@ def check_catalogue(cat, report):
     if not isinstance(limits, dict):
         errs.append("image_limits: блок отсутствует")
     else:
-        for key in ("max_images", "max_image_bytes", "max_total_image_bytes", "max_body_bytes"):
+        for key in (
+            "max_images",
+            "max_image_bytes",
+            "max_total_image_bytes",
+            "max_body_bytes",
+        ):
             if not isinstance(limits.get(key), int) or limits[key] <= 0:
                 errs.append("image_limits.%s: не положительное целое" % key)
         types = limits.get("types")
         if not isinstance(types, list) or not types or set(types) - {"image/png"}:
-            errs.append("image_limits.types: %r (ожидается непустое подмножество image/png)" % types)
+            errs.append(
+                "image_limits.types: %r (ожидается непустое подмножество image/png)"
+                % types
+            )
     admission = cat.get("admission")
     if not isinstance(admission, dict):
         errs.append("admission: блок отсутствует")
@@ -187,17 +213,27 @@ def check_catalogue(cat, report):
             if not isinstance(admission.get(key), int) or admission[key] <= 0:
                 errs.append("admission.%s: не положительное целое" % key)
     policy_ref = cat.get("policy_ref")
-    if not isinstance(policy_ref, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(policy_ref.get("sha256", ""))):
+    if not isinstance(policy_ref, dict) or not re.fullmatch(
+        r"[0-9a-f]{64}", str(policy_ref.get("sha256", ""))
+    ):
         errs.append("policy_ref.sha256: отсутствует или не hex64")
     technical = cat.get("technical_ref")
     if not isinstance(technical, dict) or not technical.get("droid_binary_path"):
         errs.append("technical_ref.droid_binary_path: отсутствует")
-    report.add("catalogue", errs, {"models": ids, "schema_version": cat.get("schema_version")})
+    report.add(
+        "catalogue", errs, {"models": ids, "schema_version": cat.get("schema_version")}
+    )
 
 
 def _proof_errors(mid, proof, efforts):
     errs = []
-    for key in ("droid_version", "droid_binary_sha256", "method", "impl_version", "formats"):
+    for key in (
+        "droid_version",
+        "droid_binary_sha256",
+        "method",
+        "impl_version",
+        "formats",
+    ):
         if key not in proof:
             errs.append("confirmed_proof_malformed (%s отсутствует): %s" % (key, mid))
     if proof.get("method") not in METHOD_IMPL_VERSIONS:
@@ -210,7 +246,12 @@ def _proof_errors(mid, proof, efforts):
     if not isinstance(formats, list) or not formats:
         errs.append("confirmed_proof_malformed (formats): %s" % mid)
     proven = proof.get("efforts_proven")
-    if not isinstance(proven, list) or not proven or len(set(proven)) != len(proven) or set(proven) - set(efforts):
+    if (
+        not isinstance(proven, list)
+        or not proven
+        or len(set(proven)) != len(proven)
+        or set(proven) - set(efforts)
+    ):
         errs.append("confirmed_efforts_proven_invalid: %s" % mid)
     return errs
 
@@ -229,7 +270,11 @@ def check_policy(cat, policy_path, report):
         return
     info["sha256"] = actual
     info["sha_match"] = actual == expected
-    errs = [] if info["sha_match"] else ["sha models.md != policy_ref.sha256 (BLOCKED-POLICY-DRIFT)"]
+    errs = (
+        []
+        if info["sha_match"]
+        else ["sha models.md != policy_ref.sha256 (BLOCKED-POLICY-DRIFT)"]
+    )
     report.add("policy", errs, info)
     report.policy = info
 
@@ -257,11 +302,18 @@ def check_efforts(cat, efforts_path, report):
             continue
         supported = set(allowed.get("supported") or [])
         if set(model.get("efforts") or []) - supported:
-            errs.append("efforts вне model-efforts.json: %s (%s ⊄ %s)"
-                        % (mid, sorted(model.get("efforts") or []), sorted(supported)))
-        if mid in DEV_EFFORTS and sorted(model.get("efforts") or []) != DEV_EFFORTS[mid]:
-            errs.append("efforts != dev-контекст (RW-001): %s (%s != %s)"
-                        % (mid, sorted(model.get("efforts") or []), DEV_EFFORTS[mid]))
+            errs.append(
+                "efforts вне model-efforts.json: %s (%s ⊄ %s)"
+                % (mid, sorted(model.get("efforts") or []), sorted(supported))
+            )
+        if (
+            mid in DEV_EFFORTS
+            and sorted(model.get("efforts") or []) != DEV_EFFORTS[mid]
+        ):
+            errs.append(
+                "efforts != dev-контекст (RW-001): %s (%s != %s)"
+                % (mid, sorted(model.get("efforts") or []), DEV_EFFORTS[mid])
+            )
     report.add("efforts", errs, info)
 
 
@@ -289,7 +341,9 @@ def _droid_models(records, errs, name):
     models = None
     for rec in records.get("llm-pi-ai") or []:
         config = rec.get("config") if isinstance(rec.get("config"), dict) else {}
-        providers = config.get("providers") if isinstance(config.get("providers"), dict) else {}
+        providers = (
+            config.get("providers") if isinstance(config.get("providers"), dict) else {}
+        )
         provider = providers.get("droid-bridge")
         if isinstance(provider, dict):
             if models is not None:
@@ -311,13 +365,20 @@ def _droid_allowlist(records, errs, name):
         allowed = config.get("allowedModels")
         if isinstance(allowed, list):
             if routes is not None:
-                errs.append("%s: дублирующая запись subagent-model-selection-settings" % name)
+                errs.append(
+                    "%s: дублирующая запись subagent-model-selection-settings" % name
+                )
             routes = allowed
     if routes is None:
-        errs.append("%s: нет config.allowedModels в subagent-model-selection-settings" % name)
+        errs.append(
+            "%s: нет config.allowedModels в subagent-model-selection-settings" % name
+        )
         return None
-    return [r.get("model") for r in routes
-            if isinstance(r, dict) and r.get("provider") == "droid-bridge"]
+    return [
+        r.get("model")
+        for r in routes
+        if isinstance(r, dict) and r.get("provider") == "droid-bridge"
+    ]
 
 
 def check_profile(path, name, cat, report):
@@ -344,32 +405,69 @@ def check_profile(path, name, cat, report):
                 continue
             model = catalogue[mid]
             if item.get("name") != model.get("name"):
-                errs.append("%s: %s имя %r != %r" % (name, mid, item.get("name"), model.get("name")))
+                errs.append(
+                    "%s: %s имя %r != %r"
+                    % (name, mid, item.get("name"), model.get("name"))
+                )
             if item.get("contextWindow") != model.get("context_window"):
-                errs.append("%s: %s contextWindow %r != %r"
-                            % (name, mid, item.get("contextWindow"), model.get("context_window")))
+                errs.append(
+                    "%s: %s contextWindow %r != %r"
+                    % (
+                        name,
+                        mid,
+                        item.get("contextWindow"),
+                        model.get("context_window"),
+                    )
+                )
             if item.get("maxTokens") != model.get("max_tokens"):
-                errs.append("%s: %s maxTokens %r != %r"
-                            % (name, mid, item.get("maxTokens"), model.get("max_tokens")))
+                errs.append(
+                    "%s: %s maxTokens %r != %r"
+                    % (name, mid, item.get("maxTokens"), model.get("max_tokens"))
+                )
             efforts = item.get("reasoningEfforts")
-            if not isinstance(efforts, dict) or sorted(efforts.keys()) != sorted(model.get("efforts") or []):
-                errs.append("%s: %s reasoningEfforts %r != %r"
-                            % (name, mid, sorted((efforts or {}).keys()) if isinstance(efforts, dict) else efforts,
-                               sorted(model.get("efforts") or [])))
+            if not isinstance(efforts, dict) or sorted(efforts.keys()) != sorted(
+                model.get("efforts") or []
+            ):
+                errs.append(
+                    "%s: %s reasoningEfforts %r != %r"
+                    % (
+                        name,
+                        mid,
+                        sorted((efforts or {}).keys())
+                        if isinstance(efforts, dict)
+                        else efforts,
+                        sorted(model.get("efforts") or []),
+                    )
+                )
             elif any(value != key for key, value in efforts.items()):
-                errs.append("%s: %s reasoningEfforts значения != ключам: %r" % (name, mid, efforts))
-            want_input = ["text", "image"] if model.get("images", {}).get("status") == "confirmed" else ["text"]
+                errs.append(
+                    "%s: %s reasoningEfforts значения != ключам: %r"
+                    % (name, mid, efforts)
+                )
+            want_input = (
+                ["text", "image"]
+                if model.get("images", {}).get("status") == "confirmed"
+                else ["text"]
+            )
             if item.get("input") != want_input:
-                errs.append("%s: %s input %r != %r" % (name, mid, item.get("input"), want_input))
+                errs.append(
+                    "%s: %s input %r != %r" % (name, mid, item.get("input"), want_input)
+                )
         if sorted(seen) != sorted(catalogue.keys()) or len(seen) != len(set(seen)):
-            errs.append("%s: состав droid-моделей %r != каталог %r"
-                        % (name, sorted(seen), sorted(catalogue.keys())))
+            errs.append(
+                "%s: состав droid-моделей %r != каталог %r"
+                % (name, sorted(seen), sorted(catalogue.keys()))
+            )
     routes = _droid_allowlist(records, errs, name)
     if routes is not None and routes != [m.get("id") for m in cat.get("models") or []]:
-        errs.append("%s: allowlist droid-bridge %r != каталог %r"
-                    % (name, routes, [m.get("id") for m in cat.get("models") or []]))
+        errs.append(
+            "%s: allowlist droid-bridge %r != каталог %r"
+            % (name, routes, [m.get("id") for m in cat.get("models") or []])
+        )
     opus = [mid for mid in seen if isinstance(mid, str) and "opus" in mid.lower()]
-    opus += [mid for mid in (routes or []) if isinstance(mid, str) and "opus" in mid.lower()]
+    opus += [
+        mid for mid in (routes or []) if isinstance(mid, str) and "opus" in mid.lower()
+    ]
     if opus:
         errs.append("%s: opus в droid-секциях: %r" % (name, opus))
     report.add(name, errs, {"models": seen, "allowlist": routes})
@@ -397,22 +495,38 @@ def check_default_compat(profiles, cat, report):
             model = str(model) if model is not None else ""
             if model not in ids:
                 status = "BLOCKED-DEFAULT"
-                info = {"reason": "model_not_in_roster", "model": model, "effort": effort,
-                        "allowed": sorted(ids.keys())}
+                info = {
+                    "reason": "model_not_in_roster",
+                    "model": model,
+                    "effort": effort,
+                    "allowed": sorted(ids.keys()),
+                }
             elif effort is not None and effort not in (ids[model].get("efforts") or []):
                 status = "BLOCKED-DEFAULT"
-                info = {"reason": "effort_not_allowed", "model": model, "effort": effort,
-                        "allowed": sorted(ids[model].get("efforts") or [])}
+                info = {
+                    "reason": "effort_not_allowed",
+                    "model": model,
+                    "effort": effort,
+                    "allowed": sorted(ids[model].get("efforts") or []),
+                }
             else:
-                status, info = "ok", {"provider": provider, "model": model, "effort": effort}
+                status, info = (
+                    "ok",
+                    {"provider": provider, "model": model, "effort": effort},
+                )
         per_profile[name] = dict(info, status=status)
         if status == "BLOCKED-DEFAULT":
             worst, detail = "BLOCKED-DEFAULT", dict(info, status=status)
         elif status == "ok" and worst != "BLOCKED-DEFAULT":
             worst, detail = "ok", dict(info, status=status)
     detail["profiles"] = per_profile
-    report.add("default_compat", [] if worst != "BLOCKED-DEFAULT" else
-               ["default_compat: %s" % json.dumps(detail, ensure_ascii=False)], detail)
+    report.add(
+        "default_compat",
+        []
+        if worst != "BLOCKED-DEFAULT"
+        else ["default_compat: %s" % json.dumps(detail, ensure_ascii=False)],
+        detail,
+    )
     report.default_compat = detail
 
 
@@ -434,11 +548,16 @@ def check_web_dump(dump_arg, cat, report):
         if isinstance(node, dict):
             provider = node.get("droid-bridge")
             if isinstance(provider, dict) and isinstance(provider.get("models"), list):
-                found_models.extend(m.get("id") for m in provider["models"] if isinstance(m, dict))
+                found_models.extend(
+                    m.get("id") for m in provider["models"] if isinstance(m, dict)
+                )
             allowed = node.get("allowedModels")
             if isinstance(allowed, list):
-                found_routes.extend(r.get("model") for r in allowed
-                                    if isinstance(r, dict) and r.get("provider") == "droid-bridge")
+                found_routes.extend(
+                    r.get("model")
+                    for r in allowed
+                    if isinstance(r, dict) and r.get("provider") == "droid-bridge"
+                )
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -450,13 +569,22 @@ def check_web_dump(dump_arg, cat, report):
     if not found_models:
         errs.append("web dump: провайдер droid-bridge с models не найден")
     elif sorted(set(found_models)) != sorted(ids):
-        errs.append("web dump: модели %r != каталог %r" % (sorted(set(found_models)), sorted(ids)))
+        errs.append(
+            "web dump: модели %r != каталог %r"
+            % (sorted(set(found_models)), sorted(ids))
+        )
     if not found_routes:
         errs.append("web dump: allowlist droid-bridge не найден")
     elif sorted(set(found_routes)) != sorted(ids):
-        errs.append("web dump: allowlist %r != каталог %r" % (sorted(set(found_routes)), sorted(ids)))
-    report.add("web_dump", errs, {"models": sorted(set(found_models)),
-                                  "allowlist": sorted(set(found_routes))})
+        errs.append(
+            "web dump: allowlist %r != каталог %r"
+            % (sorted(set(found_routes)), sorted(ids))
+        )
+    report.add(
+        "web_dump",
+        errs,
+        {"models": sorted(set(found_models)), "allowlist": sorted(set(found_routes))},
+    )
 
 
 def check_opus(cat_path, profile_paths, report):
@@ -496,7 +624,9 @@ def check_live_droid(cat, launcher, report):
     errs = []
     info = {"launcher": launcher, "results": {}}
     if not (os.path.isfile(launcher) and os.access(launcher, os.X_OK)):
-        report.add("live_droid", ["лончер отсутствует или не исполняем: %s" % launcher], info)
+        report.add(
+            "live_droid", ["лончер отсутствует или не исполняем: %s" % launcher], info
+        )
         return
     ids = [m.get("id") for m in cat.get("models") or []]
     procs = {}
@@ -504,8 +634,10 @@ def check_live_droid(cat, launcher, report):
         try:
             procs[mid] = subprocess.Popen(
                 [launcher, "exec", "-m", mid, "--list-tools"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env=dict(os.environ))
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=dict(os.environ),
+            )
         except OSError as exc:
             errs.append("запуск --list-tools не удался: %s: %s" % (mid, exc))
     for mid, proc in procs.items():
@@ -519,7 +651,9 @@ def check_live_droid(cat, launcher, report):
         if info["results"].get(mid) != 0:
             errs.append("--list-tools %s: rc=%r" % (mid, info["results"].get(mid)))
     if info["results"].get(CONTROL_MODEL) == 0:
-        errs.append("--list-tools контрольного id %s: rc=0 (ожидался rc≠0)" % CONTROL_MODEL)
+        errs.append(
+            "--list-tools контрольного id %s: rc=0 (ожидался rc≠0)" % CONTROL_MODEL
+        )
     report.add("live_droid", errs, info)
     report.live_droid = info
 
@@ -537,14 +671,22 @@ def check_image_census(path, cat, profiles, report):
     confirmed = set(census.get("confirmed") or [])
     per_model = census.get("per_model") or {}
     formats_proven = set(census.get("formats_proven") or [])
-    status = {m.get("id"): (m.get("images") or {}).get("status") for m in cat.get("models") or []}
-    input_map = {m.get("id"): ("image" in (m.get("input") or [])) for m in cat.get("models") or []}
+    status = {
+        m.get("id"): (m.get("images") or {}).get("status")
+        for m in cat.get("models") or []
+    }
+    input_map = {
+        m.get("id"): ("image" in (m.get("input") or []))
+        for m in cat.get("models") or []
+    }
     fleet_confirmed = {mid for mid, st in status.items() if st == "confirmed"}
     info["fleet_confirmed"] = sorted(fleet_confirmed)
     info["census_confirmed"] = sorted(confirmed)
     if fleet_confirmed != confirmed:
-        errs.append("множества confirmed fleet/census различаются: %r != %r"
-                    % (sorted(fleet_confirmed), sorted(confirmed)))
+        errs.append(
+            "множества confirmed fleet/census различаются: %r != %r"
+            % (sorted(fleet_confirmed), sorted(confirmed))
+        )
     if any(st == "probe" for st in status.values()):
         errs.append("probe в боевом каталоге запрещён")
     for name, parsed in profiles.items():
@@ -556,11 +698,17 @@ def check_image_census(path, cat, profiles, report):
                 advertised.append(model.get("id"))
         info["advertised_" + name] = sorted(advertised)
         if set(advertised) != confirmed:
-            errs.append("реклама %s (%r) != census confirmed (%r)"
-                        % (name, sorted(advertised), sorted(confirmed)))
+            errs.append(
+                "реклама %s (%r) != census confirmed (%r)"
+                % (name, sorted(advertised), sorted(confirmed))
+            )
     if not set((cat.get("image_limits") or {}).get("types") or []) <= formats_proven:
-        errs.append("image_limits.types ⊄ census.formats_proven: %r"
-                    % sorted(set((cat.get("image_limits") or {}).get("types") or []) - formats_proven))
+        errs.append(
+            "image_limits.types ⊄ census.formats_proven: %r"
+            % sorted(
+                set((cat.get("image_limits") or {}).get("types") or []) - formats_proven
+            )
+        )
     technical = cat.get("technical_ref") or {}
     binary_path = expand(technical.get("droid_binary_path") or "")
     for model in cat.get("models") or []:
@@ -572,12 +720,19 @@ def check_image_census(path, cat, profiles, report):
         proof = (model.get("images") or {}).get("proof") or {}
         if proof.get("impl_version") != METHOD_IMPL_VERSIONS.get(proof.get("method")):
             errs.append("proof.impl_version не совпадает с реализацией: " + str(mid))
-        if sorted(proof.get("efforts_proven") or []) != sorted(model.get("efforts") or []):
+        if sorted(proof.get("efforts_proven") or []) != sorted(
+            model.get("efforts") or []
+        ):
             errs.append("класс III (proof.efforts_proven != efforts): " + str(mid))
         pm = per_model.get(mid) or {}
         if pm.get("efforts_missing"):
-            errs.append("census.efforts_missing непуст: %s %r" % (mid, pm.get("efforts_missing")))
-        if sorted((census.get("efforts_proven") or {}).get(mid) or []) != sorted(model.get("efforts") or []):
+            errs.append(
+                "census.efforts_missing непуст: %s %r"
+                % (mid, pm.get("efforts_missing"))
+            )
+        if sorted((census.get("efforts_proven") or {}).get(mid) or []) != sorted(
+            model.get("efforts") or []
+        ):
             errs.append("census.efforts_proven != efforts: " + str(mid))
         try:
             live_sha = sha256_file(binary_path)
@@ -586,19 +741,31 @@ def check_image_census(path, cat, profiles, report):
             live_sha = None
         if live_sha and proof.get("droid_binary_sha256") != live_sha:
             errs.append("proof.droid_binary_sha256 != sha файла бинаря: " + str(mid))
-        if census.get("droid_binary_sha256") and proof.get("droid_binary_sha256") != census.get("droid_binary_sha256"):
-            errs.append("proof.droid_binary_sha256 != census.droid_binary_sha256: " + str(mid))
-        if census.get("droid_version") and proof.get("droid_version") != census.get("droid_version"):
+        if census.get("droid_binary_sha256") and proof.get(
+            "droid_binary_sha256"
+        ) != census.get("droid_binary_sha256"):
+            errs.append(
+                "proof.droid_binary_sha256 != census.droid_binary_sha256: " + str(mid)
+            )
+        if census.get("droid_version") and proof.get("droid_version") != census.get(
+            "droid_version"
+        ):
             errs.append("proof.droid_version != census.droid_version: " + str(mid))
-        if census.get("census_sha256") and proof.get("census_sha256") != census.get("census_sha256"):
+        if census.get("census_sha256") and proof.get("census_sha256") != census.get(
+            "census_sha256"
+        ):
             errs.append("proof.census_sha256 != census.census_sha256: " + str(mid))
-        if proof.get("census_sha256") and proof.get("census_sha256") != sha256_file(path):
+        if proof.get("census_sha256") and proof.get("census_sha256") != sha256_file(
+            path
+        ):
             errs.append("proof.census_sha256 != sha файла census: " + str(mid))
     report.add("image_census", errs, info)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Проверка каталога Droid-флота и профилей DSH (C-07).")
+    parser = argparse.ArgumentParser(
+        description="Проверка каталога Droid-флота и профилей DSH (C-07)."
+    )
     parser.add_argument("--catalogue", default=str(DEFAULT_CATALOGUE))
     parser.add_argument("--desktop", default=str(DEFAULT_DESKTOP))
     parser.add_argument("--web", default=str(DEFAULT_WEB))

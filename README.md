@@ -66,11 +66,13 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 | `DROID_DSH_BRIDGE_GUARD_TICK` | `30` | период автоматического контура b_guard внутри моста, с |
 | `DROID_DSH_BRIDGE_PROFILES_DIR` / `DROID_DSH_BRIDGE_CANON` | `~/.dsh/profiles` / `~/Мой диск/Context/AGENTS.md` | профили DSH и канон, которые проверяет контур (только чтение) |
 | `DROID_BRIDGE_MAX_RPC_LINE_BYTES` / `_MAX_STDERR_BYTES` / `_MAX_INBOX_BYTES` / `_MAX_TURN_TEXT_BYTES` / `_MAX_CHATS` | 8 МиБ / 64 КиБ / 4 МиБ / 10 МиБ / 4096 | байтовые бюджеты RPC-строки, stderr, очереди событий (каждая запись учитывается минимум 64 Б), text/thinking хода (дельта и итог одного блока считаются один раз) и индекса чатов (превышение — 502 `proxy_error`, процесс/слот возвращаются) |
-| `DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS` | `200000` | предел числа `{`/`[` вне строк в одной RPC-строке: строка из миллионов пустых объектов отклоняется до `json.loads` (502 `proxy_error`); глубокая вложенность — тоже контролируемая ошибка хода, читатель не падает |
+| `DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS` | `50000` | предел числа структурных токенов `{`, `[`, `,`, `:` вне строковых литералов в одной RPC-строке (счёт до `json.loads`): поток скаляров `[1.1, 1.1, …]`, миллионы пустых объектов и глубокая вложенность внутри 8 МиБ отклоняются до разбора (502 `proxy_error`), читатель не падает |
 
 Доставка ответа клиенту идёт срезами по 64 КиБ (JSON — с точным `Content-Length` без полной копии
 экранированного текста, SSE — несколькими событиями), поэтому потолок памяти определяет бюджет хода
-(10 МиБ), а не размер ответа; отдельный spool ответа на диск не используется: текст ограничен бюджетом
+(10 МиБ), а не размер ответа; бюджет доставки (`DROID_BRIDGE_MAX_DELIVERY_BYTES`) считается по
+удерживаемой памяти CPython (`sys.getsizeof`: 1/2/4 Б на символ по самому широкому символу, объединённый текст
+и события — обе копии), а не по длине UTF-8; отдельный spool ответа на диск не используется: текст ограничен бюджетом
 хода, а ENOSPC при spool картинок даёт 502 `proxy_error` (новых публичных кодов, в том числе 507, нет).
 
 Модель и `reasoning_effort` берутся из запроса (effort передаётся как `-r`;
@@ -212,6 +214,15 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
 (`-k tm001`) и docstring. `tests/baseline_inventory.json` — сопоставление 92 baseline-тестов
 с текущими. Файлы — только во временных каталогах.
 
+### Статус гейтов ruff / basedpyright
+
+Запуск — только из окружения репозитория: `.venv/bin/ruff format --check .`, `.venv/bin/ruff check .`,
+`.venv/bin/basedpyright tools server.py` (настройки — `ruff.toml` с набором E4/E7/E9/F и `pyrightconfig.json`; чужие venv
+не используются). `ruff format --check` и `ruff check` — exit 0. `basedpyright` на кандидате: **3 ошибки, все baseline** (в baseline
+`6a96370` их было 23; дельта цикла новых ошибок не добавляет): `server.py:345` (`openssl_sha256`, `bytes | None`),
+`server.py:948` (`dict | None` в объявленном `dict`), `server.py:3884` (`log_message` vs `BaseHTTPRequestHandler`).
+Предупреждения (warnings) strict-режима baseline не гейтят.
+
 ## RPC-режим (долгоживущий droid на чат)
 
 - **Ключ чата** — `prompt_cache_key` запроса; в argv/путь не попадает, идентичность —
@@ -231,6 +242,11 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
 - **Idle** `DROID_DSH_BRIDGE_IDLE_SECONDS` (2700 с): процесс закрывается штатно, SID и
   метаданные остаются; следующий ход — `load_session` того же SID (не больше 5 restore
   на SID, затем свежая generation; после load — проверка целостности служебных блоков).
+  Триаж `HISTORY_MISMATCH droid=5 bridge=8` (стенд after-idle, droid 0.235.0): корень — учёт моста, а не ограничение
+  `load_session`. Живой `create_message` служебной вставки (`<system-reminder>`) приходит с `content: []`, текст виден
+  только после load; мост считал такие user-сообщения «настоящими» (8), а проверка после load исключала их по тексту (5).
+  Теперь пустые user-сообщения в `droid_real` не входят (`_is_blank_user_message`); осознанного downgrade REQ-001
+  (sanitize-fallback вместо того же SID) нет. Стенд resumed=1 на финальном SHA — в НЕ ПРОВЕРЕНО пакета.
 - **Допуск образа (AD-010).** Мост запускает droid только как `DROID_BIN=<образ из receipt>`:
   `tools/droid_image.py` копирует глобальный бинарь в `workspace/runtime/droid-image/<sha256>/droid`
   (0500), в изолированных `runtime/probe-home`/`probe-cwd` выполняет реальные пробы (spawn с чтением

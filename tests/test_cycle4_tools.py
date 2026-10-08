@@ -35,6 +35,7 @@ DROP = object()
 
 # -- RW-010: user-global instruction source --------------------------------------------------------------
 
+
 class TestRw010UserGlobal(unittest.TestCase):
     """RW-010: check_installed читает настоящий ~/.dsh/AGENTS.md (наличие, содержимое, цель симлинка)."""
 
@@ -48,10 +49,14 @@ class TestRw010UserGlobal(unittest.TestCase):
         self.ug.parent.mkdir()
         self.ug.symlink_to(self.canon)
         cwds = self.fs["cwds"]
-        self.default = tuple((label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW"))
-        for patcher in (mock.patch.object(bg, "KB_CWD", str(cwds["KB"])),
-                        mock.patch.object(bg, "DEFAULT_CWDS", self.default),
-                        mock.patch.object(bg, "UG_PATH", str(self.ug))):
+        self.default = tuple(
+            (label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW")
+        )
+        for patcher in (
+            mock.patch.object(bg, "KB_CWD", str(cwds["KB"])),
+            mock.patch.object(bg, "DEFAULT_CWDS", self.default),
+            mock.patch.object(bg, "UG_PATH", str(self.ug)),
+        ):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -116,6 +121,7 @@ class TestRw010UserGlobal(unittest.TestCase):
 
 # -- RW-020: профиль DSH ---------------------------------------------------------------------------------
 
+
 class TestRw020Profile(unittest.TestCase):
     """RW-020: профиль с неоднозначным maxBytes нечитаем (maxbytes None), валидный разбирается."""
 
@@ -132,19 +138,26 @@ class TestRw020Profile(unittest.TestCase):
 
     def test_rw020_duplicate_maxbytes_is_unreadable(self):
         """RW-020: два maxBytes у agent-instructions -> None."""
-        text = self.yml("          maxBytes: 106496\n", "          maxBytes: 106496\n          maxBytes: 4096\n")
+        text = self.yml(
+            "          maxBytes: 106496\n",
+            "          maxBytes: 106496\n          maxBytes: 4096\n",
+        )
         self.assertIsNone(bg.parse_profile_maxbytes(text))
 
     def test_rw020_duplicate_agent_instructions_key_is_unreadable(self):
         """RW-020: второй плагин agent-instructions в preset-standard -> None."""
-        text = self.yml("      - id: tool-bash\n",
-                        "      - id: agent-instructions\n        config:\n          maxBytes: 4096\n"
-                        "      - id: tool-bash\n")
+        text = self.yml(
+            "      - id: tool-bash\n",
+            "      - id: agent-instructions\n        config:\n          maxBytes: 4096\n"
+            "      - id: tool-bash\n",
+        )
         self.assertIsNone(bg.parse_profile_maxbytes(text))
 
     def test_rw020_stray_maxbytes_in_other_plugin_is_unreadable(self):
         """RW-020: maxBytes в чужом плагине внутри preset-standard -> None."""
-        text = self.yml("          prefix: x\n", "          prefix: x\n          maxBytes: 5\n")
+        text = self.yml(
+            "          prefix: x\n", "          prefix: x\n          maxBytes: 5\n"
+        )
         self.assertIsNone(bg.parse_profile_maxbytes(text))
 
     def test_rw020_stray_maxbytes_at_preset_level_is_unreadable(self):
@@ -154,14 +167,18 @@ class TestRw020Profile(unittest.TestCase):
 
     def test_rw020_nested_maxbytes_under_agent_instructions_is_unreadable(self):
         """RW-020: вложенный дополнительный maxBytes под agent-instructions -> None."""
-        text = self.yml("          maxBytes: 106496\n",
-                        "          maxBytes: 106496\n          extra:\n            maxBytes: 4096\n")
+        text = self.yml(
+            "          maxBytes: 106496\n",
+            "          maxBytes: 106496\n          extra:\n            maxBytes: 4096\n",
+        )
         self.assertIsNone(bg.parse_profile_maxbytes(text))
 
     def test_rw020_duplicate_preset_standard_is_unreadable(self):
         """RW-020: второй пресет preset-standard с другим значением -> None."""
-        text = self.yml() + ("- id: preset-standard\n  config:\n    plugins:\n      - id: agent-instructions\n"
-                             "        config:\n          maxBytes: 262144\n")
+        text = self.yml() + (
+            "- id: preset-standard\n  config:\n    plugins:\n      - id: agent-instructions\n"
+            "        config:\n          maxBytes: 262144\n"
+        )
         self.assertIsNone(bg.parse_profile_maxbytes(text))
 
     def test_rw020_find_profiles_reports_none_for_ambiguous_profile(self):
@@ -169,12 +186,18 @@ class TestRw020Profile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "web"
             target.mkdir()
-            text = self.yml("          maxBytes: 106496\n", "          maxBytes: 106496\n          maxBytes: 4096\n")
+            text = self.yml(
+                "          maxBytes: 106496\n",
+                "          maxBytes: 106496\n          maxBytes: 4096\n",
+            )
             (target / bg.PROFILE_FILE).write_text(text, encoding="utf-8")
-            self.assertEqual(bg.find_profiles(tmp), [("web", str(target / bg.PROFILE_FILE), None)])
+            self.assertEqual(
+                bg.find_profiles(tmp), [("web", str(target / bg.PROFILE_FILE), None)]
+            )
 
 
 # -- RW-011/RW-012: пробы droid_image на сценарном RPC ----------------------------------------------------
+
 
 def settings(**over):
     """Read-back настроек сессии; DROP убирает поле."""
@@ -203,7 +226,9 @@ class ScriptedRpc:
     def wait_settings(self, timeout=5.0):
         self.waited += 1
         if self.queued is None:
-            raise droid_image.ProbeError("update_session_settings: read-back settings_updated не получен")
+            raise droid_image.ProbeError(
+                "update_session_settings: read-back settings_updated не получен"
+            )
         return self.queued
 
     def close(self):
@@ -215,11 +240,19 @@ def scripted(init=None, update=None, load=None, in_notes=False, no_readback=Fals
     upd = settings(disabledToolIds=IDS) if update is None else update
     notes = [note(upd)] if in_notes else []
     replies = {
-        "droid.initialize_session": ({"sessionId": "sid-1", "settings": settings() if init is None else init}, []),
+        "droid.initialize_session": (
+            {"sessionId": "sid-1", "settings": settings() if init is None else init},
+            [],
+        ),
         "droid.list_tools": ({"tools": [{"id": i} for i in IDS]}, []),
         "droid.update_session_settings": ({}, [] if no_readback else notes),
-        "droid.load_session": ({"session": {"messages": []},
-                                "settings": settings() if load is None else load}, []),
+        "droid.load_session": (
+            {
+                "session": {"messages": []},
+                "settings": settings() if load is None else load,
+            },
+            [],
+        ),
     }
     return ScriptedRpc(replies, None if (in_notes or no_readback) else upd)
 
@@ -271,7 +304,9 @@ class TestRw011ReadbackFromNotes(ProbeCase):
     def test_rw011_wrong_readback_in_notes_raises_and_writes_no_receipt(self):
         """RW-011: read-back в notes не подтверждает отключение tools -> ProbeError, receipt не записан."""
         with self.assertRaises(droid_image.ProbeError):
-            self.install(scripted(update=settings(disabledToolIds=["Read"]), in_notes=True))
+            self.install(
+                scripted(update=settings(disabledToolIds=["Read"]), in_notes=True)
+            )
         self.assertFalse(self.receipt_path().exists())
 
     def test_rw011_wrong_readback_in_queue_raises_and_writes_no_receipt(self):
@@ -312,8 +347,12 @@ class TestRw012VerifiedProfile(ProbeCase):
             for in_notes in (False, True):
                 with self.subTest(key=key, value=value, in_notes=in_notes):
                     with self.assertRaises(droid_image.ProbeError):
-                        self.probes(scripted(update=settings(disabledToolIds=IDS, **{key: value}),
-                                             in_notes=in_notes))
+                        self.probes(
+                            scripted(
+                                update=settings(disabledToolIds=IDS, **{key: value}),
+                                in_notes=in_notes,
+                            )
+                        )
 
     def test_rw012_load_substitution_raises(self):
         """RW-012: подмена в settings load_session -> ProbeError."""
@@ -336,25 +375,48 @@ class TestRw012VerifiedProfile(ProbeCase):
     def test_rw012_receipt_marks_fields_without_readback(self):
         """RW-012: поля, которых droid не сообщает, записаны как not_confirmed_readback; ключи профиля прежние."""
         import server
+
         receipt = self.install(scripted())
         readback = receipt["settings_profile"]["readback"]
-        self.assertEqual(readback["confirmed"], ["autonomyLevel", "modelId", "reasoningEffort"])
-        self.assertEqual(readback["not_confirmed_readback"],
-                         ["autoRejectPermissionRequests", "disableBuiltinSkills", "interactionMode"])
-        self.assertEqual(receipt["settings_profile"]["profile"], server.SETTINGS_PROFILE)
-        self.assertEqual(receipt["settings_profile"]["digest"], server.settings_profile_digest())
+        self.assertEqual(
+            readback["confirmed"], ["autonomyLevel", "modelId", "reasoningEffort"]
+        )
+        self.assertEqual(
+            readback["not_confirmed_readback"],
+            ["autoRejectPermissionRequests", "disableBuiltinSkills", "interactionMode"],
+        )
+        self.assertEqual(
+            receipt["settings_profile"]["profile"], server.SETTINGS_PROFILE
+        )
+        self.assertEqual(
+            receipt["settings_profile"]["digest"], server.settings_profile_digest()
+        )
         self.assertEqual(receipt["schema"], 2)
         server._check_receipt_quad(receipt)
 
     def test_rw012_receipt_confirms_reported_flags(self):
         """RW-012: сообщённые и верные флаги/interactionMode попадают в confirmed."""
-        full = settings(interactionMode="auto", disableBuiltinSkills=True, autoRejectPermissionRequests=True)
+        full = settings(
+            interactionMode="auto",
+            disableBuiltinSkills=True,
+            autoRejectPermissionRequests=True,
+        )
         receipt = self.install(scripted(init=full))
         readback = receipt["settings_profile"]["readback"]
         self.assertEqual(readback["not_confirmed_readback"], [])
-        self.assertEqual(readback["confirmed"], sorted(
-            ["modelId", "reasoningEffort", "autonomyLevel", "interactionMode",
-             "disableBuiltinSkills", "autoRejectPermissionRequests"]))
+        self.assertEqual(
+            readback["confirmed"],
+            sorted(
+                [
+                    "modelId",
+                    "reasoningEffort",
+                    "autonomyLevel",
+                    "interactionMode",
+                    "disableBuiltinSkills",
+                    "autoRejectPermissionRequests",
+                ]
+            ),
+        )
         self.assertTrue(self.receipt_path().exists())
         stored = json.loads(self.receipt_path().read_text(encoding="utf-8"))
         self.assertEqual(stored["settings_profile"]["readback"], readback)
@@ -366,6 +428,7 @@ class TestRw012FakeImage(RpcCase):
     def setUp(self):
         super().setUp()
         import server
+
         self.server = server
         self.source = Path(self._tmp.name) / "global-droid"
         self.source.write_bytes(self.hub.launcher.read_bytes())
@@ -375,9 +438,13 @@ class TestRw012FakeImage(RpcCase):
         """RW-012: fake droid не сообщает флаги/interactionMode -> они в not_confirmed_readback."""
         receipt = droid_image.install_image(self.source, self.server.WORKSPACE)
         readback = receipt["settings_profile"]["readback"]
-        self.assertEqual(readback["confirmed"], ["autonomyLevel", "modelId", "reasoningEffort"])
+        self.assertEqual(
+            readback["confirmed"], ["autonomyLevel", "modelId", "reasoningEffort"]
+        )
         self.assertIn("disableBuiltinSkills", readback["not_confirmed_readback"])
-        self.assertIn("autoRejectPermissionRequests", readback["not_confirmed_readback"])
+        self.assertIn(
+            "autoRejectPermissionRequests", readback["not_confirmed_readback"]
+        )
 
     def test_rw012_fake_image_echoing_true_flags_confirms_them(self):
         """RW-012: droid сообщает флаги true -> они подтверждены."""
@@ -389,7 +456,9 @@ class TestRw012FakeImage(RpcCase):
 
     def test_rw012_fake_image_reporting_false_flag_is_rejected(self):
         """RW-012: droid сообщает autoRejectPermissionRequests=false -> ProbeError, receipt не записан."""
-        self.hub.configure(echo_flags=True, flags_override={"autoRejectPermissionRequests": False})
+        self.hub.configure(
+            echo_flags=True, flags_override={"autoRejectPermissionRequests": False}
+        )
         with self.assertRaises(droid_image.ProbeError):
             droid_image.install_image(self.source, self.server.WORKSPACE)
         self.assertFalse(self.server._receipt_path().exists())
@@ -397,40 +466,66 @@ class TestRw012FakeImage(RpcCase):
 
 # -- RW-013: receipt_schema без моста ---------------------------------------------------------------------
 
+
 class TestRw013ReceiptSchema(unittest.TestCase):
     """RW-013: общие константы и отпечатки живут в tools/receipt_schema.py и не требуют server.py/fleet.json."""
 
     def run_py(self, code, cwd, env=None):
-        return subprocess.run([sys.executable, "-c", code], cwd=str(cwd), stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, timeout=120,
-                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **(env or {})))
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **(env or {})),
+        )
 
     def test_rw013_schema_values_and_digests_equal_server(self):
         """RW-013: константы и отпечатки receipt_schema те же объекты, что видит server.py."""
         import receipt_schema as schema
         import server
+
         self.assertEqual(schema.RPC_API_VERSION, server.RPC_API_VERSION)
         self.assertEqual(schema.RECEIPT_SCHEMA, 2)
         self.assertEqual(schema.RECEIPT_SCHEMA, server.RECEIPT_SCHEMA)
         self.assertEqual(schema.TOOLS_POLICY, server.TOOLS_POLICY)
         self.assertEqual(schema.SETTINGS_PROFILE, server.SETTINGS_PROFILE)
         self.assertEqual(schema.RECEIPT_PROBES, server.RECEIPT_PROBES)
-        self.assertIs(server.tools_policy_digest, schema.tools_policy_digest)  # мост берёт отпечатки из общего модуля
+        self.assertIs(
+            server.tools_policy_digest, schema.tools_policy_digest
+        )  # мост берёт отпечатки из общего модуля
         self.assertIs(server.settings_profile_digest, schema.settings_profile_digest)
-        self.assertEqual(schema.tools_policy_digest(["Read", "Execute"]), server.tools_policy_digest(["Execute", "Read"]))
-        self.assertEqual(schema.settings_profile_digest(), server.settings_profile_digest())
+        self.assertEqual(
+            schema.tools_policy_digest(["Read", "Execute"]),
+            server.tools_policy_digest(["Execute", "Read"]),
+        )
+        self.assertEqual(
+            schema.settings_profile_digest(), server.settings_profile_digest()
+        )
 
     def test_rw013_exported_names(self):
         """RW-013: модуль экспортирует согласованный набор имён."""
         import receipt_schema as schema
-        for name in ("RPC_API_VERSION", "RECEIPT_SCHEMA", "TOOLS_POLICY", "SETTINGS_PROFILE", "RECEIPT_PROBES",
-                     "json_digest", "tools_policy_digest", "settings_profile_digest"):
+
+        for name in (
+            "RPC_API_VERSION",
+            "RECEIPT_SCHEMA",
+            "TOOLS_POLICY",
+            "SETTINGS_PROFILE",
+            "RECEIPT_PROBES",
+            "json_digest",
+            "tools_policy_digest",
+            "settings_profile_digest",
+        ):
             self.assertTrue(hasattr(schema, name), name)
 
     def test_rw013_droid_image_import_does_not_load_server(self):
         """RW-013: после import droid_image в чистом процессе модуль server не загружен."""
-        code = ("import sys; sys.path.insert(0, %r); import droid_image; "
-                "sys.stdout.write('server' if 'server' in sys.modules else 'clean')" % str(ROOT / "tools"))
+        code = (
+            "import sys; sys.path.insert(0, %r); import droid_image; "
+            "sys.stdout.write('server' if 'server' in sys.modules else 'clean')"
+            % str(ROOT / "tools")
+        )
         with tempfile.TemporaryDirectory() as tmp:
             proc = self.run_py(code, tmp)
         self.assertEqual(proc.stdout.decode("utf-8", "replace").strip(), "clean")
@@ -438,6 +533,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
     def test_rw013_qualification_runs_without_fleet_json_or_server(self):
         """RW-013: пробы и receipt работают в раскладке без server.py; fleet.json отсутствует либо повреждён."""
         from bridge_testlib import FakeDroidHub
+
         for fleet in (None, "{broken json"):
             with self.subTest(fleet=fleet), tempfile.TemporaryDirectory() as tmp:
                 base = Path(tmp)
@@ -450,13 +546,31 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                 hub = FakeDroidHub(base / "fake")
                 workspace = base / "workspace"
                 proc = subprocess.run(
-                    [sys.executable, str(tools / "droid_image.py"), "--source", str(hub.launcher),
-                     "--workspace", str(workspace)],
-                    cwd=str(base), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
-                    env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", FAKE_DROID_DIR=str(hub.base)))
+                    [
+                        sys.executable,
+                        str(tools / "droid_image.py"),
+                        "--source",
+                        str(hub.launcher),
+                        "--workspace",
+                        str(workspace),
+                    ],
+                    cwd=str(base),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=120,
+                    env=dict(
+                        os.environ,
+                        PYTHONDONTWRITEBYTECODE="1",
+                        FAKE_DROID_DIR=str(hub.base),
+                    ),
+                )
                 text = proc.stdout.decode("utf-8", "replace")
                 self.assertEqual(proc.returncode, 0, text)
-                receipt = json.loads((workspace / "state" / "droid-binary-receipt.json").read_text(encoding="utf-8"))
+                receipt = json.loads(
+                    (workspace / "state" / "droid-binary-receipt.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
                 self.assertEqual(receipt["schema"], 2)
                 self.assertIn("readback", receipt["settings_profile"])
 

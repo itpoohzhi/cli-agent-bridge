@@ -3,6 +3,7 @@
 import re
 import sys
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -10,14 +11,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
 from bridge_testlib import BridgeCase, pid_alive, wait_until  # noqa: E402
 
-USAGE_LINE = re.compile(r"^usage sess=(?P<sess>\S+) raw=(?P<rin>\d+)/(?P<rout>\d+) "
-                        r"rep=(?P<in>\d+)/(?P<out>\d+) resumed=(?P<resumed>[01]) turns=(?P<turns>\d+)$")
+USAGE_LINE = re.compile(
+    r"^usage sess=(?P<sess>\S+) raw=(?P<rin>\d+)/(?P<rout>\d+) "
+    r"rep=(?P<in>\d+)/(?P<out>\d+) resumed=(?P<resumed>[01]) turns=(?P<turns>\d+)$"
+)
 DONE_LINE = re.compile(r"^done model=\S+ rc=\d+ state=\S+ .*client=\S+ ua=.*$")
 EXEC_LINE = re.compile(
     r"^exec model=(?P<model>\S+) effort=(?P<effort>\S+) effort_source=(?P<source>\S+) "
     r"autonomy=(?P<autonomy>\S+) autonomy_source=(?P<autonomy_source>\S+) "
-    r"prompt_bytes=(?P<bytes>\d+) (?P<tag>client=\S+ ua=.*)$")
-REJECT_LINE = re.compile(r"^reject reason=[a-z0-9_]+ model=\S+ model_len=[0-9]+ client=[0-9a-f.:]+$")
+    r"prompt_bytes=(?P<bytes>\d+) (?P<tag>client=\S+ ua=.*)$"
+)
+REJECT_LINE = re.compile(
+    r"^reject reason=[a-z0-9_]+ model=\S+ model_len=[0-9]+ client=[0-9a-f.:]+$"
+)
 
 
 class Conv:
@@ -54,6 +60,27 @@ class Conv:
 
 
 class RpcCase(BridgeCase):
+    def setUp(self):
+        super().setUp()
+        # In-process main() держит flock-handle .writer.lock до конца процесса: тест закрывает его сам (FU-001).
+        self._lock_handles = []
+        real = server.acquire_writer_lock
+
+        def tracked():
+            handle = real()
+            if handle is not None:
+                self._lock_handles.append(handle)
+            return handle
+
+        patcher = mock.patch.object(server, "acquire_writer_lock", tracked)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._close_lock_handles)
+
+    def _close_lock_handles(self):
+        for handle in self._lock_handles:
+            handle.close()
+
     def conv(self, key="chat-1", **extra):
         return Conv(self, key, **extra)
 
@@ -65,7 +92,11 @@ class RpcCase(BridgeCase):
         result = {}
         for rec in self.hub.rpcs("droid.add_user_message"):
             result.setdefault(rec["pid"], []).append(
-                (rec["params"].get("text", ""), bool(rec["params"].get("skipAgentLoop"))))
+                (
+                    rec["params"].get("text", ""),
+                    bool(rec["params"].get("skipAgentLoop")),
+                )
+            )
         return result
 
     def wait_gone(self, pid, timeout=10.0):

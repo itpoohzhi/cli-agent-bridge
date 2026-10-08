@@ -104,7 +104,9 @@ FRAME_BASE = 272  # обёртка system-reminder, intro и т.п. (калиб�
 SECTION_FIXED = 23  # заголовок `Instructions from: ` и разделители без самого пути
 MARKER_PREFIX = "Workspace instruction budget "
 MARKER_TAIL_BYTES = 2  # пустая строка после метки
-FORMULA_BASE = 279  # AD-006: 279 + 32·N + Σ байт (путь-зависимая модель при 16/9 Б путях)
+FORMULA_BASE = (
+    279  # AD-006: 279 + 32·N + Σ байт (путь-зависимая модель при 16/9 Б путях)
+)
 FORMULA_PER_SECTION = 32
 
 BLOCK_LIMIT = 60000  # REQ-003, граница строгая: <= 60000 проходит
@@ -115,9 +117,11 @@ LINE_MARGIN_MIN = 2048
 # Реальный рендер блока и события журнала (снято с живого session.v4.jsonl, RW-003):
 # block = HEAD + [метка + "\n\n"] + "\n\n".join(секции) + "\n" + TAIL, где секция =
 # "Instructions from: <display>\n\n<тело>"; длина совпадает с моделью FRAME_BASE/SECTION_FIXED.
-BLOCK_HEAD = ("<system-reminder>\nThe following workspace instructions may be relevant to your work. "
-              "Use them as guidance when applicable. More specific instructions take precedence over "
-              "broader ones. They do not override system, developer, or direct user instructions.\n\n")
+BLOCK_HEAD = (
+    "<system-reminder>\nThe following workspace instructions may be relevant to your work. "
+    "Use them as guidance when applicable. More specific instructions take precedence over "
+    "broader ones. They do not override system, developer, or direct user instructions.\n\n"
+)
 BLOCK_TAIL = "</system-reminder>"
 SECTION_HEADER = "Instructions from: "
 JOURNAL_SEQ = 10  # номер события (поле seq) - в обёртке занимает 2-3 символа
@@ -178,7 +182,9 @@ class Result(NamedTuple):
     window_high: Optional[int] = None
     renders: Optional[Dict[str, RenderResult]] = None
     line_margin: Optional[int] = None
-    line_estimates: Optional[Dict[str, Tuple[int, bool]]] = None  # cwd -> (байт строки журнала, точный ли расчёт)
+    line_estimates: Optional[Dict[str, Tuple[int, bool]]] = (
+        None  # cwd -> (байт строки журнала, точный ли расчёт)
+    )
 
 
 def make_user_global(canon_size: int) -> FileEntry:
@@ -196,7 +202,9 @@ def estimate_block_bytes(n_sections: int, files_total: int) -> int:
     return FORMULA_BASE + FORMULA_PER_SECTION * n_sections + files_total
 
 
-def marker_text(maxbytes: int, omitted: Sequence[str], truncated: Optional[Tuple[str, int, int]]) -> str:
+def marker_text(
+    maxbytes: int, omitted: Sequence[str], truncated: Optional[Tuple[str, int, int]]
+) -> str:
     """Строка-метка бюджета без завершающей пустой строки; пустая, если ничего не отброшено."""
     parts: List[str] = []
     if omitted:
@@ -220,7 +228,11 @@ def _block(entries: Sequence[FileEntry], marker: str) -> int:
     """Длина блока: рамка + секции + метка; пустой набор без метки не даёт блока вовсе."""
     if not entries and not marker:
         return 0
-    return FRAME_BASE + sum(section_bytes(e.display, e.size) for e in entries) + _marker_bytes(marker)
+    return (
+        FRAME_BASE
+        + sum(section_bytes(e.display, e.size) for e in entries)
+        + _marker_bytes(marker)
+    )
 
 
 def dedupe_entries(entries: Sequence[FileEntry]) -> List[FileEntry]:
@@ -252,8 +264,15 @@ def render_plan(entries: Sequence[FileEntry], maxbytes: int) -> RenderResult:
     items = dedupe_entries(entries)
     n = len(items)
     if _block(items, "") <= maxbytes:
-        return RenderResult(CLASS_ALL, [e.display for e in items], [], None,
-                            _block(items, ""), _canon_copies(items), "")
+        return RenderResult(
+            CLASS_ALL,
+            [e.display for e in items],
+            [],
+            None,
+            _block(items, ""),
+            _canon_copies(items),
+            "",
+        )
     # Шаг 2: отбрасываем файлы целиком с широкого начала, пока остаток с меткой влезает.
     for k in range(1, n):
         omitted = [e.display for e in items[:k]]
@@ -261,9 +280,20 @@ def render_plan(entries: Sequence[FileEntry], maxbytes: int) -> RenderResult:
         rest = items[k:]
         size = _block(rest, marker)
         if size <= maxbytes:
-            cls = CLASS_UG_OMITTED if (k == 1 and items[0].user_global) else CLASS_PROJECT_OMITTED
-            return RenderResult(cls, [e.display for e in rest], omitted, None,
-                                size, _canon_copies(rest), marker)
+            cls = (
+                CLASS_UG_OMITTED
+                if (k == 1 and items[0].user_global)
+                else CLASS_PROJECT_OMITTED
+            )
+            return RenderResult(
+                cls,
+                [e.display for e in rest],
+                omitted,
+                None,
+                size,
+                _canon_copies(rest),
+                marker,
+            )
     # Шаг 3: не влезает даже последний - усекаем его (двоичный поиск по длине Y).
     last = items[-1]
     omitted = [e.display for e in items[:-1]]
@@ -276,8 +306,15 @@ def render_plan(entries: Sequence[FileEntry], maxbytes: int) -> RenderResult:
         else:
             hi = mid - 1
     marker = marker_text(maxbytes, omitted, (last.display, last.size, lo))
-    return RenderResult(CLASS_TRUNCATED, [last.display], omitted, (last.display, last.size, lo),
-                        _block([last._replace(size=lo)], marker), 0, marker)
+    return RenderResult(
+        CLASS_TRUNCATED,
+        [last.display],
+        omitted,
+        (last.display, last.size, lo),
+        _block([last._replace(size=lo)], marker),
+        0,
+        marker,
+    )
 
 
 def block_within_limit(block_bytes: int) -> bool:
@@ -305,7 +342,9 @@ def render_block_text(sections: Sequence[Tuple[str, str]], marker: str = "") -> 
     """
     if not sections and not marker:
         return ""
-    body = "\n\n".join("%s%s\n\n%s" % (SECTION_HEADER, display, text) for display, text in sections)
+    body = "\n\n".join(
+        "%s%s\n\n%s" % (SECTION_HEADER, display, text) for display, text in sections
+    )
     return BLOCK_HEAD + (marker + "\n\n" if marker else "") + body + "\n" + BLOCK_TAIL
 
 
@@ -315,51 +354,79 @@ def _change_entry(display: str, text: str) -> Dict[str, str]:
         directory, name = "user-global", posixpath.basename(display)
     else:
         directory, name = posixpath.dirname(display) or ".", posixpath.basename(display)
-    return {"action": "set", "scope": directory + "\u0000" + name, "path": display,
-            "digest": hashlib.sha1(text.encode("utf-8")).hexdigest()}
+    return {
+        "action": "set",
+        "scope": directory + "\u0000" + name,
+        "path": display,
+        "digest": hashlib.sha1(text.encode("utf-8")).hexdigest(),
+    }
 
 
 def _baseline_identity(maxbytes: int) -> str:
     """Строка baselineIdentity события (внутри JSON экранируется ещё раз, это и считается)."""
-    return json.dumps({
-        "projectRoot": "", "projectRootMarkers": [PROJECT_ROOT_MARKER], "maxBytes": maxbytes,
-        "maxSourceBytes": MAX_SOURCE_BYTES,
-        "instructionFileCandidates": list(CANDIDATE_NAMES[:2]),
-        "localInstructionFileCandidates": list(CANDIDATE_NAMES[2:]),
-    }, separators=(",", ":"))
+    return json.dumps(
+        {
+            "projectRoot": "",
+            "projectRootMarkers": [PROJECT_ROOT_MARKER],
+            "maxBytes": maxbytes,
+            "maxSourceBytes": MAX_SOURCE_BYTES,
+            "instructionFileCandidates": list(CANDIDATE_NAMES[:2]),
+            "localInstructionFileCandidates": list(CANDIDATE_NAMES[2:]),
+        },
+        separators=(",", ":"),
+    )
 
 
-def render_journal_line(block_text: str, sections: Sequence[Tuple[str, str]], maxbytes: int) -> str:
+def render_journal_line(
+    block_text: str, sections: Sequence[Tuple[str, str]], maxbytes: int
+) -> str:
     """Строка session.v4.jsonl с событием agent-instructions: компактный json.dumps + перевод строки."""
     event = {
-        "type": "user/message", "seq": JOURNAL_SEQ, "time": JOURNAL_TIME,
+        "type": "user/message",
+        "seq": JOURNAL_SEQ,
+        "time": JOURNAL_TIME,
         "data": {
             "content": [{"type": "text", "text": block_text}],
-            "source": {"kind": "agent-instructions", "form": "instructions", "baseline": True,
-                       "baselineIdentity": _baseline_identity(maxbytes),
-                       "changes": [_change_entry(d, t) for d, t in sections]},
-            "role": "user", "id": JOURNAL_ID,
+            "source": {
+                "kind": "agent-instructions",
+                "form": "instructions",
+                "baseline": True,
+                "baselineIdentity": _baseline_identity(maxbytes),
+                "changes": [_change_entry(d, t) for d, t in sections],
+            },
+            "role": "user",
+            "id": JOURNAL_ID,
         },
         "surfaceOp": "append",
     }
     return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
-def exact_journal_line_bytes(sections: Sequence[Tuple[str, str]], maxbytes: int, marker: str = "") -> int:
+def exact_journal_line_bytes(
+    sections: Sequence[Tuple[str, str]], maxbytes: int, marker: str = ""
+) -> int:
     """Точная длина строки журнала (UTF-8) по реальным текстам файлов: блок -> событие -> json.dumps."""
     block = render_block_text(sections, marker)
     return len(render_journal_line(block, sections, maxbytes).encode("utf-8"))
 
 
-def journal_line_bytes_fallback(block_bytes: int, displays: Sequence[str], maxbytes: int) -> int:
+def journal_line_bytes_fallback(
+    block_bytes: int, displays: Sequence[str], maxbytes: int
+) -> int:
     """Запасная оценка строки без текстов (только размеры): обёртка события из реального рендера
     с пустым телом (display paths входят в text, path и scope) плюс доля ESCAPE_RATIO на экранирование."""
-    wrapper = len(render_journal_line("", [(d, "") for d in displays], maxbytes).encode("utf-8"))
+    wrapper = len(
+        render_journal_line("", [(d, "") for d in displays], maxbytes).encode("utf-8")
+    )
     return wrapper + block_bytes + int(math.ceil(block_bytes * ESCAPE_RATIO))
 
 
-def _line_estimate(rend: RenderResult, cwd_texts: Optional[Dict[str, str]], canon_text: Optional[str],
-                   maxbytes: int) -> Tuple[int, bool]:
+def _line_estimate(
+    rend: RenderResult,
+    cwd_texts: Optional[Dict[str, str]],
+    canon_text: Optional[str],
+    maxbytes: int,
+) -> Tuple[int, bool]:
     """Длина строки журнала для рендера: точная (по текстам) или запасная оценка по размерам."""
     sections: List[Tuple[str, str]] = []
     for display in rend.kept:
@@ -368,9 +435,11 @@ def _line_estimate(rend: RenderResult, cwd_texts: Optional[Dict[str, str]], cano
         else:
             text = (cwd_texts or {}).get(display)
         if text is None:
-            return journal_line_bytes_fallback(rend.block_bytes, rend.kept, maxbytes), False
+            return journal_line_bytes_fallback(
+                rend.block_bytes, rend.kept, maxbytes
+            ), False
         if rend.truncated is not None and display == rend.truncated[0]:
-            text = text.encode("utf-8")[:rend.truncated[2]].decode("utf-8", "ignore")
+            text = text.encode("utf-8")[: rend.truncated[2]].decode("utf-8", "ignore")
         sections.append((display, text))
     return exact_journal_line_bytes(sections, maxbytes, rend.marker), True
 
@@ -405,14 +474,21 @@ def evaluate(
         entries = dedupe_entries([ug] + list(files))
         rend = render_plan(entries, maxbytes)
         renders[label] = rend
-        line_estimates[label] = _line_estimate(rend, texts.get(label) if texts else None, canon_text, maxbytes)
+        line_estimates[label] = _line_estimate(
+            rend, texts.get(label) if texts else None, canon_text, maxbytes
+        )
         full = _block(entries, "")
         if rend.canon_copies == 0:
-            reasons.append("CANON_LOST cwd=%s: канон не попал в запрос (класс %s, omitted=%s)"
-                           % (label, rend.cls, ",".join(rend.omitted) or "-"))
+            reasons.append(
+                "CANON_LOST cwd=%s: канон не попал в запрос (класс %s, omitted=%s)"
+                % (label, rend.cls, ",".join(rend.omitted) or "-")
+            )
             severe = True
         elif rend.canon_copies >= 2:
-            reasons.append("DUPLICATE_RETURNED cwd=%s: копий канона в запросе %d" % (label, rend.canon_copies))
+            reasons.append(
+                "DUPLICATE_RETURNED cwd=%s: копий канона в запросе %d"
+                % (label, rend.canon_copies)
+            )
             severe = True
         if sum(1 for e in entries if e.is_canon) >= 2:
             uppers.append(full - 1)
@@ -434,33 +510,52 @@ def evaluate(
         margin = BLOCK_LIMIT - line_est
         line_margin = margin if line_margin is None else min(line_margin, margin)
         if not block_within_limit(rend.block_bytes):
-            reasons.append("REQ003_SIZE_EXCEEDED cwd=%s basis=block block=%d limit=%d"
-                           % (label, rend.block_bytes, BLOCK_LIMIT))
+            reasons.append(
+                "REQ003_SIZE_EXCEEDED cwd=%s basis=block block=%d limit=%d"
+                % (label, rend.block_bytes, BLOCK_LIMIT)
+            )
             warn = True
             severe = severe or strict_req003
         elif not block_within_limit(line_est):
-            reasons.append("REQ003_SIZE_EXCEEDED cwd=%s basis=line_estimate line_est=%d limit=%d"
-                           % (label, line_est, BLOCK_LIMIT))
+            reasons.append(
+                "REQ003_SIZE_EXCEEDED cwd=%s basis=line_estimate line_est=%d limit=%d"
+                % (label, line_est, BLOCK_LIMIT)
+            )
             warn = True
             severe = severe or strict_req003
         elif margin < LINE_MARGIN_MIN:
-            reasons.append("LINE_ORACLE_RISK cwd=%s: запас строки журнала %d Б < %d"
-                           % (label, margin, LINE_MARGIN_MIN))
+            reasons.append(
+                "LINE_ORACLE_RISK cwd=%s: запас строки журнала %d Б < %d"
+                % (label, margin, LINE_MARGIN_MIN)
+            )
             warn = True
 
     if lower_margin < MARGIN_MIN:
-        reasons.append("LOW_MARGIN_LOWER: запас снизу %d Б < %d (рост проектных файлов/канона съест окно)"
-                       % (lower_margin, MARGIN_MIN))
+        reasons.append(
+            "LOW_MARGIN_LOWER: запас снизу %d Б < %d (рост проектных файлов/канона съест окно)"
+            % (lower_margin, MARGIN_MIN)
+        )
         warn = True
     if upper_margin is not None and upper_margin < MARGIN_MIN:
-        reasons.append("LOW_MARGIN_UPPER: запас сверху %d Б < %d (уменьшение канона вернёт дубль)"
-                       % (upper_margin, MARGIN_MIN))
+        reasons.append(
+            "LOW_MARGIN_UPPER: запас сверху %d Б < %d (уменьшение канона вернёт дубль)"
+            % (upper_margin, MARGIN_MIN)
+        )
         warn = True
 
     exit_code = 2 if severe else (1 if warn else 0)
-    return Result(exit_code, reasons, lower_margin, upper_margin,
-                  recommend_maxbytes(window_low, window_high), window_low, window_high,
-                  renders, line_margin, line_estimates)
+    return Result(
+        exit_code,
+        reasons,
+        lower_margin,
+        upper_margin,
+        recommend_maxbytes(window_low, window_high),
+        window_low,
+        window_high,
+        renders,
+        line_margin,
+        line_estimates,
+    )
 
 
 def recommend_maxbytes(window_low: int, window_high: Optional[int]) -> Optional[int]:
@@ -496,8 +591,9 @@ def _find_project_root(cwd: str) -> str:
         cur = parent
 
 
-def collect_cwd_entries(cwd: str, canon_real: str,
-                        texts_out: Optional[Dict[str, str]] = None) -> Tuple[List[FileEntry], bool]:
+def collect_cwd_entries(
+    cwd: str, canon_real: str, texts_out: Optional[Dict[str, str]] = None
+) -> Tuple[List[FileEntry], bool]:
     """Проектные файлы цепочки root -> cwd; (список, cwd существует).
 
     Файл читается один раз: размер - длина содержимого (симлинк следуется, как у клиента),
@@ -545,7 +641,9 @@ def collect_cwd_entries(cwd: str, canon_real: str,
                     texts_out[display] = data.decode("utf-8", "replace")
             except OSError:
                 pass
-            out.append(FileEntry(display, size, real == canon_real, directory, key, False))
+            out.append(
+                FileEntry(display, size, real == canon_real, directory, key, False)
+            )
     return out, True
 
 
@@ -585,15 +683,22 @@ def self_test() -> List[str]:
     for name, entries, maxbytes, cls, block in exact:
         got = render_plan(entries, maxbytes)
         if got.cls != cls or got.block_bytes != block:
-            fails.append("%s: ожидалось %s/%d, получено %s/%d" % (name, cls, block, got.cls, got.block_bytes))
+            fails.append(
+                "%s: ожидалось %s/%d, получено %s/%d"
+                % (name, cls, block, got.cls, got.block_bytes)
+            )
     # Усечение: реальная граница UTF-8 может быть на 1-3 Б ниже модельной (F-707).
-    for name, entries, maxbytes, y_meas in (("KB M=40000", kb, 40000, 39580),
-                                            ("KB M=55500", kb, 55500, 55081),
-                                            ("DW M=55500", dw, 55500, 55093)):
+    for name, entries, maxbytes, y_meas in (
+        ("KB M=40000", kb, 40000, 39580),
+        ("KB M=55500", kb, 55500, 55081),
+        ("DW M=55500", dw, 55500, 55093),
+    ):
         got = render_plan(entries, maxbytes)
         y_model = got.truncated[2] if got.truncated else -1
         if not (y_meas <= y_model <= y_meas + 3):
-            fails.append("%s: усечение Y=%d вне [%d..%d]" % (name, y_model, y_meas, y_meas + 3))
+            fails.append(
+                "%s: усечение Y=%d вне [%d..%d]" % (name, y_model, y_meas, y_meas + 3)
+            )
     # Формула AD-006 совпадает с путь-зависимой моделью на типичных наборах.
     for name, entries in (("KB", kb), ("AB", ab), ("WA", wa), ("DW", dw)):
         formula = estimate_block_bytes(len(entries), sum(e.size for e in entries))
@@ -612,13 +717,26 @@ def self_test() -> List[str]:
     golden = ((plain, 102), (quotes, 202), (newlines, 202), (cyr, 202))
     for text, expected in golden:
         if journal_line_bytes_est(text) != expected:
-            fails.append("golden journal_line_bytes_est(%r...) != %d" % (text[:3], expected))
+            fails.append(
+                "golden journal_line_bytes_est(%r...) != %d" % (text[:3], expected)
+            )
     # Окно на снимке: запасы при 106 496 = 12 736 / 4 680.
-    res = evaluate(canon, {"KB": kb[1:], "WA": wa[1:], "AB": ab[1:], "DW": []}, DEFAULT_MAXBYTES, ("KB",))
+    res = evaluate(
+        canon,
+        {"KB": kb[1:], "WA": wa[1:], "AB": ab[1:], "DW": []},
+        DEFAULT_MAXBYTES,
+        ("KB",),
+    )
     if (res.lower_margin, res.upper_margin, res.exit_code) != (12736, 4680, 0):
-        fails.append("окно снимка: %r/%r/exit %d" % (res.lower_margin, res.upper_margin, res.exit_code))
+        fails.append(
+            "окно снимка: %r/%r/exit %d"
+            % (res.lower_margin, res.upper_margin, res.exit_code)
+        )
     if res.recommended != DEFAULT_MAXBYTES:
-        fails.append("рекомендуемый maxBytes на снимке %r != %d" % (res.recommended, DEFAULT_MAXBYTES))
+        fails.append(
+            "рекомендуемый maxBytes на снимке %r != %d"
+            % (res.recommended, DEFAULT_MAXBYTES)
+        )
     return fails
 
 
@@ -660,7 +778,9 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
         canon_text = canon_bytes.decode("utf-8", "replace")
     except OSError:
         pass
-    _say("mode=PLANNED maxbytes=%d canon=%s size=%d" % (maxbytes, canon_path, canon_size))
+    _say(
+        "mode=PLANNED maxbytes=%d canon=%s size=%d" % (maxbytes, canon_path, canon_size)
+    )
     cwd_files: Dict[str, Sequence[FileEntry]] = {}
     texts: Dict[str, Dict[str, str]] = {}
     exists: Dict[str, bool] = {}
@@ -672,24 +792,56 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
         exists[label] = ok
         paths[label] = path
     req_labels = [label for label, path in cwds if path == KB_CWD]
-    res = evaluate(canon_size, cwd_files, maxbytes, req_labels, strict_req003=True,
-                   texts=texts, canon_text=canon_text)
+    res = evaluate(
+        canon_size,
+        cwd_files,
+        maxbytes,
+        req_labels,
+        strict_req003=True,
+        texts=texts,
+        canon_text=canon_text,
+    )
     for label, _path in cwds:
         rend = (res.renders or {})[label]
         files = cwd_files[label]
-        listing = ", ".join("%s=%d%s" % (f.display, f.size, "(canon)" if f.is_canon else "") for f in files) or "-"
+        listing = (
+            ", ".join(
+                "%s=%d%s" % (f.display, f.size, "(canon)" if f.is_canon else "")
+                for f in files
+            )
+            or "-"
+        )
         note = "" if exists[label] else " [cwd отсутствует]"
         canon_state = "present" if rend.canon_copies >= 1 else "LOST"
         dup_state = "RETURNED" if rend.canon_copies >= 2 else "absent"
         line_est, exact = (res.line_estimates or {})[label]
         _say("cwd[%s] %s%s" % (label, paths[label], note))
         _say("  files: %s" % listing)
-        _say("  forecast block=%d class=%s sections=%d omitted=%s line_est=%d line_mode=%s canon=%s dup=%s"
-              % (rend.block_bytes, rend.cls, len(rend.kept), ",".join(rend.omitted) or "-",
-                 line_est, "exact" if exact else "size-estimate", canon_state, dup_state))
-    _say("window=[%d..%s] maxbytes=%d" % (res.window_low, _fmt_margin(res.window_high), maxbytes))
-    _say("lower_margin=%d upper_margin=%s line_margin=%s"
-          % (res.lower_margin, _fmt_margin(res.upper_margin), _fmt_margin(res.line_margin)))
+        _say(
+            "  forecast block=%d class=%s sections=%d omitted=%s line_est=%d line_mode=%s canon=%s dup=%s"
+            % (
+                rend.block_bytes,
+                rend.cls,
+                len(rend.kept),
+                ",".join(rend.omitted) or "-",
+                line_est,
+                "exact" if exact else "size-estimate",
+                canon_state,
+                dup_state,
+            )
+        )
+    _say(
+        "window=[%d..%s] maxbytes=%d"
+        % (res.window_low, _fmt_margin(res.window_high), maxbytes)
+    )
+    _say(
+        "lower_margin=%d upper_margin=%s line_margin=%s"
+        % (
+            res.lower_margin,
+            _fmt_margin(res.upper_margin),
+            _fmt_margin(res.line_margin),
+        )
+    )
     _say("recommended_maxbytes=%s" % _fmt_margin(res.recommended))
     if res.reasons:
         for reason in res.reasons:
@@ -719,7 +871,9 @@ def _user_global_problem(canon_real: str, canon_bytes: bytes) -> Optional[str]:
     return None
 
 
-def check_installed(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -> Optional[Result]:
+def check_installed(
+    maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str
+) -> Optional[Result]:
     """Тот же прогноз, что `run_check`, но без печати (для автоматического контура моста).
 
     None - канон не найден (CANON_LOST). Результат с exit_code 2 и причиной CANON_LOST - настоящий
@@ -735,15 +889,24 @@ def check_installed(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: 
     canon_real = os.path.realpath(canon_path)
     problem = _user_global_problem(canon_real, canon_bytes)
     if problem is not None:
-        return Result(2, ["CANON_LOST user-global %s: %s" % (UG_DISPLAY, problem)], 0, None, None)
+        return Result(
+            2, ["CANON_LOST user-global %s: %s" % (UG_DISPLAY, problem)], 0, None, None
+        )
     cwd_files: Dict[str, Sequence[FileEntry]] = {}
     texts: Dict[str, Dict[str, str]] = {}
     for label, path in cwds:
         texts[label] = {}
         cwd_files[label], _ = collect_cwd_entries(path, canon_real, texts[label])
     req_labels = [label for label, path in cwds if path == KB_CWD]
-    return evaluate(len(canon_bytes), cwd_files, maxbytes, req_labels, strict_req003=True,
-                    texts=texts, canon_text=canon_text)
+    return evaluate(
+        len(canon_bytes),
+        cwd_files,
+        maxbytes,
+        req_labels,
+        strict_req003=True,
+        texts=texts,
+        canon_text=canon_text,
+    )
 
 
 def parse_profile_maxbytes(text: str) -> Optional[int]:
@@ -760,6 +923,7 @@ def parse_profile_maxbytes(text: str) -> Optional[int]:
     in_preset = False
     in_plugin = False
     presets = plugins = configs = 0
+    flow_config = False
     plugin_indent = config_indent = child_indent = -1
     hits: List[Tuple[str, bool]] = []
     for line in text.splitlines():
@@ -771,7 +935,10 @@ def parse_profile_maxbytes(text: str) -> Optional[int]:
         if not in_preset:
             continue
         if re.match(r"^\s+- id:", line):
-            in_plugin = re.match(r"^\s+- id:\s*[\"']?agent-instructions[\"']?\s*$", line) is not None
+            in_plugin = (
+                re.match(r"^\s+- id:\s*[\"']?agent-instructions[\"']?\s*$", line)
+                is not None
+            )
             plugins += in_plugin
             plugin_indent = len(line) - len(line.lstrip())
             config_indent = child_indent = -1
@@ -780,9 +947,16 @@ def parse_profile_maxbytes(text: str) -> Optional[int]:
         if not stripped or stripped.startswith("#"):
             continue
         indent = len(line) - len(line.lstrip())
-        if in_plugin and indent == plugin_indent + 2 and re.match(r"^[\"']?config[\"']?\s*:\s*$", stripped):
-            configs += 1
+        if (
+            in_plugin
+            and indent == plugin_indent + 2
+            and re.match(r"^[\"']?config[\"']?\s*:", stripped)
+        ):
+            configs += 1  # ключ config считается в любой форме значения (block, flow `{...}`, inline)
             config_indent, child_indent = indent, -1
+            flow_config |= (
+                re.match(r"^[\"']?config[\"']?\s*:\s*$", stripped) is None
+            )  # не блочная форма: неоднозначно
             continue
         if config_indent >= 0 and indent <= config_indent:
             config_indent = child_indent = -1  # блок config закрыт
@@ -790,9 +964,18 @@ def parse_profile_maxbytes(text: str) -> Optional[int]:
             child_indent = indent
         found = re.match(r"^[\"']?maxBytes[\"']?\s*:\s*(.*?)\s*$", stripped)
         if found:
-            hits.append((found.group(1), in_plugin and configs == 1 and indent == child_indent))
-    if (presets != 1 or plugins != 1 or configs != 1 or len(hits) != 1 or not hits[0][1]
-            or not (hits[0][0].isascii() and hits[0][0].isdigit())):
+            hits.append(
+                (found.group(1), in_plugin and configs == 1 and indent == child_indent)
+            )
+    if (
+        presets != 1
+        or plugins != 1
+        or configs != 1
+        or flow_config
+        or len(hits) != 1
+        or not hits[0][1]
+        or not (hits[0][0].isascii() and hits[0][0].isdigit())
+    ):
         return None
     return int(hits[0][0])
 
@@ -818,16 +1001,24 @@ def find_profiles(profiles_dir: str) -> List[Tuple[str, str, Optional[int]]]:
     return found
 
 
-def run_profiles(profiles_dir: str, cwds: Sequence[Tuple[str, str]], canon_path: str) -> int:
+def run_profiles(
+    profiles_dir: str, cwds: Sequence[Tuple[str, str]], canon_path: str
+) -> int:
     """Проверка установленных профилей: на каждом maxBytes - тот же прогноз, что и `--check`; итог - худший код."""
     profiles = find_profiles(profiles_dir)
     if not profiles:
-        _say("профили не найдены: %s (ожидается <профиль>/%s)" % (profiles_dir, PROFILE_FILE))
+        _say(
+            "профили не найдены: %s (ожидается <профиль>/%s)"
+            % (profiles_dir, PROFILE_FILE)
+        )
         return 2
     worst = 0
     for name, path, maxbytes in profiles:
         if maxbytes is None:
-            _say("profile=%s path=%s: maxBytes не найден (preset-standard / agent-instructions)" % (name, path))
+            _say(
+                "profile=%s path=%s: maxBytes не найден (preset-standard / agent-instructions)"
+                % (name, path)
+            )
             worst = 2
             continue
         _say("profile=%s path=%s maxBytes=%d" % (name, path, maxbytes))
@@ -838,17 +1029,40 @@ def run_profiles(profiles_dir: str, cwds: Sequence[Tuple[str, str]], canon_path:
 
 def build_parser() -> argparse.ArgumentParser:
     """Парсер CLI: режимы self-test/check/profiles взаимоисключающие."""
-    parser = argparse.ArgumentParser(prog="b_guard", description="Охранник B: прогноз блока agent-instructions DSH")
+    parser = argparse.ArgumentParser(
+        prog="b_guard", description="Охранник B: прогноз блока agent-instructions DSH"
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--self-test", action="store_true", help="сверить модель с границами zone-F")
-    mode.add_argument("--check", action="store_true", help="прогноз по реальным размерам файлов (stat)")
-    mode.add_argument("--profiles", action="store_true",
-                      help="прочитать maxBytes установленных профилей DSH (только чтение) и проверить каждый")
-    parser.add_argument("--maxbytes", type=int, default=DEFAULT_MAXBYTES, help="планируемый maxBytes")
-    parser.add_argument("--cwd", action="append", default=None, metavar="PATH", help="cwd для проверки (повторяемый)")
+    mode.add_argument(
+        "--self-test", action="store_true", help="сверить модель с границами zone-F"
+    )
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="прогноз по реальным размерам файлов (stat)",
+    )
+    mode.add_argument(
+        "--profiles",
+        action="store_true",
+        help="прочитать maxBytes установленных профилей DSH (только чтение) и проверить каждый",
+    )
+    parser.add_argument(
+        "--maxbytes", type=int, default=DEFAULT_MAXBYTES, help="планируемый maxBytes"
+    )
+    parser.add_argument(
+        "--cwd",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="cwd для проверки (повторяемый)",
+    )
     parser.add_argument("--canon", default=CANON_PATH, help="путь канона (для тестов)")
-    parser.add_argument("--profiles-dir", default=PROFILES_DIR, metavar="PATH",
-                        help="каталог профилей DSH для --profiles (по умолчанию ~/.dsh/profiles)")
+    parser.add_argument(
+        "--profiles-dir",
+        default=PROFILES_DIR,
+        metavar="PATH",
+        help="каталог профилей DSH для --profiles (по умолчанию ~/.dsh/profiles)",
+    )
     return parser
 
 
@@ -865,7 +1079,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.cwd:
         # Известные пути получают свои метки (KB включает ограничение REQ-003), прочие - basename.
         known = {path: label for label, path in DEFAULT_CWDS}
-        cwds = [(known.get(p, os.path.basename(p.rstrip("/")) or p), p) for p in args.cwd]
+        cwds: List[Tuple[str, str]] = [
+            (known.get(p, os.path.basename(p.rstrip("/")) or p), p)
+            for p in map(str, args.cwd)
+        ]
     else:
         cwds = list(DEFAULT_CWDS)
     if args.profiles:

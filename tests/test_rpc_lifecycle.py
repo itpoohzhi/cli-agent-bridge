@@ -24,7 +24,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
 from bridge_testlib import pid_alive, wait_until  # noqa: E402
 from rpc_testlib import (  # noqa: E402
-    DONE_LINE, EXEC_LINE, REJECT_LINE, USAGE_LINE, FakeClock, RpcCase,
+    DONE_LINE,
+    EXEC_LINE,
+    REJECT_LINE,
+    USAGE_LINE,
+    FakeClock,
+    RpcCase,
 )
 
 SLOW = {"steps": [{"op": "sleep", "s": 1.0}, {"op": "text", "text": "slow"}]}
@@ -57,7 +62,11 @@ class TestIdleAndRestore(RpcCase):
         self.assertEqual(state.state, "PERSISTED")
         self.assertEqual(state.sid, sid)  # SID и файлы остаются, процесс закрыт штатно
         # Закрытие штатное (close_session/EOF), а не убийство процесса.
-        self.assertTrue(wait_until(lambda: any(e["reason"] == "close_session" for e in self.hub.exits())))
+        self.assertTrue(
+            wait_until(
+                lambda: any(e["reason"] == "close_session" for e in self.hub.exits())
+            )
+        )
         pids = [first_pid]
         for cycle in range(3):
             self.assertEqual(chat.ask(f"r{cycle}")[0], 200)
@@ -79,13 +88,19 @@ class TestIdleAndRestore(RpcCase):
         chat = self.conv("chat-busy")
         thread = threading.Thread(target=lambda: chat.ask("long"))
         thread.start()
-        self.assertTrue(wait_until(lambda: server.REGISTRY.chats and self.chat_of("chat-busy").lock.locked()))
+        self.assertTrue(
+            wait_until(
+                lambda: (
+                    server.REGISTRY.chats and self.chat_of("chat-busy").lock.locked()
+                )
+            )
+        )
         time.sleep(0.3)
-        self.clock.now = 10 ** 6
+        self.clock.now = 10**6
         self.assertEqual(self._reap(), [])  # ход идёт: аренда занята
         thread.join(30)
-        self.assertEqual(self.chat_of("chat-busy").last_used, 10 ** 6)
-        self.clock.now = 10 ** 6 + 2699
+        self.assertEqual(self.chat_of("chat-busy").last_used, 10**6)
+        self.clock.now = 10**6 + 2699
         self.assertEqual(self._reap(), [])
 
     def test_tm008_corrupt_or_missing_state_falls_back_to_history(self):
@@ -98,14 +113,23 @@ class TestIdleAndRestore(RpcCase):
         self.clock.advance(2700)
         self._reap()
         record.write_text("{not json", encoding="utf-8")
-        server.REGISTRY = server.ChatRegistry()  # рестарт моста: реестр заново читает диск
+        server.REGISTRY = (
+            server.ChatRegistry()
+        )  # рестарт моста: реестр заново читает диск
         inits = len(self.hub.inits())
         with self.capture_logs() as lines:
             self.assertEqual(chat.ask("q1")[0], 200)
         self.assertEqual(len(self.hub.inits()), inits + 1)
         self.assertEqual(self.hub.rpcs("droid.load_session"), [])
         self.assertTrue(any("record=corrupt" in ln for ln in lines))
-        self.assertTrue(all(skip for _, skip in self.texts_by_pid()[self.chat_of("chat-corrupt").proc.pid][:-1]))
+        self.assertTrue(
+            all(
+                skip
+                for _, skip in self.texts_by_pid()[
+                    self.chat_of("chat-corrupt").proc.pid
+                ][:-1]
+            )
+        )
         # Отсутствующий файл — то же самое.
         record = server._record_path(self.chat_of("chat-corrupt").key_hash)
         self.clock.advance(2700)
@@ -143,12 +167,16 @@ class TestIdleAndRestore(RpcCase):
         sid = state.sid
         self.clock.advance(2700)
         self._reap()
-        self.assertEqual(chat.ask("q1")[0], 200)  # первый restore: один каталог — допустимо
+        self.assertEqual(
+            chat.ask("q1")[0], 200
+        )  # первый restore: один каталог — допустимо
         self.assertEqual(state.sid, sid)
         self.clock.advance(2700)
         self._reap()
         with self.capture_logs() as lines:
-            self.assertEqual(chat.ask("q2")[0], 200)  # повтор: каталог задвоен -> санитация
+            self.assertEqual(
+                chat.ask("q2")[0], 200
+            )  # повтор: каталог задвоен -> санитация
         self.assertTrue(any(ln.startswith("restore_integrity ") for ln in lines))
         self.assertNotEqual(state.sid, sid)
         replay = self.texts_by_pid()[state.proc.pid]
@@ -221,7 +249,9 @@ class TestCapAndQueue(RpcCase):
             stop.set()
             sampler.join(2)
         self.assertLessEqual(max(peak), 2)
-        self.assertTrue(wait_until(lambda: server.POOL.used == len(server._rpc_procs) == 2))
+        self.assertTrue(
+            wait_until(lambda: server.POOL.used == len(server._rpc_procs) == 2)
+        )
 
     def test_tm009_pending_chat_not_evicted_and_queue_waits_for_slot(self):
         """TM-009: busy-чат не вытесняется; при полном cap — FIFO-очередь с keepalive до освобождения."""
@@ -230,40 +260,75 @@ class TestCapAndQueue(RpcCase):
         self.hub.script([SLOW])
         busy = self.conv("chat-busy")
         out = {}
-        first = threading.Thread(target=lambda: out.__setitem__("busy", busy.ask("long")))
+        first = threading.Thread(
+            target=lambda: out.__setitem__("busy", busy.ask("long"))
+        )
         first.start()
-        self.assertTrue(wait_until(lambda: server.REGISTRY.chats and self.chat_of("chat-busy").lock.locked()))
+        self.assertTrue(
+            wait_until(
+                lambda: (
+                    server.REGISTRY.chats and self.chat_of("chat-busy").lock.locked()
+                )
+            )
+        )
         time.sleep(0.4)
         started = time.monotonic()
-        status, stream = self._post({"model": "claude-sonnet-5-5", "stream": True,
-                                     "prompt_cache_key": "chat-wait",
-                                     "messages": [{"role": "user", "content": "hello"}]})
+        status, stream = self._post(
+            {
+                "model": "claude-sonnet-5-5",
+                "stream": True,
+                "prompt_cache_key": "chat-wait",
+                "messages": [{"role": "user", "content": "hello"}],
+            }
+        )
         first.join(30)
         self.assertEqual(out["busy"][0], 200)
         self.assertEqual(status, 200)
         self.assertIn(": keepalive", stream)  # keepalive в очереди
-        self.assertGreater(time.monotonic() - started, 0.3)  # ждал занятый слот, но не 900 с
+        self.assertGreater(
+            time.monotonic() - started, 0.3
+        )  # ждал занятый слот, но не 900 с
         self.assertIn('"content": "PONG"', stream)
-        self.assertIsNone(self.chat_of("chat-busy").proc)  # после завершения был вытеснен (LRU idle)
+        self.assertIsNone(
+            self.chat_of("chat-busy").proc
+        )  # после завершения был вытеснен (LRU idle)
 
     def test_tm009_queue_timeout_and_client_abort_return_reservations(self):
         """TM-009: таймаут очереди -> 503 overloaded; отмена клиента возвращает билет; счётчики как раньше."""
         server.MAX_CONCURRENT = 1
-        self.hub.script([{"steps": [{"op": "sleep", "s": 2.0}, {"op": "text", "text": "slow"}]}])
+        self.hub.script(
+            [{"steps": [{"op": "sleep", "s": 2.0}, {"op": "text", "text": "slow"}]}]
+        )
         busy = self.conv("chat-busy2")
         first = threading.Thread(target=lambda: busy.ask("long"))
         first.start()
-        self.assertTrue(wait_until(lambda: server.REGISTRY.chats and self.chat_of("chat-busy2").lock.locked()))
+        self.assertTrue(
+            wait_until(
+                lambda: (
+                    server.REGISTRY.chats and self.chat_of("chat-busy2").lock.locked()
+                )
+            )
+        )
         time.sleep(0.3)
         server.QUEUE_TIMEOUT_S = 1
-        status, body = self._post_json({"model": "claude-sonnet-5-5", "prompt_cache_key": "chat-q",
-                                        "messages": [{"role": "user", "content": "hi"}]})
+        status, body = self._post_json(
+            {
+                "model": "claude-sonnet-5-5",
+                "prompt_cache_key": "chat-q",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
         self.assertEqual(status, 503)
         self.assertEqual(body["error"]["type"], "overloaded")
         # Клиент уходит из очереди: билет и резервации возвращены, spawn не было.
         server.QUEUE_TIMEOUT_S = 900
-        payload = json.dumps({"model": "claude-sonnet-5-5", "prompt_cache_key": "chat-gone",
-                              "messages": [{"role": "user", "content": "hi"}]}).encode()
+        payload = json.dumps(
+            {
+                "model": "claude-sonnet-5-5",
+                "prompt_cache_key": "chat-gone",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        ).encode()
         sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
         sock.sendall(self._raw_request(payload))
         time.sleep(0.6)
@@ -320,7 +385,9 @@ class TestTimeoutsAndCancel(RpcCase):
     def test_tm010_silence_watchdog_interrupts_and_invalidates_chat(self):
         """TM-010: watchdog без прогресса -> interrupt, 504 timeout; чат DIRTY, следующий ход — replay."""
         server.SILENCE_WATCHDOG_S = 0.6
-        self.hub.script([{"steps": [{"op": "text", "text": "partial"}, {"op": "hang"}]}])
+        self.hub.script(
+            [{"steps": [{"op": "text", "text": "partial"}, {"op": "hang"}]}]
+        )
         chat = self.conv("chat-wd")
         status, body = chat.ask("q0")
         self.assertEqual(status, 504)
@@ -342,41 +409,70 @@ class TestTimeoutsAndCancel(RpcCase):
         # first-token: initialize не отвечает дольше порога.
         server.FIRST_TOKEN_TIMEOUT_S = 0.5
         self.hub.configure(init_delay=3.0)
-        status, body = self._post_json({"model": "claude-sonnet-5-5",
-                                        "messages": [{"role": "user", "content": "hi"}]})
+        status, body = self._post_json(
+            {
+                "model": "claude-sonnet-5-5",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
         self.assertEqual(status, 504)
         self.assertEqual(body["error"]["type"], "first_token_timeout")
         server.FIRST_TOKEN_TIMEOUT_S = self._saved["FIRST_TOKEN_TIMEOUT_S"]
         self.hub.configure(init_delay=0)
         # keepalive во время буферизации (ход молчит в SSE до terminal).
         server.KEEPALIVE_S = 0.2
-        self.hub.script([{"steps": [{"op": "sleep", "s": 2.5}, {"op": "text", "text": "buffered"}]}])
-        status, stream = self._post({"model": "claude-sonnet-5-5", "stream": True,
-                                     "messages": [{"role": "user", "content": "hi"}]})
+        self.hub.script(
+            [{"steps": [{"op": "sleep", "s": 2.5}, {"op": "text", "text": "buffered"}]}]
+        )
+        status, stream = self._post(
+            {
+                "model": "claude-sonnet-5-5",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
         self.assertEqual(status, 200)
         self.assertGreaterEqual(stream.count(": keepalive"), 2)
         self.assertIn('"content": "buffered"', stream)
         # общий абсолютный таймаут хода.
         server.TIMEOUT_S = 1
         self.hub.script([{"steps": [{"op": "hang"}]}])
-        status, body = self._post_json({"model": "claude-sonnet-5-5",
-                                        "messages": [{"role": "user", "content": "hi"}]})
+        status, body = self._post_json(
+            {
+                "model": "claude-sonnet-5-5",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
         self.assertEqual(status, 504)
         self.assertEqual(body["error"]["type"], "timeout")
         server.TIMEOUT_S = self._saved["TIMEOUT_S"]
         # client_gone -> interrupt, аренда чата и слоты свободны, следующий запрос проходит.
-        self.hub.script([{"steps": [{"op": "sleep", "s": 6.0}, {"op": "text", "text": "never"}]}])
+        self.hub.script(
+            [{"steps": [{"op": "sleep", "s": 6.0}, {"op": "text", "text": "never"}]}]
+        )
         interrupts_before = len(self.hub.rpcs("droid.interrupt_session"))
         calls = []
         real_gone = server._client_gone
-        server._client_gone = lambda sock: (calls.append(1) or len(calls) > 3)
+        server._client_gone = lambda sock: calls.append(1) or len(calls) > 3
         try:
-            payload = json.dumps({"model": "claude-sonnet-5-5", "prompt_cache_key": "chat-gone",
-                                  "messages": [{"role": "user", "content": "long"}]}).encode()
+            payload = json.dumps(
+                {
+                    "model": "claude-sonnet-5-5",
+                    "prompt_cache_key": "chat-gone",
+                    "messages": [{"role": "user", "content": "long"}],
+                }
+            ).encode()
             sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
             sock.sendall(self._raw_request(payload))
-            self.assertTrue(wait_until(
-                lambda: len(self.hub.rpcs("droid.interrupt_session")) > interrupts_before, timeout=20))
+            self.assertTrue(
+                wait_until(
+                    lambda: (
+                        len(self.hub.rpcs("droid.interrupt_session"))
+                        > interrupts_before
+                    ),
+                    timeout=20,
+                )
+            )
             sock.close()
         finally:
             server._client_gone = real_gone
@@ -389,12 +485,20 @@ class TestTimeoutsAndCancel(RpcCase):
 
     def test_tm010_late_events_are_not_counted_for_next_request(self):
         """TM-010: запоздавшее событие прежнего хода не засчитывается следующему запросу."""
-        self.hub.script([{"steps": [{"op": "text", "text": "A0"}], "late": 0.3},
-                         {"steps": [{"op": "text", "text": "A1"}],
-                          "usage": {"inputTokens": 21, "outputTokens": 2}}])
+        self.hub.script(
+            [
+                {"steps": [{"op": "text", "text": "A0"}], "late": 0.3},
+                {
+                    "steps": [{"op": "text", "text": "A1"}],
+                    "usage": {"inputTokens": 21, "outputTokens": 2},
+                },
+            ]
+        )
         chat = self.conv("chat-late")
         self.assertEqual(chat.ask("q0")[0], 200)
-        time.sleep(0.8)  # запоздавшие LATE/terminal уже лежат в inbox простаивающего процесса
+        time.sleep(
+            0.8
+        )  # запоздавшие LATE/terminal уже лежат в inbox простаивающего процесса
         status, body = chat.ask("q1")
         self.assertEqual(status, 200)
         self.assertEqual(body["choices"][0]["message"]["content"], "A1")
@@ -405,35 +509,51 @@ class TestPersistenceAndShutdown(RpcCase):
     def test_tm012_metadata_atomic_private_and_crash_recovery(self):
         """TM-012: метаданные атомарны (0600/0700, только хеши); смерть посреди хода -> replay без двойного user."""
         server.AUTH_KEY = "test-key"
-        chat = self.conv("secret-chat-key-ABC", )
+        chat = self.conv(
+            "secret-chat-key-ABC",
+        )
         self.assertEqual(chat.ask("CANARY-PROMPT-TEXT")[0], 200)
         state = self.chat_of("secret-chat-key-ABC")
         record = server._record_path(state.key_hash)
         self.assertEqual(stat.S_IMODE(record.stat().st_mode), 0o600)
-        for directory in (record.parent, record.parent.parent, record.parent.parent.parent):
+        for directory in (
+            record.parent,
+            record.parent.parent,
+            record.parent.parent.parent,
+        ):
             self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
         raw = record.read_text(encoding="utf-8")
         data = json.loads(raw)
         self.assertEqual(data["state"], "READY")
-        self.assertEqual(data["rec_rev"], 2)  # RW-019: PENDING пишется до первого add_user_message, затем READY
+        self.assertEqual(
+            data["rec_rev"], 2
+        )  # RW-019: PENDING пишется до первого add_user_message, затем READY
         self.assertEqual(chat.ask("second")[0], 200)
-        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))["rec_rev"], 4)  # ещё PENDING + READY
+        self.assertEqual(
+            json.loads(record.read_text(encoding="utf-8"))["rec_rev"], 4
+        )  # ещё PENDING + READY
         self.assertNotIn("CANARY-PROMPT-TEXT", raw)
         self.assertNotIn("secret-chat-key-ABC", raw)
         self.assertNotIn("test-key", raw)
-        self.assertEqual(sorted(p.name for p in record.parent.iterdir()), [record.name])  # tmp не остался
+        self.assertEqual(
+            sorted(p.name for p in record.parent.iterdir()), [record.name]
+        )  # tmp не остался
         # Смерть процесса посреди хода: чат DIRTY на диске, следующий запрос — replay, user ровно один раз.
         self.hub.script([{"steps": [{"op": "exit", "rc": 1, "stderr": "crash"}]}] * 3)
         status, _ = chat.ask("q-crash")
         self.assertEqual(status, 502)
-        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))["state"], "DIRTY")
+        self.assertEqual(
+            json.loads(record.read_text(encoding="utf-8"))["state"], "DIRTY"
+        )
         chat.msgs.pop()
         self.hub.script([{"steps": [{"op": "text", "text": "recovered"}]}])
         status, body = chat.ask("q-crash")
         self.assertEqual(status, 200)
         replay = self.texts_by_pid()[self.chat_of("secret-chat-key-ABC").proc.pid]
-        self.assertEqual([t for t, _ in replay],
-                         ["CANARY-PROMPT-TEXT", "PONG", "second", "PONG", "q-crash"])
+        self.assertEqual(
+            [t for t, _ in replay],
+            ["CANARY-PROMPT-TEXT", "PONG", "second", "PONG", "q-crash"],
+        )
         self.assertEqual([t for t, _ in replay].count("q-crash"), 1)
 
     def test_tm012_pending_marker_after_bridge_death_forces_replay(self):
@@ -495,7 +615,12 @@ class TestPersistenceAndShutdown(RpcCase):
         first = server.acquire_writer_lock()
         self.assertIsNotNone(first)
         try:
-            self.assertEqual(stat.S_IMODE((server.WORKSPACE / "state" / ".writer.lock").stat().st_mode), 0o600)
+            self.assertEqual(
+                stat.S_IMODE(
+                    (server.WORKSPACE / "state" / ".writer.lock").stat().st_mode
+                ),
+                0o600,
+            )
             self.assertIsNone(server.acquire_writer_lock())
         finally:
             first.close()
@@ -519,10 +644,16 @@ class TestPersistenceAndShutdown(RpcCase):
             self.assertLess(elapsed, 5.0)
             self.assertTrue(all(not pid_alive(pid) for pid in pids))
             self.assertEqual(server._rpc_procs, {})
-            self.assertTrue(all(not p._reader.is_alive() for p in procs))  # reader-потоки закрыты
+            self.assertTrue(
+                all(not p._reader.is_alive() for p in procs)
+            )  # reader-потоки закрыты
             self.assertIsNone(bystander.poll())  # чужой процесс жив
-            status, body = self._post_json({"model": "claude-sonnet-5-5",
-                                            "messages": [{"role": "user", "content": "late"}]})
+            status, body = self._post_json(
+                {
+                    "model": "claude-sonnet-5-5",
+                    "messages": [{"role": "user", "content": "late"}],
+                }
+            )
             self.assertEqual(status, 503)
             self.assertEqual(body["error"]["type"], "overloaded")
         finally:
@@ -536,8 +667,16 @@ class TestPersistenceAndShutdown(RpcCase):
         reused = subprocess.Popen(["sleep", "60"], start_new_session=True)
         try:
             entries = [
-                {"pid": own.pid, "start": server._proc_start_sig(own.pid), "bridge_pid": 1},
-                {"pid": reused.pid, "start": "Mon Jan  1 00:00:00 1990", "bridge_pid": 1},  # подпись не совпала
+                {
+                    "pid": own.pid,
+                    "start": server._proc_start_sig(own.pid),
+                    "bridge_pid": 1,
+                },
+                {
+                    "pid": reused.pid,
+                    "start": "Mon Jan  1 00:00:00 1990",
+                    "bridge_pid": 1,
+                },  # подпись не совпала
                 {"pid": foreign.pid, "start": "", "bridge_pid": 1},  # без подписи
             ]
             server._atomic_write(server._children_path(), json.dumps(entries).encode())
@@ -558,8 +697,11 @@ class TestPersistenceAndShutdown(RpcCase):
             "p=subprocess.Popen([%r,%r,'exec'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,"
             "start_new_session=True,env=env)\n"
             "print(p.pid,flush=True)\n"
-            "time.sleep(60)\n" % (str(self.hub.launcher), "x"))
-        parent = subprocess.Popen([sys.executable, "-c", parent_code], stdout=subprocess.PIPE, text=True)
+            "time.sleep(60)\n" % (str(self.hub.launcher), "x")
+        )
+        parent = subprocess.Popen(
+            [sys.executable, "-c", parent_code], stdout=subprocess.PIPE, text=True
+        )
         try:
             child_pid = int(parent.stdout.readline())
             self.assertTrue(pid_alive(child_pid))
@@ -576,43 +718,69 @@ class TestPersistenceAndShutdown(RpcCase):
         """TM-014: новый tool id отключается, сбой list_tools/невалидный init — fail-closed без LLM-хода."""
         chat = self.conv("chat-drift")
         chat.ask("q0")
-        first = [r["params"]["disabledToolIds"] for r in self.hub.rpcs("droid.update_session_settings")
-                 if "disabledToolIds" in r["params"]]
+        first = [
+            r["params"]["disabledToolIds"]
+            for r in self.hub.rpcs("droid.update_session_settings")
+            if "disabledToolIds" in r["params"]
+        ]
         self.assertEqual(first, [["Read", "Execute", "Edit", "web_search"]])
         # Дрейф версии droid: на новой generation каталог шире — отключаются ВСЕ актуальные id.
-        self.hub.configure(tools=["Read", "Execute", "Edit", "web_search", "BrandNewTool"])
+        self.hub.configure(
+            tools=["Read", "Execute", "Edit", "web_search", "BrandNewTool"]
+        )
         chat.msgs[0] = {"role": "user", "content": "edited prefix"}
         self.assertEqual(chat.ask("q1")[0], 200)
-        second = [r["params"]["disabledToolIds"] for r in self.hub.rpcs("droid.update_session_settings")
-                  if "disabledToolIds" in r["params"]]
+        second = [
+            r["params"]["disabledToolIds"]
+            for r in self.hub.rpcs("droid.update_session_settings")
+            if "disabledToolIds" in r["params"]
+        ]
         self.assertIn("BrandNewTool", second[-1])
         # Ошибка list_tools: каталог неизвестен — ход не начинается (fail-closed).
         admissions = len(self.hub.admissions())
         self.hub.configure(list_tools_error=True)
-        status, body = self._post_json({"model": "claude-sonnet-5-5",
-                                        "messages": [{"role": "user", "content": "hi"}]})
+        status, body = self._post_json(
+            {
+                "model": "claude-sonnet-5-5",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
         self.assertEqual(len(self.hub.admissions()), admissions)
         # Неизвестный обязательный ответ: initialize без sessionId -> 502, без add_user_message.
         self.hub.configure(list_tools_error=False, bad_init=True)
-        status, body = self._post_json({"model": "claude-sonnet-5-5",
-                                        "messages": [{"role": "user", "content": "hi"}]})
+        status, body = self._post_json(
+            {
+                "model": "claude-sonnet-5-5",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
         self.assertEqual(len(self.hub.admissions()), admissions)
         # Молчаливая подмена модели невозможна (read-back).
         self.hub.configure(bad_init=False, substitute_model="gpt-default")
-        status, body = self._post_json({"model": "claude-sonnet-5-5",
-                                        "messages": [{"role": "user", "content": "hi"}]})
+        status, body = self._post_json(
+            {
+                "model": "claude-sonnet-5-5",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "droid_error")
         self.assertEqual(len(self.hub.admissions()), admissions)
 
     def test_tm015_child_env_private_dirs_and_no_secrets_in_log_or_state(self):
         """TM-015: ключ моста вырезан, FACTORY_API_KEY унаследован и не в лог/state; права 0700/0600; sweep не трогает state."""
-        saved = {k: os.environ.get(k) for k in ("FACTORY_API_KEY", "DROID_DSH_BRIDGE_KEY",
-                                                 "FAKE_DROID_EXPECT_KEY")}
+        saved = {
+            k: os.environ.get(k)
+            for k in (
+                "FACTORY_API_KEY",
+                "DROID_DSH_BRIDGE_KEY",
+                "FAKE_DROID_EXPECT_KEY",
+            )
+        }
         os.environ["FACTORY_API_KEY"] = "TESTFACTORYKEY-NOT-REAL-0123456789"
         os.environ["FAKE_DROID_EXPECT_KEY"] = "TESTFACTORYKEY-NOT-REAL-0123456789"
         os.environ["DROID_DSH_BRIDGE_KEY"] = "bridge-secret-value-xyz"
@@ -628,7 +796,9 @@ class TestPersistenceAndShutdown(RpcCase):
                     os.environ[key] = value
         spawn = self.hub.spawns()[0]
         self.assertTrue(spawn["factory_api_key_present"])
-        self.assertTrue(spawn["factory_api_key_expected"])  # значение сверено в fake, в журнал не пишется
+        self.assertTrue(
+            spawn["factory_api_key_expected"]
+        )  # значение сверено в fake, в журнал не пишется
         self.assertNotIn("TESTFACTORYKEY-NOT-REAL", json.dumps(spawn))
         self.assertFalse(spawn["bridge_key_in_env"])
         joined = "\n".join(lines)
@@ -659,36 +829,66 @@ class TestJournalGolden(RpcCase):
 
     def test_tm019_new_lines_outside_strict_regexes_and_order_stable(self):
         """TM-019: session_rpc/instr_guard не совпадают со строгими регулярками; strict-строки и их порядок неизменны."""
-        instr = ("<system-reminder>\nWorkspace instruction budget 106496 bytes: omitted ~/.dsh/AGENTS.md\n"
-                 "Instructions from: /x/AGENTS.md\nbody\n</system-reminder>")
+        instr = (
+            "<system-reminder>\nWorkspace instruction budget 106496 bytes: omitted ~/.dsh/AGENTS.md\n"
+            "Instructions from: /x/AGENTS.md\nbody\n</system-reminder>"
+        )
         chat = self.conv("chat-golden")
-        chat.add({"role": "user", "content": "hello"}, {"role": "user", "content": instr})
+        chat.add(
+            {"role": "user", "content": "hello"}, {"role": "user", "content": instr}
+        )
         with self.capture_logs() as lines:
             self.assertEqual(chat.send()[0], 200)
             self.assertEqual(chat.ask("again")[0], 200)
-        strict = [ln for ln in lines if ln.startswith(("exec ", "usage ", "done ", "reject "))]
+        strict = [
+            ln for ln in lines if ln.startswith(("exec ", "usage ", "done ", "reject "))
+        ]
         for line in strict:
             self.assertTrue(any(rx.match(line) for rx in self.STRICT), line)
         new = [ln for ln in lines if ln.startswith(("session_rpc ", "instr_guard "))]
         self.assertTrue(new)
         for line in new:
             self.assertFalse(any(rx.match(line) for rx in self.STRICT), line)
-        kinds = [ln.split(" ", 1)[0] for ln in lines if ln.split(" ", 1)[0] in
-                 ("exec", "instr_guard", "session_rpc", "usage", "done")]
-        self.assertEqual(kinds, ["exec", "instr_guard", "session_rpc", "usage", "done",
-                                 "exec", "session_rpc", "usage", "done"])
+        kinds = [
+            ln.split(" ", 1)[0]
+            for ln in lines
+            if ln.split(" ", 1)[0]
+            in ("exec", "instr_guard", "session_rpc", "usage", "done")
+        ]
+        self.assertEqual(
+            kinds,
+            [
+                "exec",
+                "instr_guard",
+                "session_rpc",
+                "usage",
+                "done",
+                "exec",
+                "session_rpc",
+                "usage",
+                "done",
+            ],
+        )
         guard = [ln for ln in lines if ln.startswith("instr_guard ")][0]
-        self.assertRegex(guard, r"^instr_guard sections=1 omitted=~/\.dsh/AGENTS\.md bytes=\d+$")
+        self.assertRegex(
+            guard, r"^instr_guard sections=1 omitted=~/\.dsh/AGENTS\.md bytes=\d+$"
+        )
         session = [ln for ln in lines if ln.startswith("session_rpc ")][0]
-        self.assertRegex(session, r"^session_rpc chat=[0-9a-f]{8} key=1 path=cold gen=0 sid=-$")
+        self.assertRegex(
+            session, r"^session_rpc chat=[0-9a-f]{8} key=1 path=cold gen=0 sid=-$"
+        )
         # Golden неудачного хода: usage без сессии, формат строки не менялся.
         broken = Path(self._tmp.name) / "broken-launcher"
         broken.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         broken.chmod(0o755)
         server.LAUNCHER = str(broken)
         with self.capture_logs() as lines:
-            status, _ = self._post_json({"model": "claude-sonnet-5-5",
-                                         "messages": [{"role": "user", "content": "hi"}]})
+            status, _ = self._post_json(
+                {
+                    "model": "claude-sonnet-5-5",
+                    "messages": [{"role": "user", "content": "hi"}],
+                }
+            )
         self.assertEqual(status, 502)
         usage = [ln for ln in lines if ln.startswith("usage ")]
         self.assertEqual(usage, ["usage sess=- raw=0/0 rep=0/0 resumed=0 turns=0"])
@@ -698,9 +898,15 @@ class TestJournalGolden(RpcCase):
 class TestBaselineInventory(unittest.TestCase):
     def test_tm016_baseline_inventory_mapped_to_current_tests(self):
         """TM-016: все 92 baseline-теста сохранены либо сопоставлены (oracle_change) с новыми кейсами."""
-        data = json.loads((Path(__file__).resolve().parent / "baseline_inventory.json").read_text(encoding="utf-8"))
+        data = json.loads(
+            (Path(__file__).resolve().parent / "baseline_inventory.json").read_text(
+                encoding="utf-8"
+            )
+        )
         loader = unittest.defaultTestLoader
-        suite = loader.discover(str(Path(__file__).resolve().parent), pattern="test_*.py")
+        suite = loader.discover(
+            str(Path(__file__).resolve().parent), pattern="test_*.py"
+        )
         present = set()
 
         def walk(item):
@@ -713,10 +919,16 @@ class TestBaselineInventory(unittest.TestCase):
 
         walk(suite)
         self.assertEqual(len(data["baseline_to_current"]), 92)
-        missing = [(old, new) for old, targets in data["baseline_to_current"].items()
-                   for new in targets if new not in present]
+        missing = [
+            (old, new)
+            for old, targets in data["baseline_to_current"].items()
+            for new in targets
+            if new not in present
+        ]
         self.assertEqual(missing, [])
-        renamed = {old: t for old, t in data["baseline_to_current"].items() if t != [old]}
+        renamed = {
+            old: t for old, t in data["baseline_to_current"].items() if t != [old]
+        }
         self.assertEqual(len(renamed), 4)  # ровно 4 перепривязанных oracle_change
 
 
