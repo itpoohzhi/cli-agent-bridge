@@ -5,20 +5,9 @@ through a single **OpenAI-compatible API**. One port, one key, one model catalog
 on the other side, the vendor binaries do the work.
 
 If a vendor ships a headless CLI for its agent — Factory Droid, Muse,
-Claude Code, OpenAI Codex, or anything similar — this bridge lets you call it
-with plain `POST /v1/chat/completions`, from any framework, harness, or script
-that speaks the OpenAI protocol.
-
-## Supported backends
-
-| Backend | Vendor binary | Status | Notes |
-|---|---|---|---|
-| `droid` | Factory Droid CLI (`droid`) | enabled | Resident long-lived process per chat (RPC mode); concurrency 4 |
-| `muse` | Muse CLI (`muse`, via launcher wrapper) | opt-in (`enabled: false` by default) | Headless one-shot turn per request, no sessions; concurrency 1 |
-
-Models are routed strictly `model → backend` by the fleet catalog — no silent
-cross-backend fallback. Adding another vendor CLI means adding one adapter
-(see [Adding a backend](#adding-a-backend)); the HTTP facade stays the same.
+Claude Code, OpenAI Codex, Cursor, or anything similar — this bridge lets you
+call it with plain `POST /v1/chat/completions`, from any framework, harness,
+or script that speaks the OpenAI protocol.
 
 ## Features
 
@@ -44,6 +33,53 @@ cross-backend fallback. Adding another vendor CLI means adding one adapter
 - **Operability** — structured journal log, read-only `fleet_check.py`
   preflight validator (catalog, profiles, live probes), 476-test `unittest`
   suite, ruff + basedpyright clean.
+
+## Supported backends
+
+Two adapters ship in this repo; any other vendor CLI joins the same way
+([Adding a backend](#adding-a-backend)). Models are routed strictly
+`model → backend` by the fleet catalog — no silent cross-backend fallback.
+
+### `droid` — Factory Droid CLI (enabled by default)
+
+- Transport: resident long-lived `droid exec` process per chat
+  (stream-JSON-RPC); one chat completion = one turn in that process.
+- Models served: `claude-sonnet-5-5` (default), `gemini-3.8-flash`, `grok-4.7`,
+  `deepseek-v4.1-flash`, `gpt-6.1-sol`, `glm-5.3`.
+- Concurrency: up to 4 chats in flight.
+- Sessions: resident (`hot | restore | rebase | cold` plan), keyed-chat state on
+  disk with restricted permissions.
+
+### `muse` — Muse CLI (opt-in)
+
+- Transport: headless one-shot `muse exec` per request through a launcher
+  wrapper; no sessions — every turn replays the request history.
+- Models served: `muse-spark-1.3`, `muse-spark-1.3-contributor`.
+- Concurrency: strictly 1 across all Muse adapters in the hub.
+- Guardrails: binary `sha256` pin plus executable-wrapper check, re-verified
+  after slot acquisition right before spawn; per-turn isolated directory
+  removed unconditionally; secrets stripped from the child environment.
+
+Enable it by flipping `backends.muse.enabled` to `true` in `fleet.json` (binary
+pin and launcher wrapper required), then restart and run
+`python3 fleet_check.py` — `/v1/models` picks the new models up automatically.
+
+### Beyond this repo
+
+The same hub pattern fronts other vendor CLIs in the author's setup —
+cursor-agent and Claude Code run as sibling bridges behind the identical
+OpenAI facade. They are separate deployments, not part of this repo; they
+prove the point: one facade, any CLI behind it.
+
+### Your CLI here
+
+Any headless vendor CLI can be connected — you write one **adapter** (that's
+what the connector layer is called here): a small class implementing the
+`BackendAdapter` interface (`core/backend_adapter.py`), registered by `kind` in
+`ADAPTER_KINDS` (`adapters/__init__.py`). Config alone can never load
+arbitrary code, so a new CLI always lands as explicit, reviewable code plus
+`fleet.json` entries — full recipe in
+[Adding a backend](#adding-a-backend).
 
 ## Quick start
 
