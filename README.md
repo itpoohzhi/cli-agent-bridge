@@ -20,6 +20,19 @@ or script that speaks the OpenAI protocol.
 - **Tool-calling emulation** — for CLIs with text-only transport, the bridge
   renders tool schemas into the prompt and parses the model's answer back into
   `delta.tool_calls`, so agents keep their function-calling loop unchanged.
+- **Hot resident sessions with configurable TTL** — chats stick to a
+  long-lived backend process keyed by `prompt_cache_key` (sha256, never a
+  path), with a `hot | restore | rebase | cold` lifecycle: a follow-up request
+  with the same key resumes the same session instead of cold-starting.
+  Idle eviction is tunable via `DROID_DSH_BRIDGE_IDLE_SECONDS` (default 2700 s).
+- **Streaming + thinking out of the box** — SSE `stream: true` completions and
+  non-streaming calls alike; the backend's thinking trace is translated into
+  `reasoning_content`, tool blocks into `delta.tool_calls`.
+- **Explicit reasoning and autonomy control** — per-request `reasoning_effort`
+  (validated against the catalog, always forwarded) and a top-level
+  `autonomy` switch (`low | medium | high | off`, default `high`) for how much
+  freedom the downstream executor gets. Unknown values fail fast with `400` —
+  nothing is coerced or defaulted silently.
 - **Binary pinning & sandboxing** — backends start only if the binary matches
   the pinned `sha256` in the catalog; each run executes in its own locked-down
   directory (0600/0700), secrets are stripped from the child environment,
