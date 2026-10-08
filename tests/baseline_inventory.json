@@ -1,0 +1,283 @@
+{
+ "base_sha": "6a96370b00140cd99f7b228044ab36f7db6c416a",
+ "baseline_to_current": {
+  "test_bridge_http.TestMessageJoining.test_two_message_events_joined_nonstream": [
+   "test_bridge_http.TestMessageJoining.test_two_message_events_joined_nonstream"
+  ],
+  "test_bridge_http.TestMessageJoining.test_two_message_events_joined_sse": [
+   "test_bridge_http.TestMessageJoining.test_two_message_events_joined_sse"
+  ],
+  "test_bridge_http.TestNonStreamToolCalls.test_tool_call_block_becomes_tool_calls": [
+   "test_bridge_http.TestNonStreamToolCalls.test_tool_call_block_becomes_tool_calls"
+  ],
+  "test_bridge_http.TestOverallTimeout.test_slot_released_after_timeout": [
+   "test_bridge_http.TestOverallTimeout.test_slot_released_after_timeout"
+  ],
+  "test_bridge_http.TestOverallTimeout.test_timeout_returns_504": [
+   "test_bridge_http.TestOverallTimeout.test_timeout_returns_504"
+  ],
+  "test_bridge_http.TestSSEFrames.test_stream_ends_with_finish_and_done": [
+   "test_bridge_http.TestSSEFrames.test_stream_ends_with_finish_and_done"
+  ],
+  "test_bridge_http.TestSSEFrames.test_stream_error_frame_then_done": [
+   "test_bridge_http.TestSSEFrames.test_stream_error_frame_then_done"
+  ],
+  "test_bridge_http.TestSweepWorkspace.test_sweep_removes_only_stale_prompts": [
+   "test_bridge_http.TestSweepWorkspace.test_sweep_removes_only_stale_prompts"
+  ],
+  "test_bridge_http.TestTransientRetry.test_no_retry_when_text_delivered": [
+   "test_bridge_http.TestTransientRetry.test_no_retry_after_content_committed",
+   "test_bridge_http.TestTransientRetry.test_buffered_text_not_leaked_on_failed_turn"
+  ],
+  "test_bridge_http.TestTransientRetry.test_retry_gives_up_after_three": [
+   "test_bridge_http.TestTransientRetry.test_retry_gives_up_after_three"
+  ],
+  "test_bridge_http.TestTransientRetry.test_retry_until_success": [
+   "test_bridge_http.TestTransientRetry.test_retry_until_success"
+  ],
+  "test_bridge_strict.TestAdmissionBudget.test_budget_exhausted_gives_503_before_body": [
+   "test_bridge_strict.TestAdmissionBudget.test_budget_exhausted_gives_503_before_body"
+  ],
+  "test_bridge_strict.TestAdmissionBudget.test_budget_unit": [
+   "test_bridge_strict.TestAdmissionBudget.test_budget_unit"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_broken_file_refuses_start": [
+   "test_bridge_strict.TestCatalogClassI.test_broken_file_refuses_start"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_confirmed_efforts_proven_empty": [
+   "test_bridge_strict.TestCatalogClassI.test_confirmed_efforts_proven_empty"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_confirmed_efforts_proven_outside_efforts": [
+   "test_bridge_strict.TestCatalogClassI.test_confirmed_efforts_proven_outside_efforts"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_confirmed_partial_efforts_proven_starts": [
+   "test_bridge_strict.TestCatalogClassI.test_confirmed_partial_efforts_proven_starts"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_confirmed_proof_malformed": [
+   "test_bridge_strict.TestCatalogClassI.test_confirmed_proof_malformed"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_confirmed_without_proof": [
+   "test_bridge_strict.TestCatalogClassI.test_confirmed_without_proof"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_default_effort_outside_efforts": [
+   "test_bridge_strict.TestCatalogClassI.test_default_effort_outside_efforts"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_default_model_outside_roster": [
+   "test_bridge_strict.TestCatalogClassI.test_default_model_outside_roster"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_duplicate_id": [
+   "test_bridge_strict.TestCatalogClassI.test_duplicate_id"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_efforts_off_invalid": [
+   "test_bridge_strict.TestCatalogClassI.test_efforts_off_invalid"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_env_model_outside_roster": [
+   "test_bridge_strict.TestCatalogClassI.test_env_model_outside_roster"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_explicit_unsupported_must_be_unsupported": [
+   "test_bridge_strict.TestCatalogClassI.test_explicit_unsupported_must_be_unsupported"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_method_not_implemented": [
+   "test_bridge_strict.TestCatalogClassI.test_method_not_implemented"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_probe_without_flag": [
+   "test_bridge_strict.TestCatalogClassI.test_probe_without_flag"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_status_input_inconsistent": [
+   "test_bridge_strict.TestCatalogClassI.test_status_input_inconsistent"
+  ],
+  "test_bridge_strict.TestCatalogClassI.test_valid_catalogue": [
+   "test_bridge_strict.TestCatalogClassI.test_valid_catalogue"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_allowed_efforts_accepted": [
+   "test_bridge_strict.TestEffortAndModel.test_allowed_efforts_accepted"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_autonomy_bad_rejected": [
+   "test_bridge_strict.TestEffortAndModel.test_autonomy_bad_rejected"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_autonomy_default_is_high": [
+   "test_bridge_strict.TestEffortAndModel.test_autonomy_default_is_high"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_autonomy_levels_accepted": [
+   "test_bridge_strict.TestEffortAndModel.test_autonomy_levels_accepted"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_defaults_when_model_and_effort_absent": [
+   "test_bridge_strict.TestEffortAndModel.test_defaults_when_model_and_effort_absent"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_judge_levels_and_outside_rejected": [
+   "test_bridge_strict.TestEffortAndModel.test_judge_levels_and_outside_rejected"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_launcher_missing_gives_503_and_no_spawn": [
+   "test_bridge_strict.TestEffortAndModel.test_launcher_missing_gives_503_and_no_spawn"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_model_and_effort_are_stripped": [
+   "test_bridge_strict.TestEffortAndModel.test_model_and_effort_are_stripped"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_models_outside_fleet_rejected": [
+   "test_bridge_strict.TestEffortAndModel.test_models_outside_fleet_rejected"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_reasoning_object_rejected": [
+   "test_bridge_strict.TestEffortAndModel.test_reasoning_object_rejected"
+  ],
+  "test_bridge_strict.TestEffortAndModel.test_stream_with_bad_effort_is_plain_json_400": [
+   "test_bridge_strict.TestEffortAndModel.test_stream_with_bad_effort_is_plain_json_400"
+  ],
+  "test_bridge_strict.TestHealthAndModels.test_health_exactly_seven_keys": [
+   "test_bridge_strict.TestHealthAndModels.test_health_exactly_seven_keys"
+  ],
+  "test_bridge_strict.TestHealthAndModels.test_models_list": [
+   "test_bridge_strict.TestHealthAndModels.test_models_list"
+  ],
+  "test_bridge_strict.TestJournal.test_exec_and_done_lines_bound_by_tag": [
+   "test_bridge_strict.TestJournal.test_exec_and_done_lines_bound_by_tag"
+  ],
+  "test_bridge_strict.TestJournal.test_model_len_reported_for_untrusted_model": [
+   "test_bridge_strict.TestJournal.test_model_len_reported_for_untrusted_model"
+  ],
+  "test_bridge_strict.TestJournal.test_reject_line_strict_format_and_no_client_string": [
+   "test_bridge_strict.TestJournal.test_reject_line_strict_format_and_no_client_string"
+  ],
+  "test_framing_strict.TestFraming.test_body_over_limit_413_and_leftover_not_parsed": [
+   "test_framing_strict.TestFraming.test_body_over_limit_413_and_leftover_not_parsed"
+  ],
+  "test_framing_strict.TestFraming.test_conflicting_content_length": [
+   "test_framing_strict.TestFraming.test_conflicting_content_length"
+  ],
+  "test_framing_strict.TestFraming.test_each_reject_logs_one_strict_line": [
+   "test_framing_strict.TestFraming.test_each_reject_logs_one_strict_line"
+  ],
+  "test_framing_strict.TestFraming.test_invalid_content_length": [
+   "test_framing_strict.TestFraming.test_invalid_content_length"
+  ],
+  "test_framing_strict.TestFraming.test_json_not_object": [
+   "test_framing_strict.TestFraming.test_json_not_object"
+  ],
+  "test_framing_strict.TestFraming.test_short_body": [
+   "test_framing_strict.TestFraming.test_short_body"
+  ],
+  "test_framing_strict.TestFraming.test_transfer_encoding_rejected": [
+   "test_framing_strict.TestFraming.test_transfer_encoding_rejected"
+  ],
+  "test_images_strict.TestImageCleanup.test_cleanup_after_client_gone": [
+   "test_images_strict.TestImageCleanup.test_cleanup_after_client_gone"
+  ],
+  "test_images_strict.TestImageCleanup.test_cleanup_after_exception": [
+   "test_images_strict.TestImageCleanup.test_cleanup_after_exception"
+  ],
+  "test_images_strict.TestImageCleanup.test_cleanup_after_retries": [
+   "test_images_strict.TestImageCleanup.test_cleanup_after_retries"
+  ],
+  "test_images_strict.TestImageCleanup.test_cleanup_after_success": [
+   "test_images_strict.TestImageCleanup.test_cleanup_after_success"
+  ],
+  "test_images_strict.TestImageJournal.test_exec_line_counters_only": [
+   "test_images_strict.TestImageJournal.test_exec_line_counters_only"
+  ],
+  "test_images_strict.TestImagePositive.test_image_only_message_is_not_pong": [
+   "test_images_strict.TestImagePositive.test_image_only_message_is_not_pong"
+  ],
+  "test_images_strict.TestImagePositive.test_sixteen_images_at_the_limit": [
+   "test_images_strict.TestImagePositive.test_sixteen_images_at_the_limit"
+  ],
+  "test_images_strict.TestImagePositive.test_tools_get_read_exception_with_attachments": [
+   "test_images_strict.TestImagePositive.test_tools_get_read_exception_with_attachments"
+  ],
+  "test_images_strict.TestImagePositive.test_two_images_history_prompt_and_layout": [
+   "test_images_strict.TestImagePositive.test_two_images_history_prompt_and_layout"
+  ],
+  "test_images_strict.TestImagePositive.test_unknown_non_image_parts_are_skipped": [
+   "test_images_strict.TestImagePositive.test_unknown_non_image_parts_are_skipped"
+  ],
+  "test_images_strict.TestImageRejections.test_limits": [
+   "test_images_strict.TestImageRejections.test_limits"
+  ],
+  "test_images_strict.TestImageRejections.test_reject_line_for_image_is_strict": [
+   "test_images_strict.TestImageRejections.test_reject_line_for_image_is_strict"
+  ],
+  "test_images_strict.TestImageRejections.test_taxonomy": [
+   "test_images_strict.TestImageRejections.test_taxonomy"
+  ],
+  "test_images_strict.TestImageRejections.test_unverified_and_unsupported_models_rejected": [
+   "test_images_strict.TestImageRejections.test_unverified_and_unsupported_models_rejected"
+  ],
+  "test_images_strict.TestProofFailClosed.test_effort_not_proven_degrades_only_that_effort": [
+   "test_images_strict.TestProofFailClosed.test_effort_not_proven_degrades_only_that_effort"
+  ],
+  "test_images_strict.TestProofFailClosed.test_formats_mismatch_degrades": [
+   "test_images_strict.TestProofFailClosed.test_formats_mismatch_degrades"
+  ],
+  "test_images_strict.TestProofFailClosed.test_impl_version_mismatch_degrades": [
+   "test_images_strict.TestProofFailClosed.test_impl_version_mismatch_degrades"
+  ],
+  "test_images_strict.TestProofFailClosed.test_valid_proof_accepts_then_degrades_on_binary_change": [
+   "test_images_strict.TestProofFailClosed.test_valid_proof_accepts_then_degrades_on_binary_change"
+  ],
+  "test_launch_env.TestLaunchEnv.test_absent_factory_key_does_not_appear": [
+   "test_launch_env.TestLaunchEnv.test_absent_factory_key_does_not_appear"
+  ],
+  "test_launch_env.TestLaunchEnv.test_factory_key_survives_and_bridge_key_is_dropped": [
+   "test_launch_env.TestLaunchEnv.test_factory_key_survives_and_bridge_key_is_dropped"
+  ],
+  "test_launch_env.TestLaunchEnv.test_masking_covers_short_factory_key": [
+   "test_launch_env.TestLaunchEnv.test_masking_covers_short_factory_key"
+  ],
+  "test_launch_env.TestLaunchEnv.test_masking_leaves_ordinary_text_intact": [
+   "test_launch_env.TestLaunchEnv.test_masking_leaves_ordinary_text_intact"
+  ],
+  "test_run_integration.TestRealRun.test_image_argv_and_layout": [
+   "test_run_integration.TestRealRun.test_image_layout_without_prompt_file"
+  ],
+  "test_run_integration.TestRealRun.test_readonly_off_omits_auto_and_low_passes": [
+   "test_run_integration.TestRealRun.test_readonly_off_is_set_over_rpc_and_low_passes"
+  ],
+  "test_run_integration.TestRealRun.test_text_argv_shape_and_prompt_cleanup": [
+   "test_run_integration.TestRealRun.test_text_rpc_argv_init_and_env"
+  ],
+  "test_tool_parser.TestPromptRendering.test_tool_choice_none_omits_section": [
+   "test_tool_parser.TestPromptRendering.test_tool_choice_none_omits_section"
+  ],
+  "test_tool_parser.TestPromptRendering.test_tool_history_roundtrip": [
+   "test_tool_parser.TestPromptRendering.test_tool_history_roundtrip"
+  ],
+  "test_tool_parser.TestToolCallParser.test_close_tag_inside_string_is_not_boundary": [
+   "test_tool_parser.TestToolCallParser.test_close_tag_inside_string_is_not_boundary"
+  ],
+  "test_tool_parser.TestToolCallParser.test_code_fence_stripped": [
+   "test_tool_parser.TestToolCallParser.test_code_fence_stripped"
+  ],
+  "test_tool_parser.TestToolCallParser.test_escaped_quote_does_not_end_string": [
+   "test_tool_parser.TestToolCallParser.test_escaped_quote_does_not_end_string"
+  ],
+  "test_tool_parser.TestToolCallParser.test_invalid_block_falls_back_to_text": [
+   "test_tool_parser.TestToolCallParser.test_invalid_block_falls_back_to_text"
+  ],
+  "test_tool_parser.TestToolCallParser.test_multiple_calls_in_row": [
+   "test_tool_parser.TestToolCallParser.test_multiple_calls_in_row"
+  ],
+  "test_tool_parser.TestToolCallParser.test_non_object_arguments_rejected": [
+   "test_tool_parser.TestToolCallParser.test_non_object_arguments_rejected"
+  ],
+  "test_tool_parser.TestToolCallParser.test_pending_prefix_not_emitted_early": [
+   "test_tool_parser.TestToolCallParser.test_pending_prefix_not_emitted_early"
+  ],
+  "test_tool_parser.TestToolCallParser.test_plain_text_passthrough": [
+   "test_tool_parser.TestToolCallParser.test_plain_text_passthrough"
+  ],
+  "test_tool_parser.TestToolCallParser.test_single_call_split_across_deltas": [
+   "test_tool_parser.TestToolCallParser.test_single_call_split_across_deltas"
+  ],
+  "test_tool_parser.TestToolCallParser.test_unclosed_block_flushed_as_text_on_finish": [
+   "test_tool_parser.TestToolCallParser.test_unclosed_block_flushed_as_text_on_finish"
+  ],
+  "test_tool_parser.TestToolsSection.test_forced_function": [
+   "test_tool_parser.TestToolsSection.test_forced_function"
+  ],
+  "test_tool_parser.TestToolsSection.test_protocol_and_schema_present": [
+   "test_tool_parser.TestToolsSection.test_protocol_and_schema_present"
+  ],
+  "test_tool_parser.TestToolsSection.test_tool_choice_required": [
+   "test_tool_parser.TestToolsSection.test_tool_choice_required"
+  ]
+ },
+ "schema": 1
+}

@@ -1,20 +1,20 @@
 """Общая библиотека тестов моста droid-bridge (не собирается как тесты).
 
-Фейковый Run, базовый HTTP-класс на свободном порту и сборщики запросов к
-image-пути. Сеть — только петлевой сокет тестового сервера; droid и лончер
-не вызываются (кроме отдельного теста с локальной заглушкой лончера в tmp).
+Фейковый droid (настоящий subprocess со stream-jsonrpc, tests/fake_droid.py) и
+его хаб, базовый HTTP-класс на свободном порту и сборщики запросов к image-пути.
+Сеть — только петлевой сокет тестового сервера; реальный droid не вызывается.
 """
 
 import base64
 import copy
 import http.client
 import json
+import os
 import socket
 import sys
 import tempfile
 import threading
 import time
-import types
 import unittest
 
 from contextlib import contextmanager
@@ -25,14 +25,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get current weather",
-        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
-    },
-}]
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    }
+]
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 JPEG_MAGIC = b"\xff\xd8\xff\xe0"
@@ -66,8 +71,11 @@ def image_url_part(url):
 
 
 def chat_body(model=None, effort=None, content=None, messages=None, **extra):
-    body = {"messages": messages if messages is not None else [
-        {"role": "user", "content": content if content is not None else "hi"}]}
+    body = {
+        "messages": messages
+        if messages is not None
+        else [{"role": "user", "content": content if content is not None else "hi"}]
+    }
     if model is not None:
         body["model"] = model
     if effort is not None:
@@ -88,9 +96,16 @@ def find_model(data, model_id):
     raise KeyError(model_id)
 
 
-def make_proof(binary_path, efforts_proven, impl_version=1, method="workspace-read",
-               formats=("image/png",), droid_version="0.0.0-test"):
+def make_proof(
+    binary_path,
+    efforts_proven,
+    impl_version=1,
+    method="workspace-read",
+    formats=("image/png",),
+    droid_version="0.0.0-test",
+):
     import hashlib
+
     digest = hashlib.sha256(Path(binary_path).read_bytes()).hexdigest()
     return {
         "droid_version": droid_version,
@@ -105,86 +120,238 @@ def make_proof(binary_path, efforts_proven, impl_version=1, method="workspace-re
     }
 
 
-class FakeRun:
-    """Заглушка Run: сценарии событий раздаются по одному на попытку."""
-
-    scripts = []
-    instances = []
-
-    def __init__(self, prompt, model, effort, effort_source,
-                 autonomy, autonomy_source, cwd, tag,
-                 img_dir=None, img_stats=None, sess_sid=""):
-        self.sess_sid = sess_sid
-        self.prompt = prompt
-        self.model = model
-        self.effort = effort
-        self.effort_source = effort_source
-        self.autonomy = autonomy
-        self.autonomy_source = autonomy_source
-        self.cwd = cwd
-        self.tag = tag
-        self.img_dir = img_dir
-        self.img_stats = img_stats
-        self.img_snapshot = self._snapshot(img_dir)
-        self.events = list(type(self).scripts.pop(0)) if type(self).scripts else [
-            ("text", "PONG"), ("result", {"finalText": "", "usage": {}}), ("done", (0, ""))]
-        self.q = server.queue.Queue()
-        self.err_box = [""]
-        self.proc = types.SimpleNamespace(pid=-1, poll=lambda: 0,
-                                          stdout=None, stderr=None)
-        self.got_event = False
-        self.started = time.monotonic()
-        self.closed = False
-        for ev in self.events:
-            if ev[0] == "stderr":  # ("stderr", text) -> err_box, как дренаж stderr
-                self.err_box.append(ev[1])
-            else:
-                self.q.put(ev)
-        type(self).instances.append(self)
-
-    @staticmethod
-    def _snapshot(img_dir):
-        if img_dir is None:
-            return None
-        path = Path(img_dir)
-        snapshot = {"dir": str(path), "dir_mode": "", "files": {}}
-        if path.exists():
-            snapshot["dir_mode"] = oct(path.stat().st_mode & 0o777)
-            for item in sorted(path.iterdir()):
-                snapshot["files"][item.name] = oct(item.stat().st_mode & 0o777)
-        return snapshot
-
-    def close(self):
-        self.closed = True
+FAKE_DROID = Path(__file__).resolve().parent / "fake_droid.py"
+TEST_FACTORY_KEY = (
+    "bridge-test-factory-key-not-real"  # то же значение, что ждёт fake_droid
+)
+_MISSING = object()
 
 
-class BoomRun(FakeRun):
-    """Run, падающий на старте (исключение при создании процесса)."""
+def legacy_scenario(events):
+    """Старый сценарий FakeRun (text/reasoning/result/stderr/done) -> сценарий fake_droid."""
+    steps = []
+    usage = {}
+    silent = not events
+    for ev in events:
+        kind = ev[0]
+        if kind == "text":
+            steps.append({"op": "text", "text": ev[1]})
+        elif kind == "reasoning":
+            steps.append({"op": "thinking", "text": ev[1]})
+        elif kind == "result":
+            raw = (ev[1] or {}).get("usage") or {}
+            usage = {
+                "inputTokens": raw.get("input_tokens", 0),
+                "outputTokens": raw.get("output_tokens", 0),
+            }
+        elif kind == "stderr":
+            steps.append({"op": "exit", "rc": 1, "stderr": ev[1]})
+        elif (
+            kind == "done"
+            and ev[1][0] != 0
+            and not any(s["op"] == "exit" for s in steps)
+        ):
+            steps.append({"op": "exit", "rc": ev[1][0]})
+    if silent:
+        steps.append({"op": "hang"})
+    return {"steps": steps, "usage": usage}
 
-    def __init__(self, *args, **kwargs):
-        raise OSError("boom")
+
+def make_receipt(image_path, digest, **override):
+    """Receipt schema 2 для fake_droid (протокол по умолчанию fake): тесты ломают по одному компоненту."""
+    import fake_droid
+
+    ids = list(fake_droid.DEFAULT_TOOLS)
+    receipt = {
+        "schema": server.RECEIPT_SCHEMA,
+        "image_path": str(image_path),
+        "image_sha256": digest,
+        "protocol": {
+            "api_version": server.RPC_API_VERSION,
+            "protocol_version": fake_droid.PROTOCOL,
+        },
+        "tools_policy": {
+            "policy": server.TOOLS_POLICY,
+            "disabled_tool_ids": sorted(ids),
+            "digest": server.tools_policy_digest(ids),
+        },
+        "settings_profile": {
+            "profile": dict(server.SETTINGS_PROFILE),
+            "digest": server.settings_profile_digest(),
+        },
+        "probes": {name: "ok" for name in server.RECEIPT_PROBES},
+    }
+    receipt.update(override)
+    return receipt
+
+
+class FakeDroidHub:
+    """Каталог управления fake_droid: конфиг, очередь сценариев, журнал процессов."""
+
+    def __init__(self, base):
+        self.base = Path(base)
+        self.base.mkdir(parents=True, exist_ok=True)
+        self.config = {}
+        self.launcher = self.base / "fake-launcher"
+        self.launcher.write_text(
+            "#!%s\nimport sys\nsys.path.insert(0, %r)\nimport fake_droid\nfake_droid.main(sys.argv[1:])\n"
+            % (sys.executable, str(FAKE_DROID.parent)),
+            encoding="utf-8",
+        )
+        self.launcher.chmod(0o755)
+        self._flush()
+
+    def _flush(self):
+        (self.base / "config.json").write_text(
+            json.dumps(self.config), encoding="utf-8"
+        )
+
+    def configure(self, **cfg):
+        self.config.update(cfg)
+        self._flush()
+
+    def script(self, scenarios):
+        """Добавить сценарии ходов (по одному на запущенный цикл, глобально по очереди)."""
+        scripted = self.config.setdefault("scenarios", [])
+        counter = self.base / "turn.counter"
+        claimed = int(counter.read_text() or 0) if counter.exists() else 0
+        while (
+            len(scripted) < claimed
+        ):  # ходы без сценария уже взяли значение по умолчанию
+            scripted.append(None)
+        scripted.extend(scenarios)
+        self._flush()
+
+    def legacy(self, scripts):
+        self.script([legacy_scenario(ev) for ev in scripts])
+
+    def records(self):
+        path = self.base / "log.jsonl"
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def spawns(self):
+        return [r for r in self.records() if r["ev"] == "spawn"]
+
+    def rpcs(self, method=None):
+        return [
+            r
+            for r in self.records()
+            if r["ev"] == "rpc" and (method is None or r["method"] == method)
+        ]
+
+    def admissions(self):
+        """Принятые циклы agent loop (add_user_message без skipAgentLoop): аналог Run.instances."""
+        return [
+            r
+            for r in self.rpcs("droid.add_user_message")
+            if not r["params"].get("skipAgentLoop")
+        ]
+
+    def inits(self):
+        return self.rpcs("droid.initialize_session")
+
+    def sent_texts(self):
+        return [
+            r["params"].get("text", "") for r in self.rpcs("droid.add_user_message")
+        ]
+
+    def exits(self):
+        return [r for r in self.records() if r["ev"] == "exit"]
+
+
+def wait_until(predicate, timeout=10.0, step=0.05):
+    """Ждать условие (закрытие процессов асинхронно)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(step)
+    return predicate()
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class BridgeCase(unittest.TestCase):
     """Сервер на свободном порту с подменённым Run и временным workspace."""
 
     def setUp(self):
-        FakeRun.scripts = []
-        FakeRun.instances = []
-        self._real_run = server.Run
-        self._real_key = server.AUTH_KEY
-        self._real_workspace = server.WORKSPACE
-        self._real_fleet = server.FLEET
-        self._real_probe = server.IMAGE_PROBE
-        self._real_launcher = server.LAUNCHER
-        self._real_budget = server._budget
-        self._real_model_id = server.MODEL_ID
-        server.Run = FakeRun
-        server.AUTH_KEY = "test-key"
+        self._saved = {
+            name: getattr(server, name, _MISSING)
+            for name in (
+                "AUTH_KEY",
+                "WORKSPACE",
+                "FLEET",
+                "IMAGE_PROBE",
+                "LAUNCHER",
+                "_budget",
+                "MODEL_ID",
+                "_sleep",
+                "INTERRUPT_GRACE_S",
+                "RPC_CALL_TIMEOUT_S",
+                "SILENCE_WATCHDOG_S",
+                "FIRST_TOKEN_TIMEOUT_S",
+                "TIMEOUT_S",
+                "_clock",
+                "IDLE_SECONDS",
+                "RECEIPT_REQUIRED",
+                "MAX_RPC_LINE_BYTES",
+                "MAX_STDERR_BYTES",
+                "MAX_INBOX_BYTES",
+                "MAX_TURN_TEXT_BYTES",
+                "MAX_CHATS",
+                "MAX_CONCURRENT",
+                "INSTR_BLOCK_LIMIT",
+                "FINISHED_TURNS_KEEP",
+                "DELIVERY_CHUNK_BYTES",
+                "ENTRY_OVERHEAD_BYTES",
+                "GUARD",
+                "GUARD_PROFILES_DIR",
+                "GUARD_CANON",
+                "INSTR_NONKB_MARGIN",
+                "MAX_JSON_STRUCT_TOKENS",
+            )
+        }
+        server._canon_seen.clear()
+        # Реальный FACTORY_API_KEY рабочего окружения в тестах не используется: подставляем
+        # фиктивный sentinel; восстановление через addCleanup срабатывает и при падении теста.
+        self._env_factory_key = os.environ.get("FACTORY_API_KEY")
+        self.addCleanup(self._restore_factory_key)
+        os.environ["FACTORY_API_KEY"] = TEST_FACTORY_KEY
+        self._env_fake = os.environ.get("FAKE_DROID_DIR")
         self._tmp = tempfile.TemporaryDirectory()
+        self.hub = FakeDroidHub(Path(self._tmp.name) / "fake")
+        os.environ["FAKE_DROID_DIR"] = str(self.hub.base)
+        server.LAUNCHER = str(self.hub.launcher)
+        server.AUTH_KEY = "test-key"
         server.WORKSPACE = Path(self._tmp.name) / "workspace"
         server.WORKSPACE.mkdir(parents=True, exist_ok=True)
         server._budget = None
+        # Охранник B: реальные профили/канон владельца в тестах не читаются (пустые пути под tmp).
+        if hasattr(server, "InstructionGuard"):
+            server.GUARD = server.InstructionGuard()
+            server.GUARD_PROFILES_DIR = str(Path(self._tmp.name) / "profiles-none")
+            server.GUARD_CANON = str(Path(self._tmp.name) / "canon-none.md")
+            server._canon_cache.update(key=None, digest="")
+        server.RECEIPT_REQUIRED = (
+            False  # receipt квалификации образа: отдельные тесты RW-007 включают
+        )
+        server._sleep = lambda _seconds: None  # ретраи 2/4 с — без реального ожидания
+        server.INTERRUPT_GRACE_S = 1.0
+        server._reset_rpc_state()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
@@ -193,24 +360,38 @@ class BridgeCase(unittest.TestCase):
     def tearDown(self):
         self.httpd.shutdown()
         self.httpd.server_close()
-        server.Run = self._real_run
-        server.AUTH_KEY = self._real_key
-        server.WORKSPACE = self._real_workspace
-        server.FLEET = self._real_fleet
-        server.IMAGE_PROBE = self._real_probe
-        server.LAUNCHER = self._real_launcher
-        server._budget = self._real_budget
-        server.MODEL_ID = self._real_model_id
+        server._reset_rpc_state()
+        for name, value in self._saved.items():
+            if value is _MISSING:
+                if hasattr(server, name):
+                    delattr(server, name)
+            else:
+                setattr(server, name, value)
+        if self._env_fake is None:
+            os.environ.pop("FAKE_DROID_DIR", None)
+        else:
+            os.environ["FAKE_DROID_DIR"] = self._env_fake
         self._tmp.cleanup()
+
+    def _restore_factory_key(self):
+        if self._env_factory_key is None:
+            os.environ.pop("FACTORY_API_KEY", None)
+        else:
+            os.environ["FACTORY_API_KEY"] = self._env_factory_key
 
     # -- helpers ----------------------------------------------------------------
     def _post(self, body: dict, timeout: float = 60.0):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
-            conn.request("POST", "/v1/chat/completions",
-                         body=json.dumps(body),
-                         headers={"Authorization": "Bearer test-key",
-                                  "Content-Type": "application/json"})
+            conn.request(
+                "POST",
+                "/v1/chat/completions",
+                body=json.dumps(body),
+                headers={
+                    "Authorization": "Bearer test-key",
+                    "Content-Type": "application/json",
+                },
+            )
             resp = conn.getresponse()
             raw = resp.read().decode("utf-8")
             return resp.status, raw
@@ -260,9 +441,14 @@ class BridgeCase(unittest.TestCase):
             sock.close()
 
     @staticmethod
-    def _raw_request(body: bytes = b"", cl="auto", extra=(), auth=True, path="/v1/chat/completions"):
-        headers = [f"POST {path} HTTP/1.1", "Host: 127.0.0.1",
-                   "Content-Type: application/json"]
+    def _raw_request(
+        body: bytes = b"", cl="auto", extra=(), auth=True, path="/v1/chat/completions"
+    ):
+        headers = [
+            f"POST {path} HTTP/1.1",
+            "Host: 127.0.0.1",
+            "Content-Type: application/json",
+        ]
         if auth:
             headers.append("Authorization: Bearer test-key")
         if cl == "auto":
@@ -281,8 +467,13 @@ class BridgeCase(unittest.TestCase):
         if b"\r\n\r\n" in buf:
             body = buf.split(b"\r\n\r\n", 1)[1]
             try:
-                err = json.loads(body.decode("utf-8", "replace").split("HTTP/1.1")[0])["error"]
-                if sorted(err) == ["code", "message", "type"] and err.get("code") == code:
+                err = json.loads(body.decode("utf-8", "replace").split("HTTP/1.1")[0])[
+                    "error"
+                ]
+                if (
+                    sorted(err) == ["code", "message", "type"]
+                    and err.get("code") == code
+                ):
                     typ = err.get("type", "-")
                 else:
                     typ = "BADFORM"

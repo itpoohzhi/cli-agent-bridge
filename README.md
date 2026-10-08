@@ -3,18 +3,27 @@
 OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`droid exec`) с
 эмуляцией OpenAI function calling (tool_emulation). Порт **9882**.
 
-- Один запрос `/v1/chat/completions` = один headless-ход
-  `droid exec -o stream-json -m <model> --cwd <workspace> --tag droid-dsh-bridge -f <prompt_file> -r <effort>`
-  через канонический лончер `~/.config/factory-launch/droid-cli.sh` (egress-пиннинг;
-  голый droid-бинарь не используется — бьёт в WAF Factory; fallback на него удалён).
-- Модели и уровни effort — из каталога `fleet.json` (6 моделей Droid-флота,
-  только dev-контекст): sonnet-5-5, gemini-3.8-flash, grok-4.7,
-  deepseek-v4.1-flash, gpt-6.1-sol, glm-5.3.
+- Один запрос `/v1/chat/completions` = один ход в долгоживущем процессе
+  `droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc`
+  (по процессу на keyed-чат, см. «RPC-режим») через канонический лончер
+  `~/.config/factory-launch/droid-cli.sh` (egress-пиннинг; голый droid-бинарь не
+  используется — бьёт в WAF Factory; fallback на него удалён).
+- Модели и уровни effort — из каталога `fleet.json` **schema 3** (**8 определений моделей,
+  два вида бэкендов**): в P2 Muse выключен (`backends.muse.enabled=false`), `/v1/models`
+  публикует только 6 droid-моделей — sonnet-5-5, gemini-3.8-flash,
+  grok-4.7, deepseek-v4.1-flash, gpt-6.1-sol, glm-5.3; 2 muse-модели —
+  muse-spark-1.3, muse-spark-1.3-contributor (kind `muse`, Meta Muse Code CLI) остаются
+  определениями каталога до прохождения P3-гейта (ASM-001, см. ниже).
+- :9882 — **хаб нескольких бинарников** (ADR 0002): один порт, один ключ и один каталог
+  на все бэкенды, `model → backend` строго по `fleet.json`, межбэкендного fallback нет.
+  droid обслуживается резидентным RPC-процессом на чат, muse — отдельным headless-ходом
+  `muse exec` без сессий (см. «Мульти-бинарный хаб (ADR 0002)»).
 - `model`/`reasoning_effort` валидируются строго **до** SSE: не из каталога —
   HTTP 400 `model_not_allowed` / `unsupported_reasoning_effort`; никаких
   clamp, алиасов и silent fallback. `-r` передаётся всегда (из запроса либо
-  `default_effort` модели). Флаги `--auto` / `--skip-permissions-unsafe` не
-  передаются никогда.
+  `default_effort` модели). Автономность и effort задаются параметрами RPC
+  (`autonomyLevel`, `reasoningEffort`); `--skip-permissions-unsafe` не
+  используется никогда.
 - `tools` в запросе → в промпт добавляется протокол
   `<tool_call>{"name":…,"arguments":{…}}</tool_call>` и схемы инструментов;
   потоковые блоки переводятся в `delta.tool_calls` + `finish_reason:"tool_calls"`,
@@ -25,19 +34,182 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 ## Файлы
 
 - `server.py` — сам мост (HTTP, `/health`, `/v1/models`, `/v1/chat/completions`,
-  framing/admission, image-модуль).
-- `fleet.json` — каталог флота: модели, allowed efforts, `default_effort`,
-  `default_model`, лимиты изображений, admission, `policy_ref`, `technical_ref`.
-  Мост читает его при старте (sha и число моделей пишутся в журнал строкой
-  `fleet_sha256=… models=…`); `model-efforts.json` в рантайме не читается.
+  framing/admission, image-модуль, фасад хаба).
+- `core/` — общий контракт хаба: `core/backend_adapter.py` (интерфейс `BackendAdapter`,
+  реестр адаптеров, typed DTO и полный структурный валидатор `build_catalog` schema 2/3), `core/tool_emulation.py`
+  (рендер tools/истории и `ToolCallParser` — общий для всех бэкендов).
+- `adapters/` — адаптеры бинарников: `adapters/droid_adapter.py` (обёртка над RPC-путём
+  `server.py`), `adapters/muse_adapter.py` (Muse CLI), `adapters/__init__.py`
+  (`ADAPTER_KINDS` — реестр `kind → класс`, заданный в коде).
+- `fleet.json` — каталог флота schema 3: `backends` (записи бэкендов с `kind`, `enabled`,
+  `required`, `owned_by`, `max_concurrent`, `wrapper`, `technical_ref`, `proxy_port`),
+  модели с полем `backend`, allowed efforts, `default_effort`, `default_model`, лимиты
+  изображений, admission, `policy_ref`, `technical_ref`. Мост читает его при старте
+  (sha и число моделей пишутся в журнал строкой `fleet_sha256=… models=…`);
+  `model-efforts.json` в рантайме не читается.
 - `fleet_check.py` — read-only проверка каталога и профилей (`/opt/homebrew/bin/python3`,
   PyYAML; JSON в stdout, exit 0 только при полном успехе).
 - `tests/` — stdlib `unittest` (см. «Тесты»).
+- `docs/adr/` — решения: `0001-persistent-droid-bridge.md` (RPC-режим, receipt),
+  `0002-multi-binary-hub.md` (мульти-бинарный хаб, schema 3, политика Muse).
 - `start.sh` — запуск: читает ключ из окружения или `~/.dsh/.env`
   (строка `DROID_DSH_BRIDGE_KEY=…`), затем `exec /usr/bin/python3 server.py`.
-- `workspace/` — cwd для droid-процессов и промпт-файлы `prompt-<hex>.txt`
-  (удаляются после хода); для image-запросов — per-run каталоги `img-<uuid32>`
-  (0700, файлы 0600), удаляются при любом исходе.
+- `tools/b_guard.py` — офлайн-охранник бюджета agent-instructions (см. «B: охранник»).
+- `workspace/` — cwd для droid-процессов; `workspace/state/` — метаданные чатов
+  (`conversations.v1/chats/<2hex>/<sha256>.json`, 0600/0700, только хеши) и
+  `children.json` (реестр собственных детей всех бэкендов, поле `kind`); `workspace/runtime/factory-home` — чистый Factory home детей;
+  `workspace/muse/` — ходы muse: `turn-<uuid32>` (0700, prompt-файл 0600 внутри),
+  удаляется в `finally` хода; для image-запросов — per-run каталоги `img-<uuid32>` (0700, файлы 0600),
+  удаляются при любом исходе. Свипер трогает только `prompt-*`/`img-*`/`muse/prompt-*.txt`/`muse/turn-*`
+  (порог 1 ч; на остановке моста наследие ходов сносится безусловно, хранилище чатов не трогается).
+
+## Мульти-бинарный хаб (ADR 0002)
+
+Один процесс-хаб обслуживает несколько консольных бинарников за одним OpenAI-совместимым
+фасадом :9882. Решение и обоснование — `docs/adr/0002-multi-binary-hub.md`.
+
+- **Каталог.** `fleet.json` schema 3: `backends` — объект `id → запись`, каждая модель
+  ссылается на бэкенд полем `backend`. `kind` разрешается только через `ADAPTER_KINDS`
+  в коде (`adapters/__init__.py`): конфигурация не может подключить произвольный код.
+  Schema 2 читается как «единственный бэкенд droid» (откат конфигурации без смены кода),
+  schema 3 прежним кодом отвергается — модель muse не публикуется как droid-модель.
+- **Валидация — одна на два потребителя.** `core/backend_adapter.py: build_catalog`
+  полностью проверяет и нормализует структуру schema 2/3: записи бэкендов через
+  `backend_entry_error`, модели (включая выключенные), ссылки, уникальные id, default/env
+  model, efforts, image status/proof, image limits и admission. Его вызывают
+  `server._build_catalog` и `fleet_check.check_catalogue` с одинаковыми env/probe-настройками.
+  Это паритет структурных отказов, не всей операционной проверки: census класса III,
+  policy, профили и live-проверки остаются в `fleet_check.py`. Неподдерживаемые
+  `transport` и `tool_policy` не входят в `BACKEND_KEYS` и отвергаются
+  (`backend_key_unknown`), а не принимаются без действия. Нарушение — отказ старта
+  (`fleet_invalid`), checker возвращает структурированную ошибку, а не AttributeError.
+- **Маршрутизация.** `model → backend` строго по каталогу; один запрос — ровно один
+  бэкенд; межбэкендного fallback нет. Не допущенный/нездоровый бэкенд — 503
+  `launcher_unavailable`, модель остаётся в `/v1/models`.
+- **Ёмкость.** У каждого бэкенда свой пул: `max_concurrent` droid = 4 (cap процессов),
+  muse строго = 1 (иначе `backend_muse_max_concurrent_invalid`; конструктор тоже отказывает).
+  Общий семафор `_MUSE_SLOTS` сериализует ходы всех экземпляров MuseAdapter в одном
+  процессе хаба, даже с разными backend id. При одном UID и `--yolo` их нельзя
+  развести правами, per-turn каталог разводит только данные. Насыщение muse не занимает
+  слоты droid. `/health` — те же 7 ключей: `active`/`max_concurrent` — сумма по бэкендам,
+  `ok` — AND по `required`-бэкендам.
+- **Сессии.** Бэкенд с `sessions=resident` (droid) идёт планом `hot|restore|rebase|cold`;
+  `sessions=none` (muse) — только `ephemeral`: записи чата нет, каждый ход — replay
+  истории запроса. `prompt_cache_key` существующего droid-чата не делает muse-запрос
+  продолжением сессии.
+- **Инструменты и охранник — фасадные.** `<tool_call>` разбирает общий
+  `core/tool_emulation.py`, `b_guard`/admission/таксономия ошибок одинаковы для всех
+  бэкендов; отключение гарда per-backend запрещено (fail-closed).
+
+### Muse: безопасность и компенсаторы
+
+Решение владельца (AD-007, 2026-10-08): Muse работает через обёртку
+`~/.config/muse-launch/muse-cli.sh` с `--yolo --trust-workspace` (как muse-bridge :9886),
+поэтому риск нативных shell/write/web-инструментов Muse компенсируется:
+
+- ход исполняется в собственном каталоге `workspace/muse/turn-<uuid>/` (0700): `cwd` и
+  `--workspace` — только он, prompt-файл (0600) внутри и удаляется вместе с каталогом;
+- `max_concurrent: 1` — одновременные ходы всех Muse-адаптеров одного хаба исключены
+  общим семафором, не только отдельным пулом backend id;
+- допуск `qualify()`: обёртка исполняема **и** sha256 `~/.local/bin/muse` совпал с
+  обязательным `technical_ref` каталога; иной `binary_path` отвергается
+  (`binary_path_not_canonical`). Допуск повторяется после получения слота,
+  непосредственно перед spawn, без sha-кэша; без pin ход не запускается. Это проверка
+  пути и содержимого, не неизменяемый образ: остаётся окно подмены между проверкой и exec;
+- `MUSE_BIN` вырезается из окружения ребёнка (обёртка не исполнит произвольный файл),
+  `MUSE_PROXY_PORT` — нормализованный `proxy_port` бэкенда; `META_API_KEY` и ключ моста вырезаны;
+- успех требует `terminal.completed`; автоматического replay промпта нет (ход мог уже
+  исполнить действие); текст и failure reasons ограничены байтовыми бюджетами, сырой
+  backend-текст в журнал не пишется. Stdout читается ограниченными блоками как bytes,
+  UTF-8 декодируется строго: строка JSONL ≤ 8 МиБ, текст/дельты/failure reasons суммарно
+  ≤ 10 МиБ; до `json.loads` проверяются ≤ 50 000 структурных токенов и глубина ≤ 128,
+  на ход ≤ 50 000 непустых событий; пустые дельты не накапливаются;
+- `STDERR_DRAIN_GRACE_S = 5 с` ограничивает добор pipe после выхода лидера; EOF stdout
+  не даёт бесконечно ждать лидера/stderr. В `finally` группа получает SIGKILL, лидер
+  ожидается до 5 с, исчезновение группы до 2 с; это отдельные окна, не общий лимит 5 с.
+  Сбой запуска служебного потока проходит ту же очистку. Запись `children.json` снимается
+  только после исчезновения группы; если группа жива, адаптер запрещает новые ходы;
+- до exec создаётся живой свидетель группы, а `pid`/`pgid`/`start-signature` лидера и
+  `members` свидетеля записываются в `workspace/state/children.json`. На рестарте
+  `reconcile_children()` сверяет подпись и PGID живого лидера либо подписанного члена
+  при мёртвом лидере; переиспользованный PID и неподтверждённый PGID не сигналятся.
+  Подписанная запись сохраняется, пока свой член остаётся жив в группе.
+
+Это компенсаторы, **не OS sandbox**: 0700/0600 не ограничивают другой процесс того же
+UID, общий слот не сериализует отдельные хабы или внешний muse-bridge. Потомок,
+вызвавший `setsid`, выходит из исходной группы: его завершение не гарантируется;
+ограничение чтения pipe предотвращает зависание хода, но не доказывает очистку такого
+потомка. Флаги AD-007 оставляют нативные инструменты Muse доступными.
+
+**P2 по умолчанию:** `backends.muse.enabled=false`; Muse не публикуется в `/v1/models`
+и не получает запросов. AD-007 разрешает флаги Muse, но не снимает P3-гейт включения.
+
+**P3-гейт (ASM-001):** включение разрешено только после приложенного лога живого хода
+Muse на провайдере `meta` через `~/.config/muse-launch/muse-cli.sh` и совместной нагрузки
+с Droid, с согласованием владельца, либо после явной записи решения владельца,
+снимающей этот гейт. Fake/echo, unit/HTTP-тесты и `/health` не заменяют живую пробу.
+Живой ASM-001 в этом контуре **НЕ ПРОВЕРЕНО**; боевой cutover не выполнялся.
+
+Однострочное включение из корня репозитория, **только после P3-гейта** (команда здесь
+не выполнялась; применение каталога и cutover согласуются отдельно):
+
+```bash
+python3 -c 'import json; from pathlib import Path; p=Path("fleet.json"); f=json.loads(p.read_text()); f["backends"]["muse"]["enabled"]=True; p.write_text(json.dumps(f, ensure_ascii=False, indent=2)+"\n")'
+```
+
+### Как добавить бэкенд
+
+1. Написать адаптер `adapters/<name>_adapter.py` — наследник `BackendAdapter`
+   (`get_models`, `qualify`, `is_healthy`, `spawn_session`, `execute_turn`,
+   `close_session`, `shutdown`); модуль не импортирует `server`, настройки берёт у `host`.
+   Текущий межмодульный seam: `execute_turn(ctx: TurnContext, sse_writer: StreamSink | None)
+   -> TurnResult`, `qualify() -> Qualification`, `get_models() -> list[BackendModel]`,
+   `is_healthy() -> bool`, `spawn_session(ctx: TurnContext) -> object`,
+   `close_session(sid: str) -> None`, `shutdown() -> None`. `TurnContext` и `TurnResult` —
+   frozen dataclass (история/вложения, usage, события/tool calls также DTO); `Qualification`
+   сохраняет пару ok/reason. Класс возможностей называется **`Capabilities`**, не
+   `AdapterCapabilities`: `sessions`, `streaming`, `autonomy`, `usage`.
+   Legacy dict-конверсия Droid остаётся внутри `DroidAdapter`; HTTP dict-кодирование —
+   локально в фасаде. `finalize_turn(TurnResult, emulate_tools)` возвращает `TurnResult`.
+2. Зарегистрировать `kind` в `adapters/__init__.py: ADAPTER_KINDS` — единственное место,
+   где конфигурация получает класс. `AdapterRegistry.register` проверяет `adapter_api`
+   против `ADAPTER_API`, экземпляр/значения `Capabilities`, возможность вызвать bound
+   `execute_turn` двумя аргументами и его аннотации `ctx`/return (`TurnContext`/`TurnResult`),
+   return-аннотацию `qualify` (`Qualification`), уникальность backend id.
+   Несовместимость — отказ регистрации (`ValueError`), не поздний отказ `qualify()`;
+   это не полная runtime-проверка всех возвращаемых DTO и всех методов адаптера.
+3. Добавить запись в `fleet.json: backends` (`kind`, `enabled`, `required`, `owned_by`,
+   `max_concurrent`, при необходимости `wrapper`/`technical_ref`/`proxy_port`) и модели с
+   полем `backend`; прогнать `/opt/homebrew/bin/python3 fleet_check.py`.
+4. Прогнать гейты: `.venv/bin/ruff format --check .`, `.venv/bin/ruff check .`,
+   `.venv/bin/basedpyright tools server.py core adapters fleet_check.py`,
+   `PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests`.
+5. Проверить на копии моста (порт ≠ 9882): `/v1/models` отдаёт модели нового бэкенда,
+   `/health.ok` учитывает `required`, ход идёт через адаптер.
+
+### Запуск и откат (самодостаточно, без временных каталогов)
+
+```bash
+# запуск (launchd): ключ — из окружения или ~/.dsh/.env, каталог — этот репозиторий
+launchctl kickstart -k gui/$(id -u)/com.user.dsh-droid-bridge
+curl -s http://127.0.0.1:9882/health | python3 -m json.tool
+
+# проверка перед выкаткой (из корня репозитория)
+/opt/homebrew/bin/python3 fleet_check.py
+.venv/bin/ruff format --check . && .venv/bin/ruff check .
+.venv/bin/basedpyright tools server.py core adapters fleet_check.py
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests
+
+# откат: вернуть прежний коммит/файл и перезапустить мост
+git log --oneline -5
+git revert <sha>                # либо: git checkout <sha> -- .
+launchctl kickstart -k gui/$(id -u)/com.user.dsh-droid-bridge
+```
+
+Откат конфигурации без смены кода: `git checkout <sha> -- fleet.json` (schema 2 читается
+загрузчиком как «единственный бэкенд droid»); записи чатов и `children.json` совместимы
+(поля аддитивные). Отключить только muse — `"enabled": false` в `backends.muse`:
+остальной хаб продолжает работать, `/v1/models` перестаёт отдавать muse-модели.
 
 ## Env
 
@@ -48,12 +220,27 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 | `DROID_DSH_BRIDGE_KEY` | — (обязателен) | ключ авторизации (Bearer / x-api-key) |
 | `FACTORY_API_KEY` | — | headless-вход `droid exec` без интерактивного логина; `start.sh` читает из `~/.zshenv` |
 | `DROID_DSH_BRIDGE_MODEL` | `default_model` каталога | модель по умолчанию (обязана быть в каталоге) |
-| `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | параллельных droid-процессов |
+| `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | cap процессов droid (resident, стартующие, title, закрывающиеся) и одновременных ходов |
+| `DROID_DSH_BRIDGE_IDLE_SECONDS` | `2700` | idle-гашение процесса чата, с (SID и файлы остаются, следующий ход — `load_session`) |
 | `DROID_DSH_BRIDGE_QUEUE_TIMEOUT` | `900` | ожидание слота, с |
 | `DROID_DSH_BRIDGE_KEEPALIVE` | `15` | keepalive SSE, с |
 | `DROID_DSH_BRIDGE_FLEET` | `<каталог моста>/fleet.json` | путь к каталогу флота |
 | `DROID_DSH_BRIDGE_IMAGE_PROBE` | — | `1` — включить `probe`-модели изображений (**только для копии моста**, не для боевого запуска) |
 | `DROID_LAUNCHER` | `~/.config/factory-launch/droid-cli.sh` | канонический лончер droid |
+| `DROID_DSH_BRIDGE_RECEIPT_REQUIRED` | `1` | допуск образа droid по receipt (`workspace/state/droid-binary-receipt.json`) на каждом spawn; `0` — только стенд/разработка |
+| `DROID_DSH_BRIDGE_INSTR_LIMIT` | `60000` | жёсткий предел блока agent-instructions формы KB (cwd запроса = KB либо блок целиком из копий канона), Б (REQ-003): больше — 503 `launcher_unavailable` до spawn/add (внутреннее имя `REQ003_SIZE_EXCEEDED` только в журнале) |
+| `DROID_DSH_BRIDGE_INSTR_MARGIN` | `2048` | запас для остальных блоков (WA/AB и т.п.): допустимый блок = `maxBytes` профиля − запас (при неизвестном `maxBytes` — 106496) |
+| `DROID_DSH_BRIDGE_GUARD_TICK` | `30` | период автоматического контура b_guard внутри моста, с |
+| `DROID_DSH_BRIDGE_PROFILES_DIR` / `DROID_DSH_BRIDGE_CANON` | `~/.dsh/profiles` / `~/Мой диск/Context/AGENTS.md` | профили DSH и канон, которые проверяет контур (только чтение) |
+| `DROID_BRIDGE_MAX_RPC_LINE_BYTES` / `_MAX_STDERR_BYTES` / `_MAX_INBOX_BYTES` / `_MAX_TURN_TEXT_BYTES` / `_MAX_CHATS` | 8 МиБ / 64 КиБ / 4 МиБ / 10 МиБ / 4096 | байтовые бюджеты RPC-строки, stderr, очереди событий (каждая запись учитывается минимум 64 Б), text/thinking хода (дельта и итог одного блока считаются один раз) и индекса чатов (превышение — 502 `proxy_error`, процесс/слот возвращаются) |
+| `DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS` | `50000` | предел числа структурных токенов `{`, `[`, `,`, `:` вне строковых литералов в одной RPC-строке (счёт до `json.loads`): поток скаляров `[1.1, 1.1, …]`, миллионы пустых объектов и глубокая вложенность внутри 8 МиБ отклоняются до разбора (502 `proxy_error`), читатель не падает |
+
+Доставка ответа клиенту идёт срезами по 64 КиБ (JSON — с точным `Content-Length` без полной копии
+экранированного текста, SSE — несколькими событиями), поэтому потолок памяти определяет бюджет хода
+(10 МиБ), а не размер ответа; бюджет доставки (`DROID_BRIDGE_MAX_DELIVERY_BYTES`) считается по
+удерживаемой памяти CPython (`sys.getsizeof`: 1/2/4 Б на символ по самому широкому символу, объединённый текст
+и события — обе копии), а не по длине UTF-8; отдельный spool ответа на диск не используется: текст ограничен бюджетом
+хода, а ENOSPC при spool картинок даёт 502 `proxy_error` (новых публичных кодов, в том числе 507, нет).
 
 Модель и `reasoning_effort` берутся из запроса (effort передаётся как `-r`;
 модель по умолчанию — каталог/env). Секретов в коде нет: только окружение.
@@ -61,6 +248,13 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 
 ## Каталог `fleet.json` (C-01)
 
+- Схема — **schema 3** (schema 2 читается как «единственный бэкенд droid»): блок `backends`
+  (`id → запись`, поля см. «Мульти-бинарный хаб») и поле `backend` у каждой модели.
+  Полный структурный валидатор — `core/backend_adapter.py: build_catalog`, общий с
+  `fleet_check.py`; записи бэкендов внутри него проверяет `backend_entry_error`.
+  Неизвестные/неподдерживаемые ключи, неверные типы, `max_concurrent < 1` (для Muse любое значение ≠ 1),
+  `proxy_port` вне 1…65535, неполный/несовпавший по форме `technical_ref` (для kind `muse`
+  pin обязателен) — отказ старта (`fleet_invalid`), а не тихое отбрасывание.
 - Инварианты (класс I) проверяются при старте: уникальные `id`, `efforts ⊆
   {minimal,low,medium,high,xhigh,max}`, `default_effort ∈ efforts`,
   `default_model ∈ ids`, `images.status ∈ {unsupported,unverified,probe,confirmed}`,
@@ -123,6 +317,9 @@ Admission: резерв байт по заявленному `Content-Length` п
 
 - `GET /health` и `/v1/health` — без авторизации, ровно 7 ключей: `ok`,
   `transport`, `model`, `active`, `max_concurrent`, `tool_emulation`, `uptime_s`.
+  `ok=false`, если допуск образа обязателен (`RECEIPT_REQUIRED`), а receipt отсутствует/не проходит проверку
+  (ни один ход не будет обслужен); состояние контура b_guard в `/health` не выводится (контракт 7 ключей), оно
+  видно только в журнале (`instr_guard_alert`).
 - `GET /v1/models` и `/models` (с авторизацией) — `{"object":"list","data":[…6…]}`,
   первым `default_model`; запись `{"id","object":"model","owned_by":"factory-droid",
   "created":0,"context_length":…}`.
@@ -133,11 +330,21 @@ Admission: резерв байт по заявленному `Content-Length` п
 ## Журнал
 
 `logs/` (JSON-строки stdout launchd). Формат ключевых строк:
-`exec model=<id> effort=<lvl> effort_source=<request|default> prompt_bytes=… [images=…] <tag>`,
+`exec model=<id> effort=<lvl> effort_source=<request|default> autonomy=<lvl> autonomy_source=<request|default> prompt_bytes=… [images=…] <tag>`,
+`usage sess=<sid8|-> raw=<in>/<out> rep=<in>/<out> resumed=<0|1> turns=<n>`,
 `done model=<id> rc=<n> state=<s> … <tag>`,
 `reject reason=<тип> model=<id каталога|unknown> model_len=<n> client=<ip:port>`.
 Тела запросов, ключи, base64 и пути хранилища в журнал не попадают; в строке
 `reject` — только каталожный id (или `unknown`) и длина клиентской строки.
+Служебные строки вне строгих форматов: `session_rpc chat=<hash8> key=<1|0>
+path=<hot|restore|rebase|cold|ephemeral> gen=<n> sid=<sid8|->` (по ходу),
+`instr_guard sections=<N> omitted=<пути|-> bytes=<B>` (первый запрос нового чата),
+`restore_integrity …` (повтор служебных блоков после load -> санитация),
+`instr_guard_alert state=<ok|unsafe|unknown> warnings=<n> reasons=… max_bytes=…` (контур b_guard: смена состояния
+профиля/канона; при `state=ok` и `warnings>0` — предупреждения `LOW_MARGIN_*`/`LINE_ORACLE_RISK`, трафик не
+останавливается), `guard_state state=ok max_bytes=…`, `instr_gate_alert guard=unsafe refused=<0|1> bytes=… limit=…`
+(гейт при небезопасном профиле) и `instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes=… limit=…` (блок сверх предела), `droid_receipt_invalid err=…` (старт без валидного receipt),
+`session_rpc leader_exited_pipe_held pid=… rc=…` (лидер вышел, потомок держит pipe: группа добивается).
 
 ## Запуск и проверка
 
@@ -155,6 +362,11 @@ curl -s -H "Authorization: Bearer $DROID_DSH_BRIDGE_KEY" \
 Read-only проверка каталога и профилей; JSON в stdout, exit 0 только при полном
 успехе (расхождение sha `models.md` → `policy.sha_match=false` + exit 1;
 `default_compat.status` = `ok` / `not_applicable` / `BLOCKED-DEFAULT`).
+Каталог принимается в schema 2 или 3; в schema 3 записи `backends` проверяются
+полным структурным валидатором хаба (`build_catalog` + `ADAPTER_KINDS`), а census класса III
+и операционные проверки выполняются отдельно. Droid-специфичные
+проверки (efforts, профили DSH, allowlist, `--live-droid`) выполняются по области
+`droid_scope` — muse-модели в них не попадают.
 
 ```bash
 /opt/homebrew/bin/python3 fleet_check.py                 # каталог + профили + policy
@@ -169,12 +381,163 @@ cd ~/.dsh/bridges/droid-bridge
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests -v
 ```
 
-84 теста: каталог и его классы I/II/III, строгая валидация model/effort, argv
-(один `-m`/`-r`, без `--auto`), framing/413/admission, tool emulation, ретраи,
-sweep, image-путь (таксономия C-10, лимиты, права 0700/0600, очистка,
-fail-closed proof), журнал. Тесты не ходят в сеть и к droid: `Run` подменяется
-фейком, а argv/раскладка проверяются на локальной заглушке лончера; файлы — только
-во временных каталогах.
+Набор — stdlib `unittest`, без сети и без реального droid. Процесс droid в тестах —
+**настоящий subprocess** `tests/fake_droid.py` (stream-jsonrpc по stdin/stdout:
+ACK `add_user_message` мгновенный и не завершает ход, нотификации, retract,
+сбои), лончер подставляется через `DROID_LAUNCHER`. Покрыто: каталог (классы I/II),
+строгая валидация model/effort, framing/413/admission, tool emulation, ретраи,
+image-путь (таксономия C-10, лимиты, права 0700/0600, очистка, fail-closed proof),
+журнал, а также `tests/test_rpc_*.py` (дельта истории, изоляция чатов, title, idle-реап
+и restore того же SID, cap/вытеснение, таймауты, метаданные, остановка, дрейф droid)
+`tests/test_rpc_rework.py` / `tests/test_rpc_cycle3.py` / `tests/test_rpc_cycle4.py` / `tests/test_cycle4_tools.py` (регрессии замечаний совета cycle-2/cycle-3/cycle-4: гейт и контур b_guard, ошибки записи состояния, изоляция ходов, бюджеты и доставка срезами, receipt schema 2, группы процессов, реапер, права каталогов) и `tests/test_b_guard.py`. Идентификаторы обязательств `TM-NNN` — в именах методов
+(`-k tm001`) и docstring. `tests/baseline_inventory.json` — сопоставление 92 baseline-тестов
+с текущими. Файлы — только во временных каталогах.
+
+Хаб (ADR 0002): `tests/test_backend_contract.py` — контракт `BackendAdapter`/`AdapterRegistry`;
+`tests/test_fleet_v3.py` — schema 2/3, полный структурный `build_catalog` и паритет с `fleet_check`;
+`tests/test_muse_adapter.py` — адаптер muse (per-turn изоляция хода, pin образа, отсутствие
+replay, `terminal.completed`, байтовые бюджеты, завершение группы, реестр детей, нормализация
+порта); `tests/test_hub_integration.py` — фасадный шов через настоящий HTTP-handler с fake
+droid/muse в `BACKENDS` (POST muse-модели JSON и SSE с `tool_calls`, 502 `backend_error` с
+detail, 503 preflight/proxy-down, общий `finalize_turn` при `emulate_tools` true/false,
+unsafe-guard для muse против droid-чата, независимость ёмкостей, abort потока). Полный
+сьют на предыдущем кандидате `0cecaf0` — 459 тестов; это не результат текущего
+rework без привязки нового лога к финальному коммиту.
+
+### Статус гейтов ruff / basedpyright
+
+Запуск — только из окружения репозитория: `.venv/bin/ruff format --check .`, `.venv/bin/ruff check .`,
+`.venv/bin/basedpyright server.py core adapters fleet_check.py` (настройки — `ruff.toml` с набором E4/E7/E9/F
+и `pyrightconfig.json`; чужие venv не используются). Исторические логи кандидата `0cecaf0`:
+`ruff format --check` и `ruff check` — exit 0; `basedpyright` — 13 ошибок (exit 1),
+из них 11 в `fleet_check.py` и 2 в `server.py`; `core/` и `adapters/` ошибок не дают.
+Прежняя атрибуция «17 ошибок baseline `be95d60`» неверна: лог с ошибками Muse и
+`tool_emulation` не мог относиться к дереву `be95d60`, где этих файлов нет (RW-011).
+Независимые commit-bound прогоны RW-011 дали: `be95d60` — 13 ошибок (10 `fleet_check.py`,
+3 `server.py`), `e2c882b` — 16, `0cecaf0` — 13. Это не подтверждает «0 новых относительно
+baseline»: состав диагностик различается (assignment-ошибка `server.py` в baseline,
+unresolved `yaml` только в product worktree `0cecaf0`), окружения тоже различаются.
+Гейты текущего rework требуют нового лога и финального SHA.
+Предупреждения (warnings) strict-режима сами по себе не гейтят.
+
+## RPC-режим (долгоживущий droid на чат)
+
+- **Ключ чата** — `prompt_cache_key` запроса; в argv/путь не попадает, идентичность —
+  `sha256(namespace + ключ)`. Без ключа (или с невалидным — нового 400 нет), для
+  title-запросов (определяются по структуре: system-инструкция, 2 messages, без tools,
+  `max_tokens=64`) и для запросов с изображениями — эфемерная чистая сессия с replay
+  истории запроса под общим cap процессов.
+- **Дельта истории.** DSH-запрос — авторитетная история. Мост хранит хеш-цепочку
+  потреблённого префикса и проекцию выданных assistant-сообщений; префикс совпал —
+  в RPC уходит только непросмотренный суффикс (все сообщения кроме последнего с
+  `skipAgentLoop:true`, последнее запускает один цикл). Расхождение, форк, правка,
+  компакция, смена system/tools/cwd, недоставленный ход — новая generation:
+  `initialize_session` + replay всей истории запроса. Fuzzy-сопоставления нет.
+- **Ресурсы и порядок** `L → P → T`: аренда чата (одновременные запросы одного ключа
+  идут по очереди), ёмкость процессов `P` (cap 4, FIFO-очередь 900 с с keepalive 15 с,
+  вытеснение только idle по LRU: SIGTERM → waitpid 2 с → SIGKILL) и разрешение хода `T`.
+- **Idle** `DROID_DSH_BRIDGE_IDLE_SECONDS` (2700 с): процесс закрывается штатно, SID и
+  метаданные остаются; следующий ход — `load_session` того же SID (не больше 5 restore
+  на SID, затем свежая generation; после load — проверка целостности служебных блоков).
+  Триаж `HISTORY_MISMATCH droid=5 bridge=8` (стенд after-idle, droid 0.235.0): корень — учёт моста, а не ограничение
+  `load_session`. Живой `create_message` служебной вставки (`<system-reminder>`) приходит с `content: []`, текст виден
+  только после load; мост считал такие user-сообщения «настоящими» (8), а проверка после load исключала их по тексту (5).
+  Теперь пустые user-сообщения в `droid_real` не входят (`_is_blank_user_message`); осознанного downgrade REQ-001
+  (sanitize-fallback вместо того же SID) нет. Стенд resumed=1 на финальном SHA — в НЕ ПРОВЕРЕНО пакета.
+- **Допуск образа (AD-010).** Мост запускает droid только как `DROID_BIN=<образ из receipt>`:
+  `tools/droid_image.py` копирует глобальный бинарь в `workspace/runtime/droid-image/<sha256>/droid`
+  (0500), в изолированных `runtime/probe-home`/`probe-cwd` выполняет реальные пробы (spawn с чтением
+  `factoryProtocolVersion` и model read-back, update — `list_tools` → отключение всех → read-back
+  `settings_updated`, load — `load_session` того же SID вторым процессом) и только после них атомарно пишет
+  receipt **schema 2**: `image_path`, `image_sha256`, `protocol` (`api_version`, `protocol_version`),
+  `tools_policy` (`disabled_tool_ids` + digest), `settings_profile` (профиль безопасных настроек + digest),
+  `probes`. На каждом spawn receipt читается заново: нет/schema≠2/sha образа не совпал/digest компонента
+  не сошёлся/проба не `ok` — 503 `launcher_unavailable`; живой `factoryProtocolVersion` обязан совпасть с
+  квалифицированным, а каталог `list_tools` живого процесса — с `tools_policy` (иначе 502 до `add_user_message`).
+  Глобальный `~/.local/bin/droid` образ не меняет. Каталоги `state`/`runtime` внутри workspace принудительно
+  приводятся к 0700 (чужой владелец — отказ старта), недоступный каталог состояния — отказ старта с сообщением.
+- **Состояние чата и ошибки записи.** Перед первым `add_user_message` на диск пишется PENDING (у нового чата — сразу
+  после `initialize_session`, с новым SID); сбой записи
+  (ENOSPC, расхождение `rec_rev`) — 502 `proxy_error` без `add_user_message`, чат DIRTY. Сбой записи commit
+  READY после хода — успех клиенту не выдаётся (502), процесс закрывается, чат DIRTY: на диске остаётся
+  PENDING, после рестарта старый SID не продолжается, следующий ход — новая generation с replay. Слоты L/P/T
+  освобождаются при любом исходе, в том числе при сбое Popen/запуска потоков/конструктора хода.
+- **Изоляция ходов.** `turnId` реального droid присутствует только у `agent_turn_completed` и равен id
+  user-сообщения хода (у ассистентских сообщений он же — `parentId`). Терминал без `turnId`, с неизвестным
+  или уже завершённым `turnId` ход не завершает (пока id user-сообщения неизвестен, терминал не принимается вовсе);
+  сообщение принадлежит ходу только по подтверждённой цепочке `parentId` от user-сообщения хода: события с
+  неизвестным id/parent (в том числе на путях cold/restore, где списки завершённых пусты) не создают слот, не
+  идут в ответ, не увеличивают счётчик истории и не продлевают watchdog тишины; дельты, пришедшие раньше своего
+  `create_message`, ждут его в ограниченном буфере (входит в бюджет хода) и применяются после подтверждения. Набор завершённых turnId не вытесняется: при превышении 65536 процесс заменяется на границе
+  хода (`retired` → новая generation).
+- **Процессы и группы.** Дети — лидеры своих групп (`start_new_session`); закрытие всегда сигналит собственную
+  группу независимо от состояния лидера. Если лидер вышел, а потомок держит pipe, сторож лидера публикует EOF и
+  добивает группу (`leader_exited_pipe_held`). Эфемерные сессии (без ключа/title/images) закрываются SIGTERM без
+  ожидания `close_session`. Реапер перепроверяет idle/busy/waiters/идентичность процесса уже под арендой чата.
+- **Запись в stdin ребёнка** идёт срезами с дедлайном (`DROID_BRIDGE_RPC_CALL_TIMEOUT_S` охватывает и
+  запись) и отменой; зависший (не читающий) ребёнок не держит interrupt и shutdown — они не ждут
+  пишущий лок, дальше SIGTERM/SIGKILL.
+- **Доставка отдельно от вычисления.** `_execute` только копит вывод; T и L освобождаются после
+  terminal и checkpoint, SSE/JSON уходят клиенту после — медленный клиент не блокирует следующий ход.
+- **Безопасность ребёнка.** Чистый Factory home (`FACTORY_HOME_OVERRIDE`; ошибка подготовки — отказ spawn),
+  `disableBuiltinSkills`, `autoRejectPermissionRequests`, нативные tools отключаются по
+  актуальному `list_tools` (ошибка, пустой/невалидный каталог, нет `settings_updated`,
+  `disabledToolIds` или `autonomyLevel` — fail-closed, ход не начинается); model/effort/autonomy
+  сверяются read-back, подмена модели — 502 `droid_error`; `disableBuiltinSkills` и
+  `autoRejectPermissionRequests` сверяются, если droid их сообщает (реальный 1.248 не сообщает);
+  ключ моста вырезан из env.
+- **Вывод хода** удерживается до `agent_turn_completed`; `llm_retry` и
+  `assistant_message_retracted` удаляют только незакоммиченное; usage — из
+  `tokenUsage` терминального события по ходу (не кумулятив). Таймауты: первое событие 90 с,
+  ход 1800 с (абсолютный), тишина без событий текущего хода 120 с (interrupt),
+  keepalive 15 с. После неудачного хода чат инвалидируется (повтор строится из истории
+  запроса, а не повтором user в старую сессию).
+- **Остановка.** SIGTERM: приём прекращается, активные прерываются, дети закрываются
+  параллельно в пределах 4,5 с, затем SIGKILL только собственных PGID; при SIGKILL
+  родителя дети завершаются по EOF stdin; на старте добиваются только собственные
+  осиротевшие дети (PID + start-signature из `workspace/state/children.json`).
+  `flock` на `workspace/state/.writer.lock` не пускает второй экземпляр.
+
+## B: охранник бюджета инструкций (`tools/b_guard.py`)
+
+Офлайн (stdlib, читает только размеры файлов): расчёт блока agent-instructions по
+формуле `279 + 32·N_секций + Σбайт` (+ метка при omitted/truncated), классы
+`ALL/UG_OMITTED/TRUNCATED`.
+
+```bash
+/usr/bin/python3 tools/b_guard.py --self-test                 # границы zone-F (KB/AB/WA)
+/usr/bin/python3 tools/b_guard.py --check --maxbytes 106496   # прогноз, запасы, рекомендуемый maxBytes
+```
+
+Коды выхода `--check`: 0 — оба запаса ≥ 4096 Б, 1 — запас меньше, 2 — канон теряется
+в каком-либо cwd (`CANON_LOST`), дубль возвращается в KB (`DUPLICATE_RETURNED`) или блок/строка
+KB > 60 000 Б (`REQ003_SIZE_EXCEEDED`, строгий режим включён в CLI). `--profiles [--profiles-dir PATH]`
+только читает установленные профили DSH (`maxBytes` плагина agent-instructions; профиль с дублем плагина или
+посторонним `maxBytes` считается нечитаемым) и прогоняет ту же проверку; профили утилита не правит —
+применение `maxBytes=106496` остаётся шагом владельца. Источник user-global — настоящий `~/.dsh/AGENTS.md`
+(симлинк на канон либо точная копия); удалён/изменён/перенацелен — `CANON_LOST`.
+
+### Автоматический контур и гейт REQ-003 в мосте
+
+Мост сам запускает проверку b_guard (`check_installed`: профили `DROID_DSH_BRIDGE_PROFILES_DIR`, канон
+`DROID_DSH_BRIDGE_CANON`) на старте и каждые `DROID_DSH_BRIDGE_GUARD_TICK` с в фоновом потоке, без ручного CLI.
+Состояния: `ok`; `unsafe` (`CANON_LOST`, `DUPLICATE_RETURNED`, `REQ003_SIZE_EXCEEDED` на профиле, нечитаемый
+`maxBytes`, `PROFILES_LOST` — профили исчезли после того, как уже наблюдались); `unknown` (профилей не было с
+самого старта). Смена состояния — строка `instr_guard_alert` в журнале; рестарт-петель нет. Предупреждения b_guard
+(код 1: `LOW_MARGIN_*`, `LINE_ORACLE_RISK`) не отказ: состояние остаётся `ok`, а в журнал уходит один
+`instr_guard_alert … warnings=<n>`.
+
+Гейт входящих запросов (до spawn/`add_user_message`) проверяет **все** блоки agent-instructions во **всём**
+тексте user-сообщений (маркер не ограничен началом сообщения):
+
+- блок формы KB (cwd запроса = KB или его подкаталог, либо все секции — копии канона, в том числе прежнего:
+  дайджесты виденных процессом канонов запоминаются) — не больше 60 000 Б, иначе 503 `launcher_unavailable`
+  (в журнале `instr_gate_alert reason=REQ003_SIZE_EXCEEDED`);
+- прочие блоки (WA/AB и т.п.) — не больше `maxBytes` профиля минус запас (по умолчанию 106496 − 2048), а не 60 000;
+- при `unsafe` (выбранный вариант RW-001: управляемый отказ + alert, а не немой 400 по размеру) **новые** чаты
+  с блоком получают 503 `launcher_unavailable` с пояснением про охранник и строкой `instr_gate_alert`;
+  живые чаты (есть SID/запись) и запросы без блока продолжают обслуживаться. Новых публичных кодов ошибок нет:
+  отказ по размеру и по охраннику идёт кодом из baseline-таксономии (503 `launcher_unavailable`).
 
 ## Подключение к DSH
 
@@ -182,8 +545,35 @@ fail-closed proof), журнал. Тесты не ходят в сеть и к d
 `~/.dsh/profiles/web/cordis.patch.yml`: `baseURL http://127.0.0.1:9882/v1`,
 `apiKeyEnv DROID_DSH_BRIDGE_KEY`. Совместимость профиля уже выставлена:
 `supportsDeveloperRole: false`, `maxTokensField: max_tokens`,
-`supportsReasoningEffort: true`. Список моделей в профилях — дословно из
-`fleet.json` (6 моделей, только dev-уровни effort); сверка — `fleet_check.py`.
+`supportsReasoningEffort: true`. Список моделей провайдера в профилях — 6 droid-моделей
+(дословно из `fleet.json`); в P2 хаб отдаёт в `/v1/models` только 6 droid-моделей,
+после P3-гейта и включения Muse — 8 (6 droid + 2 muse). Muse-модели
+в профили DSH не добавлены — перенос DSH с :9886 на :9882 остаётся решением владельца
+(ADR 0002, фаза P3). Сверка — `fleet_check.py`.
+
+## Развёртывание (порядок обязателен)
+
+Каждый шаг — предусловие следующего; без шагов 1–2 каждый spawn даёт 503 `launcher_unavailable`
+(`/health` при этом `ok:false`, в журнале на старте `droid_receipt_invalid`).
+
+1. `/usr/bin/python3 tools/droid_image.py [--source <путь к droid>]` — копия образа (0500) в
+   `workspace/runtime/droid-image/<sha256>/`, реальные пробы (spawn / update / load), receipt schema 2.
+   Exit 3 — проба провалена, receipt не записан.
+2. Проверить receipt: `workspace/state/droid-binary-receipt.json` (`schema: 2`, все `probes: ok`,
+   `protocol.protocol_version` = версия установленного droid).
+3. Проверка плана до применения: `/usr/bin/python3 tools/b_guard.py --check --maxbytes 106496` — обязательно
+   exit 0 (канон везде сохраняется, дубль не возвращается, KB-блок ≤ 60 000 Б). Установленные профили при этом
+   ещё прежние (`maxBytes=262144`, блок ~111 114 Б), поэтому `--profiles` на этом шаге даёт exit 2 — это ожидаемо.
+4. Владелец применяет `maxBytes=106496` в профилях DSH (утилита и мост профили не правят).
+5. Проверка применённого: `/usr/bin/python3 tools/b_guard.py --profiles` — обязательно exit 0.
+6. Рестарт моста (на старте в журнале не должно быть `droid_receipt_invalid` и `instr_guard_alert`;
+   `guard_state state=ok`).
+7. Проба: `/health` → `ok:true`, затем один ход из KB-cwd на копии моста (порт 9892, не боевой 9882) — без 503.
+
+Откат: вернуть предыдущий коммит и перезапустить мост (`launchctl kickstart`). Прежний код принимает только
+receipt `schema: 1`, поэтому перед откатом нужно перезаписать receipt прежней версией `tools/droid_image.py`
+(на стенде — `DROID_DSH_BRIDGE_RECEIPT_REQUIRED=0`). Формат записей чатов в `workspace/state` (`schema: 1`)
+не менялся; сомнительные записи прежний код перестраивает из истории запроса (history-fallback).
 
 ## Деплой
 
