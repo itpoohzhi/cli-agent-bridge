@@ -6,13 +6,17 @@ Accepted (2026-10-08). Формат: ADR-full — решение затраги�
 модель безопасности (несколько дочерних бинарников, trust boundary), персистентные данные (`fleet.json`, записи чатов)
 и откатывается не одним действием. Решение владельца по AD-007 принято 2026-10-08 12:07 MSK: Muse работает с
 `--yolo --trust-workspace`, изоляция добирается компенсаторами (см. «Обновления после ревью Совета Тимлидов»).
-Включение Muse в бою (`enabled:true` для реального cutover DSH) по-прежнему упирается в живую пробу на `meta` (ASM-001),
-которая в этом контуре не выполнялась. Не отменяет ADR 0001: его инварианты (L → P → T, receipt-допуск образа, изоляция ходов,
+Поставка P2 — только с `backends.muse.enabled=false`. Включение Muse (`enabled:true`, P3) требует лога живой пробы
+на `meta` через обёртку и совместной нагрузки с Droid (ASM-001), с согласованием владельца, либо явной записи решения
+владельца, снимающей P3-гейт. AD-007 разрешает флаги, но не снимает этот гейт. ASM-001 в этом контуре
+**НЕ ПРОВЕРЕНО**; fake/echo и тесты его не заменяют. Не отменяет ADR 0001: его инварианты (L → P → T, receipt-допуск образа, изоляция ходов,
 байтовые бюджеты) наследуются `DroidAdapter` без изменений.
 
 ### Обновления после ревью Совета Тимлидов (Cycle 1, 2026-10-08)
 
-Текст ниже — исходное предложение; реализация уточнена по итогам ревью (все пункты закрыты тестами):
+Ниже зафиксированы уточнения Cycle 1, а не итоговый вердикт Cycle 2. Свидетельства тестов относятся к `0cecaf0`;
+замечания RW-001…RW-012 из Cycle 2 проверяются отдельно. Остальной текст содержит исходное предложение,
+не обещание, что каждый архитектурный набросок уже реализован.
 
 1. **Muse `max_concurrent` = 1** (было 2): параллельные muse-ходы разведены per-turn каталогом
    `workspace/muse/turn-<uuid>/`, но оба процесса идут под одним UID с `--yolo`, поэтому ёмкость 1 — реальная граница
@@ -32,7 +36,8 @@ Accepted (2026-10-08). Формат: ADR-full — решение затраги�
 7. **`_sweep_workspace` метёт наследие muse** (`muse/prompt-*.txt`, `muse/turn-*`), на остановке — безусловно;
    `children.json` тегируется `kind: muse` и `reconcile_children` на старте добивает свои осиротевшие группы (RW-010).
 8. **`MUSE_PROXY_PORT` нормализуется один раз** и уходит и в preflight, и в окружение обёртки (RW-011);
-   basedpyright по хабу — без новых ошибок относительно baseline (RW-012).
+   basedpyright по хабу в `0cecaf0` — без ошибок в новых модулях; сравнение с настоящим baseline `be95d60`
+   требует отдельного commit-bound лога (исправление атрибуции: RW-011 Cycle 2).
 9. **Фасадный шов покрыт интеграционными тестами** через настоящий HTTP-handler с fake droid/muse в `BACKENDS`
    (`tests/test_hub_integration.py`): JSON/SSE, `tool_calls`, 502 `backend_error` с detail, 503 preflight,
    `finalize_turn` (`emulate_tools` true/false), unsafe-guard, независимость ёмкостей, abort потока (RW-013).
@@ -137,7 +142,15 @@ MB-REQ-001 интерфейс `BackendAdapter` (`get_models`, `execute_turn`, `s
 
 ### Component: seam `BackendAdapter` (VIEW-002)
 
-Фасад знает только `core/backend_adapter.py`. Конкретные адаптеры не импортируют `server`. Нормализованные типы — dataclass/TypedDict:
+Межмодульный контракт определён в `core/backend_adapter.py`; фасад также использует общий `core/tool_emulation.py`.
+Конкретные адаптеры не импортируют `server`.
+**Следующий блок — неисполняемый архитектурный набросок (sketch), а не готовый интерфейс реализации.**
+Сигнатуры `execute_turn(turn, session, sink, cancel)`, `qualify() -> Qualification`, `is_healthy() -> Health`
+и допуск через `ADAPTER_API` не служат инструкцией регистрации адаптера.
+Набросок сохранён как история предложения; типизированный seam реализован в RW-012 Cycle 2
+(актуальный интерфейс ниже). Фактический контракт берётся из `core/backend_adapter.py`
+и проверяется `tests/test_backend_contract.py`, а не из этого sketch.
+Нормализованные типы в наброске — dataclass/TypedDict:
 
 <!-- fmt: off -->
 
@@ -180,7 +193,30 @@ class BackendAdapter(Protocol):
 - **Ошибки (`BackendError`)** отображаются на существующую таксономию без новых кодов: `BackendUnavailable` → 503
   `launcher_unavailable`; `BackendProtocolError`/пустой ответ → 502 `proxy_error`; `BackendTimeout` → 504; `ModelMismatch` →
   502; перегрузка ёмкости → 503 `overloaded`.
-- **Версионирование:** несовпадение `ADAPTER_API` → `qualify()` = fail, модели бэкенда недоступны (503), хаб стартует.
+- **Версионирование исходного sketch:** предполагался отказ `qualify()` при несовпадении `ADAPTER_API`.
+  Описания `EventSink`/`TurnRequest` выше относятся к предложению, не к текущим DTO.
+  Реализация теперь отказывает раньше, при регистрации, как описано далее.
+
+#### Актуальный интерфейс (RW-012 Cycle 2)
+
+`core/backend_adapter.py` определяет frozen dataclass `TurnContext`, `TurnResult`,
+`BackendModel`, `Capabilities` (это фактическое имя, не `AdapterCapabilities`) и связанные
+DTO `Transcript`/`TranscriptItem`, `ImageAttachment`, `Usage`, `ToolCall`/`ToolFunction`/`TurnEvent`.
+`Qualification` — typed NamedTuple `(ok, reason)`. Текущие сигнатуры:
+
+- `get_models() -> list[BackendModel]`, `qualify() -> Qualification`, `is_healthy() -> bool`;
+- `spawn_session(ctx: TurnContext) -> object`, `execute_turn(ctx: TurnContext, sse_writer: StreamSink | None) -> TurnResult`;
+- `close_session(sid: str) -> None`, `shutdown() -> None`.
+
+`Capabilities` содержит только `sessions`, `streaming`, `autonomy`, `usage`.
+`AdapterRegistry.register` проверяет `adapter_api == ADAPTER_API`, тип и допустимые значения
+возможностей, bind `execute_turn` на два аргумента, точные аннотации `ctx`/return
+(`TurnContext`/`TurnResult`) и return `qualify` (`Qualification`), уникальность backend id.
+Невалидный адаптер получает `ValueError` до попадания в реестр. Это не проверка всех
+runtime-возвратов и сигнатур каждого метода. Legacy dict-преобразование Droid ограничено
+`DroidAdapter`; HTTP dict-кодирование остаётся локальным в фасаде.
+`core.tool_emulation.finalize_turn(TurnResult, emulate_tools) -> TurnResult` сохраняет
+готовые события Droid либо разбирает текст другого адаптера в типизированные события/tool calls.
 
 ### Адаптеры
 
@@ -196,9 +232,14 @@ settings_profile + пробы, `tools/droid_image.py`); `is_healthy()` = `_recei
 `sessions="none"`: каждый ход — полный replay истории в промпте (как сейчас), запись чата в кэше не создаётся (путь `ephemeral`).
 `usage`: оценка по словам ×1.3 (`exec` точных токенов не отдаёт). Дети — лидеры своих групп (`start_new_session`),
 регистрируются в `ChildRegistry`, `kill` группы по `TIMEOUT_S`. `qualify()`: (1) `muse-cli.sh` исполняем; (2) образ `~/.local/bin/muse`
-совпал с `fleet.json technical_ref` (sha256 + версия) — pin обязателен, без него ход не запускается; (3) прокси :10816 слушает
-(иначе `is_healthy`=down, причина `proxy_down`, exit 42 → 503); (4) проба на провайдере `echo`: argv принят, терминал `completed`, rc=0;
-(5) модель резолвится (`model-profile show`). Политика прав — AD-007.
+совпал по sha256 с `fleet.json technical_ref`; поле версии справочное, не отдельная runtime-проба.
+Путь обязан быть каноническим `~/.local/bin/muse` (иначе `binary_path_not_canonical`).
+Допуск повторяется после получения слота непосредственно перед spawn, без sha-кэша;
+неизменяемый образ не создаётся, окно подмены между проверкой и exec остаётся.
+Pin обязателен, без него ход не запускается; (3) прокси :10816 слушает
+(иначе `is_healthy`=down, причина `proxy_down`, exit 42 → 503). Пункты исходного sketch о пробе `echo` и
+`model-profile show` — не подтверждённые шаги runtime `qualify()`; `echo` не заменяет живой ASM-001.
+Политика прав — AD-007.
 
 ### fleet.json schema 3 (MB-REQ-004)
 
@@ -206,7 +247,7 @@ settings_profile + пробы, `tools/droid_image.py`); `is_healthy()` = `_recei
 { "schema_version": 3, "catalogue": "droid-bridge-fleet", "default_model": "claude-sonnet-5-5",
   "backends": {
     "droid": {"kind": "droid", "enabled": true, "required": true, "owned_by": "factory-droid", "max_concurrent": 4},
-    "muse": {"kind": "muse", "enabled": true, "required": false, "owned_by": "meta-muse", "max_concurrent": 1,
+    "muse": {"kind": "muse", "enabled": false, "required": false, "owned_by": "meta-muse", "max_concurrent": 1,
              "wrapper": "~/.config/muse-launch/muse-cli.sh",
              "technical_ref": {"version": "1.4.3", "binary_sha256": "c6db2947…a4bc", "binary_path": "~/.local/bin/muse"}} },
   "models": [ {"id": "claude-sonnet-5-5", "backend": "droid", "…": "как в schema 2 (всего 6 droid-моделей)"},
@@ -219,16 +260,29 @@ settings_profile + пробы, `tools/droid_image.py`); `is_healthy()` = `_recei
 
 `backends` — объект `id → запись` (не список). Допустимые ключи записи (единственный источник —
 `core/backend_adapter.py: BACKEND_KEYS`): `kind`, `enabled`, `required`, `owned_by`, `max_concurrent`,
-`wrapper`, `technical_ref`, `transport`, `tool_policy`, `proxy_port`; `technical_ref` — `version` +
+`wrapper`, `technical_ref`, `proxy_port`. `transport` и `tool_policy` не поддерживаются:
+они исключены из allowlist и отвергаются с `backend_key_unknown`, а не игнорируются.
+`technical_ref` — справочная `version` +
 `binary_path` + `binary_sha256` (64 hex, обязательны для `kind: muse`).
 
-Инварианты (класс I, отказ старта `fleet_invalid …`): `kind ∈ ADAPTER_KINDS` (реестр в коде); каждая модель
-ссылается на существующий включённый `backend`; `id` моделей уникальны **глобально** (не на бэкенд — клиент выбирает по `model`);
-`default_model` принадлежит включённому бэкенду; `efforts ⊆ EFFORT_LEVELS`; `max_concurrent ≥ 1`; неизвестные ключи — отказ
+Пример отражает P2: Muse выключен, его модели остаются определениями каталога, но не публикуются и не маршрутизируются.
+Для разрешённых запросов модель должна ссылаться на включённый backend; `default_model` не может принадлежать выключенному.
+
+Инварианты (класс I, отказ старта `fleet_invalid …`): `kind ∈ ADAPTER_KINDS` (реестр в коде); каждое определение модели
+ссылается на существующий `backend`, а в эффективный каталог входят только модели включённых бэкендов;
+`id` моделей уникальны **глобально** (не на бэкенд — клиент выбирает по `model`);
+`default_model` принадлежит включённому бэкенду; `efforts ⊆ EFFORT_LEVELS`; `max_concurrent ≥ 1` (для Muse строго 1); неизвестные ключи — отказ
 (в отличие от schema 2, где они молча отбрасывались). **Совместимость:** загрузчик принимает и schema 2 (неявный единственный
 `backend: droid`, поведение прежнее) — это даёт откат конфигурации без смены кода. Код старой версии schema 3 **отвергает**
 (fail-closed, rc=1), а не публикует модель Muse как droid — поэтому версия поднимается, а не расширяется молча.
-`fleet_check.py` обновляется: schema 2|3, проверка `backend`-ссылок, `--live-backends` вместо `--live-droid`.
+Текущий полный структурный валидатор — `core/backend_adapter.py: build_catalog`; его вызывают
+`server._build_catalog` и `fleet_check.check_catalogue` с одинаковыми env/probe-настройками.
+Паритет охватывает schema 2/3, backends, модели (включая выключенные), ссылки/уникальные id/default/env model,
+efforts, image status/proof, image limits и admission. Census класса III, policy, профили и live-проверки
+в `fleet_check.py` остаются отдельными операционными проверками, не частью этого паритета.
+Muse допускается только с `max_concurrent = 1` (иначе `backend_muse_max_concurrent_invalid`;
+конструктор тоже отказывает). CLI сохраняет `--live-droid`; исходное предложение `--live-backends`
+не реализовано этим rework.
 
 ### Единый фасад (MB-REQ-005..008)
 
@@ -268,7 +322,9 @@ settings_profile + пробы, `tools/droid_image.py`); `is_healthy()` = `_recei
 
 `MAX_CONCURRENT` ADR 0001 (cap 4) становится **ёмкостью P бэкенда droid**; у каждого бэкенда своя `max_concurrent` из `fleet.json`
 (Muse = 1: per-turn каталог разводит ходы по данным, но при одном UID и `--yolo` параллельные ходы нельзя развести правами —
-поэтому одновременность исключена планированием). Порядок **L → P(backend) → T** сохранён; так как запрос принадлежит ровно одному бэкенду и межбэкендного fallback нет,
+поэтому одновременность исключена планированием). Общий `_MUSE_SLOTS` сериализует ходы всех экземпляров MuseAdapter
+в одном процессе хаба независимо от backend id; отдельные хабы и внешний muse-bridge этим семафором не связаны.
+Порядок **L → P(backend) → T** сохранён; так как запрос принадлежит ровно одному бэкенду и межбэкендного fallback нет,
 взаимные блокировки между пулами невозможны по построению. Admission (`max_http_connections`, `max_inflight_body_bytes`) остаётся общим.
 Насыщение пула Muse не занимает слоты droid и наоборот. Число бэкендов не ограничено архитектурой; ограничение — ресурсы хоста.
 
@@ -277,18 +333,41 @@ settings_profile + пробы, `tools/droid_image.py`); `is_healthy()` = `_recei
 1. **Никакой динамической загрузки кода из конфигурации.** `kind` разрешается только через словарь `ADAPTER_KINDS` в коде; `fleet.json`
    (0600, владелец) не содержит путей к модулям/командам-шаблонам. Новый бинарник = новый модуль адаптера в репозитории + review.
    Универсальный `exec-template` адаптер — отдельный ADR (вне этого решения).
-2. **Наименьшие права дочернего бинарника.** Нативные инструменты бинарника недоступны модели: tools — только эмуляция хаба.
-   Для droid — как сейчас (отключены по `list_tools`, receipt). Для Muse решение владельца по AD-007 (2026-10-08 12:07 MSK):
+2. **Права дочернего бинарника.** Клиентские OpenAI tools эмулирует хаб; нативные tools droid
+   отключены по `list_tools`/receipt, но это не запрет нативных tools Muse. Для Muse решение владельца по AD-007 (2026-10-08 12:07 MSK):
    `--yolo --trust-workspace` **сохранены** (как в muse-bridge :9886); изоляция добирается компенсаторами —
    per-turn каталог `workspace/muse/turn-<uuid>/` (0700, `cwd` и `--workspace` только он), `max_concurrent: 1`,
    обязательный sha256-pin исполняемого образа, вычищенный `MUSE_BIN`. Это **меняет baseline muse-bridge** (там `--yolo`
-   без per-turn изоляции и без pin-гейта); обязательная проба на `meta` — verification gate до включения `enabled:true` (ASM-001).
+   без per-turn изоляции и без pin-гейта); до включения `enabled:true` действует P3-гейт ASM-001
+   (живой лог плюс согласование, либо явное решение владельца о снятии гейта).
 3. **Окружение детей — allowlist, а не наследование.** `META_API_KEY` и ключ моста вырезаются (как `_child_env()` сегодня для droid); у адаптера
    своя явная выборка (PATH, HOME, прокси-переменные из обёртки).
-4. **qualify() — условие допуска.** Бинарник без совпавшего sha/версии/протокола не получает ходов (503). Дрейф версии (1.4.2 → 1.4.3) —
-   не тихая работа: несовпавший pin виден в `is_healthy`/`preflight` (причина `binary_sha256_mismatch`), а в журнал пишутся
+4. **qualify() — условие допуска.** Droid проходит receipt-допуск образа/протокола; Muse — проверку
+   исполняемой обёртки и sha256 канонического бинарника, не отдельную проверку строки версии.
+   Замена содержимого Muse даёт несовпавший pin в `is_healthy`/`preflight` (`binary_sha256_mismatch`), а в журнал пишутся
    только безопасные коды состояния/rc/байты (RW-007).
 5. Аудит: журнал не содержит prompt-текст; `backend_state` / `backend_qualify` — без секретов; маскировка `_mask_secrets` сохраняется.
+
+#### Ограничения вывода и владения процессами (Cycle 2)
+
+- Stdout читается ограниченными блоками bytes, UTF-8 декодируется строго; JSONL-строка ≤ 8 МиБ,
+  текст/дельты/failure reasons суммарно ≤ 10 МиБ. До `json.loads` допускаются ≤ 50 000 структурных
+  токенов и глубина ≤ 128; на ход ≤ 50 000 непустых событий, пустые дельты не накапливаются.
+- `STDERR_DRAIN_GRACE_S = 5 с` ограничивает добор pipe после выхода лидера; EOF stdout не превращается
+  в бесконечное ожидание лидера/stderr. Очистка в `finally`: SIGKILL группе, wait лидера до 5 с,
+  ожидание исчезновения группы до 2 с, затем ограниченные join потоков. Это отдельные окна, не общий
+  shutdown-дедлайн 5 с. Сбой старта служебного потока не обходит очистку.
+- Перед exec создаётся живой свидетель группы; в `children.json` до открытия exec-gate пишутся
+  лидер `pid`/`pgid`/`start-signature` и подписанный свидетель в `members`. При рестарте `reconcile_children`
+  проверяет подпись и PGID лидера либо члена при мёртвом лидере; повторно проверяет подпись перед сигналом,
+  отвергает переиспользованный PID/неподтверждённый PGID. Запись сохраняется, пока свой член жив в группе.
+  В ходе запись снимается только после исчезновения группы; живое наследие запрещает новые ходы адаптера.
+
+0700/0600 и сериализация под одним UID — компенсаторы, **не OS sandbox** и не защита от
+произвольного same-UID доступа. Подписанное владение подтверждает исходную группу, не все
+возможные потомки: вызвавший `setsid` потомок выходит из неё, его завершение не гарантируется.
+Ограниченный добор pipe не означает очистку escaped-потомка. FU-003/FU-008 и будущий
+out-of-process путь остаются отдельными решениями владельца, не закрыты этим уточнением.
 
 ## Консервативные последствия
 
@@ -309,7 +388,11 @@ settings_profile + пробы, `tools/droid_image.py`); `is_healthy()` = `_recei
 **Фазы (strangler, каждая — отдельный MR, baseline зелёный на каждой):**
 P1 — seam: `core/backend_adapter.py`, `AdapterRegistry`, `core/tool_emulation.py`, оболочка `DroidAdapter` (`adapters/droid_adapter.py`), загрузчик принимает schema 2|3; `fleet.json` ещё v2.
 P2 — `adapters/muse_adapter.py` + fake-muse тесты + контрактный набор `BackendContract` по всем адаптерам; Muse в `fleet.json` v3 с `enabled:false`.
-P3 — `enabled:true` после живых проб (ASM-001) и согласования владельца; cutover DSH с :9886 на :9882 — владелец (профили DSH принадлежат ему).
+P3 — `enabled:true` только после приложенного лога ASM-001: реальный ход Muse на `meta` через
+`~/.config/muse-launch/muse-cli.sh` и совместная нагрузка с Droid, с согласованием владельца; альтернатива —
+явная запись решения владельца, снимающая P3-гейт. Fake/echo, unit/HTTP-тесты и `/health` не заменяют живой gate.
+ASM-001 сейчас **НЕ ПРОВЕРЕНО**. Однострочное включение после гейта — README «Muse: безопасность и компенсаторы».
+Cutover DSH с :9886 на :9882 — владелец (профили DSH принадлежат ему).
 **Откат:** P3 — вернуть `enabled:false`/DSH на :9886; P2/P1 — revert коммита и вернуть `fleet.json` schema 2
 (`git checkout <sha> -- fleet.json`: загрузчик читает и schema 2, отдельной копии `fleet.json.v2` в репозитории нет);
 записи чатов и `children.json` читаются старым кодом (аддитивные поля). Смешанные версии: код с schema 2|3 + файл v2 = прежнее поведение.

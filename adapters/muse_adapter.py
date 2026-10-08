@@ -35,18 +35,27 @@ import re
 import shutil
 import signal
 import socket
+import select
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional, cast
 
 from core.backend_adapter import (
     SESSIONS_NONE,
     STREAMING_EMULATED,
     BackendAdapter,
     BackendNotSupported,
+    BackendModel,
+    Capabilities,
+    Qualification,
+    StreamSink,
+    TurnContext,
+    TurnResult,
+    Usage,
 )
 
 DEFAULT_WRAPPER = "~/.config/muse-launch/muse-cli.sh"
@@ -79,6 +88,29 @@ MAX_ERR_LINES = 6  # строк stderr в err-сводке
 MAX_ERR_CHARS = 500  # длина одной строки/причины в err-сводке
 MAX_EVENT_ERRORS = 6  # ошибок из потока событий: bounded-буфер до append (RW-006)
 STDERR_DRAIN_GRACE_S = 5.0  # грейс добора stderr после EOF stdout (RW-009)
+MAX_JSON_STRUCT_TOKENS = 50_000
+MAX_JSON_DEPTH = 128
+MAX_EVENTS = 50_000
+READ_CHUNK_BYTES = 65536
+_MUSE_SLOTS = threading.BoundedSemaphore(1)  # один UID: общий слот всех Muse-адаптеров
+# Свидетель группы создаётся ДО exec и подписывается/пишется в реестр ДО открытия gate.
+# Он не держит stdout/stderr, но остаётся жив после выхода лидера и аварии хаба.
+_GROUP_BOOTSTRAP = """
+import os, signal, sys
+ready, gate = int(sys.argv[1]), int(sys.argv[2])
+member = os.fork()
+if member == 0:
+    for fd in (0, 1, 2, ready, gate):
+        try: os.close(fd)
+        except OSError: pass
+    while True: signal.pause()
+os.write(ready, (str(member) + "\\n").encode("ascii"))
+os.close(ready)
+if os.read(gate, 1) != b"1":
+    os.killpg(0, signal.SIGKILL)
+os.close(gate)
+os.execv(sys.argv[3], sys.argv[3:])
+"""
 TURN_DIR_PREFIX = "turn-"
 _TOKEN_SPLIT = re.compile(r"\s+")
 
@@ -105,17 +137,45 @@ class ExecEvents:
         self.reason: "str | None" = None
         self.errors: list = []
         self.text_bytes = 0
+        self.event_count = 0
 
     def _charge(self, text: str) -> None:
         """Текст учитывается в байтовом бюджете хода (включая причины ошибок)."""
-        self.text_bytes += len(text.encode("utf-8", "replace"))
+        self.text_bytes += len(text.encode("utf-8", "strict"))
 
     def feed_line(self, raw: str) -> None:
         raw = raw.strip()
         if not raw:
             return
+        self.event_count += 1
+        if self.event_count > MAX_EVENTS:
+            raise ValueError("event count exceeds the limit")
+        depth = tokens = 0
+        in_string = escaped = False
+        for char in raw:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char in "{[":
+                depth += 1
+                tokens += 1
+            elif char in "}]":
+                depth -= 1
+            elif char in ",:":
+                tokens += 1
+            if depth > MAX_JSON_DEPTH or tokens > MAX_JSON_STRUCT_TOKENS:
+                raise ValueError("json structure exceeds the limit")
         try:
             event = json.loads(raw)
+        except RecursionError as exc:
+            raise ValueError("json depth exceeds the limit") from exc
         except ValueError:
             return
         if not isinstance(event, dict):
@@ -124,11 +184,22 @@ class ExecEvents:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         if ptype == "run.output.delta":
             text = payload.get("text")
-            if isinstance(text, str):
+            if isinstance(text, str) and text:
                 self._charge(text)
                 self.deltas.append(text)
         elif ptype.startswith("run.terminal"):
-            self.terminal = str(payload.get("terminal") or ptype.rsplit(".", 1)[-1])
+            expected = {
+                "run.terminal.completed": "completed",
+                "run.terminal.failed": "failed",
+                "run.terminal.cancelled": "cancelled",
+            }.get(ptype)
+            if (
+                expected is None
+                or payload.get("terminal") != expected
+                or self.terminal is not None
+            ):
+                raise ValueError("terminal envelope invalid")
+            self.terminal = expected
             text = payload.get("text")
             if isinstance(text, str):
                 self._charge(text)
@@ -155,12 +226,7 @@ class ExecEvents:
 
 class MuseAdapter(BackendAdapter):
     kind = "muse"
-    capabilities = {
-        "sessions": SESSIONS_NONE,
-        "streaming": STREAMING_EMULATED,  # готовый текст режет фасад SSE-срезами
-        "autonomy": False,  # поле запроса принимается и игнорируется
-        "usage": "estimated",
-    }
+    capabilities = Capabilities(SESSIONS_NONE, STREAMING_EMULATED, False, "estimated")
 
     def __init__(
         self,
@@ -185,7 +251,9 @@ class MuseAdapter(BackendAdapter):
         self.workspace = Path(workspace)
         # proxy_port нормализуется один раз: preflight и child_env получают одно значение (RW-011).
         self.proxy_port = self._normalize_proxy_port()
-        self._slots = threading.BoundedSemaphore(self.max_concurrent)
+        if self.max_concurrent != 1:
+            raise ValueError("muse_max_concurrent_must_be_one")
+        self._slots = _MUSE_SLOTS
         self._active: dict = {}  # pid -> Popen (под _lock): остановка и /health
         self._lock = threading.Lock()
         self._sha_cache: dict = {}
@@ -201,26 +269,24 @@ class MuseAdapter(BackendAdapter):
             log(message)
 
     # -- модели / допуск / здоровье ------------------------------------------------------
-    def get_models(self) -> list:
+    def get_models(self) -> list[BackendModel]:
         return self._catalog_models()
 
     def _file_sha256(self, path: str) -> str:
         try:
-            st = os.stat(path)
+            os.stat(path)
         except OSError:
             return ""
-        cached = self._sha_cache.get(path)
-        if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
-            return str(cached[2])
         try:
             with open(path, "rb") as handle:
-                digest = hashlib.sha256(handle.read()).hexdigest()
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: handle.read(READ_CHUNK_BYTES), b""):
+                    digest.update(chunk)
         except OSError:
             return ""
-        self._sha_cache[path] = (st.st_mtime_ns, st.st_size, digest)
-        return digest
+        return digest.hexdigest()
 
-    def qualify(self) -> tuple:
+    def qualify(self) -> Qualification:
         """Допуск: обёртка исполняема; образ Muse совпал с обязательным pin `technical_ref`.
 
         Без комплектного pin квалифицировать нечего (AD-007), и ход не запускается: иначе
@@ -229,26 +295,30 @@ class MuseAdapter(BackendAdapter):
         тот путь, который сверяет pin (RW-002).
         """
         if not (os.path.isfile(self.wrapper) and os.access(self.wrapper, os.X_OK)):
-            return (False, "wrapper_not_executable")
+            return Qualification(False, "wrapper_not_executable")
         ref = self.config.get("technical_ref")
         if not isinstance(ref, dict):
-            return (False, "pin_missing")
+            return Qualification(False, "pin_missing")
         binary = os.path.expanduser(str(ref.get("binary_path") or ""))
         pinned = str(ref.get("binary_sha256") or "")
         if not binary or not pinned:
-            return (False, "pin_missing")
+            return Qualification(False, "pin_missing")
+        canonical = os.path.abspath(os.path.expanduser("~/.local/bin/muse"))
+        if os.path.abspath(binary) != canonical:
+            return Qualification(False, "binary_path_not_canonical")
         actual = self._file_sha256(binary)
         if not actual:
-            return (False, "binary_missing")
+            return Qualification(False, "binary_missing")
         if actual != pinned:
-            return (False, "binary_sha256_mismatch")
-        return (True, "ok")
+            return Qualification(False, "binary_sha256_mismatch")
+        return Qualification(True, "ok")
 
     def _normalize_proxy_port(self) -> int:
         """proxy_port бэкенда (иначе env, иначе default) -> int; мусор -> default."""
         raw = self.config.get("proxy_port") or os.environ.get("MUSE_PROXY_PORT")
         try:
-            return int(raw) if raw else DEFAULT_PROXY_PORT
+            port = int(raw) if raw else DEFAULT_PROXY_PORT
+            return port if 1 <= port <= 65535 else DEFAULT_PROXY_PORT
         except (TypeError, ValueError):
             return DEFAULT_PROXY_PORT
 
@@ -263,20 +333,20 @@ class MuseAdapter(BackendAdapter):
         """Дёшево и без spawn: допуск пройден и прокси-контур слушает."""
         return self.qualify()[0] and self._proxy_up()
 
-    def preflight(self) -> tuple:
+    def preflight(self) -> Qualification:
         ok, reason = self.qualify()
         if not ok:
-            return (False, reason)
+            return Qualification(False, reason)
         if not self._proxy_up():
-            return (False, "proxy_down")
-        return (True, "")
+            return Qualification(False, "proxy_down")
+        return Qualification(True, "")
 
     def active_count(self) -> int:
         with self._lock:
             return len(self._active)
 
     # -- сессии (нет) ---------------------------------------------------------------------
-    def spawn_session(self, ctx: dict) -> Any:
+    def spawn_session(self, ctx: TurnContext) -> object:
         raise BackendNotSupported("sessions_none")
 
     def close_session(self, sid: str) -> None:
@@ -339,9 +409,24 @@ class MuseAdapter(BackendAdapter):
         except Exception as exc:  # noqa: BLE001 - реестр не должен ронять ход
             self._log(f"muse children_registry_failed err={type(exc).__name__}")
 
-    def _register_child(self, pid: int) -> None:
+    def _register_child(self, pid: int, member: int) -> None:
         sig_fn = getattr(self.host, "_proc_start_sig", None)
-        start = str(sig_fn(pid) or "") if callable(sig_fn) else ""
+
+        def signature(target: int) -> str:
+            if callable(sig_fn):
+                return str(sig_fn(target) or "")
+            res = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(target)],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            return res.stdout.strip()
+
+        start = signature(pid)
+        member_start = signature(member)
+        if not start or not member_start:
+            raise OSError("group ownership signature unavailable")
         self._registry_update(
             add={
                 "pid": pid,
@@ -349,8 +434,16 @@ class MuseAdapter(BackendAdapter):
                 "start": start,
                 "bridge_pid": os.getpid(),
                 "kind": self.kind,
+                "members": [{"pid": member, "start": member_start}],
             }
         )
+        read = getattr(self.host, "_read_children", None)
+        if callable(read) and not any(
+            e.get("pid") == pid
+            and e.get("members") == [{"pid": member, "start": member_start}]
+            for e in cast(Any, read)()
+        ):
+            raise OSError("group ownership registration failed")
 
     def _unregister_child(self, pid: int) -> None:
         self._registry_update(remove_pid=pid)
@@ -396,29 +489,18 @@ class MuseAdapter(BackendAdapter):
 
     def _result(
         self, state: str, rc: int, text: str = "", err: str = "", prompt: str = ""
-    ) -> dict:
-        usage = {}
+    ) -> TurnResult:
+        usage = Usage()
         if state == "done":
-            usage = {
-                "input_tokens": estimate_tokens(prompt),
-                "output_tokens": estimate_tokens(text),
-            }
-        return {
-            "state": state,
-            "rc": rc,
-            "text": text,
-            "reasoning": "",
-            "usage": usage,
-            "result": {},
-            "err": err,
-        }
+            usage = Usage(estimate_tokens(prompt), estimate_tokens(text))
+        return TurnResult(state=state, rc=rc, text=text, usage=usage, err=err)
 
-    def _acquire_slot(self, ctx: dict) -> str:
+    def _acquire_slot(self, ctx: TurnContext) -> str:
         """Ждать ёмкость бэкенда (≤ QUEUE_TIMEOUT_S): '' — взят, иначе причина отказа."""
         queue_s = self._setting("QUEUE_TIMEOUT_S", 900.0)
         keepalive_s = self._setting("KEEPALIVE_S", 15.0)
-        gone = ctx.get("client_gone")
-        keepalive = ctx.get("keepalive")
+        gone = ctx.client_gone
+        keepalive = ctx.keepalive
         started = time.monotonic()
         last_ka = 0.0
         while not self._slots.acquire(timeout=1.0):
@@ -433,12 +515,14 @@ class MuseAdapter(BackendAdapter):
                     return "client_gone"
         return ""
 
-    def execute_turn(self, ctx: dict, sse_writer: Any) -> dict:
+    def execute_turn(
+        self, ctx: TurnContext, sse_writer: Optional[StreamSink]
+    ) -> TurnResult:
         """Один ход; автоматического replay промпта нет (RW-003): после старта процесса
         нативные shell/write/web-инструменты могли исполниться, повтор небезопасен даже при
         network-marker, поэтому ненулевой exit — сразу backend_error.
         """
-        prompt = str(ctx["prompt"])
+        prompt = ctx.prompt
         ok, reason = self.preflight()
         if not ok:
             return self._result("launcher_unavailable", 1, err=reason)
@@ -450,9 +534,9 @@ class MuseAdapter(BackendAdapter):
         finally:
             self._slots.release()
 
-    def _run_exec(self, ctx: dict, prompt: str) -> dict:
-        model = str(ctx["model"])
-        effort = str(ctx["effort"])
+    def _run_exec(self, ctx: TurnContext, prompt: str) -> TurnResult:
+        model = ctx.model
+        effort = ctx.effort
         if self._shutting_down:
             return self._result("launcher_unavailable", 1, err="adapter_shutting_down")
         turn_dir: "Path | None" = None
@@ -471,25 +555,36 @@ class MuseAdapter(BackendAdapter):
         cmd = self.build_argv(model, effort, str(prompt_path))
         self._log(
             f"muse exec model={model} effort={effort} prompt_chars={len(prompt)} "
-            f"{ctx.get('tag', '')}".rstrip()
+            f"{ctx.tag}".rstrip()
         )
         events = ExecEvents()
         err_lines: list = []
         flags: dict = {}
         done = threading.Event()
         proc = None
+        threads: list[threading.Thread] = []
+        state = "done"
+        timeout_s = self._setting("TIMEOUT_S", 1800.0)
+        pipe_fds: list[int] = []
         try:
             try:
+                ready_r, ready_w = os.pipe()
+                gate_r, gate_w = os.pipe()
+                pipe_fds = [ready_r, ready_w, gate_r, gate_w]
+                # Повторный допуск ПОСЛЕ слота, непосредственно перед spawn, без sha-кэша.
+                ok, reason = self.preflight()
+                if not ok:
+                    return self._result("launcher_unavailable", 1, err=reason)
                 proc = subprocess.Popen(
-                    cmd,
+                    [sys.executable, "-c", _GROUP_BOOTSTRAP, str(ready_w), str(gate_r)]
+                    + cmd,
                     cwd=str(turn_dir),
                     env=self.child_env(),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    bufsize=0,
+                    pass_fds=(ready_w, gate_r),
                     start_new_session=True,
                 )
             except OSError as exc:
@@ -498,20 +593,41 @@ class MuseAdapter(BackendAdapter):
                 )
             with self._lock:
                 self._active[proc.pid] = proc
-            self._register_child(proc.pid)
+            for fd in (ready_w, gate_r):
+                os.close(fd)
+                pipe_fds.remove(fd)
+            if not select.select([ready_r], [], [], 5.0)[0]:
+                raise OSError("group witness handshake timed out")
+            member = int(os.read(ready_r, 32).strip())
+            self._register_child(proc.pid, member)
+            os.write(gate_w, b"1")
+            for fd in (ready_r, gate_w):
+                os.close(fd)
+                pipe_fds.remove(fd)
             if self._shutting_down:  # shutdown успел пройти до регистрации ребёнка
                 self._kill_group(proc)
-            timeout_s = self._setting("TIMEOUT_S", 1800.0)
             keepalive_s = self._setting("KEEPALIVE_S", 15.0)
-            gone = ctx.get("client_gone")
-            keepalive = ctx.get("keepalive")
+            gone = ctx.client_gone
+            keepalive = ctx.keepalive
+            stdout, stderr = proc.stdout, proc.stderr
+            assert stdout is not None and stderr is not None
+            child = proc
+            os.set_blocking(stdout.fileno(), False)
+            os.set_blocking(stderr.fileno(), False)
+            leader_exited: list[float] = []
 
             def watch() -> None:
                 deadline = time.monotonic() + timeout_s
                 last_ka = time.monotonic()
                 while not done.wait(0.25):
                     now = time.monotonic()
-                    if now > deadline:
+                    if child.poll() is not None:
+                        if not leader_exited:
+                            leader_exited.append(now)
+                        if now - leader_exited[0] >= STDERR_DRAIN_GRACE_S:
+                            self._kill_group(child)
+                            return
+                    elif now > deadline:
                         flags["timeout"] = True
                     elif callable(gone) and gone():
                         flags["client_gone"] = True
@@ -520,80 +636,120 @@ class MuseAdapter(BackendAdapter):
                         if not keepalive():
                             flags["client_gone"] = True
                     if flags:
-                        self._kill_group(proc)
+                        self._kill_group(child)
                         return
 
             def drain_stderr() -> None:
+                kept = bytearray()
                 try:
-                    for line in iter(lambda: proc.stderr.readline(8192), ""):
-                        line = line.strip()
-                        if line:
-                            err_lines.append(line[:MAX_ERR_CHARS])
-                            del err_lines[:-MAX_ERR_LINES]
+                    while not done.is_set():
+                        if not select.select([stderr], [], [], 0.1)[0]:
+                            continue
+                        try:
+                            chunk = os.read(stderr.fileno(), 8192)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            break
+                        kept.extend(chunk)
+                        while b"\n" in kept or len(kept) >= 8192:
+                            split = kept.find(b"\n")
+                            size = split + 1 if split >= 0 else 8192
+                            line = bytes(kept[:size]).decode("utf-8", "strict").strip()
+                            del kept[:size]
+                            if line:
+                                err_lines.append(line[:MAX_ERR_CHARS])
+                                del err_lines[:-MAX_ERR_LINES]
+                    if kept:
+                        err_lines.append(
+                            bytes(kept).decode("utf-8", "strict")[:MAX_ERR_CHARS]
+                        )
+                        del err_lines[:-MAX_ERR_LINES]
+                except UnicodeDecodeError:
+                    flags["pump_error"] = True
+                    self._kill_group(child)
                 except (OSError, ValueError):
-                    pass
+                    if not done.is_set():
+                        flags["pump_error"] = True
+                        self._kill_group(child)
 
             err_thread = threading.Thread(target=drain_stderr, daemon=True)
             watch_thread = threading.Thread(target=watch, daemon=True)
-            err_thread.start()
-            watch_thread.start()
-            state = "done"
-            try:
-                while True:
-                    line = proc.stdout.readline(MAX_LINE_BYTES + 1)
-                    if not line:
-                        break
-                    if len(line) > MAX_LINE_BYTES:
-                        state = "pump_error"
-                        err_lines.append("jsonl line exceeds the limit")
-                        self._kill_group(proc)
-                        break
+            for thread in (err_thread, watch_thread):
+                thread.start()
+                threads.append(thread)
+            pending = bytearray()
+            eof = False
+            while not eof:
+                if (
+                    leader_exited
+                    and time.monotonic() - leader_exited[0] > STDERR_DRAIN_GRACE_S + 0.5
+                ):
+                    break  # сбежавший setsid-потомок не удерживает pipe/потоки/FD
+                if not select.select([stdout], [], [], 0.1)[0]:
+                    continue
+                try:
+                    chunk = os.read(
+                        stdout.fileno(),
+                        min(READ_CHUNK_BYTES, MAX_LINE_BYTES + 1 - len(pending)),
+                    )
+                except BlockingIOError:
+                    continue
+                eof = not chunk
+                pending.extend(chunk)
+                while b"\n" in pending or (eof and pending):
+                    split = pending.find(b"\n")
+                    size = split + 1 if split >= 0 else len(pending)
+                    if size > MAX_LINE_BYTES:
+                        raise ValueError("jsonl line exceeds the limit")
+                    line = bytes(pending[:size]).decode("utf-8", "strict")
+                    del pending[:size]
                     events.feed_line(line)
                     if events.text_bytes > MAX_TURN_TEXT_BYTES:
-                        state = "pump_error"
-                        err_lines.append("turn text exceeds the limit")
-                        self._kill_group(proc)
-                        break
-            except (OSError, ValueError) as exc:
-                state = "pump_error"
-                err_lines.append(f"stdout read failed: {exc}")
-            finally:
-                # Ограниченное завершение группы (RW-009): EOF stdout НЕ выключает сторож —
-                # `done` взводится только после гашения группы; слот и _active освобождаются
-                # после killpg, а не после EOF одного pipe.
-                try:
-                    proc.wait(timeout=STDERR_DRAIN_GRACE_S)
-                except subprocess.TimeoutExpired:
-                    if events.terminal != "completed":
-                        flags.setdefault("timeout", True)
-                    self._kill_group(proc)
-                    try:
-                        proc.wait(timeout=5.0)
-                    except subprocess.TimeoutExpired:
-                        pass
-                drain_deadline = time.monotonic() + STDERR_DRAIN_GRACE_S
-                while err_thread.is_alive() and time.monotonic() < drain_deadline:
-                    err_thread.join(timeout=0.1)
-                self._kill_group(
-                    proc
-                )  # потомки лидера (в т.ч. с закрытыми pipe) — до слота
-                self._wait_group_exit(proc.pid, 2.0)
-                err_thread.join(timeout=1.0)
-                done.set()
-                if not err_thread.is_alive():
-                    # Закрываем трубы только когда добор завершён: close при заблокированном
-                    # readline мог бы ждать блокировку потока (RW-009).
-                    for stream in (proc.stdout, proc.stderr):
-                        try:
-                            stream.close()
-                        except (OSError, ValueError):
-                            pass
-                watch_thread.join(timeout=5.0)
+                        raise ValueError("turn text exceeds the limit")
+                if len(pending) > MAX_LINE_BYTES:
+                    raise ValueError("jsonl line exceeds the limit")
+            # EOF одного pipe не даёт бесконечно ждать работающего лидера.
+            try:
+                child.wait(timeout=STDERR_DRAIN_GRACE_S)
+            except subprocess.TimeoutExpired:
+                if events.terminal != "completed":
+                    flags.setdefault("timeout", True)
+            drain_deadline = time.monotonic() + STDERR_DRAIN_GRACE_S
+            while err_thread.is_alive() and time.monotonic() < drain_deadline:
+                err_thread.join(timeout=0.1)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            state = "pump_error"
+            err_lines.append(
+                f"muse pump failed: {type(exc).__name__}: {str(exc)[:MAX_ERR_CHARS]}"
+            )
         finally:
             if proc is not None:
-                self._unregister_child(proc.pid)
+                # Владение начинается сразу после Popen: даже отказ первого Thread.start
+                # не может обойти kill/wait. Реестр и слот освобождаются ПОСЛЕ группы.
+                self._kill_group(proc)
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    state = "pump_error"
+                group_gone = self._wait_group_exit(proc.pid, 2.0)
+                done.set()
+                for thread in threads:
+                    thread.join(timeout=1.0)
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        stream.close()
+                if group_gone:
+                    self._unregister_child(proc.pid)
                 with self._lock:
                     self._active.pop(proc.pid, None)
+                if not group_gone:
+                    self._shutting_down = (
+                        True  # не допустить следующий ход при живом наследии
+                    )
+                    state = "pump_error"
+            for fd in pipe_fds:
+                os.close(fd)
             if turn_dir is not None:
                 shutil.rmtree(str(turn_dir), ignore_errors=True)
         rc = proc.returncode if proc.returncode is not None else -1
@@ -606,6 +762,8 @@ class MuseAdapter(BackendAdapter):
             return self._result(
                 "timeout", 124, err=f"proxy timeout after {timeout_s:g}s"
             )
+        if flags.get("pump_error"):
+            state = "pump_error"
         if state != "done":
             return self._result(state, 1, err=err)
         if rc == PROXY_DOWN_RC:

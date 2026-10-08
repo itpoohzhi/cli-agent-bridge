@@ -4,8 +4,11 @@
 маппинг модель -> адаптер, отказ от загрузки кода из конфигурации, изоляция сбоя shutdown.
 """
 
+from __future__ import annotations
+
 import sys
 import unittest
+from typing import Optional
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -17,6 +20,10 @@ from core.backend_adapter import (  # noqa: E402
     AdapterRegistry,
     BackendAdapter,
     BackendNotSupported,
+    Qualification,
+    StreamSink,
+    TurnContext,
+    TurnResult,
 )
 
 CONTRACT_METHODS = (
@@ -55,8 +62,8 @@ class FakeAdapter(BackendAdapter):
     def get_models(self):
         return self._catalog_models()
 
-    def qualify(self):
-        return (True, "ok")
+    def qualify(self) -> Qualification:
+        return Qualification(True, "ok")
 
     def is_healthy(self):
         return True
@@ -64,8 +71,10 @@ class FakeAdapter(BackendAdapter):
     def spawn_session(self, ctx):
         raise BackendNotSupported("none")
 
-    def execute_turn(self, ctx, sse_writer):
-        return {"state": "done", "rc": 0, "text": self.id, "usage": {}, "err": ""}
+    def execute_turn(
+        self, ctx: TurnContext, sse_writer: Optional[StreamSink]
+    ) -> TurnResult:
+        return TurnResult(text=self.id)
 
     def close_session(self, sid):
         return None
@@ -123,7 +132,7 @@ class TestRegistry(unittest.TestCase):
 
     def test_models_union_follows_catalog_order_per_adapter(self):
         registry, _ = self.build()
-        union = [(a.id, m["id"]) for a, m in registry.models()]
+        union = [(a.id, m.id) for a, m in registry.models()]
         self.assertEqual(union, [("alpha", "a-1"), ("alpha", "a-2"), ("beta", "b-1")])
 
     def test_catalog_is_read_lazily(self):
@@ -164,17 +173,24 @@ class TestRegistry(unittest.TestCase):
         registry.shutdown(exclude=("alpha",))
         self.assertEqual(FakeAdapter.stopped, ["beta"])
 
+    def test_incompatible_adapter_is_rejected_at_registration(self):
+        class LegacyAdapter(FakeAdapter):
+            capabilities = {}
+
+        registry = AdapterRegistry()
+        with self.assertRaisesRegex(ValueError, "adapter_contract"):
+            registry.register(LegacyAdapter("bad", {}, catalog))
+
 
 class TestRealAdapters(unittest.TestCase):
     """Droid и Muse подчиняются одному контракту; поведение droid-моделей не меняется."""
 
     def test_server_registry_has_both_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        self.assertEqual(set(ids), {"droid", "muse"})
+        self.assertEqual(set(ids), {"droid"})
         self.assertIsInstance(ids["droid"], DroidAdapter)
-        self.assertIsInstance(ids["muse"], MuseAdapter)
         self.assertTrue(ids["droid"].required)
-        self.assertFalse(ids["muse"].required)
+        self.assertNotIn("muse", ids)
 
     def test_model_routing(self):
         reg = server.BACKENDS
@@ -193,10 +209,10 @@ class TestRealAdapters(unittest.TestCase):
             self.assertIsInstance(adapter.is_healthy(), bool)
             self.assertTrue(adapter.get_models())
             for model in adapter.get_models():
-                self.assertEqual(model["backend"], adapter.id)
-            self.assertIn(adapter.capabilities["sessions"], ("resident", "none"))
+                self.assertEqual(model.backend, adapter.id)
+            self.assertIn(adapter.capabilities.sessions, ("resident", "none"))
             with self.assertRaises(BackendNotSupported):
-                adapter.spawn_session({})
+                adapter.spawn_session(TurnContext("test", "high", "hi"))
             adapter.close_session("no-such-sid")
 
     def test_droid_health_follows_receipt_state(self):

@@ -16,6 +16,7 @@ import socket
 import sys
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
 from bridge_testlib import BridgeCase, TOOLS, chat_body  # noqa: E402
-from core.backend_adapter import AdapterRegistry  # noqa: E402
+from core.backend_adapter import AdapterRegistry, TurnEvent, TurnResult, Usage  # noqa: E402
 
 TOOL_JSON = (
     '{"payload_type":"run.output.delta","payload":{"text":"<tool_call>'
@@ -55,6 +56,23 @@ EOF
     ;;
   noterminal)
     echo '{"payload_type":"run.output.delta","payload":{"text":"partial"}}' ;;
+  contradictory)
+    echo '{"payload_type":"run.terminal.failed","payload":{"terminal":"completed","text":"wrong"}}' ;;
+  unknown_terminal)
+    echo '{"payload_type":"run.terminal.future","payload":{"terminal":"completed","text":"wrong"}}' ;;
+  missing_status)
+    echo '{"payload_type":"run.terminal.completed","payload":{"text":"wrong"}}' ;;
+  deep)
+    "@PYTHON@" -c 'print("["*2000+"0"+"]"*2000)' ;;
+  unicode)
+    "@PYTHON@" -c 'import json; print(json.dumps({"payload_type":"run.terminal.completed","payload":{"terminal":"completed","text":"я"*1000}},ensure_ascii=False))' ;;
+  struct)
+    "@PYTHON@" -c 'print("["+"{},"*1000+"{}]")' ;;
+  bad_utf8)
+    printf '\377\n' ;;
+  empty_flood)
+    for i in $(seq 1 300); do echo '{"payload_type":"run.output.delta","payload":{"text":""}}'; done
+    echo '{"payload_type":"run.terminal.completed","payload":{"terminal":"completed","text":"wrong"}}' ;;
   failed)
     echo '{"payload_type":"run.terminal.failed","payload":{"terminal":"failed","reason":"boom"}}' ;;
   sentinel)
@@ -74,12 +92,23 @@ class FakeMuse:
         base.mkdir(parents=True, exist_ok=True)
         self.base = base
         self.wrapper = base / "muse-cli.sh"
-        self.wrapper.write_text(WRAPPER.replace("@TOOL@", TOOL_JSON), encoding="utf-8")
+        self.binary = Path(os.path.expanduser("~/.local/bin/muse"))
+        self.binary.parent.mkdir(parents=True, exist_ok=True)
+        self.binary.write_text(
+            WRAPPER.replace("@TOOL@", TOOL_JSON)
+            .replace("@PYTHON@", sys.executable)
+            .replace('DIR="$(cd "$(dirname "$0")" && pwd)"', "DIR=" + repr(str(base))),
+            encoding="utf-8",
+        )
+        self.binary.chmod(0o755)
+        self.wrapper.write_text(
+            '#!/bin/sh\nexec "$HOME/.local/bin/muse" "$@"\n', encoding="utf-8"
+        )
         self.wrapper.chmod(0o755)
         self.set_mode("ok")
         self._proxy = socket.socket()
         self._proxy.bind(("127.0.0.1", 0))
-        self._proxy.listen(8)
+        self._proxy.listen(512)
         self.proxy_port = self._proxy.getsockname()[1]
 
     def set_mode(self, mode: str) -> None:
@@ -92,8 +121,8 @@ class FakeMuse:
             return 0
 
     def pin(self) -> dict:
-        digest = hashlib.sha256(self.wrapper.read_bytes()).hexdigest()
-        return {"binary_path": str(self.wrapper), "binary_sha256": digest}
+        digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        return {"binary_path": str(self.binary), "binary_sha256": digest}
 
     def close(self) -> None:
         self._proxy.close()
@@ -115,11 +144,17 @@ class HubCase(BridgeCase):
 
     def setUp(self):
         super().setUp()
+        home = mock.patch.dict(os.environ, {"HOME": str(Path(self._tmp.name) / "home")})
+        home.start()
+        self.addCleanup(home.stop)
         self.fake_muse = FakeMuse(Path(self._tmp.name) / "muse-fake")
         self.addCleanup(self.fake_muse.close)
 
         def mutate(data):
             muse = data["backends"]["muse"]
+            muse["enabled"] = (
+                True  # только изолированный HTTP-стенд с fake, не mainline
+            )
             muse["wrapper"] = str(self.fake_muse.wrapper)
             muse["proxy_port"] = self.fake_muse.proxy_port
             muse["technical_ref"] = self.fake_muse.pin()
@@ -155,6 +190,53 @@ class HubCase(BridgeCase):
 
 
 class TestMuseFacade(HubCase):
+    def test_bad_terminal_and_untrusted_output_return_http_502(self):
+        import adapters.muse_adapter as muse_module
+
+        for mode, limits in (
+            ("contradictory", {"MAX_EVENTS": 50000}),
+            ("unknown_terminal", {"MAX_EVENTS": 50000}),
+            ("missing_status", {"MAX_EVENTS": 50000}),
+            ("deep", {"MAX_EVENTS": 50000}),
+            ("unicode", {"MAX_LINE_BYTES": 1800}),
+            ("struct", {"MAX_JSON_STRUCT_TOKENS": 100}),
+            ("bad_utf8", {"MAX_EVENTS": 50000}),
+            ("empty_flood", {"MAX_EVENTS": 128}),
+        ):
+            with self.subTest(mode=mode), mock.patch.multiple(muse_module, **limits):
+                self.fake_muse.set_mode(mode)
+                status, body = self._post_json(chat_body(model="muse-spark-1.3"))
+                self.assertEqual(status, 502)
+                self.assertEqual(body["error"]["type"], "proxy_error")
+                self.assertEqual(self.muse.active_count(), 0)
+
+    def test_each_service_thread_start_failure_returns_http_502(self):
+        import adapters.muse_adapter as muse_module
+        import threading
+
+        for index in (1, 2):
+            original = threading.Thread.start
+            starts = [0]
+
+            def start(thread):
+                # HTTP-сервер должен принять запрос; инъекция только служебных потоков Muse.
+                if getattr(thread._target, "__module__", "") == muse_module.__name__:
+                    starts[0] += 1
+                    if starts[0] == index:
+                        raise RuntimeError("injected start failure")
+                return original(thread)
+
+            with (
+                self.subTest(index=index),
+                mock.patch.object(threading.Thread, "start", start),
+            ):
+                status, body = self._post_json(chat_body(model="muse-spark-1.3"))
+            self.assertEqual(status, 502)
+            self.assertEqual(body["error"]["type"], "proxy_error")
+            self.assertEqual(self.muse.active_count(), 0)
+        status, body = self._post_json(chat_body(model="muse-spark-1.3"))
+        self.assertEqual(status, 200)
+
     def test_json_tool_calls_200(self):
         """POST muse-модели JSON: 200 + tool_calls из общего finalize_turn."""
         self.fake_muse.set_mode("tool")
@@ -330,33 +412,30 @@ class TestMuseFacade(HubCase):
 
 class TestFinalizeTurn(unittest.TestCase):
     def test_emulate_true_parses_tool_calls(self):
-        raw = {
-            "text": 'pre <tool_call>{"name": "t", "arguments": {"a": 1}}</tool_call> post',
-            "reasoning": "think",
-        }
-        out = server.finalize_turn(dict(raw), True)
-        self.assertEqual(out["text"], "pre  post")
-        self.assertEqual(len(out["tool_calls"]), 1)
-        self.assertEqual(out["tool_calls"][0]["function"]["name"], "t")
-        self.assertEqual(
-            json.loads(out["tool_calls"][0]["function"]["arguments"]), {"a": 1}
+        raw = TurnResult(
+            text='pre <tool_call>{"name": "t", "arguments": {"a": 1}}</tool_call> post',
+            reasoning="think",
         )
+        out = server.finalize_turn(raw, True)
+        self.assertEqual(out.text, "pre  post")
+        self.assertEqual(len(out.tool_calls), 1)
+        self.assertEqual(out.tool_calls[0].function.name, "t")
+        self.assertEqual(json.loads(out.tool_calls[0].function.arguments), {"a": 1})
         self.assertEqual(
-            [kind for kind, _ in out["events"]],
+            [event.kind for event in out.events],
             ["reasoning", "content", "tool_call", "content"],
         )
-        self.assertEqual(out["usage"], {})
-        self.assertEqual(out["result"], {})
+        self.assertEqual(out.usage, Usage())
 
     def test_emulate_false_keeps_raw_text(self):
-        raw = {"text": '<tool_call>{"name": "t"}</tool_call>'}
-        out = server.finalize_turn(dict(raw), False)
-        self.assertEqual(out["tool_calls"], [])
-        self.assertEqual(out["text"], raw["text"])
-        self.assertEqual([kind for kind, _ in out["events"]], ["content"])
+        raw = TurnResult(text='<tool_call>{"name": "t"}</tool_call>')
+        out = server.finalize_turn(raw, False)
+        self.assertEqual(out.tool_calls, ())
+        self.assertEqual(out.text, raw.text)
+        self.assertEqual([event.kind for event in out.events], ["content"])
 
     def test_existing_events_are_returned_untouched(self):
-        raw = {"events": [("content", "x")], "text": "x"}
+        raw = TurnResult(events=(TurnEvent("content", "x"),), text="x")
         self.assertIs(server.finalize_turn(raw, True), raw)
 
 

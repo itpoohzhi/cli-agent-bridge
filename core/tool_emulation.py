@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 from typing import Any
+from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
 
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
@@ -366,55 +368,45 @@ class ToolCallParser:
             self._on_content(text)
 
 
-def finalize_turn(raw: dict, emulate_tools: bool) -> dict:
+def finalize_turn(raw: TurnResult, emulate_tools: bool) -> TurnResult:
     """Сырой итог адаптера -> `out` фасада с буфером `events` (content/reasoning/tool_call).
 
     Готовый `out` (в нём уже есть `events`, как у droid-пути, где разбор идёт по потоку)
     возвращается без изменений. Для остальных: размышления идут мимо парсера, текст — через
     `ToolCallParser` при `emulate_tools`, вызовы получают `call_<hex>` как в droid-пути.
     """
-    if "events" in raw:
+    if raw.events is not None:
         return raw
-    events: list = []
-    tool_calls: list = []
-    pieces: list = []
-    reasoning = str(raw.get("reasoning") or "")
+    events: list[TurnEvent] = []
+    tool_calls: list[ToolCall] = []
+    pieces: list[str] = []
+    reasoning = raw.reasoning
     if reasoning:
-        events.append(("reasoning", reasoning))
+        events.append(TurnEvent("reasoning", reasoning))
 
     def add_content(text: str) -> None:
         if text:
             pieces.append(text)
-            events.append(("content", text))
+            events.append(TurnEvent("content", text))
 
     def add_call(call: dict) -> None:
-        entry = {
-            "index": len(tool_calls),
-            "id": "call_" + uuid.uuid4().hex[:24],
-            "type": "function",
-            "function": {
-                "name": call["name"],
-                "arguments": json.dumps(call["arguments"], ensure_ascii=False),
-            },
-        }
+        entry = ToolCall(
+            index=len(tool_calls),
+            id="call_" + uuid.uuid4().hex[:24],
+            function=ToolFunction(
+                call["name"], json.dumps(call["arguments"], ensure_ascii=False)
+            ),
+        )
         tool_calls.append(entry)
-        events.append(("tool_call", entry))
+        events.append(TurnEvent("tool_call", entry))
 
-    text = str(raw.get("text") or "")
+    text = raw.text
     if emulate_tools:
         parser = ToolCallParser(add_content, add_call)
         parser.feed(text)
         parser.finish()
     else:
         add_content(text)
-    out = dict(raw)
-    out.update(
-        {
-            "text": "".join(pieces),
-            "usage": raw.get("usage") or {},
-            "result": raw.get("result") or {},
-            "tool_calls": tool_calls,
-            "events": events,
-        }
+    return replace(
+        raw, text="".join(pieces), tool_calls=tuple(tool_calls), events=tuple(events)
     )
-    return out

@@ -23,7 +23,7 @@
   старте после аварии хаба (RW-010).
 - Тесты хаба: `tests/test_backend_contract.py`, `tests/test_fleet_v3.py` (включая паритет
   валидатора с `fleet_check.py`), `tests/test_muse_adapter.py`, `tests/test_hub_integration.py`
-  (фасадный шов через настоящий HTTP-handler с fake droid/muse) — всего в сьюте 459 тестов.
+  (фасадный шов через настоящий HTTP-handler с fake droid/muse) — в историческом сьюте `0cecaf0` 459 тестов.
 - Долгоживущий процесс `droid exec` (stream-jsonrpc) на keyed-чат: resume того же SID через `load_session`, idle-гашение
   (`DROID_DSH_BRIDGE_IDLE_SECONDS`), ресурсы L/P/T, персистентность состояния чатов (ADR 0001).
 - Допуск образа droid по receipt schema 2 (`tools/droid_image.py` с реальными пробами spawn/update/load), проверка версии
@@ -33,6 +33,9 @@
 - README: раздел «Развёртывание» с обязательным порядком шагов и откатом; ADR 0001 и индекс ADR.
 
 ### Changed
+- Muse в P2 поставляется выключенным (`backends.muse.enabled=false`): `/v1/models` публикует только 6 droid-моделей;
+  включение требует живого ASM-001 и согласования либо явного решения владельца о снятии P3-гейта.
+  README содержит однострочную команду включения, ADR отделяет живую пробу от fake/echo (RW-010 Cycle 2).
 - Предел блока agent-instructions: форма KB (cwd = KB либо блок из копий канона, в том числе прежнего) — 60 000 Б, прочие блоки —
   `maxBytes` профиля минус запас; проверяются все блоки во всём тексте сообщений. Отказ по размеру и по охраннику — 503
   `launcher_unavailable` (раньше 400 `REQ003_SIZE_EXCEEDED`; внутреннее имя осталось в журнале `instr_gate_alert`).
@@ -45,9 +48,20 @@
 - Каталог `fleet.json` — schema 3 (`backends`, поле `backend` у моделей, muse `max_concurrent: 1`);
   `/v1/models` объединяет модели включённых бэкендов, `/health` суммирует `active`/`max_concurrent`
   по бэкендам и берёт `ok` по `required`-бэкендам (ключи не менялись). README: разделы хаба, ADR 0002,
-  актуальный статус гейтов (`basedpyright` — 13 baseline-ошибок, файлы хаба чистые).
+  исторический статус гейтов `0cecaf0` (`basedpyright` — 13 ошибок, файлы хаба чистые);
+  атрибуция исправлена по commit-bound evidence: `be95d60` — 13 ошибок, `e2c882b` — 16,
+  `0cecaf0` — 13, без вывода «0 новых» из одинаковых totals (RW-011 Cycle 2).
 
 ### Fixed
+- Cycle 2 хаба: полный структурный `build_catalog` используется загрузчиком и `fleet_check.py`;
+  неподдерживаемые `transport`/`tool_policy` отвергаются. Muse допускает только cap=1,
+  общий семафор сериализует все Muse-адаптеры одного хаба; канонический pin перепроверяется
+  после слота без sha-кэша. Stdout читается как bounded bytes со строгим UTF-8 и лимитами
+  JSON-структуры/числа событий; добор pipe ограничен 5 с, персистентное подписанное владение
+  группой сохраняется до её исчезновения и проверяется при рестарте.
+  Seam использует `TurnContext`/`TurnResult`/`Capabilities` и проверку регистрации адаптера.
+  Это не OS sandbox и не гарантия очистки `setsid`-потомков; Muse остаётся выключенным в P2,
+  живой ASM-001 не подтверждён (RW-003/004/005/007/009/012 Cycle 2).
 - Замечания Совета Тимлидов Cycle 1 по хабу: автоматический replay промпта muse убран
   (повтор мог продублировать уже исполненные native-действия), успех требует
   `terminal.completed`, failure reasons и текст входят в общий байтовый бюджет, сырой
@@ -57,8 +71,9 @@
   открывает muse-ход в обход `unsafe` (RW-008). Единая проверка schema 3 в `server._build_backends`
   и `fleet_check.py` (вложенные типы, `wrapper`, `proxy_port`, `max_concurrent`, неизвестные
   ключи, обязательный pin для muse) вместо AttributeError на `.get()` (RW-005).
-- basedpyright по хабу: устранены 4 новые ошибки (`muse_adapter.py` ×3, `tool_emulation.py` ×1),
-  остаются 13 baseline-ошибок в `fleet_check.py`/`server.py` (RW-012); dead code `split_tool_calls`
+- basedpyright по хабу в Cycle 1: устранены 4 ошибки новых модулей (`muse_adapter.py` ×3, `tool_emulation.py` ×1),
+  в логе `0cecaf0` остаются 13 ошибок в `fleet_check.py`/`server.py` (RW-012), но это не доказательство
+  совпадения с диагностикой baseline `be95d60` (RW-011 Cycle 2); dead code `split_tool_calls`
   удалён (FU-002), docstring `DroidAdapter` приведён к фактическому поведению (FU-009).
 - Замечания Совета Cycle 5: счёт истории моста исключает user-вставки с пустым `content` (корень `HISTORY_MISMATCH droid=5
   bridge=8` после idle); `DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS` по умолчанию 50000 (счёт `{ [ , :` до `json.loads`);

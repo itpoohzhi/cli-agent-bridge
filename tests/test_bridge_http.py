@@ -376,6 +376,63 @@ class TestSweepWorkspace(unittest.TestCase):
                     proc.kill()
                 proc.wait()
 
+    def test_reconcile_dead_leader_uses_signed_member_not_reused_identity(self):
+        """RW-009: вышедший лидер не мешает проверке подписанного члена своей группы."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "child.pid"
+            leader = subprocess.Popen(
+                [
+                    "/bin/sh",
+                    "-c",
+                    'sleep 60 > /dev/null 2>&1 & echo $! > "$1"; sleep 0.3',
+                    "fake",
+                    str(pid_path),
+                ],
+                start_new_session=True,
+            )
+            foreign = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            saved = server.WORKSPACE
+            try:
+                self.assertTrue(wait_until(pid_path.exists))
+                child = int(pid_path.read_text())
+                start = server._proc_start_sig(leader.pid)
+                child_start = server._proc_start_sig(child)
+                leader.wait(timeout=5)
+                server.WORKSPACE = Path(tmp) / "ws"
+                entries = [
+                    {
+                        "pid": leader.pid,
+                        "pgid": leader.pid,
+                        "start": start,
+                        "members": [{"pid": child, "start": child_start}],
+                        "bridge_pid": 1,
+                        "kind": "muse",
+                    },
+                    {
+                        "pid": foreign.pid,
+                        "pgid": foreign.pid,
+                        "start": "reused",
+                        "members": [{"pid": foreign.pid, "start": "reused"}],
+                        "bridge_pid": 1,
+                        "kind": "muse",
+                    },
+                ]
+                server._atomic_write(
+                    server._children_path(), json.dumps(entries).encode()
+                )
+                self.assertEqual(server.reconcile_children(), 1)
+                self.assertTrue(wait_until(lambda: not server._proc_start_sig(child)))
+                self.assertIsNone(foreign.poll())
+            finally:
+                server.WORKSPACE = saved
+                try:
+                    os.killpg(leader.pid, 9)
+                except ProcessLookupError:
+                    pass
+                foreign.kill()
+                foreign.wait()
+                leader.wait()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

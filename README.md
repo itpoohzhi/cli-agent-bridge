@@ -8,10 +8,12 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
   (по процессу на keyed-чат, см. «RPC-режим») через канонический лончер
   `~/.config/factory-launch/droid-cli.sh` (egress-пиннинг; голый droid-бинарь не
   используется — бьёт в WAF Factory; fallback на него удалён).
-- Модели и уровни effort — из каталога `fleet.json` **schema 3** (**8 моделей, два вида
-  бэкендов**, только dev-контекст): 6 droid-моделей — sonnet-5-5, gemini-3.8-flash,
+- Модели и уровни effort — из каталога `fleet.json` **schema 3** (**8 определений моделей,
+  два вида бэкендов**): в P2 Muse выключен (`backends.muse.enabled=false`), `/v1/models`
+  публикует только 6 droid-моделей — sonnet-5-5, gemini-3.8-flash,
   grok-4.7, deepseek-v4.1-flash, gpt-6.1-sol, glm-5.3; 2 muse-модели —
-  muse-spark-1.3, muse-spark-1.3-contributor (kind `muse`, Meta Muse Code CLI).
+  muse-spark-1.3, muse-spark-1.3-contributor (kind `muse`, Meta Muse Code CLI) остаются
+  определениями каталога до прохождения P3-гейта (ASM-001, см. ниже).
 - :9882 — **хаб нескольких бинарников** (ADR 0002): один порт, один ключ и один каталог
   на все бэкенды, `model → backend` строго по `fleet.json`, межбэкендного fallback нет.
   droid обслуживается резидентным RPC-процессом на чат, muse — отдельным headless-ходом
@@ -34,7 +36,7 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 - `server.py` — сам мост (HTTP, `/health`, `/v1/models`, `/v1/chat/completions`,
   framing/admission, image-модуль, фасад хаба).
 - `core/` — общий контракт хаба: `core/backend_adapter.py` (интерфейс `BackendAdapter`,
-  реестр адаптеров, единый валидатор записей `backends` schema 3), `core/tool_emulation.py`
+  реестр адаптеров, typed DTO и полный структурный валидатор `build_catalog` schema 2/3), `core/tool_emulation.py`
   (рендер tools/истории и `ToolCallParser` — общий для всех бэкендов).
 - `adapters/` — адаптеры бинарников: `adapters/droid_adapter.py` (обёртка над RPC-путём
   `server.py`), `adapters/muse_adapter.py` (Muse CLI), `adapters/__init__.py`
@@ -71,18 +73,24 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
   в коде (`adapters/__init__.py`): конфигурация не может подключить произвольный код.
   Schema 2 читается как «единственный бэкенд droid» (откат конфигурации без смены кода),
   schema 3 прежним кодом отвергается — модель muse не публикуется как droid-модель.
-- **Валидация — одна на два потребителя.** `core/backend_adapter.py: backend_entry_error`
-  проверяет запись бэкенда (типы `enabled`/`required`, `max_concurrent ≥ 1`, `owned_by`,
-  непустой `wrapper`, `proxy_port` 1…65535, вложенный `technical_ref` с sha256 и
-  обязательный pin для kind `muse`, неизвестные ключи) и вызывается и загрузчиком
-  `server._build_backends`, и `fleet_check.py`. Нарушение — отказ старта (`fleet_invalid`),
-  а не AttributeError на `.get()`.
+- **Валидация — одна на два потребителя.** `core/backend_adapter.py: build_catalog`
+  полностью проверяет и нормализует структуру schema 2/3: записи бэкендов через
+  `backend_entry_error`, модели (включая выключенные), ссылки, уникальные id, default/env
+  model, efforts, image status/proof, image limits и admission. Его вызывают
+  `server._build_catalog` и `fleet_check.check_catalogue` с одинаковыми env/probe-настройками.
+  Это паритет структурных отказов, не всей операционной проверки: census класса III,
+  policy, профили и live-проверки остаются в `fleet_check.py`. Неподдерживаемые
+  `transport` и `tool_policy` не входят в `BACKEND_KEYS` и отвергаются
+  (`backend_key_unknown`), а не принимаются без действия. Нарушение — отказ старта
+  (`fleet_invalid`), checker возвращает структурированную ошибку, а не AttributeError.
 - **Маршрутизация.** `model → backend` строго по каталогу; один запрос — ровно один
   бэкенд; межбэкендного fallback нет. Не допущенный/нездоровый бэкенд — 503
   `launcher_unavailable`, модель остаётся в `/v1/models`.
 - **Ёмкость.** У каждого бэкенда свой пул: `max_concurrent` droid = 4 (cap процессов),
-  muse = 1 (параллельные ходы muse сериализованы: при одном UID и `--yolo` их нельзя
-  развести правами, per-turn каталог разводит только данные). Насыщение muse не занимает
+  muse строго = 1 (иначе `backend_muse_max_concurrent_invalid`; конструктор тоже отказывает).
+  Общий семафор `_MUSE_SLOTS` сериализует ходы всех экземпляров MuseAdapter в одном
+  процессе хаба, даже с разными backend id. При одном UID и `--yolo` их нельзя
+  развести правами, per-turn каталог разводит только данные. Насыщение muse не занимает
   слоты droid. `/health` — те же 7 ключей: `active`/`max_concurrent` — сумма по бэкендам,
   `ok` — AND по `required`-бэкендам.
 - **Сессии.** Бэкенд с `sessions=resident` (droid) идёт планом `hot|restore|rebase|cold`;
@@ -101,28 +109,75 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 
 - ход исполняется в собственном каталоге `workspace/muse/turn-<uuid>/` (0700): `cwd` и
   `--workspace` — только он, prompt-файл (0600) внутри и удаляется вместе с каталогом;
-- `max_concurrent: 1` — одновременные ходы исключены планированием;
+- `max_concurrent: 1` — одновременные ходы всех Muse-адаптеров одного хаба исключены
+  общим семафором, не только отдельным пулом backend id;
 - допуск `qualify()`: обёртка исполняема **и** sha256 `~/.local/bin/muse` совпал с
-  обязательным `technical_ref` каталога; без pin ход не запускается;
+  обязательным `technical_ref` каталога; иной `binary_path` отвергается
+  (`binary_path_not_canonical`). Допуск повторяется после получения слота,
+  непосредственно перед spawn, без sha-кэша; без pin ход не запускается. Это проверка
+  пути и содержимого, не неизменяемый образ: остаётся окно подмены между проверкой и exec;
 - `MUSE_BIN` вырезается из окружения ребёнка (обёртка не исполнит произвольный файл),
   `MUSE_PROXY_PORT` — нормализованный `proxy_port` бэкенда; `META_API_KEY` и ключ моста вырезаны;
 - успех требует `terminal.completed`; автоматического replay промпта нет (ход мог уже
   исполнить действие); текст и failure reasons ограничены байтовыми бюджетами, сырой
-  backend-текст в журнал не пишется;
-- завершение группы процессов ограничено по времени, потомки добиваются `killpg` до
-  освобождения слота; свои дети регистрируются в `workspace/state/children.json`
-  (поле `kind`) и добиваются `reconcile_children()` на старте после аварии хаба.
+  backend-текст в журнал не пишется. Stdout читается ограниченными блоками как bytes,
+  UTF-8 декодируется строго: строка JSONL ≤ 8 МиБ, текст/дельты/failure reasons суммарно
+  ≤ 10 МиБ; до `json.loads` проверяются ≤ 50 000 структурных токенов и глубина ≤ 128,
+  на ход ≤ 50 000 непустых событий; пустые дельты не накапливаются;
+- `STDERR_DRAIN_GRACE_S = 5 с` ограничивает добор pipe после выхода лидера; EOF stdout
+  не даёт бесконечно ждать лидера/stderr. В `finally` группа получает SIGKILL, лидер
+  ожидается до 5 с, исчезновение группы до 2 с; это отдельные окна, не общий лимит 5 с.
+  Сбой запуска служебного потока проходит ту же очистку. Запись `children.json` снимается
+  только после исчезновения группы; если группа жива, адаптер запрещает новые ходы;
+- до exec создаётся живой свидетель группы, а `pid`/`pgid`/`start-signature` лидера и
+  `members` свидетеля записываются в `workspace/state/children.json`. На рестарте
+  `reconcile_children()` сверяет подпись и PGID живого лидера либо подписанного члена
+  при мёртвом лидере; переиспользованный PID и неподтверждённый PGID не сигналятся.
+  Подписанная запись сохраняется, пока свой член остаётся жив в группе.
 
-Живой ход Muse на провайдере `meta` через обёртку (ASM-001) в этом контуре **не
-выполнялся** — до него боевой cutover Muse не заявляется проверенным.
+Это компенсаторы, **не OS sandbox**: 0700/0600 не ограничивают другой процесс того же
+UID, общий слот не сериализует отдельные хабы или внешний muse-bridge. Потомок,
+вызвавший `setsid`, выходит из исходной группы: его завершение не гарантируется;
+ограничение чтения pipe предотвращает зависание хода, но не доказывает очистку такого
+потомка. Флаги AD-007 оставляют нативные инструменты Muse доступными.
+
+**P2 по умолчанию:** `backends.muse.enabled=false`; Muse не публикуется в `/v1/models`
+и не получает запросов. AD-007 разрешает флаги Muse, но не снимает P3-гейт включения.
+
+**P3-гейт (ASM-001):** включение разрешено только после приложенного лога живого хода
+Muse на провайдере `meta` через `~/.config/muse-launch/muse-cli.sh` и совместной нагрузки
+с Droid, с согласованием владельца, либо после явной записи решения владельца,
+снимающей этот гейт. Fake/echo, unit/HTTP-тесты и `/health` не заменяют живую пробу.
+Живой ASM-001 в этом контуре **НЕ ПРОВЕРЕНО**; боевой cutover не выполнялся.
+
+Однострочное включение из корня репозитория, **только после P3-гейта** (команда здесь
+не выполнялась; применение каталога и cutover согласуются отдельно):
+
+```bash
+python3 -c 'import json; from pathlib import Path; p=Path("fleet.json"); f=json.loads(p.read_text()); f["backends"]["muse"]["enabled"]=True; p.write_text(json.dumps(f, ensure_ascii=False, indent=2)+"\n")'
+```
 
 ### Как добавить бэкенд
 
 1. Написать адаптер `adapters/<name>_adapter.py` — наследник `BackendAdapter`
    (`get_models`, `qualify`, `is_healthy`, `spawn_session`, `execute_turn`,
    `close_session`, `shutdown`); модуль не импортирует `server`, настройки берёт у `host`.
+   Текущий межмодульный seam: `execute_turn(ctx: TurnContext, sse_writer: StreamSink | None)
+   -> TurnResult`, `qualify() -> Qualification`, `get_models() -> list[BackendModel]`,
+   `is_healthy() -> bool`, `spawn_session(ctx: TurnContext) -> object`,
+   `close_session(sid: str) -> None`, `shutdown() -> None`. `TurnContext` и `TurnResult` —
+   frozen dataclass (история/вложения, usage, события/tool calls также DTO); `Qualification`
+   сохраняет пару ok/reason. Класс возможностей называется **`Capabilities`**, не
+   `AdapterCapabilities`: `sessions`, `streaming`, `autonomy`, `usage`.
+   Legacy dict-конверсия Droid остаётся внутри `DroidAdapter`; HTTP dict-кодирование —
+   локально в фасаде. `finalize_turn(TurnResult, emulate_tools)` возвращает `TurnResult`.
 2. Зарегистрировать `kind` в `adapters/__init__.py: ADAPTER_KINDS` — единственное место,
-   где конфигурация получает класс.
+   где конфигурация получает класс. `AdapterRegistry.register` проверяет `adapter_api`
+   против `ADAPTER_API`, экземпляр/значения `Capabilities`, возможность вызвать bound
+   `execute_turn` двумя аргументами и его аннотации `ctx`/return (`TurnContext`/`TurnResult`),
+   return-аннотацию `qualify` (`Qualification`), уникальность backend id.
+   Несовместимость — отказ регистрации (`ValueError`), не поздний отказ `qualify()`;
+   это не полная runtime-проверка всех возвращаемых DTO и всех методов адаптера.
 3. Добавить запись в `fleet.json: backends` (`kind`, `enabled`, `required`, `owned_by`,
    `max_concurrent`, при необходимости `wrapper`/`technical_ref`/`proxy_port`) и модели с
    полем `backend`; прогнать `/opt/homebrew/bin/python3 fleet_check.py`.
@@ -195,8 +250,9 @@ launchctl kickstart -k gui/$(id -u)/com.user.dsh-droid-bridge
 
 - Схема — **schema 3** (schema 2 читается как «единственный бэкенд droid»): блок `backends`
   (`id → запись`, поля см. «Мульти-бинарный хаб») и поле `backend` у каждой модели.
-  Запись бэкенда проверяется `core/backend_adapter.py: backend_entry_error` — тем же кодом,
-  что и `fleet_check.py`: неизвестные ключи, неверные типы, `max_concurrent < 1`,
+  Полный структурный валидатор — `core/backend_adapter.py: build_catalog`, общий с
+  `fleet_check.py`; записи бэкендов внутри него проверяет `backend_entry_error`.
+  Неизвестные/неподдерживаемые ключи, неверные типы, `max_concurrent < 1` (для Muse любое значение ≠ 1),
   `proxy_port` вне 1…65535, неполный/несовпавший по форме `technical_ref` (для kind `muse`
   pin обязателен) — отказ старта (`fleet_invalid`), а не тихое отбрасывание.
 - Инварианты (класс I) проверяются при старте: уникальные `id`, `efforts ⊆
@@ -307,7 +363,8 @@ Read-only проверка каталога и профилей; JSON в stdout,
 успехе (расхождение sha `models.md` → `policy.sha_match=false` + exit 1;
 `default_compat.status` = `ok` / `not_applicable` / `BLOCKED-DEFAULT`).
 Каталог принимается в schema 2 или 3; в schema 3 записи `backends` проверяются
-единым валидатором хаба (`backend_entry_error` + `ADAPTER_KINDS`), а droid-специфичные
+полным структурным валидатором хаба (`build_catalog` + `ADAPTER_KINDS`), а census класса III
+и операционные проверки выполняются отдельно. Droid-специфичные
 проверки (efforts, профили DSH, allowlist, `--live-droid`) выполняются по области
 `droid_scope` — muse-модели в них не попадают.
 
@@ -337,24 +394,31 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
 с текущими. Файлы — только во временных каталогах.
 
 Хаб (ADR 0002): `tests/test_backend_contract.py` — контракт `BackendAdapter`/`AdapterRegistry`;
-`tests/test_fleet_v3.py` — schema 3, единый валидатор записи бэкенда и паритет с `fleet_check`;
+`tests/test_fleet_v3.py` — schema 2/3, полный структурный `build_catalog` и паритет с `fleet_check`;
 `tests/test_muse_adapter.py` — адаптер muse (per-turn изоляция хода, pin образа, отсутствие
 replay, `terminal.completed`, байтовые бюджеты, завершение группы, реестр детей, нормализация
 порта); `tests/test_hub_integration.py` — фасадный шов через настоящий HTTP-handler с fake
 droid/muse в `BACKENDS` (POST muse-модели JSON и SSE с `tool_calls`, 502 `backend_error` с
 detail, 503 preflight/proxy-down, общий `finalize_turn` при `emulate_tools` true/false,
 unsafe-guard для muse против droid-чата, независимость ёмкостей, abort потока). Полный
-сьют — 459 тестов.
+сьют на предыдущем кандидате `0cecaf0` — 459 тестов; это не результат текущего
+rework без привязки нового лога к финальному коммиту.
 
 ### Статус гейтов ruff / basedpyright
 
 Запуск — только из окружения репозитория: `.venv/bin/ruff format --check .`, `.venv/bin/ruff check .`,
 `.venv/bin/basedpyright server.py core adapters fleet_check.py` (настройки — `ruff.toml` с набором E4/E7/E9/F
-и `pyrightconfig.json`; чужие venv не используются). На кандидате `ruff format --check` и `ruff check` — exit 0;
-`basedpyright` — **13 ошибок, все baseline** (0 новых относительно `be95d60`), из них 11 в `fleet_check.py`
-(резолв `yaml`, `Report.__setitem__`, типы `list/dict` в отчёте) и 2 в `server.py` (`openssl_sha256` — аргумент
-`bytes | None`; `log_message` vs `BaseHTTPRequestHandler`). Файлы хаба (`core/`, `adapters/`) ошибок не дают.
-Предупреждения (warnings) strict-режима baseline не гейтят.
+и `pyrightconfig.json`; чужие venv не используются). Исторические логи кандидата `0cecaf0`:
+`ruff format --check` и `ruff check` — exit 0; `basedpyright` — 13 ошибок (exit 1),
+из них 11 в `fleet_check.py` и 2 в `server.py`; `core/` и `adapters/` ошибок не дают.
+Прежняя атрибуция «17 ошибок baseline `be95d60`» неверна: лог с ошибками Muse и
+`tool_emulation` не мог относиться к дереву `be95d60`, где этих файлов нет (RW-011).
+Независимые commit-bound прогоны RW-011 дали: `be95d60` — 13 ошибок (10 `fleet_check.py`,
+3 `server.py`), `e2c882b` — 16, `0cecaf0` — 13. Это не подтверждает «0 новых относительно
+baseline»: состав диагностик различается (assignment-ошибка `server.py` в baseline,
+unresolved `yaml` только в product worktree `0cecaf0`), окружения тоже различаются.
+Гейты текущего rework требуют нового лога и финального SHA.
+Предупреждения (warnings) strict-режима сами по себе не гейтят.
 
 ## RPC-режим (долгоживущий droid на чат)
 
@@ -482,7 +546,8 @@ KB > 60 000 Б (`REQ003_SIZE_EXCEEDED`, строгий режим включён
 `apiKeyEnv DROID_DSH_BRIDGE_KEY`. Совместимость профиля уже выставлена:
 `supportsDeveloperRole: false`, `maxTokensField: max_tokens`,
 `supportsReasoningEffort: true`. Список моделей провайдера в профилях — 6 droid-моделей
-(дословно из `fleet.json`); хаб отдаёт в `/v1/models` все 8 (6 droid + 2 muse), muse-модели
+(дословно из `fleet.json`); в P2 хаб отдаёт в `/v1/models` только 6 droid-моделей,
+после P3-гейта и включения Muse — 8 (6 droid + 2 muse). Muse-модели
 в профили DSH не добавлены — перенос DSH с :9886 на :9882 остаётся решением владельца
 (ADR 0002, фаза P3). Сверка — `fleet_check.py`.
 

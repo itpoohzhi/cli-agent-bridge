@@ -11,6 +11,7 @@ prompt рядом с собой и по файлу `mode` выдаёт JSONL-с�
 """
 
 import hashlib
+from dataclasses import asdict
 import os
 import signal
 import socket
@@ -33,7 +34,7 @@ from adapters.muse_adapter import (  # noqa: E402
     MuseAdapter,
     estimate_tokens,
 )
-from core.backend_adapter import BackendNotSupported  # noqa: E402
+from core.backend_adapter import BackendNotSupported, TurnContext  # noqa: E402
 
 TOOL_JSON = (
     '{"payload_type":"run.output.delta","payload":{"text":"<tool_call>'
@@ -78,6 +79,31 @@ EOF
     echo '{"payload_type":"run.terminal.failed","payload":{"terminal":"failed","reason":"boom"}}' ;;
   exit1) echo "something bad" >&2; exit 1 ;;
   noterminal) echo '{"payload_type":"run.output.delta","payload":{"text":"partial"}}' ;;
+  contradictory)
+    echo '{"payload_type":"run.terminal.failed","payload":{"terminal":"completed","text":"wrong"}}' ;;
+  unknown_terminal)
+    echo '{"payload_type":"run.terminal.surprise","payload":{"terminal":"completed","text":"wrong"}}' ;;
+  missing_status)
+    echo '{"payload_type":"run.terminal.completed","payload":{"text":"wrong"}}' ;;
+  unicode)
+    "@PYTHON@" -c 'import json; print(json.dumps({"payload_type":"run.terminal.completed","payload":{"terminal":"completed","text":"я"*1000}},ensure_ascii=False))' ;;
+  deep)
+    "@PYTHON@" -c 'print("["*2000+"0"+"]"*2000)' ;;
+  struct)
+    "@PYTHON@" -c 'print("["+"{},"*1000+"{}]")' ;;
+  empty_flood)
+    for i in $(seq 1 300); do echo '{"payload_type":"run.output.delta","payload":{"text":""}}'; done
+    ok ;;
+  bad_utf8)
+    printf '\377\n'; ok ;;
+  spy)
+    find "$(dirname "$PWD")" -name prompt.txt -exec cat {} \; > "$DIR/seen.$$"
+    sleep 0.5
+    ok ;;
+  desc_stdout)
+    ok
+    sleep 30 &
+    echo $! > "$DIR/child.pid" ;;
   sentinel)
     echo "invalid prompt: patient John has HIV" >&2
     echo '{"payload_type":"run.terminal.failed","payload":{"terminal":"failed","reason":"invalid prompt: patient John has HIV"}}' ;;
@@ -117,17 +143,21 @@ class FakeMuse:
         self.base = base
         base.mkdir(parents=True, exist_ok=True)
         self.wrapper = base / "muse-cli.sh"
-        self.wrapper.write_text(
-            FAKE_WRAPPER.replace("@TOOL@", TOOL_JSON).replace(
-                "@PYTHON@", sys.executable
-            ),
+        self.binary = Path(os.path.expanduser("~/.local/bin/muse"))
+        self.binary.parent.mkdir(parents=True, exist_ok=True)
+        self.binary.write_text(
+            FAKE_WRAPPER.replace("@TOOL@", TOOL_JSON)
+            .replace("@PYTHON@", sys.executable)
+            .replace('DIR="$(cd "$(dirname "$0")" && pwd)"', "DIR=" + repr(str(base))),
             encoding="utf-8",
         )
+        self.binary.chmod(0o755)
+        self.wrapper.write_text('#!/bin/sh\nexec "$HOME/.local/bin/muse" "$@"\n')
         self.wrapper.chmod(0o755)
         self.set_mode("ok")
         self._proxy = socket.socket()
         self._proxy.bind(("127.0.0.1", 0))
-        self._proxy.listen(8)
+        self._proxy.listen(512)
         self.proxy_port = self._proxy.getsockname()[1]
 
     def set_mode(self, mode: str) -> None:
@@ -147,8 +177,8 @@ class FakeMuse:
         return dict(line.split("=", 1) for line in lines if "=" in line)
 
     def pin(self) -> dict:
-        digest = hashlib.sha256(self.wrapper.read_bytes()).hexdigest()
-        return {"binary_path": str(self.wrapper), "binary_sha256": digest}
+        digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        return {"binary_path": str(self.binary), "binary_sha256": digest}
 
     def close(self) -> None:
         self._proxy.close()
@@ -159,7 +189,7 @@ class FakeMuse:
             "enabled": True,
             "required": False,
             "owned_by": "meta-muse",
-            "max_concurrent": 2,
+            "max_concurrent": 1,
             "wrapper": str(self.wrapper),
             "proxy_port": self.proxy_port,
             "technical_ref": self.pin(),
@@ -198,7 +228,7 @@ def ctx_for(prompt="hi", **extra):
         "emulate_tools": False,
     }
     ctx.update(extra)
-    return ctx
+    return TurnContext(**ctx)
 
 
 def wait_pid_gone(pid: int, timeout: float = 10.0) -> bool:
@@ -216,6 +246,9 @@ class MuseCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        home = mock.patch.dict(os.environ, {"HOME": str(self.tmp / "home")})
+        home.start()
+        self.addCleanup(home.stop)
         self.fake = FakeMuse(self.tmp / "fake")
         self.addCleanup(self.fake.close)
         self.addCleanup(self._tmp.cleanup)
@@ -296,7 +329,7 @@ class TestExecEvents(unittest.TestCase):
             "[1,2]",
             "",
             '{"payload_type":"run.output.delta","payload":{"text":"b"}}',
-            '{"payload_type":"run.terminal.completed","payload":{}}',
+            '{"payload_type":"run.terminal.completed","payload":{"terminal":"completed"}}',
         ):
             events.feed_line(line)
         self.assertEqual(events.text, "ab")
@@ -306,7 +339,7 @@ class TestExecEvents(unittest.TestCase):
         events = ExecEvents()
         events.feed_line('{"payload_type":"run.output.delta","payload":{"text":"x"}}')
         events.feed_line(
-            '{"payload_type":"run.terminal.completed","payload":{"text":"FINAL"}}'
+            '{"payload_type":"run.terminal.completed","payload":{"terminal":"completed","text":"FINAL"}}'
         )
         self.assertEqual(events.text, "FINAL")
 
@@ -348,10 +381,10 @@ class TestExecuteTurn(MuseCase):
     def test_success_passes_flags_and_cleans_up(self):
         adapter = self.adapter()
         out = adapter.execute_turn(ctx_for("привет"), None)
-        self.assertEqual((out["state"], out["rc"]), ("done", 0))
-        self.assertEqual(out["text"], "Hello world")
-        self.assertEqual(out["usage"]["output_tokens"], estimate_tokens("Hello world"))
-        self.assertGreater(out["usage"]["input_tokens"], 0)
+        self.assertEqual((out.state, out.rc), ("done", 0))
+        self.assertEqual(out.text, "Hello world")
+        self.assertEqual(out.usage.output_tokens, estimate_tokens("Hello world"))
+        self.assertGreater(out.usage.input_tokens, 0)
         argv = self.fake.argv()
         for flag in ("--yolo", "--trust-workspace", "--json", "exec"):
             self.assertIn(flag, argv)
@@ -368,7 +401,7 @@ class TestExecuteTurn(MuseCase):
 
     def test_parallel_turns_use_own_workspace_and_prompt(self):
         """RW-001: у каждого хода собственный каталог; prompt соседа недостижим по argv."""
-        adapter = self.adapter(max_concurrent=2)
+        adapter = self.adapter(max_concurrent=1)
         results = []
 
         def run() -> None:
@@ -379,7 +412,7 @@ class TestExecuteTurn(MuseCase):
             thread.start()
         for thread in threads:
             thread.join(timeout=30)
-        self.assertEqual([out["state"] for out in results], ["done", "done"])
+        self.assertEqual([out.state for out in results], ["done", "done"])
         # Файлы, привязанные к pid процесса-обёртки: гонка счётчика не влияет.
         prompt_files = sorted(self.fake.base.glob("promptpath.pid.*"))
         argv_files = sorted(self.fake.base.glob("argv.pid.*"))
@@ -411,7 +444,7 @@ class TestExecuteTurn(MuseCase):
             },
         ):
             out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "done")
+        self.assertEqual(out.state, "done")
         env = self.fake.env()
         for name in ("META_API_KEY", "DROID_DSH_BRIDGE_KEY", "ZZ_LEAK", "MUSE_BIN"):
             self.assertNotIn(name, env)
@@ -419,53 +452,53 @@ class TestExecuteTurn(MuseCase):
     def test_configured_proxy_port_is_passed_to_wrapper(self):
         """RW-011: обёртка получает ровно тот порт, который проверил preflight."""
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "done")
+        self.assertEqual(out.state, "done")
         self.assertEqual(self.fake.env()["MUSE_PROXY_PORT"], str(self.fake.proxy_port))
 
     def test_final_text_in_terminal_wins(self):
         self.fake.set_mode("final")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["text"], "FINAL TEXT")
+        self.assertEqual(out.text, "FINAL TEXT")
 
     def test_adapter_returns_raw_tool_call_text_for_facade_parsing(self):
         self.fake.set_mode("tool")
         out = self.adapter().execute_turn(ctx_for(emulate_tools=True), None)
-        self.assertEqual(out["state"], "done")
-        self.assertIn("<tool_call>", out["text"])
-        self.assertNotIn("tool_calls", out)  # разбор блоков — дело фасада
+        self.assertEqual(out.state, "done")
+        self.assertIn("<tool_call>", out.text)
+        self.assertEqual(out.tool_calls, ())  # разбор блоков — дело фасада
 
     def test_proxy_exit_42_is_launcher_unavailable(self):
         self.fake.set_mode("fail42")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "launcher_unavailable")
-        self.assertEqual(out["rc"], 42)
+        self.assertEqual(out.state, "launcher_unavailable")
+        self.assertEqual(out.rc, 42)
         self.assertEqual(self.fake.count(), 1)  # без ретрая
 
     def test_failed_terminal_is_backend_error(self):
         self.fake.set_mode("failed")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "backend_error")
-        self.assertIn("boom", out["err"])
+        self.assertEqual(out.state, "backend_error")
+        self.assertIn("boom", out.err)
 
     def test_missing_terminal_completed_is_backend_error(self):
         """RW-004: delta + EOF + rc=0 без terminal.completed — не done, а backend_error (502)."""
         self.fake.set_mode("noterminal")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual((out["state"], out["rc"]), ("backend_error", 1))
-        self.assertIn("terminal_missing", out["err"])
+        self.assertEqual((out.state, out.rc), ("backend_error", 1))
+        self.assertIn("terminal_missing", out.err)
 
     def test_nonzero_exit_is_backend_error_and_not_retried(self):
         self.fake.set_mode("exit1")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual((out["state"], out["rc"]), ("backend_error", 1))
-        self.assertIn("something bad", out["err"])
+        self.assertEqual((out.state, out.rc), ("backend_error", 1))
+        self.assertIn("something bad", out.err)
         self.assertEqual(self.fake.count(), 1)
 
     def test_network_marker_is_not_replayed(self):
         """RW-003: действие могло исполниться до сетевой ошибки — промпт не повторяется."""
         self.fake.set_mode("netmarker")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "backend_error")
+        self.assertEqual(out.state, "backend_error")
         self.assertEqual(self.fake.count(), 1)
         self.assertEqual(
             (self.fake.base / "action.log").read_text(encoding="utf-8").splitlines(),
@@ -475,22 +508,20 @@ class TestExecuteTurn(MuseCase):
     def test_network_marker_on_first_run_does_not_retry(self):
         self.fake.set_mode("netonce")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "backend_error")
+        self.assertEqual(out.state, "backend_error")
         self.assertEqual(self.fake.count(), 1)
 
     def test_missing_wrapper_is_launcher_unavailable(self):
         adapter = self.adapter(wrapper=str(self.tmp / "no-such.sh"))
         out = adapter.execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "launcher_unavailable")
-        self.assertEqual(out["err"], "wrapper_not_executable")
+        self.assertEqual(out.state, "launcher_unavailable")
+        self.assertEqual(out.err, "wrapper_not_executable")
 
     def test_proxy_down_refuses_before_spawn(self):
         adapter = self.adapter(proxy_port=1)  # порт 1 не слушается
         self.assertFalse(adapter.is_healthy())
         out = adapter.execute_turn(ctx_for(), None)
-        self.assertEqual(
-            (out["state"], out["err"]), ("launcher_unavailable", "proxy_down")
-        )
+        self.assertEqual((out.state, out.err), ("launcher_unavailable", "proxy_down"))
         self.assertEqual(self.fake.count(), 0)
 
     def test_timeout_kills_process_group(self):
@@ -499,7 +530,7 @@ class TestExecuteTurn(MuseCase):
         started = time.monotonic()
         out = self.adapter(host).execute_turn(ctx_for(), None)
         self.assertLess(time.monotonic() - started, 15)
-        self.assertEqual((out["state"], out["rc"]), ("timeout", 124))
+        self.assertEqual((out.state, out.rc), ("timeout", 124))
         pid = int((self.fake.base / "pid").read_text())
         self.assertTrue(wait_pid_gone(pid), "process group survived timeout")
 
@@ -508,7 +539,7 @@ class TestExecuteTurn(MuseCase):
         gone = threading.Event()
         threading.Timer(0.5, gone.set).start()
         out = self.adapter().execute_turn(ctx_for(client_gone=gone.is_set), None)
-        self.assertEqual(out["state"], "client_gone")
+        self.assertEqual(out.state, "client_gone")
 
     def test_capacity_cap_gives_queue_timeout(self):
         self.fake.set_mode("sleep")
@@ -518,7 +549,7 @@ class TestExecuteTurn(MuseCase):
         gone = threading.Event()
         worker = threading.Thread(
             target=lambda: first.update(
-                adapter.execute_turn(ctx_for(client_gone=gone.is_set), None)
+                asdict(adapter.execute_turn(ctx_for(client_gone=gone.is_set), None))
             )
         )
         worker.start()
@@ -526,7 +557,7 @@ class TestExecuteTurn(MuseCase):
         while adapter.active_count() == 0 and time.monotonic() < deadline:
             time.sleep(0.05)
         second = adapter.execute_turn(ctx_for(), None)
-        self.assertEqual(second["state"], "queue_timeout")
+        self.assertEqual(second.state, "queue_timeout")
         gone.set()
         worker.join(timeout=10)
         self.assertEqual(first.get("state"), "client_gone")
@@ -536,7 +567,7 @@ class TestExecuteTurn(MuseCase):
         adapter = self.adapter()
         result: dict = {}
         worker = threading.Thread(
-            target=lambda: result.update(adapter.execute_turn(ctx_for(), None))
+            target=lambda: result.update(asdict(adapter.execute_turn(ctx_for(), None)))
         )
         worker.start()
         deadline = time.monotonic() + 5
@@ -547,7 +578,7 @@ class TestExecuteTurn(MuseCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(adapter.active_count(), 0)
         again = adapter.execute_turn(ctx_for(), None)
-        self.assertEqual(again["state"], "launcher_unavailable")
+        self.assertEqual(again.state, "launcher_unavailable")
 
     def test_jsonl_line_over_limit_is_pump_error(self):
         """RW-006: строка > MAX_LINE_BYTES прекращает ход без роста памяти хаба."""
@@ -556,8 +587,8 @@ class TestExecuteTurn(MuseCase):
         started = time.monotonic()
         out = adapter.execute_turn(ctx_for(), None)
         self.assertLess(time.monotonic() - started, 30)
-        self.assertEqual(out["state"], "pump_error")
-        self.assertIn("jsonl line exceeds the limit", out["err"])
+        self.assertEqual(out.state, "pump_error")
+        self.assertIn("jsonl line exceeds the limit", out.err)
         self.assertEqual(adapter.active_count(), 0)
 
     def test_turn_text_over_budget_is_pump_error(self):
@@ -567,8 +598,8 @@ class TestExecuteTurn(MuseCase):
         started = time.monotonic()
         out = adapter.execute_turn(ctx_for(), None)
         self.assertLess(time.monotonic() - started, 30)
-        self.assertEqual(out["state"], "pump_error")
-        self.assertIn("turn text exceeds the limit", out["err"])
+        self.assertEqual(out.state, "pump_error")
+        self.assertIn("turn text exceeds the limit", out.err)
         self.assertEqual(adapter.active_count(), 0)
 
     def test_descendant_holding_stderr_is_killed_bounded(self):
@@ -578,7 +609,7 @@ class TestExecuteTurn(MuseCase):
         started = time.monotonic()
         out = adapter.execute_turn(ctx_for(), None)
         elapsed = time.monotonic() - started
-        self.assertEqual(out["state"], "done")
+        self.assertEqual(out.state, "done")
         self.assertLess(elapsed, 15)
         child = int((self.fake.base / "child.pid").read_text())
         self.assertTrue(wait_pid_gone(child), "stderr-holding descendant survived")
@@ -591,7 +622,7 @@ class TestExecuteTurn(MuseCase):
         started = time.monotonic()
         out = adapter.execute_turn(ctx_for(), None)
         self.assertLess(time.monotonic() - started, 15)
-        self.assertEqual(out["state"], "done")
+        self.assertEqual(out.state, "done")
         child = int((self.fake.base / "child.pid").read_text())
         self.assertTrue(wait_pid_gone(child), "DEVNULL descendant survived")
         self.assertEqual(adapter.active_count(), 0)
@@ -606,9 +637,12 @@ class RegistryHost:
         self.QUEUE_TIMEOUT_S = 900.0
         self.KEEPALIVE_S = 15.0
         self.calls: list = []
+        self.removed_alive: list = []
         self._log = lambda message: None
 
     def _children_update(self, add=None, remove_pid=None) -> None:
+        if remove_pid is not None and MuseAdapter._group_alive(remove_pid):
+            self.removed_alive.append(remove_pid)
         self.calls.append((add, remove_pid))
 
     def _proc_start_sig(self, pid: int) -> str:
@@ -623,18 +657,19 @@ class TestChildRegistry(MuseCase):
         )
         self.addCleanup(adapter.shutdown)
         out = adapter.execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "done")
+        self.assertEqual(out.state, "done")
         added = [add for add, _ in host.calls if add]
         removed = [pid for _, pid in host.calls if pid is not None]
         self.assertEqual(len(added), 1)
         self.assertEqual(added[0]["kind"], "muse")
         self.assertEqual(added[0]["pgid"], added[0]["pid"])
         self.assertEqual(added[0]["start"], "sig-%d" % added[0]["pid"])
+        self.assertEqual(len(added[0]["members"]), 1)
         self.assertIn(added[0]["pid"], removed)
 
     def test_host_without_registry_hooks_still_runs(self):
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "done")
+        self.assertEqual(out.state, "done")
 
 
 class TestQualify(MuseCase):
@@ -656,12 +691,12 @@ class TestQualify(MuseCase):
             (False, "pin_missing"),
         )
         out = self.adapter(technical_ref=None).execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "launcher_unavailable")
-        self.assertEqual(out["err"], "pin_missing")
+        self.assertEqual(out.state, "launcher_unavailable")
+        self.assertEqual(out.err, "pin_missing")
         self.assertEqual(self.fake.count(), 0)
 
     def test_qualify_pin_match_and_mismatch(self):
-        binary = self.tmp / "muse-bin"
+        binary = self.fake.binary
         binary.write_bytes(b"muse-image")
         digest = hashlib.sha256(b"muse-image").hexdigest()
         ref = {"binary_path": str(binary), "binary_sha256": digest}
@@ -671,10 +706,9 @@ class TestQualify(MuseCase):
             self.adapter(technical_ref=ref_bad).qualify(),
             (False, "binary_sha256_mismatch"),
         )
+        adapter = self.adapter(technical_ref=ref)
         binary.unlink()
-        self.assertEqual(
-            self.adapter(technical_ref=ref).qualify(), (False, "binary_missing")
-        )
+        self.assertEqual(adapter.qualify(), (False, "binary_missing"))
 
     def test_qualify_rejects_non_executable_wrapper(self):
         self.fake.wrapper.chmod(0o644)
@@ -683,11 +717,138 @@ class TestQualify(MuseCase):
     def test_sessions_none_and_models(self):
         adapter = self.adapter()
         with self.assertRaises(BackendNotSupported):
-            adapter.spawn_session({})
+            adapter.spawn_session(ctx_for())
         adapter.close_session("whatever")  # идемпотентно, без ошибок
-        self.assertEqual([m["id"] for m in adapter.get_models()], ["muse-spark-1.3"])
-        self.assertEqual(adapter.capabilities["sessions"], "none")
-        self.assertFalse(adapter.capabilities["autonomy"])
+        self.assertEqual([m.id for m in adapter.get_models()], ["muse-spark-1.3"])
+        self.assertEqual(adapter.capabilities.sessions, "none")
+        self.assertFalse(adapter.capabilities.autonomy)
+
+
+class TestPanelRework(MuseCase):
+    def test_terminal_envelopes_fail_closed(self):
+        for mode in ("contradictory", "unknown_terminal", "missing_status"):
+            with self.subTest(mode=mode):
+                self.fake.set_mode(mode)
+                out = self.adapter().execute_turn(ctx_for(), None)
+                self.assertEqual(out.state, "pump_error")
+
+    def test_pin_must_name_canonical_home_binary(self):
+        ref = {
+            "binary_path": str(self.fake.wrapper),
+            "binary_sha256": hashlib.sha256(self.fake.wrapper.read_bytes()).hexdigest(),
+        }
+        out = self.adapter(technical_ref=ref).execute_turn(ctx_for(), None)
+        self.assertEqual(out.state, "launcher_unavailable")
+        self.assertEqual(out.err, "binary_path_not_canonical")
+        self.assertEqual(self.fake.count(), 0)
+
+    def test_cap_above_one_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "muse_max_concurrent"):
+            self.adapter(max_concurrent=2)
+
+    def test_untrusted_output_is_bounded(self):
+        import adapters.muse_adapter as muse_module
+
+        for mode, limits in (
+            ("unicode", {"MAX_LINE_BYTES": 1800}),
+            ("deep", {"MAX_LINE_BYTES": 10000}),
+            ("struct", {"MAX_JSON_STRUCT_TOKENS": 100}),
+            ("empty_flood", {"MAX_EVENTS": 128}),
+            ("bad_utf8", {"MAX_LINE_BYTES": 10000}),
+        ):
+            with (
+                self.subTest(mode=mode),
+                mock.patch.multiple(muse_module, create=True, **limits),
+            ):
+                self.fake.set_mode(mode)
+                out = self.adapter().execute_turn(ctx_for(), None)
+                self.assertEqual(out.state, "pump_error")
+
+    def test_empty_deltas_do_not_accumulate(self):
+        events = ExecEvents()
+        for _ in range(100):
+            events.feed_line(
+                '{"payload_type":"run.output.delta","payload":{"text":""}}'
+            )
+        self.assertEqual(events.deltas, [])
+
+    def test_stdout_holding_child_is_drained_in_five_seconds(self):
+        self.fake.set_mode("desc_stdout")
+        started = time.monotonic()
+        out = self.adapter(host_stub(self.tmp, TIMEOUT_S=20)).execute_turn(
+            ctx_for(), None
+        )
+        self.assertEqual(out.state, "done")
+        self.assertLess(time.monotonic() - started, 12)
+        child = int((self.fake.base / "child.pid").read_text())
+        self.assertTrue(wait_pid_gone(child))
+
+    def test_each_thread_start_failure_cleans_group_before_unregister(self):
+        for failing in (1, 2):
+            with self.subTest(thread=failing):
+                host = RegistryHost(self.tmp)
+                adapter = self.adapter(host)
+                real_start = threading.Thread.start
+                calls = [0]
+
+                def start(thread):
+                    calls[0] += 1
+                    if calls[0] == failing:
+                        raise RuntimeError("injected start failure")
+                    return real_start(thread)
+
+                self.fake.set_mode("sleep")
+                with mock.patch.object(threading.Thread, "start", start):
+                    out = adapter.execute_turn(ctx_for(), None)
+                self.assertEqual(out.state, "pump_error")
+                self.assertEqual(adapter.active_count(), 0)
+                self.assertEqual(host.removed_alive, [])
+                for add, _ in host.calls:
+                    if add:
+                        self.assertFalse(adapter._group_alive(add["pgid"]))
+
+    def test_typed_seam_is_available(self):
+        import core.backend_adapter as backend
+
+        for name in ("TurnContext", "TurnResult", "Capabilities", "Qualification"):
+            self.assertTrue(hasattr(backend, name), name)
+
+    def test_pin_is_checked_after_slot_before_spawn(self):
+        adapter = self.adapter()
+        acquire = adapter._acquire_slot
+
+        def replace_in_queue(ctx):
+            reason = acquire(ctx)
+            self.fake.binary.write_text(
+                self.fake.binary.read_text() + "\n# replaced while queued\n"
+            )
+            return reason
+
+        with mock.patch.object(adapter, "_acquire_slot", replace_in_queue):
+            out = adapter.execute_turn(ctx_for(), None)
+        self.assertEqual(out.state, "launcher_unavailable")
+        self.assertEqual(out.err, "binary_sha256_mismatch")
+        self.assertEqual(self.fake.count(), 0)
+
+    def test_two_backends_serialize_same_uid_workspace_and_cannot_read_neighbor(self):
+        self.fake.set_mode("spy")
+        first = self.adapter()
+        second = self.adapter()
+        results = []
+        workers = [
+            threading.Thread(
+                target=lambda a=a, p=p: results.append(a.execute_turn(ctx_for(p), None))
+            )
+            for a, p in ((first, "prompt-one"), (second, "prompt-two"))
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=20)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual([r.state for r in results], ["done", "done"])
+        seen = sorted(p.read_text() for p in self.fake.base.glob("seen.*"))
+        self.assertEqual(seen, ["prompt-one", "prompt-two"])
 
 
 if __name__ == "__main__":

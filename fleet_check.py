@@ -31,7 +31,8 @@ if str(ROOT) not in sys.path:
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов задан в коде
 from core.backend_adapter import (  # noqa: E402  - та же проверка записи backend, что у сервера
-    backend_entry_error,
+    FleetViolation,
+    build_catalog,
 )
 
 HOME = Path(os.path.expanduser("~"))
@@ -126,133 +127,25 @@ def check_catalogue(cat, report):
     if not isinstance(cat, dict):
         report.add("catalogue", ["каталог не является JSON-объектом"])
         return
-    schema = cat.get("schema_version")
-    if schema not in (2, 3):
-        errs.append("schema_version не 2 и не 3")
-    backends = cat.get("backends")
-    if schema == 3:
-        if not isinstance(backends, dict) or not backends:
-            errs.append("backends: пустой или не объект (schema 3)")
-            backends = {}
-        for bid, entry in backends.items():
-            # Единый источник вида (ADAPTER_KINDS) и единая проверка записи с сервером (RW-005):
-            # fleet_check принимает/отвергает ровно то же множество каталогов, что _build_backends.
-            reason = backend_entry_error(bid, entry, ADAPTER_KINDS)
-            if reason:
-                errs.append("%s: %s" % (reason, bid))
-    elif backends is not None:
-        errs.append("backends_in_schema_2")
-    models = cat.get("models")
-    if not isinstance(models, list) or not models:
-        errs.append("models: пустой или не список")
-        report.add("catalogue", errs)
+    try:
+        build_catalog(
+            cat,
+            ADAPTER_KINDS,
+            env_model=os.environ.get("DROID_DSH_BRIDGE_MODEL", "").strip(),
+            image_probe=os.environ.get("DROID_DSH_BRIDGE_IMAGE_PROBE") == "1",
+        )
+    except FleetViolation as exc:
+        report.add("catalogue", ["%s: %s" % (exc.reason, exc.model)])
         return
-    ids = []
-    for model in models:
-        mid = model.get("id")
-        if not isinstance(mid, str) or not mid:
-            errs.append("model без id")
-            continue
-        if mid in ids:
-            errs.append("duplicate_id: " + mid)
-        ids.append(mid)
-        efforts = model.get("efforts")
-        if not isinstance(efforts, list) or not efforts or set(efforts) - LEVELS:
-            errs.append("efforts_invalid: %s (%r)" % (mid, efforts))
-            efforts = efforts if isinstance(efforts, list) else []
-        if len(set(efforts)) != len(efforts):
-            errs.append("efforts_invalid (дубли): " + mid)
-        if model.get("default_effort") not in efforts:
-            errs.append("default_effort_invalid: %s" % mid)
-        if schema == 3 and model.get("backend") not in (backends or {}):
-            errs.append("model_backend_unknown: %s (%r)" % (mid, model.get("backend")))
-        if (
-            not isinstance(model.get("context_window"), int)
-            or model.get("context_window") <= 0
-        ):
-            errs.append("context_window_invalid: " + mid)
-        if not isinstance(model.get("max_tokens"), int) or model.get("max_tokens") <= 0:
-            errs.append("max_tokens_invalid: " + mid)
-        images = model.get("images")
-        if not isinstance(images, dict):
-            errs.append("images_missing: " + mid)
-            continue
-        status = images.get("status")
-        if status not in STATUSES:
-            errs.append("status_invalid: %s (%r)" % (mid, status))
-            continue
-        if (
-            images.get("cli_registry") == "explicit_unsupported"
-            and status != "unsupported"
-        ):
-            errs.append(
-                "status_inconsistent (explicit_unsupported != unsupported): " + mid
-            )
-        input_list = model.get("input")
-        if status in ("unsupported", "unverified"):
-            if images.get("method") is not None:
-                errs.append(
-                    "status_inconsistent (method != null при %s): %s" % (status, mid)
-                )
-            if input_list != ["text"]:
-                errs.append(
-                    "status_inconsistent (input != [text] при %s): %s" % (status, mid)
-                )
-        if status in ("probe", "confirmed"):
-            if images.get("method") not in METHOD_IMPL_VERSIONS:
-                errs.append(
-                    "confirmed_method_missing/метод не реализован: %s (%r)"
-                    % (mid, images.get("method"))
-                )
-            if "image" not in (input_list or []):
-                errs.append("confirmed_input_missing: " + mid)
-        if status == "confirmed":
-            proof = images.get("proof")
-            if not isinstance(proof, dict):
-                errs.append("confirmed_proof_missing: " + mid)
-            else:
-                errs.extend(_proof_errors(mid, proof, efforts))
-                if sorted(proof.get("efforts_proven") or []) != sorted(efforts):
-                    errs.append("класс III (efforts_proven != efforts): " + mid)
-    default_model = cat.get("default_model")
-    if default_model not in ids:
-        errs.append("default_model_invalid: %r" % default_model)
-    env_model = os.environ.get("DROID_DSH_BRIDGE_MODEL", "").strip()
-    if env_model and env_model not in ids:
-        errs.append("env DROID_DSH_BRIDGE_MODEL вне каталога: %r" % env_model)
-    limits = cat.get("image_limits")
-    if not isinstance(limits, dict):
-        errs.append("image_limits: блок отсутствует")
-    else:
-        for key in (
-            "max_images",
-            "max_image_bytes",
-            "max_total_image_bytes",
-            "max_body_bytes",
-        ):
-            if not isinstance(limits.get(key), int) or limits[key] <= 0:
-                errs.append("image_limits.%s: не положительное целое" % key)
-        types = limits.get("types")
-        if not isinstance(types, list) or not types or set(types) - {"image/png"}:
-            errs.append(
-                "image_limits.types: %r (ожидается непустое подмножество image/png)"
-                % types
-            )
-    admission = cat.get("admission")
-    if not isinstance(admission, dict):
-        errs.append("admission: блок отсутствует")
-    else:
-        for key in ("max_http_connections", "max_inflight_body_bytes"):
-            if not isinstance(admission.get(key), int) or admission[key] <= 0:
-                errs.append("admission.%s: не положительное целое" % key)
-    policy_ref = cat.get("policy_ref")
-    if not isinstance(policy_ref, dict) or not re.fullmatch(
-        r"[0-9a-f]{64}", str(policy_ref.get("sha256", ""))
-    ):
-        errs.append("policy_ref.sha256: отсутствует или не hex64")
-    technical = cat.get("technical_ref")
-    if not isinstance(technical, dict) or not technical.get("droid_binary_path"):
-        errs.append("technical_ref.droid_binary_path: отсутствует")
+    ids = [model["id"] for model in cat["models"]]
+    # Класс III — операционный census, не второй структурный валидатор:
+    # частичный proof допустим на старте, но не при публикации image-профилей.
+    for model in cat["models"]:
+        images = model["images"]
+        if images["status"] == "confirmed":
+            proof = images["proof"]
+            if sorted(proof["efforts_proven"]) != sorted(model["efforts"]):
+                errs.append("класс III (efforts_proven != efforts): " + model["id"])
     report.add(
         "catalogue", errs, {"models": ids, "schema_version": cat.get("schema_version")}
     )
@@ -821,6 +714,7 @@ def main(argv=None):
         cat = {}
     else:
         check_catalogue(cat, report)
+    if report.ok:
         cat = droid_scope(
             cat
         )  # дальше — проверки Droid-флота и профилей DSH (Muse — вне их области)

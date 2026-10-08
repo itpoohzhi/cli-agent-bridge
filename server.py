@@ -60,6 +60,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from dataclasses import asdict
 from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parent
@@ -80,7 +81,12 @@ from receipt_schema import (  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from core.backend_adapter import (  # noqa: E402
     AdapterRegistry,
-    backend_entry_error,
+    FleetViolation,
+    ImageAttachment,
+    Transcript,
+    TranscriptItem,
+    TurnContext,
+    build_catalog,
 )
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
@@ -155,293 +161,11 @@ IMAGE_EXTENSIONS = {
 }
 
 
-class FleetViolation(Exception):
-    """Структурное нарушение каталога (класс I): отказ старта."""
-
-    def __init__(self, reason: str, model: str = "-"):
-        super().__init__(reason)
-        self.reason = reason
-        self.model = model or "-"
-
-
-def _validate_proof(model_id: str, images: dict, method: str, efforts: list) -> None:
-    """Форма proof у confirmed-модели (класс I: confirmed_proof_malformed и др.)."""
-    proof = images.get("proof")
-    if proof is None:
-        raise FleetViolation("confirmed_proof_missing", model_id)
-    if not isinstance(proof, dict):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    for key in (
-        "droid_version",
-        "droid_binary_sha256",
-        "method",
-        "impl_version",
-        "formats",
-    ):
-        if key not in proof:
-            raise FleetViolation("confirmed_proof_malformed", model_id)
-    if not isinstance(proof.get("droid_version"), str) or not isinstance(
-        proof.get("droid_binary_sha256"), str
-    ):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("droid_binary_sha256") or "")):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if proof.get("method") != method:
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if not isinstance(proof.get("impl_version"), int) or isinstance(
-        proof.get("impl_version"), bool
-    ):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    formats = proof.get("formats")
-    if not isinstance(formats, list) or not all(isinstance(f, str) for f in formats):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    proven = proof.get("efforts_proven")
-    if not isinstance(proven, list) or not all(isinstance(p, str) for p in proven):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if not proven or len(set(proven)) != len(proven):
-        raise FleetViolation("confirmed_efforts_proven_invalid", model_id)
-    if any(p not in efforts for p in proven):
-        raise FleetViolation("confirmed_efforts_proven_invalid", model_id)
-
-
-_FLEET_TOP_KEYS = frozenset(
-    {
-        "schema_version",
-        "catalogue",
-        "default_model",
-        "policy_ref",
-        "technical_ref",
-        "image_limits",
-        "admission",
-        "backends",
-        "models",
-    }
-)
-_FLEET_MODEL_KEYS = frozenset(
-    {
-        "id",
-        "backend",
-        "name",
-        "efforts",
-        "default_effort",
-        "context_window",
-        "max_tokens",
-        "input",
-        "images",
-        "policy_lines",
-    }
-)
-# schema 2 = единственный неявный бэкенд droid (поведение прежнее, откат конфигурации без смены кода).
-_IMPLICIT_DROID_BACKEND = {
-    "kind": "droid",
-    "enabled": True,
-    "required": True,
-    "owned_by": "factory-droid",
-    "max_concurrent": 4,
-}
-
-
-def _build_backends(data: dict, schema: int) -> tuple:
-    """Секция `backends` каталога (класс I) -> ({id: нормализованная запись}, порядок id).
-
-    schema 2: секции нет (её появление — отказ), неявный бэкенд droid. schema 3: словарь
-    `id -> запись`; kind только из реестра в коде (`ADAPTER_KINDS`), полная проверка записи —
-    общей `backend_entry_error` (тот же код в `fleet_check`, RW-005): вложенные типы
-    (`technical_ref` с комплектным pin, wrapper, proxy_port), флаги, `max_concurrent` и
-    неизвестные ключи отвергаются ДО регистрации адаптера, а не падением на `.get()`.
-    """
-    if schema == 2:
-        if "backends" in data:
-            raise FleetViolation("backends_in_schema_2", "-")
-        return {"droid": dict(_IMPLICIT_DROID_BACKEND)}, ["droid"]
-    if set(data) - _FLEET_TOP_KEYS:
-        raise FleetViolation("fleet_key_unknown", "-")
-    raw = data.get("backends")
-    if not isinstance(raw, dict) or not raw:
-        raise FleetViolation("backends_invalid", "-")
-    backends: dict = {}
-    for backend_id, entry in raw.items():
-        reason = backend_entry_error(backend_id, entry, ADAPTER_KINDS)
-        if reason:
-            raise FleetViolation(reason, str(backend_id))
-        enabled = entry.get("enabled", True)
-        required = entry.get("required", False)
-        normalized = {
-            key: value
-            for key, value in entry.items()
-            if key not in ("enabled", "required")
-        }
-        normalized.update(
-            enabled=enabled,
-            required=required,
-            owned_by=entry.get("owned_by") or backend_id,
-            max_concurrent=entry.get("max_concurrent", 1),
-        )
-        backends[backend_id] = normalized
-    if not any(b["enabled"] for b in backends.values()):
-        raise FleetViolation("backends_none_enabled", "-")
-    return backends, list(backends)
-
-
 def _build_catalog(data: Any) -> dict:
-    """Проверить каталог (C-01, класс I) и вернуть нормализованный словарь."""
-    if not isinstance(data, dict):
-        raise FleetViolation("fleet_unreadable", "-")
-    schema = data.get("schema_version")
-    if isinstance(schema, bool) or schema not in (2, 3):
-        raise FleetViolation("schema_version_invalid", "-")
-    backends, backend_order = _build_backends(data, schema)
-    limits = data.get("image_limits")
-    if not isinstance(limits, dict):
-        raise FleetViolation("limits_invalid", "-")
-    for key in (
-        "max_images",
-        "max_image_bytes",
-        "max_total_image_bytes",
-        "max_body_bytes",
-    ):
-        if (
-            not isinstance(limits.get(key), int)
-            or isinstance(limits.get(key), bool)
-            or limits[key] <= 0
-        ):
-            raise FleetViolation("limits_invalid", "-")
-    if not isinstance(limits.get("types"), list) or not limits["types"]:
-        raise FleetViolation("limits_invalid", "-")
-    admission = data.get("admission")
-    if not isinstance(admission, dict):
-        raise FleetViolation("admission_invalid", "-")
-    for key in ("max_http_connections", "max_inflight_body_bytes"):
-        if (
-            not isinstance(admission.get(key), int)
-            or isinstance(admission.get(key), bool)
-            or admission[key] <= 0
-        ):
-            raise FleetViolation("admission_invalid", "-")
-    raw_models = data.get("models")
-    if not isinstance(raw_models, list) or not raw_models:
-        raise FleetViolation("models_invalid", "-")
-    models = {}
-    order = []
-    seen: set = set()
-    for item in raw_models:
-        if not isinstance(item, dict):
-            raise FleetViolation("model_invalid", "-")
-        mid = item.get("id")
-        if not isinstance(mid, str) or not mid:
-            raise FleetViolation("model_invalid", "-")
-        if mid in seen:
-            raise FleetViolation("duplicate_id", mid)
-        seen.add(mid)
-        if schema == 3:
-            if set(item) - _FLEET_MODEL_KEYS:
-                raise FleetViolation("model_key_unknown", mid)
-            backend_id = item.get("backend")
-            if not isinstance(backend_id, str) or backend_id not in backends:
-                raise FleetViolation("model_backend_unknown", mid)
-        else:
-            backend_id = "droid"
-        efforts = item.get("efforts")
-        if (
-            not isinstance(efforts, list)
-            or not efforts
-            or not all(isinstance(e, str) for e in efforts)
-            or any(e not in EFFORT_LEVELS for e in efforts)
-        ):
-            raise FleetViolation("efforts_invalid", mid)
-        if item.get("default_effort") not in efforts:
-            raise FleetViolation("default_effort_invalid", mid)
-        images = item.get("images")
-        if not isinstance(images, dict):
-            raise FleetViolation("status_invalid", mid)
-        status = images.get("status")
-        if status not in IMAGE_STATUSES:
-            raise FleetViolation("status_invalid", mid)
-        input_types = item.get("input")
-        if not isinstance(input_types, list) or not all(
-            isinstance(t, str) for t in input_types
-        ):
-            raise FleetViolation("status_inconsistent", mid)
-        if (
-            images.get("cli_registry") == "explicit_unsupported"
-            and status != "unsupported"
-        ):
-            raise FleetViolation("status_inconsistent", mid)
-        if status in ("unsupported", "unverified"):
-            if images.get("method") is not None or input_types != ["text"]:
-                raise FleetViolation("status_inconsistent", mid)
-        if status == "confirmed":
-            method = images.get("method")
-            if method is None:
-                raise FleetViolation("confirmed_method_missing", mid)
-            if "image" not in input_types or "text" not in input_types:
-                raise FleetViolation("confirmed_input_missing", mid)
-            _validate_proof(mid, images, method, efforts)
-        if status == "probe":
-            method = images.get("method")
-            if (
-                method is None
-                or "image" not in input_types
-                or "text" not in input_types
-            ):
-                raise FleetViolation("status_inconsistent", mid)
-            if not IMAGE_PROBE:
-                raise FleetViolation("probe_flag_missing", mid)
-        method = images.get("method")
-        if method is not None and method not in IMPLEMENTED_METHODS:
-            raise FleetViolation("method_not_implemented", mid)
-        if not backends[backend_id]["enabled"]:
-            continue  # модели выключенного бэкенда проверены, но не публикуются
-        models[mid] = {
-            "id": mid,
-            "backend": backend_id,
-            "name": str(item.get("name") or mid),
-            "efforts": [str(e) for e in efforts],
-            "default_effort": str(item["default_effort"]),
-            "context_window": int(item.get("context_window") or 0),
-            "input": [str(t) for t in input_types],
-            "images": {
-                "status": str(status),
-                "cli_registry": str(images.get("cli_registry") or ""),
-                "method": method,
-                "proof": images.get("proof"),
-            },
-        }
-        order.append(mid)
-    default_model = data.get("default_model")
-    if not isinstance(default_model, str) or default_model not in models:
-        raise FleetViolation("default_model_invalid", "-")
-    if ENV_MODEL and ENV_MODEL not in models:
-        raise FleetViolation("env_model_invalid", ENV_MODEL)
-    technical_ref = (
-        data.get("technical_ref") if isinstance(data.get("technical_ref"), dict) else {}
+    """Общий с fleet_check структурный валидатор; env/probe остаются настройками хоста."""
+    return build_catalog(
+        data, ADAPTER_KINDS, env_model=ENV_MODEL, image_probe=IMAGE_PROBE
     )
-    return {
-        "schema_version": data.get("schema_version"),
-        "catalogue": str(data.get("catalogue") or ""),
-        "default_model": default_model,
-        "backends": backends,
-        "backend_order": backend_order,
-        "order": order,
-        "models": models,
-        "image_limits": {
-            "max_images": int(limits["max_images"]),
-            "max_image_bytes": int(limits["max_image_bytes"]),
-            "max_total_image_bytes": int(limits["max_total_image_bytes"]),
-            "max_body_bytes": int(limits["max_body_bytes"]),
-            "types": [str(t) for t in limits["types"]],
-            "max_types": [str(t).lower() for t in limits["types"]],
-        },
-        "admission": {
-            "max_http_connections": int(admission["max_http_connections"]),
-            "max_inflight_body_bytes": int(admission["max_inflight_body_bytes"]),
-        },
-        "technical_ref": {
-            "droid_version": str(technical_ref.get("droid_version") or ""),
-            "droid_binary_sha256": str(technical_ref.get("droid_binary_sha256") or ""),
-            "droid_binary_path": str(technical_ref.get("droid_binary_path") or ""),
-        },
-    }
 
 
 def _load_fleet() -> dict:
@@ -1117,22 +841,92 @@ def reconcile_children() -> int:
         entries = _read_children()
     for entry in entries:
         pid = entry.get("pid")
+        pgid = entry.get("pgid", pid)
         sig = str(entry.get("start") or "")
-        if not isinstance(pid, int) or pid <= 1 or not sig:
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 1
+            or pgid != pid
+            or not sig
+        ):
             continue
-        if _proc_start_sig(pid) != sig:
+        leader_sig = _proc_start_sig(pid)
+        # Живой PID с другой подписью уже чужой: никакого fallback на stale pgid.
+        if leader_sig and leader_sig != sig:
+            continue
+        owned_pid = pid if leader_sig == sig else None
+        members: list = []
+        if owned_pid is None:
+            members = entry.get("members") or []
+            if not isinstance(members, list):
+                continue
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                mid = member.get("pid")
+                msig = member.get("start")
+                if (
+                    isinstance(mid, int)
+                    and not isinstance(mid, bool)
+                    and mid > 1
+                    and isinstance(msig, str)
+                    and msig
+                    and _proc_start_sig(mid) == msig
+                ):
+                    try:
+                        if os.getpgid(mid) == pgid:
+                            owned_pid = mid
+                            break
+                    except (ProcessLookupError, PermissionError):
+                        continue
+        if owned_pid is None:
             continue
         try:
-            if os.getpgid(pid) != pid:
+            if os.getpgid(owned_pid) != pgid:
                 continue
-            os.killpg(pid, signal.SIGKILL)
+            # Последняя сверка подписи непосредственно перед сигналом.
+            expected = (
+                sig
+                if owned_pid == pid
+                else next(m["start"] for m in members if m.get("pid") == owned_pid)
+            )
+            if _proc_start_sig(owned_pid) != expected:
+                continue
+            os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             continue
         killed += 1
         _log(f"session_rpc reconcile killed_orphan pid={pid}")
     with _children_lock:
         try:
-            _atomic_write(_children_path(), b"[]")
+            # После SIGKILL группа может ещё завершаться. Сохраняем подписанное владение,
+            # пока хотя бы собственный член жив: следующий restart повторит cleanup.
+            remaining = []
+            for entry in entries:
+                pgid = entry.get("pgid", entry.get("pid"))
+                identities = [{"pid": entry.get("pid"), "start": entry.get("start")}]
+                if isinstance(entry.get("members"), list):
+                    identities += entry["members"]
+                for identity in identities:
+                    if not isinstance(identity, dict):
+                        continue
+                    mid, msig = identity.get("pid"), identity.get("start")
+                    if (
+                        not isinstance(mid, int)
+                        or isinstance(mid, bool)
+                        or mid <= 1
+                        or not msig
+                        or _proc_start_sig(mid) != msig
+                    ):
+                        continue
+                    try:
+                        if os.getpgid(mid) == pgid:
+                            remaining.append(entry)
+                            break
+                    except (ProcessLookupError, PermissionError):
+                        continue
+            _atomic_write(_children_path(), json.dumps(remaining).encode())
         except OSError as exc:
             _log(
                 f"session_rpc children_registry_write_failed err={_err_summary(exc, 80)!r}"
@@ -2793,7 +2587,7 @@ def _chat_known(route: str, raw_key: Any, adapter: Any = None) -> bool:
     """
     if route != "keyed" or adapter is None:
         return False
-    if adapter.capabilities.get("sessions") != "resident":
+    if adapter.capabilities.sessions != "resident":
         return False
     key_hash = _key_hash(raw_key)
     chat = REGISTRY.chats.get(key_hash)
@@ -4326,7 +4120,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/v1/models", "/models"):
             # Объединение моделей всех активных адаптеров; порядок — как в fleet.json, модель по умолчанию первой.
-            published = {m["id"]: (a, m) for a, m in BACKENDS.models()}
+            published = {m.id: (a, m) for a, m in BACKENDS.models()}
             order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
             data = []
             for mid in order:
@@ -4339,7 +4133,7 @@ class Handler(BaseHTTPRequestHandler):
                         "object": "model",
                         "owned_by": adapter.owned_by,
                         "created": 0,
-                        "context_length": model["context_window"],
+                        "context_length": model.context_window,
                     }
                 )
             self._send(200, {"object": "list", "data": data})
@@ -4720,12 +4514,43 @@ class Handler(BaseHTTPRequestHandler):
                 "tool_calls": [],
                 "events": [],
             }
-        ctx["handler"] = self
-        ctx["keepalive"] = keepalive
-        ctx["client_gone"] = lambda: _client_gone(self.connection)
+        transcript = ctx["rpc"]
+        turn = TurnContext(
+            **{
+                key: value for key, value in ctx.items() if key not in ("rpc", "images")
+            },
+            rpc=Transcript(
+                system=transcript["system"],
+                runnable=transcript["runnable"],
+                items=tuple(TranscriptItem(**item) for item in transcript["items"]),
+            ),
+            images=tuple(ImageAttachment(**image) for image in ctx["images"]),
+            handler=self,
+            keepalive=keepalive,
+            client_gone=lambda: _client_gone(self.connection),
+        )
         t0 = time.monotonic()
-        out = finalize_turn(adapter.execute_turn(ctx, None), ctx["emulate_tools"])
-        out.setdefault("backend_kind", adapter.kind)
+        result = finalize_turn(adapter.execute_turn(turn, None), turn.emulate_tools)
+        # Только локальный HTTP-буфер: межмодульный seam уже вернул DTO.
+        out = {
+            "state": result.state,
+            "rc": result.rc,
+            "text": result.text,
+            "err": result.err,
+            "usage": asdict(result.usage),
+            "result": {},
+            "tool_calls": [asdict(call) for call in result.tool_calls],
+            "events": [
+                (
+                    event.kind,
+                    asdict(event.value)
+                    if not isinstance(event.value, str)
+                    else event.value,
+                )
+                for event in result.events or ()
+            ],
+            "backend_kind": adapter.kind,
+        }
         if (
             adapter.kind != "droid"
         ):  # droid-путь пишет свои done/usage строки в _run_once

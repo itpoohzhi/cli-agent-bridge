@@ -1,6 +1,8 @@
 """fleet.json schema 3: парсинг backends, привязка моделей, совместимость со schema 2 (AC-001)."""
 
 import copy
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -51,12 +53,14 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
-        self.assertTrue(muse["enabled"])
+        self.assertFalse(muse["enabled"])
         self.assertEqual(muse["wrapper"], "~/.config/muse-launch/muse-cli.sh")
         self.assertEqual(muse["max_concurrent"], 1)  # RW-001: ходы muse сериализованы
 
     def test_models_are_bound_to_backends(self):
-        catalog = server._build_catalog(raw_v3())
+        data = raw_v3()
+        data["backends"]["muse"]["enabled"] = True
+        catalog = server._build_catalog(data)
         self.assertEqual(len(catalog["order"]), 8)
         for mid in DROID_MODELS:
             self.assertEqual(catalog["models"][mid]["backend"], "droid")
@@ -81,7 +85,7 @@ class TestLiveFleetV3(unittest.TestCase):
 
     def test_load_fleet_reads_schema_3_file(self):
         self.assertEqual(server.FLEET["schema_version"], 3)
-        self.assertEqual(len(server.FLEET["order"]), 8)
+        self.assertEqual(len(server.FLEET["order"]), 6)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -435,6 +439,73 @@ class TestFleetCheckParity(unittest.TestCase):
                 with self.assertRaises(server.FleetViolation) as caught:
                     server._build_catalog(data)
                 self.assertEqual(caught.exception.reason, reason, name)
+
+    def test_full_catalogue_fail_closed_parity(self):
+        cases = (
+            (lambda d: d.update(surprise=1), "fleet_key_unknown"),
+            (lambda d: d["models"][0].update(surprise=1), "model_key_unknown"),
+            (lambda d: d["models"][0].update(backend=[]), "model_backend_unknown"),
+            (
+                lambda d: (
+                    d["backends"]["muse"].update(enabled=True),
+                    d["backends"]["droid"].update(enabled=False),
+                ),
+                "default_model_invalid",
+            ),
+            (
+                lambda d: [b.update(enabled=False) for b in d["backends"].values()],
+                "backends_none_enabled",
+            ),
+            (
+                lambda d: d["backends"]["muse"].update(
+                    tool_policy={"disable_shell": True}
+                ),
+                "backend_key_unknown",
+            ),
+            (
+                lambda d: d["backends"]["muse"].update(transport=[]),
+                "backend_key_unknown",
+            ),
+            (
+                lambda d: d["backends"]["muse"].update(max_concurrent=2),
+                "backend_muse_max_concurrent_invalid",
+            ),
+        )
+        for mutate, reason in cases:
+            with self.subTest(reason=reason):
+                data = raw_v3()
+                mutate(data)
+                errors = self.catalogue_errors(data)
+                self.assertTrue(any(reason in e for e in errors), errors)
+                with self.assertRaises(server.FleetViolation) as caught:
+                    server._build_catalog(data)
+                self.assertEqual(caught.exception.reason, reason)
+        data = to_schema_2(raw_v3())
+        data["backends"] = None
+        self.assertTrue(
+            any("backends_in_schema_2" in e for e in self.catalogue_errors(data))
+        )
+        with self.assertRaises(server.FleetViolation):
+            server._build_catalog(data)
+
+    def test_mainline_muse_is_dark(self):
+        data = raw_v3()
+        self.assertFalse(data["backends"]["muse"]["enabled"])
+        self.assertEqual(server._build_catalog(data)["order"], list(DROID_MODELS))
+
+    def test_checker_main_returns_structured_error_for_invalid_model(self):
+        data = raw_v3()
+        data["models"][0] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "invalid.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = self.fleet_check.main(["--catalogue", str(path)])
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertIn("model_invalid", result["checks"][0]["errors"][0])
 
 
 if __name__ == "__main__":
