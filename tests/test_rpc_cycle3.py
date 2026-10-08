@@ -51,7 +51,10 @@ class GuardCase(RpcCase):
         self.fs = build_snapshot_fs(self.root)
         cwds = self.fs["cwds"]
         default = tuple((label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW"))
+        user_global = self.root / "user-global-AGENTS.md"
+        user_global.symlink_to(self.fs["canon"])  # как на стенде владельца: ~/.dsh/AGENTS.md -> канон
         for patcher in (mock.patch.object(b_guard, "KB_CWD", str(cwds["KB"])),
+                        mock.patch.object(b_guard, "UG_PATH", str(user_global)),
                         mock.patch.object(b_guard, "DEFAULT_CWDS", default)):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -120,13 +123,13 @@ class TestGuardGate(GuardCase):
     """RW-001: небезопасный профиль не даёт немого 400 живому трафику; новые чаты — управляемый отказ."""
 
     def test_rw001_unsafe_guard_refuses_new_chat_with_block_before_spawn(self):
-        """RW-001: unsafe + новый чат с блоком -> 400 REQ003_SIZE_EXCEEDED до spawn/add, в журнале gate-alert."""
+        """RW-001: unsafe + новый чат с блоком -> 503 launcher_unavailable до spawn/add, в журнале gate-alert."""
         self.write_profile(262144)
         server.GUARD.check_once()
         with self.capture_logs() as lines:
             status, body = self.block_ask("chat-new")
-        self.assertEqual(status, 400, body)
-        self.assertEqual(body["error"]["type"], "REQ003_SIZE_EXCEEDED")
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"]["type"], "launcher_unavailable")
         self.assertIn("guard", body["error"]["message"])
         self.assertEqual(self.hub.spawns(), [])
         self.assertEqual(self.hub.rpcs("droid.add_user_message"), [])
@@ -154,13 +157,13 @@ class TestGuardGate(GuardCase):
             self.assertEqual(status, 200, body)
 
     def test_rw001_canon_only_block_over_60000_is_refused(self):
-        """RW-001: форма «только канон» (KB/DW) сверх 60 000 Б — 400 до spawn/add даже при ok-профиле."""
+        """RW-001: форма «только канон» (KB/DW) сверх 60 000 Б — 503 до spawn/add даже при ok-профиле."""
         self.write_profile(106496)
         server.GUARD.check_once()
         canon_text = self.fs["canon"].read_text(encoding="utf-8")
         status, body = _ask(self, "chat-kb", "hello", HEAD + canon_text + "\n" + HEAD + canon_text)
-        self.assertEqual(status, 400, body)
-        self.assertEqual(body["error"]["type"], "REQ003_SIZE_EXCEEDED")
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"]["type"], "launcher_unavailable")
         self.assertEqual(self.hub.spawns(), [])
 
 
@@ -187,10 +190,10 @@ class TestInstructionScan(RpcCase):
         self.assertEqual(len(server._instr_blocks([msg(text)])), 1)
 
     def test_rw002_oversized_second_block_refused_before_spawn(self):
-        """RW-002: малый первый блок + второй 60 001 Б (канон) -> 400 до spawn/add."""
+        """RW-002: малый первый блок + второй 60 001 Б (канон) -> 503 до spawn/add."""
         big = self.canon_block(60001)
         status, body = _ask(self, "chat-two", "hello", HEAD + "tiny", big)
-        self.assertEqual(status, 400, body)
+        self.assertEqual(status, 503, body)
         self.assertEqual(self.hub.spawns(), [])
         self.assertEqual(self.hub.rpcs("droid.add_user_message"), [])
 

@@ -41,6 +41,7 @@ import base64
 import binascii
 import collections
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -63,6 +64,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
 import b_guard  # noqa: E402  - охранник B: автоматический контур профилей DSH (RW-003)
+from receipt_schema import (  # noqa: E402
+    RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE, TOOLS_POLICY,
+    settings_profile_digest, tools_policy_digest)
 HOME = Path.home()
 HOST = os.environ.get("DROID_DSH_BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("DROID_DSH_BRIDGE_PORT", "9882"))
@@ -336,7 +340,6 @@ TITLE_SYSTEM_PREFIX = ("Create a concise title for an AI coding-assistant sessio
                        "from the supplied human messages.")
 TITLE_USER_PREFIX = "Generate the session title from this JSON array of human messages:"
 TITLE_MAX_TOKENS = 64
-RPC_API_VERSION = "1.0.0"
 # Допуск Droid-бинаря (AD-010, RW-007): spawn только по receipt квалификации неизменяемого
 # образа; `DROID_DSH_BRIDGE_RECEIPT_REQUIRED=0` отключает gate (только стенд/разработка).
 RECEIPT_REQUIRED = os.environ.get("DROID_DSH_BRIDGE_RECEIPT_REQUIRED", "1") != "0"
@@ -349,6 +352,9 @@ MAX_STDERR_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_STDERR_BYTES", str(64 <<
 # ограничена MAX_INBOX_BYTES + одной строкой.
 MAX_INBOX_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_INBOX_BYTES", str(4 << 20)))
 MAX_TURN_TEXT_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_TURN_TEXT_BYTES", str(10 << 20)))
+# Структурный предел строки RPC: число `{`/`[` вне строк. Строка из миллионов пустых объектов укладывается
+# в MAX_RPC_LINE_BYTES, но json.loads раздул бы её в сотни МиБ объектов (RW-014): отклоняется до разбора.
+MAX_JSON_STRUCT_TOKENS = int(os.environ.get("DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS", str(200_000)))
 # Условная стоимость записи/слота в бюджетах: поток пустых сообщений тоже упирается в лимит.
 ENTRY_OVERHEAD_BYTES = 64
 # Кусок вывода при сериализации ответа клиенту (JSON/SSE выдаются порциями, без второй полной копии).
@@ -463,28 +469,7 @@ def _receipt_path() -> Path:
 
 # Квалификационный receipt (RW-009): четвёрка «образ + протокол + политика tools + профиль настроек».
 # Любое расхождение с ожиданиями моста запрещает spawn до новой квалификации (tools/droid_image.py).
-RECEIPT_SCHEMA = 2
-TOOLS_POLICY = "disable-all-listed-keep-read-for-images"
-SETTINGS_PROFILE = {"disableBuiltinSkills": True, "autoRejectPermissionRequests": True,
-                    "interactionMode": "auto"}
-RECEIPT_PROBES = ("spawn", "update", "load")
-
-
-def _json_digest(obj: Any) -> str:
-    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"),
-                                     ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def tools_policy_digest(disabled_ids: list) -> str:
-    """Отпечаток политики tools: идентификатор политики + набор отключённых id (читают мост и установщик)."""
-    return _json_digest({"policy": TOOLS_POLICY, "disabled_tool_ids": sorted(map(str, disabled_ids))})
-
-
-def settings_profile_digest() -> str:
-    """Отпечаток профиля настроек сессии, который мост выставляет и проверяет read-back'ом."""
-    return _json_digest(SETTINGS_PROFILE)
-
-
+# Константы и отпечатки живут в tools/receipt_schema.py: их делят мост и установщик (RW-013).
 def _check_receipt_quad(rec: dict) -> None:
     """Проверка протокола, политики tools и профиля настроек receipt; расхождение — LauncherUnavailable."""
     protocol = rec.get("protocol")
@@ -1080,7 +1065,10 @@ def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
             args=(proc, {"mode": "graceful", "graceful_wait": grace * 0.45,
                          "term_wait": grace * 0.2, "kill_wait": grace * 0.15}),
             daemon=True)
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError:
+            continue  # поток не создан: этого ребёнка добивает force_kill ниже, остальные закрываются как обычно
         threads.append(thread)
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
@@ -1285,6 +1273,18 @@ def acquire_writer_lock() -> Any:
     return handle
 
 
+_JSON_STRING = re.compile(rb'"(?:[^"\\]|\\.)*"', re.DOTALL)
+
+
+def _struct_flood(raw: bytes) -> bool:
+    """Строка содержит больше MAX_JSON_STRUCT_TOKENS открывающих `{`/`[` вне строковых литералов."""
+    limit = MAX_JSON_STRUCT_TOKENS
+    if raw.count(b"{") + raw.count(b"[") <= limit:
+        return False  # быстрый путь: верхняя оценка уже в пределах
+    bare = _JSON_STRING.sub(b'""', raw)
+    return bare.count(b"{") + bare.count(b"[") > limit
+
+
 class RpcProcess:
     """Один долгоживущий `droid exec` в режиме stream-jsonrpc.
 
@@ -1422,9 +1422,12 @@ class RpcProcess:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("{"):
                     continue  # шум лончера/preflight, как и раньше
+                if _struct_flood(raw):
+                    self._put_error("bad_json", f"rpc line exceeds {MAX_JSON_STRUCT_TOKENS} structural tokens")
+                    continue
                 try:
                     msg = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):  # глубокая вложенность: ошибка хода, а не гибель читателя
                     self._put_error("bad_json", line[:200])
                     continue
                 if not isinstance(msg, dict):
@@ -2014,6 +2017,17 @@ def _persist_chat(chat: Chat) -> bool:
         return False
 
 
+def _write_pending(chat: Chat, sid: str) -> None:
+    """PENDING нового SID до первого add_user_message: не записан — ход не стартует (RpcError -> 502)."""
+    chat.sid = sid
+    try:
+        _write_record(chat, "PENDING")
+    except (OSError, StateConflict, ValueError, TypeError) as exc:
+        chat.state = "DIRTY"
+        _log(f"session_rpc chat={chat.key_hash[:8]} persist_failed err={_err_summary(exc, 120)!r}")
+        raise RpcError("chat state is not writable")
+
+
 class ChatRegistry:
     """Реестр чатов: индекс O(1) по sha256(namespace+ключ), реапер idle, вытеснение LRU."""
 
@@ -2168,6 +2182,17 @@ def _message_text(message: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def _message_thinking(message: Any) -> str:
+    """Текст thinking-блоков сообщения droid."""
+    content = message.get("content") if isinstance(message, dict) else None
+    parts = []
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                parts.append(str(block.get("thinking") or ""))
+    return "\n".join(p for p in parts if p)
+
+
 def _is_service_message(message: Any) -> bool:
     """Служебные вставки droid (system-reminder, каталог tools) в проверку истории не входят."""
     text = _message_text(message).lstrip()
@@ -2289,6 +2314,8 @@ def _is_title_request(messages: list, tools: list, req: dict) -> bool:
 
 _SECTION_RE = re.compile(r"^Instructions from: (.*)$", re.M)
 _canon_cache: dict = {"key": None, "digest": ""}
+# Дайджесты канонов, виденных процессом: блок со старой копией канона остаётся KB-формой и после правки канона.
+_canon_seen: collections.deque = collections.deque(maxlen=8)
 
 
 def _canon_digest() -> str:
@@ -2304,12 +2331,14 @@ def _canon_digest() -> str:
         return ""
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     _canon_cache.update(key=key, digest=digest)
+    if digest not in _canon_seen:
+        _canon_seen.append(digest)
     return digest
 
 
 def _block_is_canon_only(text: str) -> bool:
     """Все секции блока — копии канона: форма KB/DW, к которой применим жёсткий предел REQ-003."""
-    canon = _canon_digest()
+    canon = {_canon_digest(), *_canon_seen} - {""}
     heads = list(_SECTION_RE.finditer(text))
     if not canon or not heads:
         return False
@@ -2318,13 +2347,24 @@ def _block_is_canon_only(text: str) -> bool:
         body = text[head.end():end].strip()
         if body.endswith("</system-reminder>"):
             body = body[:-len("</system-reminder>")]
-        if hashlib.sha256(body.strip().encode("utf-8")).hexdigest() != canon:
+        if hashlib.sha256(body.strip().encode("utf-8")).hexdigest() not in canon:
             return False
     return True
 
 
-def _instr_blocks(messages: list) -> list:
+def _in_kb_cwd(cwd: str) -> bool:
+    """cwd запроса — KB (или каталог внутри): там предел REQ-003 жёсткий независимо от состава блока."""
+    if not cwd:
+        return False
+    real = os.path.realpath(cwd)
+    root = os.path.realpath(b_guard.KB_CWD)
+    return real == root or real.startswith(root + os.sep)
+
+
+def _instr_blocks(messages: list, kb_cwd: bool = False) -> list:
     """ВСЕ блоки agent-instructions входящих messages: [{bytes, sections, omitted, canon_only}].
+
+    canon_only — форма KB: cwd запроса = KB либо блок целиком из копий канона (текущего или виденного ранее).
 
     Маркер ищется по всему тексту user-сообщения (без ограничения префиксом), блоков может быть несколько
     (baseline старого разговора плюс новый): каждый проверяется отдельно.
@@ -2341,13 +2381,13 @@ def _instr_blocks(messages: list) -> list:
         if found:
             omitted = found.group(1).strip()
         blocks.append({"bytes": len(text.encode("utf-8")), "sections": len(_SECTION_RE.findall(text)),
-                       "omitted": omitted, "canon_only": _block_is_canon_only(text)})
+                       "omitted": omitted, "canon_only": kb_cwd or _block_is_canon_only(text)})
     return blocks
 
 
-def _instr_scan(messages: list) -> tuple:
+def _instr_scan(messages: list, kb_cwd: bool = False) -> tuple:
     """Крупнейший блок agent-instructions входящих messages: (секций, omitted, байт); нет блоков — (0, "-", 0)."""
-    blocks = _instr_blocks(messages)
+    blocks = _instr_blocks(messages, kb_cwd)
     if not blocks:
         return 0, "-", 0
     top = max(blocks, key=lambda b: b["bytes"])
@@ -2398,18 +2438,23 @@ class InstructionGuard:
         self.max_bytes: int | None = None
         self.checked = 0.0
         self._alerted: tuple | None = None
+        self._had_profiles = False  # профили DSH уже наблюдались: их исчезновение — unsafe, а не unknown
         self._thread: threading.Thread | None = None
 
     def snapshot(self) -> tuple:
         with self.lock:
             return self.state, list(self.reasons), self.max_bytes
 
-    @staticmethod
-    def _evaluate() -> tuple:
+    def _evaluate(self) -> tuple:
+        """(состояние, причины, maxBytes, предупреждения b_guard)."""
         profiles = b_guard.find_profiles(GUARD_PROFILES_DIR)
         if not profiles:
-            return "unknown", ["PROFILES_NOT_FOUND"], None
+            if self._had_profiles:
+                return "unsafe", ["PROFILES_LOST: profile directory disappeared after it was verified"], None, []
+            return "unknown", ["PROFILES_NOT_FOUND"], None, []
+        self._had_profiles = True
         reasons: list = []
+        warnings: list = []
         unsafe = False
         known: list = []
         for name, _path, maxbytes in profiles:
@@ -2425,21 +2470,25 @@ class InstructionGuard:
             elif result.exit_code == 2:
                 reasons.extend(f"profile={name} {reason.split(':')[0]}" for reason in result.reasons)
                 unsafe = True
-        return ("unsafe" if unsafe else "ok"), reasons, (min(known) if known else None)
+            elif result.exit_code == 1:
+                warnings.extend(f"profile={name} {reason}" for reason in result.reasons)
+        return ("unsafe" if unsafe else "ok"), reasons, (min(known) if known else None), warnings
 
     def check_once(self) -> str:
         """Один проход контура; alert пишется при смене состояния/причин, а не на каждом тике."""
         try:
-            state, reasons, max_bytes = self._evaluate()
+            state, reasons, max_bytes, warnings = self._evaluate()
         except OSError as exc:
-            state, reasons, max_bytes = "unsafe", [f"GUARD_CHECK_FAILED {_err_summary(exc, 80)}"], None
+            state, reasons, max_bytes, warnings = "unsafe", [f"GUARD_CHECK_FAILED {_err_summary(exc, 80)}"], None, []
         with self.lock:
             self.state, self.reasons, self.max_bytes = state, reasons, max_bytes
             self.checked = time.time()
-            changed = (state, tuple(reasons)) != self._alerted
-            self._alerted = (state, tuple(reasons))
-        if changed and (state != "ok" or reasons):
-            _log(f"instr_guard_alert state={state} reasons={'; '.join(reasons)[:300]!r} max_bytes={max_bytes}")
+            changed = (state, tuple(reasons), tuple(warnings)) != self._alerted
+            self._alerted = (state, tuple(reasons), tuple(warnings))
+        if changed and (state != "ok" or reasons or warnings):
+            # Предупреждения (запас ниже порога, риск oracle строки) не отказ, но видны в журнале владельцу.
+            _log(f"instr_guard_alert state={state} warnings={len(warnings)} "
+                 f"reasons={'; '.join(reasons + warnings)[:300]!r} max_bytes={max_bytes}")
         elif changed:
             _log(f"guard_state state=ok max_bytes={max_bytes}")
         return state
@@ -2503,6 +2552,9 @@ class Run:
         self._acc_bytes = 0  # накопленный text/thinking/метаданные хода (бюджет MAX_TURN_TEXT_BYTES)
         self.active_turn = ""  # id user-сообщения текущего хода: у реального droid он же turnId терминала
         self._foreign_mids: set = set()  # сообщения прежних ходов, попавшие в поток после arming
+        self._own: set = set()  # подтверждённые id хода: user-сообщение и собственные assistant (цепочка parentId)
+        self._held: dict = {}  # события ещё не подтверждённого mid (дельты раньше create_message): mid -> [(type, note, size)]
+        self._held_bytes = 0
         self._last_error = ""
         self._quarantined = 0
         self.thread = threading.Thread(target=self._work, daemon=True)
@@ -2572,8 +2624,11 @@ class Run:
                 self._initialize(proc)
         assert proc is not None
         proc.busy = True
-        self._send_items(proc, items)
-        self._consume(proc)
+        before_add = plan.get("before_add")
+        if before_add is not None:
+            before_add(self.sid)
+        if not self._send_items(proc, items):
+            self._consume(proc)
 
     def _check_settings(self, settings: Any) -> None:
         """Read-back фактических model/effort/autonomy: молча не подменяем (F-214)."""
@@ -2747,9 +2802,13 @@ class Run:
             return False
         return True
 
-    def _send_items(self, proc: RpcProcess, items: list) -> None:
-        """Все входы кроме последнего — skipAgentLoop, последний запускает ровно один цикл."""
+    def _send_items(self, proc: RpcProcess, items: list) -> bool:
+        """Все входы кроме последнего — skipAgentLoop, последний запускает ровно один цикл.
+
+        True — terminal хода уже получен до ACK (событие лежало в stash): ожидание и interrupt не нужны.
+        """
         last = len(items) - 1
+        done = False
         for index, item in enumerate(items):
             params = {"text": item["text"]}
             if item["role"] == "assistant":
@@ -2762,11 +2821,14 @@ class Run:
                 self.turn_req_id = proc.new_id()
                 self.sent = True
                 _, stash = proc.call("droid.add_user_message", params, self.cancel, rid=self.turn_req_id)
-                self._absorb(stash)
+                done = self._absorb(stash)
+        return done
 
-    def _absorb(self, stash: list) -> None:
+    def _absorb(self, stash: list) -> bool:
         for params in stash:
-            self._on_notif(params)
+            if self._on_notif(params):
+                return True
+        return False
 
     def _consume(self, proc: RpcProcess) -> None:
         grace_end = 0.0
@@ -2799,13 +2861,18 @@ class Run:
     def _slot_for(self, mid: str) -> dict:
         if mid not in self._msgs:
             self._charge(ENTRY_OVERHEAD_BYTES)  # пустые сообщения тоже расходуют бюджет хода
-            self._msgs[mid] = {"text": "", "thinking": "", "tb": 0, "kb": 0, "acc": ENTRY_OVERHEAD_BYTES}
+            # tb/kb — текущий размер, tc/kc — максимум уже учтённого в бюджете (короткий complete его не снижает)
+            self._msgs[mid] = {"text": "", "thinking": "", "tb": 0, "kb": 0, "tc": 0, "kc": 0,
+                               "acc": ENTRY_OVERHEAD_BYTES}
             self._order.append(mid)
         return self._msgs[mid]
 
     def _progress(self) -> None:
         self.last_progress = time.monotonic()
         self.got_event = True
+
+    _MID_EVENTS = ("assistant_text_delta", "assistant_text_complete", "thinking_text_delta",
+                   "thinking_text_complete", "assistant_message_retracted")
 
     def _on_notif(self, params: Any) -> bool:
         """True — получен terminal ТЕКУЩЕГО хода (события опубликованы)."""
@@ -2822,33 +2889,7 @@ class Run:
         ntype = note.get("type")
         mid = str(note.get("messageId") or "")
         if ntype == "create_message":
-            message = note.get("message") if isinstance(note.get("message"), dict) else {}
-            role = message.get("role")
-            if not _is_service_message(message):
-                counted_id = mid or str(message.get("id") or "")
-                if not counted_id or counted_id not in self._counted:
-                    self.droid_real += 1
-                    if counted_id:
-                        self._charge(ENTRY_OVERHEAD_BYTES + len(counted_id))
-                        self._counted.add(counted_id)
-            if role == "user" and note.get("requestId") == self.turn_req_id and self.turn_req_id:
-                self.armed = True
-                # У реального droid turnId терминала равен id user-сообщения, запустившего ход.
-                self.active_turn = str(message.get("id") or mid or "")
-                self._progress()
-            elif role == "assistant" and self.armed:
-                mid = mid or str(message.get("id") or "")
-                parent = str(message.get("parentId") or "")
-                if self._is_foreign_mid(mid) or self._is_foreign_parent(parent):
-                    self._drop_foreign(mid)  # сообщение прежнего хода, пришедшее после arming
-                    return False
-                slot = self._slot_for(mid) if mid else None
-                if slot is not None and not slot["text"]:
-                    text = _message_text(message)
-                    slot["text"] = text
-                    slot["tb"] = len(text.encode("utf-8"))
-                    self._charge(slot["tb"], slot)
-                self._progress()
+            self._on_create(note, mid)
             return False
         if not self.armed:
             return False  # запоздавшее событие прежнего хода
@@ -2864,13 +2905,83 @@ class Run:
         if mid and self._is_foreign_mid(mid):
             self._quarantined += 1
             return False
+        if mid and ntype in self._MID_EVENTS and mid not in self._own:
+            # Сообщение не подтверждено цепочкой parentId: прогресса, слота и текста нет, событие ждёт свой create.
+            self._hold(mid, ntype, note)
+            return False
         self._progress()
+        self._apply(ntype, mid, note)
+        return False
+
+    def _on_create(self, note: dict, mid: str) -> None:
+        message = note.get("message") if isinstance(note.get("message"), dict) else {}
+        role = message.get("role")
+        counted_id = mid or str(message.get("id") or "")
+        if role == "assistant":
+            parent = str(message.get("parentId") or "")
+            if (self._is_foreign_mid(counted_id) or self._is_foreign_parent(parent)
+                    or (self.armed and (not counted_id or parent not in self._own))):
+                self._drop_foreign(counted_id)  # прежний ход или неподтверждённая цепочка: не наш и не в истории хода
+                return
+            if self.armed:
+                self._own.add(counted_id)
+        if not _is_service_message(message) and (not counted_id or counted_id not in self._counted):
+            self.droid_real += 1
+            if counted_id:
+                self._charge(ENTRY_OVERHEAD_BYTES + len(counted_id))
+                self._counted.add(counted_id)
+        if role == "user" and note.get("requestId") == self.turn_req_id and self.turn_req_id:
+            self.armed = True
+            # У реального droid turnId терминала равен id user-сообщения, запустившего ход.
+            self.active_turn = str(message.get("id") or mid or "")
+            if self.active_turn:
+                self._own.add(self.active_turn)
+            self._progress()
+        elif role == "assistant" and self.armed:
+            slot = self._slot_for(counted_id)
+            self._release_held(counted_id)
+            if not slot["text"]:
+                self._set_slot_text(slot, "text", "tb", _message_text(message))
+            if not slot["thinking"]:
+                self._set_slot_text(slot, "thinking", "kb", _message_thinking(message))
+            self._progress()
+
+    @staticmethod
+    def _held_size(note: dict) -> int:
+        return ENTRY_OVERHEAD_BYTES + len(str(note.get("textDelta") or note.get("text") or "").encode("utf-8"))
+
+    def _hold(self, mid: str, ntype: str, note: dict) -> None:
+        if ntype.endswith("_complete") and isinstance(note.get("text"), str):
+            # complete несёт полный текст блока и вытесняет накопленные дельты: байты не считаются дважды.
+            kind = ntype[:-len("_complete")]
+            kept = []
+            for entry in self._held.get(mid, []):
+                if entry[0] in (kind + "_delta", ntype):
+                    self._held_bytes -= entry[2]
+                else:
+                    kept.append(entry)
+            self._held[mid] = kept
+        size = self._held_size(note)
+        self._held_bytes += size
+        if self._acc_bytes + self._held_bytes > MAX_TURN_TEXT_BYTES:
+            raise RpcError(f"turn output exceeds limit {MAX_TURN_TEXT_BYTES} bytes")
+        self._held.setdefault(mid, []).append((ntype, note, size))
+
+    def _release_held(self, mid: str, apply: bool = True) -> None:
+        """События mid, пришедшие раньше его create_message: применить (сообщение подтверждено) либо выбросить."""
+        for ntype, note, size in self._held.pop(mid, []):
+            self._held_bytes -= size
+            if apply:
+                self._apply(ntype, mid, note)
+
+    def _apply(self, ntype: Any, mid: str, note: dict) -> None:
         if ntype == "assistant_text_delta" and mid:
             delta = str(note.get("textDelta") or "")
             slot = self._slot_for(mid)
             size = len(delta.encode("utf-8"))
             slot["text"] += delta
             slot["tb"] += size
+            slot["tc"] += size
             self._charge(size, slot)
         elif ntype == "assistant_text_complete" and mid:
             slot = self._slot_for(mid)
@@ -2882,6 +2993,7 @@ class Run:
             size = len(delta.encode("utf-8"))
             slot["thinking"] += delta
             slot["kb"] += size
+            slot["kc"] += size
             self._charge(size, slot)
         elif ntype == "thinking_text_complete" and mid:
             slot = self._slot_for(mid)
@@ -2899,21 +3011,20 @@ class Run:
                 self.droid_real -= 1
         elif ntype == "error":
             self._last_error = str(note.get("message") or note.get("errorType") or "droid error")[:300]
-        return False
 
     def _own_terminal(self, note: dict) -> bool:
         """terminal принадлежит ТЕКУЩЕМУ ходу: непустой turnId, не завершённый ранее, равный id запустившего user.
 
         У реального droid turnId есть только у agent_turn_completed и равен id user-сообщения хода
-        (create_message с requestId нашего add). Пустой, неизвестный и уже завершённый turnId ход
-        не завершают. Если id user-сообщения неизвестен, достаточно непустого и не встречавшегося ID.
+        (create_message с requestId нашего add). Пока id user-сообщения неизвестен, терминал не принимается
+        (fail-closed): ход закончится по watchdog, а не по чужому событию.
         """
         turn_id = str(note.get("turnId") or "")
-        if not turn_id:
+        if not turn_id or not self.active_turn:
             return False
         if self.proc is not None and turn_id in self.proc.finished_turns:
             return False
-        return not self.active_turn or turn_id == self.active_turn
+        return turn_id == self.active_turn
 
     def _is_foreign_mid(self, mid: str) -> bool:
         return mid in self._foreign_mids or (self.proc is not None and mid in self.proc.finished_mids)
@@ -2927,7 +3038,7 @@ class Run:
         return False
 
     def _drop_foreign(self, mid: str) -> None:
-        """Выбросить уже накопленное сообщение прежнего хода: его байты и вывод не принадлежат текущему."""
+        """Выбросить уже накопленное сообщение чужого хода: его байты и вывод не принадлежат текущему."""
         self._quarantined += 1
         if mid:
             self._foreign_mids.add(mid)
@@ -2936,6 +3047,7 @@ class Run:
                 self._acc_bytes = max(0, self._acc_bytes - slot["acc"])
             if mid in self._order:
                 self._order.remove(mid)
+            self._release_held(mid, apply=False)
 
     def _charge(self, size: int, slot: dict | None = None) -> None:
         """Бюджет хода MAX_TURN_TEXT_BYTES: текст, размышления и метаданные (сообщения, слоты) вместе.
@@ -2945,14 +3057,16 @@ class Run:
         self._acc_bytes += size
         if slot is not None:
             slot["acc"] += size
-        if self._acc_bytes > MAX_TURN_TEXT_BYTES:
+        if self._acc_bytes + self._held_bytes > MAX_TURN_TEXT_BYTES:
             raise RpcError(f"turn output exceeds limit {MAX_TURN_TEXT_BYTES} bytes")
 
     def _set_slot_text(self, slot: dict, field: str, size_field: str, text: str) -> None:
-        """*_complete несёт полный текст: бюджет получает только прирост к накопленному (не повторный счёт)."""
+        """*_complete несёт полный текст: бюджет получает только прирост к максимуму уже учтённого."""
         size = len(text.encode("utf-8"))
-        if size > slot[size_field]:
-            self._charge(size - slot[size_field], slot)
+        charged = "tc" if field == "text" else "kc"
+        if size > slot[charged]:
+            self._charge(size - slot[charged], slot)
+            slot[charged] = size
         slot[field] = text
         slot[size_field] = size
 
@@ -2986,7 +3100,10 @@ class Run:
 
 def _close_async(proc: RpcProcess, mode: str) -> None:
     """Закрытие в фоне: финальные кадры клиенту не ждут waitpid (слот P держится до него)."""
-    threading.Thread(target=proc.close, kwargs={"mode": mode}, daemon=True).start()
+    try:
+        threading.Thread(target=proc.close, kwargs={"mode": mode}, daemon=True).start()
+    except RuntimeError:
+        proc.close(mode=mode)  # поток не создан: закрываем синхронно, иначе процесс и слот P остались бы навсегда
 
 
 def _make_plan(ctx: dict, chat: Chat | None, cfg: str, work_dir: str, keep_tools: list) -> dict:
@@ -3141,14 +3258,13 @@ class Handler(BaseHTTPRequestHandler):
              f"model_len={int(model_len)} client={self._client_tag()}")
 
     def _reject(self, code: int, reason: str, message: str,
-                model: str = "unknown", model_len: int = 0, err_type: str = "") -> None:
+                model: str = "unknown", model_len: int = 0) -> None:
         """Отказ (до SSE): строка `reject …` в журнал и общий формат ошибки.
 
-        err_type — публичный тип ошибки, если он отличается от строки журнала (REQ003_SIZE_EXCEEDED).
         """
         self._log_reject(reason, model, model_len)
         self.close_connection = True
-        self._send(code, {"error": {"message": message, "type": err_type or reason, "code": int(code)}})
+        self._send(code, {"error": {"message": message, "type": reason, "code": int(code)}})
 
     def _acquire_slot(self, keepalive):
         """Ждём слот семафора до QUEUE_TIMEOUT_S, попутно keepalive и проверка клиента."""
@@ -3341,20 +3457,14 @@ class Handler(BaseHTTPRequestHandler):
                 total_bytes = 0
                 try:
                     img_dir.mkdir(parents=True, exist_ok=True)
-                    try:
-                        os.chmod(img_dir, 0o700)
-                    except OSError:
-                        pass
+                    os.chmod(img_dir, 0o700)
                     for image in images:
                         target = img_dir / image["name"]
                         target.write_bytes(image["data"])
-                        try:
-                            os.chmod(target, 0o600)
-                        except OSError:
-                            pass
+                        os.chmod(target, 0o600)
                         total_bytes += len(image["data"])
                 except OSError as exc:
-                    # ENOSPC и пр. при spool картинок: предусмотренная ошибка 502, каталог чистится в finally.
+                    # ENOSPC, отказ chmod и пр. при spool картинок: предусмотренная ошибка 502, каталог чистится в finally.
                     _log(f"spool_error err={_err_summary(exc, 120)!r}")
                     return {"state": "spool_error", "rc": 1, "text": "", "usage": {}, "result": {},
                             "err": "", "tool_calls": [], "events": []}
@@ -3407,7 +3517,7 @@ class Handler(BaseHTTPRequestHandler):
                     if plan["path"] in ("cold", "rebase", "ephemeral") and ctx.get("instr", (0, "-", 0))[2]:
                         sections, omitted, nbytes = ctx["instr"]
                         _log(f"instr_guard sections={sections} omitted={omitted} bytes={nbytes}")
-                    if chat is not None and chat.sid:
+                    if chat is not None and chat.sid and plan["path"] in ("hot", "restore"):
                         # Отпечаток ожидающего хода ДО add: после падения моста — только replay.
                         # Не записан — ход не стартует (иначе рестарт продолжил бы старый SID неоднозначно).
                         try:
@@ -3430,6 +3540,9 @@ class Handler(BaseHTTPRequestHandler):
                     _log(f"session_rpc chat={plan['hash8']} key={1 if chat is not None else 0} "
                          f"path={plan['path']} gen={(chat.generation if chat else 0)} "
                          f"sid={plan['sid'][:8] or '-'}")
+                    if chat is not None and plan["path"] in ("cold", "rebase"):
+                        # Новая generation: SID известен только после initialize, PENDING пишется Run до первого add.
+                        plan["before_add"] = functools.partial(_write_pending, chat)
                     new_run = Run(plan, chat.proc if plan["path"] == "hot" else None, holds_slot)
                     holds_slot = False
                 except Exception as exc:  # noqa: BLE001 - любая ошибка подготовки хода: ресурсы назад, штатный 502
@@ -3493,15 +3606,22 @@ class Handler(BaseHTTPRequestHandler):
             _log(f"usage sess={sess8} raw={raw_in}/{raw_out} "
                  f"rep={raw_in}/{raw_out} resumed={1 if hot else 0} turns={rep_turns}")
         finally:
-            if open_attempt is not None:
-                # Исключение посреди хода: чат инвалидируется, процесс не остаётся «в середине хода».
-                _finish_attempt(chat, open_attempt[0], open_attempt[1], {}, False, cfg, rpc["items"])
-            if img_dir is not None:
-                shutil.rmtree(str(img_dir), ignore_errors=True)
-            if chat_held:
-                chat.lock.release()
-            if chat is not None:
-                REGISTRY.release(chat)
+            # Независимые звенья: сбой одного (например, _finish_attempt) не оставляет аренду L и ссылку на чат.
+            try:
+                if open_attempt is not None:
+                    # Исключение посреди хода: чат инвалидируется, процесс не остаётся «в середине хода».
+                    _finish_attempt(chat, open_attempt[0], open_attempt[1], {}, False, cfg, rpc["items"])
+            finally:
+                try:
+                    if img_dir is not None:
+                        shutil.rmtree(str(img_dir), ignore_errors=True)
+                finally:
+                    try:
+                        if chat_held:
+                            chat.lock.release()
+                    finally:
+                        if chat is not None:
+                            REGISTRY.release(chat)
         if out.get("state") != "client_gone":
             _last_ok[0] = time.monotonic() if (out.get("state") == "done" and out.get("rc") == 0) else 0.0
         _log(f"done model={model} rc={out['rc']} state={out['state']} "
@@ -3737,8 +3857,9 @@ class Handler(BaseHTTPRequestHandler):
                 route = "keyed"
             else:
                 route = "nokey"
-            blocks = _instr_blocks(messages) if route != "title" else []
-            instr = _instr_scan(messages) if blocks else (0, "-", 0)
+            in_kb = _in_kb_cwd(cwd)
+            blocks = _instr_blocks(messages, in_kb) if route != "title" else []
+            instr = _instr_scan(messages, in_kb) if blocks else (0, "-", 0)
             guard_state, guard_reasons, guard_max = GUARD.snapshot()
             over = _instr_violation(blocks, guard_max)
             if guard_state == "unsafe" and blocks:
@@ -3749,16 +3870,18 @@ class Handler(BaseHTTPRequestHandler):
                     top = over or (instr[2], _instr_limit(max(blocks, key=lambda b: b["bytes"]), guard_max))
                     _log(f"instr_gate_alert guard=unsafe refused={int(refuse)} bytes={top[0]} limit={top[1]}")
                 if refuse:
-                    self._reject(400, "req003_size_exceeded",
+                    # Код из базовой таксономии отказов (503 launcher_unavailable), клиенты DSH нового кода не знают.
+                    self._reject(503, "launcher_unavailable",
                                  "instruction guard is unsafe (" + "; ".join(guard_reasons)[:200]
                                  + "): new chats are refused until the DSH profile is fixed",
-                                 model_id, model_len, err_type="REQ003_SIZE_EXCEEDED")
+                                 model_id, model_len)
                     return
             elif over is not None:
                 # REQ-003: блок agent-instructions сверх применимого предела не доходит ни до spawn, ни до add.
-                self._reject(400, "req003_size_exceeded",
-                             f"agent-instructions block {over[0]} bytes exceeds {over[1]}",
-                             model_id, model_len, err_type="REQ003_SIZE_EXCEEDED")
+                _log(f"instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes={over[0]} limit={over[1]}")
+                self._reject(503, "launcher_unavailable",
+                             f"agent-instructions block {over[0]} bytes exceeds {over[1]}: request refused before launch",
+                             model_id, model_len)
                 return
             ctx = {
                 "route": route,

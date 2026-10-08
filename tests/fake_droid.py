@@ -15,7 +15,8 @@
 Сценарий хода — список шагов {"op": ...} либо словарь {"steps": [...], "reason": ...,
 "usage": {...}, "late": true}. Шаги: text, thinking, retry, retract, error, sleep, hang,
 exit, garbage, foreign_terminal, stale_terminal, unknown_terminal, empty_terminal, stale_message,
-stale_delta, empty_msgs, orphan_child, big_line, flood, notify.
+stale_delta, ghost_message, ghost_delta, struct_flood, deep_nesting, empty_msgs, orphan_child, big_line, flood,
+notify. Конфиг ack_after_turn — ACK add_user_message уходит после terminal хода.
 Протокол как у реального droid: turnId есть ТОЛЬКО у agent_turn_completed и равен id user-сообщения
 (create_message с requestId), запустившего ход; у ассистентских сообщений parentId == turnId;
 каждый кадр несёт factoryProtocolVersion (конфиг protocol_version, по умолчанию PROTOCOL).
@@ -276,11 +277,12 @@ class Fake:
         if cfg.get("ack_error") and not params.get("skipAgentLoop"):
             self.respond(rid, error={"code": -32603, "message": "add rejected"})
             return
-        if not cfg.get("no_ack"):
+        skip_loop = bool(params.get("skipAgentLoop"))
+        late_ack = bool(cfg.get("ack_after_turn")) and not skip_loop  # ACK приходит ПОСЛЕ terminal (RW-023)
+        if not cfg.get("no_ack") and not late_ack:
             self.respond(rid, {})
         role = params.get("role") or "user"
         self.seq += 1
-        skip_loop = bool(params.get("skipAgentLoop"))
         # Id user-сообщения, запускающего ход, == turnId терминала (как у реального droid).
         self.cur_turn = "" if skip_loop else "turn-" + uuid.uuid4().hex[:8]
         message = {"id": self.cur_turn or f"u{self.seq}", "role": role, "content": [{"type": "text", "text": params.get("text", "")}]}
@@ -294,6 +296,8 @@ class Fake:
             self.respond(rid, {})
         if not skip:
             self.run_turn()
+        if late_ack:
+            self.respond(rid, {})
 
     # -- ход ---------------------------------------------------------------------
     def interrupted(self) -> bool:
@@ -430,6 +434,20 @@ class Fake:
                 mid = self.prev_mids[-1] if self.prev_mids else "m-old"
                 self.notify("assistant_text_delta", messageId=mid, blockIndex=0,
                             textDelta=step.get("text", "STALE"))
+            elif op == "ghost_message":
+                # Ассистентское сообщение с НЕИЗВЕСТНЫМИ id и parentId: не собственное и не прежнего хода (RW-005).
+                ghost = {"id": "ghost-m", "role": "assistant", "parentId": "turn-ghost",
+                         "content": [{"type": "text", "text": step.get("text", "GHOST")}]}
+                self.notify("create_message", message=ghost, messageId="ghost-m")
+            elif op == "ghost_delta":
+                self.notify("assistant_text_delta", messageId="ghost-d", blockIndex=0,
+                            textDelta=step.get("text", "GHOST"))
+            elif op == "struct_flood":
+                # Одна строка из миллионов пустых JSON-объектов: структурная нагрузка на json.loads (RW-014).
+                self.raw('{"pad":[' + ",".join(["{}"] * int(step.get("count", 1000))) + "]}")
+            elif op == "deep_nesting":
+                depth = int(step.get("depth", 3000))
+                self.raw('{"pad":' + "[" * depth + "]" * depth + "}")
             elif op == "empty_msgs":
                 for index in range(int(step.get("count", 10))):
                     mid = f"e{index}"

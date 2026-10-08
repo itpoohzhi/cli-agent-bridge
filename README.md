@@ -61,11 +61,12 @@ OpenAI-совместимый мост DeepSeek Harness → Factory Droid CLI (`
 | `DROID_DSH_BRIDGE_IMAGE_PROBE` | — | `1` — включить `probe`-модели изображений (**только для копии моста**, не для боевого запуска) |
 | `DROID_LAUNCHER` | `~/.config/factory-launch/droid-cli.sh` | канонический лончер droid |
 | `DROID_DSH_BRIDGE_RECEIPT_REQUIRED` | `1` | допуск образа droid по receipt (`workspace/state/droid-binary-receipt.json`) на каждом spawn; `0` — только стенд/разработка |
-| `DROID_DSH_BRIDGE_INSTR_LIMIT` | `60000` | жёсткий предел блока agent-instructions формы «только канон» (KB/DW), Б (REQ-003): больше — 400 `REQ003_SIZE_EXCEEDED` до spawn/add |
+| `DROID_DSH_BRIDGE_INSTR_LIMIT` | `60000` | жёсткий предел блока agent-instructions формы KB (cwd запроса = KB либо блок целиком из копий канона), Б (REQ-003): больше — 503 `launcher_unavailable` до spawn/add (внутреннее имя `REQ003_SIZE_EXCEEDED` только в журнале) |
 | `DROID_DSH_BRIDGE_INSTR_MARGIN` | `2048` | запас для остальных блоков (WA/AB и т.п.): допустимый блок = `maxBytes` профиля − запас (при неизвестном `maxBytes` — 106496) |
 | `DROID_DSH_BRIDGE_GUARD_TICK` | `30` | период автоматического контура b_guard внутри моста, с |
 | `DROID_DSH_BRIDGE_PROFILES_DIR` / `DROID_DSH_BRIDGE_CANON` | `~/.dsh/profiles` / `~/Мой диск/Context/AGENTS.md` | профили DSH и канон, которые проверяет контур (только чтение) |
 | `DROID_BRIDGE_MAX_RPC_LINE_BYTES` / `_MAX_STDERR_BYTES` / `_MAX_INBOX_BYTES` / `_MAX_TURN_TEXT_BYTES` / `_MAX_CHATS` | 8 МиБ / 64 КиБ / 4 МиБ / 10 МиБ / 4096 | байтовые бюджеты RPC-строки, stderr, очереди событий (каждая запись учитывается минимум 64 Б), text/thinking хода (дельта и итог одного блока считаются один раз) и индекса чатов (превышение — 502 `proxy_error`, процесс/слот возвращаются) |
+| `DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS` | `200000` | предел числа `{`/`[` вне строк в одной RPC-строке: строка из миллионов пустых объектов отклоняется до `json.loads` (502 `proxy_error`); глубокая вложенность — тоже контролируемая ошибка хода, читатель не падает |
 
 Доставка ответа клиенту идёт срезами по 64 КиБ (JSON — с точным `Content-Length` без полной копии
 экранированного текста, SSE — несколькими событиями), поэтому потолок памяти определяет бюджет хода
@@ -163,9 +164,10 @@ Admission: резерв байт по заявленному `Content-Length` п
 path=<hot|restore|rebase|cold|ephemeral> gen=<n> sid=<sid8|->` (по ходу),
 `instr_guard sections=<N> omitted=<пути|-> bytes=<B>` (первый запрос нового чата),
 `restore_integrity …` (повтор служебных блоков после load -> санитация),
-`instr_guard_alert state=<unsafe|unknown> reasons=… max_bytes=…` (контур b_guard: смена состояния профиля/канона),
-`guard_state state=ok max_bytes=…`, `instr_gate_alert guard=unsafe refused=<0|1> bytes=… limit=…` (гейт при
-небезопасном профиле), `droid_receipt_invalid err=…` (старт без валидного receipt),
+`instr_guard_alert state=<ok|unsafe|unknown> warnings=<n> reasons=… max_bytes=…` (контур b_guard: смена состояния
+профиля/канона; при `state=ok` и `warnings>0` — предупреждения `LOW_MARGIN_*`/`LINE_ORACLE_RISK`, трафик не
+останавливается), `guard_state state=ok max_bytes=…`, `instr_gate_alert guard=unsafe refused=<0|1> bytes=… limit=…`
+(гейт при небезопасном профиле) и `instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes=… limit=…` (блок сверх предела), `droid_receipt_invalid err=…` (старт без валидного receipt),
 `session_rpc leader_exited_pipe_held pid=… rc=…` (лидер вышел, потомок держит pipe: группа добивается).
 
 ## Запуск и проверка
@@ -206,7 +208,7 @@ ACK `add_user_message` мгновенный и не завершает ход, �
 image-путь (таксономия C-10, лимиты, права 0700/0600, очистка, fail-closed proof),
 журнал, а также `tests/test_rpc_*.py` (дельта истории, изоляция чатов, title, idle-реап
 и restore того же SID, cap/вытеснение, таймауты, метаданные, остановка, дрейф droid)
-`tests/test_rpc_rework.py` / `tests/test_rpc_cycle3.py` (регрессии замечаний совета cycle-2/cycle-3: гейт и контур b_guard, ошибки записи состояния, изоляция ходов, бюджеты и доставка срезами, receipt schema 2, группы процессов, реапер, права каталогов) и `tests/test_b_guard.py`. Идентификаторы обязательств `TM-NNN` — в именах методов
+`tests/test_rpc_rework.py` / `tests/test_rpc_cycle3.py` / `tests/test_rpc_cycle4.py` / `tests/test_cycle4_tools.py` (регрессии замечаний совета cycle-2/cycle-3/cycle-4: гейт и контур b_guard, ошибки записи состояния, изоляция ходов, бюджеты и доставка срезами, receipt schema 2, группы процессов, реапер, права каталогов) и `tests/test_b_guard.py`. Идентификаторы обязательств `TM-NNN` — в именах методов
 (`-k tm001`) и docstring. `tests/baseline_inventory.json` — сопоставление 92 baseline-тестов
 с текущими. Файлы — только во временных каталогах.
 
@@ -241,15 +243,19 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
   квалифицированным, а каталог `list_tools` живого процесса — с `tools_policy` (иначе 502 до `add_user_message`).
   Глобальный `~/.local/bin/droid` образ не меняет. Каталоги `state`/`runtime` внутри workspace принудительно
   приводятся к 0700 (чужой владелец — отказ старта), недоступный каталог состояния — отказ старта с сообщением.
-- **Состояние чата и ошибки записи.** Перед `add_user_message` на диск пишется PENDING; сбой записи
+- **Состояние чата и ошибки записи.** Перед первым `add_user_message` на диск пишется PENDING (у нового чата — сразу
+  после `initialize_session`, с новым SID); сбой записи
   (ENOSPC, расхождение `rec_rev`) — 502 `proxy_error` без `add_user_message`, чат DIRTY. Сбой записи commit
   READY после хода — успех клиенту не выдаётся (502), процесс закрывается, чат DIRTY: на диске остаётся
   PENDING, после рестарта старый SID не продолжается, следующий ход — новая generation с replay. Слоты L/P/T
   освобождаются при любом исходе, в том числе при сбое Popen/запуска потоков/конструктора хода.
 - **Изоляция ходов.** `turnId` реального droid присутствует только у `agent_turn_completed` и равен id
   user-сообщения хода (у ассистентских сообщений он же — `parentId`). Терминал без `turnId`, с неизвестным
-  или уже завершённым `turnId` ход не завершает; сообщения и дельты прежних ходов отбрасываются и не продлевают
-  watchdog тишины. Набор завершённых turnId не вытесняется: при превышении 65536 процесс заменяется на границе
+  или уже завершённым `turnId` ход не завершает (пока id user-сообщения неизвестен, терминал не принимается вовсе);
+  сообщение принадлежит ходу только по подтверждённой цепочке `parentId` от user-сообщения хода: события с
+  неизвестным id/parent (в том числе на путях cold/restore, где списки завершённых пусты) не создают слот, не
+  идут в ответ, не увеличивают счётчик истории и не продлевают watchdog тишины; дельты, пришедшие раньше своего
+  `create_message`, ждут его в ограниченном буфере (входит в бюджет хода) и применяются после подтверждения. Набор завершённых turnId не вытесняется: при превышении 65536 процесс заменяется на границе
   хода (`retired` → новая generation).
 - **Процессы и группы.** Дети — лидеры своих групп (`start_new_session`); закрытие всегда сигналит собственную
   группу независимо от состояния лидера. Если лидер вышел, а потомок держит pipe, сторож лидера публикует EOF и
@@ -293,24 +299,32 @@ image-путь (таксономия C-10, лимиты, права 0700/0600, �
 Коды выхода `--check`: 0 — оба запаса ≥ 4096 Б, 1 — запас меньше, 2 — канон теряется
 в каком-либо cwd (`CANON_LOST`), дубль возвращается в KB (`DUPLICATE_RETURNED`) или блок/строка
 KB > 60 000 Б (`REQ003_SIZE_EXCEEDED`, строгий режим включён в CLI). `--profiles [--profiles-dir PATH]`
-только читает установленные профили DSH (`maxBytes` плагина agent-instructions) и прогоняет
-ту же проверку; профили утилита не правит — применение `maxBytes=106496` остаётся шагом владельца.
+только читает установленные профили DSH (`maxBytes` плагина agent-instructions; профиль с дублем плагина или
+посторонним `maxBytes` считается нечитаемым) и прогоняет ту же проверку; профили утилита не правит —
+применение `maxBytes=106496` остаётся шагом владельца. Источник user-global — настоящий `~/.dsh/AGENTS.md`
+(симлинк на канон либо точная копия); удалён/изменён/перенацелен — `CANON_LOST`.
 
 ### Автоматический контур и гейт REQ-003 в мосте
 
 Мост сам запускает проверку b_guard (`check_installed`: профили `DROID_DSH_BRIDGE_PROFILES_DIR`, канон
 `DROID_DSH_BRIDGE_CANON`) на старте и каждые `DROID_DSH_BRIDGE_GUARD_TICK` с в фоновом потоке, без ручного CLI.
 Состояния: `ok`; `unsafe` (`CANON_LOST`, `DUPLICATE_RETURNED`, `REQ003_SIZE_EXCEEDED` на профиле, нечитаемый
-`maxBytes`); `unknown` (профилей нет). Смена состояния — строка `instr_guard_alert` в журнале; рестарт-петель нет.
+`maxBytes`, `PROFILES_LOST` — профили исчезли после того, как уже наблюдались); `unknown` (профилей не было с
+самого старта). Смена состояния — строка `instr_guard_alert` в журнале; рестарт-петель нет. Предупреждения b_guard
+(код 1: `LOW_MARGIN_*`, `LINE_ORACLE_RISK`) не отказ: состояние остаётся `ok`, а в журнал уходит один
+`instr_guard_alert … warnings=<n>`.
 
 Гейт входящих запросов (до spawn/`add_user_message`) проверяет **все** блоки agent-instructions во **всём**
 тексте user-сообщений (маркер не ограничен началом сообщения):
 
-- блок формы «только канон» (все секции — копии канона: KB/DW) — не больше 60 000 Б, иначе 400 `REQ003_SIZE_EXCEEDED`;
+- блок формы KB (cwd запроса = KB или его подкаталог, либо все секции — копии канона, в том числе прежнего:
+  дайджесты виденных процессом канонов запоминаются) — не больше 60 000 Б, иначе 503 `launcher_unavailable`
+  (в журнале `instr_gate_alert reason=REQ003_SIZE_EXCEEDED`);
 - прочие блоки (WA/AB и т.п.) — не больше `maxBytes` профиля минус запас (по умолчанию 106496 − 2048), а не 60 000;
 - при `unsafe` (выбранный вариант RW-001: управляемый отказ + alert, а не немой 400 по размеру) **новые** чаты
-  с блоком получают 400 `REQ003_SIZE_EXCEEDED` с пояснением про охранник и строкой `instr_gate_alert`;
-  живые чаты (есть SID/запись) и запросы без блока продолжают обслуживаться. Новых кодов ошибок нет.
+  с блоком получают 503 `launcher_unavailable` с пояснением про охранник и строкой `instr_gate_alert`;
+  живые чаты (есть SID/запись) и запросы без блока продолжают обслуживаться. Новых публичных кодов ошибок нет:
+  отказ по размеру и по охраннику идёт кодом из baseline-таксономии (503 `launcher_unavailable`).
 
 ## Подключение к DSH
 
@@ -331,12 +345,14 @@ KB > 60 000 Б (`REQ003_SIZE_EXCEEDED`, строгий режим включён
    Exit 3 — проба провалена, receipt не записан.
 2. Проверить receipt: `workspace/state/droid-binary-receipt.json` (`schema: 2`, все `probes: ok`,
    `protocol.protocol_version` = версия установленного droid).
-3. `/usr/bin/python3 tools/b_guard.py --profiles` — обязательно exit 0 (канон на месте, дубль не возвращается,
-   KB-блок ≤ 60 000 Б). На профиле `maxBytes=262144` (блок ~111 114 Б) будет exit 2.
+3. Проверка плана до применения: `/usr/bin/python3 tools/b_guard.py --check --maxbytes 106496` — обязательно
+   exit 0 (канон везде сохраняется, дубль не возвращается, KB-блок ≤ 60 000 Б). Установленные профили при этом
+   ещё прежние (`maxBytes=262144`, блок ~111 114 Б), поэтому `--profiles` на этом шаге даёт exit 2 — это ожидаемо.
 4. Владелец применяет `maxBytes=106496` в профилях DSH (утилита и мост профили не правят).
-5. Рестарт моста (на старте в журнале не должно быть `droid_receipt_invalid` и `instr_guard_alert`;
+5. Проверка применённого: `/usr/bin/python3 tools/b_guard.py --profiles` — обязательно exit 0.
+6. Рестарт моста (на старте в журнале не должно быть `droid_receipt_invalid` и `instr_guard_alert`;
    `guard_state state=ok`).
-6. Проба: `/health` → `ok:true`, затем один ход из KB-cwd на копии моста (порт 9892, не боевой 9882) — без 400.
+7. Проба: `/health` → `ok:true`, затем один ход из KB-cwd на копии моста (порт 9892, не боевой 9882) — без 503.
 
 Откат: вернуть предыдущий коммит и перезапустить мост (`launchctl kickstart`). Прежний код принимает только
 receipt `schema: 1`, поэтому перед откатом нужно перезаписать receipt прежней версией `tools/droid_image.py`

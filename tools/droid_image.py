@@ -31,16 +31,51 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import server  # noqa: E402  - константы и отпечатки политики берутся у моста, а не дублируются
+import receipt_schema as schema  # noqa: E402  - единственная общая с мостом зависимость: без server.py и fleet.json
 
 PROBE_TIMEOUT_S = 30.0
 PROBE_MODEL_EFFORT = ("claude-sonnet-5-5", "high")
+PROBE_AUTONOMY = "high"
+READBACK_KEYS = ("modelId", "reasoningEffort", "autonomyLevel", "interactionMode",
+                 "disableBuiltinSkills", "autoRejectPermissionRequests")
 
 
 class ProbeError(Exception):
     """Проба квалификации не пройдена: receipt не пишется."""
+
+
+def _settings_from_notes(notes: list) -> dict | None:
+    """settings из первой нотификации settings_updated среди уже полученных call()."""
+    for params in notes:
+        note = params.get("notification") if isinstance(params, dict) else None
+        if isinstance(note, dict) and note.get("type") == "settings_updated" and isinstance(note.get("settings"), dict):
+            return note["settings"]
+    return None
+
+
+def _verify_settings(stage: str, reported: object, expected: dict, required: tuple = ()) -> set:
+    """Сверка сообщённых droid настроек с профилем -> множество подтверждённых ключей.
+
+    Сообщённое поле с другим значением (в том числе `1` вместо `true`) - ProbeError; отсутствующее
+    поле не ошибка, кроме `required`: его молчание не доказывает профиль и в receipt не попадает.
+    """
+    confirmed: set = set()
+    if not isinstance(reported, dict):
+        if required:
+            raise ProbeError(f"{stage}: read-back настроек отсутствует")
+        return confirmed
+    for key, want in expected.items():
+        if key not in reported:
+            if key in required:
+                raise ProbeError(f"{stage}: в read-back нет {key}")
+            continue
+        got = reported[key]
+        if got != want or type(got) is not type(want):
+            raise ProbeError(f"{stage}: подмена {key}: ожидали {want!r}, получили {got!r}")
+        confirmed.add(key)
+    return confirmed
 
 
 def _sha256(path: Path) -> str:
@@ -110,7 +145,7 @@ class _Rpc:
         """-> (result, нотификации за время ожидания)."""
         self._next += 1
         rid = f"p{self._next}"
-        frame = {"type": "request", "jsonrpc": "2.0", "factoryApiVersion": server.RPC_API_VERSION,
+        frame = {"type": "request", "jsonrpc": "2.0", "factoryApiVersion": schema.RPC_API_VERSION,
                  "id": rid, "method": method, "params": params}
         try:
             self.proc.stdin.write((json.dumps(frame) + "\n").encode("utf-8"))
@@ -184,18 +219,23 @@ def run_probes(image: Path, workspace: Path) -> dict:
     _ensure_private_chain(home, workspace)
     _ensure_private_chain(cwd, workspace)
     model, effort = PROBE_MODEL_EFFORT
+    expected = {"modelId": model, "reasoningEffort": effort, "autonomyLevel": PROBE_AUTONOMY,
+                **schema.SETTINGS_PROFILE}
+    confirmed: set = set()
     rpc = _Rpc(image, cwd, home)
     try:
         result, _ = rpc.call("droid.initialize_session", {
             "machineId": "droid-image-probe", "cwd": str(cwd), "modelId": model,
-            "reasoningEffort": effort, "autonomyLevel": "high", "interactionMode": "auto",
-            "title": "droid-image-probe", **{k: v for k, v in server.SETTINGS_PROFILE.items()
+            "reasoningEffort": effort, "autonomyLevel": PROBE_AUTONOMY, "interactionMode": "auto",
+            "title": "droid-image-probe", **{k: v for k, v in schema.SETTINGS_PROFILE.items()
                                               if k != "interactionMode"}})
         sid = result.get("sessionId")
         settings = result.get("settings")
         if not isinstance(sid, str) or not sid or not isinstance(settings, dict) \
                 or settings.get("modelId") != model:
             raise ProbeError("spawn: initialize_session без sessionId или с подменой модели")
+        confirmed |= _verify_settings("spawn", settings, expected,
+                                      required=("modelId", "reasoningEffort", "autonomyLevel"))
         protocol = rpc.protocol
         if not protocol:
             raise ProbeError("spawn: в кадрах droid нет factoryProtocolVersion")
@@ -205,11 +245,14 @@ def run_probes(image: Path, workspace: Path) -> dict:
                 isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"] for t in listed):
             raise ProbeError("update: list_tools вернул некорректный каталог")
         ids = sorted(t["id"] for t in listed)
-        rpc.call("droid.update_session_settings", {"disabledToolIds": ids})
-        updated = rpc.wait_settings()
+        _, stash = rpc.call("droid.update_session_settings", {"disabledToolIds": ids})
+        updated = _settings_from_notes(stash)
+        if updated is None:
+            updated = rpc.wait_settings()
         disabled = updated.get("disabledToolIds")
         if not isinstance(disabled, list) or not set(ids).issubset(set(map(str, disabled))):
             raise ProbeError("update: read-back не подтвердил отключение tools")
+        confirmed |= _verify_settings("update", updated, expected)
     finally:
         rpc.close()
     second = _Rpc(image, cwd, home)
@@ -218,10 +261,13 @@ def run_probes(image: Path, workspace: Path) -> dict:
         session = loaded.get("session")
         if not isinstance(session, dict) or not isinstance(session.get("messages"), list):
             raise ProbeError("load: load_session не вернул сессию")
+        confirmed |= _verify_settings("load", loaded.get("settings"), expected)
     finally:
         second.close()
     return {"protocol_version": protocol, "disabled_tool_ids": ids,
-            "probes": {name: "ok" for name in server.RECEIPT_PROBES}}
+            "probes": {name: "ok" for name in schema.RECEIPT_PROBES},
+            "readback": {"confirmed": sorted(confirmed),
+                         "not_confirmed_readback": sorted(set(READBACK_KEYS) - confirmed)}}
 
 
 def install_image(source: Path, workspace: Path) -> dict:
@@ -244,12 +290,13 @@ def install_image(source: Path, workspace: Path) -> dict:
     os.chmod(image, 0o500)
     facts = run_probes(image, workspace)
     receipt = {
-        "schema": server.RECEIPT_SCHEMA, "image_path": str(image), "image_sha256": image_sha,
-        "protocol": {"api_version": server.RPC_API_VERSION, "protocol_version": facts["protocol_version"]},
-        "tools_policy": {"policy": server.TOOLS_POLICY, "disabled_tool_ids": facts["disabled_tool_ids"],
-                         "digest": server.tools_policy_digest(facts["disabled_tool_ids"])},
-        "settings_profile": {"profile": server.SETTINGS_PROFILE,
-                             "digest": server.settings_profile_digest()},
+        "schema": schema.RECEIPT_SCHEMA, "image_path": str(image), "image_sha256": image_sha,
+        "protocol": {"api_version": schema.RPC_API_VERSION, "protocol_version": facts["protocol_version"]},
+        "tools_policy": {"policy": schema.TOOLS_POLICY, "disabled_tool_ids": facts["disabled_tool_ids"],
+                         "digest": schema.tools_policy_digest(facts["disabled_tool_ids"])},
+        "settings_profile": {"profile": schema.SETTINGS_PROFILE,
+                             "digest": schema.settings_profile_digest(),
+                             "readback": facts["readback"]},
         "probes": facts["probes"],
         "source": {"path": str(source), "mtime_ns": snapshot.st_mtime_ns,
                    "size": snapshot.st_size, "sha256": source_sha},

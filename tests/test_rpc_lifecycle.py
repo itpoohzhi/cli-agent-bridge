@@ -415,9 +415,9 @@ class TestPersistenceAndShutdown(RpcCase):
         raw = record.read_text(encoding="utf-8")
         data = json.loads(raw)
         self.assertEqual(data["state"], "READY")
-        self.assertEqual(data["rec_rev"], 1)  # у нового чата нечего отпечатывать до commit
+        self.assertEqual(data["rec_rev"], 2)  # RW-019: PENDING пишется до первого add_user_message, затем READY
         self.assertEqual(chat.ask("second")[0], 200)
-        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))["rec_rev"], 3)  # PENDING + READY
+        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))["rec_rev"], 4)  # ещё PENDING + READY
         self.assertNotIn("CANARY-PROMPT-TEXT", raw)
         self.assertNotIn("secret-chat-key-ABC", raw)
         self.assertNotIn("test-key", raw)

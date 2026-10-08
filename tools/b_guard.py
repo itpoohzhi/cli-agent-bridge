@@ -89,6 +89,7 @@ KB_CWD = os.path.expanduser("~/Мой диск/Работа/Sber/knowledge-base"
 WA_CWD = os.path.expanduser("~/src/saluteeye/gigabus/gigawebaccess/webaccess")
 AB_CWD = os.path.expanduser("~/Мой диск/Workshop/aibunker-workshop")
 DW_CWD = os.path.expanduser("~/Documents/deepseek-harness/default-workspace")
+UG_PATH = os.path.expanduser("~/.dsh/AGENTS.md")
 PROFILES_DIR = os.path.expanduser("~/.dsh/profiles")
 PROFILE_FILE = "cordis.patch.yml"
 DEFAULT_CWDS: Tuple[Tuple[str, str], ...] = (
@@ -699,11 +700,31 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
     return res.exit_code
 
 
+def _user_global_problem(canon_real: str, canon_bytes: bytes) -> Optional[str]:
+    """Причина, по которой настоящий user-global файл не равен канону (None - равен).
+
+    Рендер DSH берёт именно файл `UG_PATH`, а не канон: удалённый, подменённый по содержимому или
+    перенацеленный симлинк означают, что канон в запросе пропал или заменён. Обычный файл допустим
+    только как байтовая копия канона; симлинк - только на сам канон.
+    """
+    try:
+        with open(UG_PATH, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return "файл отсутствует или нечитаем"
+    if os.path.islink(UG_PATH) and os.path.realpath(UG_PATH) != canon_real:
+        return "симлинк указывает не на канон"
+    if data != canon_bytes:
+        return "содержимое отличается от канона"
+    return None
+
+
 def check_installed(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -> Optional[Result]:
     """Тот же прогноз, что `run_check`, но без печати (для автоматического контура моста).
 
-    None - канон не найден (CANON_LOST). REQ-003 строгий, как в рабочем CLI. Файлы читаются только для
-    хеша и точной длины строки журнала; содержимое наружу не отдаётся.
+    None - канон не найден (CANON_LOST). Результат с exit_code 2 и причиной CANON_LOST - настоящий
+    user-global `UG_PATH` удалён, изменён или указывает не на канон. REQ-003 строгий, как в рабочем CLI.
+    Файлы читаются только для хеша и точной длины строки журнала; содержимое наружу не отдаётся.
     """
     try:
         with open(canon_path, "rb") as handle:
@@ -712,6 +733,9 @@ def check_installed(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: 
         return None
     canon_text = canon_bytes.decode("utf-8", "replace")
     canon_real = os.path.realpath(canon_path)
+    problem = _user_global_problem(canon_real, canon_bytes)
+    if problem is not None:
+        return Result(2, ["CANON_LOST user-global %s: %s" % (UG_DISPLAY, problem)], 0, None, None)
     cwd_files: Dict[str, Sequence[FileEntry]] = {}
     texts: Dict[str, Dict[str, str]] = {}
     for label, path in cwds:
@@ -726,26 +750,33 @@ def parse_profile_maxbytes(text: str) -> Optional[int]:
     """maxBytes плагина agent-instructions внутри пресета `preset-standard` (YAML-патч профиля DSH).
 
     Построчный разбор без YAML-библиотеки: пресет - элемент верхнего уровня `- id: preset-standard`,
-    плагин - `- id: agent-instructions` глубже, значение - первая строка `maxBytes: <число>` после него
-    в пределах пресета. Комментарии и другие пресеты игнорируются; не найдено - None.
+    плагин - `- id: agent-instructions` глубже, значение - единственная строка `maxBytes: <число>`
+    пресета. Комментарии и другие пресеты игнорируются. Неоднозначность (повтор пресета или плагина,
+    второй maxBytes в любом месте пресета, maxBytes вне плагина, нечисловое значение) и отсутствие
+    значения - None: охранник считает такой профиль нечитаемым, а не берёт первое попавшееся число.
     """
     in_preset = False
     in_plugin = False
+    presets = plugins = 0
+    hits: List[Tuple[str, bool]] = []
     for line in text.splitlines():
         if re.match(r"^- id:", line):
             in_preset = re.match(r"^- id:\s*preset-standard\s*$", line) is not None
+            presets += in_preset
             in_plugin = False
             continue
         if not in_preset:
             continue
         if re.match(r"^\s+- id:", line):
             in_plugin = re.match(r"^\s+- id:\s*agent-instructions\s*$", line) is not None
+            plugins += in_plugin
             continue
-        if in_plugin:
-            found = re.match(r"^\s+maxBytes:\s*(\d+)\s*$", line)
-            if found:
-                return int(found.group(1))
-    return None
+        found = re.match(r"^\s+maxBytes:\s*(.*?)\s*$", line)
+        if found:
+            hits.append((found.group(1), in_plugin))
+    if presets != 1 or plugins != 1 or len(hits) != 1 or not hits[0][1] or not (hits[0][0].isascii() and hits[0][0].isdigit()):
+        return None
+    return int(hits[0][0])
 
 
 def find_profiles(profiles_dir: str) -> List[Tuple[str, str, Optional[int]]]:

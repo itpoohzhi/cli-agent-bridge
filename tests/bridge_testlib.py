@@ -241,7 +241,8 @@ class BridgeCase(unittest.TestCase):
             "MAX_RPC_LINE_BYTES", "MAX_STDERR_BYTES", "MAX_INBOX_BYTES", "MAX_TURN_TEXT_BYTES",
             "MAX_CHATS", "MAX_CONCURRENT", "INSTR_BLOCK_LIMIT", "FINISHED_TURNS_KEEP",
             "DELIVERY_CHUNK_BYTES", "ENTRY_OVERHEAD_BYTES", "GUARD", "GUARD_PROFILES_DIR", "GUARD_CANON",
-            "INSTR_NONKB_MARGIN")}
+            "INSTR_NONKB_MARGIN", "MAX_JSON_STRUCT_TOKENS")}
+        server._canon_seen.clear()
         # Реальный FACTORY_API_KEY рабочего окружения в тестах не используется: подставляем
         # фиктивный sentinel; восстановление через addCleanup срабатывает и при падении теста.
         self._env_factory_key = os.environ.get("FACTORY_API_KEY")

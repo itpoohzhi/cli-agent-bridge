@@ -103,18 +103,24 @@ C экономит процессы, но общий процесс делит �
 ### Ход и изоляция
 
 - Вывод удерживается до `agent_turn_completed` собственного хода: `turnId` терминала обязан быть непустым, не завершённым и
-  равным id user-сообщения текущего хода (`active_turn`). Чужие/неизвестные/пустые терминалы, сообщения и дельты прежних ходов
-  отбрасываются и не продлевают watchdog тишины. Набор завершённых turnId не вытесняется; предел 65536 → процесс заменяется
-  (`retired`).
+  равным id user-сообщения текущего хода (`active_turn`; пока он неизвестен, терминал не принимается). Сообщение — часть хода,
+  только если цепочка `parentId` ведёт к user-сообщению хода; неизвестные id/parent (в том числе на путях cold/restore) не
+  создают слот, не попадают в ответ и счётчик истории и не продлевают watchdog; дельты раньше своего `create_message` ждут его в
+  буфере, учитываемом в бюджете хода. Набор завершённых turnId не вытесняется; предел 65536 → процесс заменяется (`retired`).
+  Terminal, пришедший до ACK `add_user_message`, завершает ход без interrupt и ожидания grace.
 - Байтовые бюджеты: RPC-строка 8 МиБ, inbox 4 МиБ (запись ≥ 64 Б), текст хода 10 МиБ (дельта + итог блока = один раз);
-  превышение — 502 `proxy_error`, процесс закрыт, слоты возвращены. Доставка срезами по 64 КиБ.
+  превышение — 502 `proxy_error`, процесс закрыт, слоты возвращены. Доставка срезами по 64 КиБ. RPC-строка с числом `{`/`[`
+  вне строк больше `MAX_JSON_STRUCT_TOKENS` (200 000) отклоняется до `json.loads`; `RecursionError` разбора — ошибка хода, а не
+  гибель читателя. Бюджет памяти пикового хода: строка ≤ 8 МиБ + inbox ≤ 4 МиБ + текст ≤ 10 МиБ на процесс при ≤ 4 процессах;
+  отдельный сэмплер RSS не вводится.
 
 ### Персистентность
 
 - Запись чата `workspace/state/conversations.v1/chats/<2hex>/<sha256>.json` (schema 1, 0600/0700, только хеши):
   `state` ∈ PENDING | READY | DIRTY, `rec_rev` (CAS: расхождение — `StateConflict`), хеш-цепочка `head`/`n`, `cfg`, `sid`,
   `generation`, `restore_count`.
-- Порядок хода: PENDING на диск → `add_user_message` → terminal → commit READY. Сбой записи PENDING — 502 до
+- Порядок хода: PENDING на диск (у новой generation — сразу после `initialize_session`, с новым SID) → первый
+  `add_user_message` → terminal → commit READY. Сбой записи PENDING — 502 до
   `add_user_message`; сбой commit READY — успех клиенту не выдаётся (502), процесс закрыт, чат DIRTY; после рестарта на диске
   PENDING, старый SID не продолжается — новая generation с replay.
 - Restore после idle/рестарта — `load_session` того же SID (≤ 5 подряд, затем новая generation), затем проверка целостности
@@ -124,7 +130,8 @@ C экономит процессы, но общий процесс делит �
 
 ### Допуск образа (AD-010)
 
-- Мост запускает droid только как `DROID_BIN=<образ из receipt>`. Receipt schema 2 пишет `tools/droid_image.py` атомарно после
+- Константы и отпечатки receipt общие для моста и установщика: `tools/receipt_schema.py` (установщик не импортирует мост).
+  Мост запускает droid только как `DROID_BIN=<образ из receipt>`. Receipt schema 2 пишет `tools/droid_image.py` атомарно после
   реальных проб (spawn / update / load в изолированном home): `image_path`, `image_sha256`, `protocol`, `tools_policy`
   (+digest), `settings_profile` (+digest), `probes`. На каждом spawn receipt перечитывается; любое расхождение — 503
   `launcher_unavailable`. Живой `factoryProtocolVersion` и каталог `list_tools` обязаны совпасть с квалифицированными
@@ -138,9 +145,12 @@ C экономит процессы, но общий процесс делит �
 
 ### REQ-003 и охранник b_guard
 
-- Гейт до spawn/add: блок «только канон» ≤ 60 000 Б; прочие блоки ≤ `maxBytes` профиля − 2048; проверяются все блоки во всём
-  тексте. Контур b_guard в мосте (старт + период) переводит состояние в `unsafe`; тогда новые чаты с блоком получают управляемый
-  отказ + alert, живые чаты не останавливаются.
+- Гейт до spawn/add: блок формы KB (cwd запроса = KB либо блок из копий канона, в том числе виденного ранее) ≤ 60 000 Б; прочие
+  блоки ≤ `maxBytes` профиля − 2048; проверяются все блоки во всём тексте. Отказ — 503 `launcher_unavailable` (код из baseline-
+  таксономии; имя `REQ003_SIZE_EXCEEDED` остаётся во внутреннем alert `instr_gate_alert`). Контур b_guard в мосте (старт +
+  период) переводит состояние в `unsafe` (в том числе `PROFILES_LOST` — профили исчезли после наблюдения; user-global
+  `~/.dsh/AGENTS.md` проверяется по факту); тогда новые чаты с блоком получают управляемый отказ + alert, живые чаты не
+  останавливаются. Предупреждения (`LOW_MARGIN_*`, `LINE_ORACLE_RISK`) журналируются одним alert с `warnings=N`, состояние `ok`.
 
 ## Consequences
 
@@ -155,7 +165,7 @@ C экономит процессы, но общий процесс делит �
 ## Validation
 
 - `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests` зелёный; регрессии cycle-2/cycle-3 — `tests/test_rpc_rework.py`,
-  `tests/test_rpc_cycle3.py`.
+  `tests/test_rpc_cycle3.py`, cycle-4 — `tests/test_rpc_cycle4.py`, `tests/test_cycle4_tools.py`.
 - Живой журнал: `session_rpc path=restore resumed=1`, отсутствие `instr_guard_alert`/`droid_receipt_invalid` на старте.
 - Пересмотр ADR: смена протокола droid (receipt перестаёт сходиться), изменение REQ-002, появление мультиплекса в протоколе droid.
 

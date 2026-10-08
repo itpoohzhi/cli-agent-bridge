@@ -392,7 +392,7 @@ class TestByteBudgets(RpcCase):
 class TestSpoolEnospc(ImageCase):
     """RW-008/RW-004: ENOSPC при spool картинок — штатный 502 proxy_error (без новых кодов), ресурсы возвращены."""
 
-    def test_rw008_enospc_on_image_spool_gives_507_and_frees_resources(self):
+    def test_rw008_enospc_on_image_spool_gives_502_proxy_error_and_frees_resources(self):
         """RW-008/RW-004: write_bytes картинки -> OSError(ENOSPC): 502 proxy_error (новых кодов нет), lease/слот/каталог свободны."""
         from bridge_testlib import image_part, make_png, text_part
         server.IMAGE_PROBE = True
@@ -542,13 +542,13 @@ class TestInstructionBudget(RpcCase):
                                     messages=[msg("hello")] + [msg(b) for b in blocks]))
 
     def _refused(self, status, body):
-        self.assertEqual(status, 400, body)
-        self.assertEqual(body["error"]["type"], "REQ003_SIZE_EXCEEDED")
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"]["type"], "launcher_unavailable")
         self.assertEqual(self.hub.spawns(), [])
         self.assertEqual(self.hub.rpcs("droid.add_user_message"), [])
 
     def test_rw002_oversized_block_rejected_before_spawn(self):
-        """RW-002: канон-блок 60 001 Б -> 400 REQ003_SIZE_EXCEEDED, ни spawn, ни add_user_message."""
+        """RW-002: канон-блок 60 001 Б -> 503 launcher_unavailable, ни spawn, ни add_user_message."""
         self._refused(*self._ask(self.canon_block(60001)))
 
     def test_rw002_exact_limit_passes(self):
@@ -558,13 +558,13 @@ class TestInstructionBudget(RpcCase):
         self.assertEqual(len(self.hub.spawns()), 1)
 
     def test_rw002_non_canon_block_is_limited_by_maxbytes_minus_margin(self):
-        """RW-001: блок не из канона: предел maxBytes(106496) − запас; 60 001 Б проходит, на 1 Б больше предела — 400."""
+        """RW-001: блок не из канона: предел maxBytes(106496) − запас; 60 001 Б проходит, на 1 Б больше предела — 503."""
         limit = server.b_guard.DEFAULT_MAXBYTES - server.INSTR_NONKB_MARGIN
         self.assertEqual(self._ask(self.other_block(60001))[0], 200)
         status, body = self._post_json(dict(BODY, prompt_cache_key="chat-instr-2",
                                             messages=[msg("hello"), msg(self.other_block(limit + 1))]))
-        self.assertEqual(status, 400, body)
-        self.assertEqual(body["error"]["type"], "REQ003_SIZE_EXCEEDED")
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"]["type"], "launcher_unavailable")
         self.assertEqual(self._post_json(dict(BODY, prompt_cache_key="chat-instr-3",
                                               messages=[msg("hello"), msg(self.other_block(limit))]))[0], 200)
 
