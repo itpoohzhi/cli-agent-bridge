@@ -26,6 +26,14 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))  # adapters/ и core/ лежат рядом с этим файлом
+
+from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов задан в коде
+from core.backend_adapter import (  # noqa: E402  - та же проверка записи backend, что у сервера
+    backend_entry_error,
+)
+
 HOME = Path(os.path.expanduser("~"))
 
 DEFAULT_CATALOGUE = ROOT / "fleet.json"
@@ -127,11 +135,11 @@ def check_catalogue(cat, report):
             errs.append("backends: пустой или не объект (schema 3)")
             backends = {}
         for bid, entry in backends.items():
-            if not isinstance(entry, dict) or entry.get("kind") not in (
-                "droid",
-                "muse",
-            ):
-                errs.append("backend_kind_unknown: %s" % bid)
+            # Единый источник вида (ADAPTER_KINDS) и единая проверка записи с сервером (RW-005):
+            # fleet_check принимает/отвергает ровно то же множество каталогов, что _build_backends.
+            reason = backend_entry_error(bid, entry, ADAPTER_KINDS)
+            if reason:
+                errs.append("%s: %s" % (reason, bid))
     elif backends is not None:
         errs.append("backends_in_schema_2")
     models = cat.get("models")

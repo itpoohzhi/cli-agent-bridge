@@ -3,6 +3,11 @@
 Настоящий subprocess: вместо `muse-cli.sh` — фейковая обёртка (bash), которая пишет argv/env/
 prompt рядом с собой и по файлу `mode` выдаёт JSONL-сценарий. Реальный Muse, Meta и прокси
 :10816 не вызываются; «прокси» — слушающий сокет на свободном порту.
+
+Покрываются компенсаторы AD-007: per-turn каталог хода (RW-001), очистка `MUSE_BIN` (RW-002),
+отсутствие автоматического replay (RW-003), обязательный terminal.completed (RW-004), байтовые
+бюджеты строки/текста и bounded failure reasons (RW-006), ограниченное завершение группы
+процессов (RW-009), персистентный реестр детей (RW-010), `MUSE_PROXY_PORT` (RW-011).
 """
 
 import hashlib
@@ -22,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adapters.muse_adapter import (  # noqa: E402
     ENV_ALLOWLIST,
+    MAX_ERR_CHARS,
+    MAX_EVENT_ERRORS,
     ExecEvents,
     MuseAdapter,
     estimate_tokens,
@@ -38,9 +45,14 @@ FAKE_WRAPPER = r"""#!/bin/bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
 n=$(cat "$DIR/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$DIR/count"
 printf '%s\n' "$@" > "$DIR/argv.$n"
+printf '%s\n' "$@" > "$DIR/argv.pid.$$"
 env > "$DIR/env.$n"
+env > "$DIR/env.pid.$$"
 while [ $# -gt 0 ]; do
-  if [ "$1" = "--prompt-file" ]; then cp "$2" "$DIR/prompt.$n"; echo "$2" > "$DIR/promptpath.$n"; fi
+  if [ "$1" = "--prompt-file" ]; then
+    cp "$2" "$DIR/prompt.$n"; echo "$2" > "$DIR/promptpath.$n"
+    cp "$2" "$DIR/prompt.pid.$$"; echo "$2" > "$DIR/promptpath.pid.$$"
+  fi
   shift
 done
 mode=$(cat "$DIR/mode")
@@ -65,9 +77,34 @@ EOF
   failed)
     echo '{"payload_type":"run.terminal.failed","payload":{"terminal":"failed","reason":"boom"}}' ;;
   exit1) echo "something bad" >&2; exit 1 ;;
+  noterminal) echo '{"payload_type":"run.output.delta","payload":{"text":"partial"}}' ;;
+  sentinel)
+    echo "invalid prompt: patient John has HIV" >&2
+    echo '{"payload_type":"run.terminal.failed","payload":{"terminal":"failed","reason":"invalid prompt: patient John has HIV"}}' ;;
   netonce)
     if [ "$n" -eq 1 ]; then echo "network connection could not be opened" >&2; exit 1; fi
     ok ;;
+  netmarker)
+    echo action >> "$DIR/action.log"
+    echo "network connection could not be opened" >&2
+    exit 1 ;;
+  bigline)
+    "@PYTHON@" -c 'import sys; sys.stdout.write("a"*9000000)'; echo ;;
+  bigtext)
+    chunk=$("@PYTHON@" -c 'import sys; sys.stdout.write("a"*600000)')
+    for i in $(seq 1 20); do
+      printf '{"payload_type":"run.output.delta","payload":{"text":"%s"}}\n' "$chunk"
+    done ;;
+  desc_stderr)
+    echo '{"payload_type":"run.output.delta","payload":{"text":"Hello "}}'
+    echo '{"payload_type":"run.terminal.completed","payload":{"terminal":"completed"}}'
+    sleep 30 > /dev/null &
+    echo $! > "$DIR/child.pid" ;;
+  desc_devnull)
+    echo '{"payload_type":"run.output.delta","payload":{"text":"Hello "}}'
+    echo '{"payload_type":"run.terminal.completed","payload":{"terminal":"completed"}}'
+    sleep 30 > /dev/null 2>&1 &
+    echo $! > "$DIR/child.pid" ;;
   sleep) echo $$ > "$DIR/pid"; sleep 30 ;;
 esac
 """
@@ -81,7 +118,10 @@ class FakeMuse:
         base.mkdir(parents=True, exist_ok=True)
         self.wrapper = base / "muse-cli.sh"
         self.wrapper.write_text(
-            FAKE_WRAPPER.replace("@TOOL@", TOOL_JSON), encoding="utf-8"
+            FAKE_WRAPPER.replace("@TOOL@", TOOL_JSON).replace(
+                "@PYTHON@", sys.executable
+            ),
+            encoding="utf-8",
         )
         self.wrapper.chmod(0o755)
         self.set_mode("ok")
@@ -106,6 +146,10 @@ class FakeMuse:
         lines = (self.base / f"env.{n}").read_text(encoding="utf-8").splitlines()
         return dict(line.split("=", 1) for line in lines if "=" in line)
 
+    def pin(self) -> dict:
+        digest = hashlib.sha256(self.wrapper.read_bytes()).hexdigest()
+        return {"binary_path": str(self.wrapper), "binary_sha256": digest}
+
     def close(self) -> None:
         self._proxy.close()
 
@@ -118,6 +162,7 @@ class FakeMuse:
             "max_concurrent": 2,
             "wrapper": str(self.wrapper),
             "proxy_port": self.proxy_port,
+            "technical_ref": self.pin(),
         }
         config.update(extra)
         return config
@@ -156,6 +201,17 @@ def ctx_for(prompt="hi", **extra):
     return ctx
 
 
+def wait_pid_gone(pid: int, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
 class MuseCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -189,6 +245,13 @@ class TestArgv(MuseCase):
         self.assertEqual(argv[argv.index("--prompt-file") + 1], "/tmp/p.txt")
         self.assertIn("--no-session-log", argv)
 
+    def test_argv_workspace_is_prompt_directory_not_common_parent(self):
+        """RW-001: `--workspace` — каталог хода (родитель prompt-файла), не общий workspace/muse."""
+        argv = self.adapter().build_argv(
+            "muse-spark-1.3", "max", "/tmp/turn-1/prompt.txt"
+        )
+        self.assertEqual(argv[argv.index("--workspace") + 1], "/tmp/turn-1")
+
     def test_default_wrapper_is_canonical_launcher(self):
         adapter = MuseAdapter("muse", {"kind": "muse"}, catalog_with_muse)
         self.assertEqual(
@@ -210,6 +273,18 @@ class TestArgv(MuseCase):
         self.assertEqual(env["HOME"], "/home/x")
         self.assertIn("PATH", env)
         self.assertTrue(set(env) <= set(ENV_ALLOWLIST))
+
+    def test_child_env_scrubs_muse_bin_and_pins_proxy_port(self):
+        """RW-002/RW-011: унаследованный MUSE_BIN не проходит; порт — из конфигурации бэкенда."""
+        with mock.patch.dict(
+            os.environ,
+            {"MUSE_BIN": "/tmp/evil-muse", "MUSE_PROXY_PORT": "9999"},
+        ):
+            adapter = self.adapter(proxy_port=12345)
+            env = adapter.child_env()
+        self.assertNotIn("MUSE_BIN", env)
+        self.assertEqual(env["MUSE_PROXY_PORT"], "12345")
+        self.assertEqual(adapter.proxy_port, 12345)
 
 
 class TestExecEvents(unittest.TestCase):
@@ -247,6 +322,23 @@ class TestExecEvents(unittest.TestCase):
         self.assertEqual(events.reason, "boom")
         self.assertEqual(events.errors, ["task failed: r1"])
 
+    def test_failure_reasons_are_bounded_and_charged(self):
+        """RW-006: errors bounded до append, reason обрезан, всё списано в байтовый бюджет."""
+        events = ExecEvents()
+        for index in range(50):
+            events.feed_line(
+                '{"payload_type":"task.lifecycle.failed","payload":'
+                '{"event":{"reason":"r%03d-%s"}}}' % (index, "x" * 2000)
+            )
+        events.feed_line(
+            '{"payload_type":"run.terminal.failed","payload":'
+            '{"terminal":"failed","reason":"%s"}}' % ("y" * 5000)
+        )
+        self.assertEqual(len(events.errors), MAX_EVENT_ERRORS)
+        self.assertTrue(all(len(item) <= MAX_ERR_CHARS for item in events.errors))
+        self.assertLessEqual(len(events.reason), MAX_ERR_CHARS)
+        self.assertGreater(events.text_bytes, 1000)
+
     def test_estimate_tokens(self):
         self.assertEqual(estimate_tokens(""), 0)
         self.assertEqual(estimate_tokens("one two three four five"), 6)
@@ -254,7 +346,8 @@ class TestExecEvents(unittest.TestCase):
 
 class TestExecuteTurn(MuseCase):
     def test_success_passes_flags_and_cleans_up(self):
-        out = self.adapter().execute_turn(ctx_for("привет"), None)
+        adapter = self.adapter()
+        out = adapter.execute_turn(ctx_for("привет"), None)
         self.assertEqual((out["state"], out["rc"]), ("done", 0))
         self.assertEqual(out["text"], "Hello world")
         self.assertEqual(out["usage"]["output_tokens"], estimate_tokens("Hello world"))
@@ -266,9 +359,46 @@ class TestExecuteTurn(MuseCase):
         self.assertEqual(
             (self.fake.base / "prompt.1").read_text(encoding="utf-8"), "привет"
         )
-        prompt_path = (self.fake.base / "promptpath.1").read_text().strip()
+        prompt_path = Path((self.fake.base / "promptpath.1").read_text().strip())
+        self.assertEqual(prompt_path.parent, Path(argv[argv.index("--workspace") + 1]))
+        self.assertEqual(prompt_path.parent.parent, adapter.workspace)
         self.assertFalse(os.path.exists(prompt_path))  # prompt-файл удалён после хода
-        self.assertEqual(self.adapter().active_count(), 0)
+        self.assertFalse(prompt_path.parent.exists())  # каталог хода удалён целиком
+        self.assertEqual(adapter.active_count(), 0)
+
+    def test_parallel_turns_use_own_workspace_and_prompt(self):
+        """RW-001: у каждого хода собственный каталог; prompt соседа недостижим по argv."""
+        adapter = self.adapter(max_concurrent=2)
+        results = []
+
+        def run() -> None:
+            results.append(adapter.execute_turn(ctx_for(), None))
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        self.assertEqual([out["state"] for out in results], ["done", "done"])
+        # Файлы, привязанные к pid процесса-обёртки: гонка счётчика не влияет.
+        prompt_files = sorted(self.fake.base.glob("promptpath.pid.*"))
+        argv_files = sorted(self.fake.base.glob("argv.pid.*"))
+        self.assertEqual(len(prompt_files), 2)
+        self.assertEqual(len(argv_files), 2)
+        workspaces = []
+        prompts = []
+        for prompt_file, argv_file in zip(prompt_files, argv_files):
+            argv = argv_file.read_text(encoding="utf-8").split("\n")[:-1]
+            workspaces.append(argv[argv.index("--workspace") + 1])
+            prompts.append(Path(prompt_file.read_text().strip()))
+        self.assertNotEqual(workspaces[0], workspaces[1])
+        self.assertNotEqual(prompts[0].parent, prompts[1].parent)
+        self.assertNotEqual(prompts[0].parent, adapter.workspace)
+        self.assertNotIn(prompts[0].parent, prompts[1].parents)
+        self.assertNotIn(prompts[1].parent, prompts[0].parents)
+        for path in prompts:
+            self.assertFalse(path.exists())
+            self.assertFalse(path.parent.exists())
 
     def test_child_env_has_no_secrets_in_real_process(self):
         with mock.patch.dict(
@@ -277,13 +407,20 @@ class TestExecuteTurn(MuseCase):
                 "META_API_KEY": "m" * 40,
                 "DROID_DSH_BRIDGE_KEY": "k" * 40,
                 "ZZ_LEAK": "z",
+                "MUSE_BIN": "/tmp/evil-muse",
             },
         ):
             out = self.adapter().execute_turn(ctx_for(), None)
         self.assertEqual(out["state"], "done")
         env = self.fake.env()
-        for name in ("META_API_KEY", "DROID_DSH_BRIDGE_KEY", "ZZ_LEAK"):
+        for name in ("META_API_KEY", "DROID_DSH_BRIDGE_KEY", "ZZ_LEAK", "MUSE_BIN"):
             self.assertNotIn(name, env)
+
+    def test_configured_proxy_port_is_passed_to_wrapper(self):
+        """RW-011: обёртка получает ровно тот порт, который проверил preflight."""
+        out = self.adapter().execute_turn(ctx_for(), None)
+        self.assertEqual(out["state"], "done")
+        self.assertEqual(self.fake.env()["MUSE_PROXY_PORT"], str(self.fake.proxy_port))
 
     def test_final_text_in_terminal_wins(self):
         self.fake.set_mode("final")
@@ -310,6 +447,13 @@ class TestExecuteTurn(MuseCase):
         self.assertEqual(out["state"], "backend_error")
         self.assertIn("boom", out["err"])
 
+    def test_missing_terminal_completed_is_backend_error(self):
+        """RW-004: delta + EOF + rc=0 без terminal.completed — не done, а backend_error (502)."""
+        self.fake.set_mode("noterminal")
+        out = self.adapter().execute_turn(ctx_for(), None)
+        self.assertEqual((out["state"], out["rc"]), ("backend_error", 1))
+        self.assertIn("terminal_missing", out["err"])
+
     def test_nonzero_exit_is_backend_error_and_not_retried(self):
         self.fake.set_mode("exit1")
         out = self.adapter().execute_turn(ctx_for(), None)
@@ -317,11 +461,22 @@ class TestExecuteTurn(MuseCase):
         self.assertIn("something bad", out["err"])
         self.assertEqual(self.fake.count(), 1)
 
-    def test_single_retry_only_on_network_marker(self):
+    def test_network_marker_is_not_replayed(self):
+        """RW-003: действие могло исполниться до сетевой ошибки — промпт не повторяется."""
+        self.fake.set_mode("netmarker")
+        out = self.adapter().execute_turn(ctx_for(), None)
+        self.assertEqual(out["state"], "backend_error")
+        self.assertEqual(self.fake.count(), 1)
+        self.assertEqual(
+            (self.fake.base / "action.log").read_text(encoding="utf-8").splitlines(),
+            ["action"],
+        )
+
+    def test_network_marker_on_first_run_does_not_retry(self):
         self.fake.set_mode("netonce")
         out = self.adapter().execute_turn(ctx_for(), None)
-        self.assertEqual(out["state"], "done")
-        self.assertEqual(self.fake.count(), 2)
+        self.assertEqual(out["state"], "backend_error")
+        self.assertEqual(self.fake.count(), 1)
 
     def test_missing_wrapper_is_launcher_unavailable(self):
         adapter = self.adapter(wrapper=str(self.tmp / "no-such.sh"))
@@ -346,15 +501,7 @@ class TestExecuteTurn(MuseCase):
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual((out["state"], out["rc"]), ("timeout", 124))
         pid = int((self.fake.base / "pid").read_text())
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        self.assertTrue(wait_pid_gone(pid), "process group survived timeout")
 
     def test_client_gone_kills_child(self):
         self.fake.set_mode("sleep")
@@ -402,11 +549,116 @@ class TestExecuteTurn(MuseCase):
         again = adapter.execute_turn(ctx_for(), None)
         self.assertEqual(again["state"], "launcher_unavailable")
 
+    def test_jsonl_line_over_limit_is_pump_error(self):
+        """RW-006: строка > MAX_LINE_BYTES прекращает ход без роста памяти хаба."""
+        self.fake.set_mode("bigline")
+        adapter = self.adapter()
+        started = time.monotonic()
+        out = adapter.execute_turn(ctx_for(), None)
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual(out["state"], "pump_error")
+        self.assertIn("jsonl line exceeds the limit", out["err"])
+        self.assertEqual(adapter.active_count(), 0)
+
+    def test_turn_text_over_budget_is_pump_error(self):
+        """RW-006: суммарный текст хода > MAX_TURN_TEXT_BYTES прекращает ход."""
+        self.fake.set_mode("bigtext")
+        adapter = self.adapter()
+        started = time.monotonic()
+        out = adapter.execute_turn(ctx_for(), None)
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual(out["state"], "pump_error")
+        self.assertIn("turn text exceeds the limit", out["err"])
+        self.assertEqual(adapter.active_count(), 0)
+
+    def test_descendant_holding_stderr_is_killed_bounded(self):
+        """RW-009: лидер вышел, потомок держит stderr — добор ограничен, группа убита."""
+        self.fake.set_mode("desc_stderr")
+        adapter = self.adapter()
+        started = time.monotonic()
+        out = adapter.execute_turn(ctx_for(), None)
+        elapsed = time.monotonic() - started
+        self.assertEqual(out["state"], "done")
+        self.assertLess(elapsed, 15)
+        child = int((self.fake.base / "child.pid").read_text())
+        self.assertTrue(wait_pid_gone(child), "stderr-holding descendant survived")
+        self.assertEqual(adapter.active_count(), 0)
+
+    def test_descendant_with_devnull_stdio_is_killed(self):
+        """RW-009: потомок с закрытыми pipe не остаётся после освобождения слота."""
+        self.fake.set_mode("desc_devnull")
+        adapter = self.adapter()
+        started = time.monotonic()
+        out = adapter.execute_turn(ctx_for(), None)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(out["state"], "done")
+        child = int((self.fake.base / "child.pid").read_text())
+        self.assertTrue(wait_pid_gone(child), "DEVNULL descendant survived")
+        self.assertEqual(adapter.active_count(), 0)
+
+
+class RegistryHost:
+    """Хост-заглушка с персистентным реестром детей (RW-010)."""
+
+    def __init__(self, base: Path):
+        self.WORKSPACE = base / "ws"
+        self.TIMEOUT_S = 30.0
+        self.QUEUE_TIMEOUT_S = 900.0
+        self.KEEPALIVE_S = 15.0
+        self.calls: list = []
+        self._log = lambda message: None
+
+    def _children_update(self, add=None, remove_pid=None) -> None:
+        self.calls.append((add, remove_pid))
+
+    def _proc_start_sig(self, pid: int) -> str:
+        return "sig-%d" % pid
+
+
+class TestChildRegistry(MuseCase):
+    def test_child_registered_and_unregistered(self):
+        host = RegistryHost(self.tmp)
+        adapter = MuseAdapter(
+            "muse", self.fake.config(), lambda: catalog_with_muse(), host
+        )
+        self.addCleanup(adapter.shutdown)
+        out = adapter.execute_turn(ctx_for(), None)
+        self.assertEqual(out["state"], "done")
+        added = [add for add, _ in host.calls if add]
+        removed = [pid for _, pid in host.calls if pid is not None]
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0]["kind"], "muse")
+        self.assertEqual(added[0]["pgid"], added[0]["pid"])
+        self.assertEqual(added[0]["start"], "sig-%d" % added[0]["pid"])
+        self.assertIn(added[0]["pid"], removed)
+
+    def test_host_without_registry_hooks_still_runs(self):
+        out = self.adapter().execute_turn(ctx_for(), None)
+        self.assertEqual(out["state"], "done")
+
 
 class TestQualify(MuseCase):
-    def test_qualify_ok_without_pin(self):
+    def test_qualify_ok_with_complete_pin(self):
         self.assertEqual(self.adapter().qualify(), (True, "ok"))
         self.assertTrue(self.adapter().is_healthy())
+
+    def test_qualify_requires_complete_pin(self):
+        """RW-002: без комплектного pin допуск не выдаётся — ход не запускается."""
+        self.assertEqual(
+            self.adapter(technical_ref=None).qualify(), (False, "pin_missing")
+        )
+        self.assertEqual(
+            self.adapter(technical_ref={"binary_path": "/tmp/x"}).qualify(),
+            (False, "pin_missing"),
+        )
+        self.assertEqual(
+            self.adapter(technical_ref={"binary_sha256": "0" * 64}).qualify(),
+            (False, "pin_missing"),
+        )
+        out = self.adapter(technical_ref=None).execute_turn(ctx_for(), None)
+        self.assertEqual(out["state"], "launcher_unavailable")
+        self.assertEqual(out["err"], "pin_missing")
+        self.assertEqual(self.fake.count(), 0)
 
     def test_qualify_pin_match_and_mismatch(self):
         binary = self.tmp / "muse-bin"

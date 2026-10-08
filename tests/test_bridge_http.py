@@ -7,7 +7,10 @@
 """
 
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 import time
 from pathlib import Path
@@ -16,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import BridgeCase, TOOLS  # noqa: E402
+from bridge_testlib import BridgeCase, TOOLS, wait_until  # noqa: E402
 
 
 class TestMessageJoining(BridgeCase):
@@ -270,11 +273,9 @@ class TestOverallTimeout(BridgeCase):
 
 
 class TestSweepWorkspace(unittest.TestCase):
-    """m1: sweep удаляет только старые prompt-*.txt и img-*."""
+    """m1/RW-010: sweep удаляет только старое наследие ходов (prompt-*.txt, img-*, muse/*)."""
 
     def test_sweep_removes_only_stale_prompts(self):
-        import tempfile
-
         real_ws = server.WORKSPACE
         with tempfile.TemporaryDirectory() as tmp:
             server.WORKSPACE = Path(tmp)
@@ -287,11 +288,20 @@ class TestSweepWorkspace(unittest.TestCase):
             fresh_dir.mkdir()
             for p in (old, new, keep):
                 p.write_text("x", encoding="utf-8")
+            muse = Path(tmp) / "muse"
+            muse.mkdir()
+            muse_prompt = muse / "prompt-old.txt"
+            muse_prompt.write_text("PROMPT-CANARY", encoding="utf-8")
+            stale_turn = muse / "turn-old"
+            fresh_turn = muse / "turn-new"
+            stale_turn.mkdir()
+            fresh_turn.mkdir()
+            (stale_turn / "prompt.txt").write_text("PROMPT-CANARY", encoding="utf-8")
             stale = time.time() - 7200
-            import os
-
             os.utime(old, (stale, stale))
             os.utime(stale_dir, (stale, stale))
+            os.utime(muse_prompt, (stale, stale))
+            os.utime(stale_turn, (stale, stale))
             try:
                 server._sweep_workspace()
             finally:
@@ -301,6 +311,70 @@ class TestSweepWorkspace(unittest.TestCase):
             self.assertTrue(keep.exists())
             self.assertFalse(stale_dir.exists())
             self.assertTrue(fresh_dir.exists())
+            # RW-010: каталог хода muse и его промпт подметаются тем же порогом.
+            self.assertFalse(muse_prompt.exists())
+            self.assertFalse(stale_turn.exists())
+            self.assertTrue(fresh_turn.exists())
+
+    def test_shutdown_sweep_removes_fresh_turns_but_keeps_state(self):
+        """RW-010: на остановке моста наследие ходов сносится безусловно, хранилище чатов — нет."""
+        real_ws = server.WORKSPACE
+        with tempfile.TemporaryDirectory() as tmp:
+            server.WORKSPACE = Path(tmp)
+            muse = Path(tmp) / "muse"
+            muse.mkdir()
+            fresh_turn = muse / "turn-fresh"
+            fresh_turn.mkdir()
+            (fresh_turn / "prompt.txt").write_text("PROMPT-CANARY", encoding="utf-8")
+            state = Path(tmp) / "state"
+            state.mkdir()
+            (state / "chat.json").write_text("{}", encoding="utf-8")
+            try:
+                server._sweep_workspace(cutoff_s=0.0)
+            finally:
+                server.WORKSPACE = real_ws
+            self.assertFalse(fresh_turn.exists())
+            self.assertTrue((state / "chat.json").exists())
+
+    def test_restart_reconciles_own_muse_orphans_keeps_foreign(self):
+        """RW-010: после аварии хаба restart добивает свои orphan-группы muse; чужой PID цел."""
+        own = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        foreign = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        real_ws = server.WORKSPACE
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                server.WORKSPACE = Path(tmp)
+                entries = [
+                    {
+                        "pid": own.pid,
+                        "pgid": own.pid,
+                        "start": server._proc_start_sig(own.pid),
+                        "bridge_pid": 1,
+                        "kind": "muse",
+                    },
+                    {
+                        "pid": foreign.pid,
+                        "pgid": foreign.pid,
+                        "start": "Mon Jan  1 00:00:00 1990",
+                        "bridge_pid": 1,
+                        "kind": "muse",
+                    },
+                ]
+                server._atomic_write(
+                    server._children_path(), json.dumps(entries).encode("utf-8")
+                )
+                self.assertEqual(server.reconcile_children(), 1)
+                self.assertTrue(wait_until(lambda: own.poll() is not None))
+                self.assertIsNone(foreign.poll())
+                self.assertEqual(
+                    json.loads(server._children_path().read_text(encoding="utf-8")), []
+                )
+        finally:
+            server.WORKSPACE = real_ws
+            for proc in (own, foreign):
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
 
 
 if __name__ == "__main__":

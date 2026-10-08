@@ -62,7 +62,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "meta-muse",
-      "max_concurrent": 2,
+      "max_concurrent": 1,
       "wrapper": "~/.config/muse-launch/muse-cli.sh",
       "technical_ref": {
         "version": "1.4.3",

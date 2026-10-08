@@ -4,6 +4,7 @@ import copy
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from adapters import ADAPTER_KINDS  # noqa: E402
 
 FLEET_FILE = Path(server.ROOT) / "fleet.json"
 
@@ -51,7 +53,7 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(muse["kind"], "muse")
         self.assertTrue(muse["enabled"])
         self.assertEqual(muse["wrapper"], "~/.config/muse-launch/muse-cli.sh")
-        self.assertEqual(muse["max_concurrent"], 2)
+        self.assertEqual(muse["max_concurrent"], 1)  # RW-001: ходы muse сериализованы
 
     def test_models_are_bound_to_backends(self):
         catalog = server._build_catalog(raw_v3())
@@ -182,8 +184,113 @@ class TestSchema3Violations(unittest.TestCase):
         self.expect(
             lambda d: d["backends"]["muse"].update(enabled="yes"), "backend_invalid"
         )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(required="no"), "backend_invalid"
+        )
         self.expect(lambda d: d.update(backends={}), "backends_invalid")
         self.expect(lambda d: d.pop("backends"), "backends_invalid")
+
+    def test_backend_nested_types_refused_before_registration(self):
+        """RW-005: вложенные типы (technical_ref, wrapper, proxy_port) — отказ до регистрации.
+
+        Раньше `technical_ref: ["bad"]` доезжал до `qualify()` и падал AttributeError на .get();
+        теперь запись проверяется общим с сервером и fleet_check валидатором.
+        """
+        self.expect(
+            lambda d: d["backends"]["muse"].update(technical_ref=["bad"]),
+            "backend_technical_ref_invalid",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(technical_ref={}),
+            "backend_technical_ref_incomplete",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(
+                technical_ref={"binary_path": "~/.local/bin/muse"}
+            ),
+            "backend_technical_ref_incomplete",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(
+                technical_ref={"binary_sha256": "0" * 64}
+            ),
+            "backend_technical_ref_incomplete",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(
+                technical_ref={
+                    "binary_path": "~/.local/bin/muse",
+                    "binary_sha256": "zz",
+                }
+            ),
+            "backend_technical_ref_incomplete",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(
+                technical_ref={
+                    "binary_path": "~/.local/bin/muse",
+                    "binary_sha256": "0" * 64,
+                    "surprise": 1,
+                }
+            ),
+            "backend_technical_ref_invalid",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].pop("technical_ref"),
+            "backend_technical_ref_missing",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(proxy_port=0),
+            "backend_proxy_port_invalid",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(proxy_port=65536),
+            "backend_proxy_port_invalid",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(proxy_port="10816"),
+            "backend_proxy_port_invalid",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(proxy_port=True),
+            "backend_proxy_port_invalid",
+            "muse",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(wrapper=""),
+            "backend_wrapper_invalid",
+        )
+        self.expect(
+            lambda d: d["backends"]["muse"].update(wrapper=7), "backend_wrapper_invalid"
+        )
+        # Явный null/не-dict в technical_ref отвергается и у droid: поле присутствует, но неверного типа.
+        self.expect(
+            lambda d: d["backends"]["droid"].update(technical_ref=None),
+            "backend_technical_ref_invalid",
+            "droid",
+        )
+        # Droid-запись без ключа technical_ref допустима: pin обязателен только для muse.
+        data = raw_v3()
+        data["backends"]["droid"].pop("technical_ref", None)
+        server._build_catalog(data)
+
+    def test_complete_pin_and_proxy_port_accepted(self):
+        data = raw_v3()
+        data["backends"]["muse"]["proxy_port"] = 10816
+        catalog = server._build_catalog(data)
+        ref = catalog["backends"]["muse"]["technical_ref"]
+        self.assertTrue(ref["binary_path"])
+        self.assertEqual(len(ref["binary_sha256"]), 64)
 
     def test_duplicate_model_id_across_backends(self):
         def dup(d):
@@ -225,6 +332,109 @@ class TestSchema3Violations(unittest.TestCase):
             "default_effort_invalid",
             "muse-spark-1.3",
         )
+
+
+def _import_fleet_check():
+    """Импорт fleet_check; PyYAML в .venv отсутствует — для проверки каталога хватает заглушки."""
+    root = str(Path(server.ROOT))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        import yaml  # noqa: F401
+    except ModuleNotFoundError:
+        shim = types.ModuleType("yaml")
+
+        class _Loader:
+            @classmethod
+            def add_multi_constructor(cls, prefix, fn):
+                return None
+
+        shim.SafeLoader = _Loader
+        shim.YAMLError = ValueError
+        shim.load = lambda *args, **kwargs: None
+        sys.modules["yaml"] = shim
+    import fleet_check  # noqa: E402
+
+    return fleet_check
+
+
+class TestFleetCheckParity(unittest.TestCase):
+    """RW-005: fleet_check и сервер принимают/отвергают одно множество backend-записей."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.fleet_check = _import_fleet_check()
+
+    def catalogue_errors(self, data):
+        report = self.fleet_check.Report()
+        self.fleet_check.check_catalogue(data, report)
+        for check in report.checks:
+            if check["name"] == "catalogue":
+                return check["errors"]
+        return []
+
+    def test_kind_registry_is_shared_with_server(self):
+        self.assertIs(self.fleet_check.ADAPTER_KINDS, ADAPTER_KINDS)
+
+    def test_live_catalogue_has_no_catalogue_errors(self):
+        self.assertEqual(self.catalogue_errors(raw_v3()), [])
+
+    def test_same_backend_mutations_are_refused(self):
+        cases = [
+            (
+                "technical_ref_list",
+                lambda d: d["backends"]["muse"].update(technical_ref=["bad"]),
+                "backend_technical_ref_invalid",
+            ),
+            (
+                "pin_incomplete",
+                lambda d: d["backends"]["muse"].update(
+                    technical_ref={"binary_path": "~/.local/bin/muse"}
+                ),
+                "backend_technical_ref_incomplete",
+            ),
+            (
+                "pin_missing",
+                lambda d: d["backends"]["muse"].pop("technical_ref"),
+                "backend_technical_ref_missing",
+            ),
+            (
+                "proxy_port_range",
+                lambda d: d["backends"]["muse"].update(proxy_port=70000),
+                "backend_proxy_port_invalid",
+            ),
+            (
+                "enabled_string",
+                lambda d: d["backends"]["muse"].update(enabled="yes"),
+                "backend_invalid",
+            ),
+            (
+                "max_concurrent_zero",
+                lambda d: d["backends"]["muse"].update(max_concurrent=0),
+                "backend_max_concurrent_invalid",
+            ),
+            (
+                "unknown_key",
+                lambda d: d["backends"]["muse"].update(command="rm -rf /"),
+                "backend_key_unknown",
+            ),
+            (
+                "unknown_kind",
+                lambda d: d["backends"]["muse"].update(kind="codex"),
+                "backend_kind_unknown",
+            ),
+        ]
+        for name, mutate, reason in cases:
+            with self.subTest(name=name):
+                data = raw_v3()
+                mutate(data)
+                errors = self.catalogue_errors(data)
+                self.assertTrue(
+                    any(reason in error for error in errors), (name, errors)
+                )
+                with self.assertRaises(server.FleetViolation) as caught:
+                    server._build_catalog(data)
+                self.assertEqual(caught.exception.reason, reason, name)
 
 
 if __name__ == "__main__":

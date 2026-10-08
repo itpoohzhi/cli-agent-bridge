@@ -78,7 +78,10 @@ from receipt_schema import (  # noqa: E402
 )
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
-from core.backend_adapter import AdapterRegistry  # noqa: E402
+from core.backend_adapter import (  # noqa: E402
+    AdapterRegistry,
+    backend_entry_error,
+)
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
@@ -214,20 +217,6 @@ _FLEET_TOP_KEYS = frozenset(
         "models",
     }
 )
-_FLEET_BACKEND_KEYS = frozenset(
-    {
-        "kind",
-        "enabled",
-        "required",
-        "owned_by",
-        "max_concurrent",
-        "wrapper",
-        "technical_ref",
-        "transport",
-        "tool_policy",
-        "proxy_port",
-    }
-)
 _FLEET_MODEL_KEYS = frozenset(
     {
         "id",
@@ -256,8 +245,10 @@ def _build_backends(data: dict, schema: int) -> tuple:
     """Секция `backends` каталога (класс I) -> ({id: нормализованная запись}, порядок id).
 
     schema 2: секции нет (её появление — отказ), неявный бэкенд droid. schema 3: словарь
-    `id -> запись`; kind только из реестра в коде (`ADAPTER_KINDS`), неизвестные ключи — отказ
-    (в schema 2 их молча отбрасывали бы, и старый код опубликовал бы модель Muse как droid).
+    `id -> запись`; kind только из реестра в коде (`ADAPTER_KINDS`), полная проверка записи —
+    общей `backend_entry_error` (тот же код в `fleet_check`, RW-005): вложенные типы
+    (`technical_ref` с комплектным pin, wrapper, proxy_port), флаги, `max_concurrent` и
+    неизвестные ключи отвергаются ДО регистрации адаптера, а не падением на `.get()`.
     """
     if schema == 2:
         if "backends" in data:
@@ -270,31 +261,22 @@ def _build_backends(data: dict, schema: int) -> tuple:
         raise FleetViolation("backends_invalid", "-")
     backends: dict = {}
     for backend_id, entry in raw.items():
-        if (
-            not isinstance(backend_id, str)
-            or not backend_id
-            or not isinstance(entry, dict)
-        ):
-            raise FleetViolation("backend_invalid", str(backend_id))
-        if set(entry) - _FLEET_BACKEND_KEYS:
-            raise FleetViolation("backend_key_unknown", backend_id)
-        kind = entry.get("kind")
-        if not isinstance(kind, str) or kind not in ADAPTER_KINDS:
-            raise FleetViolation("backend_kind_unknown", backend_id)
-        flags = {}
-        for flag, default in (("enabled", True), ("required", False)):
-            value = entry.get(flag, default)
-            if not isinstance(value, bool):
-                raise FleetViolation("backend_invalid", backend_id)
-            flags[flag] = value
-        cap = entry.get("max_concurrent", 1)
-        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
-            raise FleetViolation("backend_max_concurrent_invalid", backend_id)
-        owned_by = entry.get("owned_by", backend_id)
-        if not isinstance(owned_by, str) or not owned_by:
-            raise FleetViolation("backend_invalid", backend_id)
-        normalized = {k: v for k, v in entry.items() if k not in flags}
-        normalized.update(flags, kind=kind, owned_by=owned_by, max_concurrent=cap)
+        reason = backend_entry_error(backend_id, entry, ADAPTER_KINDS)
+        if reason:
+            raise FleetViolation(reason, str(backend_id))
+        enabled = entry.get("enabled", True)
+        required = entry.get("required", False)
+        normalized = {
+            key: value
+            for key, value in entry.items()
+            if key not in ("enabled", "required")
+        }
+        normalized.update(
+            enabled=enabled,
+            required=required,
+            owned_by=entry.get("owned_by") or backend_id,
+            max_concurrent=entry.get("max_concurrent", 1),
+        )
         backends[backend_id] = normalized
     if not any(b["enabled"] for b in backends.values()):
         raise FleetViolation("backends_none_enabled", "-")
@@ -1037,6 +1019,11 @@ def _kill_all(*_: Any) -> None:
     closed = shutdown_all()
     # Остальные бэкенды: droid уже закрыт выше (его adapter.shutdown() — тот же shutdown_all).
     BACKENDS.shutdown(exclude=("droid",))
+    try:
+        # Ходы убиты: свежие prompt/turn-файлы собственных детей больше не нужны (RW-010).
+        _sweep_workspace(cutoff_s=0.0)
+    except Exception as exc:  # noqa: BLE001 - уборка не должна мешать остановке
+        _log(f"sweep_workspace_failed err={_err_summary(exc, 80)!r}")
     _log(f"shutdown: closed {closed} child process group(s)")
     os._exit(0)
 
@@ -2797,9 +2784,16 @@ class InstructionGuard:
 GUARD = InstructionGuard()
 
 
-def _chat_known(route: str, raw_key: Any) -> bool:
-    """Продолжение существующего чата (есть SID в памяти или запись на диске), а не новый."""
-    if route != "keyed":
+def _chat_known(route: str, raw_key: Any, adapter: Any = None) -> bool:
+    """Продолжение существующего чата ТОГО ЖЕ резидентного бэкенда, а не новый (RW-008).
+
+    Исключение b_guard для «известного чата» — только подтверждённое продолжение сессии:
+    у backend с `sessions=none` (muse) сессий нет, поэтому ключ существующего droid-чата не
+    делает muse-запрос продолжением — под unsafe он считается новым и отклоняется до spawn.
+    """
+    if route != "keyed" or adapter is None:
+        return False
+    if adapter.capabilities.get("sessions") != "resident":
         return False
     key_hash = _key_hash(raw_key)
     chat = REGISTRY.chats.get(key_hash)
@@ -4603,7 +4597,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 route = "nokey"
             instr = self._prompt_guard(
-                messages, route, raw_key, cwd, model_id, model_len
+                messages, route, raw_key, cwd, model_id, model_len, adapter
             )
             if instr is None:
                 return
@@ -4649,6 +4643,7 @@ class Handler(BaseHTTPRequestHandler):
         cwd: str,
         model_id: str,
         model_len: int,
+        adapter: Any,
     ) -> Any:
         """Фасадный контур b_guard / REQ-003 для ВСЕХ бэкендов: до выбора процесса и до адаптера.
 
@@ -4674,8 +4669,8 @@ class Handler(BaseHTTPRequestHandler):
         over = _instr_violation(blocks, guard_max)
         if guard_state == "unsafe" and blocks:
             # Профиль DSH небезопасен (alert уже в журнале): размер не режем немым 400, а явно
-            # отказываем только НОВЫМ чатам; живые чаты (есть SID/запись) продолжают.
-            refuse = not _chat_known(route, raw_key)
+            # отказываем только НОВЫМ чатам; живые резидентные чаты продолжают (RW-008).
+            refuse = not _chat_known(route, raw_key, adapter)
             if refuse or over is not None:
                 top = over or (
                     instr[2],
@@ -4734,10 +4729,13 @@ class Handler(BaseHTTPRequestHandler):
         if (
             adapter.kind != "droid"
         ):  # droid-путь пишет свои done/usage строки в _run_once
+            # RW-007: сырой stderr/terminal reason бэкенда может содержать пользовательский
+            # текст; в постоянный журнал идут только коды и размеры (сырой err — в ответ клиенту).
             _log(
                 f"done model={ctx['model']} backend={adapter.id} rc={out.get('rc')} "
                 f"state={out.get('state')} out_bytes={len(str(out.get('text') or '').encode())} "
-                f"wall_s={time.monotonic() - t0:.1f} err={_err_summary(out.get('err'))!r} {ctx['tag']}"
+                f"wall_s={time.monotonic() - t0:.1f} "
+                f"err_bytes={len(str(out.get('err') or '').encode())} {ctx['tag']}"
             )
         return out
 
@@ -4987,15 +4985,24 @@ class Server(ThreadingHTTPServer):
             self._conn_sem.release()
 
 
-def _sweep_workspace() -> None:
-    """Удалить prompt-*.txt и img-* старше часа (наследие упавших ходов)."""
-    cutoff = time.time() - 3600
-    for path in WORKSPACE.glob("prompt-*.txt"):
-        try:
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-        except OSError:
-            pass
+def _sweep_workspace(cutoff_s: float = 3600.0) -> None:
+    """Удалить ходы muse и prompt-*/img-* старше cutoff (наследие упавших ходов, RW-010).
+
+    Подметаются per-turn подкаталоги muse (`muse/turn-*`) и legacy `muse/prompt-*.txt`:
+    после SIGKILL хаба они остаются без владельца. `cutoff_s=0` — уборка на shutdown.
+    """
+    cutoff = time.time() - cutoff_s
+    for pattern in ("prompt-*.txt", "muse/prompt-*.txt", "muse/turn-*"):
+        for path in WORKSPACE.glob(pattern):
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(str(path), ignore_errors=True)
+                else:
+                    path.unlink()
+            except OSError:
+                pass
     for path in WORKSPACE.glob("img-*"):
         try:
             if path.is_dir() and path.stat().st_mtime < cutoff:

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Mapping
@@ -21,6 +22,87 @@ SESSIONS_RESIDENT = "resident"
 SESSIONS_NONE = "none"
 STREAMING_NATIVE = "native"
 STREAMING_EMULATED = "emulated"
+
+# ---- schema 3: единая проверка записи `backends[id]` (RW-005) ------------------------
+# Ключи записи бэкенда; проверка одна для загрузчика сервера (`_build_backends`) и
+# `fleet_check`: обе стороны обязаны принимать ровно одно множество каталогов.
+BACKEND_KEYS = frozenset(
+    {
+        "kind",
+        "enabled",
+        "required",
+        "owned_by",
+        "max_concurrent",
+        "wrapper",
+        "technical_ref",
+        "transport",
+        "tool_policy",
+        "proxy_port",
+    }
+)
+TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
+PROXY_PORT_MIN = 1
+PROXY_PORT_MAX = 65535
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+# Виды, для которых pin технического образа обязателен (AD-007): без него `qualify()`
+# нечего сверять, и допуск вырождается в «любой файл, который найдёт обёртка».
+PIN_REQUIRED_KINDS = frozenset({"muse"})
+
+
+def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -> str:
+    """Причина отказа записи `backends[id]` schema 3 ('' — запись валидна).
+
+    Короткий slug класса I (без пользовательских данных): его пишут в журнал/отчёт и
+    сервер, и `fleet_check`. `kinds` — реестр видов, заданный В КОДЕ
+    (`adapters.ADAPTER_KINDS`), а не конфигурация.
+    """
+    if not isinstance(backend_id, str) or not backend_id:
+        return "backend_invalid"
+    if not isinstance(entry, dict):
+        return "backend_invalid"
+    if set(entry) - BACKEND_KEYS:
+        return "backend_key_unknown"
+    kind = entry.get("kind")
+    if not isinstance(kind, str) or kind not in kinds:
+        return "backend_kind_unknown"
+    for flag, default in (("enabled", True), ("required", False)):
+        if not isinstance(entry.get(flag, default), bool):
+            return "backend_invalid"
+    cap = entry.get("max_concurrent", 1)
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        return "backend_max_concurrent_invalid"
+    owned_by = entry.get("owned_by", backend_id)
+    if not isinstance(owned_by, str) or not owned_by:
+        return "backend_invalid"
+    if "wrapper" in entry and (
+        not isinstance(entry["wrapper"], str) or not entry["wrapper"].strip()
+    ):
+        return "backend_wrapper_invalid"
+    if "proxy_port" in entry:
+        port = entry["proxy_port"]
+        if (
+            isinstance(port, bool)
+            or not isinstance(port, int)
+            or not PROXY_PORT_MIN <= port <= PROXY_PORT_MAX
+        ):
+            return "backend_proxy_port_invalid"
+    if "technical_ref" not in entry:
+        return "backend_technical_ref_missing" if kind in PIN_REQUIRED_KINDS else ""
+    ref = entry.get("technical_ref")
+    if not isinstance(ref, dict) or set(ref) - TECHNICAL_REF_KEYS:
+        return "backend_technical_ref_invalid"
+    if "version" in ref and not isinstance(ref["version"], str):
+        return "backend_technical_ref_invalid"
+    path = ref.get("binary_path")
+    digest = ref.get("binary_sha256")
+    if (
+        not isinstance(path, str)
+        or not path.strip()
+        or not isinstance(digest, str)
+        or not _SHA256_HEX.fullmatch(digest)
+    ):
+        return "backend_technical_ref_incomplete"
+    return ""
 
 
 class BackendError(Exception):

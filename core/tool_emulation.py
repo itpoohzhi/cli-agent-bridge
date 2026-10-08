@@ -265,9 +265,10 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     if "arguments" not in obj:
         arguments: dict = {}
     else:
-        arguments = _normalize_arguments(obj.get("arguments"))
-        if arguments is None:
+        normalized = _normalize_arguments(obj.get("arguments"))
+        if normalized is None:
             return None
+        arguments = normalized
     return {"name": name.strip(), "arguments": arguments}
 
 
@@ -363,21 +364,6 @@ class ToolCallParser:
         if self._buf:
             text, self._buf = self._buf, ""
             self._on_content(text)
-
-
-def split_tool_calls(chunks: list) -> tuple:
-    """Готовые текстовые куски -> (content, [вызовы {"name","arguments"}]).
-
-    Разбор тем же `ToolCallParser`, что и в потоке: фасад применяет его к сырому тексту
-    любого бэкенда, адаптеры блоки `<tool_call>` не разбирают.
-    """
-    pieces: list = []
-    calls: list = []
-    parser = ToolCallParser(pieces.append, calls.append)
-    for chunk in chunks:
-        parser.feed(chunk)
-    parser.finish()
-    return "".join(pieces), calls
 
 
 def finalize_turn(raw: dict, emulate_tools: bool) -> dict:
