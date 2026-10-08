@@ -4,7 +4,7 @@ A universal bridge that plugs **vendor coding-agent CLIs** into any AI-agent sta
 through a single **OpenAI-compatible API**. One port, one key, one model catalog —
 on the other side, the vendor binaries do the work.
 
-If a vendor ships a headless CLI for its agent — Factory Droid, Muse,
+If a vendor ships a headless CLI for its agent — Factory Droid, Meta's Muse,
 Claude Code, OpenAI Codex, Cursor, or anything similar — this bridge lets you
 call it with plain `POST /v1/chat/completions`, from any framework, harness,
 or script that speaks the OpenAI protocol.
@@ -63,7 +63,7 @@ Two adapters ship in this repo; any other vendor CLI joins the same way
 - Sessions: resident (`hot | restore | rebase | cold` plan), keyed-chat state on
   disk with restricted permissions.
 
-### `muse` — Muse CLI (opt-in)
+### `muse` — Muse CLI, Meta's coding-agent CLI (opt-in)
 
 - Transport: headless one-shot `muse exec` per request through a launcher
   wrapper; no sessions — every turn replays the request history.
