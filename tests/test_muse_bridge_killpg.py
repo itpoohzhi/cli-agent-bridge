@@ -258,17 +258,8 @@ class _BridgeScenario(unittest.TestCase):
             return True
         return False
 
-
-class DisconnectScenarioTest(_BridgeScenario):
-    """R2/R3: обрыв клиента во время exec-хода освобождает слот и убивает группу."""
-
-    def _run_pid(self) -> int | None:
-        """PID лидера exec-группы; None — exec не стартовал (обрыв раньше fallback)."""
-        if not wait_until(lambda: self.pidfile.exists(), 4.0):
-            return None
-        return int(self.pidfile.read_text(encoding="utf-8").strip())
-
-    def _health_active(self) -> int:
+    def _health_json(self) -> dict[str, Any]:
+        """Тело ответа GET /health."""
         head = (
             "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
         ).encode("utf-8")
@@ -283,16 +274,47 @@ class DisconnectScenarioTest(_BridgeScenario):
                     break
                 chunks.append(chunk)
         body = b"".join(chunks).split(b"\r\n\r\n", 1)[1]
-        return int(json.loads(body.decode("utf-8"))["active"])
+        return json.loads(body.decode("utf-8"))
+
+
+class HealthQuarantinedTest(_BridgeScenario):
+    """FU-004: /health показывает число слотов, изъятых в карантин."""
+
+    def test_health_reports_quarantined_slots(self) -> None:
+        self.assertEqual(self._health_json()["quarantined"], 0)
+        self.mod._quarantined_slots.append([424242])
+        self.assertEqual(self._health_json()["quarantined"], 1)
+
+
+class DisconnectScenarioTest(_BridgeScenario):
+    """R2/R3: обрыв клиента во время exec-хода освобождает слот и убивает группу."""
+
+    def _run_pid(self) -> int | None:
+        """PID лидера exec-группы; None — exec не стартовал (обрыв раньше fallback)."""
+        if not wait_until(lambda: self.pidfile.exists(), 4.0):
+            return None
+        return int(self.pidfile.read_text(encoding="utf-8").strip())
+
+    def _health_active(self) -> int:
+        return int(self._health_json()["active"])
 
     def test_r2_disconnect_frees_slot_and_kills_group(self) -> None:
-        self._post_request_disconnect()
-        pid = self._run_pid()
-        if pid is None:
-            # Обрыв успел раньше fallback: exec не запущен, слот обязан быть свободен.
-            ok = wait_until(self._slot_free, SCENARIO_DEADLINE_S)
-            self.assertTrue(ok, "exec не стартовал после обрыва, но слот занят")
-            return
+        sock = self._open_request()
+        self.addCleanup(sock.close)
+        # Обрываем только после появления pid лидера: без запущенного exec сценарий
+        # не проверяет killpg и не вправе давать PASS.
+        started = wait_until(
+            lambda: (
+                self.pidfile.exists()
+                and self.pidfile.read_text(encoding="utf-8").strip() != ""
+            ),
+            SCENARIO_DEADLINE_S,
+        )
+        self.assertTrue(started, "exec не стартовал: сценарий не проверяет killpg")
+        pid = int(self.pidfile.read_text(encoding="utf-8").strip())
+        self.assertTrue(group_alive(pid), "exec-группа не жива до обрыва")
+        time.sleep(DISCONNECT_AFTER_S)
+        sock.close()
         ok = wait_until(
             lambda: self._slot_free() and not group_alive(pid),
             SCENARIO_DEADLINE_S,
@@ -465,6 +487,7 @@ class QuarantineSlotTest(unittest.TestCase):
         mod._kill_group = lambda p: kills.append(p.pid)
 
         mod._quarantine_slot([SimpleNamespace(proc=proc)])
+        self.assertEqual(len(mod._quarantined_slots), 1, "слот не учтён в карантине")
 
         critical = wait_until(
             lambda: any("CRITICAL" in line for line in logs), SCENARIO_DEADLINE_S
@@ -486,10 +509,106 @@ class QuarantineSlotTest(unittest.TestCase):
         )
         self.assertTrue(released, "слот не вернулся после смерти группы")
         self.assertTrue(mod._slots.acquire(blocking=False), "слот не освобождён")
+        self.assertEqual(len(mod._quarantined_slots), 0, "карантин не очищен")
         time.sleep(1.2)
         self.assertFalse(
             mod._slots.acquire(blocking=False), "слот освобождён больше одного раза"
         )
+
+    def test_no_signals_after_ceiling(self) -> None:
+        """RW-007: после потолка карантина killpg не шлётся, слот остаётся изъятым."""
+        mod = load_bridge()
+        mod._slots = threading.Semaphore(1)
+        mod._slots.acquire()
+        mod.QUARANTINE_MAX_S = 0.3
+        logs: list[str] = []
+        mod._log = logs.append
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 60 & wait"], start_new_session=True
+        )
+        self.addCleanup(CloseKillsGroupTest._reap_group, proc)
+        kills: list[int] = []
+        mod._kill_group = lambda p: kills.append(p.pid)
+
+        mod._quarantine_slot([SimpleNamespace(proc=proc)])
+        critical = wait_until(
+            lambda: any("CRITICAL" in line for line in logs), SCENARIO_DEADLINE_S
+        )
+        self.assertTrue(critical, "после потолка карантина нет аварийной эскалации")
+        sent = len(kills)
+        self.assertGreaterEqual(sent, 1, "до потолка группа не добивалась")
+        time.sleep(2.2)
+        self.assertEqual(len(kills), sent, "после потолка продолжается спам killpg")
+        self.assertFalse(
+            mod._slots.acquire(blocking=False), "слот возвращён при живой группе"
+        )
+
+    def test_reaped_leader_gets_no_signals(self) -> None:
+        """RW-007: лидер реапнут — его PGID свободен для переиспользования, сигналов нет."""
+        mod = load_bridge()
+        mod._slots = threading.Semaphore(1)
+        mod._slots.acquire()
+        logs: list[str] = []
+        mod._log = logs.append
+        # Лидер выходит сразу, «внук» остаётся в группе.
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 60 & exit 0"], start_new_session=True
+        )
+        proc.wait(timeout=5)
+        self.addCleanup(CloseKillsGroupTest._reap_group, proc)
+        self.assertTrue(group_alive(proc.pid), "стенд: группа должна быть жива")
+        kills: list[int] = []
+        mod._kill_group = lambda p: kills.append(p.pid)
+
+        mod._quarantine_slot([SimpleNamespace(proc=proc)])
+        time.sleep(2.2)
+        self.assertEqual(kills, [], "killpg по PGID реапнутого лидера")
+
+        os.killpg(proc.pid, signal.SIGKILL)
+        released = wait_until(
+            lambda: any("slot released" in line for line in logs), SCENARIO_DEADLINE_S
+        )
+        self.assertTrue(released, "слот не вернулся после смерти группы")
+
+
+class ConcurrentCloseTest(unittest.TestCase):
+    """RW-006: параллельный close() ждёт конца уборки, а не выходит по _closed."""
+
+    def _assert_second_close_waits(self, cls_name: str) -> None:
+        mod = load_bridge()
+        with tempfile.TemporaryDirectory(prefix="muse-bridge-rw006-") as tmp:
+            run = getattr(mod, cls_name)("muse-spark-1.3", "p", "max", Path(tmp))
+            proc = CloseKillsGroupTest._spawn_group()
+            self.addCleanup(CloseKillsGroupTest._reap_group, proc)
+            run.proc = proc
+            real_kill = mod._kill_group
+            started = threading.Event()
+            seen: list[bool] = []
+
+            def slow_kill(p: subprocess.Popen) -> None:
+                seen.append(run.dead_confirmed)
+                started.set()
+                time.sleep(0.6)
+                real_kill(p)
+
+            mod._kill_group = slow_kill
+            first = threading.Thread(target=run.close)
+            first.start()
+            self.assertTrue(started.wait(5), "первая уборка не стартовала")
+            run.close()
+            self.assertFalse(
+                group_alive(proc.pid),
+                "второй close() вернулся до окончания уборки группы",
+            )
+            self.assertTrue(run.dead_confirmed)
+            self.assertEqual(seen, [False], "во время уборки dead_confirmed не False")
+            first.join(timeout=5)
+
+    def test_run_second_close_waits_for_cleanup(self) -> None:
+        self._assert_second_close_waits("Run")
+
+    def test_serve_run_second_close_waits_for_cleanup(self) -> None:
+        self._assert_second_close_waits("ServeRun")
 
 
 class WaitGroupExitTest(unittest.TestCase):

@@ -147,6 +147,8 @@ DEFAULT_SYSTEM_HINT = (
 _started = time.time()
 _active: dict[str, float] = {}
 _active_lock = threading.Lock()
+# Слоты в карантине (по записи на слот: pgid не подтверждённых мёртвыми групп); под _active_lock.
+_quarantined_slots: list[list[int]] = []
 _slots = threading.Semaphore(MAX_CONCURRENT)
 _LOG_LOCK = threading.Lock()
 
@@ -361,12 +363,12 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     name = obj.get("name")
     if not isinstance(name, str) or not name.strip():
         return None
-    if "arguments" not in obj:
-        arguments: dict = {}
-    else:
-        arguments = _normalize_arguments(obj.get("arguments"))
-        if arguments is None:
+    arguments: dict = {}
+    if "arguments" in obj:
+        normalized = _normalize_arguments(obj.get("arguments"))
+        if normalized is None:
             return None
+        arguments = normalized
     return {"name": name.strip(), "arguments": arguments}
 
 
@@ -582,37 +584,46 @@ def _terminate_run(run: Any, streams: tuple) -> None:
     закрываются (close() ждал бы читателя), слот хендлера уйдёт в карантин.
     """
     proc = run.proc
-    if proc is None or run._closed:
+    if proc is None:
         return
-    run._closed = True
-    _kill_group(proc)
-    try:
-        proc.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        _log(f"cleanup: wait after SIGKILL timed out pid={proc.pid}, escalating")
+    # Уборка идёт под замком: параллельный close() (таймер, надзор обрыва, finally
+    # execute) ждёт её конца и видит итоговый dead_confirmed, а не выходит по _closed.
+    with run._cleanup_lock:
+        if run._closed:
+            return
+        run._closed = True
+        # Пессимистично до подтверждения: оборванная уборка уйдёт в карантин слота.
+        run.dead_confirmed = False
         _kill_group(proc)
         try:
             proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            pass
-    run.dead_confirmed = _wait_group_exit(
-        proc.pid, 2.0, leader_reaped=proc.poll() is not None
-    )
-    if not run.dead_confirmed:
-        _log(f"cleanup: process group {proc.pid} not confirmed dead after SIGKILL")
-        return
-    for stream in streams:
-        try:
-            if stream is not None:
-                stream.close()
-        except OSError:
-            pass
+            _log(f"cleanup: wait after SIGKILL timed out pid={proc.pid}, escalating")
+            _kill_group(proc)
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
+        run.dead_confirmed = _wait_group_exit(
+            proc.pid, 2.0, leader_reaped=proc.poll() is not None
+        )
+        if not run.dead_confirmed:
+            _log(f"cleanup: process group {proc.pid} not confirmed dead after SIGKILL")
+            return
+        for stream in streams:
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
 
 
 def _quarantine_slot(runs: list) -> None:
     """Слот держится, пока группы ходов не подтверждены мёртвыми (карантин), затем возвращается."""
     pgids = [r.proc.pid for r in runs if r.proc is not None]
     _log(f"quarantine: slot held, groups not confirmed dead pgids={pgids}")
+    with _active_lock:
+        _quarantined_slots.append(pgids)
 
     def work() -> None:
         end = time.monotonic() + QUARANTINE_MAX_S
@@ -623,16 +634,21 @@ def _quarantine_slot(runs: list) -> None:
                 break
             if not escalated and time.monotonic() >= end:
                 # Потолок вышел, а группа жива: слот отпускать нельзя (orphan продолжит
-                # работу при свободном слоте) — сигнал оператору, ожидание продолжается.
+                # работу при свободном слоте) — сигнал оператору, дальше только опрос.
                 escalated = True
                 _log(
                     "CRITICAL quarantine: process groups still alive after "
                     f"{QUARANTINE_MAX_S:.0f}s pgids={[r.proc.pid for r in alive]}, "
-                    "slot stays withdrawn until they die"
+                    "slot stays withdrawn until they die, signals stopped"
                 )
-            for run in alive:
-                _kill_group(run.proc)
+            if not escalated:
+                for run in alive:
+                    # Реапнутый лидер освободил pid: killpg по нему может попасть в чужую группу.
+                    if run.proc.poll() is None:
+                        _kill_group(run.proc)
             time.sleep(1.0)
+        with _active_lock:
+            _quarantined_slots.remove(pgids)
         _log("quarantine: slot released")
         _slots.release()
 
@@ -649,6 +665,7 @@ class Run:
         self.workdir = workdir
         self.proc: subprocess.Popen | None = None
         self._closed = False
+        self._cleanup_lock = threading.Lock()
         self.dead_confirmed = (
             True  # False — группа не подтверждена мёртвой (карантин слота)
         )
@@ -727,6 +744,10 @@ class Run:
         err_lines: list[str] = []
         state = "ok"
         try:
+            # Регистрация в _active ДО Popen: между появлением self.proc и записью в _active
+            # нет окна, в котором надзор уже видит процесс, а /health его не учитывает.
+            with _active_lock:
+                _active[run_id] = time.time()
             try:
                 self.proc = subprocess.Popen(
                     cmd,
@@ -742,15 +763,14 @@ class Run:
                     start_new_session=True,
                 )
             except OSError as exc:
+                with _active_lock:
+                    _active.pop(run_id, None)
                 return {
                     "rc": -1,
                     "text": "",
                     "err": f"spawn failed: {exc}",
                     "state": "spawn_failed",
                 }
-
-            with _active_lock:
-                _active[run_id] = time.time()
 
             def drain_stderr() -> None:
                 try:
@@ -785,10 +805,9 @@ class Run:
                     if not isinstance(event, dict):
                         continue
                     ptype = str(event.get("payload_type") or "")
-                    payload = (
-                        event.get("payload")
-                        if isinstance(event.get("payload"), dict)
-                        else {}
+                    raw_payload = event.get("payload")
+                    payload: dict[str, Any] = (
+                        raw_payload if isinstance(raw_payload, dict) else {}
                     )
                     if ptype == "run.output.delta":
                         text = payload.get("text")
@@ -810,11 +829,8 @@ class Run:
                             timer.cancel()
                             break
                     elif ptype == "task.lifecycle.failed":
-                        ev = (
-                            payload.get("event")
-                            if isinstance(payload.get("event"), dict)
-                            else {}
-                        )
+                        raw_ev = payload.get("event")
+                        ev: dict[str, Any] = raw_ev if isinstance(raw_ev, dict) else {}
                         if ev.get("reason"):
                             err_lines.append(f"task failed: {ev['reason']}")
                 if terminal == "completed":
@@ -903,6 +919,8 @@ class ServeRun:
         self.proc: subprocess.Popen | None = None
         self._rid = 0
         self._closed = False
+        self._cleanup_lock = threading.Lock()
+        self._handle_event: Any = None  # обработчик событий; ставится в execute
         self.dead_confirmed = (
             True  # False — группа не подтверждена мёртвой (карантин слота)
         )
@@ -1051,9 +1069,8 @@ class ServeRun:
                 if isinstance(msg, dict) and msg.get("id") == rid:
                     if "error" in msg:
                         raise ServeUnavailable(f"serve RPC error: {msg['error']}")
-                    return (
-                        msg.get("result") if isinstance(msg.get("result"), dict) else {}
-                    )
+                    result = msg.get("result")
+                    return result if isinstance(result, dict) else {}
                 self._handle_event(msg, None)
 
         kinds: dict[str, str] = {}
@@ -1072,9 +1089,8 @@ class ServeRun:
             if method in ("approval/request", "userInput/request"):
                 raise ServeUnavailable(f"serve needs interaction ({method})")
             if method in ("item/started", "item/completed"):
-                item = (
-                    params.get("item") if isinstance(params.get("item"), dict) else {}
-                )
+                raw_item = params.get("item")
+                item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
                 iid = str(item.get("itemId") or "")
                 kind = str(item.get("kind") or "")
                 if iid:
@@ -1111,7 +1127,7 @@ class ServeRun:
                 if isinstance(raw, dict):
                     usage.update(raw)
 
-        self._handle_event = _handle_event  # type: ignore[attr-defined]
+        self._handle_event = _handle_event
 
         try:
             init_rid = self._send(
@@ -1242,8 +1258,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
 
-    def log_message(self, fmt: str, *args: Any) -> None:
-        _log("http " + (fmt % args))
+    def log_message(self, format: str, *args: Any) -> None:
+        _log("http " + (format % args))
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         _log(f"http accept error from {client_address}")
@@ -1471,6 +1487,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/health", "/v1/health"):
             with _active_lock:
                 active = len(_active)
+                quarantined = len(_quarantined_slots)
             self._send(
                 200,
                 {
@@ -1481,6 +1498,7 @@ class Handler(BaseHTTPRequestHandler):
                     "default_model": DEFAULT_MODEL,
                     "default_effort": DEFAULT_EFFORT,
                     "active": active,
+                    "quarantined": quarantined,
                     "max_concurrent": MAX_CONCURRENT,
                     "stream": True,
                     "tool_emulation": True,
@@ -1654,6 +1672,11 @@ class Handler(BaseHTTPRequestHandler):
             # Слот отпускаем после остановки надзора (kill -> wait уже внутри execute).
             watch_stop.set()
             watcher.join(timeout=2)
+            # close() идемпотентен и ждёт уборку, начатую другим потоком (надзор, таймер):
+            # dead_confirmed читается только после её конца. Заодно страхует ход, упавший
+            # между Popen и собственным finally execute().
+            for run in runs:
+                run.close()
             if all(run.dead_confirmed for run in runs):
                 _slots.release()
             else:
@@ -1738,10 +1761,12 @@ class Handler(BaseHTTPRequestHandler):
             reasoning_tokens = 0
         if reasoning_tokens < 0:
             reasoning_tokens = 0
-        summaries = (
-            out.get("summaries") if isinstance(out.get("summaries"), list) else []
+        raw_summaries = out.get("summaries")
+        summaries: list[str] = (
+            [s for s in raw_summaries if isinstance(s, str)]
+            if isinstance(raw_summaries, list)
+            else []
         )
-        summaries = [s for s in summaries if isinstance(s, str)]
         sum_chars = sum(len(s) for s in summaries)
         if summaries:
             preview = next((s for s in summaries if s), "")[:300]
