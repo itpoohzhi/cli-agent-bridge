@@ -106,7 +106,12 @@ class DroidAdapter(BackendAdapter):
             text=raw.get("text") or "",
             reasoning=raw.get("reasoning") or "",
             err=raw.get("err") or "",
-            usage=Usage(usage.get("input_tokens", 0), usage.get("output_tokens", 0)),
+            usage=Usage(
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cache_read_tokens=usage.get("cache_read_tokens"),
+                cache_creation_tokens=usage.get("cache_creation_tokens"),
+            ),
             tool_calls=tuple(tool_call(call) for call in raw.get("tool_calls") or ()),
             events=events,
         )

@@ -107,6 +107,7 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     _tools_section,
     finalize_turn,
 )
+from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 
 HOME = Path.home()
 HOST = os.environ.get("DROID_DSH_BRIDGE_HOST", "127.0.0.1")
@@ -2169,13 +2170,43 @@ def _map_usage(token_usage: Any) -> dict:
         value = tu.get(key)
         return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
+    def opt_num(key: str) -> int | None:
+        value = tu.get(key)
+        return (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else None
+        )
+
     return {
         "input_tokens": num("inputTokens"),
         "output_tokens": num("outputTokens"),
-        "cache_creation_tokens": num("cacheCreationTokens"),
-        "cache_read_tokens": num("cacheReadTokens"),
+        "cache_creation_tokens": opt_num("cacheCreationTokens"),
+        "cache_read_tokens": opt_num("cacheReadTokens"),
         "thinking_tokens": num("thinkingTokens"),
     }
+
+
+def _wire_usage(
+    prompt_tokens: Any, completion_tokens: Any, cache_read_tokens: Any
+) -> dict:
+    """Wire-`usage` OpenAI-контракта: `prompt_tokens_details` — только при известном кэше."""
+    wire = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    details, inconsistent = normalize_prompt_cache_details(
+        prompt_tokens, cache_read_tokens
+    )
+    if details is not None:
+        wire["prompt_tokens_details"] = details
+    if inconsistent:
+        _log(
+            "usage_cache_inconsistent prompt_tokens=%r cache_read_tokens=%r"
+            % (prompt_tokens, cache_read_tokens)
+        )
+    return wire
 
 
 def _transcribe(messages: list, tools: list, tool_choice: Any, images: list) -> dict:
@@ -3956,8 +3987,15 @@ class Handler(BaseHTTPRequestHandler):
             sess8 = ((run.sid if ok_done else plan["sid"]) or "")[:8] or "-"
             raw_in = usage.get("input_tokens", 0)
             raw_out = usage.get("output_tokens", 0)
+            cache_read = usage.get("cache_read_tokens")
+            cache_read_str = (
+                str(cache_read)
+                if isinstance(cache_read, int) and not isinstance(cache_read, bool)
+                else "-"
+            )
             _log(
                 f"usage sess={sess8} raw={raw_in}/{raw_out} "
+                f"cache_read={cache_read_str} "
                 f"rep={raw_in}/{raw_out} resumed={1 if hot else 0} turns={rep_turns}"
             )
         finally:
@@ -4573,6 +4611,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
+        wire_usage = _wire_usage(
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_read_tokens"),
+        )
         # content и arguments вызовов сериализуются отдельно и вставляются на место меток: большой текст
         # не проходит через дополнительный dict -> dumps -> encode (RW-012).
         marker = "@@content-" + uuid.uuid4().hex + "@@"
@@ -4599,12 +4642,7 @@ class Handler(BaseHTTPRequestHandler):
                 "created": int(time.time()),
                 "model": ctx["model"],
                 "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-                "usage": {
-                    "prompt_tokens": usage.get("input_tokens", 0),
-                    "completion_tokens": usage.get("output_tokens", 0),
-                    "total_tokens": usage.get("input_tokens", 0)
-                    + usage.get("output_tokens", 0),
-                },
+                "usage": wire_usage,
             },
             ensure_ascii=False,
         )
@@ -4739,11 +4777,11 @@ class Handler(BaseHTTPRequestHandler):
                             "choices": [
                                 {"index": 0, "delta": {}, "finish_reason": finish}
                             ],
-                            "usage": {
-                                "prompt_tokens": prompt_toks,
-                                "completion_tokens": compl_toks,
-                                "total_tokens": prompt_toks + compl_toks,
-                            },
+                            "usage": _wire_usage(
+                                prompt_toks,
+                                compl_toks,
+                                out_usage.get("cache_read_tokens"),
+                            ),
                         },
                         ensure_ascii=False,
                     )

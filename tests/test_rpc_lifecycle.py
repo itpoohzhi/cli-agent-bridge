@@ -891,7 +891,9 @@ class TestJournalGolden(RpcCase):
             )
         self.assertEqual(status, 502)
         usage = [ln for ln in lines if ln.startswith("usage ")]
-        self.assertEqual(usage, ["usage sess=- raw=0/0 rep=0/0 resumed=0 turns=0"])
+        self.assertEqual(
+            usage, ["usage sess=- raw=0/0 cache_read=- rep=0/0 resumed=0 turns=0"]
+        )
         self.assertEqual(len([ln for ln in lines if ln.startswith("exec ")]), 3)
 
 

@@ -13,6 +13,7 @@ from bridge_testlib import BridgeCase, pid_alive, wait_until  # noqa: E402
 
 USAGE_LINE = re.compile(
     r"^usage sess=(?P<sess>\S+) raw=(?P<rin>\d+)/(?P<rout>\d+) "
+    r"cache_read=(?P<cache_read>\d+|-) "
     r"rep=(?P<in>\d+)/(?P<out>\d+) resumed=(?P<resumed>[01]) turns=(?P<turns>\d+)$"
 )
 DONE_LINE = re.compile(r"^done model=\S+ rc=\d+ state=\S+ .*client=\S+ ua=.*$")
