@@ -25,13 +25,16 @@ or script that speaks the OpenAI protocol.
   path), with a `hot | restore | rebase | cold` lifecycle: a follow-up request
   with the same key resumes the same session instead of cold-starting.
   Idle eviction is tunable via `DROID_DSH_BRIDGE_IDLE_SECONDS` (default 2700 s).
-- **Streaming-compatible delivery + thinking** — `stream: true` and
-  non-streaming calls alike; the backend's thinking trace is translated into
-  `reasoning_content`, tool blocks into `delta.tool_calls`. Honest caveat: the
-  SSE framing is currently buffered, not live — the full turn executes first
-  (keepalive comments hold the connection), then content / reasoning / tool
-  events flush as chunks, followed by a usage chunk and `[DONE]`. Any OpenAI
-  client consumes it, but tokens don't trickle in real time.
+- **Live SSE streaming + thinking** — `stream: true` and non-streaming calls
+  alike; the backend's thinking trace is translated into `reasoning_content`,
+  tool blocks into `delta.tool_calls`. On the `droid` backend, `content` and
+  `reasoning_content` deltas stream live as events arrive from the resident
+  `droid exec` RPC stream (coalesced in ~40 ms windows, with bounded per-chunk
+  write timeouts and explicit `stream_error` fail-close frames if a turn aborts
+  after live bytes were sent), followed by tool-call chunks, a `finish_reason`
+  chunk, a `usage` chunk, and `[DONE]`. One-shot backends without live delta
+  transport (`muse`) hold the connection with `: keepalive` comments and flush
+  chunks when the turn completes.
 - **Explicit reasoning and autonomy control** — per-request `reasoning_effort`
   (validated against the catalog, always forwarded) and a top-level
   `autonomy` switch (`low | medium | high | off`, default `high`) for how much
@@ -71,7 +74,8 @@ Two adapters ship in this repo; any other vendor CLI joins the same way
 
 - Transport: headless one-shot `muse exec` per request through a launcher
   wrapper; no sessions — every turn replays the request history.
-- Models served: `muse-spark-1.3`, `muse-spark-1.3-contributor`.
+- Models served: `muse-spark-1.3`, `muse-spark-1.3-contributor`,
+  `muse-wonder-1.0`, `muse-wonder-full-1.0`.
 - Concurrency: strictly 1 across all Muse adapters in the hub.
 - Guardrails: binary `sha256` pin plus executable-wrapper check, re-verified
   after slot acquisition right before spawn; per-turn isolated directory

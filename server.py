@@ -83,6 +83,7 @@ from core.backend_adapter import (  # noqa: E402
     AdapterRegistry,
     FleetViolation,
     ImageAttachment,
+    StreamSink,
     Transcript,
     TranscriptItem,
     TurnContext,
@@ -91,6 +92,7 @@ from core.backend_adapter import (  # noqa: E402
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
+    LiveParserError,
     ToolCallParser,
     _attachments_section,
     _flatten_content,
@@ -126,6 +128,10 @@ MAX_CONCURRENT = int(os.environ.get("DROID_DSH_BRIDGE_MAX_CONCURRENT", "4"))
 QUEUE_TIMEOUT_S = int(os.environ.get("DROID_DSH_BRIDGE_QUEUE_TIMEOUT", "900"))
 TIMEOUT_S = int(os.environ.get("DROID_DSH_BRIDGE_TIMEOUT", "1800"))
 KEEPALIVE_S = float(os.environ.get("DROID_DSH_BRIDGE_KEEPALIVE", "15"))
+# RW-009 в живом ходе: запись живого куска клиенту ограничена этим таймаутом (а не 300с
+# socket-таймаута соединения) — зависший/нечитающий клиент не держит T/L (см. sse_writer в
+# _serve_sse и add_content/add_reasoning в Handler._execute).
+LIVE_WRITE_TIMEOUT_S = float(os.environ.get("DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S", "3"))
 # Таймаут первого события stream-json от `droid exec` (с момента старта процесса).
 FIRST_TOKEN_TIMEOUT_S = float(
     os.environ.get("DROID_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "90")
@@ -269,6 +275,10 @@ MAX_INBOX_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_INBOX_BYTES", str(4 << 20
 MAX_TURN_TEXT_BYTES = int(
     os.environ.get("DROID_BRIDGE_MAX_TURN_TEXT_BYTES", str(10 << 20))
 )
+# Промежуточная очередь Run.q (RW-204, F-103 Архитектурной панели): ограничена, чтобы
+# медленный потребитель (_execute) не давал producer (RPC-поток Run) копить события
+# без предела. Переполнение — не блокировка producer, а явный fail-close (Run._publish).
+RUN_QUEUE_MAXSIZE = int(os.environ.get("DROID_BRIDGE_RUN_QUEUE_MAXSIZE", "1024"))
 # Структурный предел строки RPC: число `{`/`[`/`,`/`:` вне строк. Строка из миллионов пустых объектов или
 # чисел укладывается в MAX_RPC_LINE_BYTES, но json.loads раздул бы её в сотни МиБ объектов (RW-014, RW-010):
 # отклоняется до разбора.
@@ -2636,12 +2646,27 @@ class Run:
     незакоммиченное; после успеха — прежняя гранулярность SSE.
     """
 
-    def __init__(self, plan: dict, proc: RpcProcess | None, holds_slot: bool):
+    def __init__(
+        self,
+        plan: dict,
+        proc: RpcProcess | None,
+        holds_slot: bool,
+        sse_writer: "StreamSink | None" = None,
+    ):
         self.plan = plan
         self.proc = proc
         self.slot_held = holds_slot
         self.path = plan["path"]
-        self.q: queue.Queue = queue.Queue()
+        # RW-208 (AD-002/AD-003): лимит ёмкости очереди — только у живого SSE-хода
+        # (sse_writer задан): его producer публикует дельты по мере готовности и может
+        # обогнать consumer'а, отбрасывание здесь — осознанный fail-close. Non-stream копит
+        # вывод до terminal, очередь остаётся неограниченной (как до RW-204): terminal-пачка
+        # не теряется из-за размера.
+        self.q: queue.Queue = (
+            queue.Queue(maxsize=RUN_QUEUE_MAXSIZE)
+            if sse_writer is not None
+            else queue.Queue()
+        )
         self.err_box: list = proc.err_box if proc is not None else []
         self.got_event = False
         self.started = time.monotonic()
@@ -2671,6 +2696,14 @@ class Run:
         self._held_bytes = 0
         self._last_error = ""
         self._quarantined = 0
+        # Живой SSE-ход (AD-002/AD-003): sse_writer сам не вызывается отсюда (это дело _execute),
+        # сигнал используется только как флаг "эмитить text_delta/reasoning_delta в self.q по мере
+        # подтверждения дельт" вместо прежней пачки одним куском на terminal.
+        self.sse_writer = sse_writer
+        self._live_mids: set = (
+            set()
+        )  # mid, для которых клиенту уже ушёл хоть один байт живьём
+        self.live_invalidated = False  # AD-001: уже показанный mid потом retracted
         self.thread = threading.Thread(target=self._work, daemon=True)
         self.thread.start()
 
@@ -2681,22 +2714,44 @@ class Run:
         except _Cancelled:
             return
         except ModelMismatch as exc:
-            self.q.put(("stream_error", str(exc)[:500]))
+            self._publish(("stream_error", str(exc)[:500]))
         except RpcEof as exc:
-            self.q.put(("done", (exc.rc or 1, "")))
+            self._publish(("done", (exc.rc or 1, "")))
         except RpcError as exc:
-            self.q.put(("pump_error", str(exc)[:500]))
+            self._publish(("pump_error", str(exc)[:500]))
         except OSError as exc:
-            self.q.put(("pump_error", repr(exc)))
+            self._publish(("pump_error", repr(exc)))
         except Exception as exc:  # noqa: BLE001 - воркер не должен умирать молча: ход иначе висел бы до таймаута
             _log(f"session_rpc worker_error err={_err_summary(repr(exc), 160)!r}")
-            self.q.put(("pump_error", repr(exc)[:500]))
+            self._publish(("pump_error", repr(exc)[:500]))
         finally:
             if self.slot_held:
                 self.slot_held = False
                 POOL.release()
             if self.proc is not None:
                 self.proc.busy = False
+
+    def _publish(self, item: tuple) -> bool:
+        """Публикация в self.q без блокировки producer.
+
+        RW-204/RW-208: лимит RUN_QUEUE_MAXSIZE, неблокирующее отбрасывание при queue.Full
+        и инвалидация live_invalidated действуют только у живого SSE-хода (sse_writer задан).
+        Non-stream очередь неограниченна: событие не отбрасывается, live_invalidated из-за
+        размера очереди не выставляется.
+        """
+        if self.sse_writer is None:
+            self.q.put(item)  # неограниченная очередь: put не блокирует и не теряет события
+            return True
+        try:
+            self.q.put_nowait(item)
+            return True
+        except queue.Full:
+            self.live_invalidated = True
+            self._last_error = self._last_error or "Run.q overflow"
+            _log(
+                f"run_queue_overflow turn={self.active_turn or '-'} maxsize={self.q.maxsize}"
+            )
+            return False
 
     def _spawn(self) -> RpcProcess:
         holds = self.slot_held
@@ -3050,9 +3105,50 @@ class Run:
                 "tc": 0,
                 "kc": 0,
                 "acc": ENTRY_OVERHEAD_BYTES,
+                "live_text": 0,  # сколько байт slot["text"] уже отдано live-ходу (sse_writer)
+                "live_thinking": 0,
             }
             self._order.append(mid)
         return self._msgs[mid]
+
+    def _live_diff(self, slot: dict, mid: str, field: str, kind: str) -> None:
+        """Живой ход (AD-002/RW-009): протолкнуть в self.q только НОВЫЙ хвост slot[field].
+
+        Вызывается после любого обновления slot["text"]/slot["thinking"] (дельта, complete с полным
+        текстом, backfill из create_message) — одинаково покрывает все три источника, отдавая клиенту
+        только то, что ещё не ушло. Применяется только когда sse_writer задан (живой SSE-ход);
+        для обычного (не-live) хода ничего не публикуется здесь — вывод копится до terminal, как раньше.
+        """
+        if self.sse_writer is None:
+            return
+        live_key = "live_" + field
+        sent = slot.get(live_key, 0)
+        text = slot[field]
+        if len(text) <= sent:
+            return
+        diff = text[sent:]
+        slot[live_key] = len(text)
+        self._live_mids.add(mid)
+        self._publish((kind, (mid, diff)))
+
+    def _check_live_prefix(self, slot: dict, field: str, new_text: str) -> bool:
+        """RW-205: complete/backfill обязан продолжать уже отправленный live-префикс поля.
+
+        Сравнение идёт с текстом, который РЕАЛЬНО ушёл в self.q (slot[field][:sent] до
+        перезаписи), а не просто с предыдущим slot[field]: несовпадающий или укороченный
+        complete после публикации префикса -> live_invalidated, без молчаливого среза и
+        без нового хвоста (вызывающая сторона не должна звать _set_slot_text/_live_diff).
+        """
+        if self.sse_writer is None:
+            return True
+        sent = slot.get("live_" + field, 0)
+        if sent == 0:
+            return True
+        if not new_text.startswith(slot[field][:sent]):
+            self.live_invalidated = True
+            self._last_error = self._last_error or "non-prefix complete detected"
+            return False
+        return True
 
     def _progress(self) -> None:
         self.last_progress = time.monotonic()
@@ -3150,8 +3246,10 @@ class Run:
             self._release_held(counted_id)
             if not slot["text"]:
                 self._set_slot_text(slot, "text", "tb", _message_text(message))
+                self._live_diff(slot, counted_id, "text", "text_delta")
             if not slot["thinking"]:
                 self._set_slot_text(slot, "thinking", "kb", _message_thinking(message))
+                self._live_diff(slot, counted_id, "thinking", "reasoning_delta")
             self._progress()
 
     @staticmethod
@@ -3202,10 +3300,14 @@ class Run:
             slot["tb"] += size
             slot["tc"] += size
             self._charge(size, slot)
+            self._live_diff(slot, mid, "text", "text_delta")
         elif ntype == "assistant_text_complete" and mid:
             slot = self._slot_for(mid)
-            if isinstance(note.get("text"), str):
+            if isinstance(note.get("text"), str) and self._check_live_prefix(
+                slot, "text", note["text"]
+            ):
                 self._set_slot_text(slot, "text", "tb", note["text"])
+                self._live_diff(slot, mid, "text", "text_delta")
         elif ntype == "thinking_text_delta" and mid:
             delta = str(note.get("textDelta") or "")
             slot = self._slot_for(mid)
@@ -3214,11 +3316,19 @@ class Run:
             slot["kb"] += size
             slot["kc"] += size
             self._charge(size, slot)
+            self._live_diff(slot, mid, "thinking", "reasoning_delta")
         elif ntype == "thinking_text_complete" and mid:
             slot = self._slot_for(mid)
-            if isinstance(note.get("text"), str):
+            if isinstance(note.get("text"), str) and self._check_live_prefix(
+                slot, "thinking", note["text"]
+            ):
                 self._set_slot_text(slot, "thinking", "kb", note["text"])
+                self._live_diff(slot, mid, "thinking", "reasoning_delta")
         elif ntype == "assistant_message_retracted" and mid:
+            if mid in self._live_mids:
+                # Клиенту уже ушёл live-байт этого сообщения, а droid его отозвал: честный live-ход
+                # не может сделать вид, что этого не было (AD-001) — весь ход фейлится явным сигналом.
+                self.live_invalidated = True
             slot = self._msgs.pop(mid, None)
             if slot is not None:
                 self._acc_bytes = max(0, self._acc_bytes - slot["acc"])
@@ -3299,23 +3409,39 @@ class Run:
         reason = str(note.get("reason") or "")
         if self.cancel.is_set() or reason not in ("completed", "permission_rejected"):
             if not self.cancel.is_set():
-                self.q.put(
+                self._publish(
                     (
                         "stream_error",
                         self._last_error or f"turn ended: {reason or 'unknown'}",
                     )
                 )
             return True
+        if self.live_invalidated:
+            # AD-001: клиенту уже ушёл байт живого сообщения, которое droid потом отозвал, а ход
+            # всё же дошёл до успешного terminal — честный live-ход не может притвориться, что
+            # retract не было: явный fail-close вместо обычных result/usage/stop.
+            self._publish(
+                (
+                    "live_invalidated",
+                    self._last_error
+                    or "a streamed message was retracted before the turn completed",
+                )
+            )
+            return True
         final_text = ""
         for mid in self._order:
             slot = self._msgs.get(mid) or {}
-            if slot.get("thinking"):
-                self.q.put(("reasoning", slot["thinking"]))
+            if self.sse_writer is None:
+                # Живой ход уже отдал text/reasoning по мере дельт (_live_diff); здесь — только
+                # обычная (не-live) гранулярность: целиком message-событием на terminal, как прежде.
+                if slot.get("thinking"):
+                    self._publish(("reasoning", slot["thinking"]))
+                if slot.get("text"):
+                    self._publish(("text", slot["text"]))
             if slot.get("text"):
-                self.q.put(("text", slot["text"]))
                 final_text = slot["text"]
         self.ok = True
-        self.q.put(
+        self._publish(
             (
                 "result",
                 {
@@ -3327,7 +3453,7 @@ class Run:
                 },
             )
         )
-        self.q.put(("done", (0, final_text)))
+        self._publish(("done", (0, final_text)))
         return True
 
     # -- завершение ----------------------------------------------------------------
@@ -3492,10 +3618,15 @@ class _ByteBudget:
 _DELIVERY_BUDGET = _ByteBudget(MAX_DELIVERY_BYTES)
 
 
+class _LiveBudgetExceeded(Exception):
+    """RW-011 в живом ходе: очередной кусок live-доставки не влез в бюджет памяти."""
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
     _delivery_reserved = 0  # байты, взятые в _DELIVERY_BUDGET текущим запросом (RW-011)
+    _client_write_dead = False  # RW-203: живая запись отвергнута — терминал не шлём
 
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
@@ -3561,14 +3692,27 @@ class Handler(BaseHTTPRequestHandler):
                     return "client_gone"
         return ""
 
-    def _execute(self, run: Run, keepalive, emulate_tools: bool) -> dict:
+    _FAIL_CLOSE_KINDS = ("stream_error", "pump_error", "live_invalidated")
+
+    def _execute(
+        self,
+        run: Run,
+        keepalive,
+        emulate_tools: bool,
+        sse_writer: "StreamSink | None" = None,
+    ) -> dict:
         """Гнать ход до конца; сквозной таймаут TIMEOUT_S на весь ход.
 
-        Клиенту во время вычисления пишется только keepalive (False — клиент ушёл). Вывод
-        НЕ доставляется здесь: он копится в out["events"] (content/reasoning/tool_call по
-        порядку) и уходит клиенту отдельным этапом после освобождения T/L и checkpoint
-        (RW-009). Размышления идут мимо ToolCallParser. При emulate_tools текстовый поток
-        проходит через ToolCallParser: блоки <tool_call> выделяются как вызовы.
+        Без sse_writer вывод копится в out["events"] и уходит клиенту отдельным этапом после
+        освобождения T/L (RW-009), как прежде. С sse_writer (живой SSE-ход, AD-001..AD-003)
+        content/reasoning_content уходят сюда же, по мере готовности text_delta/reasoning_delta
+        от Run — с коалесацией ~40мс (AD-003), чтобы не дробить кадры на один символ. Пока
+        дельта мессенджа копится, вперёд подсматривается один элемент очереди (pushback): смена
+        mid/вида завершает текущую группу, а fail-close вид (stream_error/pump_error/
+        live_invalidated) или уже выставленный run.live_invalidated — отбрасывает НЕотданный
+        буфер целиком и завершает ход ошибкой (ничего незакоммиченного клиенту не покажется).
+        Размышления идут мимо ToolCallParser. При emulate_tools текстовый поток проходит через
+        ToolCallParser (в живом ходе — в strict_live режиме: сырой `<tool_call>` не утечёт).
         Превышение deadline -> kill группы (в run.close()), state=timeout.
         """
         pieces = []
@@ -3578,6 +3722,10 @@ class Handler(BaseHTTPRequestHandler):
         result_ev = {}
         last_ka = time.monotonic()
         deadline = time.monotonic() + TIMEOUT_S
+        cur_mid = [
+            None
+        ]  # mid последнего content-куска в pieces (разделитель "\n\n" между сообщениями)
+        pushback = None  # элемент очереди, подсмотренный при коалесации, но не обработанный сейчас
 
         def state(name: str, rc: int, err: str = "") -> dict:
             return {
@@ -3594,11 +3742,48 @@ class Handler(BaseHTTPRequestHandler):
                 "events": events,
             }
 
+        # RW-009 в живом ходе: зависший (не читающий, но не закрытый) клиент — write()
+        # с LIVE_WRITE_TIMEOUT_S сигналит об этом провалом sse_writer. Вычисление хода и
+        # commit чата НЕ прерываются (как и в небуферизованном старом пути — T/L освобождаются
+        # по расписанию _execute, независимо от клиента): просто дальнейшие попытки живой
+        # записи этому клиенту прекращаются (повторный таймаут на каждый кусок — бессмысленная
+        # трата времени, раз клиент уже не читает).
+        # RW-203: состояние живёт на Handler (а не в локальной переменной), чтобы внешний
+        # _serve_sse видел отказ и после возврата _execute; каждый ход начинает с чистого.
+        self._client_write_dead = False
+
         def add_content(text: str) -> None:
             if not text:
                 return
             pieces.append(text)
             events.append(("content", text))
+            if sse_writer is not None and not self._client_write_dead:
+                for piece in _text_slices(text):
+                    # RW-011 в живом ходе: бюджет резервируется ДО фактической отдачи
+                    # куска — ничего незарезервированного клиенту не покажется. Бюджет
+                    # считается в байтах UTF-8 (RW-206): piece может содержать кириллицу/
+                    # emoji, где len(piece) (символы) занижает фактический размер на проводе.
+                    piece_bytes = len(piece.encode("utf-8"))
+                    if not _DELIVERY_BUDGET.reserve(piece_bytes):
+                        raise _LiveBudgetExceeded()
+                    self._delivery_reserved += piece_bytes
+                    if not sse_writer("content", piece):
+                        self._client_write_dead = True
+                        break
+
+        def add_reasoning(text: str) -> None:
+            if not text:
+                return
+            events.append(("reasoning", text))
+            if sse_writer is not None and not self._client_write_dead:
+                for piece in _text_slices(text):
+                    piece_bytes = len(piece.encode("utf-8"))
+                    if not _DELIVERY_BUDGET.reserve(piece_bytes):
+                        raise _LiveBudgetExceeded()
+                    self._delivery_reserved += piece_bytes
+                    if not sse_writer("reasoning", piece):
+                        self._client_write_dead = True
+                        break
 
         def add_call(call: dict) -> None:
             entry = {
@@ -3613,7 +3798,18 @@ class Handler(BaseHTTPRequestHandler):
             tool_calls.append(entry)
             events.append(("tool_call", entry))
 
-        parser = ToolCallParser(add_content, add_call) if emulate_tools else None
+        parser = (
+            ToolCallParser(add_content, add_call, strict_live=sse_writer is not None)
+            if emulate_tools
+            else None
+        )
+
+        def take():
+            nonlocal pushback
+            if pushback is not None:
+                item, pushback = pushback, None
+                return item
+            return run.q.get(timeout=1.0)
 
         while True:
             if time.monotonic() > deadline:
@@ -3639,12 +3835,98 @@ class Handler(BaseHTTPRequestHandler):
             if _client_gone(self.connection):
                 return state("client_gone", 1)
             try:
-                kind, payload = run.q.get(timeout=1.0)
+                kind, payload = take()
             except queue.Empty:
-                if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                # RW-204/RW-203: страховка сверх проверки внутри text_delta/reasoning_delta
+                # ниже — overflow Run.q (RW-204) мог выбросить именно terminal-событие
+                # (result/done), так что очередь остаётся пустой навсегда и ничего не
+                # подтвердит успех по kind=="done". Проверяется именно здесь (очередь
+                # подтверждённо пуста прямо сейчас), а не перед take(): так уже
+                # опубликованный и ещё не выбранный из очереди бэклог (например, валидный
+                # префикс другого mid) не отбрасывается только из-за гонки с флагом,
+                # выставленным producer'ом синхронно и раньше, чем успел отработать consumer.
+                if run.live_invalidated:
+                    return state(
+                        "live_invalidated",
+                        1,
+                        run._last_error
+                        or "a streamed message was retracted before the turn completed",
+                    )
+                # RW-201/RW-009: клиент уже признан мёртвым по провалу live-записи
+                # content/reasoning (client_write_dead) — повторная запись keepalive
+                # ему не нужна и не делается; само обращение к keepalive() ниже
+                # ограничено тем же LIVE_WRITE_TIMEOUT_S, что и content/reasoning
+                # (см. Handler._serve_sse.keepalive), так что эта ветка больше не
+                # способна держать T/L дольше нескольких секунд ради одного клиента.
+                if (
+                    keepalive is not None
+                    and not self._client_write_dead
+                    and time.monotonic() - last_ka >= KEEPALIVE_S
+                ):
                     last_ka = time.monotonic()
                     if not keepalive():
                         return state("client_gone", 1)
+                continue
+            if kind in ("text_delta", "reasoning_delta"):
+                group_mid, buf0 = payload
+                buf = [buf0]
+                coalesce_deadline = time.monotonic() + 0.04
+                while True:
+                    if run.live_invalidated:
+                        break
+                    remaining = coalesce_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        nxt_kind, nxt_payload = run.q.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if nxt_kind == kind and nxt_payload[0] == group_mid:
+                        buf.append(nxt_payload[1])
+                        continue
+                    pushback = (nxt_kind, nxt_payload)
+                    if nxt_kind in self._FAIL_CLOSE_KINDS:
+                        buf = None  # не наш показывать: ход фейлится, обработает pushback ниже
+                    break
+                if run.live_invalidated:
+                    return state(
+                        "live_invalidated",
+                        1,
+                        run._last_error
+                        or "a streamed message was retracted before the turn completed",
+                    )
+                if buf is None:
+                    continue
+                text = "".join(buf)
+                if kind == "text_delta":
+                    prefix = ""
+                    if cur_mid[0] != group_mid:
+                        if pieces:
+                            prefix = "\n\n"
+                        cur_mid[0] = group_mid
+                    text = prefix + text
+                    try:
+                        if parser is not None:
+                            parser.feed(text)
+                        else:
+                            add_content(text)
+                    except LiveParserError as exc:
+                        return state("live_invalidated", 1, str(exc)[:500])
+                    except _LiveBudgetExceeded:
+                        return state(
+                            "delivery_budget",
+                            1,
+                            "bridge overloaded: delivery memory budget exhausted",
+                        )
+                else:
+                    try:
+                        add_reasoning(text)
+                    except _LiveBudgetExceeded:
+                        return state(
+                            "delivery_budget",
+                            1,
+                            "bridge overloaded: delivery memory budget exhausted",
+                        )
                 continue
             if kind == "text":
                 # Событие message несёт ПОЛНЫЙ текст сообщения, не дельту:
@@ -3665,19 +3947,50 @@ class Handler(BaseHTTPRequestHandler):
                 return state("droid_error", 1, str(payload))
             elif kind == "pump_error":
                 return state("pump_error", 1, str(payload))
+            elif kind == "live_invalidated":
+                return state("live_invalidated", 1, str(payload))
             elif kind == "done":
                 rc, final_text = payload
+                if run.live_invalidated:
+                    # RW-211/AD-001: инвалидация (retract уже отданного mid, срыв префикса,
+                    # overflow live-очереди) проверяется ДО parser.finish и fallback
+                    # final_text: клиенту уже мог уйти байт отозванного сообщения — успех
+                    # не выдаётся, даже если терминал пришёл с rc == 0.
+                    return state(
+                        "live_invalidated",
+                        1,
+                        run._last_error
+                        or "a streamed message was retracted before the turn completed",
+                    )
                 if parser is not None:
-                    parser.finish()  # досбрасываем хвост незакрытого блока текстом
+                    try:
+                        parser.finish()  # досбрасываем хвост незакрытого блока текстом
+                    except LiveParserError as exc:
+                        return state("live_invalidated", 1, str(exc)[:500])
+                    except _LiveBudgetExceeded:
+                        return state(
+                            "delivery_budget",
+                            1,
+                            "bridge overloaded: delivery memory budget exhausted",
+                        )
                 # Fallback: события message не дали ни текста, ни вызовов, но итог
                 # есть в completion.finalText. Проводим его тем же путём (парсер +
                 # on_text), чтобы потоковый клиент не получил пустой ответ со stop.
                 if not pieces and not tool_calls and final_text:
-                    if parser is not None:
-                        parser.feed(final_text)
-                        parser.finish()
-                    else:
-                        add_content(final_text)
+                    try:
+                        if parser is not None:
+                            parser.feed(final_text)
+                            parser.finish()
+                        else:
+                            add_content(final_text)
+                    except LiveParserError as exc:
+                        return state("live_invalidated", 1, str(exc)[:500])
+                    except _LiveBudgetExceeded:
+                        return state(
+                            "delivery_budget",
+                            1,
+                            "bridge overloaded: delivery memory budget exhausted",
+                        )
                 time.sleep(0.05)
                 return state("done", rc, "".join(run.err_box))
 
@@ -3724,11 +4037,15 @@ class Handler(BaseHTTPRequestHandler):
             "events": [],
         }
 
-    def _run_once(self, ctx: dict, keepalive) -> dict:
+    def _run_once(
+        self, ctx: dict, keepalive, sse_writer: "StreamSink | None" = None
+    ) -> dict:
         """Ход запроса: порядок ресурсов L -> P -> T, до 3 попыток при транзиентном сбое.
 
-        Возвращает итог с буфером вывода (out["events"]); к моменту возврата T/L уже освобождены
-        и checkpoint записан — клиенту вывод отдаёт вызывающая ветка (RW-009).
+        Без sse_writer — прежнее поведение: вывод копится в out["events"] и уходит клиенту
+        отдельным этапом после освобождения T/L (RW-009). С sse_writer (живой SSE-ход)
+        content/reasoning_content уходят клиенту ПРЯМО во время _execute (AD-001..AD-003);
+        T/L всё равно освобождаются сразу по возврату _execute, независимо от скорости клиента.
         """
         model = ctx["model"]
         effort = ctx["effort"]
@@ -3900,7 +4217,10 @@ class Handler(BaseHTTPRequestHandler):
                         # Новая generation: SID известен только после initialize, PENDING пишется Run до первого add.
                         plan["before_add"] = functools.partial(_write_pending, chat)
                     new_run = Run(
-                        plan, chat.proc if plan["path"] == "hot" else None, holds_slot
+                        plan,
+                        chat.proc if plan["path"] == "hot" else None,
+                        holds_slot,
+                        sse_writer,
                     )
                     holds_slot = False
                 except Exception as exc:  # noqa: BLE001 - любая ошибка подготовки хода: ресурсы назад, штатный 502
@@ -3934,7 +4254,9 @@ class Handler(BaseHTTPRequestHandler):
                 run = new_run
                 open_attempt = (plan, run)
                 try:
-                    out = self._execute(run, keepalive, ctx["emulate_tools"])
+                    out = self._execute(
+                        run, keepalive, ctx["emulate_tools"], sse_writer
+                    )
                 finally:
                     try:
                         run.close()
@@ -3962,8 +4284,12 @@ class Handler(BaseHTTPRequestHandler):
                 open_attempt = None
                 if ok:
                     break
-                delivered = bool(out.get("text") or out.get("tool_calls"))
-                # Контент до terminal не отдаётся, поэтому delivered здесь — страховка.
+                # Без sse_writer контент до terminal не отдаётся, delivered здесь — страховка.
+                # С sse_writer часть контента могла уже уйти клиенту ЖИВЬЁМ до сбоя (run._live_mids
+                # непусто) — тихий повтор показал бы его клиенту повторно, поэтому тоже delivered.
+                delivered = bool(
+                    out.get("text") or out.get("tool_calls") or run._live_mids
+                )
                 if out["state"] != "done" or delivered or attempt == 3:
                     break
                 # Транзиентный сбой (rc!=0, клиенту ничего не выдано): повтор невидим;
@@ -4094,6 +4420,25 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "droid_error",
                 "code": 502,
             }
+        if st == "live_invalidated":
+            # AD-001: часть уже отданного клиенту live-префикса оказалась незакоммиченной
+            # (retract после показа или незакрытый/сломанный <tool_call> в strict_live-парсере).
+            return {
+                "message": str(
+                    out.get("err") or "live stream prefix was invalidated mid-turn"
+                )[:500],
+                "type": "live_prefix_invalidated",
+                "code": 502,
+            }
+        if st == "delivery_budget":
+            # RW-011 в живом ходе: кусок, который привёл бы к превышению бюджета, отброшен
+            # ДО отдачи (см. add_content/add_reasoning) — то же тело ошибки, что и у
+            # _reserve_delivery, просто обнаружено раньше (на лету, а не постфактум).
+            return {
+                "message": "bridge overloaded: delivery memory budget exhausted",
+                "type": "proxy_error",
+                "code": 502,
+            }
         if st == "backend_error":
             return {
                 "message": f"{label} exec failed rc={out.get('rc')}",
@@ -4111,8 +4456,15 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _reserve_delivery(self, out: dict) -> Any:
-        """Резерв памяти ответа до выдачи (RW-011): None — взят, иначе тело ошибки 502 proxy_error."""
-        size = _delivery_size(out)
+        """Резерв памяти ответа до выдачи (RW-011): None — взят, иначе тело ошибки 502 proxy_error.
+
+        В живом ходе часть байт (content/reasoning) уже зарезервирована поштучно во время
+        _execute (см. add_content/add_reasoning) — здесь довносится только остаток
+        (например, аргументы tool_call), чтобы не резервировать один и тот же текст дважды.
+        """
+        size = _delivery_size(out) - self._delivery_reserved
+        if size <= 0:
+            return None
         if not _DELIVERY_BUDGET.reserve(size):
             _log(f"delivery_budget_exhausted bytes={size}")
             return {
@@ -4120,7 +4472,7 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "proxy_error",
                 "code": 502,
             }
-        self._delivery_reserved = size
+        self._delivery_reserved += size
         return None
 
     # ---- HTTP --------------------------------------------------------------------
@@ -4538,8 +4890,15 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return instr
 
-    def _dispatch(self, ctx: dict, keepalive) -> dict:
-        """Ход через адаптер бэкенда модели; общий разбор `<tool_call>` и итог в формате фасада."""
+    def _dispatch(
+        self, ctx: dict, keepalive, sse_writer: "StreamSink | None" = None
+    ) -> dict:
+        """Ход через адаптер бэкенда модели; общий разбор `<tool_call>` и итог в формате фасада.
+
+        sse_writer не None только у настоящего живого SSE-хода (_serve_sse): адаптеры, умеющие
+        отдавать content/reasoning по мере готовности (сейчас — droid), сами вызывают его из
+        своего пути выполнения. Остальные (muse) его просто игнорируют — поведение не меняется.
+        """
         adapter = BACKENDS.get(ctx["backend"])
         if adapter is None:
             return {
@@ -4568,7 +4927,9 @@ class Handler(BaseHTTPRequestHandler):
             client_gone=lambda: _client_gone(self.connection),
         )
         t0 = time.monotonic()
-        result = finalize_turn(adapter.execute_turn(turn, None), turn.emulate_tools)
+        result = finalize_turn(
+            adapter.execute_turn(turn, sse_writer), turn.emulate_tools
+        )
         # Только локальный HTTP-буфер: межмодульный seam уже вернул DTO.
         out = {
             "state": result.state,
@@ -4693,6 +5054,8 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _serve_sse(self, ctx: dict) -> None:
+        # RW-203: состояние отказа живой записи не наследуется следующим запросом.
+        self._client_write_dead = False
         completion_id = f"chatcmpl-droid-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         shown_model = ctx["model"]
@@ -4725,21 +5088,104 @@ class Handler(BaseHTTPRequestHandler):
                 + "\n\n"
             )
 
+        live_sent = [0]  # RW-211: байты content/reasoning, реально отданные этим запросом
+
+        def stream_error_frame(message: str) -> str:
+            # RW-202/RW-211: fail-close кадр chat.completion.chunk, а не плоский
+            # {"error": ...}: id/created/model те же, что у предыдущих кадров,
+            # пустая delta и finish_reason=null.
+            return (
+                "data: "
+                + json.dumps(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": shown_model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                        "error": {
+                            "message": message,
+                            "type": "stream_error",
+                            "code": "live_prefix_invalidated",
+                            "param": None,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+
         def keepalive() -> bool:
-            return self._emit(": keepalive\n\n")
+            # RW-201/RW-009: та же защита, что у sse_writer ниже — запись ограничена
+            # LIVE_WRITE_TIMEOUT_S, а не таймаутом соединения (300с), иначе клиент,
+            # который просто не читает, держит T/L все 300с на одном keepalive.
+            prev_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(LIVE_WRITE_TIMEOUT_S)
+                return self._emit(": keepalive\n\n")
+            finally:
+                self.connection.settimeout(prev_timeout)
+
+        def sse_writer(kind: str, text: str) -> bool:
+            # AD-002/AD-003: честная живая доставка — content/reasoning_content уходят прямо
+            # отсюда, по мере готовности (с коалесацией ~40мс на стороне _execute), а не одним
+            # куском после полного хода. Разрыв соединения здесь — тот же сигнал, что у keepalive.
+            # RW-009: пишем с коротким таймаутом (не 300с socket-таймаута соединения) — клиент,
+            # который не читает SSE (окно забито), не держит T/L всю длину connection timeout;
+            # TimeoutError/socket.timeout — подвид OSError, _emit его уже превращает в False.
+            field = "content" if kind == "content" else "reasoning_content"
+            ok = True
+            prev_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(LIVE_WRITE_TIMEOUT_S)
+                for piece in _text_slices(text) if text else [text]:
+                    if not self._emit(chunk({field: piece})):
+                        ok = False
+                        break
+                    live_sent[0] += len(piece.encode("utf-8"))
+            finally:
+                self.connection.settimeout(prev_timeout)
+            if not ok:
+                # RW-203: отказ фиксируется на Handler — _serve_sse больше не отправит
+                # этому клиенту ни одного терминального кадра (включая keepalive).
+                self._client_write_dead = True
+            return ok
 
         if not self._emit(chunk({"role": "assistant", "content": ""})):
             return
-        out = self._dispatch(ctx, keepalive)
+        try:
+            out = self._dispatch(ctx, keepalive, sse_writer)
+        except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
+            if self._client_write_dead:
+                _log(
+                    f"client_write_dead: dispatch error suppressed "
+                    f"err={_err_summary(repr(exc), 160)!r}"
+                )
+                return
+            if not live_sent[0]:
+                raise  # живых байт не было: прежнее поведение (сбой наружу)
+            _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
+            self._emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__))
+            self._emit("data: [DONE]\n\n")
+            return
+        if self._client_write_dead:
+            # RW-203: сокет отверг живую запись — терминальные кадры (tool_call, stop,
+            # usage, error) и [DONE] мёртвому клиенту не отправляются.
+            _log("client_write_dead: terminal frames suppressed")
+            return
         if out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return
         err = self._error_body(out) or self._reserve_delivery(out)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
-            # здесь ни на что, кроме самого ответа, не влияет.
+            # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
+            # живьём из _execute (sse_writer выше): здесь остаются только tool_call-кадры.
+            live_backend = out.get("backend_kind") == "droid"
             for kind, value in out.get("events") or []:
                 if kind in ("content", "reasoning"):
+                    if live_backend:
+                        continue
                     field = "content" if kind == "content" else "reasoning_content"
                     # Большое событие выдаётся срезами: в памяти одновременно только один срез SSE-кадра.
                     delivered = (
@@ -4774,8 +5220,17 @@ class Handler(BaseHTTPRequestHandler):
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": shown_model,
+                            # AD-004/RW-206: finish уже ушёл отдельным кадром выше ТОЛЬКО
+                            # для живого Droid-стриминга — там finish_reason здесь null (как
+                            # у настоящего OpenAI stream_options.include_usage), а не повтор
+                            # "stop"/"tool_calls" на том же кадре. Для остальных бэкендов это
+                            # поведение не менялось: finish_reason в usage-кадре повторяет finish.
                             "choices": [
-                                {"index": 0, "delta": {}, "finish_reason": finish}
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": None if live_backend else finish,
+                                }
                             ],
                             "usage": _wire_usage(
                                 prompt_toks,
@@ -4787,6 +5242,14 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     + "\n\n"
                 )
+        elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
+            # RW-202/RW-211/AD-001: fail-close конверт chat.completion.chunk, а не плоский
+            # {"error": ...} — id/created/model совпадают с уже отправленными кадрами,
+            # finish_reason=null; успешного finish/usage после этого не идёт (ветка err —
+            # последний кадр перед [DONE]). Живой префикс уже отдан (live_sent > 0) — любой
+            # терминальный сбой (state=error, ненулевой rc, исключение) тоже fail-close,
+            # без повтора уже отданного префикса.
+            self._emit(stream_error_frame(str(err["message"])))
         else:
             self._emit(
                 "data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n"

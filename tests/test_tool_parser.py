@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from server import (  # noqa: E402
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
+    LiveParserError,
     ToolCallParser,
     _messages_to_prompt,
     _parse_tool_call_block,
@@ -146,6 +147,82 @@ class TestToolCallParser(unittest.TestCase):
         self.assertEqual(
             _parse_tool_call_block(inner), {"name": "t", "arguments": {"a": 1}}
         )
+
+    # -- AD-002: strict_live vs legacy, парные регрессии -----------------------------
+    # Legacy (strict_live=False, умолчание) не меняется ни байтом: malformed/unclosed
+    # блок, как и раньше, молча уходит в content как текст (test_invalid_block_falls_back_to_text/
+    # test_unclosed_block_flushed_as_text_on_finish выше). strict_live=True (живой SSE-ход
+    # droid) вместо этого поднимает LiveParserError — сырой `<tool_call>` клиенту не утекает.
+
+    def test_nonstream_malformed_xml_fallback_unchanged(self):
+        """Legacy (strict_live=False): невалидный блок — текстом, без исключения."""
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=False)
+        p.feed(TOOL_CALL_OPEN + "not json" + TOOL_CALL_CLOSE)
+        p.finish()
+        self.assertEqual(c.calls, [])
+        self.assertIn(TOOL_CALL_OPEN + "not json" + TOOL_CALL_CLOSE, "".join(c.content))
+
+    def test_nonstream_unclosed_xml_finish_fallback_unchanged(self):
+        """Legacy (strict_live=False): незакрытый блок на finish() — текстом, без исключения."""
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=False)
+        p.feed("tail " + TOOL_CALL_OPEN + '{"name": "t"')
+        p.finish()
+        self.assertEqual(c.calls, [])
+        self.assertIn('{"name": "t"', "".join(c.content))
+
+    def test_strict_live_malformed_xml_error_no_leak(self):
+        """strict_live=True: невалидный блок — LiveParserError, сырой XML не уходит в content."""
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        with self.assertRaises(LiveParserError):
+            p.feed("Pre text " + TOOL_CALL_OPEN + "not json" + TOOL_CALL_CLOSE)
+        self.assertEqual(c.calls, [])
+        # Текст ДО блока — легитимный контент, его отдать можно (это не часть <tool_call>).
+        self.assertEqual("".join(c.content), "Pre text ")
+        self.assertNotIn("not json", "".join(c.content))
+        self.assertNotIn(TOOL_CALL_OPEN, "".join(c.content))
+
+    def test_strict_live_unclosed_xml_error_no_leak(self):
+        """strict_live=True: незакрытый блок на finish() — LiveParserError, не текст."""
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed("tail " + TOOL_CALL_OPEN + '{"name": "t"')
+        with self.assertRaises(LiveParserError):
+            p.finish()
+        self.assertEqual(c.calls, [])
+        # "tail " до открывающего тега — легитимный текст, его отдать можно;
+        # а вот незакрытое содержимое самого блока наружу не ушло — вместо него исключение.
+        self.assertEqual("".join(c.content), "tail ")
+        self.assertNotIn('{"name": "t"', "".join(c.content))
+
+    def test_strict_live_unresolved_prefix_error_no_leak(self):
+        """strict_live=True: оборванный префикс открывающего тега на finish() — тоже ошибка."""
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed("abc" + TOOL_CALL_OPEN[:5])  # разрыв прямо внутри тега, конца хода нет
+        with self.assertRaises(LiveParserError):
+            p.finish()
+        self.assertEqual(c.calls, [])
+        self.assertEqual("".join(c.content), "abc")
+        self.assertNotIn(TOOL_CALL_OPEN[:5], "".join(c.content)[3:])
+
+    def test_strict_live_well_formed_call_unaffected(self):
+        """strict_live=True не меняет поведение для валидного блока (только malformed/unclosed)."""
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed(
+            "Pre "
+            + TOOL_CALL_OPEN
+            + '{"name": "get_weather", "arguments": {"city": "Berlin"}}'
+            + TOOL_CALL_CLOSE
+        )
+        p.finish()
+        self.assertEqual(
+            c.calls, [{"name": "get_weather", "arguments": {"city": "Berlin"}}]
+        )
+        self.assertEqual("".join(c.content), "Pre ")
 
 
 class TestToolsSection(unittest.TestCase):

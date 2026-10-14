@@ -274,17 +274,32 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     return {"name": name.strip(), "arguments": arguments}
 
 
+class LiveParserError(Exception):
+    """Strict-live (AD-002): recognized `<tool_call>` блок невалиден либо не закрыт.
+
+    Поднимается только при `strict_live=True`; legacy-режим (stream=false либо
+    без sink) этот блок, как раньше, молча отдаёт текстом — исключение означает
+    fail-close всего live-хода (сырой XML клиенту не уходит).
+    """
+
+
 class ToolCallParser:
     """Поток текстовых дельт -> content и завершённые вызовы инструментов.
 
     Тег <tool_call> может прийти разорванным между дельтами: хвост, который может
     оказаться началом тега, удерживается и не уходит в content до разрешения.
+
+    `strict_live=True` (AD-002, только Droid stream=true с живым sink) запрещает
+    malformed/unclosed recognized-блокам уйти в content как текст: вместо
+    `_flush_all()`/raw-passthrough поднимается `LiveParserError`. `strict_live=False`
+    (умолчание, legacy nonstream/без sink) ведёт себя абсолютно без изменений.
     """
 
-    def __init__(self, on_content, on_tool_call):
+    def __init__(self, on_content, on_tool_call, strict_live: bool = False):
         self._buf = ""
         self._on_content = on_content
         self._on_tool_call = on_tool_call
+        self.strict_live = strict_live
 
     def feed(self, text: str) -> None:
         self._buf += text
@@ -298,6 +313,8 @@ class ToolCallParser:
             start = self._buf.find(TOOL_CALL_OPEN)
             if start == -1:
                 if final:
+                    if self.strict_live and self._pending_prefix():
+                        raise LiveParserError("unresolved tool_call prefix at finish")
                     self._flush_all()
                     return
                 keep = self._pending_prefix()
@@ -313,12 +330,16 @@ class ToolCallParser:
             end = self._find_close_outside_string(len(TOOL_CALL_OPEN))
             if end == -1:
                 if final:
+                    if self.strict_live:
+                        raise LiveParserError("unclosed tool_call block")
                     self._flush_all()  # незакрытый/невалидный блок отдаём текстом
                 return
             inner = self._buf[len(TOOL_CALL_OPEN) : end]
             self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
             call = _parse_tool_call_block(inner)
             if call is None:
+                if self.strict_live:
+                    raise LiveParserError("malformed tool_call block")
                 self._emit(TOOL_CALL_OPEN + inner + TOOL_CALL_CLOSE)
             else:
                 self._on_tool_call(call)

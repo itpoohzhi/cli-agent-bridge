@@ -80,7 +80,7 @@ class DroidAdapter(BackendAdapter):
         legacy["rpc"]["items"] = [asdict(item) for item in ctx.rpc.items]
         legacy["images"] = [asdict(image) for image in ctx.images]
         handler = cast(Any, ctx.handler)
-        raw = handler._run_once(legacy, ctx.keepalive)
+        raw = handler._run_once(legacy, ctx.keepalive, sse_writer)
         usage = raw.get("usage") or {}
 
         def tool_call(call: dict) -> ToolCall:

@@ -75,7 +75,7 @@
     {
       "id": "claude-sonnet-5-5",
       "backend": "droid",
-      "name": "Claude Sonnet 5.5 (Droid)",
+      "name": "Claude Sonnet 5.5 (Droid Meta bridge)",
       "efforts": [
         "high"
       ],
@@ -102,7 +102,7 @@
     {
       "id": "gemini-3.8-flash",
       "backend": "droid",
-      "name": "Gemini 3.8 Flash (Droid)",
+      "name": "Gemini 3.8 Flash (Droid Meta bridge)",
       "efforts": [
         "high"
       ],
@@ -128,7 +128,7 @@
     {
       "id": "grok-4.7",
       "backend": "droid",
-      "name": "Grok 4.7 (Droid)",
+      "name": "Grok 4.7 (Droid Meta bridge)",
       "efforts": [
         "high"
       ],
@@ -153,7 +153,7 @@
     {
       "id": "deepseek-v4.1-flash",
       "backend": "droid",
-      "name": "DeepSeek V4.1 Flash (Droid)",
+      "name": "DeepSeek V4.1 Flash (Droid Meta bridge)",
       "efforts": [
         "high",
         "max"
@@ -179,7 +179,7 @@
     {
       "id": "gpt-6.1-sol",
       "backend": "droid",
-      "name": "GPT-6.1 Sol (Droid)",
+      "name": "GPT-6.1 Sol (Droid Meta bridge)",
       "efforts": [
         "high"
       ],
@@ -205,7 +205,7 @@
     {
       "id": "glm-5.3",
       "backend": "droid",
-      "name": "GLM-5.3 (Droid)",
+      "name": "GLM-5.3 (Droid Meta bridge)",
       "efforts": [
         "max"
       ],
@@ -230,7 +230,7 @@
     {
       "id": "muse-spark-1.3",
       "backend": "muse",
-      "name": "Muse Spark 1.3 (Muse CLI)",
+      "name": "Muse Spark 1.3 (Muse Meta bridge)",
       "efforts": [
         "max"
       ],
@@ -253,7 +253,53 @@
     {
       "id": "muse-spark-1.3-contributor",
       "backend": "muse",
-      "name": "Muse Spark 1.3 Contributor (Muse CLI)",
+      "name": "Muse Spark 1.3 Contributor (Muse Meta bridge)",
+      "efforts": [
+        "max"
+      ],
+      "default_effort": "max",
+      "context_window": 1048576,
+      "max_tokens": 131072,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        321
+      ]
+    },
+    {
+      "id": "muse-wonder-1.0",
+      "backend": "muse",
+      "name": "Muse Wonder 1.0 (Muse Meta bridge)",
+      "efforts": [
+        "max"
+      ],
+      "default_effort": "max",
+      "context_window": 1048576,
+      "max_tokens": 131072,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        321
+      ]
+    },
+    {
+      "id": "muse-wonder-full-1.0",
+      "backend": "muse",
+      "name": "Muse Wonder Full 1.0 (Muse Meta bridge)",
       "efforts": [
         "max"
       ],

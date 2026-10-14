@@ -27,7 +27,12 @@ DROID_MODELS = {
     "gpt-6.1-sol": (272000, ["high"]),
     "glm-5.3": (1000000, ["max"]),
 }
-MUSE_MODELS = ("muse-spark-1.3", "muse-spark-1.3-contributor")
+MUSE_MODELS = (
+    "muse-spark-1.3",
+    "muse-spark-1.3-contributor",
+    "muse-wonder-1.0",
+    "muse-wonder-full-1.0",
+)
 
 
 def raw_v3():
@@ -61,7 +66,7 @@ class TestLiveFleetV3(unittest.TestCase):
         data = raw_v3()
         data["backends"]["muse"]["enabled"] = True
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 8)
+        self.assertEqual(len(catalog["order"]), 10)
         for mid in DROID_MODELS:
             self.assertEqual(catalog["models"][mid]["backend"], "droid")
         for mid in MUSE_MODELS:

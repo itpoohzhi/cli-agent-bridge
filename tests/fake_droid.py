@@ -526,6 +526,20 @@ class Fake:
                 os._exit(int(step.get("rc", 1)))
             elif op == "notify":
                 self.notify(step["type"], **(step.get("fields") or {}))
+            elif op == "complete_mismatch":
+                # RW-205: complete с текстом, который не продолжает уже отданный клиенту
+                # live-префикс last_mid (несовпадающий либо укороченный текст).
+                self.notify(
+                    "assistant_text_complete",
+                    messageId=last_mid,
+                    text=step.get("text", "MISMATCH"),
+                )
+            elif op == "thinking_complete_mismatch":
+                self.notify(
+                    "thinking_text_complete",
+                    messageId=last_mid,
+                    text=step.get("text", "MISMATCH"),
+                )
             elif op == "garbage":
                 self.raw("{this is not json")
             elif op == "stale_terminal":
