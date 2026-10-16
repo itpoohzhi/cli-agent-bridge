@@ -38,6 +38,7 @@ Keepalive: пустые data-чанки держат SSE-соединение, �
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -136,6 +137,170 @@ _SIGNAL_RCS = (
 )  # rc процесса, убитого мостом при уборке
 TERMINAL_EXIT_GRACE_S = 0.5
 SERVE_SPAWN_TIMEOUT_S = 30.0  # handshake+session/start должны уложиться сюда
+
+# --- REQ-MUSE-002/003/004 (пакет a4): approval, бюджеты, повторы, live ---
+APPROVAL_MODE = os.environ.get("MUSE_BRIDGE_APPROVAL_MODE", "allowAll").strip()
+TRANSIENT_RETRY_SCOPE = os.environ.get(
+    "MUSE_BRIDGE_TRANSIENT_RETRY_SCOPE", "pre-action"
+).strip()
+FINISH_RESERVE_S = 35.0
+CLOSE_RESERVE_S = 12.0
+REQUEST_CAP_S = 1800.0
+MIN_ATTEMPT_REMAINING_S = float(os.environ.get("MUSE_BRIDGE_MIN_ATTEMPT_S", "120"))
+CONTROL_WRITE_TIMEOUT_S = 5.0
+LIVE_WRITE_TIMEOUT_S = 3.0
+APPROVAL_CANCEL_GRACE_S = 15.0
+MAX_APPROVAL_DECIDE = 10
+MAX_USER_INPUT_CANCEL = 3
+TRANSIENT_MAX_RETRIES = 2
+TRANSIENT_BACKOFF_S: tuple[float, float] = (2.0, 4.0)
+TRANSIENT_JITTER_S = 1.0
+TRANSIENT_MARKERS: tuple[str, ...] = (
+    "[net-timeout]",
+    "timed out waiting for response data",
+    NETWORK_RETRY_MARKER,
+    "transport_connect_unreachable",
+)
+NON_RETRYABLE_STATES = frozenset(
+    {"timeout", "spawn_failed", "launcher_missing", "client_gone"}
+)
+
+
+def _validate_startup_config() -> None:
+    """Невалидный env-режим или бюджет останавливают старт моста (AD-007)."""
+    if APPROVAL_MODE not in ("allowAll", "denyUnmatched"):
+        raise RuntimeError(f"MUSE_BRIDGE_APPROVAL_MODE invalid: {APPROVAL_MODE!r}")
+    if TRANSIENT_RETRY_SCOPE not in ("pre-action", "observed-items"):
+        raise RuntimeError(
+            f"MUSE_BRIDGE_TRANSIENT_RETRY_SCOPE invalid: {TRANSIENT_RETRY_SCOPE!r}"
+        )
+    if TIMEOUT_S < FINISH_RESERVE_S + MIN_ATTEMPT_REMAINING_S:
+        raise RuntimeError(
+            "MUSE_BRIDGE_TIMEOUT_S too small: "
+            f"{TIMEOUT_S} < FINISH_RESERVE_S + MIN_ATTEMPT_REMAINING_S "
+            f"({FINISH_RESERVE_S + MIN_ATTEMPT_REMAINING_S})"
+        )
+
+
+_validate_startup_config()
+
+
+def _is_transient_text(*values: Any) -> bool:
+    """Классификация транзиента только по явным маркерам (§3.1 пакета)."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            text = value
+        elif isinstance(value, (list, tuple)):
+            if _is_transient_text(*value):
+                return True
+            continue
+        elif isinstance(value, dict):
+            text = " ".join(
+                str(value.get(key) or "") for key in ("kind", "message", "code")
+            )
+            if not text.strip():
+                text = str(value)
+        else:
+            text = str(value)
+        if any(marker in text for marker in TRANSIENT_MARKERS):
+            return True
+    return False
+
+
+_AUDIT_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+_TOOL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+
+
+def _render_audit_token(value: Any) -> str:
+    """Безопасный рендер свободной строки в аудит-лог (FU-009)."""
+    text = value if isinstance(value, str) else ""
+    if text and len(text) <= 64 and _AUDIT_TOKEN_RE.match(text):
+        return text
+    raw = text if isinstance(value, str) else str(value or "")
+    digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:8]
+    return f"redacted(len={len(raw)},sha256={digest})"
+
+
+def _render_tool_token(value: Any) -> str:
+    """Рендер toolName в журнал инструментальных item (allowlist §4.3)."""
+    text = value if isinstance(value, str) else ""
+    if text and len(text) <= 64 and _TOOL_TOKEN_RE.match(text):
+        return text
+    return f"redacted(len={len(text)})"
+
+
+class ApprovalPolicy:
+    """Чистая политика решения по снимку approval (BND-001): без I/O.
+
+    Читает только разрешённые поля снимка; rawArgs и тела не трогает.
+    Выход: approve / deny (ветка деградации) / fail_turn + аудит-строка.
+    """
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+
+    @staticmethod
+    def _choices(params: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = params.get("availableChoices")
+        if not isinstance(raw, list):
+            return []
+        return [c for c in raw if isinstance(c, dict)]
+
+    @staticmethod
+    def deny_choice(params: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not params:
+            return None
+        for choice in ApprovalPolicy._choices(params):
+            if choice.get("decision") in ("abort", "denied"):
+                return choice
+        return None
+
+    def evaluate(self, params: dict[str, Any]) -> dict[str, Any]:
+        choices = self._choices(params)
+        approve = next(
+            (c for c in choices if c.get("decision") == "approved"), None
+        ) or next(
+            (c for c in choices if c.get("decision") == "approvedForSession"), None
+        )
+        deny = self.deny_choice(params)
+        action = "fail_turn"
+        chosen: dict[str, Any] | None = None
+        if self.mode == "allowAll" and approve is not None:
+            action, chosen = "approve", approve
+        elif deny is not None:
+            action, chosen = "deny", deny
+        subject = (
+            params.get("subject") if isinstance(params.get("subject"), dict) else {}
+        )
+        choice_ids = ",".join(
+            _render_audit_token(c.get("choiceId")) for c in choices[:8]
+        )
+        audit = (
+            "approval_decide "
+            f"tool={_render_audit_token(params.get('toolName'))} "
+            f"subject={_render_audit_token(subject.get('kind'))} "
+            f"protected={1 if params.get('protectedWrite') else 0} "
+            f"judge={1 if params.get('judgeEscalated') else 0} "
+            f"choices=[{choice_ids}] "
+            f"chosen={_render_audit_token(chosen.get('choiceId')) if chosen else 'none'} "
+            f"decision={_render_audit_token(chosen.get('decision')) if chosen else 'none'}"
+        )
+        return {
+            "action": action,
+            "choice_id": chosen.get("choiceId") if chosen else None,
+            "decision": chosen.get("decision") if chosen else None,
+            "audit": audit,
+        }
+
+    def evaluate_user_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action": "cancel_user_input",
+            "audit": (
+                f"user_input_cancel tool={_render_audit_token(params.get('toolName'))}"
+            ),
+        }
 
 
 class ServeUnavailable(Exception):
@@ -1332,6 +1497,11 @@ class Run:
         self.dead_confirmed = (
             True  # False — группа не подтверждена мёртвой (карантин слота)
         )
+        # Барьеры AD-003: exec защёлкивает ACTION_POSSIBLE при старте процесса.
+        self.action_possible = False
+        self.approval_seen = False
+        self.observed_barrier = False
+        self.exec_deadline = float("inf")
 
     def close(self) -> None:
         """Убить группу процессов хода и коротко дождаться её ухода.
@@ -1438,6 +1608,7 @@ class Run:
                     "err": f"spawn failed: {exc}",
                     "state": "spawn_failed",
                 }
+            self.action_possible = True
 
             def drain_stderr() -> None:
                 try:
@@ -1453,8 +1624,11 @@ class Run:
             err_thread.start()
 
             # Жёсткий дедлайн: таймер убивает процесс, даже если stdout молчит.
+            _remain = self.exec_deadline - time.monotonic()
+            _timer_s = min(TIMEOUT_S, _remain) if _remain != float("inf") else TIMEOUT_S
             timer = threading.Timer(
-                TIMEOUT_S, lambda: (err_lines.append("bridge timeout"), self.close())
+                max(0.05, _timer_s),
+                lambda: (err_lines.append("bridge timeout"), self.close()),
             )
             timer.daemon = True
             timer.start()
@@ -1556,25 +1730,29 @@ class Run:
             "err": "\n".join(err_lines[-6:]),
             "state": state,
             "hard_threshold": _has_hard_threshold_marker(err_lines, reason),
+            "action_possible": self.action_possible,
+            "approval_seen": False,
+            "observed_barrier": bool(text),
+            "transient": state != "ok" and _is_transient_text(err_lines, reason),
         }
 
 
 class ServeRun:
     """Один запрос через `muse serve` (MSP v1 по stdio, NDJSON JSON-RPC).
 
-    Поток (проверен офлайн на echo-провайдере 05.10.2026): initialize ->
-    notify initialized -> session/start (без approvalMode: любое явное
-    значение режектится startup ceiling; провайдер meta)
-    провайдер meta) -> turn/start (reasoningEffort=тир) -> ждём turn/completed.
+    Поток: initialize -> notify initialized -> session/start
+    (approvalMode из AD-001/AD-007; провайдер meta) -> turn/start
+    (reasoningEffort=тир) -> ждём turn/completed; остаточные
+    approval/userInput обрабатывает ApprovalPolicy в том же ходе (AD-002).
     Текст — из agentMessage (item/completed.text, fallback — item/delta);
     reasoning summaries — из reasoning-item (summary[] + item/delta
     field "summary.N"); токены — из session/tokenUsage (reasoningTokens
     включительно). Сырой reasoning-текст в v1 не стримится (только
     summaries) — ограничение протокола, не моста.
 
-    Любая транспортная неполадка (спавн, handshake, таймаут, интерактивный
-    запрос approval/userInput, JSON-RPC error) -> ServeUnavailable, и
-    вызывающий код тихо идёт на exec. Ошибка самой модели
+    Транспортная неполадка до ACTION_POSSIBLE -> ServeUnavailable;
+    допуск exec-fallback решает единый предикат Handler (AD-003).
+    Ошибка самой модели
     (terminal != completed) — НЕ ServeUnavailable: ход реально выполнен,
     fallback лишь удвоил бы вызов.
     """
@@ -1595,6 +1773,26 @@ class ServeRun:
         # Запись в stdin serve ограничена дедлайном (ставится в execute): зависший читатель
         # не держит слот бессрочно, при истечении ход завершается, группа убивается.
         self._write_until = float("inf")
+        # Барьеры и состояние approval/повторов (AD-002/AD-003, пакет a4).
+        self.approval_seen = False
+        self.action_possible = False
+        self.allowing_decide_attempted = False
+        self.approval_degraded = False
+        self.degraded_at: float | None = None
+        self.grace_end: float | None = None
+        self.observed_barrier = False
+        self.tool_item_count = 0
+        self.decide_count = 0
+        self.user_input_cancel_count = 0
+        self.ceiling_seen = False
+        self.server_version = "?"
+        self.last_error_text = ""
+        self.live_sink: Any = None
+        self.exec_deadline = float("inf")
+        self.write_deadline = float("inf")
+        self.request_deadline = float("inf")
+        self.turn_started_at: float | None = None
+        self._live_frozen = False
 
     def close(self) -> None:
         """Убить группу процессов хода и коротко дождаться её ухода (идемпотентно)."""
@@ -1603,23 +1801,24 @@ class ServeRun:
             return
         _terminate_run(self, (proc.stdin, proc.stdout, proc.stderr))
 
-    def _send(
-        self, method: str, params: dict | None = None, notify: bool = False
-    ) -> int:
+    def _control_limit(self) -> float:
+        limit = min(
+            self._write_until,
+            time.monotonic() + CONTROL_WRITE_TIMEOUT_S,
+            self.exec_deadline,
+        )
+        if self.grace_end is not None:
+            limit = min(limit, self.grace_end)
+        return limit
+
+    def _write_bytes(self, data: bytes, limit: float) -> None:
         assert self.proc is not None and self.proc.stdin is not None
-        self._rid += 1
-        msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-        if not notify:
-            msg["id"] = self._rid
-        if params is not None:
-            msg["params"] = params
-        data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
         try:
             fd = self.proc.stdin.fileno()
             view = memoryview(data)
             sent = 0
             while sent < len(data):
-                remaining = self._write_until - time.time()
+                remaining = limit - time.monotonic()
                 if remaining <= 0:
                     raise ServeUnavailable(
                         "serve stdin write timed out: child does not read"
@@ -1631,9 +1830,39 @@ class ServeRun:
                     sent += os.write(fd, view[sent:])
                 except BlockingIOError:
                     continue
+        except ServeUnavailable:
+            raise
         except (OSError, ValueError) as exc:
             raise ServeUnavailable(f"stdio write failed: {exc}")
+
+    def _send(
+        self,
+        method: str,
+        params: dict | None = None,
+        notify: bool = False,
+        *,
+        control: bool = False,
+    ) -> int:
+        self._rid += 1
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if not notify:
+            msg["id"] = self._rid
+        if params is not None:
+            msg["params"] = params
+        data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
+        self._write_bytes(data, self._control_limit() if control else self._write_until)
         return self._rid
+
+    def _send_response(self, server_id: Any, result: dict) -> None:
+        """Receipt по серверному id дословно (AD-002)."""
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "id": server_id, "result": result}
+        data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
+        self._write_bytes(data, self._control_limit())
+
+    def _note_allowing_decide(self) -> None:
+        """Защёлкивание ДО первой попытки записи разрешающего decide (a4)."""
+        self.allowing_decide_attempted = True
+        self.action_possible = True
 
     def execute(self) -> dict[str, Any]:
         if not os.access(MUSE_WRAPPER, os.X_OK):
@@ -1693,8 +1922,16 @@ class ServeRun:
 
         err_thread = threading.Thread(target=drain_stderr, daemon=True)
         err_thread.start()
-        deadline = time.time() + TIMEOUT_S
-        setup_deadline = time.time() + SERVE_SPAWN_TIMEOUT_S
+        _now0 = time.monotonic()
+        _exec_dl = self.exec_deadline
+        deadline = (
+            min(_now0 + TIMEOUT_S, _exec_dl)
+            if _exec_dl != float("inf")
+            else _now0 + TIMEOUT_S
+        )
+        if self.exec_deadline == float("inf"):
+            self.exec_deadline = deadline
+        setup_deadline = min(_now0 + SERVE_SPAWN_TIMEOUT_S, deadline)
         self._write_until = setup_deadline
 
         # Чтение stdout serve — собственным буфером поверх os.read: select по fd не видит строки,
@@ -1702,12 +1939,15 @@ class ServeRun:
         rbuf = bytearray()
 
         def read_msg(timeout_at: float) -> dict[str, Any]:
-            while time.time() < min(timeout_at, deadline):
+            while time.monotonic() < timeout_at:
                 if self.proc is None or self.proc.stdout is None:
                     raise ServeUnavailable("serve stdout closed")
                 newline = rbuf.find(b"\n")
                 if newline < 0:
-                    ready, _, _ = select.select([self.proc.stdout], [], [], 0.5)
+                    _remain = max(0.0, timeout_at - time.monotonic())
+                    ready, _, _ = select.select(
+                        [self.proc.stdout], [], [], min(0.5, _remain)
+                    )
                     if not ready:
                         if self.proc.poll() is not None:
                             raise ServeUnavailable(
@@ -1735,16 +1975,6 @@ class ServeRun:
                     return msg
             raise ServeUnavailable("serve read timeout")
 
-        def await_result(rid: int, timeout_at: float) -> dict[str, Any]:
-            while True:
-                msg = read_msg(timeout_at)
-                if isinstance(msg, dict) and msg.get("id") == rid:
-                    if "error" in msg:
-                        raise ServeUnavailable(f"serve RPC error: {msg['error']}")
-                    result = msg.get("result")
-                    return result if isinstance(result, dict) else {}
-                self._handle_event(msg, None)
-
         kinds: dict[str, str] = {}
         deltas: list[str] = []
         summary_parts: dict[int, str] = {}
@@ -1753,13 +1983,223 @@ class ServeRun:
         usage: dict[str, Any] = {}
         turn_id: str | None = None
         session_id: str | None = None
+        pending: dict[int, str] = {}
+        seen_pairs: set[tuple[str, str]] = set()
+        tool_item_ids: set[str] = set()
+        last_snapshot: list[dict[str, Any]] = []
+        transient_terminal = [False]
+        first_summary_logged = [False]
+
+        def _pair_key(params: dict[str, Any]) -> tuple[str, str]:
+            return (
+                str(params.get("approvalId") or ""),
+                json.dumps(
+                    params.get("currentRequirementId"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+
+        def _send_decide(
+            snapshot: dict[str, Any], choice: dict[str, Any], *, allowing: bool
+        ) -> None:
+            if allowing:
+                self._note_allowing_decide()
+            self.decide_count += 1
+            rid = self._send(
+                "approval/decide",
+                {
+                    "approvalId": snapshot.get("approvalId"),
+                    "choiceId": choice.get("choiceId"),
+                    "commandId": _uuid7(),
+                    "requirementId": snapshot.get("currentRequirementId"),
+                    "sessionId": snapshot.get("sessionId") or session_id or "",
+                },
+                control=True,
+            )
+            pending[rid] = "decide"
+
+        def _latch_degradation(
+            reason: str, snapshot: dict[str, Any] | None = None
+        ) -> None:
+            if self.approval_degraded:
+                return
+            self.approval_degraded = True
+            now = time.monotonic()
+            self.degraded_at = now
+            grace_end = now + APPROVAL_CANCEL_GRACE_S
+            if self.write_deadline != float("inf"):
+                grace_end = min(
+                    grace_end, self.write_deadline - 2 * LIVE_WRITE_TIMEOUT_S
+                )
+            self.grace_end = grace_end
+            _log(
+                f"approval_degraded reason={reason} approval_seen={int(self.approval_seen)} "
+                f"action_possible={int(self.action_possible)} "
+                f"barrier={int(self.observed_barrier)} tool_items={self.tool_item_count} "
+                f"grace_s={max(0.0, grace_end - now):.2f}"
+            )
+            snap = (
+                snapshot
+                if snapshot is not None
+                else (last_snapshot[0] if last_snapshot else None)
+            )
+            try:
+                deny = ApprovalPolicy.deny_choice(snap)
+                if deny is not None and self.decide_count < MAX_APPROVAL_DECIDE:
+                    _send_decide(snap or {}, deny, allowing=False)
+                elif turn_id:
+                    rid = self._send(
+                        "turn/cancel",
+                        {
+                            "commandId": _uuid7(),
+                            "sessionId": session_id or "",
+                            "turnId": turn_id,
+                        },
+                        control=True,
+                    )
+                    pending[rid] = "turn_cancel"
+            except ServeUnavailable as exc:
+                _log(f"approval degrade command failed: {exc}")
+
+        def _handle_ack(msg: dict[str, Any]) -> None:
+            raw_id = msg.get("id")
+            if not isinstance(raw_id, int):
+                return
+            kind = pending.pop(raw_id, None)
+            if kind is None:
+                return
+            if "error" in msg:
+                err = msg.get("error") if isinstance(msg.get("error"), dict) else {}
+                code = err.get("code")
+                if kind == "decide" and code == -32051:
+                    _log("approval decide benign -32051 already resolved")
+                    return
+                if kind in ("decide", "user_cancel"):
+                    _latch_degradation(f"{kind}_error_{code}")
+                return
+            result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
+            if result.get("terminal") is False:
+                _log("approval decide terminal=false awaiting updated request")
+
+        def await_result(rid: int, timeout_at: float) -> dict[str, Any]:
+            while True:
+                msg = read_msg(timeout_at)
+                if "method" in msg:
+                    self._handle_event(msg, None)
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == rid:
+                    if "error" in msg:
+                        err = msg["error"]
+                        if isinstance(err, dict) and err.get("code") == -32030:
+                            self.ceiling_seen = True
+                            _log(
+                                f"serve approval ceiling -32030 version={self.server_version} "
+                                "warning approvalMode not applied"
+                            )
+                        self.last_error_text = str(err)
+                        raise ServeUnavailable(f"serve RPC error: {err}")
+                    result = msg.get("result")
+                    return result if isinstance(result, dict) else {}
+                _handle_ack(msg)
 
         def _handle_event(msg: dict[str, Any], _unused: Any) -> None:
             nonlocal final_text
             method = msg.get("method")
-            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
-            if method in ("approval/request", "userInput/request"):
-                raise ServeUnavailable(f"serve needs interaction ({method})")
+            _raw_params = msg.get("params")
+            params: dict[str, Any] = (
+                _raw_params if isinstance(_raw_params, dict) else {}
+            )
+            if method in (
+                "approval/request",
+                "approval/requested",
+                "userInput/request",
+            ):
+                # a4: защёлки ДО receipt/дедупликации/политики, включая setup.
+                self.approval_seen = True
+                self.action_possible = True
+                self.observed_barrier = True
+                if self.approval_degraded:
+                    _log(f"approval after degraded ignored method={method}")
+                    return
+                server_id = msg.get("id")
+                try:
+                    if server_id is not None:
+                        self._send_response(server_id, {})
+                except ServeUnavailable:
+                    _latch_degradation("receipt_write_failed", params)
+                    return
+                if method == "userInput/request":
+                    last_snapshot[:] = [params]
+                    policy = ApprovalPolicy(APPROVAL_MODE)
+                    _log(policy.evaluate_user_input(params)["audit"])
+                    if self.user_input_cancel_count >= MAX_USER_INPUT_CANCEL:
+                        _latch_degradation("user_input_limit", params)
+                        return
+                    self.user_input_cancel_count += 1
+                    try:
+                        rid = self._send(
+                            "userInput/cancel",
+                            {
+                                "commandId": _uuid7(),
+                                "sessionId": params.get("sessionId")
+                                or session_id
+                                or "",
+                                "userInputId": params.get("userInputId"),
+                            },
+                            control=True,
+                        )
+                        pending[rid] = "user_cancel"
+                    except ServeUnavailable:
+                        _latch_degradation("user_input_write_failed", params)
+                    return
+                pair = _pair_key(params)
+                if pair in seen_pairs:
+                    _log("approval duplicate suppressed")
+                    return
+                seen_pairs.add(pair)
+                last_snapshot[:] = [params]
+                if self.decide_count >= MAX_APPROVAL_DECIDE:
+                    _latch_degradation("decide_limit", params)
+                    return
+                verdict = ApprovalPolicy(APPROVAL_MODE).evaluate(params)
+                _log(f"{verdict['audit']} n={self.decide_count + 1}")
+                if verdict["action"] == "approve":
+                    choice = next(
+                        (
+                            c
+                            for c in ApprovalPolicy._choices(params)
+                            if c.get("choiceId") == verdict["choice_id"]
+                        ),
+                        {"choiceId": verdict["choice_id"]},
+                    )
+                    try:
+                        _send_decide(params, choice, allowing=True)
+                    except ServeUnavailable:
+                        _latch_degradation("decide_write_failed", params)
+                elif verdict["action"] == "deny":
+                    _latch_degradation("no_approve_choice", params)
+                else:
+                    _latch_degradation("no_choice", params)
+                return
+            if method == "turn/modelRetryScheduled":
+                _log(
+                    "turn modelRetryScheduled "
+                    f"attempt={params.get('attempt')} maxAttempts={params.get('maxAttempts')} "
+                    f"retryDelayMs={params.get('retryDelayMs')} "
+                    f"errorKind={_render_audit_token(params.get('errorKind'))}"
+                )
+                return
+            if method in (
+                "approval/updated",
+                "approval/resolved",
+                "session/approvalModeChanged",
+                "userInput/settled",
+            ):
+                if method == "approval/resolved":
+                    _log("approval resolved")
+                return
             if method in ("item/started", "item/completed"):
                 raw_item = params.get("item")
                 item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
@@ -1767,6 +2207,17 @@ class ServeRun:
                 kind = str(item.get("kind") or "")
                 if iid:
                     kinds[iid] = kind
+                if kind and kind not in ("reasoning", "agentMessage"):
+                    self.observed_barrier = True
+                    if iid:
+                        tool_item_ids.add(iid)
+                        self.tool_item_count = len(tool_item_ids)
+                    _log(
+                        f"tool_item kind={_render_tool_token(kind)} "
+                        f"tool={_render_tool_token(item.get('toolName'))}"
+                    )
+                if method == "item/completed" and kind == "reasoning":
+                    self._live_frozen = True
                 if (
                     method == "item/completed"
                     and turn_id is not None
@@ -1789,7 +2240,23 @@ class ServeRun:
                         idx = int(field.split(".", 1)[1])
                     except (IndexError, ValueError):
                         idx = len(summary_parts)
+                    if not first_summary_logged[0]:
+                        first_summary_logged[0] = True
+                        _t0 = self.turn_started_at or _now0
+                        _log(
+                            f"first summary delta idx={idx} "
+                            f"after_s={time.monotonic() - _t0:.2f}"
+                        )
                     summary_parts[idx] = summary_parts.get(idx, "") + piece
+                    if idx > 0:
+                        self._live_frozen = True
+                    elif not self._live_frozen and self.live_sink is not None:
+                        try:
+                            delivered = bool(self.live_sink(summary_parts.get(0, "")))
+                        except Exception:  # noqa: BLE001, S112
+                            delivered = False
+                        if not delivered:
+                            self._live_frozen = True
                 elif (
                     kinds.get(iid, "agentMessage") == "agentMessage" and field == "text"
                 ):
@@ -1807,10 +2274,18 @@ class ServeRun:
             )
             init = await_result(init_rid, setup_deadline)
             schema = init.get("schema") if isinstance(init.get("schema"), dict) else {}
+            _srv = (
+                init.get("serverInfo")
+                if isinstance(init.get("serverInfo"), dict)
+                else {}
+            )
+            self.server_version = str(_srv.get("version") or "?")
             _log(
-                f"serve init server={init.get('serverInfo', {}).get('version') if isinstance(init.get('serverInfo'), dict) else '?'} "
+                f"serve init server={self.server_version} "
                 f"schema_fp={str(schema.get('fingerprint', ''))[:19]}"
             )
+            if self.approval_degraded:
+                raise ServeUnavailable("serve approval degraded during setup")
             self._send("initialized", {}, notify=True)
             sess_rid = self._send(
                 "session/start",
@@ -1819,14 +2294,9 @@ class ServeRun:
                     "workspaceRoot": str(self.workdir),
                     "providerId": "meta",
                     "modelId": self.model_id,
+                    "approvalMode": APPROVAL_MODE,
                 },
             )
-            # approvalMode намеренно НЕ передаём: любое явное значение
-            # (allowAll, onRequest) отвергается sealed startup ceiling
-            # неинтерактивного serve (commandRejected/approval_mode_ceiling),
-            # а без ключа сервер назначает свой дефолт (promptUnmatched — так
-            # было в офлайн-пробе на echo). Запрос approval/userInput по ходу
-            # хода ведёт в ServeUnavailable -> fallback на exec.
             sess = await_result(sess_rid, setup_deadline)
             session = (
                 sess.get("session") if isinstance(sess.get("session"), dict) else {}
@@ -1834,7 +2304,19 @@ class ServeRun:
             session_id = str(session.get("sessionId") or "")
             if not session_id:
                 raise ServeUnavailable("session/start gave no sessionId")
+            _eff = session.get("approvalMode")
+            if isinstance(_eff, dict):
+                _eff_mode = str(_eff.get("mode") or APPROVAL_MODE)
+            elif isinstance(_eff, str) and _eff:
+                _eff_mode = _eff
+            else:
+                _eff_mode = APPROVAL_MODE
+            _log(f"serve session approvalMode={_eff_mode}")
+            if self.approval_degraded:
+                raise ServeUnavailable("serve approval degraded during setup")
             tier = _MSP_EFFORT.get(self.effort, "max")
+            # ACTION_POSSIBLE защёлкивается ДО первого байта turn/start (a3/a4).
+            self.action_possible = True
             turn_rid = self._send(
                 "turn/start",
                 {
@@ -1844,6 +2326,8 @@ class ServeRun:
                     "input": [{"type": "text", "text": self.prompt}],
                 },
             )
+            self._write_until = deadline
+            self.turn_started_at = time.monotonic()
             turn = await_result(turn_rid, setup_deadline)
             if turn.get("status") != "accepted":
                 raise ServeUnavailable(f"turn/start not accepted: {turn}")
@@ -1853,11 +2337,22 @@ class ServeRun:
             )
             terminal: str | None = None
             hard_threshold = False
-            while time.time() < deadline:
-                # Смерть serve здесь не проверяется: события и completed, уже лежащие в буфере
-                # чтения или pipe, разбираются первыми; read_msg сам поднимет ServeUnavailable
-                # на EOF/выходе процесса, когда разбирать больше нечего.
-                msg = read_msg(deadline)
+            while True:
+                _limit = (
+                    self.grace_end
+                    if self.approval_degraded and self.grace_end is not None
+                    else deadline
+                )
+                if time.monotonic() >= _limit:
+                    if self.approval_degraded:
+                        break
+                    raise ServeUnavailable("serve turn deadline exceeded")
+                try:
+                    msg = read_msg(_limit)
+                except ServeUnavailable:
+                    if self.approval_degraded:
+                        break  # EOF после cancel — подтверждение уборки
+                    raise
                 if msg.get("method") == "turn/completed" and isinstance(
                     msg.get("params"), dict
                 ):
@@ -1866,17 +2361,52 @@ class ServeRun:
                         _handle_event(msg, None)
                         continue
                     terminal = str(p.get("terminal") or "unknown")
+                    if isinstance(p.get("usage"), dict):
+                        usage.update(p["usage"])  # type: ignore[arg-type]
                     if terminal != "completed":
                         hard_threshold = _has_hard_threshold_marker(
                             p.get("error"), p.get("reason")
                         )
                         turn_diag_lines = _turn_diagnostics(p, self.prompt)
+                        _err_raw = p.get("error")
+                        transient_terminal[0] = _is_transient_text(
+                            _err_raw, p.get("reason")
+                        )
+                        if transient_terminal[0]:
+                            _log(
+                                "transient_terminal "
+                                f"ttft={1 if p.get('timeToFirstTokenMs') is not None else 0} "
+                                f"usage={1 if usage else 0} "
+                                f"tool_items={self.tool_item_count}"
+                            )
                     break
-                if "id" in msg and ("result" in msg or "error" in msg):
-                    continue  # чужой/дублированный ack — игнор, не разрываем ход
+                if "method" not in msg and ("result" in msg or "error" in msg):
+                    _handle_ack(msg)
+                    continue
                 _handle_event(msg, None)
-            else:
-                raise ServeUnavailable("serve turn deadline exceeded")
+            flags: dict[str, Any] = {
+                "action_possible": self.action_possible,
+                "approval_seen": self.approval_seen,
+                "approval_degraded": self.approval_degraded,
+                "allowing_decide": self.allowing_decide_attempted,
+                "observed_barrier": self.observed_barrier,
+                "tool_items": self.tool_item_count,
+                "transient": bool(transient_terminal[0]),
+            }
+            if self.approval_degraded:
+                _log(f"serve turn degraded outcome tool_items={self.tool_item_count}")
+                return {
+                    "rc": 1,
+                    "text": "",
+                    "chunks": [],
+                    "err": "approval_degraded",
+                    "state": "terminal_failed",
+                    "summaries": [],
+                    "usage": usage,
+                    "via": "serve",
+                    "hard_threshold": False,
+                    **flags,
+                }
             serve_rc: int | None = None
             if terminal == "completed":
                 # D-A3-1: после completed — тот же грейс, что у exec: serve вышел сам с rc != 0 ->
@@ -1894,6 +2424,8 @@ class ServeRun:
                 if part not in summaries:
                     summaries.append(part)
             text = final_text if final_text is not None else "".join(deltas)
+            if terminal != "completed":
+                self.close()
             # Прежнее ожидание drain_stderr переносится до снимка: шум после terminal
             # не теряется; приоритетный носитель не зависит от хвоста сборщика.
             err_thread.join(timeout=5)
@@ -1919,6 +2451,7 @@ class ServeRun:
                     "usage": usage,
                     "via": "serve",
                     "hard_threshold": hard_threshold,
+                    **flags,
                 }
             if terminal != "completed":
                 return {
@@ -1931,6 +2464,7 @@ class ServeRun:
                     "usage": usage,
                     "via": "serve",
                     "hard_threshold": hard_threshold,
+                    **flags,
                 }
             return {
                 "rc": 0,
@@ -1941,11 +2475,13 @@ class ServeRun:
                 "summaries": summaries,
                 "usage": usage,
                 "via": "serve",
+                "hard_threshold": hard_threshold,
+                **flags,
             }
         finally:
-            if not stderr_joined:
-                err_thread.join(timeout=5)
             self.close()
+            if not stderr_joined:
+                err_thread.join(timeout=1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1971,6 +2507,12 @@ class Handler(BaseHTTPRequestHandler):
     _sse_phase: str = "OPEN"
     _keepalive_stop: threading.Event | None = None
     _ka_thread: threading.Thread | None = None
+    _live_sent_text: str = ""
+    _write_deadline: float = float("inf")
+    _exec_deadline: float = float("inf")
+    _request_deadline: float = float("inf")
+    _delivery_failed: bool = False
+    _req_done: threading.Event | None = None
 
     def setup(self) -> None:
         # Состояние обрыва клиента и ссылка на текущий ход — на каждое соединение.
@@ -1986,36 +2528,88 @@ class Handler(BaseHTTPRequestHandler):
             self._sse_phase = "OPEN"
         self._keepalive_stop: threading.Event | None = None
         self._ka_thread: threading.Thread | None = None
+        self._live_sent_text = ""
+        self._write_deadline = float("inf")
+        self._exec_deadline = float("inf")
+        self._request_deadline = float("inf")
+        self._delivery_failed = False
+        self._req_done = None
         super().setup()
 
     # ---- ранний SSE: заголовки сразу, keepalive во время хода ---------------------
-    def _sse_write(self, text: str, *, keepalive: bool = False) -> bool:
-        """Запись кадра SSE под замком (keepalive и выдача из разных потоков)."""
+    def _sse_write(
+        self, text: str, *, keepalive: bool = False, mark_content: bool = False
+    ) -> bool:
+        """Один ограниченный бюджет L=min(s+LIVE_WRITE_TIMEOUT_S, W) (AD-004).
+
+        Ожидание замка, запись и flush делят единый остаток; исчерпание =
+        зависший клиент (client_gone + killpg). Действует на всех писателей.
+        """
+        started = time.monotonic()
+        w_deadline = getattr(self, "_write_deadline", float("inf"))
+        limit = min(started + LIVE_WRITE_TIMEOUT_S, w_deadline)
+        if limit <= started:
+            if not self._client_gone:
+                self._client_gone = True
+                self._delivery_failed = True
+                _log("delivery_deadline write budget exhausted before frame")
+                self._kill_current_run()
+            return False
+        if not self._wlock.acquire(timeout=max(0.0, limit - time.monotonic())):
+            if not self._client_gone:
+                self._client_gone = True
+                self._delivery_failed = True
+                _log("client gone mid-stream (sse lock wait budget)")
+                self._kill_current_run()
+            return False
         try:
-            with self._wlock:
-                if self._sse_phase == "CLOSED" or self._client_gone:
-                    return False
-                if keepalive and (
-                    self._sse_phase != "OPEN"
-                    or (
-                        self._keepalive_stop is not None
-                        and self._keepalive_stop.is_set()
-                    )
-                ):
-                    return False
+            if self._sse_phase == "CLOSED" or self._client_gone:
+                return False
+            if keepalive and (
+                self._sse_phase != "OPEN"
+                or (self._keepalive_stop is not None and self._keepalive_stop.is_set())
+            ):
+                return False
+            if time.monotonic() >= limit:
+                raise TimeoutError("sse write budget exhausted")
+            if mark_content:
+                self._content_started = True
+            conn = getattr(self, "connection", None)
+            prev_timeout: Any = None
+            have_conn = False
+            if conn is not None and hasattr(conn, "settimeout"):
                 try:
-                    self.wfile.write(text.encode("utf-8"))
-                    self.wfile.flush()
-                finally:
-                    if text == "data: [DONE]\n\n":
-                        self._sse_phase = "CLOSED"
+                    prev_timeout = conn.gettimeout()
+                    conn.settimeout(max(0.001, limit - time.monotonic()))
+                    have_conn = True
+                except (OSError, ValueError, AttributeError):
+                    have_conn = False
+            try:
+                self.wfile.write(text.encode("utf-8"))
+                if have_conn:
+                    try:
+                        conn.settimeout(max(0.001, limit - time.monotonic()))
+                    except (OSError, ValueError, AttributeError):
+                        pass
+                self.wfile.flush()
+            finally:
+                if text == "data: [DONE]\n\n":
+                    self._sse_phase = "CLOSED"
+                if have_conn:
+                    try:
+                        conn.settimeout(prev_timeout)
+                    except (OSError, ValueError, AttributeError):
+                        pass
             return True
         except (BrokenPipeError, ConnectionResetError, OSError):
             if not self._client_gone:
                 self._client_gone = True
+                self._delivery_failed = True
                 _log("client gone mid-stream")
                 self._kill_current_run()
             return False
+        finally:
+            self._wlock.release()
 
     def _sse_chunk(self, delta: dict, finish_reason: Any = None) -> dict:
         return {
@@ -2026,13 +2620,54 @@ class Handler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
 
-    def _sse_emit(self, obj: dict, *, keepalive: bool = False) -> bool:
+    def _sse_emit(
+        self, obj: dict, *, keepalive: bool = False, mark_content: bool = False
+    ) -> bool:
         return self._sse_write(
-            "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n", keepalive=keepalive
+            "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n",
+            keepalive=keepalive,
+            mark_content=mark_content,
         )
+
+    def _live_reasoning_sink(self, full_text: str) -> bool:
+        """Sink ServeRun: публикует только прирост summary.0 до заморозки."""
+        if not full_text or not getattr(self, "_sse_open", False):
+            return True
+        sent = getattr(self, "_live_sent_text", "")
+        if full_text == sent or not full_text.startswith(sent):
+            return True
+        delta = full_text[len(sent) :]
+        if not delta:
+            return True
+        ok = self._sse_emit(
+            self._sse_chunk({"reasoning_content": delta}), mark_content=True
+        )
+        if ok:
+            self._live_sent_text = full_text
+        return ok
+
+    def _force_close_connection(self) -> None:
+        """Закрытие соединения надзором W без ожидания _wlock (a4)."""
+        self._client_gone = True
+        conn = getattr(self, "connection", None)
+        if conn is None:
+            return
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            conn.close()
+        except (OSError, ValueError, AttributeError):
+            pass
 
     def _sse_begin(self, model: str) -> bool:
         """Заголовки 200 + role-кадр до запуска хода и поток keepalive; False — клиент ушёл."""
+        if time.monotonic() >= getattr(self, "_write_deadline", float("inf")):
+            self._delivery_failed = True
+            self._client_gone = True
+            return False
+        self._live_sent_text = ""
         self._sse_id = f"chatcmpl-muse-{uuid.uuid4().hex[:12]}"
         self._sse_created = int(time.time())
         self._sse_model = model
@@ -2072,11 +2707,22 @@ class Handler(BaseHTTPRequestHandler):
     def _sse_stop_keepalive(self) -> None:
         if self._keepalive_stop is not None:
             self._keepalive_stop.set()
-        with self._wlock:
-            if self._sse_phase == "OPEN":
-                self._sse_phase = "FINALIZING"
+        w_deadline = getattr(self, "_write_deadline", float("inf"))
+        if w_deadline == float("inf"):
+            budget = LIVE_WRITE_TIMEOUT_S
+        else:
+            budget = min(LIVE_WRITE_TIMEOUT_S, max(0.0, w_deadline - time.monotonic()))
+        if self._wlock.acquire(timeout=budget):
+            try:
+                if self._sse_phase == "OPEN":
+                    self._sse_phase = "FINALIZING"
+            finally:
+                self._wlock.release()
         if self._ka_thread is not None:
-            self._ka_thread.join(timeout=2)
+            join_budget = 2.0
+            if w_deadline != float("inf"):
+                join_budget = min(join_budget, max(0.0, w_deadline - time.monotonic()))
+            self._ka_thread.join(timeout=join_budget)
         self._keepalive_stop = None
         self._ka_thread = None
 
@@ -2137,6 +2783,26 @@ class Handler(BaseHTTPRequestHandler):
             self._sse_write("data: [DONE]\n\n")
             return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        w_deadline = getattr(self, "_write_deadline", float("inf"))
+        if time.monotonic() >= w_deadline:
+            self._delivery_failed = True
+            _log("delivery_deadline json response skipped")
+            self._force_close_connection()
+            return
+        conn = getattr(self, "connection", None)
+        prev_timeout: Any = None
+        have_conn = False
+        if (
+            conn is not None
+            and hasattr(conn, "settimeout")
+            and w_deadline != float("inf")
+        ):
+            try:
+                prev_timeout = conn.gettimeout()
+                conn.settimeout(max(0.001, w_deadline - time.monotonic()))
+                have_conn = True
+            except (OSError, ValueError, AttributeError):
+                have_conn = False
         try:
             self.send_response(int(code))
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2147,6 +2813,12 @@ class Handler(BaseHTTPRequestHandler):
             self._client_gone = True
             _log("client gone before response")
             self._kill_current_run()
+        finally:
+            if have_conn:
+                try:
+                    conn.settimeout(prev_timeout)
+                except (OSError, ValueError, AttributeError):
+                    pass
 
     def _send_sse(
         self,
@@ -2168,12 +2840,29 @@ class Handler(BaseHTTPRequestHandler):
         if not self._sse_open and not self._sse_begin(model):
             return
         self._sse_stop_keepalive()
-        with self._wlock:
-            self._content_started = True
         chunk = self._sse_chunk
         reasoning = "\n\n".join(s for s in (summaries or []) if s)
-        if reasoning and not self._sse_emit(chunk({"reasoning_content": reasoning})):
-            return
+        live_sent = getattr(self, "_live_sent_text", "")
+        if reasoning:
+            if not live_sent:
+                tail = reasoning
+            elif reasoning.startswith(live_sent):
+                tail = reasoning[len(live_sent) :]
+            else:
+                common = 0
+                for a_ch, b_ch in zip(live_sent, reasoning):
+                    if a_ch != b_ch:
+                        break
+                    common += 1
+                _log(
+                    f"reasoning_diverged p_len={len(live_sent)} f_len={len(reasoning)} "
+                    f"common={common} count=1"
+                )
+                tail = "\n\n" + reasoning
+            if tail and not self._sse_emit(
+                chunk({"reasoning_content": tail}), mark_content=True
+            ):
+                return
         for tc in tool_calls:
             fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
             delta = {
@@ -2189,12 +2878,19 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 ]
             }
-            if not self._sse_emit(chunk(delta)):
+            if not self._sse_emit(chunk(delta), mark_content=True):
                 return
         for piece in _split_sse_chunks(content):
-            if not self._sse_emit(chunk({"content": piece})):
+            if time.monotonic() >= getattr(self, "_write_deadline", float("inf")):
+                self._delivery_failed = True
+                return
+            if not self._sse_emit(chunk({"content": piece}), mark_content=True):
                 return
             if SSE_CHUNK_DELAY_S > 0:
+                _w = getattr(self, "_write_deadline", float("inf"))
+                if _w - time.monotonic() <= SSE_CHUNK_DELAY_S:
+                    self._delivery_failed = True
+                    return
                 time.sleep(SSE_CHUNK_DELAY_S)
         final = chunk({}, finish)
         final["usage"] = {
@@ -2278,8 +2974,38 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             # Любой выход (в т.ч. обрыв в очереди за слотом): поток keepalive не переживает запрос.
             self._sse_stop_keepalive()
+            _done = getattr(self, "_req_done", None)
+            if _done is not None:
+                _done.set()
+            self._write_deadline = float("inf")
+            self._exec_deadline = float("inf")
+            self._request_deadline = float("inf")
+            self._delivery_failed = False
 
     def _serve_json(self, req: dict) -> None:
+        # Абсолютный бюджет запроса a4: t0 при приёме, до очереди и вычислений.
+        _t0 = time.monotonic()
+        _req_deadline = _t0 + min(TIMEOUT_S, REQUEST_CAP_S)
+        _exec_deadline = _req_deadline - FINISH_RESERVE_S
+        _write_deadline = _req_deadline - CLOSE_RESERVE_S
+        self._request_deadline = _req_deadline
+        self._exec_deadline = _exec_deadline
+        self._write_deadline = _write_deadline
+        self._live_sent_text = ""
+        self._delivery_failed = False
+        _req_done = threading.Event()
+        self._req_done = _req_done
+
+        def _supervise_w() -> None:
+            while not _req_done.wait(0.05):
+                if time.monotonic() >= _write_deadline:
+                    self._delivery_failed = True
+                    _log("delivery_deadline W reached: closing connection")
+                    self._kill_current_run()
+                    self._force_close_connection()
+                    return
+
+        threading.Thread(target=_supervise_w, daemon=True).start()
         model = str(req.get("model") or DEFAULT_MODEL).strip()
         if model not in ALLOWED_MODELS:
             self._send(
@@ -2371,13 +3097,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if req.get("stream") is True and not self._sse_begin(model):
             return
-        waited = time.monotonic()
         while not _slots.acquire(timeout=1.0):
             if self._client_gone or self._client_gone_probe():
                 self._client_gone = True
                 _log("client gone while waiting for a slot")
                 return
-            if time.monotonic() - waited > TIMEOUT_S:
+            if time.monotonic() >= _exec_deadline - MIN_ATTEMPT_REMAINING_S:
+                _log("insufficient remaining budget while waiting for a slot")
                 self._send(
                     503, {"error": {"message": "bridge busy", "type": "overloaded"}}
                 )
@@ -2388,6 +3114,11 @@ class Handler(BaseHTTPRequestHandler):
             _log("client gone while waiting for a slot")
             _slots.release()
             return
+        if time.monotonic() > _exec_deadline - MIN_ATTEMPT_REMAINING_S:
+            _log("insufficient remaining budget after slot acquire")
+            _slots.release()
+            self._send(503, {"error": {"message": "bridge busy", "type": "overloaded"}})
+            return
         watch_stop = threading.Event()
         watcher = threading.Thread(
             target=self._watch_client, args=(watch_stop,), daemon=True
@@ -2396,80 +3127,205 @@ class Handler(BaseHTTPRequestHandler):
         runs: list = []
         terminal_context_err: str | None = None
         context_retry_count = 0
+        transient_retry_count = 0
+        attempt_calls = [0]
+        agg: dict[str, bool] = {
+            "approval_seen": False,
+            "action": False,
+            "allowing": False,
+            "degraded": False,
+            "observed": False,
+        }
 
-        def run_attempt(attempt_prompt: str) -> tuple[dict[str, Any], str]:
-            # Serve-first: пробуем MSP serve (там reasoning summaries), при любой
-            # транспортной неполадке — тихий fallback на проверенный exec.
-            attempt_out: dict[str, Any]
-            attempt_via = "exec"
-            try:
-                serve_run = ServeRun(model, attempt_prompt, effort, WORKSPACE)
-                runs.append(serve_run)
-                self._current_run = serve_run
-                attempt_out = serve_run.execute()
-                attempt_via = "serve"
-            except ServeUnavailable as exc:
-                if self._client_gone:
-                    # Обрыв клиента уже убил serve-группу: новый exec-ход не запускаем.
-                    _log("client gone during serve — exec fallback skipped")
-                    attempt_out = {
-                        "rc": -1,
-                        "text": "",
-                        "err": "client gone",
-                        "state": "client_gone",
-                    }
-                    attempt_via = "aborted"
-                else:
-                    safe_exc = _sanitize_reflected(
-                        str(exc), [*reflected_prompts, attempt_prompt], raw_messages
-                    )
-                    safe_exc = re.sub(
-                        r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", " ", safe_exc
-                    ).strip()[:300]
-                    _log(f"serve unavailable ({safe_exc}), fallback exec model={model}")
-                    exec_run = Run(model, attempt_prompt, effort, WORKSPACE)
-                    runs.append(exec_run)
-                    self._current_run = exec_run
-                    attempt_out = exec_run.execute()
-                    attempt_via = "exec-after-serve-fallback"
-                    if (
-                        attempt_out.get("rc") != 0
-                        and not self._client_gone
-                        and NETWORK_RETRY_MARKER in str(attempt_out.get("err") or "")
-                    ):
-                        _log("exec hit network marker, single retry")
-                        retry_run = Run(model, attempt_prompt, effort, WORKSPACE)
-                        runs.append(retry_run)
-                        self._current_run = retry_run
-                        attempt_out = retry_run.execute()
-                        attempt_via = "exec-retry"
-            return attempt_out, attempt_via
-
-        try:
-            t_first_attempt = time.monotonic()
-            out, via = run_attempt(prompt)
-            raw_err = str(out.get("err") or "")
-            is_hard_threshold = (
-                out.get("rc") != 0
-                and out.get("state") == "terminal_failed"
-                and (
-                    bool(out.get("hard_threshold"))
-                    or HARD_THRESHOLD_ERR_SUBSTR in raw_err
+        def _update_agg(run: Any, out: dict[str, Any] | None) -> None:
+            if run is not None:
+                agg["approval_seen"] = agg["approval_seen"] or bool(
+                    getattr(run, "approval_seen", False)
                 )
-            )
-            if (
-                is_hard_threshold
-                and context_retry_count == 0
-                and not self._client_gone
-                and not getattr(self, "_content_started", False)
-            ):
-                for run in runs:
-                    run.close()
-                if not all(run.dead_confirmed for run in runs):
-                    _log(
-                        "context retry skipped: first attempt process group not confirmed dead"
+                agg["action"] = agg["action"] or bool(
+                    getattr(run, "action_possible", False)
+                )
+                agg["allowing"] = agg["allowing"] or bool(
+                    getattr(run, "allowing_decide_attempted", False)
+                )
+                agg["degraded"] = agg["degraded"] or bool(
+                    getattr(run, "approval_degraded", False)
+                )
+                agg["observed"] = agg["observed"] or bool(
+                    getattr(run, "observed_barrier", False)
+                )
+            if out:
+                agg["approval_seen"] = agg["approval_seen"] or bool(
+                    out.get("approval_seen")
+                )
+                agg["action"] = agg["action"] or bool(out.get("action_possible"))
+                agg["allowing"] = agg["allowing"] or bool(out.get("allowing_decide"))
+                agg["degraded"] = agg["degraded"] or bool(out.get("approval_degraded"))
+                observed = out.get("observed_barrier")
+                if observed is None:
+                    observed = bool(out.get("text") or out.get("summaries"))
+                agg["observed"] = agg["observed"] or bool(observed)
+
+        def _can_start(is_exec: bool, *, context: bool = False) -> tuple[bool, str]:
+            if self._client_gone or self._client_gone_probe():
+                self._client_gone = True
+                return False, "client_gone"
+            if getattr(self, "_content_started", False):
+                return False, "content_started"
+            if getattr(self, "_delivery_failed", False):
+                return False, "delivery_failed"
+            if agg["degraded"]:
+                return False, "approval_degraded"
+            if agg["approval_seen"] or agg["allowing"]:
+                return False, "approval_barrier"
+            if is_exec and APPROVAL_MODE == "denyUnmatched":
+                return False, "exec_fallback_disabled"
+            if runs and not all(getattr(r, "dead_confirmed", True) for r in runs):
+                return False, "group_not_dead"
+            if time.monotonic() > _exec_deadline - MIN_ATTEMPT_REMAINING_S:
+                return False, "insufficient_remaining"
+            if context or TRANSIENT_RETRY_SCOPE == "observed-items":
+                if agg["observed"]:
+                    return False, "observed_barrier"
+            elif agg["action"]:
+                return False, "action_possible"
+            return True, ""
+
+        def _blocked_out(err: str) -> dict[str, Any]:
+            return {
+                "rc": 1,
+                "text": "",
+                "chunks": [],
+                "err": err,
+                "state": "terminal_failed",
+                "approval_seen": agg["approval_seen"],
+                "action_possible": agg["action"],
+                "approval_degraded": agg["degraded"],
+                "observed_barrier": agg["observed"],
+                "transient": False,
+            }
+
+        def run_attempt(
+            attempt_prompt: str, *, context: bool = False
+        ) -> tuple[dict[str, Any], str]:
+            attempt_calls[0] += 1
+            ok_gate, gate_reason = _can_start(False, context=context)
+            if not ok_gate:
+                _log(f"new serve process blocked reason={gate_reason}")
+                return _blocked_out(f"new process blocked: {gate_reason}"), "blocked"
+            serve_run = ServeRun(model, attempt_prompt, effort, WORKSPACE)
+            serve_run.exec_deadline = _exec_deadline
+            serve_run.write_deadline = _write_deadline
+            serve_run.request_deadline = _req_deadline
+            if req.get("stream") is True and self._sse_open:
+                serve_run.live_sink = self._live_reasoning_sink
+            runs.append(serve_run)
+            self._current_run = serve_run
+            try:
+                attempt_out = serve_run.execute()
+                _update_agg(serve_run, attempt_out)
+                return attempt_out, "serve"
+            except ServeUnavailable as exc:
+                _update_agg(serve_run, None)
+                if self._client_gone:
+                    _log("client gone during serve — exec fallback skipped")
+                    return (
+                        {
+                            "rc": -1,
+                            "text": "",
+                            "err": "client gone",
+                            "state": "client_gone",
+                        },
+                        "aborted",
                     )
-                else:
+                exc_text = str(exc)
+                safe_exc = _sanitize_reflected(
+                    exc_text, [*reflected_prompts, attempt_prompt], raw_messages
+                )
+                safe_exc = re.sub(
+                    r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", " ", safe_exc
+                ).strip()[:300]
+                if _is_transient_text(exc_text) and not serve_run.ceiling_seen:
+                    return (
+                        {
+                            "rc": 1,
+                            "text": "",
+                            "err": exc_text,
+                            "state": "terminal_failed",
+                            "transient": True,
+                            "approval_seen": agg["approval_seen"],
+                            "action_possible": agg["action"],
+                            "approval_degraded": agg["degraded"],
+                            "observed_barrier": agg["observed"],
+                        },
+                        "serve",
+                    )
+                ok_exec, exec_reason = _can_start(True, context=context)
+                if not ok_exec:
+                    if exec_reason == "exec_fallback_disabled":
+                        err = (
+                            "exec_fallback_disabled(denyUnmatched): "
+                            f"serve unavailable: {safe_exc}"
+                        )
+                    else:
+                        err = exc_text
+                    _log(
+                        f"serve unavailable ({safe_exc}), exec fallback blocked "
+                        f"reason={exec_reason}"
+                    )
+                    return _blocked_out(err), "serve"
+                _log(f"serve unavailable ({safe_exc}), fallback exec model={model}")
+                exec_run = Run(model, attempt_prompt, effort, WORKSPACE)
+                exec_run.exec_deadline = _exec_deadline
+                exec_run.action_possible = True
+                agg["action"] = True
+                runs.append(exec_run)
+                self._current_run = exec_run
+                attempt_out = exec_run.execute()
+                _update_agg(exec_run, attempt_out)
+                return attempt_out, "exec-after-serve-fallback"
+
+        out: dict[str, Any] = {
+            "rc": 1,
+            "text": "",
+            "err": "no attempt",
+            "state": "terminal_failed",
+        }
+        via = "none"
+        try:
+            out, via = run_attempt(prompt)
+            while True:
+                if out.get("rc") == 0 and out.get("state") == "ok":
+                    break
+                if self._client_gone or getattr(self, "_delivery_failed", False):
+                    break
+                raw_err = str(out.get("err") or "")
+                is_hard_threshold = (
+                    out.get("rc") != 0
+                    and out.get("state") == "terminal_failed"
+                    and (
+                        bool(out.get("hard_threshold"))
+                        or HARD_THRESHOLD_ERR_SUBSTR in raw_err
+                    )
+                )
+                # Сначала контекстный повтор (AD-005), затем транзиентный.
+                if (
+                    is_hard_threshold
+                    and context_retry_count == 0
+                    and attempt_calls[0] < 4
+                    and not getattr(self, "_content_started", False)
+                ):
+                    for run in runs:
+                        run.close()
+                    if not all(run.dead_confirmed for run in runs):
+                        _log(
+                            "context retry skipped: first attempt process group not confirmed dead"
+                        )
+                        break
+                    ok_ctx, ctx_reason = _can_start(False, context=True)
+                    if not ok_ctx:
+                        _log(f"context retry skipped reason={ctx_reason}")
+                        break
                     retry_res = _prune_messages(
                         raw_messages,
                         limit=retry_target,
@@ -2492,9 +3348,9 @@ class Handler(BaseHTTPRequestHandler):
                             f"mandatory context exceeds budget "
                             f"(est_tokens={retry_res.mandatory_est}, limit={retry_target})"
                         )
-                    elif (
-                        retry_res.est_after >= current_est
-                        or time.monotonic() - t_first_attempt >= TIMEOUT_S
+                        break
+                    if retry_res.est_after >= current_est or (
+                        time.monotonic() > _exec_deadline - MIN_ATTEMPT_REMAINING_S
                     ):
                         _log_context_prune(
                             rid,
@@ -2506,39 +3362,92 @@ class Handler(BaseHTTPRequestHandler):
                             retry_res,
                         )
                         terminal_context_err = (
-                            f"context hard threshold exceeded after single compaction retry "
-                            f"(est_tokens={retry_res.est_after}, target={retry_target})"
+                            "context hard threshold exceeded after single "
+                            f"compaction retry (est_tokens={retry_res.est_after}, "
+                            f"target={retry_target})"
                         )
-                    elif self._client_gone or self._client_gone_probe():
+                        break
+                    if self._client_gone or self._client_gone_probe():
                         self._client_gone = True
-                    else:
-                        context_retry_count = 1
-                        _log_context_prune(
-                            rid,
-                            model,
-                            "hard_threshold_retry",
-                            2,
-                            limit,
-                            retry_target,
-                            retry_res,
+                        break
+                    context_retry_count = 1
+                    _log_context_prune(
+                        rid,
+                        model,
+                        "hard_threshold_retry",
+                        2,
+                        limit,
+                        retry_target,
+                        retry_res,
+                    )
+                    prompt = retry_res.prompt
+                    current_est = retry_res.est_after
+                    reflected_prompts.append(prompt)
+                    out, via = run_attempt(prompt, context=True)
+                    raw_err_2 = str(out.get("err") or "")
+                    if (
+                        out.get("rc") != 0
+                        and out.get("state") == "terminal_failed"
+                        and (
+                            bool(out.get("hard_threshold"))
+                            or HARD_THRESHOLD_ERR_SUBSTR in raw_err_2
                         )
-                        prompt = retry_res.prompt
-                        current_est = retry_res.est_after
-                        reflected_prompts.append(prompt)
-                        out, via = run_attempt(prompt)
-                        raw_err_2 = str(out.get("err") or "")
-                        if (
-                            out.get("rc") != 0
-                            and out.get("state") == "terminal_failed"
-                            and (
-                                bool(out.get("hard_threshold"))
-                                or HARD_THRESHOLD_ERR_SUBSTR in raw_err_2
-                            )
-                        ):
-                            terminal_context_err = (
-                                f"context hard threshold exceeded after single compaction retry "
-                                f"(est_tokens={current_est}, target={retry_target})"
-                            )
+                    ):
+                        terminal_context_err = (
+                            "context hard threshold exceeded after single "
+                            f"compaction retry (est_tokens={current_est}, "
+                            f"target={retry_target})"
+                        )
+                    continue
+                is_transient = (
+                    out.get("rc") != 0
+                    and str(out.get("state") or "") not in NON_RETRYABLE_STATES
+                    and (bool(out.get("transient")) or _is_transient_text(raw_err))
+                )
+                max_calls = 4 if context_retry_count else 3
+                if (
+                    not is_transient
+                    or transient_retry_count >= TRANSIENT_MAX_RETRIES
+                    or attempt_calls[0] >= max_calls
+                ):
+                    if is_transient and getattr(self, "_content_started", False):
+                        _log("retry_blocked reason=content_started")
+                    break
+                for run in runs:
+                    run.close()
+                ok_retry, retry_reason = _can_start(False)
+                if not ok_retry:
+                    if getattr(self, "_content_started", False):
+                        _log(f"retry_blocked reason={retry_reason} content_started=1")
+                    else:
+                        _log(f"transient retry blocked reason={retry_reason}")
+                    break
+                backoff = TRANSIENT_BACKOFF_S
+                pause = backoff[min(transient_retry_count, len(backoff) - 1)]
+                if TRANSIENT_JITTER_S > 0:
+                    pause += random.uniform(0, TRANSIENT_JITTER_S)
+                transient_retry_count += 1
+                if TRANSIENT_RETRY_SCOPE == "observed-items":
+                    _log(
+                        "transient retry retry_scope=observed-items "
+                        f"n={transient_retry_count}"
+                    )
+                else:
+                    _log(
+                        "transient retry retry_scope=pre-action "
+                        f"n={transient_retry_count} pause_s={pause:.2f}"
+                    )
+                pause_end = min(time.monotonic() + pause, _exec_deadline)
+                client_left = False
+                while time.monotonic() < pause_end:
+                    if self._client_gone or self._client_gone_probe():
+                        self._client_gone = True
+                        client_left = True
+                        break
+                    time.sleep(min(0.05, max(0.0, pause_end - time.monotonic())))
+                if client_left:
+                    break
+                out, via = run_attempt(prompt)
         finally:
             # Слот отпускаем после остановки надзора (kill -> wait уже внутри execute).
             watch_stop.set()
@@ -2723,6 +3632,14 @@ def main() -> int:
     if not AUTH_KEY:
         sys.stderr.write("MUSE_BRIDGE_KEY is required; refusing to start\n")
         return 2
+    try:
+        _validate_startup_config()
+    except RuntimeError as exc:
+        sys.stderr.write(f"{exc}; refusing to start\n")
+        _log(f"startup config invalid: {exc}")
+        return 2
+    if TRANSIENT_RETRY_SCOPE == "observed-items":
+        _log("warning retry_scope=observed-items at-least-once accepted by operator")
     try:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

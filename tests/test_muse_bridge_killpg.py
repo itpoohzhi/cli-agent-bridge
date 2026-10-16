@@ -1032,6 +1032,311 @@ for line in sys.stdin:
     scenario.mod.MUSE_WRAPPER = str(wrapper)
 
 
+_FAKE_MSP_HEAD = """import json, os, sys, time
+from pathlib import Path
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+root = Path(cfg["root"]); mode = sys.argv[2]
+(root / (mode + "-argv.json")).write_text(json.dumps(sys.argv[2:]), encoding="utf-8")
+with (root / (mode + "-argv.jsonl")).open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(sys.argv[2:]) + "\\n")
+def bump(name):
+    p = root / name
+    n = int(p.read_text(encoding="utf-8")) if p.exists() else 0
+    n += 1; p.write_text(str(n), encoding="utf-8"); return n
+def effect(name):
+    with (root / "effects.log").open("a", encoding="utf-8") as fh:
+        fh.write(str(name) + "\\n")
+idx = bump(mode + "-count.txt")
+if mode == "exec":
+    plans = cfg.get("exec_plans") or [{"text": "fallback-ok"}]
+    plan = plans[min(idx - 1, len(plans) - 1)]
+    if plan.get("effect"): effect(plan["effect"])
+    if plan.get("delay"): time.sleep(float(plan["delay"]))
+    if plan.get("stderr"): print(plan["stderr"], file=sys.stderr, flush=True)
+    rc = int(plan.get("rc", 0))
+    if rc == 0:
+        print(json.dumps({"schema_version": 1, "payload_type": "run.terminal.completed", "payload": {"text": plan.get("text", "fallback-ok")}}), flush=True)
+    sys.exit(rc)
+plans = cfg.get("serve_plans") or [{}]
+plan = plans[min(idx - 1, len(plans) - 1)]
+with (root / "serve-pids.log").open("a", encoding="utf-8") as fh:
+    fh.write(str(os.getpid()) + "\\n")
+active_file = None
+if cfg.get("track_concurrency"):
+    active_file = root / ("active-%d" % os.getpid()); active_file.write_text("1")
+    with (root / "concurrency.log").open("a", encoding="utf-8") as fh:
+        fh.write(str(len(list(root.glob("active-*")))) + "\\n")
+if plan.get("handshake_eof"):
+    sys.exit(0)
+if plan.get("handshake_hang"):
+    time.sleep(30); sys.exit(0)
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\\n"); sys.stdout.flush()
+def read_msg():
+    line = sys.stdin.readline()
+    if not line: raise EOFError
+    msg = json.loads(line)
+    with (root / "rpc.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(msg) + "\\n")
+    return msg
+_decide_i = [0]
+def decide_reply(rid):
+    reps = plan.get("decide_replies") or [{"result": {"terminal": True}}]
+    rep = reps[min(_decide_i[0], len(reps) - 1)]; _decide_i[0] += 1
+    if "error" in rep: send({"jsonrpc": "2.0", "id": rid, "error": rep["error"]})
+    else: send({"jsonrpc": "2.0", "id": rid, "result": rep.get("result", {})})
+def cancel_reply(rid):
+    rep = plan.get("cancel_reply") or {}
+    if "error" in rep: send({"jsonrpc": "2.0", "id": rid, "error": rep["error"]})
+    else: send({"jsonrpc": "2.0", "id": rid, "result": rep.get("result", {})})
+def await_command():
+    while True:
+        msg = read_msg(); m = msg.get("method")
+        if m == "approval/decide": decide_reply(msg["id"]); return msg
+        if m in ("userInput/cancel", "turn/cancel"): cancel_reply(msg["id"]); return msg
+def appr_payload(over=None, n=0):
+    aid = "appr-%d" % n
+    base = {"approvalId": aid, "availableChoices": [
+        {"choiceId": "c-approve", "decision": "approved", "label": "Allow", "scope": "once"},
+        {"choiceId": "c-abort", "decision": "abort", "label": "Abort", "scope": "once"}],
+        "currentRequirementId": {"approvalId": aid, "sourceIndex": n}, "itemId": "item-1",
+        "judgeEscalated": False, "protectedWrite": False, "rawArgs": "{}", "sessionId": "sess-1",
+        "sourceRange": {}, "subject": {"kind": "tool", "toolName": "web_search"}, "taskId": "task-1",
+        "toolCallId": "tc-1", "toolName": "web_search", "turnId": "turn-1", "viewCursor": "0"}
+    if over: base.update(over)
+    return base
+def do_approval(over=None, req_mode="request", n=0):
+    payload = appr_payload(over, n)
+    if req_mode == "requested":
+        send({"jsonrpc": "2.0", "method": "approval/requested", "params": payload})
+    else:
+        send({"jsonrpc": "2.0", "id": 9000 + n, "method": "approval/request", "params": payload})
+    return await_command()
+def ui_payload(over=None, n=0):
+    base = {"userInputId": "ui-%d" % n, "sessionId": "sess-1", "toolName": "ask_user",
+            "itemId": "item-1", "toolCallId": "tc-1", "turnId": "turn-1", "viewCursor": "0",
+            "sourceRange": {}, "questions": [{"questionId": "q1", "text": "question"}]}
+    if over: base.update(over)
+    return base
+def do_user_input(over=None, n=0):
+    send({"jsonrpc": "2.0", "id": 9100 + n, "method": "userInput/request", "params": ui_payload(over, n)})
+    return await_command()
+"""
+
+_FAKE_MSP_TAIL = """_started = set()
+def ensure_item(kind):
+    iid = "r1" if kind == "reasoning" else "a1" if kind == "agentMessage" else "t1"
+    if iid not in _started:
+        _started.add(iid)
+        send({"jsonrpc": "2.0", "method": "item/started", "params": {"item": {"itemId": iid, "turnId": "turn-1", "kind": kind}}})
+    return iid
+def run_steps():
+    for step in plan.get("steps") or []:
+        if "delay" in step: time.sleep(float(step["delay"]))
+        elif "effect" in step: effect(step["effect"])
+        elif "approval" in step: do_approval(step["approval"] if isinstance(step["approval"], dict) else None, step.get("mode", "request"), int(step.get("n", 0)))
+        elif "approval_repeat" in step:
+            for i in range(int(step["approval_repeat"])): do_approval(None, "request", i)
+        elif "approval_nowait" in step:
+            over = step["approval_nowait"] if isinstance(step["approval_nowait"], dict) else None
+            n = int(step.get("n", 7))
+            send({"jsonrpc": "2.0", "id": 9200 + n, "method": "approval/request", "params": appr_payload(over, n)})
+        elif "approval_then_exit" in step:
+            over = step["approval_then_exit"] if isinstance(step["approval_then_exit"], dict) else None
+            send({"jsonrpc": "2.0", "id": 9300, "method": "approval/request", "params": appr_payload(over, 0)})
+            sys.stdout.flush(); os._exit(0)
+        elif "user_input" in step: do_user_input(step["user_input"] if isinstance(step["user_input"], dict) else None, int(step.get("n", 0)))
+        elif "user_input_repeat" in step:
+            for i in range(int(step["user_input_repeat"])): do_user_input(None, i)
+        elif "summary" in step:
+            ensure_item("reasoning")
+            sidx, text = step["summary"]
+            send({"jsonrpc": "2.0", "method": "item/delta", "params": {"itemId": "r1", "field": "summary.%s" % sidx, "delta": text}})
+        elif "reasoning_completed" in step:
+            ensure_item("reasoning")
+            send({"jsonrpc": "2.0", "method": "item/completed", "params": {"item": {"itemId": "r1", "turnId": "turn-1", "kind": "reasoning", "summary": list(step["reasoning_completed"])}}})
+        elif "tool_item" in step:
+            ti = step["tool_item"] if isinstance(step["tool_item"], dict) else {}
+            item = {"itemId": "t1", "turnId": "turn-1", "kind": ti.get("kind", "toolCall"), "toolName": ti.get("toolName", "web_search"), "rawArgs": ti.get("rawArgs", "{}")}
+            send({"jsonrpc": "2.0", "method": "item/started", "params": {"item": item}})
+            send({"jsonrpc": "2.0", "method": "item/completed", "params": {"item": item}})
+        elif "model_retry" in step:
+            send({"jsonrpc": "2.0", "method": "turn/modelRetryScheduled", "params": dict(step["model_retry"])})
+        elif "text_delta" in step:
+            ensure_item("agentMessage")
+            send({"jsonrpc": "2.0", "method": "item/delta", "params": {"itemId": "a1", "field": "text", "delta": step["text_delta"]}})
+        elif "eof" in step:
+            sys.stdout.flush(); os._exit(0)
+        elif "hang" in step:
+            while True:
+                msg = read_msg(); m = msg.get("method")
+                if m == "approval/decide": decide_reply(msg["id"])
+                elif m in ("userInput/cancel", "turn/cancel"): cancel_reply(msg["id"])
+        elif "no_read_hang" in step:
+            while True: time.sleep(1)
+        elif "terminal" in step:
+            t = step["terminal"] if isinstance(step["terminal"], dict) else {}
+            if t.get("text"):
+                ensure_item("agentMessage")
+                send({"jsonrpc": "2.0", "method": "item/completed", "params": {"item": {"itemId": "a1", "turnId": "turn-1", "kind": "agentMessage", "text": t["text"]}}})
+            params = {"turnId": "turn-1", "sessionId": "sess-1", "terminal": t.get("terminal", "completed")}
+            for key in ("error", "reason", "timeToFirstTokenMs", "usage", "durationMs"):
+                if key in t: params[key] = t[key]
+            send({"jsonrpc": "2.0", "method": "turn/completed", "params": params})
+            return
+def maybe_setup(when):
+    sa = plan.get("setup_approval")
+    if not sa or sa.get("when") != when: return False
+    do_approval(sa.get("payload") if isinstance(sa.get("payload"), dict) else None, sa.get("mode", "request"), 0)
+    if sa.get("effect"): effect(sa["effect"])
+    return sa.get("after") == "break"
+try:
+    while True:
+        msg = read_msg(); method = msg.get("method")
+        if method == "initialize":
+            if maybe_setup("initialize"):
+                send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": plan.get("setup_approval", {}).get("break_message", "[net-timeout] setup break")}}); break
+            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"serverInfo": {"version": "1.4.9-test"}, "schema": {"fingerprint": "fp-test-1234567890abcdef"}}})
+        elif method == "session/start":
+            if maybe_setup("session/start"):
+                send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": plan.get("setup_approval", {}).get("break_message", "[net-timeout] setup break")}}); break
+            if plan.get("setup_delay"): time.sleep(float(plan["setup_delay"]))
+            se = plan.get("session_error")
+            if se:
+                send({"jsonrpc": "2.0", "id": msg["id"], "error": se}); break
+            if plan.get("no_session_id"):
+                send({"jsonrpc": "2.0", "id": msg["id"], "result": {"session": {}}}); continue
+            reqmode = (msg.get("params") or {}).get("approvalMode") or "allowAll"
+            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"session": {"sessionId": "sess-1", "approvalMode": {"mode": reqmode, "source": "startup", "lastCommandId": None}}}})
+        elif method == "turn/start":
+            if plan.get("turn_start_eof"): os._exit(0)
+            if plan.get("turn_delay"): time.sleep(float(plan["turn_delay"]))
+            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"status": "accepted", "turnId": "turn-1"}})
+            run_steps(); break
+        elif method == "approval/decide": decide_reply(msg["id"])
+        elif method in ("userInput/cancel", "turn/cancel"): cancel_reply(msg["id"])
+except EOFError:
+    pass
+finally:
+    if active_file is not None:
+        try: active_file.unlink()
+        except OSError: pass
+"""
+
+FAKE_MSP_SCRIPT = _FAKE_MSP_HEAD + _FAKE_MSP_TAIL
+
+_OK_STEP = {"terminal": {"terminal": "completed", "text": "hello"}}
+
+
+def ok_plan(*steps: dict) -> dict:
+    """План serve, завершающийся успешным hello после шагов."""
+    return {"steps": [*steps, _OK_STEP]}
+
+
+def fail_terminal(marker: str, **extra: Any) -> dict:
+    """Шаг транзиентного терминального провала serve."""
+    term: dict[str, Any] = {
+        "terminal": "failed",
+        "error": {"kind": "network", "message": marker},
+    }
+    term.update(extra)
+    return {"terminal": term}
+
+
+def install_fake_msp(
+    scenario: Any,
+    serve_plans: list[dict] | None = None,
+    exec_plans: list[dict] | None = None,
+    track_concurrency: bool = False,
+) -> None:
+    """Расширенный фейковый MSP (a4): планы по вызовам, rpc.jsonl, счётчики."""
+    import shlex
+
+    for name in (
+        "rpc.jsonl",
+        "effects.log",
+        "serve-count.txt",
+        "exec-count.txt",
+        "serve-argv.jsonl",
+        "exec-argv.jsonl",
+        "serve-pids.log",
+        "concurrency.log",
+    ):
+        try:
+            (scenario.tmp / name).unlink()
+        except OSError:
+            pass
+    cfg = {
+        "root": str(scenario.tmp),
+        "serve_plans": serve_plans or [ok_plan()],
+        "exec_plans": exec_plans or [{"text": "fallback-ok"}],
+        "track_concurrency": track_concurrency,
+    }
+    cfg_path = scenario.tmp / "fake-cfg.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    script = scenario.tmp / "fake_msp.py"
+    script.write_text(FAKE_MSP_SCRIPT, encoding="utf-8")
+    wrapper = scenario.tmp / "muse-cli.sh"
+    wrapper.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+        f'{shlex.quote(str(cfg_path))} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    scenario.mod.MUSE_WRAPPER = str(wrapper)
+
+
+def rpc_msgs(scenario: Any) -> list[dict]:
+    """Все входящие RPC фейка (мост -> serve), включая receipt-ответы."""
+    path = scenario.tmp / "rpc.jsonl"
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def rpc_by_method(scenario: Any, method: str) -> list[dict]:
+    return [m for m in rpc_msgs(scenario) if m.get("method") == method]
+
+
+def proc_count(scenario: Any, mode: str) -> int:
+    """Число запусков serve/exec по argv-журналу фейка."""
+    path = scenario.tmp / f"{mode}-argv.jsonl"
+    if not path.exists():
+        return 0
+    return len(
+        [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    )
+
+
+def effect_lines(scenario: Any) -> list[str]:
+    path = scenario.tmp / "effects.log"
+    if not path.exists():
+        return []
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def sse_frames(body: bytes) -> list[dict]:
+    return [
+        json.loads(line[6:])
+        for line in body.decode("utf-8", "replace").splitlines()
+        if line.startswith("data: {")
+    ]
+
+
+def sse_deltas(body: bytes, key: str) -> list[str]:
+    out: list[str] = []
+    for frame in sse_frames(body):
+        for choice in frame.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if isinstance(delta.get(key), str):
+                out.append(delta[key])
+    return out
+
+
 class ServeTurnErrorExtractionTest(_BridgeScenario):
     """AD-002: приоритет, защитный разбор и точные лимиты терминальной причины."""
 
@@ -1257,7 +1562,7 @@ class SseDataKeepaliveTest(_BridgeScenario):
 
 
 class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
-    """AD-004: реальные argv фейка и неизменный approval fallback."""
+    """Реальные argv фейка; транспортный fallback до turn/start сохранён."""
 
     def test_serve_argv_disables_write_shell(self) -> None:
         install_protocol_wrapper(self, {"terminal": "completed"})
@@ -1275,8 +1580,11 @@ class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
         ):
             self.assertIn(flag, argv)
 
-    def test_approval_falls_back_to_exec_without_decide(self) -> None:
-        install_protocol_wrapper(self, {"approval": True})
+    def test_transport_fallback_exec_flags(self) -> None:
+        # oracle_change (REQ-MUSE-002): approval больше не уходит в exec;
+        # проверки exec-флагов сохранены на транспортном ServeUnavailable
+        # (EOF рукопожатия до turn/start), approval-контракт — класс Approval.
+        install_fake_msp(self, serve_plans=[{"handshake_eof": True}])
         status, body = bridge_request(self, turn_request())
         self.assertEqual(status, 200, body)
         self.assertIn("fallback-ok", body.decode())
@@ -1298,11 +1606,7 @@ class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
             "--prompt-file",
         ):
             self.assertIn(flag, argv)
-        self.assertNotIn("approval/decide", (self.tmp / "rpc.jsonl").read_text())
-        self.assertIn(
-            "serve unavailable (serve needs interaction (approval/request)), fallback exec",
-            self.mod.LOG_PATH.read_text(),
-        )
+        self.assertIn("fallback exec", self.mod.LOG_PATH.read_text())
 
 
 class AllowedModelsSyncTest(_BridgeScenario):
@@ -2068,35 +2372,46 @@ class ContextRetryTest(_BridgeScenario):
     def test_t18_serve_fallback_and_network_retry_preserve_context_retry_budget(
         self,
     ) -> None:
-        exec_prompts: list[str] = []
+        # oracle_change (AD-003): внутренний exec-reтрай по NETWORK_RETRY_MARKER
+        # упразднён; транзиентный счётчик Handler не расходует контекстный.
+        # Утверждение про контекстный бюджет сохранено дословно по смыслу:
+        # транзиентный повтор идёт тем же промптом, контекстный — прунённым.
+        self.mod.TRANSIENT_BACKOFF_S = (0.0, 0.0)
+        self.mod.TRANSIENT_JITTER_S = 0.0
+        serve_prompts: list[str] = []
+        exec_calls: list[str] = []
 
-        def fail_serve(_self: Any) -> dict[str, Any]:
-            raise self.mod.ServeUnavailable("serve down")
-
-        def fake_exec(run_self: Any) -> dict[str, Any]:
-            exec_prompts.append(run_self.prompt)
-            n = len(exec_prompts)
+        def fake_serve(run_self: Any) -> dict[str, Any]:
+            serve_prompts.append(run_self.prompt)
+            n = len(serve_prompts)
             if n == 1:
-                # Сетевой маркер на первой попытке -> сетевой ретрай с тем же промптом.
-                return {
-                    "rc": 1,
-                    "state": "nonzero_exit",
-                    "text": "",
-                    "err": self.mod.NETWORK_RETRY_MARKER,
-                }
+                # Пре-турновый транзиентный сбой serve: повтор новым serve.
+                raise self.mod.ServeUnavailable("[net-timeout] setup boom")
             if n == 2:
-                # Сетевой ретрай вернул ошибку порога Meta -> должен сработать контекстный retry.
+                # Транзиентный повтор вернул hard threshold: контекстный retry.
+                run_self.action_possible = True
                 return {
                     "rc": 1,
                     "state": "terminal_failed",
                     "text": "",
                     "err": self.mod.HARD_THRESHOLD_ERR_SUBSTR,
+                    "hard_threshold": True,
                 }
             return {
                 "rc": 0,
                 "state": "ok",
-                "text": "exec-recovered",
-                "chunks": ["exec-recovered"],
+                "text": "serve-recovered",
+                "chunks": ["serve-recovered"],
+                "err": "",
+            }
+
+        def fake_exec(run_self: Any) -> dict[str, Any]:
+            exec_calls.append(run_self.prompt)
+            return {
+                "rc": 0,
+                "state": "ok",
+                "text": "exec-should-not-run",
+                "chunks": ["exec-should-not-run"],
                 "err": "",
             }
 
@@ -2105,18 +2420,23 @@ class ContextRetryTest(_BridgeScenario):
             "messages": self._over_budget_messages(),
         }
         with (
-            mock.patch.object(self.mod.ServeRun, "execute", fail_serve),
+            mock.patch.object(self.mod.ServeRun, "execute", fake_serve),
             mock.patch.object(self.mod.Run, "execute", fake_exec),
         ):
             status, body = bridge_request(self, payload)
-        self.assertEqual(status, 200)
-        self.assertEqual(len(exec_prompts), 3)
-        self.assertEqual(exec_prompts[0], exec_prompts[1])
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(serve_prompts), 3)
+        self.assertEqual(serve_prompts[0], serve_prompts[1])
         self.assertLess(
-            self.mod._estimate_tokens(exec_prompts[2]),
-            self.mod._estimate_tokens(exec_prompts[0]),
+            self.mod._estimate_tokens(serve_prompts[2]),
+            self.mod._estimate_tokens(serve_prompts[0]),
         )
-        self.assertIn("exec-recovered", body.decode("utf-8"))
+        self.assertEqual(exec_calls, [])
+        self.assertIn("serve-recovered", body.decode("utf-8"))
+        self.assertIn(
+            "reason=hard_threshold_retry",
+            self.mod.LOG_PATH.read_text(encoding="utf-8"),
+        )
 
     def test_t19_client_disconnect_between_attempts_skips_second_run(self) -> None:
         calls = 0
@@ -2616,6 +2936,1077 @@ for line in sys.stdin:
         self.assertIn("fallback exec", logs)
         self.assertNotIn("SERVE_FALLBACK_PRIVATE_CANARY", logs)
         self.assertNotIn("fallback-secret-123", logs)
+
+
+class ApprovalTest(_BridgeScenario):
+    """REQ-MUSE-002 / AD-001, AD-002, AD-006, AD-007 (T-A01..T-A16)."""
+
+    def _shrink_grace(self) -> None:
+        self.mod.APPROVAL_CANCEL_GRACE_S = 0.4
+        self.mod.CONTROL_WRITE_TIMEOUT_S = 0.5
+
+    def test_t_a01_session_start_allowall_and_flags(self) -> None:
+        install_fake_msp(self, serve_plans=[ok_plan()])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        starts = rpc_by_method(self, "session/start")
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0]["params"]["approvalMode"], "allowAll")
+        argv = json.loads((self.tmp / "serve-argv.json").read_text())
+        self.assertIn("--disable-write", argv)
+        self.assertIn("--disable-shell", argv)
+        self.assertNotIn("--disable-sandbox", argv)
+        logs = self.mod.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("approvalMode=allowAll", logs)
+        self.assertIn("1.4.9-test", logs)
+
+    def test_t_a02_approval_receipt_and_decide_without_exec(self) -> None:
+        install_fake_msp(self, serve_plans=[ok_plan({"approval": {}})])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertIn("hello", body.decode())
+        self.assertEqual(proc_count(self, "exec"), 0)
+        self.assertEqual(len(rpc_by_method(self, "turn/start")), 1)
+        receipts = [
+            m for m in rpc_msgs(self) if "method" not in m and m.get("id") == 9000
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0].get("result"), {})
+        decides = rpc_by_method(self, "approval/decide")
+        self.assertEqual(len(decides), 1)
+        params = decides[0]["params"]
+        self.assertEqual(params["choiceId"], "c-approve")
+        self.assertEqual(
+            params["requirementId"], {"approvalId": "appr-0", "sourceIndex": 0}
+        )
+        self.assertIn("via=serve", self.mod.LOG_PATH.read_text(encoding="utf-8"))
+
+    def test_t_a03_policy_preference_and_amendment_never_chosen(self) -> None:
+        policy = self.mod.ApprovalPolicy("allowAll")
+        snap = {
+            "approvalId": "a1",
+            "sessionId": "s1",
+            "toolName": "web_search",
+            "availableChoices": [
+                {"choiceId": "c-sess", "decision": "approvedForSession"},
+                {"choiceId": "c-once", "decision": "approved"},
+            ],
+        }
+        got = policy.evaluate(snap)
+        self.assertEqual(got["action"], "approve")
+        self.assertEqual(got["choice_id"], "c-once")
+        only_amend = dict(
+            snap,
+            availableChoices=[
+                {"choiceId": "c-amend", "decision": "approvedPolicyAmendment"}
+            ],
+        )
+        self.assertEqual(policy.evaluate(only_amend)["action"], "fail_turn")
+        # Сценарно: выбор только amendment+abort ведёт в отказную деградацию.
+        self._shrink_grace()
+        choices = [
+            {
+                "choiceId": "c-amend",
+                "decision": "approvedPolicyAmendment",
+                "label": "Amend",
+                "scope": "once",
+            },
+            {
+                "choiceId": "c-abort",
+                "decision": "abort",
+                "label": "Abort",
+                "scope": "once",
+            },
+        ]
+        install_fake_msp(
+            self,
+            serve_plans=[
+                {"steps": [{"approval": {"availableChoices": choices}}, {"hang": True}]}
+            ],
+        )
+        status, _ = bridge_request(self, turn_request())
+        self.assertEqual(status, 502)
+        decides = rpc_by_method(self, "approval/decide")
+        self.assertEqual([d["params"]["choiceId"] for d in decides], ["c-abort"])
+        self.assertEqual(proc_count(self, "exec"), 0)
+
+    def test_t_a04_terminal_false_then_updated_request(self) -> None:
+        plan = ok_plan({"approval": {}, "n": 0}, {"approval": {}, "n": 1})
+        plan["decide_replies"] = [
+            {"result": {"terminal": False}},
+            {"result": {"terminal": True}},
+        ]
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(rpc_by_method(self, "approval/decide")), 2)
+
+    def test_t_a05_requested_dedup_single_decide(self) -> None:
+        plan = ok_plan(
+            {"approval": {}, "mode": "requested", "n": 0},
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(rpc_by_method(self, "approval/decide")), 1)
+        receipts = [m for m in rpc_msgs(self) if "method" not in m]
+        self.assertEqual(receipts, [])
+        # Пара request+requested с той же парой — по-прежнему один decide.
+        install_fake_msp(
+            self,
+            serve_plans=[
+                ok_plan({"approval": {}, "n": 0}, {"approval_nowait": {}, "n": 0})
+            ],
+        )
+        # approval_nowait шлёт request с другим серверным id, но той же
+        # парой appr-0/req-0: второй decide запрещён дедупликацией.
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(rpc_by_method(self, "approval/decide")), 1)
+
+    def test_t_a06_user_input_receipt_and_cancel(self) -> None:
+        canary = "CANARY_QUESTION_TEXT"
+        plan = ok_plan(
+            {"user_input": {"questions": [{"questionId": "q1", "text": canary}]}}
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(rpc_by_method(self, "userInput/cancel")), 1)
+        receipts = [
+            m for m in rpc_msgs(self) if "method" not in m and m.get("id") == 9100
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertNotIn(canary, self.mod.LOG_PATH.read_text(encoding="utf-8"))
+
+    def test_t_a07_approval_after_setup_window_still_decides(self) -> None:
+        self.mod.SERVE_SPAWN_TIMEOUT_S = 2.0
+        plan = ok_plan({"delay": 2.6}, {"approval": {}})
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(rpc_by_method(self, "approval/decide")), 1)
+        self.assertEqual(proc_count(self, "exec"), 0)
+
+    def test_t_a08_decide_error_codes_latch_and_32051_benign(self) -> None:
+        self._shrink_grace()
+        for code in (-32050, -32052, -32053, -32054, -32030):
+            with self.subTest(code=code):
+                plan = {
+                    "steps": [{"approval": {}}, {"hang": True}],
+                    "decide_replies": [
+                        {"error": {"code": code, "message": "decide boom"}}
+                    ],
+                }
+                install_fake_msp(self, serve_plans=[plan])
+                status, _ = bridge_request(self, turn_request())
+                self.assertEqual(status, 502)
+                self.assertEqual(proc_count(self, "exec"), 0)
+                self.assertTrue(self._slot_free())
+        with self.subTest(code=-32051):
+            plan = ok_plan({"approval": {}})
+            plan["decide_replies"] = [
+                {"error": {"code": -32051, "message": "already resolved"}}
+            ]
+            install_fake_msp(self, serve_plans=[plan])
+            status, body = bridge_request(self, turn_request())
+            self.assertEqual(status, 200, body)
+        with self.subTest(case="empty_choices"):
+            plan = {
+                "steps": [
+                    {"approval": {"availableChoices": []}},
+                    {"hang": True},
+                ]
+            }
+            install_fake_msp(self, serve_plans=[plan])
+            status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(len(rpc_by_method(self, "approval/decide")), 0)
+            self.assertEqual(len(rpc_by_method(self, "turn/cancel")), 1)
+        with self.subTest(case="user_input_cancel_error"):
+            plan = {
+                "steps": [{"user_input": {}}, {"hang": True}],
+                "cancel_reply": {"error": {"code": -32603, "message": "cancel boom"}},
+            }
+            install_fake_msp(self, serve_plans=[plan])
+            status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(proc_count(self, "exec"), 0)
+
+    def test_t_a09_decide_and_cancel_bounds(self) -> None:
+        self._shrink_grace()
+        plan = {"steps": [{"approval_repeat": 12}]}
+        install_fake_msp(self, serve_plans=[plan])
+        status, _ = bridge_request(self, turn_request())
+        self.assertEqual(status, 502)
+        self.assertEqual(len(rpc_by_method(self, "approval/decide")), 10)
+        self.assertEqual(proc_count(self, "exec"), 0)
+        self.assertTrue(self._slot_free())
+        plan = {"steps": [{"user_input_repeat": 5}]}
+        install_fake_msp(self, serve_plans=[plan])
+        status, _ = bridge_request(self, turn_request())
+        self.assertEqual(status, 502)
+        self.assertEqual(len(rpc_by_method(self, "userInput/cancel")), 3)
+        self.assertTrue(self._slot_free())
+
+    def test_t_a09b_ignored_cancel_killed_within_grace(self) -> None:
+        self._shrink_grace()
+        plan = {"steps": [{"approval": {"availableChoices": []}}, {"hang": True}]}
+        install_fake_msp(self, serve_plans=[plan])
+        started = time.monotonic()
+        status, body = bridge_request(self, turn_request(stream=True))
+        elapsed = time.monotonic() - started
+        self.assertEqual(status, 200)
+        self.assertEqual(body.count(b"data: [DONE]"), 1)
+        self.assertTrue(any("error" in f for f in sse_frames(body)))
+        self.assertLess(elapsed, 0.4 + 3.0)
+        self.assertTrue(
+            wait_until(self._slot_free, SCENARIO_DEADLINE_S), "слот не освободился"
+        )
+        pids = (self.tmp / "serve-pids.log").read_text().split()
+        self.assertTrue(pids)
+        self.assertTrue(
+            wait_until(lambda: not group_alive(int(pids[-1])), GROUP_EXIT_WAIT_S)
+        )
+        self.assertEqual(proc_count(self, "exec"), 0)
+
+    def test_t_a09c_blocked_stdin_grace_from_latch(self) -> None:
+        self._shrink_grace()
+        plan = {
+            "steps": [
+                {"approval_nowait": {"availableChoices": []}, "n": 3},
+                {"no_read_hang": True},
+            ]
+        }
+        install_fake_msp(self, serve_plans=[plan])
+        started = time.monotonic()
+        status, body = bridge_request(self, turn_request(stream=True))
+        elapsed = time.monotonic() - started
+        self.assertEqual(status, 200)
+        self.assertEqual(body.count(b"data: [DONE]"), 1)
+        self.assertLess(elapsed, 0.4 + 3.5)
+        self.assertTrue(wait_until(self._slot_free, SCENARIO_DEADLINE_S))
+        self.assertEqual(proc_count(self, "exec"), 0)
+        self.assertIn(
+            "approval_degraded", self.mod.LOG_PATH.read_text(encoding="utf-8")
+        )
+
+    def test_t_a10_canaries_redacted_in_audit_log(self) -> None:
+        bad_choice = "bad id CANARY_CHOICE"
+        choices = [
+            {
+                "choiceId": bad_choice,
+                "decision": "approved",
+                "label": "Allow",
+                "scope": "once",
+            },
+            {
+                "choiceId": "c-abort",
+                "decision": "abort",
+                "label": "Abort",
+                "scope": "once",
+            },
+        ]
+        plan = ok_plan(
+            {
+                "approval": {
+                    "availableChoices": choices,
+                    "toolName": "bad tool CANARY_TOOL",
+                    "rawArgs": "CANARY_RAWARGS",
+                    "subject": {"kind": "tool", "toolName": "bad tool"},
+                }
+            }
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        decides = rpc_by_method(self, "approval/decide")
+        self.assertEqual(decides[0]["params"]["choiceId"], bad_choice)
+        logs = self.mod.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("approval_decide", logs)
+        for canary in ("CANARY_CHOICE", "CANARY_TOOL", "CANARY_RAWARGS"):
+            self.assertNotIn(canary, logs)
+            self.assertNotIn(canary, body.decode())
+        self.assertIn("redacted", logs)
+
+    def test_t_a11_ceiling_32030_single_exec_fallback(self) -> None:
+        plan = {"session_error": {"code": -32030, "message": "ceiling"}}
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertIn("fallback-ok", body.decode())
+        self.assertEqual(len(rpc_by_method(self, "session/start")), 1)
+        self.assertEqual(len(rpc_by_method(self, "approval/decide")), 0)
+        self.assertEqual(len(rpc_by_method(self, "turn/start")), 0)
+        self.assertEqual(proc_count(self, "serve"), 1)
+        self.assertEqual(proc_count(self, "exec"), 1)
+        logs = self.mod.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("-32030", logs)
+        self.assertIn("1.4.9-test", logs)
+
+    def test_t_a11b_deny_unmatched_never_exec(self) -> None:
+        self._shrink_grace()
+        self.mod.APPROVAL_MODE = "denyUnmatched"
+        cases: list[tuple[str, dict]] = [
+            ("ceiling", {"session_error": {"code": -32030, "message": "x"}}),
+            ("eof", {"handshake_eof": True}),
+            ("hang", {"handshake_hang": True}),
+            ("no_session", {"no_session_id": True, "steps": []}),
+        ]
+        for name, plan in cases:
+            with self.subTest(case=name):
+                if name == "hang":
+                    self.mod.SERVE_SPAWN_TIMEOUT_S = 0.4
+                install_fake_msp(self, serve_plans=[plan])
+                status, body = bridge_request(self, turn_request(stream=True))
+                self.assertEqual(status, 200)
+                self.assertEqual(body.count(b"data: [DONE]"), 1)
+                self.assertIn(b"exec_fallback_disabled", body)
+                self.assertEqual(proc_count(self, "exec"), 0)
+                self.assertLessEqual(proc_count(self, "serve"), 1)
+                self.assertTrue(self._slot_free())
+        with self.subTest(case="spawn_failed"):
+            exec_calls: list[Any] = []
+
+            def fail_spawn(_self: Any) -> dict:
+                raise self.mod.ServeUnavailable("serve spawn failed: boom")
+
+            def fake_exec(run_self: Any) -> dict:
+                exec_calls.append(run_self)
+                return {"rc": 0, "state": "ok", "text": "x", "chunks": ["x"]}
+
+            with (
+                mock.patch.object(self.mod.ServeRun, "execute", fail_spawn),
+                mock.patch.object(self.mod.Run, "execute", fake_exec),
+            ):
+                status, body = bridge_request(self, turn_request(stream=True))
+            self.assertEqual(status, 200)
+            self.assertIn(b"exec_fallback_disabled", body)
+            self.assertEqual(exec_calls, [])
+
+    def test_t_a13_terminal_latch_discards_late_success(self) -> None:
+        self._shrink_grace()
+        choices = [
+            {
+                "choiceId": "c-abort",
+                "decision": "abort",
+                "label": "Abort",
+                "scope": "once",
+            }
+        ]
+        plan = {
+            "steps": [
+                {"approval": {"availableChoices": choices}},
+                {"approval_nowait": {}, "n": 5},
+                {"terminal": {"terminal": "completed", "text": "late-success"}},
+            ],
+            "decide_replies": [{"result": {"terminal": False}}],
+        }
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 502)
+        self.assertNotIn("late-success", body.decode())
+        self.assertLessEqual(len(rpc_by_method(self, "approval/decide")), 1)
+        self.assertEqual(proc_count(self, "exec"), 0)
+        # Молчание после denied: grace убивает группу, исход один.
+        plan = {"steps": [{"approval": {"availableChoices": choices}}, {"hang": True}]}
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200)
+        self.assertEqual(body.count(b"data: [DONE]"), 1)
+        self.assertTrue(wait_until(self._slot_free, SCENARIO_DEADLINE_S))
+
+    def test_t_a14_env_mode_gates_session_and_approve(self) -> None:
+        self._shrink_grace()
+        self.mod.APPROVAL_MODE = "denyUnmatched"
+        install_fake_msp(
+            self, serve_plans=[{"steps": [{"approval": {}}, {"hang": True}]}]
+        )
+        status, _ = bridge_request(self, turn_request())
+        self.assertEqual(status, 502)
+        starts = rpc_by_method(self, "session/start")
+        self.assertEqual(starts[0]["params"]["approvalMode"], "denyUnmatched")
+        chosen = [
+            d["params"]["choiceId"] for d in rpc_by_method(self, "approval/decide")
+        ]
+        self.assertNotIn("c-approve", chosen)
+        self.assertEqual(proc_count(self, "exec"), 0)
+        with mock.patch.dict(os.environ, {"MUSE_BRIDGE_APPROVAL_MODE": "bogus"}):
+            with self.assertRaises(Exception):
+                load_bridge()
+
+    def test_t_a15_tool_item_journal_without_args(self) -> None:
+        canary = "CANARY_TOOL_ARGS"
+        plan = {
+            "steps": [
+                {
+                    "tool_item": {
+                        "kind": "toolCall",
+                        "toolName": "web_search",
+                        "rawArgs": canary,
+                    }
+                },
+                fail_terminal(
+                    "[net-timeout] boom",
+                    timeToFirstTokenMs=123,
+                    usage={"outputTokens": 3},
+                ),
+            ]
+        }
+        install_fake_msp(self, serve_plans=[plan])
+        status, _ = bridge_request(self, turn_request())
+        self.assertEqual(status, 502)
+        logs = self.mod.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("tool_item", logs)
+        self.assertIn("web_search", logs)
+        self.assertIn("tool_items=1", logs)
+        self.assertIn("ttft=1", logs)
+        self.assertNotIn(canary, logs)
+
+    def test_t_a16_setup_approval_blocks_any_new_process(self) -> None:
+        for when in ("initialize", "session/start"):
+            for req_mode in ("request", "requested"):
+                with self.subTest(when=when, mode=req_mode):
+                    plan = {
+                        "setup_approval": {
+                            "when": when,
+                            "mode": req_mode,
+                            "effect": "setup-effect",
+                            "after": "break",
+                        },
+                        "steps": [_OK_STEP],
+                    }
+                    install_fake_msp(self, serve_plans=[plan, ok_plan()])
+                    status, body = bridge_request(self, turn_request(stream=True))
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body.count(b"data: [DONE]"), 1)
+                    self.assertTrue(any("error" in f for f in sse_frames(body)))
+                    self.assertEqual(proc_count(self, "serve"), 1)
+                    self.assertEqual(proc_count(self, "exec"), 0)
+                    self.assertEqual(effect_lines(self), ["setup-effect"])
+                    self.assertEqual(len(rpc_by_method(self, "approval/decide")), 1)
+        # Контроль: setup-транзиент без approval по-прежнему повторяется.
+        self.mod.TRANSIENT_BACKOFF_S = (0.0, 0.0)
+        self.mod.TRANSIENT_JITTER_S = 0.0
+        install_fake_msp(
+            self,
+            serve_plans=[
+                {"session_error": {"code": -32603, "message": "[net-timeout]"}},
+                ok_plan(),
+            ],
+        )
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(proc_count(self, "serve"), 2)
+
+    def test_startup_constants_validation(self) -> None:
+        with mock.patch.dict(os.environ, {"MUSE_BRIDGE_TIMEOUT_S": "100"}):
+            with self.assertRaises(Exception):
+                load_bridge()
+        with mock.patch.dict(os.environ, {"MUSE_BRIDGE_TIMEOUT_S": "1800"}):
+            self.assertIsNotNone(load_bridge())
+
+
+class TransientRetryTest(_BridgeScenario):
+    """REQ-MUSE-003 / AD-003 (T-R01..T-R12)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.mod.TRANSIENT_BACKOFF_S = (0.01, 0.01)
+        self.mod.TRANSIENT_JITTER_S = 0.0
+        self.mod.APPROVAL_CANCEL_GRACE_S = 0.4
+
+    def test_t_r01_pre_turn_markers_retry_new_serve(self) -> None:
+        markers = [
+            "[net-timeout]",
+            "timed out waiting for response data",
+            "network connection could not be opened",
+            "transport_connect_unreachable",
+        ]
+        for marker in markers:
+            with self.subTest(marker=marker):
+                install_fake_msp(
+                    self,
+                    serve_plans=[
+                        {"session_error": {"code": -32603, "message": marker}},
+                        ok_plan(),
+                    ],
+                )
+                status, body = bridge_request(self, turn_request(stream=True))
+                self.assertEqual(status, 200, body)
+                self.assertEqual(proc_count(self, "serve"), 2)
+                self.assertEqual(proc_count(self, "exec"), 0)
+                self.assertEqual(body.count(b"data: [DONE]"), 1)
+                self.assertFalse(any("error" in f for f in sse_frames(body)))
+        for marker in markers:
+            with self.subTest(terminal=marker):
+                install_fake_msp(
+                    self,
+                    serve_plans=[{"steps": [fail_terminal(marker)]}, ok_plan()],
+                )
+                status, _ = bridge_request(self, turn_request())
+                self.assertEqual(status, 502)
+                self.assertEqual(proc_count(self, "serve"), 1)
+
+    def test_t_r02_three_transient_failures_terminal(self) -> None:
+        plan = {"session_error": {"code": -32603, "message": "[net-timeout]"}}
+        install_fake_msp(self, serve_plans=[plan, plan, plan, ok_plan()])
+        status, _ = bridge_request(self, turn_request())
+        self.assertEqual(status, 502)
+        self.assertEqual(proc_count(self, "serve"), 3)
+        self.assertEqual(proc_count(self, "exec"), 0)
+        self.assertTrue(self._slot_free())
+
+    def test_t_r03_no_retry_guards(self) -> None:
+        with self.subTest(case="timeout_state"):
+            calls: list[int] = []
+
+            def fake_timeout(_self: Any) -> dict:
+                calls.append(1)
+                return {"rc": 1, "state": "timeout", "text": "", "err": "[net-timeout]"}
+
+            with mock.patch.object(self.mod.ServeRun, "execute", fake_timeout):
+                status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(len(calls), 1)
+        with self.subTest(case="spawn_failed_state"):
+            calls = []
+
+            def fake_spawn(_self: Any) -> dict:
+                calls.append(1)
+                return {
+                    "rc": 1,
+                    "state": "spawn_failed",
+                    "text": "",
+                    "err": "[net-timeout]",
+                }
+
+            with mock.patch.object(self.mod.ServeRun, "execute", fake_spawn):
+                status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(len(calls), 1)
+        with self.subTest(case="marker_in_success_text"):
+            install_fake_msp(
+                self,
+                serve_plans=[
+                    {
+                        "steps": [
+                            {
+                                "terminal": {
+                                    "terminal": "completed",
+                                    "text": "note [net-timeout] x",
+                                }
+                            }
+                        ]
+                    }
+                ],
+            )
+            status, body = bridge_request(self, turn_request())
+            self.assertEqual(status, 200, body)
+            self.assertEqual(proc_count(self, "serve"), 1)
+        with self.subTest(case="after_live_delta_observed_scope"):
+            self.mod.TRANSIENT_RETRY_SCOPE = "observed-items"
+            install_fake_msp(
+                self,
+                serve_plans=[
+                    {
+                        "steps": [
+                            {"summary": [0, "thinking"]},
+                            fail_terminal("[net-timeout]"),
+                        ]
+                    },
+                    ok_plan(),
+                ],
+            )
+            status, body = bridge_request(self, turn_request(stream=True))
+            self.assertEqual(status, 200)
+            self.assertEqual(proc_count(self, "serve"), 1)
+            self.assertIn(
+                "retry_blocked", self.mod.LOG_PATH.read_text(encoding="utf-8")
+            )
+
+    def test_t_r03b_unconfirmed_death_quarantine_then_release(self) -> None:
+        proc = CloseKillsGroupTest._spawn_group()
+        self.addCleanup(CloseKillsGroupTest._reap_group, proc)
+        calls: list[int] = []
+
+        def fake_transient(run_self: Any) -> dict:
+            calls.append(1)
+            run_self.proc = proc
+            raise self.mod.ServeUnavailable("[net-timeout] setup")
+
+        def fake_close(run_self: Any) -> None:
+            run_self.dead_confirmed = False
+
+        with (
+            mock.patch.object(self.mod.ServeRun, "execute", fake_transient),
+            mock.patch.object(self.mod.ServeRun, "close", fake_close),
+            mock.patch.object(self.mod, "_kill_group", lambda _p: None),
+        ):
+            status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(self.mod._quarantined_slots), 1)
+            self.assertFalse(self._slot_free())
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)
+            self.assertTrue(wait_until(self._slot_free, SCENARIO_DEADLINE_S))
+            self.assertEqual(len(self.mod._quarantined_slots), 0)
+
+    def test_t_r05_retry_gets_only_remaining_budget(self) -> None:
+        deadlines: list[float] = []
+        started = time.monotonic()
+
+        def fake_serve(run_self: Any) -> dict:
+            deadlines.append(float(run_self.exec_deadline))
+            if len(deadlines) == 1:
+                raise self.mod.ServeUnavailable("[net-timeout] setup")
+            return {
+                "rc": 0,
+                "state": "ok",
+                "text": "ok-now",
+                "chunks": ["ok-now"],
+                "err": "",
+            }
+
+        with mock.patch.object(self.mod.ServeRun, "execute", fake_serve):
+            status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(deadlines), 2)
+        self.assertAlmostEqual(deadlines[0], deadlines[1], places=6)
+        self.assertLess(deadlines[1], started + self.mod.TIMEOUT_S - 30)
+
+    def test_t_r06_admission_predicate_matrix(self) -> None:
+        cases: list[tuple[str, dict, int]] = [
+            ("turn_start_no_ack", {"turn_start_eof": True}, 502),
+            ("summary_eof", {"steps": [{"summary": [0, "x"]}, {"eof": True}]}, 502),
+            ("approval_exit", {"steps": [{"approval_then_exit": {}}]}, 502),
+            ("cancel_eof", {"steps": [{"approval": {"availableChoices": []}}]}, 502),
+        ]
+        for name, plan, want in cases:
+            with self.subTest(case=name):
+                install_fake_msp(self, serve_plans=[plan])
+                status, _ = bridge_request(self, turn_request())
+                self.assertEqual(status, want)
+                self.assertEqual(proc_count(self, "exec"), 0)
+        with self.subTest(case="handshake_eof_allows_exec"):
+            install_fake_msp(self, serve_plans=[{"handshake_eof": True}])
+            status, body = bridge_request(self, turn_request())
+            self.assertEqual(status, 200, body)
+            self.assertEqual(proc_count(self, "exec"), 1)
+
+    def test_t_r07_action_possible_single_effect(self) -> None:
+        with self.subTest(path="serve"):
+            install_fake_msp(
+                self,
+                serve_plans=[
+                    {"steps": [{"effect": "fx"}, fail_terminal("[net-timeout] mid")]},
+                    ok_plan(),
+                ],
+            )
+            status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(proc_count(self, "serve"), 1)
+            self.assertEqual(effect_lines(self), ["fx"])
+        with self.subTest(path="exec"):
+            install_fake_msp(
+                self,
+                serve_plans=[{"handshake_eof": True}],
+                exec_plans=[
+                    {"rc": 1, "stderr": "[net-timeout] exec", "effect": "exec-fx"}
+                ],
+            )
+            status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(proc_count(self, "exec"), 1)
+            self.assertEqual(effect_lines(self), ["exec-fx"])
+
+    def test_t_r07b_observed_items_scope(self) -> None:
+        self.mod.TRANSIENT_RETRY_SCOPE = "observed-items"
+        with self.subTest(case="no_signals_retries"):
+            install_fake_msp(
+                self,
+                serve_plans=[
+                    {"steps": [{"effect": "fx"}, fail_terminal("[net-timeout] mid")]},
+                    ok_plan(),
+                ],
+            )
+            status, body = bridge_request(self, turn_request())
+            self.assertEqual(status, 200, body)
+            self.assertEqual(proc_count(self, "serve"), 2)
+            self.assertIn("retry_scope", self.mod.LOG_PATH.read_text(encoding="utf-8"))
+        with self.subTest(case="tool_item_blocks"):
+            install_fake_msp(
+                self,
+                serve_plans=[
+                    {"steps": [{"tool_item": {}}, fail_terminal("[net-timeout] mid")]},
+                    ok_plan(),
+                ],
+            )
+            status, _ = bridge_request(self, turn_request())
+            self.assertEqual(status, 502)
+            self.assertEqual(proc_count(self, "serve"), 1)
+        with self.subTest(case="invalid_scope_stops_start"):
+            with mock.patch.dict(
+                os.environ, {"MUSE_BRIDGE_TRANSIENT_RETRY_SCOPE": "bogus"}
+            ):
+                with self.assertRaises(Exception):
+                    load_bridge()
+
+    def test_t_r03c_client_gone_during_retry_pause(self) -> None:
+        self.mod.TRANSIENT_BACKOFF_S = (1.0, 1.0)
+        install_fake_msp(
+            self,
+            serve_plans=[
+                {"session_error": {"code": -32603, "message": "[net-timeout]"}},
+                ok_plan(),
+            ],
+        )
+        sock = self._open_request()
+        self.addCleanup(sock.close)
+        self.assertTrue(
+            wait_until(lambda: proc_count(self, "serve") == 1, 3.0),
+            "первый serve не стартовал",
+        )
+        time.sleep(0.3)
+        sock.close()
+        self.assertTrue(wait_until(self._slot_free, SCENARIO_DEADLINE_S))
+        time.sleep(0.3)
+        self.assertEqual(proc_count(self, "serve"), 1)
+
+    def test_t_r08_deadline_from_receipt_queue(self) -> None:
+        self.mod._slots = threading.Semaphore(2)
+        self.mod.TIMEOUT_S = 2.0
+        self.mod.FINISH_RESERVE_S = 0.3
+        self.mod.CLOSE_RESERVE_S = 0.2
+        self.mod.MIN_ATTEMPT_REMAINING_S = 0.8
+        install_fake_msp(self, serve_plans=[ok_plan({"delay": 1.2})])
+        results: list[tuple[int, bytes]] = []
+
+        def call() -> None:
+            results.append(bridge_request(self, turn_request()))
+
+        threads = [threading.Thread(target=call) for _ in range(3)]
+        started = time.monotonic()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=8)
+        elapsed = time.monotonic() - started
+        self.assertEqual(len(results), 3)
+        self.assertLess(elapsed, 3.5)
+        self.assertEqual(proc_count(self, "serve"), 2)
+        statuses = sorted(s for s, _ in results)
+        self.assertEqual(statuses, [200, 200, 503])
+
+    def test_t_r09_parallel_series_max_two_processes(self) -> None:
+        self.mod._slots = threading.Semaphore(2)
+        plan = {
+            "setup_delay": 0.25,
+            "session_error": {"code": -32603, "message": "[net-timeout]"},
+        }
+        install_fake_msp(self, serve_plans=[plan], track_concurrency=True)
+        results: list[tuple[int, bytes]] = []
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(bridge_request(self, turn_request()))
+            )
+            for _ in range(2)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=8)
+        self.assertEqual(sorted(s for s, _ in results), [502, 502])
+        counts = [int(x) for x in (self.tmp / "concurrency.log").read_text().split()]
+        self.assertTrue(counts)
+        self.assertLessEqual(max(counts), 2)
+
+    def test_t_r10_model_hangs_to_e_outcome_by_d(self) -> None:
+        self.mod.TIMEOUT_S = 2.6
+        self.mod.FINISH_RESERVE_S = 0.7
+        self.mod.CLOSE_RESERVE_S = 0.3
+        self.mod.MIN_ATTEMPT_REMAINING_S = 0.2
+        self.mod.LIVE_WRITE_TIMEOUT_S = 0.2
+        install_fake_msp(self, serve_plans=[{"steps": [{"hang": True}]}])
+        started = time.monotonic()
+        status, _ = bridge_request(self, turn_request())
+        elapsed = time.monotonic() - started
+        self.assertEqual(status, 502)
+        self.assertLess(elapsed, 2.6 + 1.5)
+        self.assertTrue(wait_until(self._slot_free, SCENARIO_DEADLINE_S))
+        self.assertEqual(proc_count(self, "exec"), 0)
+
+    def test_t_r11_setup_approval_no_replay_either_scope(self) -> None:
+        for scope in ("pre-action", "observed-items"):
+            with self.subTest(scope=scope):
+                self.mod.TRANSIENT_RETRY_SCOPE = scope
+                plan = {
+                    "setup_approval": {
+                        "when": "session/start",
+                        "mode": "requested",
+                        "effect": "setup-fx",
+                        "after": "break",
+                    },
+                    "steps": [_OK_STEP],
+                }
+                install_fake_msp(self, serve_plans=[plan, ok_plan()])
+                status, _ = bridge_request(self, turn_request())
+                self.assertEqual(status, 502)
+                self.assertEqual(proc_count(self, "serve"), 1)
+                self.assertEqual(proc_count(self, "exec"), 0)
+                self.assertEqual(effect_lines(self), ["setup-fx"])
+
+    def test_t_r12_slow_steady_delivery_cut_at_w(self) -> None:
+        # Детерминированный транспорт: каждый кадр быстрее L, сумма — дольше W.
+        self.mod.LIVE_WRITE_TIMEOUT_S = 0.2
+        self.mod.SSE_CHUNK_SIZE = 10
+        self.mod.SSE_CHUNK_DELAY_S = 0.0
+        handler = self.mod.Handler.__new__(self.mod.Handler)
+        starts: list[float] = []
+
+        class SlowWriter(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                starts.append(time.monotonic())
+                time.sleep(0.05)
+                return super().write(data)
+
+        writer = SlowWriter()
+        handler._wlock = threading.Lock()
+        handler.wfile = writer
+        handler._sse_open = True
+        handler._live_sent_text = ""
+        w = time.monotonic() + 0.32
+        handler._write_deadline = w
+        handler._send_sse("muse-spark-1.3", "x" * 200, [], 1, 1, 0)
+        self.assertNotIn(b"data: [DONE]", writer.getvalue())
+        self.assertTrue(all(s <= w + 0.06 for s in starts), starts)
+        # Контроль: малый N успевает до W целиком с одним [DONE].
+        writer2 = SlowWriter()
+        handler.wfile = writer2
+        handler._sse_phase = "OPEN"
+        handler._client_gone = False
+        handler._write_deadline = time.monotonic() + 5
+        handler._send_sse("muse-spark-1.3", "hi", [], 1, 1, 0)
+        self.assertEqual(writer2.getvalue().count(b"data: [DONE]"), 1)
+        self.assertIn(b"hi", writer2.getvalue())
+
+
+class LiveReasoningTest(_BridgeScenario):
+    """REQ-MUSE-004 / AD-004 (T-L01..T-L09)."""
+
+    def test_t_l01_live_deltas_concat_equals_buffered(self) -> None:
+        plan = ok_plan(
+            {"summary": [0, "think-"]},
+            {"summary": [0, "more"]},
+            {"summary": [1, "second"]},
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        deltas = sse_deltas(body, "reasoning_content")
+        self.assertGreaterEqual(len(deltas), 3)
+        self.assertEqual("".join(deltas), "think-more\n\nsecond")
+        self.assertEqual("".join(sse_deltas(body, "content")), "hello")
+        self.assertEqual(body.count(b"data: [DONE]"), 1)
+
+    def test_t_l02_completed_only_summaries_not_lost(self) -> None:
+        plan = ok_plan({"reasoning_completed": ["alpha", "beta"]})
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            "".join(sse_deltas(body, "reasoning_content")), "alpha\n\nbeta"
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["reasoning_summaries"], ["alpha", "beta"])
+
+    def test_t_l03_keepalive_data_chunks_preserved(self) -> None:
+        self.mod.KEEPALIVE_S = 0.05
+        install_fake_msp(self, serve_plans=[ok_plan({"delay": 0.25})])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        self.assertNotIn(b": keepalive", body)
+        self.assertEqual(body.count(b"data: [DONE]"), 1)
+        self.assertTrue(any(d == "" for d in sse_deltas(body, "content")[:-1]))
+
+    def test_t_l04_live_write_failure_is_terminal_not_exception(self) -> None:
+        handler = self.mod.Handler.__new__(self.mod.Handler)
+
+        class BrokenWriter(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                raise OSError("closed peer")
+
+        handler._wlock = threading.Lock()
+        handler.wfile = BrokenWriter()
+        handler._sse_open = True
+        handler._live_sent_text = ""
+        self.assertFalse(handler._live_reasoning_sink("thinking"))
+        self.assertTrue(handler._client_gone)
+
+    def test_t_l05_model_retry_scheduled_log_only(self) -> None:
+        plan = ok_plan(
+            {
+                "model_retry": {
+                    "attempt": 1,
+                    "maxAttempts": 4,
+                    "retryDelayMs": 500,
+                    "errorKind": "network",
+                    "turnId": "turn-1",
+                }
+            }
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(sse_deltas(body, "reasoning_content"), [])
+        logs = self.mod.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("modelRetryScheduled", logs)
+        self.assertIn("attempt=1", logs)
+
+    def test_t_l06_out_of_order_summaries_prefix_monotone(self) -> None:
+        plan = ok_plan(
+            {"summary": [0, "a"]},
+            {"summary": [1, "b"]},
+            {"summary": [0, "c"]},
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        self.assertEqual("".join(sse_deltas(body, "reasoning_content")), "ac\n\nb")
+        plan = ok_plan({"summary": [1, "b"]}, {"summary": [0, "a"]})
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        self.assertEqual("".join(sse_deltas(body, "reasoning_content")), "a\n\nb")
+
+    def test_t_l07_diverged_snapshot_sends_authoritative_full(self) -> None:
+        handler = self.mod.Handler.__new__(self.mod.Handler)
+        handler._wlock = threading.Lock()
+        handler.wfile = io.BytesIO()
+        handler._sse_open = True
+        handler._live_sent_text = "a"
+        handler._send_sse("muse-spark-1.3", "hi", [], 1, 1, 0, ["b", "c"])
+        deltas = sse_deltas(handler.wfile.getvalue(), "reasoning_content")
+        self.assertEqual(deltas, ["\n\nb\n\nc"])
+        logs = self.mod.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("reasoning_diverged", logs)
+        handler2 = self.mod.Handler.__new__(self.mod.Handler)
+        handler2._wlock = threading.Lock()
+        handler2.wfile = io.BytesIO()
+        handler2._sse_open = True
+        handler2._live_sent_text = "a"
+        handler2._send_sse("muse-spark-1.3", "hi", [], 1, 1, 0, ["ab"])
+        self.assertEqual(
+            sse_deltas(handler2.wfile.getvalue(), "reasoning_content"), ["b"]
+        )
+
+    def _timing_handler(self) -> Any:
+        handler = self.mod.Handler.__new__(self.mod.Handler)
+        handler._wlock = threading.Lock()
+        handler._sse_open = True
+        handler._live_sent_text = ""
+        handler._write_deadline = time.monotonic() + 30
+        conn = SimpleNamespace(_timeout=None)
+
+        def gettimeout() -> Any:
+            return conn._timeout
+
+        def settimeout(value: Any) -> None:
+            conn._timeout = value
+
+        conn.gettimeout = gettimeout  # type: ignore[attr-defined]
+        conn.settimeout = settimeout  # type: ignore[attr-defined]
+        handler.connection = conn
+        return handler
+
+    def test_t_l08a_live_write_bounded_by_single_budget(self) -> None:
+        self.mod.LIVE_WRITE_TIMEOUT_S = 0.2
+        handler = self._timing_handler()
+
+        class TimeoutWriter(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                limit = handler.connection.gettimeout() or 5.0
+                time.sleep(min(float(limit), 5.0))
+                raise TimeoutError("socket timeout")
+
+        handler.wfile = TimeoutWriter()
+        started = time.monotonic()
+        self.assertFalse(handler._live_reasoning_sink("thinking"))
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertTrue(handler._client_gone)
+
+    def test_t_l08b_keepalive_blocking_first_bounds_sink(self) -> None:
+        self.mod.LIVE_WRITE_TIMEOUT_S = 0.25
+        handler = self._timing_handler()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class BlockWriter(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                limit = handler.connection.gettimeout() or 5.0
+                if not release.wait(timeout=float(limit)):
+                    raise TimeoutError("socket timeout")
+                return super().write(data)
+
+        handler.wfile = BlockWriter()
+        results: dict[str, Any] = {}
+        ka = threading.Thread(
+            target=lambda: results.__setitem__(
+                "ka", handler._sse_write("data: ka\n\n", keepalive=True)
+            ),
+            daemon=True,
+        )
+        ka.start()
+        time.sleep(0.05)
+        started = time.monotonic()
+        self.assertFalse(handler._live_reasoning_sink("summary"))
+        self.assertLess(time.monotonic() - started, 1.0)
+        ka.join(timeout=2)
+        self.assertFalse(ka.is_alive())
+
+    def test_t_l08c_terminal_delivery_and_stop_bounded(self) -> None:
+        self.mod.LIVE_WRITE_TIMEOUT_S = 0.2
+        handler = self._timing_handler()
+
+        class TimeoutWriter(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                limit = handler.connection.gettimeout() or 5.0
+                time.sleep(min(float(limit), 5.0))
+                raise TimeoutError("socket timeout")
+
+        handler.wfile = TimeoutWriter()
+        started = time.monotonic()
+        handler._send_sse("muse-spark-1.3", "hello", [], 1, 1, 0)
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertTrue(handler._client_gone)
+
+    def test_t_l09_slow_steady_frames_stop_at_w(self) -> None:
+        self.mod.LIVE_WRITE_TIMEOUT_S = 0.2
+        self.mod.SSE_CHUNK_SIZE = 10
+        self.mod.SSE_CHUNK_DELAY_S = 0.0
+        handler = self.mod.Handler.__new__(self.mod.Handler)
+        starts: list[float] = []
+
+        class SlowWriter(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                starts.append(time.monotonic())
+                time.sleep(0.05)
+                return super().write(data)
+
+        writer = SlowWriter()
+        handler._wlock = threading.Lock()
+        handler.wfile = writer
+        handler._sse_open = True
+        handler._live_sent_text = ""
+        w = time.monotonic() + 0.32
+        handler._write_deadline = w
+        handler._send_sse("muse-spark-1.3", "y" * 200, [], 1, 1, 0)
+        self.assertNotIn(b"data: [DONE]", writer.getvalue())
+        self.assertTrue(all(s <= w + 0.06 for s in starts), starts)
+        self.assertNotIn(b'"finish_reason": "stop"', writer.getvalue())
 
 
 if __name__ == "__main__":
