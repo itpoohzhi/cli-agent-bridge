@@ -14,7 +14,8 @@ Stdout CLI — JSONL-конверты (schema_version=1). Текст ответ�
 `task.lifecycle.failed` (event.reason). Usage CLI в JSONL не отдаёт — оценка по словам.
 
 Транспорт — stdlib. `stream:true`: заголовки 200 и role-delta уходят сразу, пока ход
-идёт — комментарии `: keepalive` (MUSE_BRIDGE_KEEPALIVE_S); по готовности — reasoning
+идёт — data-чанки `chat.completion.chunk` с пустой дельтой `{"content": ""}`
+(MUSE_BRIDGE_KEEPALIVE_S); по готовности — reasoning
 summaries как `delta.reasoning_content`, tool_calls, content-чанки (~300 символов), финал
 с finish_reason + usage, затем `data: [DONE]`. Ошибка после старта потока — кадр
 `{"error": …}` + `[DONE]`. Текст ответа CLI отдаёт в конце хода, поэтому content
@@ -23,10 +24,9 @@ summaries как `delta.reasoning_content`, tool_calls, content-чанки (~300
 Провал хода (failed terminal, rc != 0, таймаут) не отдаётся как успешный финал: частичный
 текст и tool-блоки отбрасываются — SSE-кадр ошибки + `[DONE]` (stream) либо 502 (JSON).
 
-Keepalive: комментарии `: keepalive` держат TCP-соединение от закрытия клиентом/прокси, но
-SDK отбрасывает их на уровне декодера и idle-watchdog не сбрасывают. Поэтому после применения
-профиля muse (`streamIdleTimeoutMs=1900000`) DSH нужно перезапустить; сброс watchdog кадрами
-данных (полный стрим текста muse) в этот мост не входит.
+Keepalive: пустые data-чанки держат SSE-соединение, не меняя текст ответа.
+Сброс idle-watchdog клиента pi-ai требует отдельной живой проверки в DSH.
+Перед финалом поток запечатывается; после `data: [DONE]` записей нет.
 
 Эмуляция OpenAI function calling (порт из droid-bridge): если запрос содержит
 непустой `tools` (и tool_choice != "none"), в системный текст добавляется протокол
@@ -39,6 +39,7 @@ SDK отбрасывает их на уровне декодера и idle-watch
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import re
@@ -53,7 +54,9 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
+
+logger = logging.getLogger("muse-bridge")
 
 HOST = os.environ.get("MUSE_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = int(os.environ.get("MUSE_BRIDGE_PORT", "9886"))
@@ -74,8 +77,20 @@ ALLOWED_MODELS: dict[str, dict[str, Any]] = {
     # 2026-10-05: контрибьютор-слот (только пикер, по просьбе владельца).
     # id подтверждён `muse model-profile show` (резолвится); окно/лимит как у spark.
     "muse-spark-1.3-contributor": {"context_length": 1048576, "max_output": 131072},
+    "muse-wonder-1.0": {"context_length": 400_000, "max_output": 131072},
+    "muse-wonder-full-1.0": {"context_length": 400_000, "max_output": 131072},
 }
-DEFAULT_MODEL = os.environ.get("MUSE_BRIDGE_MODEL", "muse-spark-1.3")
+DEFAULT_MODEL = os.environ.get("MUSE_BRIDGE_MODEL", "muse-wonder-full-1.0")
+DEFAULT_CONTEXT_LIMIT = 400_000
+
+# Подстрока ошибки жёсткого порога контекста Meta (ADR-001.3, [F-01]).
+HARD_THRESHOLD_ERR_SUBSTR = (
+    "context compaction replacement still exceeds the hard threshold"
+)
+COMPACTION_MARKER = (
+    "[... earlier conversation turns compacted to stay within Muse context limit ...]"
+)
+_COMPACTION_MARKER_ROLE = "__compaction_marker__"
 
 # OpenAI/DSH effort -> `--reasoning-effort` Muse CLI. Нет/неизвестно -> max (канон слота).
 EFFORT_MAP: dict[str, str] = {
@@ -154,7 +169,8 @@ _LOG_LOCK = threading.Lock()
 
 
 def _log(msg: str) -> None:
-    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    safe_msg = _redact_secrets(msg)
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {safe_msg}"
     sys.stderr.write(line + "\n")
     sys.stderr.flush()
     try:
@@ -170,6 +186,208 @@ def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
     if hdr.startswith("Bearer "):
         return hdr[7:].strip() == AUTH_KEY
     return handler.headers.get("x-api-key", "") == AUTH_KEY or hdr.strip() == AUTH_KEY
+
+
+def _redact_secrets(text: str) -> str:
+    """Удалить отражённые ключи до обрезки диагностики; повторный вызов безопасен."""
+    if AUTH_KEY:
+        text = text.replace(AUTH_KEY, "[REDACTED]")
+    text = re.sub(
+        r"Authorization\s*:\s*[^\r\n]+",
+        "Authorization: [REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"Bearer\s+\S+", "Bearer [REDACTED]", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"""(["']?(?:api[_-]?key|token|secret|password|bridge[_-]?key)["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;}"']+)""",
+        lambda match: match[1] + "[REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"sk-[A-Za-z0-9_-]{12,}", "[REDACTED]", text)
+
+
+def _clip_diagnostic(text: str, limit: int) -> str:
+    """Ограничить поле, убрав его целиком при разрезании маркера редакции."""
+    for marker in re.finditer(re.escape("[REDACTED]"), text):
+        if marker.start() < limit < marker.end():
+            return ""
+    return text[:limit]
+
+
+def _prompt_reflected_parts(prompt: str) -> list[str]:
+    """Выделить длинные отражённые реплики, начиная с самых полных совпадений."""
+    parts = {prompt} if len(prompt.strip()) >= 8 else set()
+    for part in prompt.split("\n\n") + prompt.splitlines():
+        for candidate in (part, re.sub(r"^(?:User|Assistant|System):\s*", "", part)):
+            if len(candidate.strip()) >= 8:
+                parts.add(candidate)
+    return sorted(parts, key=len, reverse=True)
+
+
+def _diagnostic_text(value: Any, prompt: str = "") -> str:
+    """Санитизировать свободное поле и нормализовать управляющие переводы строк."""
+    text = str(value) if value is not None else ""
+    parts = _prompt_reflected_parts(prompt)
+    for part in parts:
+        text = text.replace(part, "[REDACTED]")
+        redacted_part = _redact_secrets(part)
+        if len(redacted_part.strip()) >= 8:
+            text = text.replace(redacted_part, "[REDACTED]")
+    text = _redact_secrets(text)
+    for part in parts:
+        text = text.replace(part, "[REDACTED]")
+        redacted_part = _redact_secrets(part)
+        if len(redacted_part.strip()) >= 8:
+            text = text.replace(redacted_part, "[REDACTED]")
+    control_chars = r"[\x00-\x1f\x7f-\x9f\u2028\u2029]"
+    text = re.sub(control_chars, " ", text).strip()
+    for part in parts:
+        for variant in (part, _redact_secrets(part)):
+            normalized = re.sub(control_chars, " ", variant).strip()
+            if len(normalized) >= 8:
+                text = text.replace(normalized, "[REDACTED]")
+    return text
+
+
+def _sanitize_reflected(
+    raw_text: str,
+    reflected_prompts: list[str],
+    raw_messages: list[Any] | None = None,
+) -> str:
+    """Вырезать отражённые промпты и тела сообщений до и после _redact_secrets."""
+    text = str(raw_text or "")
+    control_chars = r"[\x00-\x1f\x7f-\x9f\u2028\u2029]"
+
+    def _strip_candidates(target: str) -> str:
+        for ref_prompt in reflected_prompts:
+            for rp_variant in (ref_prompt, _redact_secrets(ref_prompt)):
+                if len(rp_variant.strip()) >= 8:
+                    target = target.replace(rp_variant, "[REDACTED]")
+            for part in _prompt_reflected_parts(ref_prompt):
+                for p_variant in (part, _redact_secrets(part)):
+                    if len(p_variant.strip()) >= 8:
+                        target = target.replace(p_variant, "[REDACTED]")
+                    norm_part = re.sub(control_chars, " ", p_variant).strip()
+                    if len(norm_part) >= 8:
+                        target = target.replace(norm_part, "[REDACTED]")
+                    if len(norm_part) >= 160:
+                        target = target.replace(norm_part[:160], "[REDACTED]")
+        for message in raw_messages or []:
+            if isinstance(message, dict):
+                raw_ref = _flatten_content(message.get("content")).strip()
+                for reflected in (raw_ref, _redact_secrets(raw_ref)):
+                    if len(reflected) >= 8:
+                        target = target.replace(reflected, "[REDACTED]")
+                        normalized = re.sub(control_chars, " ", reflected).strip()
+                        if len(normalized) >= 8:
+                            target = target.replace(normalized, "[REDACTED]")
+                        if len(normalized) >= 160:
+                            target = target.replace(normalized[:160], "[REDACTED]")
+        return target
+
+    text = _strip_candidates(text)
+    text = _redact_secrets(text)
+    text = _strip_candidates(text)
+    return _redact_secrets(text)
+
+
+def _has_hard_threshold_marker(*values: Any) -> bool:
+    """Проверить маркер жёсткого порога контекста до 160/300-символьной обрезки."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            if _has_hard_threshold_marker(*value.values()):
+                return True
+        elif isinstance(value, (list, tuple, set)):
+            if _has_hard_threshold_marker(*value):
+                return True
+        elif HARD_THRESHOLD_ERR_SUBSTR in str(value):
+            return True
+    return False
+
+
+def _redact_quota(value: Any) -> Any:
+    """Удалить значения чувствительных ключей quota до JSON-сериализации."""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]"
+            if re.sub(r"[_-]", "", str(key)).lower()
+            in {"token", "secret", "password", "apikey", "bridgekey", "authorization"}
+            else _redact_quota(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_quota(item) for item in value]
+    if isinstance(value, str):
+        return _redact_secrets(value)
+    return value
+
+
+def _turn_diagnostics(params: dict[str, Any], prompt: str) -> list[str]:
+    """Собрать приоритетный блок MSP с покомпонентными лимитами и бюджетом 300."""
+    error = params.get("error")
+    kind = message = quota = retryable = ""
+    if isinstance(error, dict):
+        kind = _diagnostic_text(error.get("kind"), prompt)
+        message = _diagnostic_text(error.get("message"), prompt)
+        if isinstance(error.get("retryable"), bool):
+            retryable = f" retryable={error['retryable']}"
+        if error.get("quota") is not None:
+            try:
+                quota = json.dumps(
+                    _redact_quota(error["quota"]),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError, RecursionError):
+                quota = str(error["quota"])
+            quota = _diagnostic_text(quota, prompt)
+    elif error is not None:
+        message = _diagnostic_text(error, prompt)
+    reason = _diagnostic_text(params.get("reason"), prompt)
+    if reason == message:
+        reason = ""
+    fields = {
+        "kind": _clip_diagnostic(kind, 64),
+        "message": _clip_diagnostic(message, 160),
+        "quota": _clip_diagnostic(quota, 120),
+        "reason": _clip_diagnostic(reason, 160),
+    }
+
+    def lines() -> list[str]:
+        primary = ": ".join(fields[key] for key in ("kind", "message") if fields[key])
+        primary += retryable
+        if fields["quota"]:
+            primary += " quota=" + fields["quota"]
+        result = [primary.strip()] if primary.strip() else []
+        if fields["reason"]:
+            result.append("reason: " + fields["reason"])
+        return result
+
+    for key in ("quota", "reason", "message", "kind"):
+        excess = len("\n".join(lines())) - 300
+        if excess <= 0:
+            break
+        minimum = min(16, len(fields[key])) if key == "reason" else 0
+        fields[key] = _clip_diagnostic(
+            fields[key], max(minimum, len(fields[key]) - excess)
+        )
+    return lines()
+
+
+def _format_err_log(
+    model: str, via: str, out: dict[str, Any], stream: bool, state: str | None = None
+) -> str:
+    """Единая однострочная запись финального отказа без промпта и секретов."""
+    return (
+        f"error model={model} via={via} rc={out.get('rc')} state={state or out.get('state')} "
+        f"err={_redact_secrets(str(out.get('err') or ''))[:300]!r} stream={stream}"
+    )
 
 
 def _flatten_content(content: Any) -> str:
@@ -329,11 +547,36 @@ def _messages_to_prompt(messages: list[dict[str, Any]]) -> tuple[str, str]:
             systems.append(text)
         elif role == "assistant":
             turns.append(f"Assistant: {text}")
-        elif role == "tool":
+        elif role in ("tool", _COMPACTION_MARKER_ROLE):
             turns.append(text)
         else:
             turns.append(f"User: {text}")
     return "\n\n".join(systems).strip(), "\n\n".join(turns)
+
+
+def _assemble_prompt(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
+    raw_tools: Any = None,
+) -> tuple[str, str, str]:
+    """Собрать (system_text, turns_text, full_prompt) по единым правилам моста."""
+    clean_tools = (
+        [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
+    )
+    emulate_tools = bool(clean_tools) and not _tool_choice_none(tool_choice)
+    system_text, turns_text = _messages_to_prompt(messages)
+    if not turns_text:
+        return system_text, "", ""
+    head: list[str] = []
+    if system_text:
+        head.append(f"[system]\n{system_text}")
+    if emulate_tools:
+        head.append(_tools_section(clean_tools, tool_choice))
+    elif (raw_tools is not None and bool(raw_tools) or bool(tools)) and not system_text:
+        head.append(f"[system]\n{DEFAULT_SYSTEM_HINT}")
+    full_prompt = "\n\n".join(head) + f"\n\n{turns_text}" if head else turns_text
+    return system_text, turns_text, full_prompt
 
 
 def _strip_code_fence(text: str) -> str:
@@ -507,9 +750,429 @@ _TOKEN_RE = re.compile(r"\s+")
 
 
 def _estimate_tokens(text: str) -> int:
+    """Консервативная оценка токенов по UTF-8 байтам и символам (ADR-001.2 §2.5)."""
     if not text:
         return 0
+    return max(len(text) // 3, len(text.encode("utf-8")) // 3)
+
+
+def _estimate_usage_tokens(text: str) -> int:
+    """Оценка клиентских метрик usage по словам на exec-ветке (не бюджет прунинга)."""
+    if not text or not text.strip():
+        return 0
     return max(1, int(len(_TOKEN_RE.split(text.strip())) * 1.3))
+
+
+def _context_limit(model: str) -> int:
+    """Единый источник лимита окна модели из ALLOWED_MODELS (ADR-001.1)."""
+    spec = ALLOWED_MODELS.get(model)
+    if isinstance(spec, dict):
+        val = spec.get("context_length")
+        if isinstance(val, int) and val > 0:
+            return val
+    return DEFAULT_CONTEXT_LIMIT
+
+
+def _context_target(limit: int) -> int:
+    """Целевой бюджет проактивного прунинга с гистерезисом 80% (ADR-001.1)."""
+    return (limit * 4) // 5
+
+
+def _context_retry_target(limit: int) -> int:
+    """Аварийный бюджет однократного retry 50% (ADR-001.1)."""
+    return limit // 2
+
+
+class PruneResult(NamedTuple):
+    status: str  # "pass_through" | "pruned" | "refused"
+    messages: list[dict[str, Any]]
+    prompt: str
+    est_before: int
+    est_after: int
+    msgs_total: int
+    msgs_kept: int
+    msgs_dropped: int
+    mandatory_est: int
+    overhead_est: int
+
+
+def _overhead_tokens_estimate(
+    has_system: bool,
+    tools: list[dict[str, Any]] | None,
+    tool_choice: Any,
+    raw_tools: Any,
+) -> int:
+    """Оценка фиксированной шапки промпта ([system], схемы инструментов, DEFAULT_SYSTEM_HINT)."""
+    clean_tools = (
+        [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
+    )
+    emulate_tools = bool(clean_tools) and not _tool_choice_none(tool_choice)
+    overhead = 0
+    if has_system:
+        overhead += _estimate_tokens("[system]\n") + 1
+    if emulate_tools:
+        overhead += _estimate_tokens(_tools_section(clean_tools, tool_choice)) + 1
+    elif (raw_tools is not None and bool(raw_tools) or bool(tools)) and not has_system:
+        overhead += _estimate_tokens(f"[system]\n{DEFAULT_SYSTEM_HINT}") + 1
+    return overhead
+
+
+def _prune_messages(
+    messages: list[dict[str, Any]],
+    limit: int,
+    target: int,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
+    raw_tools: Any = None,
+) -> PruneResult:
+    """Чистая функция защитного прунинга истории диалога (ADR-001.2)."""
+    _, _, full_prompt = _assemble_prompt(
+        messages, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
+    )
+    est_before = _estimate_tokens(full_prompt)
+
+    valid_msgs: list[dict[str, Any]] = []
+    roles: list[str] = []
+    real_msgs_total = 0
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        role, text = _render_turn(msg)
+        if not text.strip():
+            continue
+        valid_msgs.append(msg)
+        roles.append(role)
+        if role != _COMPACTION_MARKER_ROLE:
+            real_msgs_total += 1
+
+    has_system = any(r in ("system", "developer") for r in roles)
+    overhead_est = _overhead_tokens_estimate(has_system, tools, tool_choice, raw_tools)
+
+    if est_before <= limit:
+        mandatory_est = _compute_mandatory_est_only(
+            valid_msgs, roles, tools, tool_choice, raw_tools
+        )
+        return PruneResult(
+            status="pass_through",
+            messages=messages,
+            prompt=full_prompt,
+            est_before=est_before,
+            est_after=est_before,
+            msgs_total=real_msgs_total,
+            msgs_kept=real_msgs_total,
+            msgs_dropped=0,
+            mandatory_est=mandatory_est,
+            overhead_est=overhead_est,
+        )
+
+    units, mandatory_indices = _partition_units(valid_msgs, roles)
+    u_roles: list[str] = []
+    u_chars: list[int] = []
+    u_bytes: list[int] = []
+    for unit in units:
+        u_role = _render_turn(unit[0])[0]
+        u_roles.append(u_role)
+        if u_role in ("system", "developer", _COMPACTION_MARKER_ROLE):
+            u_chars.append(0)
+            u_bytes.append(0)
+            continue
+        rendered_turns: list[str] = []
+        for m in unit:
+            m_role, m_text = _render_turn(m)
+            if m_role == "assistant":
+                rendered_turns.append(f"Assistant: {m_text}")
+            elif m_role == "tool":
+                rendered_turns.append(m_text)
+            else:
+                rendered_turns.append(f"User: {m_text}")
+        unit_str = "\n\n".join(rendered_turns)
+        u_chars.append(len(unit_str))
+        u_bytes.append(len(unit_str.encode("utf-8")))
+
+    def build_candidate(kept_flags: list[bool]) -> list[dict[str, Any]]:
+        pruned: list[dict[str, Any]] = []
+        seen_kept_turn = False
+        in_dropped_gap = False
+        for u_idx, unit in enumerate(units):
+            u_role = u_roles[u_idx]
+            if u_role in ("system", "developer"):
+                pruned.extend(unit)
+                continue
+            if u_role == _COMPACTION_MARKER_ROLE:
+                if seen_kept_turn:
+                    in_dropped_gap = True
+                continue
+            if kept_flags[u_idx]:
+                if in_dropped_gap:
+                    pruned.append(
+                        {"role": _COMPACTION_MARKER_ROLE, "content": COMPACTION_MARKER}
+                    )
+                    in_dropped_gap = False
+                pruned.extend(unit)
+                seen_kept_turn = True
+            else:
+                if seen_kept_turn:
+                    in_dropped_gap = True
+        return pruned
+
+    kept = [i in mandatory_indices for i in range(len(units))]
+    mandatory_msgs = build_candidate(kept)
+    _, mandatory_turns_text, mandatory_prompt = _assemble_prompt(
+        mandatory_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
+    )
+    mandatory_est = _estimate_tokens(mandatory_prompt)
+    cap = max(limit, target)
+    if mandatory_est > cap:
+        kept_count = sum(
+            len(units[i])
+            for i in range(len(units))
+            if kept[i] and u_roles[i] != _COMPACTION_MARKER_ROLE
+        )
+        return PruneResult(
+            status="refused",
+            messages=mandatory_msgs,
+            prompt=mandatory_prompt,
+            est_before=est_before,
+            est_after=mandatory_est,
+            msgs_total=real_msgs_total,
+            msgs_kept=kept_count,
+            msgs_dropped=max(0, real_msgs_total - kept_count),
+            mandatory_est=mandatory_est,
+            overhead_est=overhead_est,
+        )
+
+    # Фаза C: линейный проход O(n) от новейшей к старейшей опциональной единице (FU-001).
+    head_prefix_chars = len(mandatory_prompt) - len(mandatory_turns_text)
+    head_prefix_bytes = len(mandatory_prompt.encode("utf-8")) - len(
+        mandatory_turns_text.encode("utf-8")
+    )
+    marker_chars = len(COMPACTION_MARKER)
+    marker_bytes = len(COMPACTION_MARKER.encode("utf-8"))
+    non_sys = [
+        i for i in range(len(units)) if u_roles[i] not in ("system", "developer")
+    ]
+    pos_in_non_sys = {u_idx: p for p, u_idx in enumerate(non_sys)}
+    is_kept = [
+        kept[u_idx] and u_roles[u_idx] != _COMPACTION_MARKER_ROLE for u_idx in non_sys
+    ]
+    m_non_sys = len(non_sys)
+    first_kept_p = next((p for p, flag in enumerate(is_kept) if flag), m_non_sys)
+    ft_transitions = sum(
+        1 for p in range(1, m_non_sys) if not is_kept[p - 1] and is_kept[p]
+    )
+    turns_count = sum(1 for flag in is_kept if flag)
+    turns_chars = sum(u_chars[non_sys[p]] for p in range(m_non_sys) if is_kept[p])
+    turns_bytes = sum(u_bytes[non_sys[p]] for p in range(m_non_sys) if is_kept[p])
+
+    for u_idx in range(len(units) - 1, -1, -1):
+        if u_idx in mandatory_indices or u_roles[u_idx] in (
+            "system",
+            "developer",
+            _COMPACTION_MARKER_ROLE,
+        ):
+            continue
+        p = pos_in_non_sys[u_idx]
+        before_ft = (1 if p > 0 and not is_kept[p - 1] and is_kept[p] else 0) + (
+            1 if p + 1 < m_non_sys and not is_kept[p] and is_kept[p + 1] else 0
+        )
+        after_ft = 1 if p > 0 and not is_kept[p - 1] else 0
+        new_ft = ft_transitions - before_ft + after_ft
+        new_first = min(first_kept_p, p)
+        new_markers = (
+            max(0, new_ft - (1 if new_first > 0 else 0)) if new_first < m_non_sys else 0
+        )
+        new_count = turns_count + 1
+        new_chars = turns_chars + u_chars[u_idx]
+        new_bytes = turns_bytes + u_bytes[u_idx]
+        total_items = new_count + new_markers
+        sep_cost = 2 * max(0, total_items - 1)
+        cand_chars = (
+            head_prefix_chars + new_chars + new_markers * marker_chars + sep_cost
+        )
+        cand_bytes = (
+            head_prefix_bytes + new_bytes + new_markers * marker_bytes + sep_cost
+        )
+        if max(cand_chars // 3, cand_bytes // 3) <= target:
+            kept[u_idx] = True
+            is_kept[p] = True
+            ft_transitions = new_ft
+            first_kept_p = new_first
+            turns_count = new_count
+            turns_chars = new_chars
+            turns_bytes = new_bytes
+            continue
+        break
+
+    pruned_msgs = build_candidate(kept)
+    _, _, pruned_prompt = _assemble_prompt(
+        pruned_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
+    )
+    est_after = _estimate_tokens(pruned_prompt)
+    while est_after > target:
+        opt_indices = [
+            i
+            for i in range(len(units))
+            if kept[i]
+            and i not in mandatory_indices
+            and u_roles[i] != _COMPACTION_MARKER_ROLE
+        ]
+        if not opt_indices:
+            break
+        kept[opt_indices[0]] = False
+        pruned_msgs = build_candidate(kept)
+        _, _, pruned_prompt = _assemble_prompt(
+            pruned_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
+        )
+        est_after = _estimate_tokens(pruned_prompt)
+
+    kept_count = sum(
+        len(units[i])
+        for i in range(len(units))
+        if kept[i] and u_roles[i] != _COMPACTION_MARKER_ROLE
+    )
+    dropped_count = max(0, real_msgs_total - kept_count)
+    if est_after > cap:
+        return PruneResult(
+            status="refused",
+            messages=pruned_msgs,
+            prompt=pruned_prompt,
+            est_before=est_before,
+            est_after=est_after,
+            msgs_total=real_msgs_total,
+            msgs_kept=kept_count,
+            msgs_dropped=dropped_count,
+            mandatory_est=mandatory_est,
+            overhead_est=overhead_est,
+        )
+    return PruneResult(
+        status="pruned",
+        messages=pruned_msgs,
+        prompt=pruned_prompt,
+        est_before=est_before,
+        est_after=est_after,
+        msgs_total=real_msgs_total,
+        msgs_kept=kept_count,
+        msgs_dropped=dropped_count,
+        mandatory_est=mandatory_est,
+        overhead_est=overhead_est,
+    )
+
+
+def _partition_units(
+    valid_msgs: list[dict[str, Any]], roles: list[str]
+) -> tuple[list[list[dict[str, Any]]], set[int]]:
+    """Разбить валидные сообщения на атомарные единицы и выделить обязательные индексы M."""
+    units: list[list[dict[str, Any]]] = []
+    consumed_tools: set[int] = set()
+
+    for idx, msg in enumerate(valid_msgs):
+        role = roles[idx]
+        if role == "tool":
+            # Осиротевшие tool не попадают в units при прунинге; связанные поглощаются assistant.
+            continue
+        if (
+            role == "assistant"
+            and isinstance(msg.get("tool_calls"), list)
+            and msg.get("tool_calls")
+        ):
+            call_ids = [
+                _normalize_tool_call(tc)["id"]
+                for tc in msg["tool_calls"]
+                if _normalize_tool_call(tc)["id"]
+            ]
+            if call_ids:
+                expected = set(call_ids)
+                matched_indices: list[int] = []
+                matched_ids: set[str] = set()
+                for j in range(idx + 1, len(valid_msgs)):
+                    if roles[j] != "tool":
+                        break
+                    if j in consumed_tools:
+                        continue
+                    tc_id = str(
+                        valid_msgs[j].get("tool_call_id")
+                        or valid_msgs[j].get("id")
+                        or ""
+                    )
+                    if tc_id in expected and tc_id not in matched_ids:
+                        matched_indices.append(j)
+                        matched_ids.add(tc_id)
+                if matched_ids == expected:
+                    consumed_tools.update(matched_indices)
+                    units.append([msg] + [valid_msgs[j] for j in matched_indices])
+                continue
+        units.append([msg])
+
+    mandatory_indices: set[int] = set()
+    user_unit_indices: list[int] = []
+    last_non_sys_idx: int | None = None
+    for u_idx, unit in enumerate(units):
+        u_role = _render_turn(unit[0])[0]
+        if u_role in ("system", "developer"):
+            mandatory_indices.add(u_idx)
+        elif u_role != _COMPACTION_MARKER_ROLE:
+            last_non_sys_idx = u_idx
+            if u_role not in ("assistant", "tool"):
+                user_unit_indices.append(u_idx)
+
+    if user_unit_indices:
+        mandatory_indices.add(user_unit_indices[0])
+        mandatory_indices.add(user_unit_indices[-1])
+        # Незавершённая единица ответа (assistant+tool после последнего user, ADR-001.2 §2.2 п.4).
+        if (
+            last_non_sys_idx is not None
+            and last_non_sys_idx > user_unit_indices[-1]
+            and len(units[last_non_sys_idx]) > 1
+        ):
+            mandatory_indices.add(last_non_sys_idx)
+
+    return units, mandatory_indices
+
+
+def _compute_mandatory_est_only(
+    valid_msgs: list[dict[str, Any]],
+    roles: list[str],
+    tools: list[dict[str, Any]] | None,
+    tool_choice: Any,
+    raw_tools: Any,
+) -> int:
+    units, mandatory_indices = _partition_units(valid_msgs, roles)
+    mandatory_msgs = [
+        m
+        for u_idx, unit in enumerate(units)
+        if u_idx in mandatory_indices
+        for m in unit
+    ]
+    _, _, mandatory_prompt = _assemble_prompt(
+        mandatory_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
+    )
+    return _estimate_tokens(mandatory_prompt)
+
+
+def _log_context_prune(
+    rid: str,
+    model: str,
+    reason: str,
+    attempt: int,
+    limit: int,
+    target: int,
+    res: PruneResult,
+) -> None:
+    """Структурная запись прунинга без тел сообщений и секретов (ADR-001.4 §4.3)."""
+    logger.info(
+        "muse_context_pruned: model=%s initial=%d target=%d dropped=%d is_retry=%s",
+        model,
+        res.est_before,
+        target,
+        res.msgs_dropped,
+        attempt > 1,
+    )
+    _log(
+        f"context_prune rid={rid} model={model} reason={reason} attempt={attempt} "
+        f"limit={limit} target={target} est_before={res.est_before} est_after={res.est_after} "
+        f"msgs_total={res.msgs_total} msgs_kept={res.msgs_kept} msgs_dropped={res.msgs_dropped} "
+        f"mandatory_est={res.mandatory_est} overhead_est={res.overhead_est} method=bytes_div_3"
+    )
 
 
 # Эмуляция SSE (OpenAI chat.completion.chunk): результат генерации уже целиком —
@@ -729,6 +1392,10 @@ class Run:
             str(self.workdir),
             "--json",
             "--no-session-log",
+            "--disable-write",
+            "--disable-shell",
+            "--disable-web-tools",
+            "--disable-reminders",
             "--prompt-file",
             prompt_path,
         ]
@@ -888,6 +1555,7 @@ class Run:
             "chunks": chunks,
             "err": "\n".join(err_lines[-6:]),
             "state": state,
+            "hard_threshold": _has_hard_threshold_marker(err_lines, reason),
         }
 
 
@@ -986,6 +1654,8 @@ class ServeRun:
             self.model_id,
             "--no-session-log",
             "--trust-workspace",
+            "--disable-write",
+            "--disable-shell",
         ]
         try:
             self.proc = subprocess.Popen(
@@ -1008,6 +1678,8 @@ class ServeRun:
         os.set_blocking(self.proc.stdin.fileno(), False)
 
         err_lines: list[str] = []
+        turn_diag_lines: list[str] = []
+        stderr_joined = False
 
         def drain_stderr() -> None:
             try:
@@ -1180,6 +1852,7 @@ class ServeRun:
                 f"serve turn session={session_id[:8]} turn={turn_id[:8]} effort={tier}"
             )
             terminal: str | None = None
+            hard_threshold = False
             while time.time() < deadline:
                 # Смерть serve здесь не проверяется: события и completed, уже лежащие в буфере
                 # чтения или pipe, разбираются первыми; read_msg сам поднимет ServeUnavailable
@@ -1193,6 +1866,11 @@ class ServeRun:
                         _handle_event(msg, None)
                         continue
                     terminal = str(p.get("terminal") or "unknown")
+                    if terminal != "completed":
+                        hard_threshold = _has_hard_threshold_marker(
+                            p.get("error"), p.get("reason")
+                        )
+                        turn_diag_lines = _turn_diagnostics(p, self.prompt)
                     break
                 if "id" in msg and ("result" in msg or "error" in msg):
                     continue  # чужой/дублированный ack — игнор, не разрываем ход
@@ -1216,7 +1894,20 @@ class ServeRun:
                 if part not in summaries:
                     summaries.append(part)
             text = final_text if final_text is not None else "".join(deltas)
-            err = "\n".join(err_lines[-6:])
+            # Прежнее ожидание drain_stderr переносится до снимка: шум после terminal
+            # не теряется; приоритетный носитель не зависит от хвоста сборщика.
+            err_thread.join(timeout=5)
+            stderr_joined = True
+            hard_threshold = hard_threshold or _has_hard_threshold_marker(err_lines)
+            stderr_tail = _redact_secrets("\n".join(list(err_lines)[-6:]))
+            if self.prompt:
+                stderr_tail = stderr_tail.replace(self.prompt, "[REDACTED]")
+            err = "\n".join(turn_diag_lines)
+            if err:
+                if stderr_tail:
+                    err += "\n" + _clip_diagnostic(stderr_tail, 499 - len(err))
+            else:
+                err = stderr_tail
             if terminal == "completed" and serve_rc not in (None, 0, *_SIGNAL_RCS):
                 return {
                     "rc": serve_rc,
@@ -1227,6 +1918,7 @@ class ServeRun:
                     "summaries": summaries,
                     "usage": usage,
                     "via": "serve",
+                    "hard_threshold": hard_threshold,
                 }
             if terminal != "completed":
                 return {
@@ -1238,6 +1930,7 @@ class ServeRun:
                     "summaries": summaries,
                     "usage": usage,
                     "via": "serve",
+                    "hard_threshold": hard_threshold,
                 }
             return {
                 "rc": 0,
@@ -1250,7 +1943,8 @@ class ServeRun:
                 "via": "serve",
             }
         finally:
-            err_thread.join(timeout=5)
+            if not stderr_joined:
+                err_thread.join(timeout=5)
             self.close()
 
 
@@ -1269,11 +1963,13 @@ class Handler(BaseHTTPRequestHandler):
     _current_run: Run | ServeRun | None = None
     # Ранний SSE (stream=true): состояние потока и keepalive текущего соединения.
     _sse_open: bool = False
+    _content_started: bool = False
     _sse_id: str = ""
     _sse_created: int = 0
     _sse_model: str = ""
     _wlock: threading.Lock = threading.Lock()
-    _ka_stop: threading.Event | None = None
+    _sse_phase: str = "OPEN"
+    _keepalive_stop: threading.Event | None = None
     _ka_thread: threading.Thread | None = None
 
     def setup(self) -> None:
@@ -1281,21 +1977,38 @@ class Handler(BaseHTTPRequestHandler):
         self._client_gone = False
         self._current_run = None
         self._sse_open = False
+        self._content_started = False
         self._sse_id = ""
         self._sse_created = 0
         self._sse_model = ""
         self._wlock = threading.Lock()
-        self._ka_stop: threading.Event | None = None
+        with self._wlock:
+            self._sse_phase = "OPEN"
+        self._keepalive_stop: threading.Event | None = None
         self._ka_thread: threading.Thread | None = None
         super().setup()
 
     # ---- ранний SSE: заголовки сразу, keepalive во время хода ---------------------
-    def _sse_write(self, text: str) -> bool:
+    def _sse_write(self, text: str, *, keepalive: bool = False) -> bool:
         """Запись кадра SSE под замком (keepalive и выдача из разных потоков)."""
         try:
             with self._wlock:
-                self.wfile.write(text.encode("utf-8"))
-                self.wfile.flush()
+                if self._sse_phase == "CLOSED" or self._client_gone:
+                    return False
+                if keepalive and (
+                    self._sse_phase != "OPEN"
+                    or (
+                        self._keepalive_stop is not None
+                        and self._keepalive_stop.is_set()
+                    )
+                ):
+                    return False
+                try:
+                    self.wfile.write(text.encode("utf-8"))
+                    self.wfile.flush()
+                finally:
+                    if text == "data: [DONE]\n\n":
+                        self._sse_phase = "CLOSED"
             return True
         except (BrokenPipeError, ConnectionResetError, OSError):
             if not self._client_gone:
@@ -1313,14 +2026,18 @@ class Handler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
 
-    def _sse_emit(self, obj: dict) -> bool:
-        return self._sse_write("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n")
+    def _sse_emit(self, obj: dict, *, keepalive: bool = False) -> bool:
+        return self._sse_write(
+            "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n", keepalive=keepalive
+        )
 
     def _sse_begin(self, model: str) -> bool:
         """Заголовки 200 + role-кадр до запуска хода и поток keepalive; False — клиент ушёл."""
         self._sse_id = f"chatcmpl-muse-{uuid.uuid4().hex[:12]}"
         self._sse_created = int(time.time())
         self._sse_model = model
+        with self._wlock:
+            self._sse_phase = "OPEN"
         self.close_connection = True
         try:
             self.send_response(200)
@@ -1337,7 +2054,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._sse_emit(self._sse_chunk({"role": "assistant", "content": ""})):
             return False
         stop = threading.Event()
-        self._ka_stop = stop
+        self._keepalive_stop = stop
         self._ka_thread = threading.Thread(
             target=self._keepalive_loop, args=(stop,), daemon=True
         )
@@ -1345,17 +2062,22 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _keepalive_loop(self, stop: threading.Event) -> None:
-        """Комментарии `: keepalive`: держат TCP, но не сбрасывают idle-watchdog SDK."""
+        """Пустые data-чанки держат SSE; эффект на idle проверяется живым ходом."""
         while not stop.wait(KEEPALIVE_S):
-            if not self._sse_write(": keepalive\n\n"):
+            if self._client_gone or stop.is_set():
+                return
+            if not self._sse_emit(self._sse_chunk({"content": ""}), keepalive=True):
                 return
 
     def _sse_stop_keepalive(self) -> None:
-        if self._ka_stop is not None:
-            self._ka_stop.set()
+        if self._keepalive_stop is not None:
+            self._keepalive_stop.set()
+        with self._wlock:
+            if self._sse_phase == "OPEN":
+                self._sse_phase = "FINALIZING"
         if self._ka_thread is not None:
             self._ka_thread.join(timeout=2)
-        self._ka_stop = None
+        self._keepalive_stop = None
         self._ka_thread = None
 
     def _client_gone_probe(self) -> bool:
@@ -1446,6 +2168,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._sse_open and not self._sse_begin(model):
             return
         self._sse_stop_keepalive()
+        with self._wlock:
+            self._content_started = True
         chunk = self._sse_chunk
         reasoning = "\n\n".join(s for s in (summaries or []) if s)
         if reasoning and not self._sse_emit(chunk({"reasoning_content": reasoning})):
@@ -1579,8 +2303,9 @@ class Handler(BaseHTTPRequestHandler):
         tool_choice = req.get("tool_choice")
         emulate_tools = bool(tools) and not _tool_choice_none(tool_choice)
 
-        system_text, prompt = _messages_to_prompt(req.get("messages") or [])
-        if not prompt:
+        raw_messages = req.get("messages") or []
+        _, raw_turns_text = _messages_to_prompt(raw_messages)
+        if not raw_turns_text:
             self._send(
                 400,
                 {
@@ -1591,15 +2316,56 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
-        head: list[str] = []
-        if system_text:
-            head.append(f"[system]\n{system_text}")
-        if emulate_tools:
-            head.append(_tools_section(tools, tool_choice))
-        elif raw_tools and not system_text:
-            head.append(f"[system]\n{DEFAULT_SYSTEM_HINT}")
-        if head:
-            prompt = "\n\n".join(head) + f"\n\n{prompt}"
+
+        rid = uuid.uuid4().hex[:8]
+        limit = _context_limit(model)
+        target = _context_target(limit)
+        retry_target = _context_retry_target(limit)
+        prune_res = _prune_messages(
+            raw_messages,
+            limit=limit,
+            target=target,
+            tools=tools,
+            tool_choice=tool_choice,
+            raw_tools=raw_tools,
+        )
+        if prune_res.status == "refused":
+            _log_context_prune(
+                rid, model, "refused_mandatory", 1, limit, target, prune_res
+            )
+            detail = (
+                f"mandatory context exceeds budget "
+                f"(est_tokens={prune_res.mandatory_est}, limit={limit})"
+            )
+            err_msg = f"muse turn failed (rc=1, state=terminal_failed): {detail}"
+            _log(
+                _format_err_log(
+                    model,
+                    "refused",
+                    {"rc": 1, "state": "terminal_failed", "err": detail},
+                    req.get("stream") is True,
+                )
+            )
+            self._send(
+                502,
+                {
+                    "error": {
+                        "message": _redact_secrets(err_msg),
+                        "detail": _redact_secrets(detail)[:500],
+                        "type": "proxy_error",
+                        "code": 502,
+                    }
+                },
+            )
+            return
+        if prune_res.status == "pruned":
+            _log_context_prune(
+                rid, model, "proactive_prune", 1, limit, target, prune_res
+            )
+
+        prompt = prune_res.prompt
+        current_est = prune_res.est_after
+        reflected_prompts: list[str] = [prompt]
 
         effort = _map_effort(req)
 
@@ -1628,46 +2394,151 @@ class Handler(BaseHTTPRequestHandler):
         )
         watcher.start()
         runs: list = []
-        try:
+        terminal_context_err: str | None = None
+        context_retry_count = 0
+
+        def run_attempt(attempt_prompt: str) -> tuple[dict[str, Any], str]:
             # Serve-first: пробуем MSP serve (там reasoning summaries), при любой
             # транспортной неполадке — тихий fallback на проверенный exec.
-            out: dict[str, Any] | None = None
-            via = "exec"
+            attempt_out: dict[str, Any]
+            attempt_via = "exec"
             try:
-                serve_run = ServeRun(model, prompt, effort, WORKSPACE)
+                serve_run = ServeRun(model, attempt_prompt, effort, WORKSPACE)
                 runs.append(serve_run)
                 self._current_run = serve_run
-                out = serve_run.execute()
-                via = "serve"
+                attempt_out = serve_run.execute()
+                attempt_via = "serve"
             except ServeUnavailable as exc:
                 if self._client_gone:
                     # Обрыв клиента уже убил serve-группу: новый exec-ход не запускаем.
                     _log("client gone during serve — exec fallback skipped")
-                    out = {
+                    attempt_out = {
                         "rc": -1,
                         "text": "",
                         "err": "client gone",
                         "state": "client_gone",
                     }
-                    via = "aborted"
+                    attempt_via = "aborted"
                 else:
-                    _log(f"serve unavailable ({exc}), fallback exec model={model}")
-                    exec_run = Run(model, prompt, effort, WORKSPACE)
+                    safe_exc = _sanitize_reflected(
+                        str(exc), [*reflected_prompts, attempt_prompt], raw_messages
+                    )
+                    safe_exc = re.sub(
+                        r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", " ", safe_exc
+                    ).strip()[:300]
+                    _log(f"serve unavailable ({safe_exc}), fallback exec model={model}")
+                    exec_run = Run(model, attempt_prompt, effort, WORKSPACE)
                     runs.append(exec_run)
                     self._current_run = exec_run
-                    out = exec_run.execute()
-                    via = "exec-after-serve-fallback"
+                    attempt_out = exec_run.execute()
+                    attempt_via = "exec-after-serve-fallback"
                     if (
-                        out.get("rc") != 0
+                        attempt_out.get("rc") != 0
                         and not self._client_gone
-                        and NETWORK_RETRY_MARKER in str(out.get("err") or "")
+                        and NETWORK_RETRY_MARKER in str(attempt_out.get("err") or "")
                     ):
                         _log("exec hit network marker, single retry")
-                        retry_run = Run(model, prompt, effort, WORKSPACE)
+                        retry_run = Run(model, attempt_prompt, effort, WORKSPACE)
                         runs.append(retry_run)
                         self._current_run = retry_run
-                        out = retry_run.execute()
-                        via = "exec-retry"
+                        attempt_out = retry_run.execute()
+                        attempt_via = "exec-retry"
+            return attempt_out, attempt_via
+
+        try:
+            t_first_attempt = time.monotonic()
+            out, via = run_attempt(prompt)
+            raw_err = str(out.get("err") or "")
+            is_hard_threshold = (
+                out.get("rc") != 0
+                and out.get("state") == "terminal_failed"
+                and (
+                    bool(out.get("hard_threshold"))
+                    or HARD_THRESHOLD_ERR_SUBSTR in raw_err
+                )
+            )
+            if (
+                is_hard_threshold
+                and context_retry_count == 0
+                and not self._client_gone
+                and not getattr(self, "_content_started", False)
+            ):
+                for run in runs:
+                    run.close()
+                if not all(run.dead_confirmed for run in runs):
+                    _log(
+                        "context retry skipped: first attempt process group not confirmed dead"
+                    )
+                else:
+                    retry_res = _prune_messages(
+                        raw_messages,
+                        limit=retry_target,
+                        target=retry_target,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        raw_tools=raw_tools,
+                    )
+                    if retry_res.status == "refused":
+                        _log_context_prune(
+                            rid,
+                            model,
+                            "refused_retry",
+                            2,
+                            limit,
+                            retry_target,
+                            retry_res,
+                        )
+                        terminal_context_err = (
+                            f"mandatory context exceeds budget "
+                            f"(est_tokens={retry_res.mandatory_est}, limit={retry_target})"
+                        )
+                    elif (
+                        retry_res.est_after >= current_est
+                        or time.monotonic() - t_first_attempt >= TIMEOUT_S
+                    ):
+                        _log_context_prune(
+                            rid,
+                            model,
+                            "refused_retry",
+                            2,
+                            limit,
+                            retry_target,
+                            retry_res,
+                        )
+                        terminal_context_err = (
+                            f"context hard threshold exceeded after single compaction retry "
+                            f"(est_tokens={retry_res.est_after}, target={retry_target})"
+                        )
+                    elif self._client_gone or self._client_gone_probe():
+                        self._client_gone = True
+                    else:
+                        context_retry_count = 1
+                        _log_context_prune(
+                            rid,
+                            model,
+                            "hard_threshold_retry",
+                            2,
+                            limit,
+                            retry_target,
+                            retry_res,
+                        )
+                        prompt = retry_res.prompt
+                        current_est = retry_res.est_after
+                        reflected_prompts.append(prompt)
+                        out, via = run_attempt(prompt)
+                        raw_err_2 = str(out.get("err") or "")
+                        if (
+                            out.get("rc") != 0
+                            and out.get("state") == "terminal_failed"
+                            and (
+                                bool(out.get("hard_threshold"))
+                                or HARD_THRESHOLD_ERR_SUBSTR in raw_err_2
+                            )
+                        ):
+                            terminal_context_err = (
+                                f"context hard threshold exceeded after single compaction retry "
+                                f"(est_tokens={current_est}, target={retry_target})"
+                            )
         finally:
             # Слот отпускаем после остановки надзора (kill -> wait уже внутри execute).
             watch_stop.set()
@@ -1687,12 +2558,22 @@ class Handler(BaseHTTPRequestHandler):
             # Клиент ушёл: ответ в закрытый сокет не пишется (ни JSON, ни кадр ошибки).
             _log("client gone — response skipped")
             return
+        # Только локальная граница запроса знает отражённый промпт; глобально его не храним.
+        out = dict(out)
+        diagnostic = _sanitize_reflected(
+            str(out.get("err") or ""), reflected_prompts, raw_messages
+        )
+        if terminal_context_err is not None:
+            diagnostic = _redact_secrets(terminal_context_err)
+        out["err"] = _redact_secrets(diagnostic)
         if out.get("state") in ("launcher_missing", "spawn_failed"):
+            _log(_format_err_log(model, via, out, req.get("stream") is True))
             self._send(
                 502,
                 {
                     "error": {
-                        "message": out.get("err") or out["state"],
+                        "message": _redact_secrets(str(out.get("err") or out["state"])),
+                        "detail": _redact_secrets(str(out.get("err") or ""))[:500],
                         "type": "proxy_error",
                         "code": 502,
                     }
@@ -1703,12 +2584,19 @@ class Handler(BaseHTTPRequestHandler):
             # Провал хода (failed terminal, rc != 0, таймаут): частичный текст и tool-блоки
             # не выдаются как успешный финал — SSE error + [DONE] либо 502 (Q-004).
             hint = " (proxy :10816 DOWN?)" if out.get("rc") == 42 else ""
+            _log(_format_err_log(model, via, out, req.get("stream") is True))
+            detail = _redact_secrets(str(out.get("err") or ""))[:500]
+            err_message = (
+                f"muse turn failed (rc={out.get('rc')}, state={out.get('state')}){hint}"
+            )
+            if detail and detail != f"state={out.get('state')} rc={out.get('rc')}":
+                err_message = f"{err_message}: {detail}"
             self._send(
                 502,
                 {
                     "error": {
-                        "message": f"muse turn failed (rc={out.get('rc')}, state={out.get('state')}){hint}",
-                        "detail": str(out.get("err"))[:500],
+                        "message": _redact_secrets(err_message),
+                        "detail": detail,
                         "type": "proxy_error",
                         "code": 502,
                     }
@@ -1721,12 +2609,24 @@ class Handler(BaseHTTPRequestHandler):
             content, tool_calls = _split_tool_calls(out.get("chunks") or [content])
         if not content and not tool_calls:
             hint = " (proxy :10816 DOWN?)" if out.get("rc") == 42 else ""
+            _log(
+                _format_err_log(
+                    model, via, out, req.get("stream") is True, "empty_output"
+                )
+            )
+            detail = _redact_secrets(str(out.get("err") or ""))[:500]
+            err_message = (
+                f"muse exec produced no text (rc={out.get('rc')}, "
+                f"state={out.get('state')}){hint}"
+            )
+            if detail and detail != f"state={out.get('state')} rc={out.get('rc')}":
+                err_message = f"{err_message}: {detail}"
             self._send(
                 502,
                 {
                     "error": {
-                        "message": f"muse exec produced no text (rc={out.get('rc')}, state={out.get('state')}){hint}",
-                        "detail": str(out.get("err"))[:500],
+                        "message": _redact_secrets(err_message),
+                        "detail": detail,
                         "type": "proxy_error",
                         "code": 502,
                     }
@@ -1734,8 +2634,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        prompt_tokens = _estimate_tokens(prompt)
-        completion_tokens = _estimate_tokens(out["text"])
+        prompt_tokens = _estimate_usage_tokens(prompt)
+        completion_tokens = _estimate_usage_tokens(out["text"])
         # Serve даёт настоящие токены (session/tokenUsage); exec — оценку.
         # tokenUsage serve не даёт promptTokens — фолбэк на оценку по каждому
         # полю отдельно (раньше общий if занулял prompt при пустом поле).
