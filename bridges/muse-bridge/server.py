@@ -1357,6 +1357,18 @@ def _split_sse_chunks(text: str, size: int = 0) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] if text else []
 
 
+def _cli_permission_flags() -> list[str]:
+    """Ограничивать запись и shell только по явному запросу через окружение."""
+    return [
+        flag
+        for name, flag in (
+            ("MUSE_BRIDGE_DISABLE_WRITE", "--disable-write"),
+            ("MUSE_BRIDGE_DISABLE_SHELL", "--disable-shell"),
+        )
+        if os.environ.get(name, "0") == "1"
+    ]
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
     """Убить всю группу процессов хода: ребёнок — лидер группы (start_new_session).
 
@@ -1562,8 +1574,7 @@ class Run:
             str(self.workdir),
             "--json",
             "--no-session-log",
-            "--disable-write",
-            "--disable-shell",
+            *_cli_permission_flags(),
             "--disable-web-tools",
             "--disable-reminders",
             "--prompt-file",
@@ -1883,8 +1894,7 @@ class ServeRun:
             self.model_id,
             "--no-session-log",
             "--trust-workspace",
-            "--disable-write",
-            "--disable-shell",
+            *_cli_permission_flags(),
         ]
         try:
             self.proc = subprocess.Popen(

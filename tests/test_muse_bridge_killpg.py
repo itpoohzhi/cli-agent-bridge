@@ -1564,17 +1564,20 @@ class SseDataKeepaliveTest(_BridgeScenario):
 class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
     """Реальные argv фейка; транспортный fallback до turn/start сохранён."""
 
-    def test_serve_argv_disables_write_shell(self) -> None:
+    def test_serve_argv_allows_write_shell_by_default(self) -> None:
         install_protocol_wrapper(self, {"terminal": "completed"})
-        self.assertEqual(bridge_request(self, turn_request())[0], 200)
-        argv = json.loads((self.tmp / "serve-argv.json").read_text())
+        for model in self.mod.ALLOWED_MODELS:
+            with self.subTest(model=model):
+                request = turn_request()
+                request["model"] = model
+                self.assertEqual(bridge_request(self, request)[0], 200)
+                argv = json.loads((self.tmp / "serve-argv.json").read_text())
+                self.assertNotIn("--disable-write", argv)
+                self.assertNotIn("--disable-shell", argv)
         for flag in (
-            "--disable-write",
-            "--disable-shell",
             "--provider",
             "meta",
             "--model",
-            "muse-spark-1.3",
             "--no-session-log",
             "--trust-workspace",
         ):
@@ -1585,13 +1588,17 @@ class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
         # проверки exec-флагов сохранены на транспортном ServeUnavailable
         # (EOF рукопожатия до turn/start), approval-контракт — класс Approval.
         install_fake_msp(self, serve_plans=[{"handshake_eof": True}])
-        status, body = bridge_request(self, turn_request())
-        self.assertEqual(status, 200, body)
-        self.assertIn("fallback-ok", body.decode())
-        argv = json.loads((self.tmp / "exec-argv.json").read_text())
+        for model in self.mod.ALLOWED_MODELS:
+            with self.subTest(model=model):
+                request = turn_request()
+                request["model"] = model
+                status, body = bridge_request(self, request)
+                self.assertEqual(status, 200, body)
+                self.assertIn("fallback-ok", body.decode())
+                argv = json.loads((self.tmp / "exec-argv.json").read_text())
+                self.assertNotIn("--disable-write", argv)
+                self.assertNotIn("--disable-shell", argv)
         for flag in (
-            "--disable-write",
-            "--disable-shell",
             "--disable-web-tools",
             "--disable-reminders",
             "--yolo",
@@ -1607,6 +1614,31 @@ class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
         ):
             self.assertIn(flag, argv)
         self.assertIn("fallback exec", self.mod.LOG_PATH.read_text())
+
+    def test_write_shell_restrictions_are_independent_opt_ins(self) -> None:
+        for mode in ("serve", "exec"):
+            for disable_write, disable_shell in itertools.product(("0", "1"), repeat=2):
+                with (
+                    self.subTest(mode=mode, write=disable_write, shell=disable_shell),
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "MUSE_BRIDGE_DISABLE_WRITE": disable_write,
+                            "MUSE_BRIDGE_DISABLE_SHELL": disable_shell,
+                        },
+                    ),
+                ):
+                    install_fake_msp(
+                        self,
+                        serve_plans=[
+                            ok_plan() if mode == "serve" else {"handshake_eof": True}
+                        ],
+                    )
+                    status, body = bridge_request(self, turn_request())
+                    self.assertEqual(status, 200, body)
+                    argv = json.loads((self.tmp / f"{mode}-argv.json").read_text())
+                    self.assertEqual("--disable-write" in argv, disable_write == "1")
+                    self.assertEqual("--disable-shell" in argv, disable_shell == "1")
 
 
 class AllowedModelsSyncTest(_BridgeScenario):
@@ -2953,8 +2985,8 @@ class ApprovalTest(_BridgeScenario):
         self.assertEqual(len(starts), 1)
         self.assertEqual(starts[0]["params"]["approvalMode"], "allowAll")
         argv = json.loads((self.tmp / "serve-argv.json").read_text())
-        self.assertIn("--disable-write", argv)
-        self.assertIn("--disable-shell", argv)
+        self.assertNotIn("--disable-write", argv)
+        self.assertNotIn("--disable-shell", argv)
         self.assertNotIn("--disable-sandbox", argv)
         logs = self.mod.LOG_PATH.read_text(encoding="utf-8")
         self.assertIn("approvalMode=allowAll", logs)
