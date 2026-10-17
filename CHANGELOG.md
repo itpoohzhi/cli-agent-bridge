@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- **README:** раздел «Why official vendor CLIs instead of OAuth proxies (CLIProxyAPI)»: отличие моста (официальные бинарники вендоров) от OAuth-прокси и риски не-вендорных клиентов (баны аккаунтов, подделка клиента, смена серверной детекции).
 - **README:** разделы Connecting Claude Code, Connecting Cursor и sibling-мосты, карта портов экосистемы,
   copy-paste конфигурации клиентов (cordis harness, Cursor, OpenAI SDK, cURL).
 - **Live-стриминг всех шагов (ADR 0004, 2026-10-17, EYE-33873):** сквозная трансляция всех шагов рассуждений

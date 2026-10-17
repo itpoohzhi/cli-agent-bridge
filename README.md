@@ -58,6 +58,7 @@ or script that speaks the OpenAI protocol.
 ## Table of contents
 
 - [Features](#features)
+- [Why official vendor CLIs instead of OAuth proxies (CLIProxyAPI)](#why-official-vendor-clis-instead-of-oauth-proxies-cliproxyapi)
 - [Supported backends and connected agent CLIs](#supported-backends-and-connected-agent-clis)
   - [Factory Droid (`droid`)](#droid--factory-droid-cli-in-tree-hub-backend)
   - [Meta Muse (`muse`)](#muse--meta-muse-cli-in-tree-hub-and-dedicated-bridge)
@@ -70,6 +71,16 @@ or script that speaks the OpenAI protocol.
 - [Quick start and client configurations](#quick-start-and-client-configurations) (harness, Cursor IDE, Python SDK, cURL)
 - [Configuration and fleet catalog](#configuration-and-fleet-catalog)
 - [Adding a backend](#adding-a-backend)
+
+## Why official vendor CLIs instead of OAuth proxies (CLIProxyAPI)
+
+When direct pay-as-you-go API keys are not used, this hub (`droid exec`, `muse serve`) and its sibling bridges (`claude -p`, `cursor-agent -p`, `agy -p`, `opencode`) spawn the official vendor CLI as a local child process instead of extracting OAuth tokens and calling cloud APIs over raw HTTP like [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (`cliproxy`).
+
+Replaying subscription tokens through an OAuth proxy carries three risks:
+
+- **Account bans and subscription revocations.** Providers can ban accounts or revoke subscriptions when OAuth tokens issued to an official vendor CLI are replayed from an external OAuth proxy. Spawning the official vendor CLI avoids HTTP client impersonation, though it does not exempt automated usage from each provider's terms of service or guarantee against policy enforcement.
+- **Anthropic and other official vendor CLIs cannot be faithfully reproduced over HTTP.** As shown in CLIProxyAPI's [utls_transport.go](https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/auth/claude/utls_transport.go) and [claude_executor_cloaking.go](https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/runtime/executor/claude_executor_cloaking.go), mimicking Claude Code (`claude`) over raw HTTP requires custom TLS `ClientHello` fingerprints (`utls`), injected `metadata.user_id` values, salted `x-anthropic-billing-header` hashes (`SHA256(salt + messageText[4,7,20] + version)`), and prompt cloaking of sensitive words.
+- **Server-side detection rules change without notice.** Because client checks are enforced on the provider's servers, rotating the fingerprint salt, checking a new header or telemetry field, or flagging cloaked prompts breaks external OAuth proxies or triggers bans without a client release. The trade-off of the local bridge model is operational: each host must install, authenticate, and update the official vendor CLI binaries.
 
 ## Supported backends and connected agent CLIs
 
