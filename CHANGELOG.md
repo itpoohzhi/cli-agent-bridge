@@ -5,6 +5,16 @@
 ## [Unreleased]
 
 ### Added
+- **Live-стриминг всех шагов (ADR 0004, 2026-10-17, EYE-33873):** сквозная трансляция всех шагов рассуждений
+  (`summary.*`) и действий модели в `delta.reasoning_content` с маркерами инструментов
+  `[Вызов инструмента: ...]` (`docs/adr/0004-muse-live-streaming-all-steps.md`).
+- **Протокол `muse serve` (ADR 0003, 2026-10-15):** `approvalMode: "allowAll"` передаётся в `session/start`
+  через MSP вместо сброса хода и холодного перезапуска через `exec`; прунинг контекста Wonder
+  (400k/320k/200k); ретраи сетевых таймаутов (`docs/adr/0003-muse-serve-approval-allowall.md`).
+- **Full Access для моделей моста:** сняты ограничения `--disable-write` и `--disable-shell` — модели могут
+  писать файлы и запускать shell.
+- **Модели Meta Muse Wonder:** `muse-wonder-1.0` и `muse-wonder-full-1.0` подключены в каталог `fleet.json`.
+- Автономный сервис `bridges/muse-bridge/server.py` (порт 9886) отделён от мульти-бинарного хаба (порт 9882).
 - **Мульти-бинарный хаб (ADR 0002):** `core/backend_adapter.py` (контракт `BackendAdapter`,
   `AdapterRegistry`, единый валидатор записей `backends` schema 3), `adapters/` (`ADAPTER_KINDS`,
   `DroidAdapter` как оболочка над прежним RPC-путём, `MuseAdapter` — Muse CLI через

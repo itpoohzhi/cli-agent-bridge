@@ -32,9 +32,10 @@ or script that speaks the OpenAI protocol.
   `droid exec` RPC stream (coalesced in ~40 ms windows, with bounded per-chunk
   write timeouts and explicit `stream_error` fail-close frames if a turn aborts
   after live bytes were sent), followed by tool-call chunks, a `finish_reason`
-  chunk, a `usage` chunk, and `[DONE]`. One-shot backends without live delta
-  transport (`muse`) hold the connection with `: keepalive` comments and flush
-  chunks when the turn completes.
+  chunk, a `usage` chunk, and `[DONE]`. The `muse` backend streams thinking in
+  real time as well: every reasoning step and tool-progress marker is relayed
+  live in `reasoning_content` (ADR 0004). Both `droid` and `muse` therefore
+  deliver the model's thoughts as they happen.
 - **Explicit reasoning and autonomy control** — per-request `reasoning_effort`
   (validated against the catalog, always forwarded) and a top-level
   `autonomy` switch (`low | medium | high | off`, default `high`) for how much
@@ -72,8 +73,17 @@ Two adapters ship in this repo; any other vendor CLI joins the same way
 
 ### `muse` — Muse CLI, Meta's coding-agent CLI (opt-in)
 
-- Transport: headless one-shot `muse exec` per request through a launcher
-  wrapper; no sessions — every turn replays the request history.
+- Transport: `muse serve` (MSP — Muse Server Protocol, JSON-RPC over
+  stdin/stdout) with `approvalMode: "allowAll"` on `session/start`
+  ([ADR 0003](docs/adr/0003-muse-serve-approval-allowall.md)), so interactive
+  multi-step sessions run without a turn reset; headless one-shot `muse exec`
+  through a launcher wrapper remains available. Wonder context is pruned
+  (400k/320k/200k) and net-timeouts are retried.
+- Tool access: Full Access — models can read and write files and run shell
+  commands (`--disable-write` / `--disable-shell` are no longer passed).
+- Streaming: live `reasoning_content` with the model's thoughts (`summary.*`
+  steps) and text markers of tool progress (`[Вызов инструмента: ...]`)
+  ([ADR 0004](docs/adr/0004-muse-live-streaming-all-steps.md)).
 - Models served: `muse-spark-1.3`, `muse-spark-1.3-contributor`,
   `muse-wonder-1.0`, `muse-wonder-full-1.0`.
 - Concurrency: strictly 1 across all Muse adapters in the hub.
@@ -195,14 +205,16 @@ backends — an adapter only deals with its own CLI transport.
 
 ## Layout
 
-- `server.py` — the bridge (HTTP, auth, admission, hub facade).
+- `server.py` — the bridge (HTTP, auth, admission, hub facade); multi-binary hub on port 9882.
+- `bridges/muse-bridge/` — standalone Meta Muse bridge service (`server.py`, port 9886).
 - `core/` — hub contract: adapter interface, catalog validator, shared tool emulation.
 - `adapters/` — vendor CLI adapters (`droid_adapter.py`, `muse_adapter.py`).
 - `fleet.json` — backends + models catalog (schema 3).
 - `fleet_check.py` — read-only preflight validator.
 - `tools/b_guard.py` — offline instruction-budget guard.
 - `tests/` — stdlib `unittest` suite.
-- `docs/adr/` — architecture decisions (RPC mode, multi-binary hub).
+- `docs/adr/` — architecture decisions (RPC mode, multi-binary hub, ADR 0003
+  `muse serve` approval `allowAll`, ADR 0004 live streaming of all steps).
 - `start.sh` — launcher (key from env, then `exec python3 server.py`).
 
 ## Background
