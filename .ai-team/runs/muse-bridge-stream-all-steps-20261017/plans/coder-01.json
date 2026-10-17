@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-bridge-stream-all-steps-20261017",
+  "role": "coder",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Реализация непрерывного live-стриминга всех шагов рассуждений summary.0..N, маркеров вызова инструментов toolCall и опережающего сброса буфера reasoning перед ошибкой в muse-bridge",
+  "inputs_read": [
+    "docs/adr/0004-muse-live-streaming-all-steps.md",
+    ".ai-team/runs/muse-bridge-stream-all-steps-20261017/architecture/arch-spec.md",
+    ".ai-team/runs/muse-bridge-stream-all-steps-20261017/architecture/architecture-packet.json",
+    ".ai-team/runs/muse-bridge-stream-all-steps-20261017/panel/arch/r2/panel-proof.json",
+    "bridges/muse-bridge/server.py",
+    "tests/test_muse_bridge_killpg.py"
+  ],
+  "stop_conditions": [
+    "Провалены существующие unit-тесты репозитория",
+    "Сломан OpenAI-совместимый SSE контракт delta.reasoning_content",
+    "Код не проходит статический анализ ruff или basedpyright"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Снятие заморозки live-стриминга и реализация раздельной буферизации (item_id, idx) в ServeRun",
+      "expected_evidence": "server.py обновлен, _live_frozen удален, дельты индексируются ключом (item_id, idx)",
+      "status": "DONE",
+      "actual_evidence": "В server.py удалена искусственная заморозка live-стриминга, дельты индексируются составным ключом под self._acc_lock, все summary.0..N передаются в реальном времени."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Трансляция текстовых маркеров запуска и завершения инструментов со строгой санитизацией",
+      "expected_evidence": "Маркеры [Вызов инструмента: ...] отправляются в delta.reasoning_content только при stream: true",
+      "status": "DONE",
+      "actual_evidence": "Реализована функция _sanitize_tool_name, маркеры запуска и завершения инструментов транслируются в delta.reasoning_content только при stream: true."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Опережающий сброс reasoning перед ошибкой в _send(502) и нефатальная live-запись reasoning",
+      "expected_evidence": "В _sse_write параметр fatal=False, сброс накопленного reasoning перед кадром 502",
+      "status": "DONE",
+      "actual_evidence": "В _sse_write добавлен параметр fatal=False для live reasoning, при таймаутах сокета выставляется _live_degraded=True без kill хода. В _send(502) выполняется сброс reasoning перед ошибкой."
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Сброс состояния live-стриминга на ретраях хода (net-timeout) в run_attempt",
+      "expected_evidence": "Вызов _reset_live_for_attempt сбрасывает _live_sent_text и _live_degraded",
+      "status": "DONE",
+      "actual_evidence": "В run_attempt добавлен вызов _reset_live_for_attempt, сбрасывающий _live_sent_text и _live_degraded перед новой попыткой."
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Добавление модульных тестов в tests/test_muse_bridge_killpg.py и верификация качества",
+      "expected_evidence": "122 unit-теста пройдены, ruff check 0 errors, basedpyright 0 errors",
+      "status": "DONE",
+      "actual_evidence": "Добавлено 10 новых unit-тестов. Все 122 теста пройдены успешно (unittest OK). ruff check 0 errors, basedpyright 0 errors."
+    }
+  ],
+  "deviations": []
+}

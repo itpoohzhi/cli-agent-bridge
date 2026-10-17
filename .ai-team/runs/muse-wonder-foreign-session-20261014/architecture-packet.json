@@ -1,0 +1,524 @@
+{
+  "schema_version": "1.0",
+  "task_id": "muse-wonder-foreign-session-20261014",
+  "run_id": "muse-wonder-foreign-session-20261014",
+  "criticality": "S2",
+  "profile": "default",
+  "status": "DRAFT",
+  "role_plan": null,
+  "spec_path": ".ai-team/runs/muse-wonder-foreign-session-20261014/arch-spec.md",
+  "round": "R2",
+  "requirement_ids": ["REQ-01", "NFR-01", "NFR-02"],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "command",
+      "ref": "grep -n 'hard threshold' ~/.dsh/bridges/muse-bridge/logs/bridge.log (строки 1203 и 1207; в ledger указана 1222, в файле 1207 строк)",
+      "claim": "F-01: жёсткий лимит Meta 460800 токенов; ход via=serve завершается rc=1 state=terminal_failed, modelError: context compaction replacement still exceeds the hard threshold (639915 >= 460800 tokens) retryable=True, stream=True"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:77-78, 454, 1767",
+      "claim": "F-02: ALLOWED_MODELS объявляет context_length 1048576; _messages_to_prompt (определение :454, вызов :1767) склеивает историю без бюджета токенов"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/desktop/cordis.patch.yml:355,369; ~/.dsh/profiles/web/cordis.patch.yml:453,459",
+      "claim": "F-03: contextWindow 1048576 у muse-wonder-1.0 и muse-wonder-full-1.0 в профилях desktop и web (проверено 2026-10-14); профиль headless не содержит muse-bridge; ключ в ALLOWED_MODELS называется context_length, а не contextWindow"
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1743-1960 (_serve_json)",
+      "claim": "F-04: при out.state != ok мост сразу отвечает 502; контекстного retry нет; существующий retry только по NETWORK_RETRY_MARKER после serve->exec fallback; все контентные SSE-кадры пишет _send_sse после завершения всех запусков"
+    },
+    {
+      "id": "EVD-005",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:77-89, 397",
+      "claim": "F-05: порог 400000, гистерезис до 320000, консервативная оценка по байтам UTF-8 // 3, включая _tools_section и разметку"
+    },
+    {
+      "id": "EVD-006",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:431-470",
+      "claim": "F-06: assistant.tool_calls и role:tool с tool_call_id рендерятся связанными блоками; разрыв пары даёт осиротевший tool-результат"
+    },
+    {
+      "id": "EVD-007",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:454, 1447-1460",
+      "claim": "F-07: self._wlock (threading.Lock) защищает только запись в SSE-сокет; _messages_to_prompt чистая функция без замков"
+    },
+    {
+      "id": "EVD-008",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:177-245, 1877-1955",
+      "claim": "F-08: _redact_secrets и удаление отражённого промпта/сообщений обязательны для всех диагностик; тела сообщений в лог не пишутся"
+    },
+    {
+      "id": "EVD-009",
+      "kind": "command",
+      "ref": "diff -q ~/.dsh/bridges/muse-bridge/server.py bridges/muse-bridge/server.py (2026-10-14, пустой вывод)",
+      "claim": "Зеркало моста побайтно совпадает с рабочим деревом репозитория, включая незакоммиченные правки server.py и tests/test_muse_bridge_killpg.py"
+    },
+    {
+      "id": "EVD-010",
+      "kind": "code",
+      "ref": "tests/test_muse_bridge_killpg.py:1307-1322 (AllowedModelsSyncTest)",
+      "claim": "Существующий тест жёстко проверяет context_length 1048576 для wonder-моделей; изменится первым (red)"
+    },
+    {
+      "id": "EVD-011",
+      "kind": "command",
+      "ref": "ls pyproject.toml uv.lock; uv run --no-project --with pytest python -m pytest --version",
+      "claim": "В репозитории нет pyproject.toml и uv.lock; рабочий запуск тестов: uv run --no-project --with pytest python -m pytest (pytest 8.4.2)"
+    }
+  ],
+  "risk_triggers": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "OPEN-01: contextWindow/context_length = 400000 у двух wonder-моделей в ALLOWED_MODELS, зеркале и профилях desktop/web достаточен как единый безопасный лимит",
+      "status": "OPEN",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-002",
+      "statement": "OPEN-02: стратегия прунинга (все system/developer, первый и последний user, незавершённая единица ответа, атомарные tool-группы, bytes//3, 400k -> 320k, 200k при retry) принимается владельцем",
+      "status": "OPEN",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-003",
+      "statement": "Muse CLI/serve не держит серверного состояния сессии, из-за которого урезание входных messages не уменьшает счёт Meta",
+      "status": "OPEN",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-004",
+      "statement": "Оценка bytes//3 не ниже реального токенового счёта Meta на латинице, коде и кириллице; фактическое отношение измеряется на живом ходе по usage.prompt_tokens",
+      "status": "OPEN",
+      "class": "continuable",
+      "evidence_ids": []
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Где хранится лимит контекста wonder-моделей и какое значение объявлять?",
+      "choice": "ADR-001.1: единственный источник ALLOWED_MODELS[model]['context_length'] = 400000 (помощник _context_limit, по умолчанию 400_000); порог, целевой размер (80%) и аварийный размер (50%) выводятся из него; те же 400000 в зеркале и в профилях desktop/web только у двух wonder-моделей",
+      "alternatives": [
+        "оставить 1048576 и полагаться только на прунинг моста",
+        "отдельные константы MAX_CONTEXT_TOKENS, TARGET и RETRY_TARGET независимо от ALLOWED_MODELS"
+      ],
+      "drivers": [
+        "клиент DSH должен компактироваться до порога Meta 460800",
+        "будущая модель получает свой лимит без правки алгоритма",
+        "один источник истины вместо трёх констант"
+      ],
+      "consequences": [
+        "в /health и /v1/models context_length wonder-моделей = 400000",
+        "ключ в коде context_length, в YAML contextWindow: второй ключ не вводится",
+        "muse-spark-* остаются на 1048576 (Q-002)"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest tests/test_muse_bridge_killpg.py -q -k 'AllowedModelsSync or ContextEstimate'",
+        "expected": "exit 0; context_length == 400000 для двух wonder-моделей, /health и /v1/models отдают 400000, лимит читается из ALLOWED_MODELS"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Как мост защищается от переполнения входной истории?",
+      "choice": "ADR-001.2: чистая функция прунинга на локальной копии; порог 400000, цель 320000; обязательный набор: все system/developer, первый и последний user и незавершённая единица ответа; атомарные группы tool_calls/tool; оценка max(chars//3, bytes//3) по собранному промпту с _tools_section; маркер в разрывах; отказ без запуска модели, если обязательный набор не помещается",
+      "alternatives": [
+        "срез только по количеству последних сообщений",
+        "точный токенизатор Meta",
+        "не прунить, только retry по ошибке Meta"
+      ],
+      "drivers": [
+        "ни одна системная инструкция или текущий запрос не теряются молча",
+        "осиротевший tool-результат ломает контракт инструментов",
+        "кириллица и код токенизируются плотнее латиницы",
+        "стабильность кэша префикса"
+      ],
+      "consequences": [
+        "хвост без компакции клиента сдвигается каждый ход (RISK-002)",
+        "оценка выше реальной для плотной кириллицы, прунинг может сработать раньше клиента",
+        "появляется внутренняя роль сообщения-заметки для маркера"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest tests/test_muse_bridge_killpg.py -q -k 'ContextPrune'",
+        "expected": "exit 0; пороги, кириллица, tool-группы, обязательный набор, идемпотентность, неизменность входа проверены"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Как мост восстанавливается после ошибки жёсткого порога Meta?",
+      "choice": "ADR-001.3: ровно один контекстный retry (context_retry_count == 1) со срезом до 200000 из исходных messages; только по подстроке в канале ошибки out['err'] при rc != 0 и state == terminal_failed; только до первого контентного кадра (флаг _content_started); тот же слот; отдельный счётчик от сетевого retry и fallback serve->exec; терминальный 502 / SSE error + один [DONE] при повторном отказе",
+      "alternatives": [
+        "без retry, сразу 502",
+        "retry с бесконечным ужатием",
+        "буферизация ответа для retry после начала потока"
+      ],
+      "drivers": [
+        "ошибка Meta помечена retryable=True",
+        "идемпотентность SSE: после первого контентного кадра повтор запрещён",
+        "ограниченное время и ресурсы хода"
+      ],
+      "consequences": [
+        "повторная попытка добавляется в общий runs для очистки в finally",
+        "суммарный дедлайн хода ограничен остатком TIMEOUT_S, если API execute() позволяет",
+        "подстрока ошибки Meta закреплена константой и тестом"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest tests/test_muse_bridge_killpg.py -q -k 'ContextRetry'",
+        "expected": "exit 0; один повтор, терминальный 502 после второго отказа, нет retry на чужую ошибку, нет утечки промпта, очистка групп и слота"
+      }
+    },
+    {
+      "id": "AD-004",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Как обеспечить безопасность, потокобезопасность и наблюдаемость нового кода?",
+      "choice": "ADR-001.4: _wlock только для _sse_write; прунинг без замков; _redact_secrets и удаление отражённого промпта обеих попыток во всех приёмниках; структурная строка context_prune (rid, модель, reason, attempt, оценки до/после, число сообщений) без тел сообщений",
+      "alternatives": [
+        "логировать усечённые тела сообщений для отладки",
+        "заголовок X-Muse-Context-Pruned и env-переопределение лимитов в этом MR"
+      ],
+      "drivers": [
+        "NFR-01: секреты и пользовательский контент не попадают в лог",
+        "NFR-02: прунинг не блокирует запись в сокет",
+        "оператору нужно видеть сжатие без содержимого"
+      ],
+      "consequences": [
+        "заголовок и env-переопределение отложены (deferred)",
+        "тесты обязаны проверять канарейки секретов для обеих попыток"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest tests/test_muse_bridge_killpg.py -q -k 'ContextObservability or ContextRetry or ErrorLogging'",
+        "expected": "exit 0; context_prune с корректными полями, канарейки отсутствуют в логе, JSON и SSE, _wlock не захвачен при прунинге"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "владелец, переключение модели в чужой сессии DSH",
+      "stimulus": "запрос с оценкой больше 400000 токенов (639915 в прежнем сбое)",
+      "environment": "живая сессия DSH, muse-wonder-1.0 и muse-wonder-full-1.0, JSON и SSE",
+      "artifact": "muse-bridge _serve_json и функция прунинга",
+      "response": "мост сжимает историю до 320000, сохраняет все system/developer, первый и последний user, незавершённую единицу ответа и целостность tool-пар; ход завершается без terminal_failed",
+      "response_measure": "HTTP 200; реальный usage.prompt_tokens меньше 460800; в логе одна строка context_prune reason=proactive_prune; нет сообщений об ошибке terminal_failed",
+      "verification_ids": ["VER-001", "VER-006"]
+    },
+    {
+      "id": "QA-002",
+      "quality": "compatibility",
+      "source": "обычная сессия DSH",
+      "stimulus": "запрос с оценкой не больше 400000 токенов",
+      "environment": "любая модель muse-bridge",
+      "artifact": "прунинг и сборка промпта",
+      "response": "список сообщений передаётся без изменений, без маркера",
+      "response_measure": "оценка ровно 400000 и ниже: выход тождествен входу; 400001: прунинг",
+      "verification_ids": ["VER-001"]
+    },
+    {
+      "id": "QA-003",
+      "quality": "operability",
+      "source": "оператор DSH",
+      "stimulus": "GET /health, GET /v1/models, чтение профилей desktop и web",
+      "environment": "боевой мост после выката",
+      "artifact": "ALLOWED_MODELS, зеркало, cordis.patch.yml",
+      "response": "обе wonder-модели объявляют 400000, остальные записи не изменены",
+      "response_measure": "context_length == 400000 для двух моделей; diff против бэкапа профилей ровно 4 строки",
+      "verification_ids": ["VER-003", "VER-005"]
+    },
+    {
+      "id": "QA-004",
+      "quality": "reliability",
+      "source": "сервер Meta",
+      "stimulus": "ошибка context compaction replacement still exceeds the hard threshold до первого контентного кадра",
+      "environment": "JSON и SSE, serve и exec",
+      "artifact": "обработчик попыток хода",
+      "response": "ровно один повтор со срезом до 200000 из исходных messages; при повторном отказе терминальный 502 / SSE error + один [DONE]",
+      "response_measure": "ровно 2 запуска; нет error-кадра между попытками; промпт 2 не больше 200000 и меньше промпта 1; группы процессов убиты, слот освобождён один раз",
+      "verification_ids": ["VER-002", "VER-007"]
+    },
+    {
+      "id": "QA-005",
+      "quality": "reliability",
+      "source": "клиент с огромным обязательным набором",
+      "stimulus": "system/developer, первый/последний user или незавершённая единица не помещаются в лимит",
+      "environment": "проактивный путь и retry",
+      "artifact": "прунинг и обработчик ошибок",
+      "response": "мост не запускает модель (проактивно) или не повторяет, возвращает понятный терминальный 502 без потери инструкций и без текста промпта",
+      "response_measure": "ни одного запуска Run/ServeRun при проактивном отказе; сообщение содержит только числа и константный текст",
+      "verification_ids": ["VER-002", "VER-001"]
+    },
+    {
+      "id": "QA-006",
+      "quality": "security",
+      "source": "диагностика прунинга и retry",
+      "stimulus": "ошибка хода отражает исходный или усечённый промпт либо секрет",
+      "environment": "обе попытки, лог, JSON, SSE",
+      "artifact": "_redact_secrets, список reflected_prompts, строка context_prune",
+      "response": "ни тела сообщений, ни секреты не попадают ни в один приёмник",
+      "response_measure": "канарейки секретов и текста сообщений отсутствуют в логе, JSON и SSE обеих попыток",
+      "verification_ids": ["VER-002", "VER-004"]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "чистая функция прунинга и оценки токенов (server.py)",
+      "responsibility": "по списку messages, limit, target и фиксированной части выдать неизменяемый результат: сообщения, оценки до/после, число отброшенных, статус (pass-through, pruned, refused)",
+      "allowed_dependencies": ["_render_turn", "_tools_section", "json", "stdlib"],
+      "forbidden_dependencies": ["Handler", "self._wlock", "subprocess", "сеть", "глобальное изменяемое состояние"],
+      "verification_ids": ["VER-001"]
+    },
+    {
+      "id": "BND-002",
+      "component": "Handler._serve_json (цикл попыток хода)",
+      "responsibility": "один контекстный retry с отдельным счётчиком, очисткой первой попытки, проверкой клиента и дедлайна, терминальным ответом; _wlock только для SSE-записи",
+      "allowed_dependencies": ["Run", "ServeRun", "_log", "_redact_secrets", "_send", "_slots"],
+      "forbidden_dependencies": ["удержание _wlock во время выполнения модели", "второй _slots.acquire для retry", "отправка контентных кадров до решения о retry"],
+      "verification_ids": ["VER-002"]
+    },
+    {
+      "id": "BND-003",
+      "component": "внешняя конфигурация DSH (зеркало моста и профили desktop/web)",
+      "responsibility": "объявить клиенту окно 400000 только для двух wonder-моделей",
+      "allowed_dependencies": ["~/.dsh/bridges/muse-bridge/server.py", "~/.dsh/profiles/desktop/cordis.patch.yml", "~/.dsh/profiles/web/cordis.patch.yml"],
+      "forbidden_dependencies": ["записи muse-spark-*", "каталоги profiles/web.bak-*", "профиль headless"],
+      "verification_ids": ["VER-005"]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "api",
+      "producer": "muse-bridge /health и /v1/models",
+      "consumer": "клиент DSH, профили cordis.patch.yml",
+      "change": "context_length и contextWindow muse-wonder-1.0 и muse-wonder-full-1.0: 1048576 -> 400000",
+      "compatibility": "формат ответов не меняется; muse-spark-* без изменений; клиент компактирует историю раньше",
+      "verification_ids": ["VER-003", "VER-005"]
+    },
+    {
+      "id": "CD-002",
+      "type": "behavior",
+      "producer": "muse-bridge _serve_json",
+      "consumer": "клиент OpenAI-совместимый (DSH)",
+      "change": "запросы больше 400000 оценочных токенов сжимаются до 320000 с маркером пропуска; единичный retry при ошибке жёсткого порога Meta",
+      "compatibility": "запросы не больше 400000 проходят дословно; формат успешного ответа и SSE-кадров не меняется",
+      "verification_ids": ["VER-001", "VER-002"]
+    },
+    {
+      "id": "CD-003",
+      "type": "behavior",
+      "producer": "muse-bridge _serve_json",
+      "consumer": "клиент OpenAI-совместимый (DSH)",
+      "change": "два новых терминальных ответа 502: обязательный контекст превышает бюджет; жёсткий порог превышен после единственного retry (JSON 502 либо SSE error + один [DONE])",
+      "compatibility": "тот же формат ошибки proxy_error/502, что и существующие провалы хода; сообщения содержат только числа и константный текст",
+      "verification_ids": ["VER-002", "VER-004"]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "dynamic",
+      "question": "Как проходит запрос: прунинг, попытка 1, проверка ошибки Meta, попытка 2, терминальный ответ?",
+      "artifact_ref": ".ai-team/runs/muse-wonder-foreign-session-20261014/arch-spec.md#3-adr-0013-аварийный-auto-retry"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "component",
+      "question": "Какие компоненты владеют лимитом, прунингом, retry и конфигурацией?",
+      "artifact_ref": ".ai-team/runs/muse-wonder-foreign-session-20261014/arch-spec.md#5-границы-и-контракты"
+    }
+  ],
+  "evolution": {
+    "compatibility": "Запросы не больше 400000 оценочных токенов идут дословно; формат успеха и SSE не меняется; muse-spark-* и прочие провайдеры не затронуты",
+    "migration": "NOT_APPLICABLE: данные не хранятся, прунинг без состояния; обновляются только зеркало server.py и четыре значения в двух профилях",
+    "rollout": "Бэкап в ~/work/backups/, тесты, Совет ACCEPT, MR, копия server.py в зеркало и перезапуск моста, проверка /health и /v1/models, правка четырёх значений профилей desktop и web, перезапуск открытых слотов DSH, тяжёлый путь в живой сессии владельца",
+    "rollback": "Восстановить зеркало и два профиля из бэкапа и перезапустить мост; миграций данных нет"
+  },
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Оценка bytes//3 ниже реального токенового счёта Meta, и запрос после прунинга всё равно превышает 460800",
+      "probability": "low",
+      "impact": "high",
+      "mitigation": "Запас 60800 до лимита Meta, цель 320000, единичный retry до 200000 и сравнение оценки с реальным usage.prompt_tokens на тяжёлом пути",
+      "verification_ids": ["VER-006", "VER-007"]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Без компакции клиента начало хвоста сдвигается каждый ход, префикс хвоста меняется и кэш по хвосту не попадает",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Гистерезис и стабильный префикс (system, tools, первый user, маркер); клиент с окном 400000 компактирует сам; квантование границы отложено",
+      "verification_ids": ["VER-001"]
+    },
+    {
+      "id": "RISK-003",
+      "scenario": "Реплики отброшены без ведома пользователя",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Маркер для модели и строка context_prune для оператора; тела не логируются",
+      "verification_ids": ["VER-001", "VER-004"]
+    },
+    {
+      "id": "RISK-004",
+      "scenario": "Уже открытые слоты DSH держат окно 1048576 и не компактируют историю",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Мост защищает прунингом независимо от клиента; открытые слоты перезапускаются; тяжёлый путь выполняется в слоте владельца",
+      "verification_ids": ["VER-005", "VER-006"]
+    },
+    {
+      "id": "RISK-005",
+      "scenario": "Meta меняет текст ошибки жёсткого порога, и retry перестаёт срабатывать, либо подстрока совпадает с обычным текстом",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Константа подстроки и тест; поиск только в канале ошибки; сбой деградирует до обычного 502",
+      "verification_ids": ["VER-002"]
+    },
+    {
+      "id": "RISK-006",
+      "scenario": "Ошибка в retry оставляет процесс первой попытки живым или слот занятым",
+      "probability": "low",
+      "impact": "high",
+      "mitigation": "Обе попытки в общем runs, закрываются в finally; retry только при подтверждённой смерти первой; карантин слота сохранён; тесты отключений и карантина",
+      "verification_ids": ["VER-002", "VER-004"]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": ["REQ-01", "AD-001", "AD-002", "QA-001", "QA-002", "QA-005", "BND-001", "CD-002", "RISK-002", "RISK-003"],
+      "kind": "command",
+      "command": "cd ~/work/src/cli-agent-bridge && uv run --no-project --with pytest python -m pytest tests/test_muse_bridge_killpg.py -q -k 'ContextEstimate or ContextPrune'",
+      "expected": "exit 0; T-01..T-11, T-13, T-14: пороги, кириллица, tool-группы, обязательный набор, неизменность входа",
+      "environment": "локальный репозиторий, pytest через uv --no-project",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": ["REQ-01", "AD-003", "QA-004", "QA-005", "QA-006", "BND-002", "CD-002", "CD-003", "RISK-005", "RISK-006"],
+      "kind": "command",
+      "command": "cd ~/work/src/cli-agent-bridge && uv run --no-project --with pytest python -m pytest tests/test_muse_bridge_killpg.py -q -k 'ContextRetry'",
+      "expected": "exit 0; T-12, T-15..T-22: один повтор, терминальный 502, отказ при большом обязательном наборе, отключение клиента, карантин",
+      "environment": "локальный репозиторий, заглушка CLI через install_protocol_wrapper",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": ["AD-001", "QA-003", "CD-001"],
+      "kind": "command",
+      "command": "cd ~/work/src/cli-agent-bridge && uv run --no-project --with pytest python -m pytest tests/test_muse_bridge_killpg.py -q -k 'AllowedModelsSync'",
+      "expected": "exit 0; T-00: context_length 400000 для двух wonder-моделей в ALLOWED_MODELS, /health и /v1/models",
+      "environment": "локальный репозиторий",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": ["NFR-01", "NFR-02", "AD-004", "QA-006", "CD-003", "RISK-003", "RISK-006"],
+      "kind": "command",
+      "command": "cd ~/work/src/cli-agent-bridge && ruff format --check . && ruff check . && basedpyright && uv run --no-project --with pytest python -m pytest -q tests/",
+      "expected": "exit 0; Full Suite Gate; в том числе T-23 (context_prune без тел и секретов, _wlock свободен) и все прежние тесты моста",
+      "environment": "локальный репозиторий; pyproject.toml отсутствует, поэтому uv run --no-project",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": ["QA-003", "CD-001", "RISK-004"],
+      "kind": "command",
+      "command": "diff -q ~/.dsh/bridges/muse-bridge/server.py ~/work/src/cli-agent-bridge/bridges/muse-bridge/server.py && rg -n -A2 'id: muse-wonder' ~/.dsh/profiles/desktop/cordis.patch.yml ~/.dsh/profiles/web/cordis.patch.yml && curl -sS -m 5 http://127.0.0.1:${MUSE_BRIDGE_PORT}/v1/models",
+      "expected": "зеркало совпадает с репозиторием; у обоих wonder-id в desktop и web contextWindow: 400000; /v1/models отдаёт context_length 400000 для двух моделей; diff профилей против бэкапа ровно 4 строки",
+      "environment": "боевой мост владельца после выката; порт и ключ из окружения моста, секреты в вывод не печатаются",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": ["REQ-01", "QA-001", "RISK-001", "RISK-004"],
+      "kind": "manual",
+      "command": null,
+      "expected": "Бинарный gate: в живой существующей сессии владельца с историей больше 460800 токенов переключение на muse-wonder-1.0 и на muse-wonder-full-1.0, реальная работа с вызовом инструмента, повторный ход и два параллельных хода завершаются без terminal_failed; в bridge.log есть context_prune reason=proactive_prune; usage.prompt_tokens меньше 460800; записано отношение оценки к реальному счёту (закрывает ASM-003 и ASM-004)",
+      "environment": "живая сессия DSH владельца, боевой мост, слоты перезапущены после смены профилей",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": ["QA-004", "RISK-001"],
+      "kind": "manual",
+      "command": null,
+      "expected": "Бинарный gate: на отдельном экземпляре моста (другой порт, MUSE_BRIDGE_CLI указывает на заглушку, отдающую ошибку жёсткого порога на первой попытке) запрос в JSON и в SSE завершается успехом после ровно одного повтора; при ошибке на обеих попытках приходит терминальный 502 / SSE error и один [DONE]; боевой мост не затронут",
+      "environment": "отдельный экземпляр моста с заглушкой CLI, не боевой",
+      "owner": "verifier"
+    }
+  ],
+  "protected_paths": [],
+  "materialization": [],
+  "approval": {
+    "status": "NOT_REQUIRED",
+    "decision_ids": [],
+    "approved_by": null,
+    "evidence_ref": null
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED",
+    "reviewer": null,
+    "evidence_ref": null
+  },
+  "open_questions": [
+    {
+      "id": "Q-001",
+      "question": "Подтвердить: единый источник хранится под существующим ключом context_length в ALLOWED_MODELS (бриф называет contextWindow, который есть только в YAML профилей); второй ключ не вводится",
+      "blocking": false
+    },
+    {
+      "id": "Q-002",
+      "question": "muse-spark-* тоже объявлены на 1048576 и ходят через тот же жёсткий лимит Meta; в этот MR не входят. Расширять ли на них защиту (достаточно сменить значение в ALLOWED_MODELS)?",
+      "blocking": false
+    },
+    {
+      "id": "Q-003",
+      "question": "Штатный способ перезапуска боевого моста для шага выката не найден в брифе; Coder/Orchestrator берёт его из knowledge-base, при отсутствии возвращает BLOCKED владельцу",
+      "blocking": false
+    }
+  ],
+  "deferred": [
+    "заголовок X-Muse-Context-Pruned в ответе",
+    "переопределение лимитов и целевых долей через env",
+    "квантование границы среза или серверное состояние для стабильности префикса хвоста без компакции клиента",
+    "защита моделей muse-spark-* (Q-002)"
+  ]
+}

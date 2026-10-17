@@ -1,0 +1,88 @@
+{
+ "schema_version": "1.0",
+ "run_id": "muse-wonder-approval-20261015",
+ "base_sha": "1f1071a2330574bf90b53bbcaa65d3bf5bc29c2b",
+ "initial_worktree_diff_sha256": "7ffec7e0b134308ae412ef1861fc8ba5b2ec222be2f33c0b538a7d1f5e55006e",
+ "note": "в рабочем дереве незакоммиченный принятый REQ-MUSE-001 (server.py, test_muse_bridge_killpg.py); Coder коммитом №1 фиксирует его как baseline до своих правок",
+ "oracle_files": {
+  "tests/baseline_inventory.json": "ef040fd75700bda366f761c93a7335dc2b4d8122d231cb91f63a1c7773bf68c6",
+  "tests/bridge_testlib.py": "6a9b1131097b809dc48eb31c886f68c6eff4f5ed02603d73ce595f73f7064917",
+  "tests/fake_droid.py": "947bd4f65dddeb3a563c83be85115921f70c7f2528687a050903f72400d4c4af",
+  "tests/rpc_testlib.py": "221d6b502b64b3cf503dc34759b0f4d7eae632f507b9e1c3dfaa5a2a876b7933",
+  "tests/test_b_guard.py": "ec1ec30ed82353ba379c0ed0db860b9877de6a93849f9a4f764ed53703e351ed",
+  "tests/test_backend_contract.py": "89d281bdd850f472cf1ee0888b4c60fa27e75c970a85553ae41a8f3128ab3abb",
+  "tests/test_bridge_http.py": "b36c4987f41330eaadd9a4256bce4c868ae0770259ec8be5342da78d64ec1383",
+  "tests/test_bridge_strict.py": "5ea51505c881b7a4022e51e26085b7adeaad45d7798b34768c4922387b4232cb",
+  "tests/test_cache_usage.py": "5c53254f4d890f3e1281f882847757ef589761ce85e3de38d3b2e61c867420b3",
+  "tests/test_cycle4_tools.py": "64c9c848ed9f25c9cde5414046b69753ba661e4f64e39b84db2b4ac00758713d",
+  "tests/test_cycle5_rework.py": "88bba572ac4cb3f6d862c283ed9bc84d19f22c7068dc07825fe33acc3014194b",
+  "tests/test_cycle6_rework.py": "2db840faa7348a057184e2b7800e08ede02c0f6df65595fae7331861e0fe1502",
+  "tests/test_fleet_v3.py": "26f8cab589f599aba7e66b028c70984c87036d0536f73128f5d18c5fa775c60e",
+  "tests/test_framing_strict.py": "dcea631c22f481b841588bd3beefbc100df10ab25485cffa86d53ae5569f3305",
+  "tests/test_hub_integration.py": "389fbcd9e1ab0cf25f854021f819302da548efcc5790c970d5a428df3d4e8b61",
+  "tests/test_images_strict.py": "d9f63c9b4edad28278e98d60957cf7bfd354f870f515d921b632713c56bbb676",
+  "tests/test_launch_env.py": "e7103c796f37bad9eab38d0a00db7a9acbc6f9d27198a143108094c3994fbce6",
+  "tests/test_live_stream.py": "96fc008050cc260357cd582c60d3a6683bf94887b53b2adc3e0f8234eee69a37",
+  "tests/test_muse_adapter.py": "f0f68113f86b5d995c3ef3aae225eb0a3c9b57088e5f35c3c57aeb00af41cf5b",
+  "tests/test_muse_bridge_killpg.py": "952fc836486f2979bd5db9822b68d24fb6d77b58d5b3750f399ae25cd0b43d27",
+  "tests/test_rpc_core.py": "0743cab97bb36610b970984d334a096ba146f8eb6add7faa38e989c4c7f34cda",
+  "tests/test_rpc_cycle3.py": "95e54124c4e42e7d0d30d8ecb45eab68412e60b8771a1294a81ea286e3c88110",
+  "tests/test_rpc_cycle4.py": "4c7cbc9cb43352fe35b632a466d0de889fdbf52c1bb596ac1c59fa3650e8738e",
+  "tests/test_rpc_lifecycle.py": "c828843a100ae50408913d0ba1533736513f05aa4ea01b8dcb6b8ed9167d7171",
+  "tests/test_rpc_rework.py": "1195cf1e0e8dfed253d12c1ef329252a86f6e743c85bc77fd9ee133d96f0a7b1",
+  "tests/test_run_integration.py": "232998884333884d1fadc2d612f50b0ae1724066f0194fb5b264573901209628",
+  "tests/test_tool_parser.py": "be27f02ab612aa292197dc7602d9f84a5265b7f6ff90bfe9f65fac3d57b3c0bd",
+  "ruff.toml": "571ccfac063812ed2b0b7e134f3b3d227cc016c7f88bdbb2b8ccfbed1e8703b3",
+  "pyrightconfig.json": "e51484f43a6239fc638546230a93e5acb8299fc09f4bafc081a05a46ceee1a05"
+ },
+ "protected_paths": {
+  "docs/adr/0003-muse-serve-approval-allowall.md": "fcf1aea898d05a67857bcf30d812c0217ede954f0fea5d17aba596d278335c30"
+ },
+ "ci_config": "нет CI-файлов в репозитории (проверено ls -a: .gitlab-ci.yml/.github/ отсутствуют)",
+ "lockfiles": "нет (uv --no-project --with pytest)",
+ "toolchain": {
+  "python": "Python 3.14.6",
+  "uv": "uv 0.12.19 (bea138450 2026-09-24 aarch64-apple-darwin)"
+ },
+ "baseline": {
+  "L1_muse_file": {
+   "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py",
+   "passed": 67,
+   "failed": 0,
+   "log": "/tmp/cel-runs/muse-wonder-serve-approval/baseline/pytest.log"
+  },
+  "L2_full_suite": {
+   "command": "uv run --no-project --with pytest python -m pytest -q tests",
+   "passed": 604,
+   "failed": 1,
+   "known_failures": [
+    "tests/test_b_guard.py::TestTm018Guard::test_tm018_live_check_subprocess (REQ003_SIZE_EXCEEDED block=61367 limit=60000; не связан с мостом; PASS_WITH_PREEXISTING по verification-integrity §8)"
+   ],
+   "log": "/tmp/cel-runs/muse-wonder-serve-approval/baseline/pytest-full.log"
+  },
+  "ruff_format": "2 files already formatted (server.py, test_muse_bridge_killpg.py)",
+  "ruff_check": "All checks passed",
+  "basedpyright": "0 errors, 1448 warnings (exit=1 из-за warnings; baseline)"
+ },
+ "levels": {
+  "L1": "ruff format --check + ruff check + basedpyright по двум файлам + affected-тесты (-k Approval|TransientRetry|LiveReasoning|test_s1|ContextPrune|ContextRetry|AllowedModelsSync) и весь tests/test_muse_bridge_killpg.py",
+  "L2": "uv run --no-project --with pytest python -m pytest -q tests (полный сьют; clean-room Шаг 2)",
+  "L3": "N/A: в репозитории нет разбиения heavy/measured (маркеры не найдены); тяжёлый путь владельца = VER-009 (живой ход в DSH после деплоя), VER-010 (стенд net-timeout)"
+ },
+ "oracle_change_envelope": {
+  "allowed": [
+   "tests/test_muse_bridge_killpg.py::test_approval_falls_back_to_exec_without_decide (смена контракта AD-002)",
+   "tests/test_muse_bridge_killpg.py::test_t18_serve_fallback_and_network_retry_preserve_context_retry_budget (смена контракта AD-003)"
+  ],
+  "rule": "каждое изменение — oracle_change в handoff, принимает read-only verifier/панель; удаление/ослабление/skip/xfail запрещены"
+ },
+ "required_jobs": [
+  "VER-001",
+  "VER-002",
+  "VER-003",
+  "VER-004",
+  "VER-005",
+  "VER-006",
+  "VER-007"
+ ]
+}

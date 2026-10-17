@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 14,
+  "pass": "a2",
+  "pass_round": 6,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+  "artifact_sha256": "c1fc50b0f918b7ef638637c4ccfab6cc44f1238470d53bf49f7883cbf6a33c3e",
+  "seed_input": "c1fc50b0#muse-wonder-approval-20261015#c2#R6",
+  "seed_hex": "efae03b6",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "079261a6da5c1f5642d6453d9eccd964265bf9944aae3a54039dc1bf96120802"
+    },
+    {
+      "rank": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "7dd273c94ae8d83faa87b8ad1e85c3c963a9dd8060b24419b70925f727ff6f25"
+    },
+    {
+      "rank": 3,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "8d74787077b335ea56af5a5510cdaf4eda07c0608d1aee32f7ed3e64ac19a048"
+    },
+    {
+      "rank": 4,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "a8e175300dfda9c01daceefcce255f2268a1f24b56638f86d04ec2d89e59f06b"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Визионер"
+    },
+    {
+      "k": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Скептик"
+    },
+    {
+      "k": 3,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "claude-p",
+      "hat": "Реалист"
+    }
+  ],
+  "hat_index_base": 2,
+  "hat_k": 0,
+  "hat_rotation": "ok",
+  "rotation_ok": "relaxed",
+  "rotation_reason": "пул судей = 3 семьи (слот Architect исключён, SK-A-12); состав раунда не может отличаться от прежнего, меняются ранги, шляпы и транспорты",
+  "label": "D3",
+  "brief_review": {
+    "visionary": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 1,
+      "checklist_gen": 1,
+      "approved_sha256": "249fa36f4515f03acf21b01e20b8c56cc0f5555e2adf07526ec6571d158d16e5",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r6-a2-visionary/verdict-v1.json",
+      "brief_review_calls": 2,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    },
+    "skeptic": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 1,
+      "checklist_gen": 1,
+      "approved_sha256": "14e51f8d6915b7bd8a743a762658ac378d30e41f7de42be08cab5a5bd877912c",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r6-a2-skeptic/verdict-v1.json",
+      "brief_review_calls": 2,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    },
+    "realist": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 1,
+      "checklist_gen": 1,
+      "approved_sha256": "fd0d8a57e4222ebd51be48eeada4bb67c60c799b95209d95510daeabddf2d77a",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r6-a2-realist/verdict-v1.json",
+      "brief_review_calls": 1,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    }
+  }
+}

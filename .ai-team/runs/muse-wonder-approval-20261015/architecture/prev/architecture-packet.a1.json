@@ -1,0 +1,829 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-MUSE-002",
+  "run_id": "muse-wonder-approval-20261015",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "APPROVED",
+  "role_plan": {
+    "path": ".ai-team/runs/muse-wonder-approval-20261015/plans/architect-01.json",
+    "sha256": "7aacb3bf0bf5f3cd1857fad223dd66ae6551d3f5d626cbf0657222da6e2970af"
+  },
+  "spec_path": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md",
+  "requirement_ids": ["REQ-MUSE-002", "REQ-MUSE-003", "REQ-MUSE-004"],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1757-1762 (ServeRun.execute._handle_event), :1945-1948 (finally close)",
+      "claim": "F-01/F-02: единственная обработка approval/request и userInput/request безусловно бросает ServeUnavailable без JSON-RPC ответа; finally убивает группу serve, состояние хода теряется. Перепроверено архитектором 2026-10-15 (grep путь+символ, строки совпадают с ledger)"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2400-2446 (Handler.run_attempt), :2411-2446",
+      "claim": "F-03: перехват ServeUnavailable запускает muse exec с полным attempt_prompt с нуля (via=exec-after-serve-fallback); при _client_gone exec не запускается. Перепроверено 2026-10-15"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "command",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.log:1034-1042 и :1243-1252; grep -c 'serve needs interaction' = 29 (27 spark, 2 wonder)",
+      "claim": "F-05/F-06/F-07/F-42: ходы wonder до approval 275 с (13.10, повтор 2242 с до client gone, prompt 1326216 симв.) и 412 с (14.10, повтор 455 с до net-timeout, prompt 768118 симв.); цена перезапуска на spark до 1521 с (F-41)"
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1816-1829 (session/start)",
+      "claim": "F-08/F-31: session/start передаёт только commandId, workspaceRoot, providerId=meta, modelId без approvalMode; комментарий о потолке approval_mode_ceiling на 1.4.7/1.4.8 не подтверждён, отказы -32030 в логе только на 1.4.2. Перепроверено 2026-10-15"
+    },
+    {
+      "id": "EVD-005",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1648-1659 (serve argv), :1380-1401 (exec argv)",
+      "claim": "F-09: serve запускается с --disable-write --disable-shell --trust-workspace --no-session-log; exec дополнительно --yolo --disable-web-tools --disable-reminders; --disable-sandbox нигде не передаётся"
+    },
+    {
+      "id": "EVD-006",
+      "kind": "document",
+      "ref": "MSP schema 1.4.7/1.4.8 $defs.RequestReceipt, ApprovalDecideParams/Result (Explorer D D-02/D-03/D-08/D-09); evidence-ledger F-23/F-28",
+      "claim": "F-23/F-28: серверных запросов ровно два (approval/request, userInput/request), результат RequestReceipt только подтверждает показ; решение идёт approval/decide с choiceId из availableChoices, commandId UUIDv7, requirementId равным currentRequirementId, sessionId; terminal=false означает обновлённый approval/request; отклонить без решения по проводу нельзя"
+    },
+    {
+      "id": "EVD-007",
+      "kind": "document",
+      "ref": "MSP schema $defs.ApprovalMode, SessionStartParams.approvalMode, SessionSetApprovalModeParams (Explorer D D-12/D-13/D-14); F-29/F-32",
+      "claim": "F-29/F-32: ApprovalMode закрытый enum allowAll/promptUnmatched/onRequest/denyUnmatched; без поля и при null серверный default; session/start единственная поверхность политики неинтерактивного запуска; setApprovalMode действует со следующего действия и не решает pending approval"
+    },
+    {
+      "id": "EVD-008",
+      "kind": "command",
+      "ref": "python3 -I /tmp/cel-runs/muse-wonder-serve-approval/explorer-D/poc_session_start.py (probe-*.json, без turn/start)",
+      "claim": "F-30: на serve 1.4.7 и 1.4.8 при флагах моста все четыре явных approvalMode приняты и возвращены как эффективные; без поля эффективный режим promptUnmatched (source startup); setApprovalMode принял все четыре режима подряд (F-32)"
+    },
+    {
+      "id": "EVD-009",
+      "kind": "document",
+      "ref": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md (2026-10-15 05:44 MSK)",
+      "claim": "OPEN-07 закрыт владельцем: политика approval неинтерактивного моста Авторазрешение (allowAll); риск принят владельцем при сохранённых --disable-write --disable-shell и включённой песочнице"
+    },
+    {
+      "id": "EVD-010",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:114 (NETWORK_RETRY_MARKER), :2435-2445",
+      "claim": "F-12/F-45: сетевой повтор exec срабатывает один раз только по подстроке network connection could not be opened и только внутри exec-after-serve-fallback; net-timeout мостом не ретраится, текст ошибки в коде моста не определяется. Перепроверено 2026-10-15"
+    },
+    {
+      "id": "EVD-011",
+      "kind": "command",
+      "ref": "/tmp/cel-runs/muse-wonder-serve-approval/bench/results.tsv:2-6; bridge.log (F-13/F-43)",
+      "claim": "F-14/F-44/F-43: бенч wonder exec max 100 KB 51.1 с ok, 400 KB 251.2 с ok, 800 KB 281.3 с ok, 1200 KB 236.1 с fail (after 5 provider attempts), 800 KB high 31.5 с fail net-timeout; в логе net-timeout за 20 с на effort low и max и за 452 с (after 2 provider attempts); serve-ходы wonder без approval 8-94 с (24 хода) и 205-237 с на длинных"
+    },
+    {
+      "id": "EVD-012",
+      "kind": "command",
+      "ref": "grep -c по ~/Library/Logs/Factory/proxyrack-forward.log (151006 строк): retry timed out 26789, для api.meta.ai:443 3893 (F-46)",
+      "claim": "F-46: внешний слой Meta через форвардер 127.0.0.1:10816 на ProxyRack нестабилен; источник net-timeout вне моста, сопоставления времён с ходами нет (OPEN-08)"
+    },
+    {
+      "id": "EVD-013",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:65-66, :138, :1696-1697, :1455-1460, :2375-2384",
+      "claim": "F-15/F-21: TIMEOUT_S=1800 отдельно на serve-ход и на каждый exec Run (при fallback таймер заново), SERVE_SPAWN_TIMEOUT_S=30 на handshake, idle-таймаута чтения serve нет, MAX_CONCURRENT=2 с ожиданием слота до 1800 с далее 503. Перепроверено 2026-10-15"
+    },
+    {
+      "id": "EVD-014",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1185, :2034-2070, :1781-1796, :2151-2198",
+      "claim": "F-16/F-17: SSE 200 и role-кадр уходят до хода, каждые KEEPALIVE_S=15 с идёт data-чанк с пустым content (не SSE-комментарий); summary.N копятся в памяти и уходят одним reasoning_content после хода, content кусками около 300 символов. Перепроверено 2026-10-15"
+    },
+    {
+      "id": "EVD-015",
+      "kind": "code",
+      "ref": "server.py:130,134-137 (droid-мост :9882, LIVE_WRITE_TIMEOUT_S=3, коалесценция около 40 мс, : keepalive)",
+      "claim": "F-18: соседний droid-мост того же DSH отдаёт content и reasoning_content live-дельтами и SSE-комментарием : keepalive каждые 15 с; клиент DSH live reasoning_content уже потребляет"
+    },
+    {
+      "id": "EVD-016",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/web/cordis.patch.yml:426-437, desktop:327-338",
+      "claim": "F-19: клиент DSH для muse-bridge api=openai-completions, timeoutMs=1900000, streamIdleTimeoutMs=1900000, maxRetries=0, supportsReasoningEffort=true; документации idle-watchdog нет (OPEN-03)"
+    },
+    {
+      "id": "EVD-017",
+      "kind": "code",
+      "ref": "tests/test_muse_bridge_killpg.py:979-1021 (install_protocol_wrapper), :1181-1185, :1278-1305, :2068, :2582",
+      "claim": "F-20/F-52: тесты закрепляют старое поведение (test_approval_falls_back_to_exec_without_decide требует отсутствия approval/decide; test_s1 требует отсутствия : keepalive); фикстура approval шлёт params пустым объектом; baseline файла 67 passed (task envelope). Перепроверено 2026-10-15"
+    },
+    {
+      "id": "EVD-018",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:87-88, :766, :1966, :2172, :2452-2528; .ai-team/runs/muse-wonder-foreign-session-20261014/architecture-packet.json AD-001..AD-004",
+      "claim": "F-49: REQ-MUSE-001 в рабочем дереве (лимит 400000, цель 320000, retry 200000, ровно один контекстный retry только до первого контентного кадра _content_started, отдельный счётчик от сетевого retry); гарантии прошлого пакета наследуются без пересмотра"
+    },
+    {
+      "id": "EVD-019",
+      "kind": "document",
+      "ref": "MSP schema 1.4.7 fp sha256:6de32db08bbb и 1.4.8 (F-22/F-25/F-36); muse-cli.sh --version = 1.4.8-R6256.1 (проверено 2026-10-15)",
+      "claim": "F-36: лаунчер автообновился 1.4.7 -> 1.4.8 2026-10-15 05:29 MSK; методы/requests/approval-определения совпадают (69 методов); 1.4.8 добавляет уведомление turn/modelRetryScheduled (attempt, maxAttempts, retryDelayMs, errorKind); мост логирует serverInfo.version и schema fingerprint при каждом serve init (server.py:1810-1812)"
+    },
+    {
+      "id": "EVD-020",
+      "kind": "command",
+      "ref": "cmp bridges/muse-bridge/server.py ~/.dsh/bridges/muse-bridge/server.py = IDENT; ~/Library/LaunchAgents/com.user.dsh-muse-bridge.plist; launchctl list (com.user.dsh-muse-bridge); git status ветка dev, M server.py и тесты +2941 строк (F-51)",
+      "claim": "F-21/F-51: деплой-копия побайтово равна репозиторной, процесс под launchd com.user.dsh-muse-bridge (start.sh exec python3 server.py, ключ из env или ~/.dsh/.env); рабочее дерево dev несёт незакоммиченные REQ-MUSE-001 правки, откат опирается на бэкап"
+    },
+    {
+      "id": "EVD-021",
+      "kind": "document",
+      "ref": "MSP schema $defs.ApprovalRequestParams/ApprovalSubject/ApprovalChoice (Explorer D D-06/D-07/D-35/D-38); F-26/F-27/F-37",
+      "claim": "F-37/OPEN-01: живой payload approval/request не получен (toolName, subject, choiceId неизвестны); схема требует toolName, subject.kind из shell/fileAccess/network/unixSocket/process/tool, protectedWrite, judgeEscalated, rawArgs, availableChoices с choiceId свободной строкой и decision из открытого enum; каталога инструментов без хода нет"
+    },
+    {
+      "id": "EVD-022",
+      "kind": "url",
+      "ref": "https://github.com/meta-models/muse-code-sdk/issues/80",
+      "claim": "F-11: в muse serve встроенный LLM approval judge отключён (outcome=disabled), в exec включён по умолчанию и в мосте подавлен --yolo; serve --help фиксирует, что песочница конструируется хостом и по проводу не торгуется, approval mode выбирается только на проводе (F-10)"
+    }
+  ],
+  "risk_triggers": ["security", "trust-boundary"],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "OPEN-01: запросить approval может любой не отключённый флагами serve инструмент; мост логирует только безопасные поля params (toolName, subject.kind, protectedWrite, judgeEscalated, список choiceId и decision) без rawArgs и тел вопросов userInput",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-002",
+      "statement": "OPEN-02: net-timeout не зависит от размера промпта и effort в пределах бенча из пяти точек; повтор проектируется без привязки к размеру",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-003",
+      "statement": "OPEN-03: клиент DSH опирается на streamIdleTimeoutMs=1900000 и уже потребляет live reasoning_content от droid-моста; пустые data-чанки keepalive сохраняются без перехода на SSE-комментарии",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-004",
+      "statement": "OPEN-04: item/delta с field summary.N могут приходить по ходу хода; мост логирует время первой summary-дельты от старта хода для закрытия вопроса наблюдением",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-005",
+      "statement": "OPEN-05: повторы провайдера внутри CLI независимы от повторов моста; повтор моста ограничен малым числом попыток и общим дедлайном, turn/modelRetryScheduled только логируется",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-006",
+      "statement": "OPEN-06: approval/decide с разрешающим выбором продолжает ход; влияние turn/cancel на pending approval схемой не описано, поэтому cancel применяется только как терминальная деградация без ожидания продолжения хода",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-007",
+      "statement": "OPEN-08: net-timeout внешний транзиентный фактор (ProxyRack, форвардер :10816 или сторона Meta); мост повтор ограничивает и логирует, источник не чинит",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-008",
+      "statement": "OPEN-09: схемы CLI 1.4.7 и 1.4.8 эквивалентны по approval и протоколу хода; serverInfo.version и fingerprint схемы проверяются логом при каждом старте serve, неизвестная версия ход не блокирует",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": []
+    },
+    {
+      "id": "ASM-009",
+      "statement": "OPEN-07: политика approval неинтерактивного моста авторазрешение allowAll на session/start по решению владельца 2026-10-15 05:44 MSK при сохранённых --disable-write --disable-shell и включённой песочнице",
+      "status": "VALIDATED",
+      "class": "blocker",
+      "evidence_ids": ["EVD-009", "EVD-008"]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "APPROVED",
+      "kind": "one-way",
+      "question": "Какую политику approval объявляет неинтерактивный мост сессии muse serve, чтобы ход не перезапускался с нуля (REQ-MUSE-002)?",
+      "choice": "approvalMode=allowAll в session/start для каждого ServeRun (все модели, включая muse-spark-*); эффективный режим из результата логируется; флаги serve и песочница без изменений, --disable-sandbox не передаётся. Решение владельца по OPEN-07 (EVD-009), детализация в proposals/docs/adr/0003-muse-serve-approval-allowall.md",
+      "alternatives": [
+        "denyUnmatched на session/start: ход сохраняется, несопоставленные действия отклоняются без запроса; исход хода после отказа не наблюдался (OPEN-06)",
+        "оставить default promptUnmatched и отвечать approval/decide с denied: риск повторных запросов того же действия зафиксирован прошлым циклом (F-50)",
+        "передача решения пользователю DSH: канала в замороженном OpenAI-контракте нет, ход ждёт человека без серверного таймера (F-39)",
+        "статус-кво ServeUnavailable с exec-рестартом: измеренные потери 275-412 с мышления и до 2242 с повтора (EVD-003)"
+      ],
+      "drivers": [
+        "REQ-MUSE-002: ни один approval/userInput не стоит полного переигрыва промпта (768118-1326216 символов в инцидентах)",
+        "у моста нет интерактивного пользователя, клиент DSH без канала approval и без повторов (EVD-016)",
+        "allowAll принят сервером на 1.4.7 и 1.4.8 при флагах моста (EVD-008), session/start штатная поверхность политики (EVD-007)",
+        "write/shell отключены при конструировании хоста serve и по проводу не включаются (EVD-005, EVD-022)"
+      ],
+      "consequences": [
+        "модель получает авторазрешение для инструментов, не отключённых флагами serve (subject.kind network/tool и другие по EVD-021); компенсация аудит-логом решений в AD-002 и threat model пакета",
+        "поведение общее для muse-spark-* (27 из 29 исторических переходов) и muse-wonder-* без ветвления по модели",
+        "смена политики в будущем локализована в поле session/start и границе ApprovalPolicy (BND-001), остальной пакет от выбора не зависит",
+        "тест test_approval_falls_back_to_exec_without_decide закрепляет противоположный контракт и заменяется по AD-002, это смена контракта поведения по REQ-MUSE-002, а не ослабление"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'Approval'",
+        "expected": "exit 0; в rpc.jsonl фейкового MSP session/start содержит approvalMode=allowAll, serve argv без --disable-sandbox и с --disable-write --disable-shell, ход с approval завершается via=serve без запуска exec"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Что мост делает внутри хода, если при allowAll сервер всё же прислал approval/request, approval/requested или userInput/request?",
+      "choice": "Тот же ход продолжается: на запрос с id уходит receipt result={} тем же id, затем approval/decide с choiceId только из текущих availableChoices (decision=approved предпочтительнее approvedForSession, approvedPolicyAmendment не выбирается, requirementId дословно равен currentRequirementId, commandId через существующий _uuid7, sessionId из params); approval/requested без id ведёт к тому же decide без receipt, повтор по паре approvalId+requirementId подавляется дедупликацией, ошибка -32051 считается benign; terminal=false обрабатывается следующим обновлённым запросом; userInput/request получает receipt и userInput/cancel без передачи вопросов клиенту. Границы на ход: не более 10 approval/decide и не более 3 userInput/cancel (константы модуля); при отсутствии разрешающего choice, ошибке decide (-32052/-32053/-32050) или превышении границы ход завершается внутри serve выбором abort/denied при его наличии, иначе turn/cancel и терминальной ошибкой клиенту без exec-рестарта. Каждое решение логируется одной строкой безопасных полей через существующую редакцию без rawArgs. Запись в stdin serve после turn/start ограничена дедлайном хода, а не setup-окном 30 с",
+      "alternatives": [
+        "decide с denied при любом запросе: действие отклоняется, продолжение хода после отказа не наблюдалось (OPEN-06), противоречит смыслу allowAll из AD-001",
+        "немедленный turn/cancel при любом запросе: ход теряется без переигрыва, REQ-MUSE-002 выполнен только формально, результат пользователю ошибка вместо ответа",
+        "сохранить ServeUnavailable и exec-рестарт как fallback: возвращает измеренную потерю EVD-003 и двойной вызов модели"
+      ],
+      "drivers": [
+        "receipt не меняет состояние, решение обязано идти отдельной командой, отклонить без решения нельзя (EVD-006)",
+        "choiceId свободная строка без enum и живой payload неизвестен, поэтому выбор только из availableChoices по полю decision (EVD-021)",
+        "approval приходил через 275 с и 412 с после старта хода при setup-окне записи 30 с (EVD-003, EVD-013): без продления _write_until decide упал бы в ServeUnavailable",
+        "MAX_CONCURRENT=2: цикл запросов внутри хода обязан иметь счётный предел помимо дедлайна 1800 с (EVD-013)"
+      ],
+      "consequences": [
+        "ServeRun получает отправку JSON-RPC ответа по чужому id и учёт pending decide в главном цикле (голые ack чужих rid по-прежнему игнорируются, ошибка pending decide ведёт в деградацию)",
+        "политика выбора изолирована чистой границей ApprovalPolicy (BND-001): смена AD-001 не трогает транспорт, ретрай и SSE",
+        "userInput без пользователя завершается cancelled; если модель после этого завершает ход ошибкой, действует существующий путь model error без fallback",
+        "фикстура install_protocol_wrapper расширяется реальным payload с availableChoices и ветками terminal=false и userInput; старый тест approval заменяется, тесты ServeUnavailable для прочих транспортных сбоев сохраняются"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'Approval'",
+        "expected": "exit 0; receipt и decide в rpc.jsonl, choiceId из availableChoices, второй запрос при terminal=false решён, userInput отменён, границы 10 и 3 останавливают цикл, approval позже setup-окна решается в том же ходе, канарейка rawArgs отсутствует в логе, exec не запущен"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как ограниченно повторять транзиентный net-timeout и родственные транспортные сбои, не нарушая бюджет контекстного retry и идемпотентность SSE (REQ-MUSE-003)?",
+      "choice": "Единый транзиентный повтор на уровне цикла попыток Handler вместо внутреннего exec-only повтора: класс ошибки только по явным маркерам в сыром канале ошибки ([net-timeout], timed out waiting for response data, transport_connect_unreachable из текста REQ-MUSE-003, существующий network connection could not be opened), флаг в результате попытки по образцу hard_threshold; не более 2 повторов с паузой 2 с затем 4 с плюс джиттер до 1 с, пауза прерывается уходом клиента; общий бюджет хода TIMEOUT_S=1800 с от первой попытки, каждая следующая попытка получает только остаток и не стартует при остатке не больше 30 с; отдельный счётчик от контекстного retry ADR-001.3, при hard threshold приоритет у контекстного повтора с прунённым промптом; повтор только при rc не 0, клиент на месте, _content_started ложен, первая группа процессов подтверждена мёртвой, тот же слот без повторного acquire; состояния timeout, spawn_failed, client_gone не повторяются",
+      "alternatives": [
+        "только расширить список маркеров внутреннего exec-повтора: serve net-timeout по-прежнему терминальная ошибка без второй попытки, бюджет и fallback взаимодействуют неявно",
+        "повтор только внутри ServeRun новым serve-процессом: exec-путь и exec-after-fallback остаются без покрытия, два механизма повтора расходятся",
+        "без повтора моста с опорой на provider attempts CLI: бенч и лог показывают финальный отказ после исчерпания попыток провайдера (EVD-011), REQ-MUSE-003 не выполнен"
+      ],
+      "drivers": [
+        "быстрые сбои за 20 с и 31.5 с при успешных ходах 51.1-281.3 с оставляют запас бюджета 1800 с на свежий процесс и новое соединение (EVD-011, EVD-013)",
+        "CLI уже повторяет поток провайдера (attempt 3/4, 4/4, after 5 provider attempts), поэтому повтор моста мал и ограничен (EVD-011, ASM-005)",
+        "клиентский предел 1900 с запрещает складывать полные 1800 с на попытку (EVD-016)",
+        "повтор после первого контентного кадра ломает идемпотентность потока, инвариант EVD-018 расширяется на первую live reasoning-дельту из AD-004"
+      ],
+      "consequences": [
+        "внутренний однократный network retry внутри exec-after-fallback поглощается транзиентным счётчиком; тест test_t18 обновляется с сохранением утверждения, что контекстный бюджет транзиентом не расходуется",
+        "ServeRun и Run получают остаток бюджета вместо полного TIMEOUT_S на повторных попытках; контекстный повтор второй попытки получает тот же остаток, что ужесточает прежний допущенный предел 2xTIMEOUT_S до исходного замысла ADR-001.3",
+        "худший случай остановок ограничен суммой пауз не более 8 с внутри бюджета 1800 с; частичный текст упавших попыток по-прежнему отбрасывается, клиенту виден один терминальный исход",
+        "non-stream JSON повторяется на тех же условиях, так как кадров клиенту до исхода нет"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'TransientRetry'",
+        "expected": "exit 0; net-timeout затем успех даёт ровно 2 попытки и один [DONE] без error между ними, три отказа дают терминальную ошибку после 3 попыток, нет повтора после _content_started, при уходе клиента, при неподтверждённой смерти группы и при остатке бюджета не больше 30 с"
+      }
+    },
+    {
+      "id": "AD-004",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Что получает SSE-клиент во время долгого мышления, кроме пустых keepalive-чанков (REQ-MUSE-004)?",
+      "choice": "Live reasoning_content только на serve-пути: ServeRun через sink Handler отдаёт прирост summary.N дельтами того же поля и той же формы чанка по мере накопления, включая добавки из item/completed; конкатенация live-дельт равна сегодняшнему единому reasoning-чанку того же хода, финальный _send_sse доотдаёт только неотправленный хвост без дубля; пустой data-keepalive каждые 15 с сохраняется без перехода на SSE-комментарии; content и tool_calls по-прежнему буферизуются до конца хода (разбор tool-разметки по полному тексту не меняется); первая непустая reasoning-дельта выставляет _content_started под _wlock и тем закрывает окно повторов AD-003 и контекстного retry; сбой live-записи отключает только live на этот ход без исключения в ServeRun; turn/modelRetryScheduled логируется полями attempt/maxAttempts/retryDelayMs/errorKind и клиенту текстом не отдаётся; время первой summary-дельты от старта хода логируется для OPEN-04; non-stream ответы без изменений",
+      "alternatives": [
+        "SSE-комментарий : keepalive по образцу droid-моста вместо пустых data-чанков: реакция pi-ai на комментарии не проверена (OPEN-03), тест test_s1 закрепляет обратное, выигрыш против working keepalive не показан фактами",
+        "live content вместе с reasoning: частичная tool-разметка утекает клиенту до разбора _split_tool_calls по полному тексту, нужен потоковый парсер уровня droid-моста вне объёма REQ-MUSE-004",
+        "статус-кво буферизации: клиент 205-237 с длинных ходов и дольше видит только пустые чанки, прогресс мышления не показан (EVD-011, EVD-014)"
+      ],
+      "drivers": [
+        "тот же клиент DSH уже накапливает live reasoning_content от droid-моста, поле и форма чанка моста не меняются (EVD-015, EVD-016)",
+        "пустые data-чанки доказано держат соединение против клиентского ожидания заголовков около 600 с (F-47 в ledger, EVD-014)",
+        "summary.N единственный прогресс мышления в MSP v1, сырой reasoning-текст протокол не стримит (docstring ServeRun, EVD-014)",
+        "первая live-дельта сдвигает границу безопасного повтора, инвариант обязан быть явным (EVD-018)"
+      ],
+      "consequences": [
+        "единственный contract delta пакета CD-001: reasoning_content приходит несколькими кадрами вместо одного, порядок reasoning раньше content и финальная конкатенация сохранены",
+        "тест test_s1 сохраняется по keepalive и дополняется порядком кадров; exec-ходы live reasoning не имеют и поведение не меняют",
+        "если сервер шлёт summaries только в конце хода (OPEN-04), live вырождается в сегодняшнюю выдачу, соединение по-прежнему держит keepalive; факт фиксируется логом первой дельты на тяжёлом пути",
+        "все записи SSE по-прежнему только через _sse_write под _wlock из Handler, ServeRun сокет не трогает (BND-004)"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'LiveReasoning or test_s1'",
+        "expected": "exit 0; reasoning-дельты приходят до финального кадра в порядке индексов, их конкатенация равна буферизованному варианту, дубля в финале нет, пустые keepalive-чанки сохранены и : keepalive отсутствует, ровно один [DONE]"
+      }
+    },
+    {
+      "id": "AD-005",
+      "status": "INHERITED",
+      "kind": "inherited",
+      "question": "Какие ранее принятые гарантии этот пакет наследует без пересмотра?",
+      "choice": "REQ-MUSE-001 целиком: единый лимит context_length 400000 у wonder-моделей, прунинг до 320000 с обязательным набором и атомарными tool-группами, ровно один контекстный retry до 200000 только до первого контентного кадра, редакция секретов и отражённых промптов, структурный лог context_prune; внешний OpenAI-контракт моста заморожен (/v1/chat/completions, /health, /v1/models, формы ответов и коды); окна muse-spark-* 1048576 не меняются; serve/exec флаги безопасности по EVD-005 не ослабляются",
+      "alternatives": [],
+      "drivers": [
+        "прошлый пакет muse-wonder-foreign-session-20261014 AD-001..AD-004 уже в рабочем дереве и подтверждён логами context_prune (EVD-018)",
+        "task envelope замораживает внешний контракт и запрещает переоткрывать REQ-MUSE-001"
+      ],
+      "consequences": [
+        "новые повторы AD-003 живут в отдельных счётчиках и не меняют семантику контекстного retry, кроме общего остатка бюджета по AD-003",
+        "регрессия Context-тестов блокирует сдачу наравне с новыми тестами (VER-004, VER-005)"
+      ],
+      "approval_required": false,
+      "evidence_ids": ["EVD-018", "EVD-005", "EVD-016"],
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'ContextPrune or ContextRetry or AllowedModelsSync'",
+        "expected": "exit 0; пороги 400000/320000/200000, обязательный набор, один контекстный повтор и окна моделей без изменений"
+      }
+    },
+    {
+      "id": "AD-006",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как мост переживает смену версии Muse CLI и возврат потолка approvalMode при автообновлении лаунчера?",
+      "choice": "Каждый ServeRun логирует serverInfo.version, fingerprint схемы и эффективный approvalMode сессии; отказ session/start с -32030 approval_mode_ceiling один раз внутри того же ServeRun повторяет старт без approvalMode с warning в логе и опорой на внутриходовый decide AD-002; неизвестная версия CLI ход не блокирует и отдельно помечается в логе init; закрепление версии лаунчера вне объёма (OPEN-09)",
+      "alternatives": [
+        "жёсткий отказ хода на неизвестной версии: автообновление 1.4.7 -> 1.4.8 без участия моста остановило бы боевой мост (EVD-019)",
+        "без деградации при -32030: возврат потолка старой версии снова уводит каждый ход с approval в exec-рестарт через ServeUnavailable общего вида"
+      ],
+      "drivers": [
+        "потолок существовал на 1.4.2 и отсутствует на 1.4.7/1.4.8, поведение зависит от версии (EVD-004, EVD-008)",
+        "лаунчер обновляется сам и удаляет прежний бинарь, мост версию не контролирует (EVD-019)"
+      ],
+      "consequences": [
+        "деградация видна оператору одной warning строкой с версией сервера, политика AD-001 при этом честно помечена неприменённой на этом ходе",
+        "фейковая фикстура получает ветку отказа -32030 на первый session/start"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'Approval'",
+        "expected": "exit 0; при -32030 на session/start с allowAll второй старт без поля в том же ServeRun, warning в логе, ход доводится через decide без второго процесса serve"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "модель muse-wonder-full-1.0 effort=max в serve",
+      "stimulus": "approval/request через 275-412 с мышления на длинном промпте (768118-1326216 символов)",
+      "environment": "боевой мост :9886, stream=true, клиент DSH на месте",
+      "artifact": "ServeRun и ApprovalPolicy моста",
+      "response": "тот же процесс serve продолжает ход после receipt и approval/decide, exec не запускается, второй turn/start не уходит",
+      "response_measure": "в фейковом MSP ровно один turn/start и нет exec-argv; на тяжёлом пути в bridge.log строка решения approval и done via=serve без fallback exec по этому ходу",
+      "verification_ids": ["VER-001", "VER-009"]
+    },
+    {
+      "id": "QA-002",
+      "quality": "security",
+      "source": "модель запрашивает действие с subject.kind tool или network при allowAll",
+      "stimulus": "approval/request с rawArgs, содержащим канарейку секрета",
+      "environment": "serve с --disable-write --disable-shell, песочница включена",
+      "artifact": "аудит-лог решений моста",
+      "response": "действие авторазрешено только в пределах неотключённых инструментов, в лог попадает одна строка безопасных полей",
+      "response_measure": "строка лога содержит toolName, subject.kind, protectedWrite, judgeEscalated, choiceId и decision; канарейка rawArgs и тело промпта отсутствуют в логе, JSON и SSE; serve argv без --disable-sandbox",
+      "verification_ids": ["VER-001", "VER-005"]
+    },
+    {
+      "id": "QA-003",
+      "quality": "reliability",
+      "source": "транспорт Meta через ProxyRack",
+      "stimulus": "net-timeout за 20-31.5 с как в логе и бенче, затем здоровый ход 51.1-281.3 с",
+      "environment": "до первого контентного кадра, клиент на месте, stream и non-stream",
+      "artifact": "цикл попыток Handler",
+      "response": "мост повторяет ход свежим процессом в пределах общего бюджета 1800 с и отдаёт один успешный исход",
+      "response_measure": "ровно 2 попытки, пауза между ними 2 с плюс джиттер до 1 с, один [DONE] и ни одного error-кадра между попытками, суммарно не дольше TIMEOUT_S от первой попытки",
+      "verification_ids": ["VER-002", "VER-010"]
+    },
+    {
+      "id": "QA-004",
+      "quality": "reliability",
+      "source": "транспорт Meta через ProxyRack",
+      "stimulus": "net-timeout на каждой попытке, включая длинный сбой 452 с из лога",
+      "environment": "клиент на месте, MAX_CONCURRENT=2",
+      "artifact": "цикл попыток Handler и освобождение слота",
+      "response": "после исчерпания повторов один терминальный отказ существующего формата 502 или SSE error с одним [DONE]",
+      "response_measure": "не более 3 попыток суммарно, сумма пауз не более 8 с, остаток бюджета не больше 30 с останавливает повтор раньше, все группы процессов мертвы и слот освобождён ровно один раз",
+      "verification_ids": ["VER-002", "VER-005"]
+    },
+    {
+      "id": "QA-005",
+      "quality": "compatibility",
+      "source": "serve присылает первую summary-дельту, затем ход падает net-timeout",
+      "stimulus": "транзиентная ошибка после первой live reasoning-дельты клиенту",
+      "environment": "stream=true, live reasoning включён AD-004",
+      "artifact": "граница _content_started",
+      "response": "повтор запрещён, клиент получает один терминальный error и один [DONE] без дубля reasoning",
+      "response_measure": "ровно 1 попытка при _content_started истинном; тот же сбой до первой дельты повторяется по QA-003",
+      "verification_ids": ["VER-002", "VER-003"]
+    },
+    {
+      "id": "QA-006",
+      "quality": "usability",
+      "source": "владелец ждёт длинный ход wonder 205-237 с и дольше",
+      "stimulus": "serve присылает summary.N по ходу мышления",
+      "environment": "stream=true, клиент DSH с streamIdleTimeoutMs=1900000",
+      "artifact": "SSE-поток моста",
+      "response": "клиент получает reasoning_content приростами до конца хода, разрывы между любыми кадрами закрывает keepalive 15 с",
+      "response_measure": "первый reasoning-кадр раньше финального кадра в фейковом тесте с задержанными дельтами; конкатенация дельт равна буферизованному reasoning; на тяжёлом пути лог фиксирует секунды до первой summary-дельты (закрытие OPEN-04 наблюдением, порог заранее не выдумывается)",
+      "verification_ids": ["VER-003", "VER-009"]
+    },
+    {
+      "id": "QA-007",
+      "quality": "compatibility",
+      "source": "обычный короткий запрос DSH любой модели, включая muse-spark-*",
+      "stimulus": "ход без approval, без транзиентных сбоев, stream и non-stream",
+      "environment": "мост после выката, профили DSH без изменений",
+      "artifact": "внешний контракт /v1/chat/completions, /health, /v1/models",
+      "response": "формы ответов, коды, порядок финальных кадров и окна моделей как до изменения; внутреннее поле approvalMode клиенту не видно",
+      "response_measure": "полный файл тестов зелён включая прежние 67, /health и /v1/models отдают прежние context_length (wonder 400000, spark 1048576)",
+      "verification_ids": ["VER-004", "VER-005", "VER-008"]
+    },
+    {
+      "id": "QA-008",
+      "quality": "operability",
+      "source": "автообновление Muse CLI, как переход 1.4.7 -> 1.4.8 ночью 15.10",
+      "stimulus": "новая версия возвращает -32030 на явный approvalMode или меняет fingerprint схемы",
+      "environment": "боевой мост без пересборки, следующий ход после обновления",
+      "artifact": "ServeRun init и session/start",
+      "response": "ход деградирует на старт без поля с warning и доводится внутриходовым decide, версия и fingerprint видны в логе",
+      "response_measure": "фейковая ветка -32030 даёт второй session/start без поля в том же процессе и завершённый ход; строка serve init содержит версию сервера на каждом ходе",
+      "verification_ids": ["VER-001", "VER-008"]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "ApprovalPolicy (чистое решение по снимку params внутри server.py)",
+      "responsibility": "по params approval или userInput выдать действие approve с конкретным choiceId, deny/abort, cancel-user-input или fail-turn и аудит-запись только безопасных полей; единственное место знания политики AD-001",
+      "allowed_dependencies": ["stdlib", "_redact_secrets для аудит-строки"],
+      "forbidden_dependencies": ["ServeRun._send и любой I/O", "subprocess", "Handler и SSE-сокет", "чтение rawArgs дальше факта наличия", "глобальное изменяемое состояние между ходами"],
+      "verification_ids": ["VER-001"]
+    },
+    {
+      "id": "BND-002",
+      "component": "ServeRun (MSP-транспорт одного хода serve)",
+      "responsibility": "процесс serve на запрос, handshake с approvalMode и деградацией AD-006, receipt и команды decide/cancel/turn-cancel строго по решению BND-001, дедупликация и границы решений, накопление текста и summaries, вызов live-sink Handler без владения сокетом",
+      "allowed_dependencies": ["ApprovalPolicy (BND-001)", "_uuid7", "_log", "_terminate_run", "live-sink колбэк Handler"],
+      "forbidden_dependencies": ["прямая запись в SSE-сокет", "запуск exec Run", "захват _slots", "решение политики вне BND-001", "логирование rawArgs и тел вопросов"],
+      "verification_ids": ["VER-001", "VER-003"]
+    },
+    {
+      "id": "BND-003",
+      "component": "Handler, цикл попыток хода (run_attempt и окружающие повторы)",
+      "responsibility": "serve-first с exec fallback только по транспортному ServeUnavailable без approval, отдельные счётчики контекстного и транзиентного повторов, общий дедлайн TIMEOUT_S от первой попытки с передачей остатка, проверки клиента, _content_started и dead_confirmed, один слот на весь ход",
+      "allowed_dependencies": ["ServeRun (BND-002)", "Run (exec)", "_prune_messages и _context_limit", "_slots один acquire на запрос", "_watch_client"],
+      "forbidden_dependencies": ["повторный _slots.acquire для повтора", "повтор при _content_started или ушедшем клиенте", "второй контекстный retry", "полный TIMEOUT_S каждой повторной попытке", "content-кадры между попытками"],
+      "verification_ids": ["VER-002", "VER-004"]
+    },
+    {
+      "id": "BND-004",
+      "component": "Handler, SSE-эмиттер (_sse_begin, _keepalive_loop, live reasoning sink, _send_sse)",
+      "responsibility": "единственный писатель в сокет: role-кадр, пустой keepalive 15 с в фазе OPEN, live reasoning-дельты с выставлением _content_started под _wlock, финальная выдача без дубля reasoning, один [DONE]",
+      "allowed_dependencies": ["_sse_write под _wlock", "_sse_chunk", "_split_sse_chunks"],
+      "forbidden_dependencies": ["запись в обход _sse_write", "удержание _wlock во время выполнения модели", "live content и tool_calls до конца хода", "SSE-комментарии keepalive в этом изменении", "исключения live-записи в ServeRun"],
+      "verification_ids": ["VER-003", "VER-005"]
+    },
+    {
+      "id": "BND-005",
+      "component": "Внешняя эксплуатационная граница (DSH, muse CLI и Meta, прокси :10816, launchd-зеркало)",
+      "responsibility": "мост не меняет профили DSH, лаунчер и прокси; деплой только копией server.py в ~/.dsh/bridges/muse-bridge/ и перезапуском com.user.dsh-muse-bridge после бэкапа; источник net-timeout и версии CLI остаются внешними рисками",
+      "allowed_dependencies": ["~/.dsh/bridges/muse-bridge/server.py зеркало", "launchctl kickstart com.user.dsh-muse-bridge", "GET /health и /v1/models с ключом моста"],
+      "forbidden_dependencies": ["правки cordis.patch.yml профилей DSH в этом изменении", "закрепление или откат версии Muse CLI мостом", "изменения форвардера ProxyRack", "записи muse-spark-* в профилях"],
+      "verification_ids": ["VER-008", "VER-009"]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "behavior",
+      "producer": "muse-bridge SSE на POST /v1/chat/completions stream=true, только serve-путь",
+      "consumer": "клиент DSH (openai-completions, OpenAI SDK и pi-ai)",
+      "change": "delta.reasoning_content приходит несколькими кадрами по ходу мышления вместо одного кадра после хода; поле, форма чанка chat.completion.chunk, порядок reasoning раньше tool_calls и content, финальные кадры и [DONE] без изменений; конкатенация дельт равна прежнему единому значению того же хода",
+      "compatibility": "аддитивная фрагментация существующего поля: OpenAI-стрим определён накоплением дельт, тот же клиент уже накапливает live reasoning_content droid-моста (EVD-015), профиль объявляет supportsReasoningEffort=true (EVD-016); non-stream JSON, exec-ходы, /health и /v1/models не затронуты; новых полей, путей и кодов нет",
+      "verification_ids": ["VER-003", "VER-009"]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "dynamic",
+      "question": "Как ход переживает approval внутри serve: session/start allowAll, receipt, decide, terminal=false, userInput/cancel, деградация без exec?",
+      "artifact_ref": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md#2-req-muse-002-approval-без-перезапуска-хода"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "dynamic",
+      "question": "Как взаимодействуют контекстный и транзиентный повторы, общий дедлайн, _content_started и уход клиента?",
+      "artifact_ref": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md#3-req-muse-003-ограниченный-повтор-транзиентных-сбоев"
+    },
+    {
+      "id": "VIEW-003",
+      "type": "dfd",
+      "question": "Где границы доверия allowAll: промпт, инструменты модели, аудит-лог, сеть через прокси?",
+      "artifact_ref": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md#5-безопасность-и-угрозы"
+    },
+    {
+      "id": "VIEW-004",
+      "type": "deployment",
+      "question": "Как изменение доезжает до боевого моста :9886 и откатывается без потери REQ-MUSE-001?",
+      "artifact_ref": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md#7-выкат-проверка-и-откат"
+    }
+  ],
+  "evolution": {
+    "compatibility": "Внешний OpenAI-контракт заморожен, единственный дельта-эффект CD-001 внутри существующего поля; non-stream, exec-путь, /health, /v1/models, окна моделей и профили DSH без изменений; смешанных версий внутри одного процесса нет, перезапуск моста атомарно меняет поведение всех новых ходов, идущие ходы завершаются старым процессом только до перезапуска launchd",
+    "migration": "NOT_APPLICABLE: персистентных данных и схем хранения нет, serve-сессия создаётся на запрос с --no-session-log, состояние повторов и approval живёт только внутри хода; обновляются код репозитория, тесты и деплой-копия server.py",
+    "rollout": "Coder на ветке bugfix/muse-wonder-approval-retry-liveness от фактического дерева dev с REQ-MUSE-001 (git diff зафиксирован до работы, в dev не коммитить); red затем green тесты; бэкап repo и зеркала server.py в ~/work/backups с датой; после ACCEPT панели и MR человеком копия server.py в ~/.dsh/bridges/muse-bridge/server.py, launchctl kickstart -k gui/$(id -u)/com.user.dsh-muse-bridge, проверка VER-008, затем тяжёлый путь VER-009 владельцем; строка ADR 0003 добавляется в docs/adr/INDEX.md тем же MR после материализации proposal оркестратором",
+    "rollback": "Восстановить server.py из бэкапа в репозитории и в ~/.dsh/bridges/muse-bridge/server.py и перезапустить com.user.dsh-muse-bridge той же командой kickstart; данные не мигрировали, профили DSH не менялись, поведение возвращается к ServeUnavailable с exec-фолбэком и буферизованному reasoning целиком"
+  },
+  "threat_model": {
+    "required": true,
+    "assets": [
+      "файлы рабочего каталога serve (WORKSPACE моста) и доступные модели через инструменты данные",
+      "исходящая сеть модели через прокси 127.0.0.1:10816",
+      "содержимое промптов и секреты в bridge.log",
+      "два слота параллелизма боевого моста :9886"
+    ],
+    "trust_boundaries": [
+      "DSH -> мост: loopback 127.0.0.1:9886 с MUSE_BRIDGE_KEY",
+      "мост -> muse serve: stdio JSON-RPC, политика approval на проводе при песочнице хоста",
+      "модель -> инструменты serve: --disable-write и --disable-shell при конструировании хоста, песочница включена",
+      "muse -> Meta: обёртка muse-cli.sh и внешний ProxyRack вне контроля моста"
+    ],
+    "threats": [
+      {
+        "id": "THREAT-001",
+        "scenario": "Промпт или данные хода склоняют модель вызвать не отключённый флагами инструмент (network, webSearch, иной tool subject), и allowAll выполняет его без человека, включая отправку содержимого рабочего каталога наружу",
+        "mitigation": "Write и shell остаются отключены хостом, песочница не отключается, workspace ограничен каталогом моста, каждое авторазрешение пишется аудит-строкой безопасных полей для последующего разбора владельцем; селективный запрет по факту payload отложен до данных OPEN-01 и не выдумывается",
+        "verification_ids": ["VER-001", "VER-009"]
+      },
+      {
+        "id": "THREAT-002",
+        "scenario": "Логирование approval уносит rawArgs, вопросы userInput или отражённый промпт с секретами в bridge.log и ответы клиенту",
+        "mitigation": "Allowlist полей аудита в BND-001, запрет rawArgs и тел вопросов, вся диагностика через _redact_secrets и удаление отражённых промптов обеих попыток как в REQ-MUSE-001, канареечные тесты",
+        "verification_ids": ["VER-001", "VER-005"]
+      },
+      {
+        "id": "THREAT-003",
+        "scenario": "Цикл approval или userInput внутри хода либо каскад повторов удерживает оба слота MAX_CONCURRENT=2 и блокирует мост для владельца",
+        "mitigation": "Счётные границы 10 decide и 3 cancel на ход, общий дедлайн 1800 с, не более 2 транзиентных повторов, надзор ухода клиента убивает группу, слот один на ход с карантином неподтверждённой смерти",
+        "verification_ids": ["VER-001", "VER-002"]
+      },
+      {
+        "id": "THREAT-004",
+        "scenario": "Транзиентный повтор переигрывает промпт после частичных побочных эффектов первой попытки и удваивает действие или вывод",
+        "mitigation": "На обоих путях write и shell отключены, повтор только до первого контентного кадра при подтверждённой смерти первой группы, частичный текст упавших попыток отбрасывается, клиент видит один исход",
+        "verification_ids": ["VER-002", "VER-003"]
+      }
+    ]
+  },
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Авторазрешённое действие неизвестно до первого живого payload: инструмент инцидентов wonder при отключённых write и shell не установлен (OPEN-01)",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Флаги хоста и песочница сохранены, аудит каждого решения безопасными полями с первого хода, тяжёлый путь владельца сверяет лог решений с ожидаемой работой; селективная политика только отдельным решением по собранным payload",
+      "verification_ids": ["VER-001", "VER-009"]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Повторы моста складываются с повторами провайдера CLI и растягивают отказ при живом общем сбое транспорта (OPEN-05, OPEN-08)",
+      "probability": "high",
+      "impact": "medium",
+      "mitigation": "Не более 2 повторов, паузы суммарно не более 8 с, общий дедлайн 1800 с с остатком на попытку, modelRetryScheduled логируется для разбора наложения",
+      "verification_ids": ["VER-002", "VER-010"]
+    },
+    {
+      "id": "RISK-003",
+      "scenario": "Live reasoning сужает окно безопасного повтора и при ошибке учёта хвоста дублирует или теряет часть reasoning в финале",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Инвариант конкатенации live равен буферизованному варианту, _content_started только под _wlock на первой непустой дельте, финальная доотдача только хвоста, парные тесты до и после первой дельты",
+      "verification_ids": ["VER-002", "VER-003"]
+    },
+    {
+      "id": "RISK-004",
+      "scenario": "Общий код меняет поведение muse-spark-*, на которые приходятся 27 из 29 исторических approval-переходов, без отдельного живого сценария",
+      "probability": "high",
+      "impact": "medium",
+      "mitigation": "Фейковые тесты гоняют spark как модель фикстуры ServeRun, окна и лимиты spark не меняются, тяжёлый путь включает короткий контрольный ход spark после wonder",
+      "verification_ids": ["VER-001", "VER-005", "VER-009"]
+    },
+    {
+      "id": "RISK-005",
+      "scenario": "Автообновление Muse CLI меняет схему MSP или возвращает потолок approvalMode между выкатом и следующим ходом (OPEN-09)",
+      "probability": "high",
+      "impact": "medium",
+      "mitigation": "AD-006: версия и fingerprint в логе каждого хода, однократная деградация без поля при -32030, неизвестная версия не останавливает мост",
+      "verification_ids": ["VER-001", "VER-008"]
+    },
+    {
+      "id": "RISK-006",
+      "scenario": "Незакоммиченный REQ-MUSE-001 в дереве dev и единственная деплой-копия делают откат зависимым от бэкапа, ошибка копирования затирает рабочее состояние",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "git diff до работы Coder, отдельная ветка, бэкап обеих копий server.py в ~/work/backups до перезаписи, cmp зеркала и health после перезапуска до тяжёлого пути",
+      "verification_ids": ["VER-005", "VER-008"]
+    },
+    {
+      "id": "RISK-007",
+      "scenario": "Summary-дельты на effort=max приходят только в конце хода, и прогресс REQ-MUSE-004 сводится к прежнему keepalive (OPEN-04)",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Лог времени первой дельты на каждом serve-ходе и обязательная фиксация факта на тяжёлом пути; при подтверждении пакет честно помечает прогресс недостигнутым без смены транспорта в этом изменении",
+      "verification_ids": ["VER-003", "VER-009"]
+    },
+    {
+      "id": "RISK-008",
+      "scenario": "Форма живого availableChoices отличается от схемы фикстуры (scope, policy amendment, пустой список), и decide получает -32052 или выбирает лишнее разрешение",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Выбор только из текущих choices по decision с запретом policy amendment, ошибки decide ведут в терминальную деградацию без exec, аудит пишет список choiceId для сверки с первым живым ходом",
+      "verification_ids": ["VER-001", "VER-009"]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": ["REQ-MUSE-002", "AD-001", "AD-002", "AD-006", "QA-001", "QA-002", "QA-008", "BND-001", "BND-002", "RISK-001", "RISK-004", "RISK-005", "RISK-008", "THREAT-001", "THREAT-002", "THREAT-003"],
+      "kind": "command",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'Approval'",
+      "expected": "exit 0; red без фикса и green с фиксом: allowAll в session/start, receipt и decide с choiceId из availableChoices, terminal=false, userInput/cancel, границы 10 и 3, деградация без exec, -32030 повтор без поля, канарейка rawArgs отсутствует в логе",
+      "environment": "локальный репозиторий, фейковый MSP через расширенный install_protocol_wrapper, модельных ходов нет",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": ["REQ-MUSE-003", "AD-003", "QA-003", "QA-004", "QA-005", "BND-003", "RISK-002", "RISK-003", "THREAT-003", "THREAT-004"],
+      "kind": "command",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'TransientRetry'",
+      "expected": "exit 0; каждый маркер классифицируется, не более 2 повторов с паузами 2 с и 4 с плюс джиттер до 1 с (в тестах константы ужаты monkeypatch), общий дедлайн и остаток 30 с соблюдены, нет повтора после _content_started, при уходе клиента, неподтверждённой смерти группы и на состояния timeout и spawn_failed, контекстный счётчик не расходуется (обновлённый test_t18)",
+      "environment": "локальный репозиторий, фейковые serve и exec с терминальными ошибками net-timeout",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": ["REQ-MUSE-004", "AD-004", "QA-005", "QA-006", "BND-002", "BND-004", "CD-001", "RISK-003", "RISK-007", "THREAT-004"],
+      "kind": "command",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'LiveReasoning or test_s1'",
+      "expected": "exit 0; дельты reasoning_content до финального кадра в порядке summary-индексов, конкатенация равна буферизованному варианту без дубля хвоста, пустые data-keepalive сохранены, : keepalive отсутствует, ровно один [DONE], сбой live-записи не роняет ход",
+      "environment": "локальный репозиторий, фейковый MSP с задержанными item/delta summary.N и item/completed",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": ["AD-005", "QA-007", "BND-003"],
+      "kind": "command",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'ContextPrune or ContextRetry or AllowedModelsSync'",
+      "expected": "exit 0; гарантии REQ-MUSE-001 без изменений: 400000/320000/200000, обязательный набор, атомарность tool-пар, ровно один контекстный повтор до первого контентного кадра",
+      "environment": "локальный репозиторий, pytest через uv --no-project",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": ["REQ-MUSE-002", "REQ-MUSE-003", "REQ-MUSE-004", "AD-005", "QA-002", "QA-004", "QA-007", "BND-004", "RISK-004", "RISK-006", "THREAT-002"],
+      "kind": "command",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py",
+      "expected": "exit 0; весь файл зелён: прежний baseline 67 passed сохранён по смыслу, заменён только тест approval-контракта и обновлён test_t18 по AD-003, добавлены Approval, TransientRetry и LiveReasoning тесты; ни один прежний тест не удалён и не помечен skip ради зелени",
+      "environment": "локальный репозиторий, ветка Coder от фактического дерева dev",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": ["AD-005", "QA-007"],
+      "kind": "command",
+      "command": "cd /Users/aazhiry1/work/src/cli-agent-bridge && .venv/bin/ruff format --check . && .venv/bin/ruff check . && .venv/bin/basedpyright",
+      "expected": "ruff exit 0 по набору E4/E7/E9/F из ruff.toml; basedpyright 0 errors как baseline брифа, число предупреждений зафиксировано в отчёте verifier против baseline 1448 без новых errors в изменённых файлах",
+      "environment": "локальный репозиторий с .venv (ruff и basedpyright присутствуют в .venv/bin)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": ["REQ-MUSE-002", "REQ-MUSE-003", "REQ-MUSE-004", "QA-007"],
+      "kind": "command",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests/",
+      "expected": "exit 0; Full Suite Gate перед MR по всему каталогу tests без deselect и skip правок",
+      "environment": "локальный репозиторий, pyproject.toml отсутствует, поэтому uv --no-project",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-008",
+      "requirement_ids": ["QA-007", "QA-008", "BND-005", "RISK-005", "RISK-006"],
+      "kind": "command",
+      "command": "cmp bridges/muse-bridge/server.py ~/.dsh/bridges/muse-bridge/server.py && launchctl list | grep com.user.dsh-muse-bridge && curl -sS -m 5 -H \"Authorization: Bearer $MUSE_BRIDGE_KEY\" http://127.0.0.1:9886/health && curl -sS -m 5 -H \"Authorization: Bearer $MUSE_BRIDGE_KEY\" http://127.0.0.1:9886/v1/models",
+      "expected": "зеркало побайтово равно репозиторию, launchd-агент зарегистрирован, /health и /v1/models отвечают 200 с wonder context_length 400000 и spark 1048576; в свежем bridge.log после первого хода видны serve init с версией CLI и approvalMode allowAll",
+      "environment": "боевая машина владельца после kickstart; ключ подхватывается из окружения или ~/.dsh/.env без печати секрета в вывод",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-009",
+      "requirement_ids": ["REQ-MUSE-002", "REQ-MUSE-003", "REQ-MUSE-004", "QA-001", "QA-006", "BND-005", "CD-001", "RISK-001", "RISK-004", "RISK-007", "RISK-008", "THREAT-001"],
+      "kind": "manual",
+      "command": null,
+      "expected": "Бинарный gate тяжёлого пути: в существующем DSH-слоте владельца на длинной сессии живой ход muse-wonder-full-1.0 effort=max рабочего размера с вызовом инструмента, повторный ход и два параллельных хода завершаются без fallback exec по approval и без потери хода; в UI виден прирост reasoning во время мышления либо лог первой summary-дельты честно фиксирует её приход только в конце (OPEN-04); в bridge.log аудит-строки approval безопасными полями сверены владельцем с выполненной работой, done via=serve; короткий контрольный ход muse-spark проходит. Без этого gate слова готово и работает запрещены",
+      "environment": "живой DSH-слот владельца, боевой мост :9886 после VER-008, модельные ходы выполняет владелец или verifier его руками, не Coder",
+      "owner": "owner"
+    },
+    {
+      "id": "VER-010",
+      "requirement_ids": ["REQ-MUSE-003", "AD-003", "QA-003", "RISK-002"],
+      "kind": "manual",
+      "command": null,
+      "expected": "Бинарный gate: на отдельном экземпляре моста на другом порту с MUSE_BRIDGE_CLI на заглушку, отдающую net-timeout на первой попытке и успех на второй, запросы JSON и SSE завершаются успехом после ровно одного повтора внутри бюджета; при net-timeout на всех попытках терминальный 502 или SSE error и один [DONE] после 3 попыток; боевой мост не затронут",
+      "environment": "отдельный экземпляр моста с заглушкой CLI, не боевой :9886",
+      "owner": "verifier"
+    }
+  ],
+  "protected_paths": ["docs/adr/0003-muse-serve-approval-allowall.md"],
+  "materialization": [
+    {
+      "source": "architecture/proposals/docs/adr/0003-muse-serve-approval-allowall.md",
+      "target": "docs/adr/0003-muse-serve-approval-allowall.md",
+      "sha256": "fcf1aea898d05a67857bcf30d812c0217ede954f0fea5d17aba596d278335c30"
+    }
+  ],
+  "approval": {
+    "status": "APPROVED",
+    "decision_ids": ["AD-001"],
+    "approved_by": "owner (aazhiry1)",
+    "evidence_ref": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md"
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED",
+    "reviewer": null,
+    "evidence_ref": null
+  },
+  "open_questions": [
+    {
+      "id": "Q-001",
+      "question": "OPEN-01: какой инструмент и какие choiceId приходят в живом approval/request на wonder при --disable-write --disable-shell; закрывается аудит-логом первого живого хода, селективная политика после этого отдельным решением",
+      "blocking": false
+    },
+    {
+      "id": "Q-002",
+      "question": "OPEN-02: зависимость net-timeout от effort и размера промпта на выборке больше пяти точек бенча; проектирование идёт без привязки к размеру",
+      "blocking": false
+    },
+    {
+      "id": "Q-003",
+      "question": "OPEN-03: сбрасывают ли idle-watchdog клиента DSH SSE-комментарии на сессиях дольше 600 с; в этом пакете keepalive остаётся пустыми data-чанками, вопрос нужен только для будущего перехода на комментарии",
+      "blocking": false
+    },
+    {
+      "id": "Q-004",
+      "question": "OPEN-04: приходят ли summary.N по ходу хода на effort=max и за сколько секунд до конца; закрывается логом первой дельты на тяжёлом пути",
+      "blocking": false
+    },
+    {
+      "id": "Q-005",
+      "question": "OPEN-05: семантика after N provider attempts и конфигурируемые ключи повторов CLI, приход turn/modelRetryScheduled на живом ходе 1.4.8; мост ограничивается своими 2 повторами и логированием",
+      "blocking": false
+    },
+    {
+      "id": "Q-006",
+      "question": "OPEN-06: гасит ли turn/cancel pending approval и как модель ведёт себя после denied; пакет применяет cancel только как терминальную деградацию и denied не использует как основной путь",
+      "blocking": false
+    },
+    {
+      "id": "Q-007",
+      "question": "OPEN-08: источник net-timeout между ProxyRack, форвардером :10816 и стороной Meta; вне моста, на выбор повтора не влияет",
+      "blocking": false
+    },
+    {
+      "id": "Q-008",
+      "question": "OPEN-09: политика закрепления версии Muse CLI при автообновлении лаунчера; мост только логирует версию и деградирует по AD-006",
+      "blocking": false
+    }
+  ],
+  "deferred": [
+    "селективная политика approval по собранным живым payload (deny по toolName или subject.kind) отдельным решением после OPEN-01",
+    "переход keepalive на SSE-комментарии : keepalive и правка формулировки README после живой проверки OPEN-03",
+    "live-стрим content с потоковым разбором tool-разметки уровня droid-моста",
+    "проброс turn/modelRetryScheduled клиенту отдельным сигналом вместо только лога",
+    "закрепление версии Muse CLI против автообновления лаунчера (OPEN-09)",
+    "env-переопределение констант повторов и границ approval"
+  ]
+}

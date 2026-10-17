@@ -1,0 +1,201 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-realtime-streaming",
+  "teamlead_cycle": 1,
+  "panel_slug": "dsh-realtime-streaming-arch-council-1-a1",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Arch panel round 1 returned NEEDS WORK. 11 blocking findings to be addressed by Architect.",
+  "findings_total": 13,
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-001",
+      "rule_ref": "REQ-STREAM-001; CD-001: неизменность уже отправленных SSE-кадров; запрет retry после необратимого prefix; owner_decision F-001 от 2026-10-13 10:15 MSK.",
+      "action": "Отразить решение владельца «1 кажется да. главное что бы было по архитектуре. пусть архитектор говорит как делать.» как делегирование архитектурного выбора. Architect должен явно зафиксировать выбранную политику irreversible partial prefix, retract и non-prefix complete без отзыва отправленных кадров; согласовать AD-001, ASM-002, Q-001, CD-001, approval, evolution, RISK-001 и VER-010. Различить подтверждённое решение владельца, последующий выбор Architect и ещё не выполненные проверки; не утверждать, что error после partial автоматически совместим со всеми OpenAI-клиентами.",
+      "acceptance": "Пакет содержит дословное решение владельца с датой и ссылкой на ledger F-001, явный архитектурный выбор для retract/non-prefix complete и его последствия для клиентов. Q-001/ASM-002 и approval не противоречат решению; нигде не остаётся ложного требования повторного согласования уже делегированного выбора. Отправленный prefix не отзывается, retry после установленной границы необратимости запрещён; runtime acceptance остаётся NOT_RUN.",
+      "source": "SUB КОРРЕКТНОСТЬ/openai-sse-contract: FAIL [F-001] — AD-001 вводит fail-close при retract/non-prefix complete (error+DONE на уже отправленный prefix), чего нет в реальном контракте OpenAI SSE (OpenAI никогда не отзывает отправленные кадры). Решение прямо названо блокером (ASM-002, Q-001) и ещё не одобрено владельцем — то есть на уровне пакета контракт с OpenAI-клиентами пока не зафиксирован как совместимый (architecture-packet.json#AD-001, #ASM-002, #EVD-008).",
+      "evidence": "architecture-packet.json#AD-001; architecture-packet.json#ASM-002; architecture-packet.json#EVD-008; architecture-packet.json#CD-001; architecture-packet.json#Q-001; architecture-packet.json#approval",
+      "source_findings": [
+        "F-001"
+      ]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-003",
+      "rule_ref": "RW-009 / EVD-009; BND-002: lease reuse только после own terminal или подтверждённой смерти процесса; EVD-006: join не доказывает process death.",
+      "action": "Специфицировать cancellation fence как проверяемый протокол, а не обещание: владелец L/T и attempt id, источник подтверждения own terminal, подтверждение смерти принадлежащего attempt процесса/группы, порядок checkpoint/DIRTY и освобождения ресурсов, защита от late/foreign events и переиспользования lease до fence. Согласовать AD-003, BND-002, RISK-004, VER-005 и VER-011; добавить детерминированные барьеры проверки гонок без заявления о выполненной реализации.",
+      "acceptance": "Пакет однозначно перечисляет допустимые доказательства fence, владельца каждого перехода и порядок release L/T/P. Для cancel/disconnect, late terminal и повторного key указаны fault-injection сценарии с оракулом: нет reuse до own terminal/подтверждённой смерти, нет отмены нового attempt, нет утечки ресурсов. Bounded join явно не считается доказательством смерти; непроведённые проверки помечены NOT_RUN.",
+      "source": "SUB КОРРЕКТНОСТЬ/rw009-lock-release-under-race: FAIL [F-002] — для нормального завершения L/T освобождаются до drain (AD-003), но для гонки cancel/disconnect фиксация «own terminal или подтверждённая смерть процесса перед переиспользованием lease» — это ПРЕДЛОЖЕНИЕ поверх известного пробела (EVD-006: «Join сам по себе не доказывает process death»), а не реализованный факт; VER-011 — manual/NOT_RUN (architecture-packet.json#RISK-004, #VER-011, #EVD-006).",
+      "evidence": "architecture-packet.json#AD-003; architecture-packet.json#BND-002; architecture-packet.json#RISK-004; architecture-packet.json#VER-011; architecture-packet.json#EVD-006",
+      "source_findings": [
+        "F-002"
+      ]
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-002",
+      "rule_ref": "QA-002 / THREAT-001: 0 recognized tool XML bytes в live content; owner_decision F-003 от 2026-10-13 10:15 MSK; nonstream fallback сохраняется.",
+      "action": "Внести то же подтверждённое делегирование владельца и зафиксировать выбранную Architect strict-live политику malformed/unclosed recognized XML только для stream=true. Согласовать AD-002, ASM-003, Q-002, approval, BND-003, QA-002, THREAT-001, RISK-002, CD-001 и VER-010: удержание recognized XML до valid complete call, stream error при malformed/unclosed, reasoning обходит parser, классический nonstream fallback сохраняется.",
+      "acceptance": "Пакет содержит решение владельца с датой и ledger F-003, явный выбор strict-live, границу stream=true и оракул 0 байт recognized XML в live content. ASM-003/Q-002 и approval согласованы с делегированием; политика больше не оставлена условным PROPOSED/PENDING owner approval без решения Architect. Проверки split/malformed/unclosed перечислены, но не выданы за пройденные.",
+      "source": "SUB КОРРЕКТНОСТЬ/tool-parser-no-leak: FAIL [F-003] — гарантия «0 тегов в live content» существует только как PROPOSED strict-policy (AD-002), требующая одобрения (ASM-003, Q-002); до одобрения baseline-поведение (malformed/unclosed XML → в текст) сохраняется, то есть защита от утечки сейчас не architecturally locked (architecture-packet.json#AD-002, #ASM-003).",
+      "evidence": "architecture-packet.json#AD-002; architecture-packet.json#ASM-003; architecture-packet.json#Q-002; architecture-packet.json#BND-003; architecture-packet.json#QA-002",
+      "source_findings": [
+        "F-003"
+      ]
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-001",
+      "rule_ref": "EVD-004: существующий StreamSink(kind,text)->bool; BackendAdapter.execute_turn; ADAPTER_API=1; CD-001: nonstream и другие adapters сохраняют buffered path.",
+      "action": "Расписать технический plumbing _serve_sse → _dispatch → DroidAdapter.execute_turn → _run_once/_execute → обработчик собственных RPC-событий. Указать способ передачи optional StreamSink, сигнатуры/контракт вызова, типы incremental событий, обработку False/исключений и отмены, offsets и anti-duplicate final. Указать точную развилку stream=true versus sink=None/nonstream, сохраняя синхронный итог для persistence и nonstream; не оставлять выбор моста Coder.",
+      "acceptance": "В AD-001/BND-002 приведена непрерывная цепочка интерфейсов от execute_turn до RPC-handler с источником каждого callback и семантикой возврата bool. Существующий sink действительно достигает incremental handler по спецификации; RPC не пишет в socket. Для sink=None описан прежний buffered finalize flow, ADAPTER_API=1 сохраняется; есть проверяемые сценарии delayed delta, suffix-only complete и отсутствия повторной final delivery.",
+      "source": "SUB РЕАЛИЗУЕМОСТЬ/adapter-plumbing-gap: FAIL [F-004] — EVD-004 прямо фиксирует: «DroidAdapter его пока игнорирует, вызывает _run_once; изменение требует сквозного plumbing». Пакет не даёт технического моста (как _run_once синхронно превращается в incremental callback без поломки nonstream-пути) — это оставлено «Coder узнает по ходу», а не зафиксировано как архитектурное решение, что для S2-критичности и одного мейнтейнера stdlib-бриджа — реальный риск недооценки объёма работ (architecture-packet.json#EVD-004, #AD-001).",
+      "evidence": "architecture-packet.json#EVD-004; architecture-packet.json#AD-001; architecture-packet.json#BND-002; architecture-packet.json#CD-001",
+      "source_findings": [
+        "F-004"
+      ]
+    },
+    {
+      "id": "RW-005",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-004",
+      "rule_ref": "QA-005 / CD-001 / EVD-011: однозначное завершение, single optional usage, честные prompt_tokens_details.cached_tokens, ровно один [DONE].",
+      "action": "Зафиксировать точную JSON-форму finish- и usage-чанков, включая choices/delta/finish_reason и значение finish_reason в usage-чанке. Architect выбирает вариант, совместимый с фактическим DSH чтением usage, и объясняет, как исключается потеря usage или двойное завершение. Определить FIFO порядок и baseline zero/absent usage policy; cached_tokens передаются честно без clamp и без изменения normalize_prompt_cache_details. Согласовать AD-004, CD-001, QA-005, VER-007 и связанный VER-006.",
+      "acceptance": "Пакет содержит конкретные примеры finish/usage кадров и явно выбранное значение finish_reason для usage, а не неопределённое optional usage. Проверка DSH учитывает выбранную форму: usage/cached_tokens прочитаны один раз, завершение учтено один раз, затем ровно один [DONE]; значения cached_tokens, включая превышение prompt_tokens, нулевые и отсутствующие поля, сохраняют baseline без clamp. Error path не выдаёт success finish/usage.",
+      "source": "SUB КОРРЕКТНОСТЬ/OpenAI SSE и Droid JSON-RPC streaming: FAIL — architecture-packet.json#AD-004, architecture-packet.json#CD-001. F-001: успех описан как один finish_reason, затем отдельный optional usage, затем DONE. Сейчас usage едет во втором чанке, у которого finish_reason повторяется (server.py около _serve_sse). Пакет не говорит, какой finish_reason у usage-чанка. DSH читает usage из stream-chunk; пустой finish_reason: null на usage-чанке может потерять usage, повтор stop может задвоить завершение. Это ломает единственный путь, которым клиент получает cached_tokens.",
+      "evidence": "architecture-packet.json#AD-004; architecture-packet.json#CD-001; architecture-packet.json#QA-005; architecture-packet.json#VER-007; architecture-packet.json#EVD-011",
+      "source_findings": [
+        "F-005"
+      ]
+    },
+    {
+      "id": "RW-006",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-003",
+      "rule_ref": "RW-009 / EVD-009: 5-й ход после 4 slow readers и повтор key; bounded cancellation fence; lease reuse запрещён без terminal/death.",
+      "action": "Дополнить fence конкретным конечным дедлайном и фазами cancel/disconnect: interrupt/ожидание own terminal, затем SIGTERM и при необходимости SIGKILL только принадлежащей попытке группы процессов, подтверждение смерти и cleanup/release. Architect задаёт численные интервалы и суммарную верхнюю границу, описывает способ bounded waitpid и исход при невозможности подтвердить fence. Разделить release нормального committed хода до writer drain и release отменённого хода после fence; бесконечное ожидание и небезопасное reuse запрещены.",
+      "acceptance": "В AD-003/QA-003/VER-005/VER-009/VER-011 указаны конечные интервалы interrupt→TERM→KILL→подтверждение смерти и верхняя граница возврата L/T. Сценарий terminal/ack never arrives имеет проверяемый исход без бесконечного wait и без release непогашенного attempt. Пакет сохраняет RW-009: обычный 5-й ход и повтор key не ждут slow writer drain; отдельно проверяет cancel с эскалацией и отсутствие утечки L/T/P.",
+      "source": "SUB КОРРЕКТНОСТЬ/Освобождение L и T (RW-009): FAIL — architecture-packet.json#AD-003, architecture-packet.json#EVD-006. F-002: «release сразу после хода» и «checkpoint+L/T release before writer drain» несовместимы с fence. При precommit cancel L/T держатся до own terminal или waitpid. Если terminal не приходит, а waitpid не ограничен, аренда чата и слот вычисления не возвращаются, и RW-009 (5-й ход после 4 медленных) не выполняется. Дедлайна fence в пакете нет.",
+      "evidence": "architecture-packet.json#AD-003; architecture-packet.json#EVD-006; architecture-packet.json#QA-003; architecture-packet.json#VER-005; architecture-packet.json#VER-009; architecture-packet.json#VER-011",
+      "source_findings": [
+        "F-006"
+      ]
+    },
+    {
+      "id": "RW-007",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-002",
+      "rule_ref": "EVD-005 / QA-002: malformed/unclosed fallback текущего ToolCallParser; AD-001 / QA-004: установленная граница необратимости и запрет silent retry.",
+      "action": "Определить интерфейс отдельного strict-live режима ToolCallParser и поведение его feed/finish/error/reset, позволяющее удерживать malformed/unclosed XML без _flush_all/legacy text fallback в stream=true. Отдельно устранить неоднозначность «accepted queue payload = видимость»: описать состояния queued/sent/discarded, точку необратимости, политику retry и DIRTY при cancel до send. Если Architect сохраняет консервативный enqueue fence, назвать его консервативным и обосновать последствия, не приравнивая к фактической доставке клиенту.",
+      "acceptance": "Пакет задаёт отдельный live parser contract: recognized XML никогда не проходит legacy fallback, complete valid call публикуется один раз, reasoning обходит parser. Для queued-but-unsent cancel явно определены outcome, retry и cleanup; queued/sent не смешаны. AD-001/AD-002/QA-004/VER-004/VER-006/VER-011 используют одну границу необратимости и проверяют обе стороны этой границы.",
+      "source": "SUB КОРРЕКТНОСТЬ/ToolCallParser без утечки тегов: FAIL — architecture-packet.json#AD-002, architecture-packet.json#EVD-005. F-003: strict-live («malformed/unclosed recognized XML → error, 0 байт XML в content») нельзя получить переиспользованием текущего ToolCallParser без смены контракта. Сейчас незакрытый блок на finish() и невалидный блок отдаются в content (_flush_all, _emit(OPEN+inner+CLOSE)). Отдельного live-режима у парсера нет. Плюс «accepted queue payload = видимость» делает необратимым кадр, который клиент ещё не получил: cancel до send уже запрещает retry и оставляет DIRTY.",
+      "evidence": "architecture-packet.json#AD-002; architecture-packet.json#EVD-005; architecture-packet.json#AD-001; architecture-packet.json#QA-004; architecture-packet.json#VER-004; architecture-packet.json#VER-011",
+      "source_findings": [
+        "F-007"
+      ]
+    },
+    {
+      "id": "RW-008",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-003",
+      "rule_ref": "BND-001/BND-002/BND-003: один владелец socket, parser в facade, parser без socket/RPC; QA-001: coalesce ≤40 ms; nonblocking StreamSink.",
+      "action": "Установить единое нормативное описание ownership в JSON: facade владеет ToolCallParser; request-scoped writer worker владеет socket/queue/control reserve; Execution владеет L/T/attempt и persist. Определить кто создаёт, завершает и освобождает writer, как передаётся failure с immutable attempt id. Зафиксировать coalescing в writer thread с конечным таймером ≤40 ms, nonblocking enqueue из RPC и немедленным flush последнего pending chunk перед terminal/error. Согласовать AD-001/AD-003, boundaries и descriptions VIEW-001/VIEW-002 в пакете, устранив противоречия с описанными component/sequence views.",
+      "acceptance": "В JSON для каждого компонента есть ровно один владелец и полный lifecycle writer/queue/control slot. Parser отсутствует в Run как владелец и не обращается к RPC/socket; writer не владеет L/T. Указаны источник таймера и flush перед success/error/close; short last chunk не ждёт остаток 40 ms. Verification scenarios проверяют FIFO, отсутствие RPC blocking и прекращение worker без утечки; VIEW descriptions согласованы с нормативным ownership.",
+      "source": "SUB РЕАЛИЗУЕМОСТЬ/server.py и droid_adapter.py: FAIL — architecture-packet.json#VIEW-001, architecture-packet.json#AD-003. F-008: component view рисует parser внутри Run (R --> P), sequence рисует P -> W напрямую, BND-002 говорит «ToolCallParser in facade», а BND-003 запрещает парсеру socket/RPC. Три владельца одного компонента. Writer описан и как очередь, и как поток сокета, и как участник sequence, который шлёт failure в Execution. Кто создаёт поток, кто его останавливает и кто владеет reserved control slot, не названо. F-009: coalesce ≤40 мс требует таймера, а sink обязан быть nonblocking. Кто коалесцирует (RPC-поток, writer, третий таймер) и что происходит с последним чанком короче 40 мс перед terminal, не задано. Иначе последний токен задерживается, либо таймер блокирует RPC.",
+      "evidence": "architecture-packet.json#VIEW-001; architecture-packet.json#VIEW-002; architecture-packet.json#AD-003; architecture-packet.json#BND-001; architecture-packet.json#BND-002; architecture-packet.json#BND-003",
+      "source_findings": [
+        "F-010"
+      ]
+    },
+    {
+      "id": "RW-009",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "RISK-004",
+      "rule_ref": "RISK-004 / AD-001: durable checkpoint до success finish; immutable attempt id; однократный CAS outcome; AD-004/CD-001: OpenAI-compatible error chunk.",
+      "action": "Специфицировать атомарную state machine attempt outcome с однократным CAS между durable success и precommit cancellation/failure, включая окно own terminal → checkpoint. Указать победителя, persist failure, READY/DIRTY, fence/release и обработку запоздалого disconnect только как delivery abort после commit. Привести точный OpenAI chat.completion.chunk error envelope и порядок error→[DONE] best effort вместо неопределённого standard error frame/{error:err}; success finish/usage при неуспешном checkpoint запрещены.",
+      "acceptance": "Пакет содержит переходы и точку CAS, делающие READY и DIRTY взаимоисключающими для одного attempt id. Barrier scenarios VER-011 охватывают disconnect до/во время/после checkpoint, двойной callback и persist failure; success разрешён только после durable checkpoint, поздний writer не отменяет переиспользованный процесс. JSON-пример error имеет явную chat.completion.chunk оболочку и проверяемую клиентом семантику ошибки/завершения без success finish/usage.",
+      "source": "SUB РИСКИ/Обрыв соединения: FAIL — architecture-packet.json#RISK-004, architecture-packet.json#AD-001. F-010: post-commit disconnect «только delivery abort» не определён, если disconnect приходит в окне между own terminal и durable checkpoint. Два исхода (READY+release и DIRTY+fence) могут примениться к одному attempt id. Writer при этом уже мог принять prefix. Итог: либо success finish на незакоммиченном ходе, либо DIRTY после частичного READY. F-011: error-кадр пакета («standard error frame») не совпадает с текущим {\"error\": err} без OpenAI chunk-обёртки. Клиент, который ждёт chat.completion.chunk, не увидит ошибку и будет ждать finish.",
+      "evidence": "architecture-packet.json#RISK-004; architecture-packet.json#AD-001; architecture-packet.json#AD-003; architecture-packet.json#AD-004; architecture-packet.json#VER-011; architecture-packet.json#CD-001",
+      "source_findings": [
+        "F-011"
+      ]
+    },
+    {
+      "id": "RW-010",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-003",
+      "rule_ref": "QA-003 / EVD-007 / RW-009: bounded per-response/global memory, fast small chunks без ложного overflow; reserved control slot вне 1024 data frames.",
+      "action": "Уточнить модель budgeting: размер encoded payload/JSON envelope и pending data frames после коалесцирования, bounded ingress до writer coalescing и атомарное резервирование global bytes до принятия данных. Объяснить как быстрые мелкие upstream deltas нормально читающего клиента не исчерпывают frame cap, пока writer коалесцирует. Развести queue, accumulator, thinking и tool XML budgets, согласовать 16 MiB per-response с 256 MiB global и параллельными чатами. Определить отдельный bounded control reserve вне лимита 1024 data frames, позволяющий error/DONE после discard; release reservation при send/discard/close идемпотентен.",
+      "acceptance": "Пакет задаёт единицы, точки учёта и формулы per-response/global/ingress/coalesced queue budgets; никакой промежуточный буфер не неограничен. Control reserve явно не входит в 1024 data frames и имеет byte/global accounting. VER-005/VER-009 различают normal fast small chunks и настоящий slow-reader overflow, проверяют 4×3 MB + 5-й ход, thinking/tool XML и параллельное резервирование; error/DONE помещаются после discard либо socket закрывается по заданному deadline без утечки bytes.",
+      "source": "SUB РИСКИ/Медленный клиент и очередь: FAIL — architecture-packet.json#AD-003, architecture-packet.json#QA-003. F-012: лимит 1024 кадра при coalesce 40 мс не защищает быстрый upstream. Пока writer спит на coalesce, RPC продолжает enqueue. Overflow отменяет ход, который клиент читает нормально, только чанки мелкие. 16 МиБ на ответ при глобальных 256 МиБ и нескольких чатах с thinking+tool XML упирается в глобальный резерв раньше, чем в очередь, и тоже отменяет ход. Reserved control slot не описан как неучитываемый в 1024, поэтому error/DONE могут не влезть после discard.",
+      "evidence": "architecture-packet.json#AD-003; architecture-packet.json#QA-003; architecture-packet.json#BND-001; architecture-packet.json#RISK-003; architecture-packet.json#EVD-007; architecture-packet.json#VER-009",
+      "source_findings": [
+        "F-012"
+      ]
+    },
+    {
+      "id": "RW-011",
+      "priority": "blocking",
+      "criterion": "СООТВЕТСТВИЕ КОНТЕКСТУ",
+      "file": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "line_hint": "AD-002",
+      "rule_ref": "CD-001: nonstream committed-only без деградации; EVD-005/EVD-012: baseline malformed/unclosed XML fallback; server.py:_serve_json nonstream flow неизменен.",
+      "action": "Зафиксировать явный выбор parser mode по stream=true: strict-live включается только на live Droid path; stream=false/sink=None использует прежний parser и finish fallback. Описать isolation на уровне экземпляра/режима, чтобы общая правка finish не меняла nonstream. Включить в verification surface именованные парные регрессии для malformed/unclosed XML и идентичного входа в live/nonstream; согласовать AD-002, CD-001, BND-003, QA-005 и VER-004/VER-006.",
+      "acceptance": "Пакет явно описывает независимую развилку strict-live/legacy nonstream. Для одного malformed/unclosed input nonstream сохраняет baseline текстовый fallback и committed-only JSON/tool output, а stream=true даёт предусмотренный error без XML leakage. Есть точные имена/команды запланированных regression checks и ожидаемые результаты; _serve_json nonstream flow и normalize_prompt_cache_details не требуют изменения.",
+      "source": "SUB СООТВЕТСТВИЕ КОНТЕКСТУ/Non-streaming без деградации: FAIL — architecture-packet.json#AD-002, architecture-packet.json#CD-001. F-013: nonstream обещан committed-only и со старым XML fallback. Тот же ToolCallParser предлагается переиспользовать для strict-live. Если strict попадёт в общий finish(), nonstream начнёт отдавать error вместо текста на malformed XML. Пакет не фиксирует развилку по режиму и не даёт теста, что nonstream fallback не изменился. Это и есть деградация, которую критерий запрещает.",
+      "evidence": "architecture-packet.json#AD-002; architecture-packet.json#CD-001; architecture-packet.json#BND-003; architecture-packet.json#QA-005; architecture-packet.json#VER-004; architecture-packet.json#VER-006",
+      "source_findings": [
+        "F-013"
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Исправить traceability в architecture-packet.json: добавить VER-006 в verification_ids AD-001 для retract/non-prefix/suffix-only complete и anti-duplicate accumulator; добавить VER-010 в BND-002 для связи с решением владельца и согласовать его актуальное содержание с делегированием Architect.",
+      "reason": "F-008: проверки уже описаны, но прямые ссылки решений и границ неполны; это non-blocking followup совета, а не новая blocking находка.",
+      "source_findings": [
+        "F-008"
+      ]
+    },
+    {
+      "id": "FU-002",
+      "text": "Уточнить verification/quality в architecture-packet.json: именовать новый delayed-delta regression и его red→green запуск в VER-001; исправить VER-004 — тесты пишет Coder, verifier независимо запускает. Добавить QA/VER tool-roundtrip: кто исполняет tools, как role=tool попадает в следующий ход и как сохраняется identity/irreversible prefix без автоматического replay. Добавить явный fault-injection barrier persist failure после prefix с запретом success finish/usage, а не только упоминание в expected VER-011.",
+      "reason": "F-009 объединяет неполные verification инструкции, владельца тестов, tool-roundtrip и отсутствие воспроизводимого persist-failure барьера; совет классифицировал весь пункт как non-blocking.",
+      "source_findings": [
+        "F-009"
+      ]
+    }
+  ],
+  "excluded": [],
+  "do_not_change": [
+    "server.py:_serve_json nonstream flow",
+    "core/metrics_normalizer.py:normalize_prompt_cache_details"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "python3",
+    "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+    "--phase",
+    "draft",
+    "--run-dir",
+    ".ai-team/runs/dsh-realtime-streaming",
+    "--role-plan",
+    ".ai-team/runs/dsh-realtime-streaming/plans/architect-01.json"
+  ],
+  "exit_code": 0,
+  "stdout": "PASS: architecture packet is valid for draft; sha256=ed05ac18824c964d8d2903f03f0ba27efa8d1b9a989dd8b53934bd5cd01e5511\n",
+  "stderr": ""
+}

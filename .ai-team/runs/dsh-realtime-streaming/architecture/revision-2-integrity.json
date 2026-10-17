@@ -1,0 +1,16 @@
+{
+  "revision": 2,
+  "all_13_findings_mapped": true,
+  "approval_and_questions_consistent": true,
+  "markdown_normative_fields_match": true,
+  "fence_deadlines_seconds": [
+    2,
+    1,
+    1
+  ],
+  "usage_finish_reason": null,
+  "product_and_index_unchanged": true,
+  "product_file_count": 54,
+  "runtime_acceptance": "NOT_RUN",
+  "council_re_review": "PENDING"
+}

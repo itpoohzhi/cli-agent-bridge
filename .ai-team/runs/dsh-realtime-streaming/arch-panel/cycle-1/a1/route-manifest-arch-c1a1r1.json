@@ -1,0 +1,90 @@
+{
+  "run_id": "dsh-realtime-streaming",
+  "cycle": 1,
+  "round": 1,
+  "seed_input": "45ad8ef8#dsh-realtime-streaming#c1#R1",
+  "seed_hex": "2db18b15",
+  "artifact_sha256": "45ad8ef8babd776ca0f755c2c1c98fa045281879f0e15795459287bfcbb9cc8c",
+  "artifact_path": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+  "pool_setup": "default",
+  "pool_source_rev": "db749125",
+  "pool_ordered": [
+    "muse-spark-1.3",
+    "grok-4.7-high",
+    "gemini-3.8-flash-high",
+    "hermes-glm-5.3-max",
+    "deepseek-v4.1-flash"
+  ],
+  "groups": {
+    "native": [
+      "grok-4.7-high",
+      "gemini-3.8-flash-high",
+      "hermes-glm-5.3-max",
+      "deepseek-v4.1-flash"
+    ],
+    "external": [
+      "muse-spark-1.3"
+    ]
+  },
+  "ranked_order": [
+    "muse-spark-1.3",
+    "grok-4.7-high",
+    "gemini-3.8-flash-high",
+    "deepseek-v4.1-flash",
+    "hermes-glm-5.3-max"
+  ],
+  "anchor_election": {
+    "candidates": ["claude-sonnet-5-5", "gpt-6.1-sol"],
+    "hashes": {
+      "claude-sonnet-5-5": "cf267dbdba01ae3dcbdabb390e776a7d40dc784d776af0400ddb3c6f7e3c24e7",
+      "gpt-6.1-sol": "d0515f83412aea5ba1e8d8e2b7b29a5821e085fc41fbbc1eb56dfca746c55209"
+    },
+    "winner": "claude-sonnet-5-5"
+  },
+  "seats": [
+    {
+      "seat_index": 1,
+      "family": "Anthropic",
+      "slot_id": "claude-sonnet-5-5",
+      "transport": "droid exec -m claude-sonnet-5 -r high",
+      "group": "anchor",
+      "hat": "Визионер",
+      "pid": 43964,
+      "status": "RUNNING"
+    },
+    {
+      "seat_index": 2,
+      "family": "Google",
+      "slot_id": "gemini-3.8-flash-high",
+      "transport": "droid exec -m gemini-3.8-flash -r high",
+      "group": "native",
+      "hat": "Реалист",
+      "pid": 44460,
+      "status": "RUNNING"
+    },
+    {
+      "seat_index": 3,
+      "family": "xAI",
+      "slot_id": "grok-4.7-high",
+      "transport": "droid exec -m grok-4.7 -r high",
+      "group": "native",
+      "hat": "Скептик",
+      "pid": 45419,
+      "status": "RUNNING"
+    }
+  ],
+  "hats": {
+    "claude-sonnet-5-5": "Визионер",
+    "gemini-3.8-flash-high": "Реалист",
+    "grok-4.7-high": "Скептик"
+  },
+  "hat_index": 5,
+  "k": 0,
+  "rotation_ok": true,
+  "fallbacks": [],
+  "recheck": {
+    "judge_family": "xAI",
+    "slot_id": "grok-4.7-high"
+  },
+  "quorum_status": "IN_PROGRESS"
+}

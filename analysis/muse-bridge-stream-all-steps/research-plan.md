@@ -1,0 +1,6 @@
+INV-01 | Анализ протокола reasoning в Meta CLI ServeRun | bridges/muse-bridge/server.py:2240-2270 | static code inspection and protocol trace | 15 | evidence-ledger.md | F-01 defined with ISO date | none/INV-02 | closed | F-01 | 5 | ok
+INV-02 | Причина блокировки live reasoning после первого шага | bridges/muse-bridge/server.py:2260-2270 | code inspection | 15 | evidence-ledger.md | F-02 and F-03 defined | INV-01/INV-03 | closed | F-02 | 5 | ok
+INV-03 | Отправка reasoning summaries единым блоком в конце хода | bridges/muse-bridge/server.py:2854-2875 | code inspection | 15 | evidence-ledger.md | F-04 defined | INV-02/none | closed | F-04 | 5 | ok
+INV-04 | Анализ обработки toolCall и статусных событий инструментов | bridges/muse-bridge/server.py:2213-2228 | code inspection | 15 | evidence-ledger.md | F-05 defined | none/none | closed | F-05 | 5 | ok
+INV-05 | Поведение при таймаутах хода и обработка ошибок SSE | bridges/muse-bridge/server.py:2784-2794/3502-3524 | code inspection | 15 | evidence-ledger.md | F-06 and F-07 defined | none/none | closed | F-06 | 5 | ok
+INV-06 | Контракт OpenAI SSE для UI DeepSeek Harness | bridges/muse-bridge/server.py:2624-2631/2652-2654 | contract and trace inspection | 15 | evidence-ledger.md | F-08 defined | none/none | closed | F-08 | 5 | ok

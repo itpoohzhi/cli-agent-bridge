@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a149db-387c-7743-a98c-7e13788aa5e9"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Under-development features enabled: respect_system_proxy. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /Users/aazhiry1/.codex/config.toml."}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"Model metadata for `gpt-6.1-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"You’ve hit your usage limit. Try again at Oct 22nd, 2026 9:24 AM."}
+{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Try again at Oct 22nd, 2026 9:24 AM."}}

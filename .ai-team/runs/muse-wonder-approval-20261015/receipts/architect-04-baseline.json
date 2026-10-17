@@ -1,0 +1,17 @@
+{
+  "bridges/muse-bridge/server.py": "2620df402c6c2163e36e903d50b31937d71481d630e42467b4dcdb0890e55fcc",
+  "tests/test_muse_bridge_killpg.py": "952fc836486f2979bd5db9822b68d24fb6d77b58d5b3750f399ae25cd0b43d27",
+  "docs/adr/0003-muse-serve-approval-allowall.md": "721ba63d70a47d85bde9d364c48703273fae9fe43d41c7c57613aacef1b90b24",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/0003-adr.a3.md": "721ba63d70a47d85bde9d364c48703273fae9fe43d41c7c57613aacef1b90b24",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/arch-spec.a1.md": "9ad19b8f6da675cf31d9a86a93f126e06f3f77f40cc7177f86b8612e09871fb4",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/0003-adr.a2.md": "4754421f51b6bce05710efdc273dd17a83c6ed773b6a93775394c77c795c0b2b",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/architecture-packet.a1.json": "ebfa59a9869c9deb8390e2fa060ccc980bbafb96ca7cb045a8e3e73e7a78ea22",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/architecture-packet.a3.json": "38f4662021162360c22138888a86cc2d2156faba7b61ee95cda18468c952754c",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/architecture-packet.a2.json": "c1fc50b0f918b7ef638637c4ccfab6cc44f1238470d53bf49f7883cbf6a33c3e",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/arch-spec.a3.md": "d7034e48dfff640e4d2e3d77dc3a458ae3cdcfebad197b8a21fc0ad85db4311a",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/delta-a2.md": "650d8d558e60f06a8a51665d6b73820239c73ea2b3eb0d52cf6e2998efbeffd7",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/delta-a3.md": "d84c931bae2ac1332168ed87a918f33d65cf734c2a477fc22c46e2ce6e2f9e4a",
+  ".ai-team/runs/muse-wonder-approval-20261015/architecture/prev/arch-spec.a2.md": "4ab433db5f0649c0a7a3477401b0d785b7c3d34ad6ecdf9d3c697e79c31c55a6",
+  ".ai-team/runs/muse-wonder-approval-20261015/plans/architect-03.json": "2a305b66a592611de9f2c9103513c1989384bb595078d8e6b30d8bb4b454f3fb",
+  ".ai-team/runs/muse-wonder-approval-20261015/receipts/architect.iter3.json": "9784e3bccc32bf1390f13b641e83dfd9d7f7a7f0df81e3b7d99b850f19a565a0"
+}

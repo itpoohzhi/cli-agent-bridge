@@ -1,0 +1,120 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-foreign-session-20261014",
+  "teamlead_cycle": 1,
+  "panel_slug": "muse-wonder-foreign-session-20261014-council-1",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gemini-4-argon-high",
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "teamlead cycle 1 rework for Coder; blocking items from instructions[]",
+  "do_not_change": [
+    "ALLOWED_MODELS context length 400000",
+    "desktop/web cordis.patch.yml contextWindow 400000"
+  ],
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/muse-bridge/server.py",
+      "line_hint": "915-960 (особенно строка 941 в _partition_units)",
+      "rule_ref": "ADR-001.2 §2.2 п.4 (обязательное сохранение незавершённой связки assistant(tool_calls) + tool после последнего user и атомарность эпизодов)",
+      "action": "В _partition_units ограничить сбор ответов role=='tool' для assistant(tool_calls) текущим эпизодом вызова (прекращать поиск на границе следующего хода assistant/user или сопоставлять результаты строго внутри текущего эпизода), чтобы первый вызов с повторяющимся tool_call_id (например, call_0 в чужой истории) не поглощал tool-результаты более поздних эпизодов и не приводил к отбрасыванию последнего обязательного вызова assistant+tool из-за consumed_tools. Добавить регрессионный тест в tests/test_muse_bridge_killpg.py на историю с повторяющимся tool_call_id в нескольких эпизодах при прунинге.",
+      "acceptance": "Given история содержит два или более эпизода assistant(tool_calls)+tool с одинаковым tool_call_id (например, call_0), включая обязательный хвостовой эпизод после последнего user, When вызывается _prune_messages с бюджетом, требующим прунинга (например, limit=500, target=400), Then каждый assistant связывается только со своими tool-результатами текущего эпизода, а последний обязательный эпизод assistant(tool_calls)+tool полностью сохраняется в pruned-истории и промпте.",
+      "source": "Seat 3 (gpt-6.1-sol-high, Скептик) / КОРРЕКТНОСТЬ, СООТВЕТСТВИЕ КОНТЕКСТУ FAIL; консенсус леджера R1 (skeptic=AUTHOR, realist=AGREE, visionary=AGREE)",
+      "evidence": "Скептик (Seat 3): «В server.py:941 поиск результатов идёт по всей оставшейся истории. Первый вызов с id=call_0 поглощает результаты обоих эпизодов; второй assistant затем исключается из-за consumed_tools. В воспроизведении при limit=500, target=400 результат — pruned, сохранены только первый user, маркер и последний user. Последний вызов и его результат потеряны, хотя являются обязательными». Контекст расхождения R1: Реалист (Seat 1) и Визионер (Seat 2) в первичном разборе оценили атомарность tool_calls как PASS на существующих тестах без повтора id, но в консенсус-леджере R1 единогласно подтвердили F-001 как blocking (realist=AGREE, visionary=AGREE).",
+      "related_locations": [
+        {
+          "file": "tests/test_muse_bridge_killpg.py",
+          "line_hint": "1375-1460"
+        }
+      ],
+      "source_findings": [
+        "F-001"
+      ]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": "bridges/muse-bridge/server.py",
+      "line_hint": "289 (в _turn_diagnostics), 1719-1756 (ServeRun.execute), 2289-2294 (детекция is_hard_threshold)",
+      "rule_ref": "ADR-001.3 §3.1 п.2 (детекция маркера HARD_THRESHOLD_ERR_SUBSTR по необрезанному/сырому каналу ошибки до усечения диагностики)",
+      "action": "Извлекать признак превышения жёсткого порога контекста (HARD_THRESHOLD_ERR_SUBSTR) до усечения поля message до 160 символов и общего бюджета 300 символов в _turn_diagnostics (и до редактирования/обрезки ошибки), пробрасывая флаг или сохраняя необрезанный признак для проверки context retry в Handler, чтобы длинный префикс ошибки в MSP turn/completed не срезал маркер и не блокировал однократный retry. Добавить регрессионный тест через протокольный MSP-стенд (без подмены execute()), проверяющий срабатывание retry при длинном префиксе перед HARD_THRESHOLD_ERR_SUBSTR.",
+      "acceptance": "Given MSP-процесс возвращает terminal='failed' с сообщением ошибки, где перед подстрокой HARD_THRESHOLD_ERR_SUBSTR идёт префикс длиннее 160/300 символов, и контекст допускает сжатие до retry_target, When запрос проходит через реальный ServeRun.execute() и Handler, Then признак hard threshold распознаётся, выполняется однократный context retry на бюджете 50% (retry_target), а при повторном провале с тем же маркером формируется корректная ошибка terminal_context_err.",
+      "source": "Seat 3 (gpt-6.1-sol-high, Скептик) / РИСКИ, СООТВЕТСТВИЕ КОНТЕКСТУ, ПОЛНОТА FAIL; консенсус леджера R1 (skeptic=AUTHOR, realist=AGREE, visionary=AGREE)",
+      "evidence": "Скептик (Seat 3): «В server.py:289 сообщение ошибки ограничивается 160 символами, а проверка hard threshold выполняется позже по возвращённому err. Маркер после длинного префикса исчезает. Проверено через реальный MSP-стенд со stdio-процессом: исходное сообщение содержало маркер, запрос позволял уменьшить контекст, но выполнен один turn/start, ответ — 502, retry отсутствует. Признак hard threshold нужно извлекать до редакции и усечения». Контекст расхождения R1: Визионер (Seat 2) заметил, что «сопоставление retry идёт по уже отредактированному err. Это отличается от ADR §3.1 п.2, но ошибается в безопасную сторону (retry просто не стартует)», а Реалист (Seat 1) счёл проверку достаточной; в леджере R1 все трое судей согласились с блокирующим статусом F-002 (realist=AGREE, visionary=AGREE).",
+      "related_locations": [
+        {
+          "file": "tests/test_muse_bridge_killpg.py",
+          "line_hint": "970-1095"
+        }
+      ],
+      "source_findings": [
+        "F-002"
+      ]
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": "bridges/muse-bridge/server.py",
+      "line_hint": "229-241 (_diagnostic_text) и 2394-2417 (финальная очистка diagnostic в Handler)",
+      "rule_ref": "ADR-001.4 (запрет утечки отражённых тел сообщений и секретов во все приёмники ошибок и логов)",
+      "action": "Обеспечить удаление отражённых частей промпта и сообщений истории независимо от порядка редактирования секретов: вырезать отражённые куски как по исходным строкам промпта/сообщений, так и по их версиям после _redact_secrets (либо сначала удалять отражённые части промпта, а затем применять _redact_secrets и повторно вычищать отредактированные кандидаты в _diagnostic_text и на финальной границе Handler). Добавить регрессионный тест, в котором пользовательское сообщение содержит приватный текст вместе с секретом (например, 'BODY_PRIVATE_CANARY api_key=synthetic-secret'), проверяющий отсутствие BODY_PRIVATE_CANARY и секрета в HTTP 502, SSE error и логе.",
+      "acceptance": "Given сообщение в истории содержит одновременно приватный текст и редактируемый секрет (например, 'BODY_PRIVATE_CANARY api_key=synthetic-secret') и отражается апстримом в ошибке MSP/exec, When формируется диагностика в _diagnostic_text и финальный ответ/лог в Handler, Then ни секрет, ни остаток отражённого тела сообщения ('BODY_PRIVATE_CANARY') не попадают в лог, JSON 502 или SSE error-кадр.",
+      "source": "Seat 3 (gpt-6.1-sol-high, Скептик) / РИСКИ, СООТВЕТСТВИЕ КОНТЕКСТУ FAIL; консенсус леджера R1 (skeptic=AUTHOR, realist=AGREE, visionary=AGREE)",
+      "evidence": "Скептик (Seat 3): «В server.py:232 сначала изменяется диагностика, затем ищутся исходные части промпта. Для сообщения BODY_PRIVATE_CANARY api_key=synthetic-secret ключ скрывается, но исходная строка больше не совпадает. Реальный MSP-прогон подтвердил наличие BODY_PRIVATE_CANARY в ошибке и логе. Сопоставление должно учитывать одинаковую редакцию обеих сторон». Контекст расхождения R1: Реалист (Seat 1) и Визионер (Seat 2) первично поставили PASS по критерию 4 (безопасность), но в консенсус-леджере R1 согласились с F-003 как blocking (realist=AGREE, visionary=AGREE).",
+      "related_locations": [
+        {
+          "file": "tests/test_muse_bridge_killpg.py",
+          "line_hint": "910-965"
+        }
+      ],
+      "source_findings": [
+        "F-003"
+      ]
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": "bridges/muse-bridge/server.py",
+      "line_hint": "2267 (обработка except ServeUnavailable as exc в run_attempt)",
+      "rule_ref": "ADR-001.4 (запрет записи отражённого промпта и тел сообщений в лог моста на любых ветках выполнения)",
+      "action": "На границе перехвата ServeUnavailable в run_attempt (server.py:2267) очищать текст исключения от отражённого attempt_prompt, его частей (_prompt_reflected_parts) и тел raw_messages (через санитизатор с учётом _redact_secrets) перед вызовом _log, либо логировать фиксированную безопасную причину без сырого тела исключения. Добавить регрессионный тест, проверяющий, что при выбросе ServeUnavailable с отражённым текстом промпта и успешном exec-fallback (HTTP 200) тело сообщения отсутствует в LOG_PATH.",
+      "acceptance": "Given ServeRun выбрасывает ServeUnavailable, текст которого содержит отражённый промпт или реплику пользователя (в том числе с секретом), и запрос уходит в exec-fallback, When записывается лог 'serve unavailable (...), fallback exec', Then в LOG_PATH и stderr не попадает ни один фрагмент пользовательского промпта или секрета.",
+      "source": "Seat 3 (gpt-6.1-sol-high, Скептик) / РИСКИ, СООТВЕТСТВИЕ КОНТЕКСТУ FAIL; консенсус леджера R1 (skeptic=AUTHOR, realist=AGREE, visionary=AGREE)",
+      "evidence": "Скептик (Seat 3): «В server.py:2267 ServeUnavailable сразу передаётся в _log; отражение возможно через RPC error или stderr. В воспроизведении исключение содержало промпт, exec-fallback вернул 200, но тело сообщения осталось в логе. Нужна очистка на этой границе либо постоянный текст лога без содержимого исключения». Контекст расхождения R1: Реалист (Seat 1) и Визионер (Seat 2) не выявили эту утечку в R1 (Критерий 4 PASS), однако в леджере R1 подтвердили F-004 как blocking (realist=AGREE, visionary=AGREE).",
+      "related_locations": [
+        {
+          "file": "tests/test_muse_bridge_killpg.py",
+          "line_hint": "1195-1225"
+        }
+      ],
+      "source_findings": [
+        "F-004"
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "В _prune_messages (Фаза C) заменить квадратичный цикл O(n^2) с повторной полной сборкой промпта на каждом шаге на линейный O(n) расчёт (предвычисление размеров отрендеренных единиц и маркеров разрыва), чтобы устранить задержки (3.3 с на 3000 сообщений, 11.6 с на 6000 сообщений) до отправки заголовков SSE.",
+      "reason": "Согласовано советом в findings-ledger.md со статусом outcome: non-blocking (R1 visionary=AUTHOR, realist=AGREE, skeptic=AGREE).",
+      "source_findings": [
+        "F-005"
+      ]
+    },
+    {
+      "id": "FU-002",
+      "text": "Развести консервативный оценщик бюджета прунинга (_estimate_tokens по байтам/3) и функцию оценки клиентских метрик usage.prompt_tokens / usage.completion_tokens на exec-ветке (server.py:2492-2493), чтобы не завышать отчётные числа токенов в 2-3 раза на кириллице.",
+      "reason": "Согласовано советом в findings-ledger.md со статусом outcome: non-blocking (R1 visionary=AUTHOR, realist=AGREE, skeptic=AGREE).",
+      "source_findings": [
+        "F-006"
+      ]
+    }
+  ],
+  "excluded": [],
+  "findings_total": 6
+}

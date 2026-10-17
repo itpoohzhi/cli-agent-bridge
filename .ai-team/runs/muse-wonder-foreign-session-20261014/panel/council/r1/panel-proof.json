@@ -1,0 +1,55 @@
+{
+  "artifact_sha256": "47716ba5d559b066f5a753e36ec59b4963450c080868862711fd9fc1356a433a",
+  "expect_seats": 3,
+  "manifest_sha256": "22956141150f011be7a15f33a7e623550ef5aac5086f88a8ed5dd35f07ae0e1f",
+  "min_seconds": 8.0,
+  "min_verdict_chars": 200,
+  "result": "PASS",
+  "round": 1,
+  "schema": "pol-receipt/1",
+  "seats": [
+    {
+      "duration_s": 87.506415,
+      "family": "Google",
+      "k": 1,
+      "launch_sha256": "49a0119bbcecc6fd30cf965843656835747edb72dce22e7b3fd70ef0e0b009c4",
+      "raw_out_sha256": "103abf2e4683af8302d5a86c69664977900f9f29f824dd53fa0dfab91581407e",
+      "rc": 0,
+      "slot_id": "gemini-4-argon-high",
+      "transport": "droid",
+      "verdict": "ACCEPT",
+      "verdict_sha256": "1a8b85c2792891c3161e96d41766512e772f54a2320154637f0118af5325f498"
+    },
+    {
+      "duration_s": 149.915148,
+      "family": "Anthropic",
+      "k": 2,
+      "launch_sha256": "fecb42c042c3a01eb878a57078911fe081b2365bff79c29424892a94d355912a",
+      "raw_out_sha256": "69f776c56ab00967b2acb09fa4bd0af9fb677e02ea381e2616f494af60387fb4",
+      "rc": 0,
+      "slot_id": "claude-sonnet-5-5-high",
+      "transport": "droid",
+      "verdict": "NEEDS_WORK",
+      "verdict_sha256": "6e807dd3925d66cbe3ecef32a1c48d8d05515a35b828247a20255ef85df176ca"
+    },
+    {
+      "duration_s": 386.570405,
+      "family": "OpenAI",
+      "k": 3,
+      "launch_sha256": "7fdb9ee6352d0eb259598abb088bba88ff2985af4eec7ac82b174cfdad404ffd",
+      "raw_out_sha256": "559e4508a055f0bc22cbffdd68eae9fff6b1c7bd843e78be49d169c5b3bb61aa",
+      "rc": 0,
+      "slot_id": "gpt-6.1-sol-high",
+      "transport": "codex",
+      "verdict": "NEEDS_WORK",
+      "verdict_sha256": "9b936f5828f34ed56f1fc55ada058d6a46c9bd43d826ec7f7b224c819dc1c6dd"
+    }
+  ],
+  "stage": "council",
+  "verdict_counts": {
+    "ACCEPT": 1,
+    "NEEDS_WORK": 2
+  },
+  "verified_at": "2026-10-14T15:57:06.856843+00:00",
+  "verifier_sha256": "b0bf3ddf88ed17ad6addfffbef40a8f4549eb3cb98080105a0b60d2802db7bf3"
+}

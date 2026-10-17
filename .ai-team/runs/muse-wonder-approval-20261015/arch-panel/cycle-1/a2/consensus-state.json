@@ -1,0 +1,1460 @@
+{
+ "findings": [
+  {
+   "id": "F-001",
+   "origin": "Визионер · R1 · F-001",
+   "author_hat": "Визионер",
+   "author_family": "OpenAI",
+   "title": "Барьер повтора не исключает повторение ненаблюдаемого действия.",
+   "text": "F-001 — Барьер повтора не исключает повторение ненаблюдаемого действия.\n- Якоря: architecture-packet.json#AD-003, architecture-packet.json#ASM-010, architecture-packet.json#THREAT-004, architecture-packet.json#QA-005, architecture-packet.json#VER-002.\n- Правило: RW-003 требует ограничить разрешение повтора, если инструментальное действие нельзя надёжно обнаружить; разрешение allowAll не означает принятия at-least-once.\n- Evidence: ASM-010 признаёт: «действие без любого из этих сигналов до транзиентного сбоя фактами не исключено», однако разрешает повтор при чистом потоке reasoning/agentMessage. Для exec достаточен пустой результат. T-R07 проверяет только действие, сопровождаемое инструментальным item. Отсутствие текста exec также не доказывает отсутствие действия.\n- Ожидаемое исправление: до подтверждения полноты и порядка инструментальных событий запрещать повтор после возможного начала исполнения либо обеспечить доказанную дедупликацию. Отдельно определить безопасное условие для exec. Наблюдение первых успешных ходов не считать доказательством отсутствия ненаблюдаемых эффектов.\n- Критерий проверки: заглушка выполняет эффект без item/approval и без выходного текста, затем возвращает net-timeout; второго эффекта нет. Альтернатива — явное принятие владельцем семантики дублирования с соответствующим изменением пакета.\n- priority: blocking.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Визионер"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#ASM-010, architecture-packet.json#AD-003, architecture-packet.json#THREAT-004, architecture-packet.json#VER-009",
+     "fix": "(1) вынести контингенцию «ужесточить барьер до принятого turn/start» в alternatives AD-003 с условием срабатывания (первый же контрпример в логе item-kind из F-006); (2) закрыть ASM-010 через журнал item-kind (F-006) и выборку в VER-009; (3) в ASM-010 прямо записать, что эффект без item/approval-сигнала протоколом не наблюдается",
+     "by": "Скептик"
+    },
+    {
+     "rev": 3,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-003,architecture-packet.json#ASM-010,architecture-packet.json#THREAT-004,architecture-packet.json#QA-005,architecture-packet.json#VER-002",
+     "fix": "до доказательства полноты и порядка сигналов инструментальной активности либо дедупликации запрещать повтор после возможного начала исполнения; для exec отдельно установить доказуемое безопасное условие, пустого результата недостаточно; проверить эффект без item/approval и выходного текста с последующим net-timeout: второго эффекта быть не должно; альтернативная семантика требует решения владельца",
+     "by": "Визионер"
+    },
+    {
+     "rev": 4,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#ASM-010,architecture-packet.json#AD-003,architecture-packet.json#THREAT-004,architecture-packet.json#VER-009",
+     "fix": "(1) вынести контингенцию «ужесточить барьер до принятого turn/start» в alternatives AD-003 с условием срабатывания (первый контрпример в журнале item-kind из F-006); (2) закрыть ASM-010 через безопасный журнал item-kind (F-006) и выборку в VER-009; (3) в ASM-010 прямо зафиксировать, что действие без item/approval-сигнала протоколом MSP не наблюдается",
+     "by": "Скептик"
+    },
+    {
+     "rev": 5,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#ASM-010, architecture-packet.json#AD-003, architecture-packet.json#THREAT-004, architecture-packet.json#VER-009",
+     "fix": "вынести контингенцию «ужесточить барьер до принятого turn/start» в alternatives AD-003 с условием срабатывания (первый контрпример в журнале item-kind из F-006); в ASM-010 прямо записать, что эффект без item/approval-сигнала протоколом не наблюдается; не вводить запрет повтора после любого turn/start сейчас",
+     "by": "Реалист"
+    }
+   ],
+   "status": "OWNER_DECIDED",
+   "outcome": "blocking",
+   "resolved_in": "owner",
+   "votes": {
+    "R1": {
+     "Визионер": "AUTHOR"
+    },
+    "D1": {
+     "Реалист": "D",
+     "Скептик": "A"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Реалист": "A"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "C1": {
+     "Визионер": "C",
+     "Реалист": "C",
+     "Скептик": "O"
+    }
+   },
+   "dissent": [
+    "Реалист D1 «— класс: invalid — контр-evidence: architecture-packet.json#AD-003, architecture-packet.json#ASM-010, architecture-packe»",
+    "Скептик C1 «OBJECT F-001 — дефект: architecture-packet.json#ASM-010 допускает действие без наблюдаемых сигналов, но #AD-003 разрешает повтор при их отсу» → debate/c1"
+   ],
+   "amendments": [
+    "rev 2 (D2, Скептик): priority=non-blocking",
+    "rev 3 (D3, Визионер): priority=blocking",
+    "rev 4 (D3, Скептик): priority=non-blocking",
+    "rev 5 (D3, Реалист): priority=non-blocking"
+   ],
+   "families": {
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 3
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 4
+    },
+    "Anthropic": {
+     "kind": "AMEND",
+     "rev": 5
+    }
+   },
+   "owner_decision": "2026-10-15 ~18:15 MSK «F-001 (барьер повтора / ненаблюдаемое действие, ASM-010 vs AD-003): **blocking**» (owner-decisions.md, раздел «Решение владельца 2026-10-15 ~18:15 MSK — арх-панель cycle-1, проход a2»)"
+  },
+  {
+   "id": "F-002",
+   "origin": "Визионер · R1 · F-002",
+   "author_hat": "Визионер",
+   "author_family": "OpenAI",
+   "title": "Таймаут live-записи не ограничивает ожидание общего замка.",
+   "text": "F-002 — Таймаут live-записи не ограничивает ожидание общего замка.\n- Якоря: architecture-packet.json#AD-004, architecture-packet.json#BND-004, architecture-packet.json#EVD-024, architecture-packet.json#VER-003.\n- Правило: RW-004 требует ограниченного ожидания синхронного sink и сохранения чтения MSP при медленном клиенте.\n- Evidence: timeout 3 с выставляется «на время записи под _wlock» и затем восстанавливается. Через тот же замок идут keepalive и финальная выдача. EVD-024 фиксирует прежний timeout соединения 300 с. Если keepalive уже заблокирован на записи, live-sink сначала ждёт замок и до установки своего трёхсекундного timeout не доходит.\n- Ожидаемое исправление: распространить ограничение на все записи, конкурирующие за _wlock; ограничить ожидание замка остатком общего дедлайна. Либо выбрать единственного писателя с ограниченной очередью и явной политикой переполнения.\n- Критерий проверки: клиент перестаёт читать; сначала блокируется keepalive, затем приходит summary. Процесс и слот освобождаются за установленный предел, второй клиент обслуживается. Существующего T-L08 только с заполнением live-дельтами недостаточно.\n- priority: blocking.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Визионер"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-004,architecture-packet.json#BND-004,architecture-packet.json#EVD-024,architecture-packet.json#VER-003",
+     "fix": "применять предел LIVE_WRITE_TIMEOUT_S=3 с внутри общего метода Handler._sse_write под _wlock ко всем записям открытого стрима (keepalive, live-sink, финальная выдача) и дополнить T-L08 случаем, когда на заполненном буфере первым блокируется keepalive-кадр",
+     "by": "Реалист"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-004, architecture-packet.json#BND-004, architecture-packet.json#EVD-024, architecture-packet.json#VER-003",
+     "fix": "применить LIVE_WRITE_TIMEOUT_S=3 с ко всем записям под `_wlock` (keepalive, live, финал) внутри `_sse_write`; исправить формулировку AD-004 «не дольше 3 с на кадр», которая сейчас неверна при занятом замке; добавить в T-L08 случай, когда первым зависает keepalive",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-004,architecture-packet.json#BND-004,architecture-packet.json#EVD-024,architecture-packet.json#VER-003",
+     "fix": "ограничить ожидание _wlock и все конкурирующие SSE-записи, включая keepalive и финализацию, согласованным пределом с учётом остатка дедлайна; при превышении запускать ограниченную очистку; дополнить T-L08 сценарием, где первым блокируется keepalive, затем приходит summary, и проверить освобождение группы и слота",
+     "by": "Реалист"
+    },
+    {
+     "rev": 5,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-004,architecture-packet.json#BND-004,architecture-packet.json#EVD-024,architecture-packet.json#VER-003",
+     "fix": "ограничить всю операцию sink, включая ожидание _wlock и запись, согласованным пределом с учётом остатка дедлайна; распространить ограничение на keepalive, live и финализацию либо выбрать единственного писателя с ограниченной очередью; дополнить T-L08 сценарием «первым блокируется keepalive, затем приходит summary», проверяя освобождение группы и слота",
+     "by": "Визионер"
+    },
+    {
+     "rev": 6,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-004,architecture-packet.json#BND-004,architecture-packet.json#EVD-024,architecture-packet.json#VER-003",
+     "fix": "применять предел LIVE_WRITE_TIMEOUT_S=3 с внутри общего метода Handler._sse_write под _wlock ко всем записям открытого стрима (keepalive, live-sink, финальная выдача) и дополнить T-L08 сценарием, где при переполненном буфере первым блокируется keepalive-кадр",
+     "by": "Скептик"
+    },
+    {
+     "rev": 7,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-004, architecture-packet.json#BND-004, architecture-packet.json#EVD-024, architecture-packet.json#VER-003",
+     "fix": "применить LIVE_WRITE_TIMEOUT_S=3 с ко всем записям под `_wlock` внутри `_sse_write` (keepalive, live, финал) либо ограничить ожидание замка в sink; исправить формулировку AD-004 «не дольше 3 с на кадр»; дополнить T-L08 случаем, когда первым зависает keepalive-кадр",
+     "by": "Реалист"
+    }
+   ],
+   "status": "OWNER_DECIDED",
+   "outcome": "blocking",
+   "resolved_in": "owner",
+   "votes": {
+    "R1": {
+     "Визионер": "AUTHOR"
+    },
+    "D1": {
+     "Реалист": "M",
+     "Скептик": "A"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "C1": {
+     "Визионер": "O",
+     "Реалист": "C",
+     "Скептик": "O"
+    }
+   },
+   "dissent": [
+    "Визионер C1 «OBJECT F-002 — дефект: architecture-packet.json#AD-004 и #BND-004 заявляют, что синхронный sink «блокирует цикл чтения MSP не дольше 3 с на » → debate/c1",
+    "Скептик C1 «OBJECT F-002 — дефект: architecture-packet.json#AD-004 обещает блокировку чтения MSP не дольше 3 с, однако timeout устанавливается после зах» → debate/c1"
+   ],
+   "amendments": [
+    "rev 2 (D1, Реалист): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D2, Реалист): priority=blocking",
+    "rev 5 (D3, Визионер): priority=blocking",
+    "rev 6 (D3, Скептик): priority=non-blocking",
+    "rev 7 (D3, Реалист): priority=blocking"
+   ],
+   "families": {
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 5
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 6
+    },
+    "Anthropic": {
+     "kind": "AMEND",
+     "rev": 7
+    }
+   },
+   "owner_decision": "2026-10-15 ~18:15 MSK «F-002 (таймаут live-записи после захвата _wlock, AD-004/BND-004): **blocking**» (owner-decisions.md, раздел «Решение владельца 2026-10-15 ~18:15 MSK — арх-панель cycle-1, проход a2»)"
+  },
+  {
+   "id": "F-003",
+   "origin": "Визионер · R1 · F-003",
+   "author_hat": "Визионер",
+   "author_family": "OpenAI",
+   "title": "Абсолютный бюджет и grace объявлены, но распределение времени допускает их превышение.",
+   "text": "F-003 — Абсолютный бюджет и grace объявлены, но распределение времени допускает их превышение.\n- Якоря: architecture-packet.json#AD-002, architecture-packet.json#AD-003, architecture-packet.json#QA-001, architecture-packet.json#QA-004, architecture-packet.json#BND-003, architecture-packet.json#VER-001, architecture-packet.json#VER-002.\n- Правило: RW-002 включает cleanup и финальную выдачу в общий бюджет; RW-008 требует короткого освобождения слота после входа в деградацию.\n- Evidence: попытке передаётся весь «остаток до дедлайна», хотя в тот же бюджет входят cleanup и выдача. Запись stdin после turn/start ограничена дедлайном хода, а grace начинается «после отправки turn/cancel или отказного decide». При заблокированном stdin отправка отмены может ждать оставшуюся часть 1800 с ещё до запуска grace. При исчерпании попыткой всего остатка времени на последующие обязательные фазы уже нет.\n- Ожидаемое исправление: задать конечные бюджеты записи управляющей команды, завершения группы и финальной выдачи; вычислять дедлайн исполнения с резервом этих фаз. Grace отсчитывать от локального защёлкивания деградации, включая попытку отправки отмены; невозможность записать команду должна вести к принудительной очистке в том же пределе.\n- Критерий проверки: добавить остановку чтения stdin перед деградацией и зависание модели до последнего разрешённого момента бюджета. Проверять время от приёма запроса и от защёлкивания деградации до исхода и освобождения слота. Сценарии должны укладываться в заявленные пределы без дополнительного полного grace после общего дедлайна.\n- priority: blocking.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Визионер"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002,architecture-packet.json#AD-003,architecture-packet.json#QA-001,architecture-packet.json#QA-004,architecture-packet.json#BND-003",
+     "fix": "отсчитывать APPROVAL_CANCEL_GRACE_S=15 с от момента локального защёлкивания деградации (ограничивая запись отказного decide или turn/cancel и ожидание turn/completed единым пределом min(deadline, latch_ts + 15 с)) и явно уточнить в AD-003 и QA-004, что пост-дедлайновый cleanup и финальная выдача укладываются в 100-секундный запас между TIMEOUT_S=1800 с и клиентским лимитом 1900 с",
+     "by": "Реалист"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002, architecture-packet.json#AD-003, architecture-packet.json#QA-001, architecture-packet.json#QA-004, architecture-packet.json#BND-003",
+     "fix": "отсчитывать APPROVAL_CANCEL_GRACE_S от момента локального защёлкивания (ожидание = min(дедлайн, latch_ts+15 с)); при невозможности записать команду сразу идти к убийству группы; в AD-003 и QA-004 записать, что cleanup и финальная выдача после дедлайна укладываются в запас 100 с до 1900 с",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-002,architecture-packet.json#AD-003,architecture-packet.json#QA-001,architecture-packet.json#QA-004,architecture-packet.json#BND-003,architecture-packet.json#VER-001,architecture-packet.json#VER-002",
+     "fix": "сохранить заявленный общий бюджет 1800 с, выделив внутри него конечные бюджеты управляющих записей, завершения группы и финальной выдачи; исполнению передавать остаток за вычетом этих резервов; grace отсчитывать от локального защёлкивания отказа и включать в него попытку отправки отмены; проверить заблокированный stdin и исчерпание времени исполнения непосредственно перед cleanup",
+     "by": "Реалист"
+    },
+    {
+     "rev": 5,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-002,architecture-packet.json#AD-003,architecture-packet.json#QA-001,architecture-packet.json#QA-004,architecture-packet.json#BND-003,architecture-packet.json#VER-001,architecture-packet.json#VER-002",
+     "fix": "выделить внутри общего бюджета конечные резервы управляющих записей, завершения группы и финальной выдачи; исполнению передавать остаток за вычетом резервов; grace отсчитывать от локального защёлкивания отказа, включая отправку отмены; при невозможности записи переходить к ограниченной очистке; проверить заблокированный stdin и исчерпание бюджета исполнения перед cleanup",
+     "by": "Визионер"
+    },
+    {
+     "rev": 6,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002,architecture-packet.json#AD-003,architecture-packet.json#QA-001,architecture-packet.json#QA-004,architecture-packet.json#BND-003",
+     "fix": "отсчитывать APPROVAL_CANCEL_GRACE_S=15 с от момента локального защёлкивания деградации (ограничивая отправку отказного decide или turn/cancel и ожидание turn/completed общим пределом min(deadline, latch_ts + 15 с)), при ошибке записи сразу переходить к убийству группы, а в AD-003 и QA-004 явно уточнить, что пост-дедлайновый cleanup и финальная выдача укладываются в 100-секундный запас между TIMEOUT_S=1800 с и клиентским лимитом 1900 с",
+     "by": "Скептик"
+    },
+    {
+     "rev": 7,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002, architecture-packet.json#AD-003, architecture-packet.json#QA-001, architecture-packet.json#QA-004, architecture-packet.json#BND-003",
+     "fix": "отсчитывать APPROVAL_CANCEL_GRACE_S от локального защёлкивания (ожидание = min(дедлайн, latch_ts+15 с)), при невозможности записать команду идти сразу к убийству группы; в AD-003 и QA-004 записать, что cleanup и финальная выдача после дедлайна укладываются в запас 100 с до 1900 с",
+     "by": "Реалист"
+    }
+   ],
+   "status": "OWNER_DECIDED",
+   "outcome": "non-blocking",
+   "resolved_in": "owner",
+   "votes": {
+    "R1": {
+     "Визионер": "AUTHOR"
+    },
+    "D1": {
+     "Реалист": "M",
+     "Скептик": "A"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "C1": {
+     "Визионер": "C",
+     "Реалист": "C",
+     "Скептик": "O"
+    }
+   },
+   "dissent": [
+    "Скептик C1 «OBJECT F-003 — дефект: architecture-packet.json#QA-004 включает cleanup и финальную выдачу в потолок 1800 с, но #AD-003 передаёт попытке вес» → debate/c1"
+   ],
+   "amendments": [
+    "rev 2 (D1, Реалист): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D2, Реалист): priority=blocking",
+    "rev 5 (D3, Визионер): priority=blocking",
+    "rev 6 (D3, Скептик): priority=non-blocking",
+    "rev 7 (D3, Реалист): priority=non-blocking"
+   ],
+   "families": {
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 5
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 6
+    },
+    "Anthropic": {
+     "kind": "AMEND",
+     "rev": 7
+    }
+   },
+   "owner_decision": "2026-10-15 ~18:15 MSK «F-003 (бюджет 1800 с без резерва на cleanup/выдачу, grace после cancel): **non-blocking** (учесть в брифе Coder)» (owner-decisions.md, раздел «Решение владельца 2026-10-15 ~18:15 MSK — арх-панель cycle-1, проход a2»)"
+  },
+  {
+   "id": "F-004",
+   "origin": "Визионер · R1 · F-004",
+   "author_hat": "Визионер",
+   "author_family": "OpenAI",
+   "title": "Разрешена потеря reasoning за пределами допустимой фрагментации контракта.",
+   "text": "F-004 — Разрешена потеря reasoning за пределами допустимой фрагментации контракта.\n- Якоря: architecture-packet.json#AD-004, architecture-packet.json#CD-001, architecture-packet.json#BND-004, architecture-packet.json#RISK-003, architecture-packet.json#VER-003.\n- Правило: task envelope разрешает только аддитивные SSE-кадры существующих полей; RW-005 требует согласования snapshot без потерь и дублей.\n- Evidence: «если [F не начинается с P] — хвост не отправляется». При опубликованном P=`a` и авторитетном F=`b\\n\\nc` клиент останется с `a`, потеряет `b\\n\\nc` и получит успешное завершение. CD-001 при этом называет изменение «аддитивной фрагментацией», хотя меняется само значение reasoning. VER-003 сохраняет отсутствие потерь только «в расширяющем случае».\n- Ожидаемое исправление: публиковать до завершения только доказанно устойчивый префикс источника и сохранить авторитетный итоговый текст. Если такой гарантии MSP получить нельзя, вынести изменение семантики расхождения на явное решение владельца новым delta-пакетом; молчаливое усечение успешного ответа не считать совместимой фрагментацией.\n- Критерий проверки: несовместимый snapshot содержит дополнительный уникальный текст; проверка подтверждает сохранение согласованного значения без потерь и дублей либо явно утверждённый новый исход. Одного лога расхождения недостаточно.\n- priority: blocking.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Визионер"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-004, architecture-packet.json#CD-001, architecture-packet.json#VER-003, architecture-packet.json#RISK-003",
+     "fix": "в CD-001 и ADR явно записать, что при F, не начинающемся с P, стрим остаётся с отправленным префиксом, а авторитетный F доступен в non-stream; поднять лог расхождения до warning со счётчиком; добавить в T-L07 проверку на счётчик и warning; расхождение как класс вынести в Q для владельца",
+     "by": "Скептик"
+    },
+    {
+     "rev": 3,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-004,architecture-packet.json#CD-001,architecture-packet.json#BND-004,architecture-packet.json#RISK-003,architecture-packet.json#VER-003",
+     "fix": "исключить успешное завершение с усечённым авторитетным reasoning: подтвердить устойчивость публикуемого префикса либо при несовместимом snapshot завершать запрос контролируемой ошибкой существующего формата, согласовав этот исход в AD/CD/QA/VER; иная успешная семантика требует отдельного разрешения владельца; T-L07 должен содержать уникальный текст в несовместимом F и проверять отсутствие ложного успеха",
+     "by": "Визионер"
+    },
+    {
+     "rev": 4,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-004,architecture-packet.json#CD-001,architecture-packet.json#RISK-003,architecture-packet.json#VER-003",
+     "fix": "в CD-001 и ADR 0003 явно зафиксировать, что при аномальном расхождении финального snapshot с уже отправленным префиксом (not F.startswith(P)) SSE-поток сохраняет отправленный префикс P без дублирования, расхождение логируется как warning со счётчиком и проверяется в T-L07, а non-stream JSON возвращает полную сборку F",
+     "by": "Скептик"
+    },
+    {
+     "rev": 5,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-004, architecture-packet.json#CD-001, architecture-packet.json#VER-003, architecture-packet.json#RISK-003",
+     "fix": "в CD-001 и ADR 0003 явно записать, что при F, не начинающемся с P, клиент остаётся с отправленным префиксом, а авторитетный F доступен в non-stream; поднять лог расхождения до warning со счётчиком; в T-L07 проверять счётчик; при расхождении сохранить хвост по общему префиксу, если это не даёт дубля; расхождение как класс вынести владельцу через Q",
+     "by": "Реалист"
+    }
+   ],
+   "status": "OWNER_DECIDED",
+   "outcome": "non-blocking",
+   "resolved_in": "owner",
+   "votes": {
+    "R1": {
+     "Визионер": "AUTHOR"
+    },
+    "D1": {
+     "Реалист": "D",
+     "Скептик": "A"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Реалист": "A"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "C1": {
+     "Визионер": "C",
+     "Реалист": "C",
+     "Скептик": "O"
+    }
+   },
+   "dissent": [
+    "Реалист D1 «— класс: invalid — контр-evidence: architecture-packet.json#AD-004, architecture-packet.json#CD-001, architecture-packet»",
+    "Скептик C1 «OBJECT F-004 — дефект: architecture-packet.json#AD-004 при P=`a` и несовместимом F=`b\\n\\nc` отбрасывает авторитетный текст, сохраняя успешно» → debate/c1"
+   ],
+   "amendments": [
+    "rev 2 (D2, Скептик): priority=non-blocking",
+    "rev 3 (D3, Визионер): priority=blocking",
+    "rev 4 (D3, Скептик): priority=non-blocking",
+    "rev 5 (D3, Реалист): priority=non-blocking"
+   ],
+   "families": {
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 3
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 4
+    },
+    "Anthropic": {
+     "kind": "AMEND",
+     "rev": 5
+    }
+   },
+   "owner_decision": "2026-10-15 ~18:15 MSK «F-004 (потеря reasoning при расхождении snapshot, CD-001): **non-blocking** (учесть в брифе Coder)» (owner-decisions.md, раздел «Решение владельца 2026-10-15 ~18:15 MSK — арх-панель cycle-1, проход a2»)"
+  },
+  {
+   "id": "F-005",
+   "origin": "Визионер · R1 · F-005",
+   "author_hat": "Визионер",
+   "author_family": "OpenAI",
+   "title": "Операционный откат в denyUnmatched может снова включить автоматическое исполнение через exec.",
+   "text": "F-005 — Операционный откат в denyUnmatched может снова включить автоматическое исполнение через exec.\n- Якоря: architecture-packet.json#AD-006, architecture-packet.json#AD-007, architecture-packet.json#QA-008, architecture-packet.json#VER-001, architecture-packet.json#RISK-001.\n- Правило: заявленный переключатель безопасности должен сохранять выбранную политику при деградации транспорта и версии CLI.\n- Evidence: AD-007 предлагает denyUnmatched как «быстрый операционный откат политики». AD-006 при отказе явного режима направляет запрос в exec, который остаётся с --yolo. Следовательно, отказ сервера принять denyUnmatched может привести к пути автоматического исполнения. T-A11 и T-A14 проверяют эти ветки раздельно.\n- Ожидаемое исправление: в denyUnmatched запретить fallback в exec с --yolo и другие пути, не обеспечивающие выбранный режим; при невозможности сохранить политику завершать запрос контролируемым отказом. Отразить область действия переключателя в rollback и ADR.\n- Критерий проверки: сочетание MUSE_BRIDGE_APPROVAL_MODE=denyUnmatched с -32030 и другими setup-сбоями не запускает автоматически разрешающий exec; обычный allowAll сохраняет согласованную ветку fallback.\n- priority: blocking.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Визионер"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-006,architecture-packet.json#AD-007,architecture-packet.json#QA-008,architecture-packet.json#VER-001",
+     "fix": "при MUSE_BRIDGE_APPROVAL_MODE=denyUnmatched не выполнять fallback в exec при ошибке -32030 на session/start (завершать ход контролируемой ошибкой) и уточнить в AD-007 и evolution.rollback, что переключатель задаёт политику serve-сессии",
+     "by": "Реалист"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-006, architecture-packet.json#AD-007, architecture-packet.json#QA-008, architecture-packet.json#VER-001",
+     "fix": "в AD-007, rollback и ADR 0003 записать, что переключатель задаёт политику serve-сессии, а exec-fallback остаётся с `--yolo` и выключенными write, shell, web и reminders; либо запретить fallback при denyUnmatched и завершать ход контролируемой ошибкой; добавить тест на сочетание denyUnmatched с -32030 или EOF рукопожатия",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-006,architecture-packet.json#AD-007,architecture-packet.json#QA-008,architecture-packet.json#VER-001,architecture-packet.json#RISK-001",
+     "fix": "при denyUnmatched запретить любой переход в автоматически разрешающий exec, включая -32030 и остальные setup-сбои; при невозможности сохранить выбранную политику возвращать контролируемую ошибку; согласовать rollback и ADR и проверить сочетания режима с каждым разрешённым setup-fallback",
+     "by": "Реалист"
+    },
+    {
+     "rev": 5,
+     "priority": "blocking",
+     "locations": "architecture-packet.json#AD-006,architecture-packet.json#AD-007,architecture-packet.json#QA-008,architecture-packet.json#VER-001,architecture-packet.json#RISK-001",
+     "fix": "при denyUnmatched запрещать любой fallback в автоматически разрешающий exec; при невозможности сохранить выбранную политику возвращать контролируемую ошибку; согласовать rollback и ADR; проверить сочетание denyUnmatched с -32030, EOF рукопожатия и остальными разрешёнными setup-сбоями",
+     "by": "Визионер"
+    },
+    {
+     "rev": 6,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-006,architecture-packet.json#AD-007,architecture-packet.json#QA-008,architecture-packet.json#VER-001",
+     "fix": "в AD-007, evolution.rollback и ADR 0003 явно указать, что при MUSE_BRIDGE_APPROVAL_MODE=denyUnmatched ошибка -32030 на session/start не уходит в exec-fallback с --yolo (завершается контролируемой ошибкой), и добавить в VER-001 тест на сочетание denyUnmatched с -32030",
+     "by": "Скептик"
+    },
+    {
+     "rev": 7,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-006, architecture-packet.json#AD-007, architecture-packet.json#QA-008, architecture-packet.json#VER-001, evolution.rollback",
+     "fix": "в AD-007, rollback и ADR 0003 записать, что переключатель задаёт политику serve-сессии, а exec-fallback остаётся с `--yolo` при выключенных write, shell, web и reminders; либо при denyUnmatched запретить fallback и завершать ход контролируемой ошибкой; добавить тест сочетания denyUnmatched с EOF рукопожатия или -32030",
+     "by": "Реалист"
+    }
+   ],
+   "status": "OWNER_DECIDED",
+   "outcome": "blocking",
+   "resolved_in": "owner",
+   "votes": {
+    "R1": {
+     "Визионер": "AUTHOR"
+    },
+    "D1": {
+     "Реалист": "M",
+     "Скептик": "A"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "C1": {
+     "Визионер": "C",
+     "Реалист": "C",
+     "Скептик": "O"
+    }
+   },
+   "dissent": [
+    "Скептик C1 «OBJECT F-005 — дефект: architecture-packet.json#AD-007 и evolution.rollback обещают откат политики в denyUnmatched, но #AD-006 при setup-оши» → debate/c1"
+   ],
+   "amendments": [
+    "rev 2 (D1, Реалист): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D2, Реалист): priority=blocking",
+    "rev 5 (D3, Визионер): priority=blocking",
+    "rev 6 (D3, Скептик): priority=non-blocking",
+    "rev 7 (D3, Реалист): priority=non-blocking"
+   ],
+   "families": {
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 5
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 6
+    },
+    "Anthropic": {
+     "kind": "AMEND",
+     "rev": 7
+    }
+   },
+   "owner_decision": "2026-10-15 ~18:15 MSK «F-005 (откат denyUnmatched обходится exec --yolo, AD-006/AD-007): **blocking**» (owner-decisions.md, раздел «Решение владельца 2026-10-15 ~18:15 MSK — арх-панель cycle-1, проход a2»)"
+  },
+  {
+   "id": "F-006",
+   "origin": "Реалист · R1 · F-1",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Закрытие ASM-010 и аудит инструментов не имеют механизма",
+   "text": "**F-1 [non-blocking] Закрытие ASM-010 и аудит инструментов не имеют механизма**\n- Якорь: architecture-packet.json#ASM-010, #THREAT-001, #BND-002, arch-spec.md §4.3.\n- Правило: каждая допущенная остаточная неопределённость должна иметь исполнимый способ закрытия.\n- Evidence: ASM-010 говорит «закрывается сверкой item-kind аудита первых живых ходов». Ни в BND, ни в §4.3, ни в VER, ни в T-* логирование item-kind не описано. В §4.3 перечислены только первая summary-дельта, modelRetryScheduled и approval_degraded.\n- Следствие: при allowAll сервер разрешает большинство действий сам, остаточных approval/request будет мало. Аудит решений моста окажется почти пустым, а ASM-010 нечем проверить.\n- Исправление: добавить в ServeRun строку на каждый item/started и item/completed с kind не из {reasoning, agentMessage}. Поля только безопасные: kind и toolName через allowlist-рендер, без rawArgs. Добавить счётчик таких item в итоговую строку хода. Добавить тест на эту строку и пункт в VER-009: ходы с инструментальными item фиксируются отдельно.\n- Критерий проверки: тест канарейки показывает, что в логе есть kind и нет аргументов. VER-009 содержит выборку ходов с item вне reasoning/agentMessage.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#ASM-010,architecture-packet.json#BND-002,architecture-packet.json#VER-009",
+     "fix": "определить безопасный журнал наблюдаемых инструментальных item, счётчик на ход и канареечную проверку отсутствия аргументов; явно назвать этот журнал наблюдением событий, не доказательством полноты инструментального аудита",
+     "by": "Скептик"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#ASM-010, architecture-packet.json#BND-002, architecture-packet.json#VER-009",
+     "fix": "журнал item/started и item/completed с kind вне {reasoning, agentMessage} (kind и toolName через allowlist-рендер, без rawArgs), счётчик на ход, канарейка в тесте, выборка в VER-009; называть журнал наблюдением событий, а не полным аудитом",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#ASM-010,architecture-packet.json#BND-002,architecture-packet.json#VER-009",
+     "fix": "определить безопасный журнал наблюдаемых инструментальных item (item/started и item/completed с kind вне {reasoning, agentMessage}, поля kind и toolName через allowlist-рендер без rawArgs), счётчик на ход, канареечный тест и выборку в VER-009, явно назвав журнал наблюдением событий, а не полным аудитом действий",
+     "by": "Скептик"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "M"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Визионер": "A"
+    },
+    "D3": {
+     "Визионер": "A",
+     "Скептик": "M",
+     "Реалист": "A"
+    },
+    "C1": {
+     "Реалист": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [
+    "rev 2 (D1, Скептик): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D3, Скептик): priority=non-blocking"
+   ],
+   "families": {
+    "Anthropic": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "OpenAI": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 4
+    }
+   }
+  },
+  {
+   "id": "F-007",
+   "origin": "Реалист · R1 · F-2",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Быстрый откат политики через env launchd не проверяется и описан неоднозначно",
+   "text": "**F-2 [non-blocking] Быстрый откат политики через env launchd не проверяется и описан неоднозначно**\n- Якорь: architecture-packet.json#AD-007, evolution.rollback, #VER-008, arch-spec.md §7 п.7.\n- Правило: откат one-way решения безопасности должен быть проверен на реальном канале.\n- Evidence: «правка env launchd и перезапуск» и `launchctl kickstart -k`. Пакет сам указывает, что агент живёт в `~/Library/LaunchAgents/com.user.dsh-muse-bridge.plist` (EVD-020).\n- Риск: насколько я знаю, kickstart не перечитывает правки plist. Нужно bootout/bootstrap, либо чтение переменной из `~/.dsh/.env`. Это я не могу проверить по приложенным материалам.\n- Следствие: в T-A14 проверяется только чтение env внутри процесса. Реальная смена режима в деплое не проверяется нигде.\n- Исправление: в rollback и ADR 0003 записать точную последовательность команд (какой файл правится, bootout/bootstrap или иной способ). В VER-008 добавить «учение»: поставить denyUnmatched, перезапустить, увидеть в serve init `approvalMode=denyUnmatched`, вернуть allowAll.\n- Критерий проверки: в bridge.log после каждого шага виден ожидаемый эффективный режим.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-007,architecture-packet.json#VER-008,architecture-packet.json#BND-005",
+     "fix": "указать точный источник переменной и процедуру применения изменения оператором; добавить обратимое учение denyUnmatched→allowAll с подтверждением эффективного режима нового процесса и новой сессии",
+     "by": "Скептик"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-007, architecture-packet.json#VER-008, architecture-packet.json#BND-005",
+     "fix": "указать, где лежит env (plist или `~/.dsh/.env`) и точную процедуру применения; добавить в VER-008 обратимое учение denyUnmatched→allowAll с проверкой эффективного режима в serve init. Утверждение, что `kickstart` не перечитывает plist, по материалам не проверяется",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-007,architecture-packet.json#VER-008,architecture-packet.json#BND-005",
+     "fix": "указать точный источник переменной окружения MUSE_BRIDGE_APPROVAL_MODE и команды применения в launchd, а также добавить в VER-008 обратимое учение denyUnmatched -> allowAll с проверкой эффективного режима в bridge.log",
+     "by": "Скептик"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "M"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Визионер": "A"
+    },
+    "D3": {
+     "Визионер": "A",
+     "Скептик": "M",
+     "Реалист": "A"
+    },
+    "C1": {
+     "Реалист": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [
+    "rev 2 (D1, Скептик): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D3, Скептик): priority=non-blocking"
+   ],
+   "families": {
+    "Anthropic": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "OpenAI": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 4
+    }
+   }
+  },
+  {
+   "id": "F-008",
+   "origin": "Реалист · R1 · F-3",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Порог старта из очереди 30 с слишком мал, формулировка дедлайна неточна",
+   "text": "**F-3 [non-blocking] Порог старта из очереди 30 с слишком мал, формулировка дедлайна неточна**\n- Якорь: architecture-packet.json#AD-003, #QA-004, #BND-003, arch-spec.md §3.3 и §8.\n- Правило: порог должен соответствовать наблюдаемой длительности полезного хода.\n- Evidence: «остаток ≤30 с запрещает новую попытку», тот же порог 30 с для «старта из очереди». Минимальный успешный ход wonder в бенче 51.1 с ([F-14]), серверные ходы 8-94 с ([F-43]).\n- Следствие: запрос, получивший слот с остатком 31 с, займёт слот и квоту Meta на ход, который почти наверняка не завершится.\n- Второе замечание: AD-003 заявляет, что дедлайн «включает grace, cleanup и финальную выдачу». §3.3 при этом даёт первой попытке полный остаток до дедлайна. Реально cleanup и выдача уходят в запас 100 с до 1900 с.\n- Исправление: ввести отдельную константу минимального остатка для старта из очереди и для повтора (например, не меньше 120 с, настраиваемую). Для порога 30 с оставить только смысл «handshake-окно». В AD-003 и QA-004 явно написать, что cleanup и выдача после дедлайна укладываются в запас до 1900 с.\n- Критерий проверки: T-R08 проверяет, что запрос с остатком меньше нового порога получает предусмотренную ошибку, а не запуск процесса.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-003,architecture-packet.json#QA-004",
+     "fix": "оставить здесь только эффективность допуска попытки с малым остатком: явно описать компромисс и способ подобрать порог по наблюдаемым длительностям; противоречие общего дедлайна исправлять в F-003; не устанавливать обязательные 120 с без основания",
+     "by": "Скептик"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-003, architecture-packet.json#QA-004",
+     "fix": "описать компромисс допуска попытки при малом остатке и способ подобрать порог по наблюдаемым длительностям, не навязывая 120 с; противоречие формулировки дедлайна закрывается в F-003",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-003,architecture-packet.json#QA-004",
+     "fix": "ограничить находку эффективностью допуска при малом остатке: описать компромисс порога 30 с и подбор по измеренным длительностям; не требовать обязательных 120 с; противоречие общего бюджета исправлять в F-003, сохраняя утверждённые 1800 с",
+     "by": "Визионер"
+    },
+    {
+     "rev": 5,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-003,architecture-packet.json#QA-004",
+     "fix": "явно описать компромисс порога 30 с при допуске попытки из очереди для длинных ходов Wonder и возможность настройки порога по наблюдаемым длительностям, не навязывая жёсткие 120 с (вопрос резерва времени внутри дедлайна учтён в F-003)",
+     "by": "Скептик"
+    },
+    {
+     "rev": 6,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-003, architecture-packet.json#QA-004, architecture-packet.json#BND-003",
+     "fix": "вынести порог допуска попытки и старта из очереди в отдельную настраиваемую константу, отделить от handshake-окна 30 с, описать компромисс и подбор по наблюдаемым длительностям, в AD-003 и QA-004 записать, что cleanup и выдача после дедлайна идут в запас 100 с до 1900 с; конкретные 120 с не навязывать",
+     "by": "Реалист"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "M"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Визионер": "A"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "C1": {
+     "Визионер": "C",
+     "Реалист": "C",
+     "Скептик": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [
+    "rev 2 (D1, Скептик): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D3, Визионер): priority=non-blocking",
+    "rev 5 (D3, Скептик): priority=non-blocking",
+    "rev 6 (D3, Реалист): priority=non-blocking"
+   ],
+   "families": {
+    "Anthropic": {
+     "kind": "AMEND",
+     "rev": 6
+    },
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 4
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 5
+    }
+   }
+  },
+  {
+   "id": "F-009",
+   "origin": "Реалист · R1 · F-4",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Асимметрия возможностей serve и exec не названа, `--config` не рассмотрен",
+   "text": "**F-4 [non-blocking] Асимметрия возможностей serve и exec не названа, `--config` не рассмотрен**\n- Якорь: architecture-packet.json#EVD-005, #THREAT-001, #AD-001, [F-09], [F-10], [F-38].\n- Правило: trust boundary должна учитывать отличие поверхности инструментов обоих путей.\n- Evidence: exec запускается с `--disable-web-tools --disable-reminders` ([F-09]). У serve таких флагов нет ([F-10]). Единственный универсальный флаг serve — `-c/--config KEY=VALUE` ([F-38]).\n- Следствие: при allowAll на serve web-инструменты не отключены, хотя прежний exec-fallback их отключал. Это расширение возможностей модели относительно пути, на который раньше попадали ходы с approval. Решение владельца его допускает, но пакет это не называет и не рассматривает `-c` как способ сузить поверхность.\n- Исправление: записать асимметрию в THREAT-001 и в ADR 0003. Добавить альтернативу «сузить поверхность serve через `--config`». Ключи в справке не найдены, поэтому спайк без модельного хода: проверить, есть ли ключ отключения web-инструментов. Результат вынести отдельным решением владельца.\n- Критерий проверки: в пакете есть явная запись об асимметрии и альтернатива с причиной выбора или отказа.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    }
+   ],
+   "status": "WITHDRAWN",
+   "outcome": "excluded",
+   "resolved_in": "d3",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "D"
+    },
+    "D2": {
+     "Скептик": "D",
+     "Визионер": "D"
+    },
+    "D3": {
+     "Визионер": "D",
+     "Скептик": "D",
+     "Реалист": "W"
+    }
+   },
+   "dissent": [
+    "Скептик D1 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-005 прямо перечисляет дополнительные запреты web/reminde»",
+    "Скептик D2 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-005, architecture-packet.json#THREAT-001, [F-38] — EVD-0»",
+    "Визионер D2 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-005, architecture-packet.json#THREAT-001, [F-09], [F-10]»",
+    "Визионер D3 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-005,architecture-packet.json#THREAT-001,[F-38] — дополни»",
+    "Скептик D3 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-005, architecture-packet.json#THREAT-001, docs/adr/0003-»"
+   ],
+   "amendments": [],
+   "families": {
+    "Anthropic": {
+     "kind": "WITHDRAW"
+    },
+    "OpenAI": {
+     "kind": "DISPUTE"
+    },
+    "Google": {
+     "kind": "DISPUTE"
+    }
+   }
+  },
+  {
+   "id": "F-010",
+   "origin": "Реалист · R1 · F-5",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Предел 3 с применён только к live-записи, а не к каждой записи под `_wlock`",
+   "text": "**F-5 [non-blocking, частично pre-existing] Предел 3 с применён только к live-записи, а не к каждой записи под `_wlock`**\n- Якорь: architecture-packet.json#AD-004, #BND-004, EVD-024.\n- Правило: ограничение времени записи должно закрывать всех писателей, с которыми sink делит замок.\n- Evidence: «на время записи под _wlock сокету выставляется timeout 3 с» относится к live-кадру. Keepalive-поток и финальная выдача пишут через тот же `_sse_write` и по EVD-024 ограничены только `Handler.timeout=300`.\n- Следствие: если keepalive-запись зависла на переполненном буфере, она держит `_wlock` до 300 с. Синхронный sink в цикле чтения MSP ждёт этот замок без предела. Это сценарий RW-004, но через другого писателя.\n- Исправление: применить 3-секундный предел ко всем записям под `_wlock` (keepalive и финал). Либо ограничить время захвата замка в sink и считать его таймаут признаком зависшего клиента.\n- Критерий проверки: T-L08 дополнить случаем, когда буфер заполнен и первым зависает keepalive-кадр. Слот и группа освобождаются в пределах предела.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    }
+   ],
+   "status": "WITHDRAWN",
+   "outcome": "excluded",
+   "resolved_in": "d3",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "D",
+     "Скептик": "D"
+    },
+    "D2": {
+     "Скептик": "D",
+     "Визионер": "D",
+     "Реалист": "W"
+    },
+    "D3": {
+     "Визионер": "D",
+     "Скептик": "D",
+     "Реалист": "W"
+    }
+   },
+   "dissent": [
+    "Визионер D1 «— класс: duplicate_of:F-002 — контр-evidence: architecture-packet.json#AD-004, architecture-packet.json#BND-004, archite»",
+    "Скептик D1 «— класс: duplicate_of:F-002 — контр-evidence: architecture-packet.json#AD-004, architecture-packet.json#BND-004, archite»",
+    "Скептик D2 «— класс: duplicate_of:F-002 — контр-evidence: architecture-packet.json#AD-004, architecture-packet.json#BND-004, archite»",
+    "Визионер D2 «— класс: duplicate_of:F-002 — контр-evidence: architecture-packet.json#AD-004, architecture-packet.json#BND-004, archite»",
+    "Визионер D3 «— класс: duplicate_of:F-002 — контр-evidence: architecture-packet.json#AD-004,architecture-packet.json#BND-004,architect»",
+    "Скептик D3 «— класс: duplicate_of:F-002 — контр-evidence: architecture-packet.json#AD-004, architecture-packet.json#BND-004, archite»"
+   ],
+   "amendments": [],
+   "families": {
+    "Anthropic": {
+     "kind": "WITHDRAW"
+    },
+    "OpenAI": {
+     "kind": "DISPUTE"
+    },
+    "Google": {
+     "kind": "DISPUTE"
+    }
+   }
+  },
+  {
+   "id": "F-011",
+   "origin": "Реалист · R1 · F-6",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Список ошибок decide в AD-002 неполон относительно ledger",
+   "text": "**F-6 [non-blocking] [sweep] Список ошибок decide в AD-002 неполон относительно ledger**\n- Якорь: architecture-packet.json#AD-002 (choice), arch-spec.md §2.3 и §2.4, [F-28].\n- Evidence: AD-002 и §2.4 перечисляют триггеры защёлкивания -32050/-32052/-32053 и benign -32051. В [F-28] есть ещё -32054 approvalReviewerUnavailable и -32030 commandRejected. §2.3 говорит «любая error кроме -32051 ведёт в деградацию», то есть тексты расходятся.\n- Исправление: записать одним правилом «любая ошибка decide и cancel, кроме -32051, защёлкивает отказ». Добавить -32054 и -32030 в тест T-A08 или T-A13.\n- Критерий проверки: параметризованный тест на каждый код из [F-28].",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002,architecture-packet.json#VER-001",
+     "fix": "согласовать общее правило обработки ошибок с перечислением кодов: любая ошибка approval/decide, кроме -32051, защёлкивает отказ; ошибки userInput/cancel также должны иметь явный терминальный путь; добавить параметризацию по кодам [F-28], включая -32054 и -32030",
+     "by": "Скептик"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002, architecture-packet.json#VER-001",
+     "fix": "одно правило «любая ошибка approval/decide и cancel, кроме -32051, защёлкивает отказ»; параметризованный тест по кодам [F-28], включая -32054 и -32030; явный терминальный путь для ошибок userInput/cancel",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002,architecture-packet.json#VER-001",
+     "fix": "закрепить единое правило: любая ошибка approval/decide, кроме -32051, защёлкивает отказ; для ошибок userInput/cancel и turn/cancel определить явный терминальный путь без автоматического переноса исключения -32051; параметризовать проверку кодами [F-28], включая -32054 и -32030",
+     "by": "Визионер"
+    },
+    {
+     "rev": 5,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-002,architecture-packet.json#VER-001",
+     "fix": "записать единым правилом, что любая ошибка approval/decide, кроме -32051, и ошибки userInput/cancel защёлкивают терминальный отказ, и добавить параметризацию по всем кодам из [F-28], включая -32054 и -32030",
+     "by": "Скептик"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "M"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Визионер": "A"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "A"
+    },
+    "C1": {
+     "Реалист": "C",
+     "Скептик": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [
+    "rev 2 (D1, Скептик): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D3, Визионер): priority=non-blocking",
+    "rev 5 (D3, Скептик): priority=non-blocking"
+   ],
+   "families": {
+    "Anthropic": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 4
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 5
+    }
+   }
+  },
+  {
+   "id": "F-012",
+   "origin": "Реалист · R1 · F-7",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Нет плана поставки по этапам и выключателей для повтора и live",
+   "text": "**F-7 [non-blocking] Нет плана поставки по этапам и выключателей для повтора и live**\n- Якорь: arch-spec.md §6 (около 35 тестов T-A/T-R/T-L), architecture-packet.json evolution.rollout и rollback, deferred «env-переопределение остальных констант».\n- Правило: стоимость сопровождения и откат должны быть соразмерны объёму.\n- Evidence: один файл server.py (2744 строки) и один файл тестов, который уже вырос на 2941 строку. В него добавляются ApprovalPolicy, терминальное защёлкивание, абсолютный дедлайн с предикатом допуска, барьер активности и live-sink с заморозкой. Откат: env только для режима approval, для повтора и live только полный redeploy.\n- Исправление: разбить коммиты на этапы с red→green и отдельной проверкой каждого.\n  1. REQ-MUSE-002 (AD-001/002/006/007).\n  2. Дедлайн и предикат (AD-003).\n  3. Live (AD-004).\n  Добавить дешёвые env-выключатели для транзиентного повтора и live-reasoning, по образцу AD-007. Выключатель live позволит отключить его, не откатывая approval.\n- Критерий проверки: пакет перечисляет этапы и выключатели. Тест на выключенный live возвращает прежний один reasoning-кадр.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    }
+   ],
+   "status": "WITHDRAWN",
+   "outcome": "excluded",
+   "resolved_in": "d3",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "D"
+    },
+    "D2": {
+     "Скептик": "D",
+     "Визионер": "D"
+    },
+    "D3": {
+     "Визионер": "D",
+     "Скептик": "D",
+     "Реалист": "W"
+    }
+   },
+   "dissent": [
+    "Скептик D1 «— класс: invalid — контр-evidence: architecture-packet.json#BND-005 предусматривает отдельный baseline и ограниченную зо»",
+    "Скептик D2 «— класс: invalid — контр-evidence: architecture-packet.json#BND-005, architecture-packet.json#AD-007, цитата Python-over»",
+    "Визионер D2 «— класс: invalid — контр-evidence: architecture-packet.json#BND-005, architecture-packet.json#AD-007, architecture-packe»",
+    "Визионер D3 «— класс: invalid — контр-evidence: architecture-packet.json#BND-005,architecture-packet.json#AD-007, Python-overlay «пор»",
+    "Скептик D3 «— класс: invalid — контр-evidence: architecture-packet.json#BND-005, architecture-packet.json#AD-007, architecture-packe»"
+   ],
+   "amendments": [],
+   "families": {
+    "Anthropic": {
+     "kind": "WITHDRAW"
+    },
+    "OpenAI": {
+     "kind": "DISPUTE"
+    },
+    "Google": {
+     "kind": "DISPUTE"
+    }
+   }
+  },
+  {
+   "id": "F-013",
+   "origin": "Реалист · R1 · F-8",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Узкое место REQ-MUSE-004 (OPEN-04) выясняется после постройки самой сложной части",
+   "text": "**F-8 [non-blocking] Узкое место REQ-MUSE-004 (OPEN-04) выясняется после постройки самой сложной части**\n- Якорь: architecture-packet.json#RISK-007, #VER-011, #ASM-004, #Q-004.\n- Правило: самый дорогой по реализации блок не должен зависеть от недоказанного факта, если его можно проверить дёшево.\n- Evidence: по RW-007 и VER-011 при summaries только в конце хода REQ-MUSE-004 остаётся NOT_MET/BLOCKED. Отдельного пути прогресса в пакете нет. Весь AD-004 (заморозка, префикс-монотонность, предел записи, T-L01..L08) строится до проверки факта, а проверка требует только временных меток.\n- Исправление: добавить шаг до AD-004. Мост временно логирует первую summary-дельту на живом ходе (одна строка логирования, без остального). Владелец делает один ход wonder max. Результат записывается в OPEN-04. Если дельты приходят только в конце хода, остановить реализацию AD-004 и вернуться к пакету с вопросом владельцу.\n- Критерий проверки: есть запись с секундами до первой дельты и длительностью хода до начала реализации live.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "A"
+    },
+    "C1": {
+     "Реалист": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [],
+   "families": {
+    "Anthropic": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "OpenAI": {
+     "kind": "AGREE",
+     "rev": 1
+    }
+   }
+  },
+  {
+   "id": "F-014",
+   "origin": "Реалист · R1 · F-9",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Утверждения про клиента поданы как факт без опоры в ledger",
+   "text": "**F-9 [non-blocking] Утверждения про клиента поданы как факт без опоры в ledger**\n- Якорь: architecture-packet.json#EVD-015, #AD-004 (drivers), #CD-001 compatibility, #ASM-003, [F-18], [F-47].\n- Evidence: EVD-015 утверждает «клиент DSH live reasoning_content уже потребляет». В [F-18] описана только отправка со стороны droid-моста. ASM-003 те же слова называет допущением (ASSUMED). В drivers AD-004 «пустые data-чанки доказано держат соединение». [F-47] фиксирует только причину в комментарии кода, а влияние на idle-watchdog «не найдено».\n- Исправление: в EVD-015 и в CD-001 переформулировать как допущение ASM-003. Заменить «доказано» на «по комментарию кода».\n- Критерий проверки: формулировки в EVD-015, AD-004 и CD-001 совпадают со статусом ASM-003.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "A"
+    },
+    "C1": {
+     "Реалист": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [],
+   "families": {
+    "Anthropic": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "OpenAI": {
+     "kind": "AGREE",
+     "rev": 1
+    }
+   }
+  },
+  {
+   "id": "F-015",
+   "origin": "Реалист · R1 · F-10",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Коллизия идентификаторов F-NNN и [F-NN]",
+   "text": "**F-10 [non-blocking] [sweep] Коллизия идентификаторов F-NNN и [F-NN]**\n- Якорь: architecture-packet.json#AD-002 (drivers «F-006», «F-011»), #AD-003 (drivers «F-002», «F-003»), #AD-004 (drivers «F-005, F-012»), #AD-006 (alternatives «F-009»), #AD-007 (drivers «F-020»).\n- Evidence: в тех же полях ledger ссылается как «F-50 в ledger», «F-35 в ledger». Голые трёхзначные F-NNN означают находки панели, которых в приложенном ledger нет. Читатель может принять их за двузначные факты [F-NN].\n- Исправление: переименовать находки панели в PF-NNN или давать полное имя. Для ledger оставить только [F-NN].\n- Критерий проверки: поиск по пакету не находит трёхзначных F-NNN вне delta_a2.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "A"
+    },
+    "C1": {
+     "Реалист": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [],
+   "families": {
+    "Anthropic": {
+     "kind": "AGREE",
+     "rev": 1
+    },
+    "OpenAI": {
+     "kind": "AGREE",
+     "rev": 1
+    }
+   }
+  },
+  {
+   "id": "F-016",
+   "origin": "Реалист · R1 · F-11",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Устаревший текст в arch-spec",
+   "text": "**F-11 [non-blocking] [sweep] Устаревший текст в arch-spec**\n- Якорь: arch-spec.md (шапка, «Нумерация: AD-001..AD-006», строка статуса «повторный ARCH_GATE впереди»), architecture-packet.json#AD-007.\n- Evidence: AD-007 существует, а шапка перечисляет AD-001..AD-006. Строка статуса говорит, что ARCH_GATE впереди, хотя приложен receipt arch-gate-a2.json со статусом PASS. Кроме того, delta-a2.md говорит, что материализованный ADR 0003 в `docs/` имеет sha `fcf1aea8…`. Приложение adr-0003 с путём в `docs/` имеет sha `4754421f…` (я не могу проверить, какой файл на диске).\n- Исправление: привести шапку и статус к фактическому состоянию. Сверить sha файла в `docs/` с materialization[0].sha256.\n- Критерий проверки: шапка перечисляет AD-001..AD-007, строка статуса соответствует receipt, sha файла в docs совпадает с пакетом.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    },
+    {
+     "rev": 2,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-007,architecture-packet.json#EVD-023",
+     "fix": "обновить шапку arch-spec до AD-001..AD-007 и привести статус ARCH_GATE к приложенному receipt; снять утверждение о доказанном расхождении материализации",
+     "by": "Скептик"
+    },
+    {
+     "rev": 3,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-007, architecture-packet.json#EVD-023, arch-spec.md (шапка и строка статуса)",
+     "fix": "привести шапку к AD-001..AD-007 и статус к receipt arch-gate-a2.json; снять утверждение о расхождении sha материализации: приложенный ADR имеет sha 4754421f…, равный materialization[0], а delta-a2.md не приложен и проверить его нельзя",
+     "by": "Скептик"
+    },
+    {
+     "rev": 4,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-007,architecture-packet.json#EVD-023,architecture-packet.json#materialization",
+     "fix": "обновить шапку arch-spec до AD-001..AD-007 и статус ARCH_GATE по приложенному receipt; исключить утверждение о доказанном расхождении sha материализации",
+     "by": "Визионер"
+    },
+    {
+     "rev": 5,
+     "priority": "non-blocking",
+     "locations": "architecture-packet.json#AD-007,architecture-packet.json#EVD-023,architecture-packet.json:929",
+     "fix": "обновить шапку arch-spec.md до перечисления AD-001..AD-007 и привести строку статуса ARCH_GATE в соответствие с приложенным receipt arch-gate-a2.json, сняв непроверяемое утверждение о расхождении sha256 с неприложенным delta-a2.md",
+     "by": "Скептик"
+    },
+    {
+     "rev": 6,
+     "priority": "non-blocking",
+     "locations": "arch-spec.md (шапка «Нумерация: AD-001..AD-006», строка статуса «повторный ARCH_GATE впереди»), architecture-packet.json#AD-007",
+     "fix": "привести шапку к AD-001..AD-007 и статус к receipt arch-gate-a2.json (PASS); утверждение о расхождении sha материализации снять",
+     "by": "Реалист"
+    }
+   ],
+   "status": "CONSENTED",
+   "outcome": "non-blocking",
+   "resolved_in": "c1",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "M"
+    },
+    "D2": {
+     "Скептик": "M",
+     "Визионер": "A"
+    },
+    "D3": {
+     "Визионер": "M",
+     "Скептик": "M",
+     "Реалист": "M"
+    },
+    "C1": {
+     "Визионер": "C",
+     "Реалист": "C",
+     "Скептик": "C"
+    }
+   },
+   "dissent": [],
+   "amendments": [
+    "rev 2 (D1, Скептик): priority=non-blocking",
+    "rev 3 (D2, Скептик): priority=non-blocking",
+    "rev 4 (D3, Визионер): priority=non-blocking",
+    "rev 5 (D3, Скептик): priority=non-blocking",
+    "rev 6 (D3, Реалист): priority=non-blocking"
+   ],
+   "families": {
+    "Anthropic": {
+     "kind": "AMEND",
+     "rev": 6
+    },
+    "OpenAI": {
+     "kind": "AMEND",
+     "rev": 4
+    },
+    "Google": {
+     "kind": "AMEND",
+     "rev": 5
+    }
+   }
+  },
+  {
+   "id": "F-017",
+   "origin": "Реалист · R1 · F-12",
+   "author_hat": "Реалист",
+   "author_family": "Anthropic",
+   "title": "Подрешения a2 не имеют отдельных альтернатив с причиной выбора",
+   "text": "**F-12 [non-blocking] Подрешения a2 не имеют отдельных альтернатив с причиной выбора**\n- Якорь: architecture-packet.json#AD-002 (grace 15 с, защёлкивание), #AD-003 (абсолютный дедлайн, предикат и барьер), #AD-004 (префикс-монотонная заморозка).\n- Правило: новое решение должно иметь ≥2 альтернативы с причиной выбора.\n- Evidence: у каждого AD-NNN ≥2 альтернативы, так что формально критерий выполнен. Но отдельные подрешения a2 не имеют альтернатив: значение grace 15 с (обосновано только «диапазон панели 10–30 с»), абсолютный дедлайн против отдельного лимита очереди, барьер активности против запрета повтора после любого turn/start, префикс-монотонная заморозка против стриминга по item/completed.\n- Исправление: добавить в соответствующие AD по одной-две альтернативы с причиной. В ASM-010 уже названа контингенция «ужесточить до turn/start», её стоит вынести в alternatives AD-003.\n- Критерий проверки: каждое из перечисленных подрешений присутствует в alternatives соответствующего AD.",
+   "revs": [
+    {
+     "rev": 1,
+     "priority": "non-blocking",
+     "locations": "",
+     "fix": "",
+     "by": "Реалист"
+    }
+   ],
+   "status": "WITHDRAWN",
+   "outcome": "excluded",
+   "resolved_in": "d3",
+   "votes": {
+    "R1": {
+     "Реалист": "AUTHOR"
+    },
+    "D1": {
+     "Визионер": "A",
+     "Скептик": "D"
+    },
+    "D2": {
+     "Скептик": "D",
+     "Визионер": "D"
+    },
+    "D3": {
+     "Визионер": "D",
+     "Скептик": "D",
+     "Реалист": "W"
+    }
+   },
+   "dissent": [
+    "Скептик D1 «— класс: invalid — контр-evidence: architecture-packet.json#AD-002, architecture-packet.json#AD-003, architecture-packet»",
+    "Скептик D2 «— класс: invalid — контр-evidence: architecture-packet.json#AD-002, architecture-packet.json#AD-003, architecture-packet»",
+    "Визионер D2 «— класс: invalid — контр-evidence: architecture-packet.json#AD-002, architecture-packet.json#AD-003, architecture-packet»",
+    "Визионер D3 «— класс: invalid — контр-evidence: architecture-packet.json#AD-002,architecture-packet.json#AD-003,architecture-packet.j»",
+    "Скептик D3 «— класс: invalid — контр-evidence: architecture-packet.json#AD-001, architecture-packet.json#AD-002, architecture-packet»"
+   ],
+   "amendments": [],
+   "families": {
+    "Anthropic": {
+     "kind": "WITHDRAW"
+    },
+    "OpenAI": {
+     "kind": "DISPUTE"
+    },
+    "Google": {
+     "kind": "DISPUTE"
+    }
+   }
+  }
+ ],
+ "rounds": [
+  {
+   "label": "D1",
+   "seats": [
+    {
+     "k": 1,
+     "hat": "Визионер",
+     "family": "Anthropic",
+     "npos": 12,
+     "required": 12
+    },
+    {
+     "k": 2,
+     "hat": "Реалист",
+     "family": "Google",
+     "npos": 5,
+     "required": 5
+    },
+    {
+     "k": 3,
+     "hat": "Скептик",
+     "family": "OpenAI",
+     "npos": 17,
+     "required": 17
+    }
+   ],
+   "malformed": []
+  },
+  {
+   "label": "D2",
+   "seats": [
+    {
+     "k": 1,
+     "hat": "Скептик",
+     "family": "Anthropic",
+     "npos": 14,
+     "required": 14
+    },
+    {
+     "k": 2,
+     "hat": "Визионер",
+     "family": "Google",
+     "npos": 9,
+     "required": 9
+    },
+    {
+     "k": 3,
+     "hat": "Реалист",
+     "family": "OpenAI",
+     "npos": 6,
+     "required": 6
+    }
+   ],
+   "malformed": []
+  },
+  {
+   "label": "D3",
+   "seats": [
+    {
+     "k": 1,
+     "hat": "Визионер",
+     "family": "OpenAI",
+     "npos": 14,
+     "required": 14
+    },
+    {
+     "k": 2,
+     "hat": "Скептик",
+     "family": "Google",
+     "npos": 14,
+     "required": 14
+    },
+    {
+     "k": 3,
+     "hat": "Реалист",
+     "family": "Anthropic",
+     "npos": 14,
+     "required": 14
+    }
+   ],
+   "malformed": []
+  },
+  {
+   "label": "C1",
+   "seats": [
+    {
+     "k": 1,
+     "hat": "Визионер",
+     "family": "Anthropic",
+     "required": 7
+    },
+    {
+     "k": 2,
+     "hat": "Реалист",
+     "family": "Google",
+     "required": 13
+    },
+    {
+     "k": 3,
+     "hat": "Скептик",
+     "family": "OpenAI",
+     "required": 8
+    }
+   ],
+   "malformed": []
+  }
+ ],
+ "r1_families": {
+  "Скептик": "Google",
+  "Визионер": "OpenAI",
+  "Реалист": "Anthropic"
+ },
+ "ceiling": 3
+}

@@ -1,0 +1,135 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k1	92159	92159	2026-10-15T03:28:42.296632+00:00	четверг, 15 октября 2026 г. 06:28:42	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k2	95064	95064	2026-10-15T03:28:57.328435+00:00	четверг, 15 октября 2026 г. 06:28:57	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	97695	97695	2026-10-15T03:29:12.336112+00:00	четверг, 15 октября 2026 г. 06:29:12	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k2	95064	95064	2026-10-15T03:28:57.328435+00:00	четверг, 15 октября 2026 г. 06:28:57	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	97695	97695	2026-10-15T03:29:12.336112+00:00	четверг, 15 октября 2026 г. 06:29:12	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k1	92159	92159	2026-10-15T03:28:42.296632+00:00	четверг, 15 октября 2026 г. 06:28:42	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	29711	29711	2026-10-15T04:02:24.463680+00:00	четверг, 15 октября 2026 г. 07:02:24	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	32134	32134	2026-10-15T04:02:39.488861+00:00	четверг, 15 октября 2026 г. 07:02:39	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	34511	34511	2026-10-15T04:02:54.524613+00:00	четверг, 15 октября 2026 г. 07:02:54	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	34511	34511	2026-10-15T04:02:54.524613+00:00	четверг, 15 октября 2026 г. 07:02:54	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	32134	32134	2026-10-15T04:02:39.488861+00:00	четверг, 15 октября 2026 г. 07:02:39	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	29711	29711	2026-10-15T04:02:24.463680+00:00	четверг, 15 октября 2026 г. 07:02:24	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	67947	67947	2026-10-15T04:16:33.167707+00:00	четверг, 15 октября 2026 г. 07:16:33	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	70493	70493	2026-10-15T04:16:48.144198+00:00	четверг, 15 октября 2026 г. 07:16:48	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	72913	72913	2026-10-15T04:17:03.150569+00:00	четверг, 15 октября 2026 г. 07:17:03	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	67947	67947	2026-10-15T04:16:33.167707+00:00	четверг, 15 октября 2026 г. 07:16:33	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	72913	72913	2026-10-15T04:17:03.150569+00:00	четверг, 15 октября 2026 г. 07:17:03	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	70493	70493	2026-10-15T04:16:48.144198+00:00	четверг, 15 октября 2026 г. 07:16:48	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	13574	13574	2026-10-15T05:49:40.603221+00:00	четверг, 15 октября 2026 г. 08:49:40	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	16017	16017	2026-10-15T05:49:55.626977+00:00	четверг, 15 октября 2026 г. 08:49:55	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	18863	18863	2026-10-15T05:50:10.644046+00:00	четверг, 15 октября 2026 г. 08:50:10	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	18863	18863	2026-10-15T05:50:10.644046+00:00	четверг, 15 октября 2026 г. 08:50:10	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	16017	16017	2026-10-15T05:49:55.626977+00:00	четверг, 15 октября 2026 г. 08:49:55	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	13574	13574	2026-10-15T05:49:40.603221+00:00	четверг, 15 октября 2026 г. 08:49:40	rc=3
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	60377	60377	2026-10-15T07:04:21.816101+00:00	четверг, 15 октября 2026 г. 10:04:21	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	62876	62876	2026-10-15T07:04:36.788603+00:00	четверг, 15 октября 2026 г. 10:04:36	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	65358	65358	2026-10-15T07:04:51.785481+00:00	четверг, 15 октября 2026 г. 10:04:51	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	60377	60377	2026-10-15T07:04:21.816101+00:00	четверг, 15 октября 2026 г. 10:04:21	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	65358	65358	2026-10-15T07:04:51.785481+00:00	четверг, 15 октября 2026 г. 10:04:51	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	62876	62876	2026-10-15T07:04:36.788603+00:00	четверг, 15 октября 2026 г. 10:04:36	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	77708	77708	2026-10-15T07:35:58.698356+00:00	четверг, 15 октября 2026 г. 10:35:58	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	80165	80165	2026-10-15T07:36:13.713582+00:00	четверг, 15 октября 2026 г. 10:36:13	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	82860	82860	2026-10-15T07:36:28.738028+00:00	четверг, 15 октября 2026 г. 10:36:28	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	80165	80165	2026-10-15T07:36:13.713582+00:00	четверг, 15 октября 2026 г. 10:36:13	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	82860	82860	2026-10-15T07:36:28.738028+00:00	четверг, 15 октября 2026 г. 10:36:28	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	77708	77708	2026-10-15T07:35:58.698356+00:00	четверг, 15 октября 2026 г. 10:35:58	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	21460	21460	2026-10-15T07:58:29.194860+00:00	четверг, 15 октября 2026 г. 10:58:29	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	23893	23893	2026-10-15T07:58:44.237929+00:00	четверг, 15 октября 2026 г. 10:58:44	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	26996	26996	2026-10-15T07:58:59.232809+00:00	четверг, 15 октября 2026 г. 10:58:59	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	26996	26996	2026-10-15T07:58:59.232809+00:00	четверг, 15 октября 2026 г. 10:58:59	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	23893	23893	2026-10-15T07:58:44.237929+00:00	четверг, 15 октября 2026 г. 10:58:44	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	21460	21460	2026-10-15T07:58:29.194860+00:00	четверг, 15 октября 2026 г. 10:58:29	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	78153	78153	2026-10-15T12:16:39.178971+00:00	четверг, 15 октября 2026 г. 15:16:39	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	80584	80584	2026-10-15T12:16:54.196774+00:00	четверг, 15 октября 2026 г. 15:16:54	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	83735	83735	2026-10-15T12:17:09.204386+00:00	четверг, 15 октября 2026 г. 15:17:09	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	80584	80584	2026-10-15T12:16:54.196774+00:00	четверг, 15 октября 2026 г. 15:16:54	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	78153	78153	2026-10-15T12:16:39.178971+00:00	четверг, 15 октября 2026 г. 15:16:39	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	83735	83735	2026-10-15T12:17:09.204386+00:00	четверг, 15 октября 2026 г. 15:17:09	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	36313	36313	2026-10-15T12:42:28.271619+00:00	четверг, 15 октября 2026 г. 15:42:28	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	38803	38803	2026-10-15T12:42:43.275915+00:00	четверг, 15 октября 2026 г. 15:42:43	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	41363	41363	2026-10-15T12:42:58.286842+00:00	четверг, 15 октября 2026 г. 15:42:58	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	36313	36313	2026-10-15T12:42:28.271619+00:00	четверг, 15 октября 2026 г. 15:42:28	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	41363	41363	2026-10-15T12:42:58.286842+00:00	четверг, 15 октября 2026 г. 15:42:58	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	38803	38803	2026-10-15T12:42:43.275915+00:00	четверг, 15 октября 2026 г. 15:42:43	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	94737	94737	2026-10-15T12:57:52.718714+00:00	четверг, 15 октября 2026 г. 15:57:52	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	97230	97230	2026-10-15T12:58:07.737384+00:00	четверг, 15 октября 2026 г. 15:58:07	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	99636	99636	2026-10-15T12:58:22.767103+00:00	четверг, 15 октября 2026 г. 15:58:22	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	97230	97230	2026-10-15T12:58:07.737384+00:00	четверг, 15 октября 2026 г. 15:58:07	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	99636	99636	2026-10-15T12:58:22.767103+00:00	четверг, 15 октября 2026 г. 15:58:22	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	33740	33740	2026-10-15T13:31:14.741965+00:00	четверг, 15 октября 2026 г. 16:31:14	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	37725	37725	2026-10-15T13:31:29.766190+00:00	четверг, 15 октября 2026 г. 16:31:29	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	43532	43532	2026-10-15T13:31:44.771079+00:00	четверг, 15 октября 2026 г. 16:31:44	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	33740	33740	2026-10-15T13:31:14.741965+00:00	четверг, 15 октября 2026 г. 16:31:14	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	43532	43532	2026-10-15T13:31:44.771079+00:00	четверг, 15 октября 2026 г. 16:31:44	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	37725	37725	2026-10-15T13:31:29.766190+00:00	четверг, 15 октября 2026 г. 16:31:29	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k1	97203	97203	2026-10-15T14:33:29.989985+00:00	четверг, 15 октября 2026 г. 17:33:29	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	358	358	2026-10-15T14:33:45.004920+00:00	четверг, 15 октября 2026 г. 17:33:45	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	3411	3411	2026-10-15T14:34:00.030655+00:00	четверг, 15 октября 2026 г. 17:34:00	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	3411	3411	2026-10-15T14:34:00.030655+00:00	четверг, 15 октября 2026 г. 17:34:00	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	358	358	2026-10-15T14:33:45.004920+00:00	четверг, 15 октября 2026 г. 17:33:45	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k1	97203	97203	2026-10-15T14:33:29.989985+00:00	четверг, 15 октября 2026 г. 17:33:29	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	21441	21441	2026-10-15T15:05:13.269365+00:00	четверг, 15 октября 2026 г. 18:05:13	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	23930	23930	2026-10-15T15:05:28.280507+00:00	четверг, 15 октября 2026 г. 18:05:28	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	26463	26463	2026-10-15T15:05:43.290156+00:00	четверг, 15 октября 2026 г. 18:05:43	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	21441	21441	2026-10-15T15:05:13.269365+00:00	четверг, 15 октября 2026 г. 18:05:13	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	23930	23930	2026-10-15T15:05:28.280507+00:00	четверг, 15 октября 2026 г. 18:05:28	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	26463	26463	2026-10-15T15:05:43.290156+00:00	четверг, 15 октября 2026 г. 18:05:43	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	1662	1662	2026-10-15T20:07:16.229194+00:00	четверг, 15 октября 2026 г. 23:07:16	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	4489	4489	2026-10-15T20:07:31.234510+00:00	четверг, 15 октября 2026 г. 23:07:31	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k3	6986	6986	2026-10-15T20:07:46.247181+00:00	четверг, 15 октября 2026 г. 23:07:46	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	1662	1662	2026-10-15T20:07:16.229194+00:00	четверг, 15 октября 2026 г. 23:07:16	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	4489	4489	2026-10-15T20:07:31.234510+00:00	четверг, 15 октября 2026 г. 23:07:31	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k3	6986	6986	2026-10-15T20:07:46.247181+00:00	четверг, 15 октября 2026 г. 23:07:46	rc=1
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k1	11300	11300	2026-10-15T21:20:11.519610+00:00	пятница, 16 октября 2026 г. 00:20:11	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	13927	13927	2026-10-15T21:20:26.543075+00:00	пятница, 16 октября 2026 г. 00:20:26	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	16422	16422	2026-10-15T21:20:41.548046+00:00	пятница, 16 октября 2026 г. 00:20:41	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k3	16422	16422	2026-10-15T21:20:41.548046+00:00	пятница, 16 октября 2026 г. 00:20:41	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k2	13927	13927	2026-10-15T21:20:26.543075+00:00	пятница, 16 октября 2026 г. 00:20:26	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k1	11300	11300	2026-10-15T21:20:11.519610+00:00	пятница, 16 октября 2026 г. 00:20:11	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	25553	25553	2026-10-16T02:05:45.685362+00:00	пятница, 16 октября 2026 г. 05:05:45	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	25906	25906	2026-10-16T02:06:00.783251+00:00	пятница, 16 октября 2026 г. 05:06:00	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	26280	26280	2026-10-16T02:06:15.735117+00:00	пятница, 16 октября 2026 г. 05:06:15	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k3	26280	26280	2026-10-16T02:06:15.735117+00:00	пятница, 16 октября 2026 г. 05:06:15	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k1	25553	25553	2026-10-16T02:05:45.685362+00:00	пятница, 16 октября 2026 г. 05:05:45	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	25906	25906	2026-10-16T02:06:00.783251+00:00	пятница, 16 октября 2026 г. 05:06:00	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	84279	84279	2026-10-16T02:44:06.369971+00:00	пятница, 16 октября 2026 г. 05:44:06	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	84984	84984	2026-10-16T02:44:21.347711+00:00	пятница, 16 октября 2026 г. 05:44:21	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	85719	85719	2026-10-16T02:44:36.429179+00:00	пятница, 16 октября 2026 г. 05:44:36	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	84279	84279	2026-10-16T02:44:06.369971+00:00	пятница, 16 октября 2026 г. 05:44:06	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	85719	85719	2026-10-16T02:44:36.429179+00:00	пятница, 16 октября 2026 г. 05:44:36	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	84984	84984	2026-10-16T02:44:21.347711+00:00	пятница, 16 октября 2026 г. 05:44:21	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	21042	21042	2026-10-16T03:35:18.379546+00:00	пятница, 16 октября 2026 г. 06:35:18	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	21576	21576	2026-10-16T03:35:33.372828+00:00	пятница, 16 октября 2026 г. 06:35:33	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	21042	21042	2026-10-16T03:35:18.379546+00:00	пятница, 16 октября 2026 г. 06:35:18	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	22078	22078	2026-10-16T03:35:48.417399+00:00	пятница, 16 октября 2026 г. 06:35:48	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	22078	22078	2026-10-16T03:35:48.417399+00:00	пятница, 16 октября 2026 г. 06:35:48	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	21576	21576	2026-10-16T03:35:33.372828+00:00	пятница, 16 октября 2026 г. 06:35:33	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	39297	39297	2026-10-16T03:46:14.334415+00:00	пятница, 16 октября 2026 г. 06:46:14	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	39677	39677	2026-10-16T03:46:29.339796+00:00	пятница, 16 октября 2026 г. 06:46:29	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	39297	39297	2026-10-16T03:46:14.334415+00:00	пятница, 16 октября 2026 г. 06:46:14	rc=0
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	40157	40157	2026-10-16T03:46:44.357159+00:00	пятница, 16 октября 2026 г. 06:46:44	running
+muse-wonder-approval-20261015	gemini-4-argon-high	panel-judge-k3	40157	40157	2026-10-16T03:46:44.357159+00:00	пятница, 16 октября 2026 г. 06:46:44	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k2	39677	39677	2026-10-16T03:46:29.339796+00:00	пятница, 16 октября 2026 г. 06:46:29	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k1	10579	10579	2026-10-16T05:53:53.932622+00:00	Fri Oct 16 08:53:53 2026	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k2	10964	10964	2026-10-16T05:53:55.058762+00:00	Fri Oct 16 08:53:55 2026	running
+muse-wonder-approval-20261015	muse-wonder-1.0	panel-judge-k3	11025	11025	2026-10-16T05:53:55.961529+00:00	Fri Oct 16 08:53:55 2026	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k2	10964	10964	2026-10-16T05:53:55.058762+00:00	Fri Oct 16 08:53:55 2026	rc=0
+muse-wonder-approval-20261015	muse-wonder-1.0	panel-judge-k3	11025	11025	2026-10-16T05:53:55.961529+00:00	Fri Oct 16 08:53:55 2026	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k1	10579	10579	2026-10-16T05:53:53.932622+00:00	Fri Oct 16 08:53:53 2026	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k1	70285	70285	2026-10-16T05:59:57.683481+00:00	Fri Oct 16 08:59:57 2026	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k2	70636	70636	2026-10-16T05:59:58.787943+00:00	Fri Oct 16 08:59:58 2026	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k3	70742	70742	2026-10-16T05:59:59.724049+00:00	Fri Oct 16 08:59:59 2026	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k2	70636	70636	2026-10-16T05:59:58.787943+00:00	Fri Oct 16 08:59:58 2026	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k1	70285	70285	2026-10-16T05:59:57.683481+00:00	Fri Oct 16 08:59:57 2026	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k3	70742	70742	2026-10-16T05:59:59.724049+00:00	Fri Oct 16 08:59:59 2026	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	coder	31947	31947	2026-10-16T06:06:24.193794+00:00	Fri Oct 16 09:06:24 2026	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	coder	54220	54220	2026-10-16T06:17:33.515945+00:00	Fri Oct 16 09:17:33 2026	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	coder	54220	54220	2026-10-16T07:05:23.233862+00:00	Fri Oct 16 10:05:23 2026	rc=0
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	11217	11217	2026-10-16T07:14:56.252596+00:00	Fri Oct 16 10:14:56 2026	running
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	12842	12842	2026-10-16T07:15:06.064675+00:00	Fri Oct 16 10:15:06 2026	running
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k3	14938	14938	2026-10-16T07:15:16.167424+00:00	Fri Oct 16 10:15:16 2026	running
+muse-wonder-approval-20261015	claude-sonnet-5-5-high	panel-judge-k1	11217	11217	2026-10-16T07:14:56.252596+00:00	Fri Oct 16 10:14:56 2026	rc=0
+muse-wonder-approval-20261015	muse-wonder-full-1.0	panel-judge-k3	14938	14938	2026-10-16T07:15:16.167424+00:00	Fri Oct 16 10:15:16 2026	rc=0
+muse-wonder-approval-20261015	gpt-6.1-sol-high	panel-judge-k2	12842	12842	2026-10-16T07:15:06.064675+00:00	Fri Oct 16 10:15:06 2026	rc=0

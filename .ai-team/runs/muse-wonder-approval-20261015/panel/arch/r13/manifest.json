@@ -1,0 +1,97 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 13,
+  "pass": "a2",
+  "pass_round": 5,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+  "artifact_sha256": "c1fc50b0f918b7ef638637c4ccfab6cc44f1238470d53bf49f7883cbf6a33c3e",
+  "seed_input": "c1fc50b0#muse-wonder-approval-20261015#c2#R5",
+  "seed_hex": "fab89e43",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "03fe8732ae846c75fd8e764f0771e6185f1b40d6be184db165afbeaaa302b3a3"
+    },
+    {
+      "rank": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "1e4f72e5416cdbc906e3f62fd93f4cfaadfa836b84a0f76e08eb881f94aad1bc"
+    },
+    {
+      "rank": 3,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "3fc26eb2e782f38b670325f09893500ae3faac5fccf86603f6c38c8ee2b23d92"
+    },
+    {
+      "rank": 4,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "535e0d6fc1dbab7b7e02fa6794e937afaf9744bb1b58e0a81ca3d5b9b7a0cd2b"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Скептик"
+    },
+    {
+      "k": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "claude-p",
+      "hat": "Реалист"
+    },
+    {
+      "k": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Визионер"
+    }
+  ],
+  "hat_index_base": 0,
+  "hat_k": 2,
+  "hat_rotation": "ok",
+  "rotation_ok": "relaxed",
+  "rotation_reason": "пул судей = 3 семьи (слот Architect исключён, SK-A-12); состав раунда не может отличаться от прежнего, меняются ранги, шляпы и транспорты",
+  "label": "D3",
+  "brief_review": {
+    "realist": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 1,
+      "checklist_gen": 1,
+      "approved_sha256": "3a0fa2ba3abc6ea6dd445802ee40491b90b789a78b1953e7913cdf0f230ecfdb",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r5-a2-realist/verdict-v1.json",
+      "brief_review_calls": 1,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    },
+    "visionary": {
+      "verdict": "REJECT",
+      "blocked_reason": null,
+      "iterations": 1,
+      "checklist_gen": 1,
+      "approved_sha256": null,
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r5-a2-visionary/verdict-v1.json",
+      "brief_review_calls": 1,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    }
+  },
+  "transport_note": "gemini-4-argon-high: жребий выдал agy, но agy недоступен по региону аккаунта (Eligibility check failed, проба 16:13); транспорт заменён на droid до запуска мест"
+}

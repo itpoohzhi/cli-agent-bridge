@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 74,
+  "pass": "a4",
+  "pass_round": 50,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+  "artifact_sha256": "9ddc18254368aa868db6bdff1df2fcb91426f87bc6c4fe90fd7be90f73b830c6",
+  "seed_input": "9ddc1825#muse-wonder-approval-20261015#c4#R50",
+  "seed_hex": "e5baa292",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "1d07d4b26c26490d7946860d2ab0900a7f3c24ca92f11f64029bef4560f56929"
+    },
+    {
+      "rank": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "6637e7e67b84949605c132295a5b7ea54a8aae3ff053cbbc7a17e0c8c1ae3aa7"
+    },
+    {
+      "rank": 3,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "795e37657eaa69ce1936ac4b23402c609d4f09dcd61e5d261916ab0806330111"
+    },
+    {
+      "rank": 4,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "8663d68c0c10ea9881b33b30e7739b3cf3f12a24a73f2341c2e09a650acbdaf0"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Реалист"
+    },
+    {
+      "k": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "claude-p",
+      "hat": "Визионер"
+    },
+    {
+      "k": 3,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "transport": "muse",
+      "hat": "Скептик"
+    }
+  ],
+  "hat_index_base": 5,
+  "hat_k": 0,
+  "hat_rotation": "ok",
+  "rotation_ok": "relaxed",
+  "rotation_reason": "пул судей = 3 семьи (слот Architect gpt-6.1-sol-high исключён, SK-A-12; Muse допущен как судья); состав раунда фиксирован пулом, меняются ранги, шляпы и транспорты",
+  "label": "C1",
+  "brief_review": {
+    "realist": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 1,
+      "checklist_gen": 1,
+      "approved_sha256": "f0df48e2c678e43bf8b17e6a0f12276eee08d3ff55dea930856efd36f0aad822",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r50-a4-realist/verdict-v1.json",
+      "brief_review_calls": 2,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    },
+    "skeptic": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 1,
+      "checklist_gen": 1,
+      "approved_sha256": "1ff95843ff4e9581a273d0ca440d00a6a32cdd6ede0dc30179d47b7e47fa35ef",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r50-a4-skeptic/verdict-v1.json",
+      "brief_review_calls": 3,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    }
+  }
+}

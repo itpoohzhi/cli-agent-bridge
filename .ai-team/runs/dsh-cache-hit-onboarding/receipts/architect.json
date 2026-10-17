@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "role": "architect",
+  "task_id": "REQ-CACHE-001",
+  "run_id": "dsh-cache-hit-onboarding",
+  "verdict": "DRAFT_READY_PENDING_APPROVAL",
+  "gate": "ARCH_GATE_NOT_PASSED",
+  "packet_status": "DRAFT",
+  "validator": {
+    "phase": "draft",
+    "command": "python3 \"/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py\" .ai-team/runs/dsh-cache-hit-onboarding/architecture/architecture-packet.json --phase draft --run-dir .ai-team/runs/dsh-cache-hit-onboarding --role-plan .ai-team/runs/dsh-cache-hit-onboarding/plans/architect-01.json",
+    "result": "PASS",
+    "exit_code": 0
+  },
+  "artifacts": [
+    {
+      "path": ".ai-team/runs/dsh-cache-hit-onboarding/plans/architect-01.json",
+      "sha256": "c362415ff00997e7d2eae54aac8ad451205c45f22d100165e74dbedce6f6056d"
+    },
+    {
+      "path": ".ai-team/runs/dsh-cache-hit-onboarding/architecture/architecture-packet.json",
+      "sha256": "65560f3434bae25c4a6a7e057a2512028aacc9abeb3ecc06d051748731598b17"
+    },
+    {
+      "path": ".ai-team/runs/dsh-cache-hit-onboarding/architecture/architecture-packet.md",
+      "sha256": "5a5af9b5a1b2ee4c42974ae6025a693296dda63fbd0a2e98753966aa0081be1c"
+    }
+  ],
+  "blocking_for_approved_phase": [
+    "Q-001 (OPEN-01): семантика agy cache; нужен ответ владельца или явное решение Совета вынести agy из scope",
+    "ASM-001, ASM-002, ASM-003 в статусе OPEN",
+    "approval PENDING по AD-001 и AD-005 (решение человека/Совета)"
+  ],
+  "product_worktree": "Продуктовый код не изменялся; записаны только файлы внутри .ai-team/runs/dsh-cache-hit-onboarding/. fleet.json (M) и analysis/ (??) существовали до старта роли.",
+  "not_verified": [
+    "python3 -m unittest (полная базовая линия) и basedpyright не запускались",
+    "Живые сценарии VER-005..009 не выполнялись (роль read-only)",
+    "OPEN-01, OPEN-02, OPEN-05..OPEN-09"
+  ]
+}

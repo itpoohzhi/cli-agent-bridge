@@ -1,0 +1,19 @@
+# Architect a4 files written; sha256  absolute path; manifest self-hash excluded
+ed8fa4d4d9b5eea7b7db0c18576f94faf643e378f72e25d4b30a4920d2f57a41  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/plans/architect-04.json
+9ddc18254368aa868db6bdff1df2fcb91426f87bc6c4fe90fd7be90f73b830c6  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json
+1b66622035d122d2cf18c80df0ff54c3285830158478580ddd9942218429b8af  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md
+0dd71c8e22761021ead29643acb05d2fa7d602d92f0248769889dc4e1755d25d  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/proposals/docs/adr/0003-muse-serve-approval-allowall.md
+5de696edadcd0b2aea31c3523fd9c16b5d77cef57ad9394b316d372136605cdd  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/delta-a4.md
+0db3fd063ab428ca3a21fefaba9f7e4657020cf2cd40fe957a1b2c0a67f8529a  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/delta-a4.contracts.md
+6326e4c5f6222003c3f8a8694bab249b45bed34cb7da42821af36db5f616f428  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/delta-a4.packet.diff
+5a0443bf6bcb482d60e733a98d100a5571ed2bd1a66580946fd089f1c2e88fc4  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/delta-a4.spec.diff
+26131941a231a6e02ad7de25ddeff4c68204a48b124dd520caab5a26d53a0761  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/delta-a4.adr.diff
+d61add023a68b69522cf5ec60f7dda8a391d77695f9b39aa1e637c3b1a3f4fd7  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/architect-04-baseline.json
+e7d36b24e3a9d6be31db4c7aa108f0176a0229d5a1b9f46b1ae215416d5cf47e  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/architect-04-validation.log
+60cdc65c58fba053f26ab98f19b4d8c5a58b68aa40774aca1ce7580849dfdc19  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/architect.json
+
+# Orchestrator operational snapshots; read-only to Architect, not owned writes
+ea0655ae1fcfcbc21360e17419fcf061c6f2c749ab88edd9ca1d3cf1ffe51056  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/plans/architect-04.input.md
+1d015eac5826e8a1dd6f655c1581211e09f40dd8ba6625cdaab76c5ffb141bea  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/architect-04.process.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/architect-04.transport.jsonl
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/architect-04.transport.err

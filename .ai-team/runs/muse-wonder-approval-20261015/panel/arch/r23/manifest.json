@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 23,
+  "pass": "a3",
+  "pass_round": 8,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+  "artifact_sha256": "38f4662021162360c22138888a86cc2d2156faba7b61ee95cda18468c952754c",
+  "seed_input": "38f46620#muse-wonder-approval-20261015#c3#R8",
+  "seed_hex": "6a42ec68",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "15e441bab228a0c4cc1026521ab4e0ec196afafffa611e77cb74d0d9520a35d3"
+    },
+    {
+      "rank": 2,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "a6df034d766618df5126fd7749ae5a13092f3ff0405d7b6b630bee5cabe25169"
+    },
+    {
+      "rank": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "be7a9a7174137e9b454b1a377bd64813e707187766d2946743abb125a9704c5d"
+    },
+    {
+      "rank": 4,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "dd68f56ccafe6a341da35a3c9bfa57f6a0a93ee6600dac78d011670f7b713570"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "transport": "muse",
+      "hat": "Реалист"
+    },
+    {
+      "k": 2,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "droid",
+      "hat": "Визионер"
+    },
+    {
+      "k": 3,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Скептик"
+    }
+  ],
+  "hat_index_base": 1,
+  "hat_k": 0,
+  "hat_rotation": "ok",
+  "rotation_ok": "relaxed",
+  "rotation_reason": "пул судей = 3 семьи (слот Architect claude-sonnet-5-5-high исключён, SK-A-12; Muse допущен как судья); состав раунда фиксирован пулом, меняются ранги, шляпы и транспорты",
+  "label": "D1",
+  "brief_review": {}
+}

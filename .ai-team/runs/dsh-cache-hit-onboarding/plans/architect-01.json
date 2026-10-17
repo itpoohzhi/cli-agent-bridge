@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "role": "architect",
+  "task_id": "REQ-CACHE-001",
+  "run_id": "dsh-cache-hit-onboarding",
+  "iteration": 1,
+  "steps": [
+    {
+      "id": "S1",
+      "description": "Прочитать регламенты роли, Python-overlay и входы System Analyst (handoff, evidence ledger, open questions); не переисследовать систему.",
+      "status": "DONE",
+      "actual_evidence": "Прочитаны SKILL.md, references/protocol.md, validate_architecture_packet.py, aisdlc-gcge/skills/architecture.md, analysis/cache-hit-telemetry/{handoff-architect,evidence-ledger,open-questions}.md; факты [F-01]..[F-36] приняты как evidence, свежесть 2026-10-12 (<7 дней)."
+    },
+    {
+      "id": "S2",
+      "description": "Выборочно перепроверить ключевые факты repo bridge по коду и собрать недостающие факты по пробелам ledger (раннер тестов, обработка stream_options, персистентность usage, fake_droid).",
+      "status": "DONE",
+      "actual_evidence": "Прочитаны server.py:2164-2177, 3540-3960, 4490-4757; core/backend_adapter.py:Usage; adapters/droid_adapter.py:84-109; rg по stream_options/include_usage/prompt_tokens_details в *.py дал 0 совпадений; README.md:51,186 (unittest, нет pyproject); tests/fake_droid.py без cache-полей; .venv/bin/ruff format --check и ruff check зелёные (EVD-005..EVD-008, EVD-013, EVD-014)."
+    },
+    {
+      "id": "S3",
+      "description": "Принять решения AD-001..AD-005, границы BND-001..003, дельту контракта CD-001 и quality scenarios; отделить one-way/approval и вынести agy и proxy в deferred.",
+      "status": "DONE",
+      "actual_evidence": "architecture/architecture-packet.json: decisions AD-001..AD-005 (approval_required у AD-001, AD-005), boundaries BND-001..003, contract_deltas CD-001, quality_scenarios QA-001..005, assumptions ASM-001..003, open_questions Q-001..Q-006, deferred."
+    },
+    {
+      "id": "S4",
+      "description": "Заморозить verification surface с точными командами (unittest, ruff, basedpyright, curl SSE, параллельный прогон) и ручными gate владельца для DSH и Hermes.",
+      "status": "DONE",
+      "actual_evidence": "architecture-packet.json: verification_surface VER-001..VER-010; каждый QA, BND, CD и RISK ссылается на VER-ID; владельцем manual gate назначен owner, не Coder."
+    },
+    {
+      "id": "S5",
+      "description": "Собрать architecture-packet.json и читаемый architecture-packet.md, проверить валидатором в фазе draft с role plan, сформировать receipt.",
+      "status": "DONE",
+      "actual_evidence": "Созданы architecture/architecture-packet.json и architecture/architecture-packet.md; первичная проверка validate_architecture_packet.py --phase draft без role_plan: PASS sha256=ea33140a40ed51f59f8cd797188a8b0e562c5a2823897733ce08c97ea1b5ff4c; итоговая проверка с --role-plan и хеши записаны в receipts/architect.json."
+    }
+  ]
+}

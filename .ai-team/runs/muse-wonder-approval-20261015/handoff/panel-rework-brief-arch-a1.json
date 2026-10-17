@@ -1,0 +1,227 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "teamlead_cycle": 1,
+  "panel_slug": "muse-wonder-approval-20261015-arch-council-1-a1",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "muse-wonder-full-1.0",
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "AD-002, AD-003, AD-004, BND-003, VIEW-001, VER-002",
+      "rule_ref": "architecture-packet.json#BND-003; правило леджера F-001: после первого опубликованного reasoning повтор запрещён; обработка approval не должна запускать полный переигрыш",
+      "action": "В delta-пакете определить единые условия допуска любого нового процесса, включая внутренний serve→exec fallback (AD-002, AD-003, BND-003, VIEW-001; синхронно arch-spec §2.3, §2.4, §3.2). После опубликованного reasoning (_content_started) или входа в терминальную approval-деградацию EOF, ошибка чтения, ошибка записи stdin (receipt/decide) и таймаут завершают запрос без exec; допустимый исход транспортной ошибки при обработке approval определить явно. Устранить противоречие между запретом BND-003, сохраняемым тихим exec fallback для EOF/RPC-ошибок setup/дедлайна чтения и выводом fallback из счётчика повторов в AD-003 — перечислить исчерпывающе ветки, где fallback ещё разрешён до _content_started и до деградации.",
+      "acceptance": "В VER-002 и плане тестов delta-пакета есть red→green: summary→EOF; summary→ошибка чтения; approval→ошибка записи receipt/decide; cancel→EOF. В запрещённых ветках exec отсутствует, клиент получает ровно один терминальный исход.",
+      "source": "Реалист R1 F-01 / леджер F-001 CONSENTED blocking resolved_in=c1; verdict-a1 NEEDS WORK",
+      "evidence": "BND-003 запрещает повтор при _content_started, однако связанная спецификация сохраняет тихий exec fallback для EOF, RPC-ошибок setup и дедлайна чтения, а ошибку записи receipt определяет как существующий ServeUnavailable; AD-003 отдельно выводит serve→exec fallback из счётчика повторов; прежний обработчик ServeUnavailable запускает exec с полным промптом. Противоречие не сглажено: место 3 в R1 дало PASS без F-блоков и считало AD-002/AD-003/AD-004 синхронизированными через _content_started, итог леджера — CONSENTED blocking.",
+      "source_findings": ["F-001"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§2.3, §2.4, §3.2"}
+      ]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "AD-003, BND-003, QA-004, EVD-013, EVD-016",
+      "rule_ref": "architecture-packet.json#AD-003, #QA-004; правило леджера F-002: бюджет должен учитывать весь путь, значимый для клиента, и иметь измеримое поведение при насыщении",
+      "action": "В AD-003/QA-004 и arch-spec §3.3 определить абсолютный бюджет от приёма запроса либо ограничить очередь так, чтобы ожидание слота, выполнение, cleanup и финальная выдача помещались в клиентский предел 1900 с. Один абсолютный дедлайн распространить и на serve→exec fallback, а не только на следующую run_attempt. Исправить обоснование, что ход укладывается в клиентские 1900 с, пока ожидание слота до t0 в бюджет не входит (1800 с ожидания плюс 1800 с выполнения превышают 1900 с).",
+      "acceptance": "Сценарий QA/VER delta-пакета: три и более одновременных запроса при двух занятых слотах, задержанные serve и fallback; запрос либо получает ответ в установленном общем бюджете, либо завершается предусмотренной ошибкой до клиентского обрыва. Общий измеримый потолок записан в AD-003 и QA-004 одинаково.",
+      "source": "Реалист R1 F-02 / леджер F-002 OWNER_DECIDED outcome=blocking resolved_in=owner, owner_decision 2026-10-15 13:39 MSK blocking",
+      "evidence": "dissent (дословно): Реалист C1 «OBJECT F-002 — дефект: architecture-packet.json#AD-003, #QA-004, #EVD-013, #EVD-016; arch-spec.md §3.3 — ожидание слота до 1800 с плюс выполнение до 1800 с превышают клиентские 1900 с. Очередь существ» → debate/c1/Реалист.md. Противоречие приоритетов не сглажено: amendments леджера rev2 priority=non-blocking, rev3 blocking, rev4 blocking, rev5 non-blocking; поле priority леджера non-blocking, outcome blocking по решению владельца.",
+      "source_findings": ["F-002"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§3.3"}
+      ]
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "AD-001, AD-003, THREAT-001, THREAT-004, RISK-001, VER-002",
+      "rule_ref": "architecture-packet.json#THREAT-004, #THREAT-001; правило леджера F-003: повтор после возможного побочного эффекта требует идемпотентности, дедупликации либо явно принятой семантики повторного выполнения",
+      "action": "Выбрать и зафиксировать в AD-003/THREAT-004 одно решение: запрет повтора после начала потенциально неидемпотентного инструмента; доказанная дедупликация; либо явно записанное принятие владельцем семантики at-least-once (принятие allowAll в AD-001 таким принятием дублирования не считать). Если надёжно обнаружить инструментальное действие нельзя, это ограничение должно ограничивать разрешение повтора, а не скрываться за _content_started; митигацию THREAT-004, опирающуюся только на отключённые write/shell, отсутствие контентного кадра и смерть группы процессов, переписать.",
+      "acceptance": "В VER-002/плане тестов есть заглушка, выполняющая наблюдаемый побочный эффект до любого SSE reasoning/content и затем возвращающая net-timeout; проверка подтверждает отсутствие второго эффекта либо именно согласованную и записанную семантику дублирования.",
+      "source": "Реалист R1 F-03 / леджер F-003 OWNER_DECIDED outcome=blocking resolved_in=owner, owner_decision 2026-10-15 13:39 MSK blocking",
+      "evidence": "dissent (дословно): Реалист C1 «OBJECT F-003 — дефект: architecture-packet.json#AD-003, #THREAT-001, #THREAT-004 — отсутствие SSE-контента и подтверждённая смерть процесса не исключают уже выполненного внешнего действия. При allowAl» → debate/c1/Реалист.md. THREAT-001 признаёт оставшиеся network/tool-инструменты, каталог и payload неизвестны; amendments леджера колебали priority rev2 non-blocking, rev3 blocking, rev4 blocking, rev5 non-blocking — outcome blocking по решению владельца.",
+      "source_findings": ["F-003"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§3.2, §5"}
+      ]
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "AD-004, BND-002, BND-004, QA-006, VER-003",
+      "rule_ref": "architecture-packet.json#BND-002, #BND-004; правило леджера F-004: новый потоковый I/O должен иметь backpressure, ограниченное ожидание и определённый cleanup",
+      "action": "Для синхронного live-sink в AD-004/BND-002/BND-004 и arch-spec §4.2 определить ограниченное время записи или ограниченную очередь с политикой переполнения (значение и механизм зафиксировать в пакете; соседний эталон LIVE_WRITE_TIMEOUT_S=3 — evidence-ориентир, не автоматический выбор). Описать судьбу частично записанного SSE-кадра и гарантировать, что медленный, но подключённый клиент не останавливает чтение MSP под _wlock и не срывает соблюдение дедлайна хода; обработка исключения записи сама по себе время до исключения не ограничивает.",
+      "acceptance": "В VER-003/плане тестов есть сценарий: клиент перестаёт читать, заглушка заполняет сокетный буфер reasoning-дельтами; запрос освобождает процессы и слот за установленное в пакете время, второй клиент продолжает обслуживаться.",
+      "source": "Реалист R1 F-04 / леджер F-004 OWNER_DECIDED outcome=blocking resolved_in=owner, owner_decision 2026-10-15 13:39 MSK blocking",
+      "evidence": "dissent (дословно): Реалист C1 «OBJECT F-004 — дефект: architecture-packet.json#BND-002, #BND-004, #AD-004; arch-spec.md §4.2 — новый синхронный sink связывает чтение MSP с неограниченной записью SSE под `_wlock`. Подключённый клиен» → debate/c1/Реалист.md. Спецификация вызывает sink синхронно из цикла чтения, отдельная очередь не вводится, ограничение времени live-записи не определено; amendments леджера колебали priority rev2 non-blocking, rev3 blocking, rev4 blocking, rev5 non-blocking — outcome blocking по решению владельца.",
+      "source_findings": ["F-004"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§4.2"}
+      ]
+    },
+    {
+      "id": "RW-005",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "AD-004, BND-004, QA-006, VER-003, CD-001",
+      "rule_ref": "architecture-packet.json#AD-004, #CD-001; правило леджера F-005: streaming-источник требует аккумуляции и независимого сигнала полноты, заявленный порядок обеспечивается алгоритмом или контрактом источника",
+      "action": "В AD-004/BND-004/CD-001 и arch-spec §4.2 определить, когда summary-индекс или reasoning-item считается окончательно закрытым: буферизовать ещё неустойчивый порядок (live префикс-монотонен) либо привести подтверждённую гарантию порядка MSP. Отдельно определить согласование накопленных дельт с итоговым item/completed, включая случай, когда финальная сборка не расширяет уже отправленное (дубль не отправлять, расхождение фиксировать), чтобы последовательность 0:a затем 1:b затем 0:c не давала неверную опубликованную конкатенацию вместо итоговой сборки по индексам через разделитель \\n\\n.",
+      "acceptance": "В VER-003/плане тестов есть interleaved-индексы, поздний меньший индекс, расхождение item/completed с накопленными дельтами и повтор итогового snapshot: порядок не меняется задним числом, текст не теряется и не дублируется; либо пакет доказывает недопустимость таких последовательностей контрактом MSP.",
+      "source": "Реалист R1 F-05 / леджер F-005 CONSENTED blocking resolved_in=c1; дубль той же причины F-012 вынесен в excluded",
+      "evidence": "Пакет обещает одновременно немедленную публикацию приростов и равенство итоговой сборке join по индексам, но ledger подтверждает item/delta без гарантии, что после начала summary.1 не придёт продолжение summary.0. Противоречие не сглажено: место 3 в R1 дало PASS без F-блоков, Скептик R1 поднял ту же причину отдельным F-4 (леджер F-012), в D2/D3 Визионер классифицировал её duplicate_of:F-005 — итог F-005 CONSENTED blocking, F-012 excluded.",
+      "source_findings": ["F-005"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§4.2"}
+      ]
+    },
+    {
+      "id": "RW-006",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "AD-002, BND-002, QA-001, VER-001",
+      "rule_ref": "architecture-packet.json#AD-002, #QA-001; правило леджера F-006: ограничение числа команд и терминальный исход должны оставаться истинными при любом ответе сервера",
+      "action": "В AD-002/BND-002 и arch-spec §2.4 ввести явное терминальное состояние approval-отказа: запрет новых разрешений и повторных входов в деградацию, локально зафиксированный неуспешный результат, ограниченный cleanup. Согласовать предел 10 approval/decide: включает ли он финальную команду отказа abort/denied или допускает отдельную дополнительную команду сверх десяти. Определить поведение при очередном request, terminal=false или успешном turn/completed после denied, а также если сервер ход не завершает (влияние denied по OPEN-06 неизвестно и не должно менять локальный терминальный исход).",
+      "acceptance": "В VER-001/плане тестов после denied сервер поочерёдно: повторяет request, возвращает terminal=false, присылает успешный terminal, не завершает ход; во всех ветках соблюдены согласованный предел команд, отсутствие exec и ровно один терминальный исход клиенту.",
+      "source": "Реалист R1 F-06 / леджер F-006 OWNER_DECIDED outcome=blocking resolved_in=owner, owner_decision 2026-10-15 13:39 MSK blocking",
+      "evidence": "dissent (дословно): Реалист C1 «OBJECT F-006 — дефект: architecture-packet.json#AD-002, #QA-001; arch-spec.md §2.4 — предел «не более 10 approval/decide» противоречит дополнительному отказному decide после исчерпания лимита. После d» → debate/c1/Реалист.md. AD-002 после превышения границы предусматривает ещё один decide с abort/denied; amendments леджера колебали priority rev2 non-blocking, rev3 blocking, rev4 blocking, rev5 non-blocking — outcome blocking по решению владельца.",
+      "source_findings": ["F-006"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§2.4"}
+      ]
+    },
+    {
+      "id": "RW-007",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "AD-004, QA-006, RISK-007, VER-009",
+      "rule_ref": "architecture-packet.json#VER-009, #RISK-007; правило леджера F-007: наблюдение ограничения не заменяет выполнение требования или согласованное изменение DoD",
+      "action": "В VER-009/RISK-007/QA-006 разделить успешную приёмку REQ-MUSE-004 и диагностическое закрытие OPEN-04: убрать ветку «либо лог первой summary-дельты фиксирует её приход только в конце» из условий PASS бинарного gate. При summaries только в конце REQ-MUSE-004 в delta-пакете остаётся NOT_MET/BLOCKED и требуется отдельный согласованный путь достижения прогресса либо явное записанное изменение требования владельцем; OPEN при этом не объявлять неблокирующим сдачу исходного набора требований.",
+      "acceptance": "Текст VER-009 delta-пакета не даёт общей приёмки в сценарии «summary только при завершении»; успех REQ-MUSE-004 подтверждается только реальным pre-terminal обновлением reasoning в существующем DSH-слоте владельца, диагностический факт конца хода записывается отдельным исходом.",
+      "source": "Реалист R1 F-07 / леджер F-007 CONSENTED blocking resolved_in=c1; verdict-a1 NEEDS WORK",
+      "evidence": "VER-009 допускает прирост reasoning в UI во время мышления либо честную фиксацию логом прихода первой дельты только в конце, а RISK-007 признаёт, что во втором случае прогресс недостигнут; тем не менее VER-009 назван бинарным gate. Противоречие не сглажено: место 3 в R1 сочло VER-009 достаточным тяжёлым путём и дало PASS без F-блоков, итог леджера — CONSENTED blocking.",
+      "source_findings": ["F-007"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§4.3, §7 п.6"}
+      ]
+    },
+    {
+      "id": "RW-008",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+      "line_hint": "THREAT-003, ASM-006, QA-004, AD-002",
+      "rule_ref": "architecture-packet.json#THREAT-003, #ASM-006, #QA-004; arch-spec.md §2.4 (леджер F-011)",
+      "action": "В деградации AD-002/ASM-006/THREAT-003 и arch-spec §2.4 ввести короткий grace после отправки turn/cancel или decide(abort) — константу порядка 10–30 с с зафиксированным в пакете значением; после grace убивать группу процессов serve, отдавать терминальную ошибку клиенту и освобождать слот, не ожидая дедлайна 1800 с. Определить влияние cancel на pending approval в пределах этого grace (схемой не описано), чтобы два проигнорировавших cancel хода не блокировали оба слота MAX_CONCURRENT=2 только keepalive клиенту.",
+      "acceptance": "В VER-001/QA-004 и плане тестов есть T-A09b: фейковый serve игнорирует cancel, группа мертва и слот освобождён не позже зафиксированного grace после деградации, клиент получает один терминальный исход.",
+      "source": "Скептик R1 F-3 / леджер F-011 CONSENTED blocking resolved_in=c1; verdict-a1 NEEDS WORK",
+      "evidence": "После cancel мост по arch-spec §2.4 не ждёт продолжения сверх обычного turn/completed и дедлайна, влияние cancel на pending approval схемой не описано; если serve ход не завершит, слот из MAX_CONCURRENT=2 занят до 1800 с и два таких хода блокируют мост целиком. Противоречие не сглажено: место 3 в R1 дало PASS без F-блоков, итог леджера — CONSENTED blocking при AGREE в D1 от Визионера и Реалиста.",
+      "source_findings": ["F-011"],
+      "related_locations": [
+        {"file": ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md", "line_hint": "§2.4"}
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "THREAT-001/AD-002/VER-009: назвать журнал аудитом решений моста по остаточным approval-запросам, а не всех разрешённых при allowAll действий; полный аудит инструментов, если нужен, определить отдельным источником и проверкой. Живой gate допускает корректный ход без остаточного approval-запроса и фиксирует это явно; отсутствие approval-строки не трактуется как доказательство отсутствия инструментального действия (ходы с запросом и без него проверены отдельно).",
+      "reason": "леджер F-008: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-008"]
+    },
+    {
+      "id": "FU-002",
+      "text": "AD-006/QA-008/RISK-005 и arch-spec §2.4: разрешить вопрос обхода серверного approval_mode_ceiling одним из путей — при -32030 не включать клиентское автоодобрение (ход завершается ошибкой или старым ServeUnavailable в exec с warning) либо получить явное записанное решение владельца, что обход ceiling допустим, с фиксацией в ADR 0003 только новой материализацией и в owner-decisions; тест T-A11 показывает выбранное поведение. Решение владельца AD-001 allowAll на session/start само по себе таким разрешением не считать.",
+      "reason": "Реалист D1 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-009, architecture-packet.json#AD-006, docs/adr/0003-muse»; Визионер D2 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-009, architecture-packet.json#AD-006, architecture-packe»",
+      "source_findings": ["F-009"],
+      "decision_required_human": true
+    },
+    {
+      "id": "FU-003",
+      "text": "BND-001/AD-002/THREAT-001: взвесить детерминированный запрет approve при protectedWrite=true или judgeEscalated=true (выбор deny/abort вместо approved) как смягчение внутри allowAll, с фиксацией в ADR 0003 только новой материализацией и тестом T-A12 — запрос с protectedWrite=true получает abort/denied и не получает approved; если запрет отклоняется, записать причину против закреплённого решения владельца AD-001.",
+      "reason": "Реалист D1 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-009, architecture-packet.json#THREAT-001, architecture-p»; Визионер D2 «— класс: invalid — контр-evidence: architecture-packet.json#EVD-009, architecture-packet.json#AD-002, architecture-packe»",
+      "source_findings": ["F-010"],
+      "decision_required_human": true
+    },
+    {
+      "id": "FU-004",
+      "text": "AD-002 alternatives/RISK-004 и arch-spec §2.4: добавить взвешенную альтернативу «exec как последний шаг approval-деградации до _content_started» с причиной выбора или отказа для muse-spark на фоне 27 исторических переходов, большинство из которых завершились успешно в exec за 19–1521 с; либо явно принять потерю исхода «терминальная ошибка вместо ответа» с измеримым условием пересмотра. Критерий: альтернатива присутствует в AD-002 delta-пакета.",
+      "reason": "леджер F-013: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-013"]
+    },
+    {
+      "id": "FU-005",
+      "text": "AD-004/AD-003/QA-005/RISK-003: добавить взвешенную альтернативу «повтор после первой live-дельты с подавлением уже отправленного reasoning-префикса» для конфликта REQ-MUSE-004 и REQ-MUSE-003 (ранняя дельта закрывает повтор при позднем net-timeout) с причиной выбора или отказа, и метрику доли ходов, где первая дельта опережает сбой, по логу OPEN-04. Критерий: альтернатива и метрика присутствуют в delta-пакете.",
+      "reason": "леджер F-014: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-014"]
+    },
+    {
+      "id": "FU-006",
+      "text": "QA-004/AD-003/VER-002 и arch-spec §3.3: привести пределы попыток к одним числам — QA-004 сейчас говорит не более 3 суммарно, §3.3 допускает 4 вызова run_attempt (1 + 1 контекстный + 2 транзиентных); зафиксировать, например, до 3 без контекстного повтора и до 4 с ним, одинаково во всех трёх местах delta-пакета и спеки.",
+      "reason": "леджер F-015: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-015"]
+    },
+    {
+      "id": "FU-007",
+      "text": "architecture-packet.json protected_paths, VER-005, BND-005: расширить protected_paths за пределы одного docs/adr/0003 — ruff.toml, pyrightconfig.json, docs/adr/0001*, docs/adr/0002*, корневой droid-мост server.py — и ограничить правки тестов явным списком (замена approval-теста, обновление test_t18); критерий: проверка diff Coder по защищённым путям даёт пустой результат вне списка.",
+      "reason": "леджер F-016: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-016"]
+    },
+    {
+      "id": "FU-008",
+      "text": "evolution.rollout/VIEW-004/RISK-006 и arch-spec §7 п.1: зафиксировать отделение незакоммиченного baseline REQ-MUSE-001 в дереве dev (2941 вставка) первым шагом до правок REQ-MUSE-002..004 — отдельный коммит baseline Coder или предварительная фиксация владельцем; дальнейшие коммиты содержат только дельту REQ-002..004, git diff baseline..HEAD правок REQ-MUSE-001 не включает.",
+      "reason": "леджер F-017: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-017"]
+    },
+    {
+      "id": "FU-009",
+      "text": "BND-001/THREAT-002/QA-002: ограничить в аудит-записи длину и набор символов свободных строк choiceId и toolName (живой payload неизвестен, строка может нести фрагмент команды или пути) и добавить канареечный тест на choiceId; критерий: канареечное значение choiceId не попадает в bridge.log дословно.",
+      "reason": "леджер F-018: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-018"]
+    },
+    {
+      "id": "FU-010",
+      "text": "RISK-002/AD-003/THREAT-003: добавить анализ роста нагрузки при деградации транспорта — до 4 попыток на запрос при MAX_CONCURRENT=2 умножают нагрузку на нестабильный прокси без глобального backoff или circuit breaker; выбрать меру (общий cooldown повторов) или записать обоснованный отказ и добавить QA-стимул «серия net-timeout под двумя параллельными ходами»; потолок wall-time против 1900 с здесь только ссылается на блокирующий бюджет F-002 и заново не определяется.",
+      "reason": "леджер F-019: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-019"]
+    },
+    {
+      "id": "FU-011",
+      "text": "AD-001/deferred env-переопределение и arch-spec §5: ввести операционный env-переключатель режима approval (allowAll/denyUnmatched) в этом же изменении либо явно зафиксировать в ADR 0003 новой материализацией, что смена режима только правкой кода и redeploy принята осознанно; критерий при выборе переключателя: переключение режима не требует правки кода.",
+      "reason": "леджер F-020: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-020"]
+    },
+    {
+      "id": "FU-012",
+      "text": "AD-003 и arch-spec §3.1: явно указать источник текста транзиентной ошибки для serve (turn/completed.error с полями kind, message, retryable) и для exec отдельно, учесть error.kind при его наличии вместо опоры только на сырой канал по образцу _has_hard_threshold_marker и добавить тест T-R01 с реальной формой serve-терминала, где маркер лежит в error.message из лога.",
+      "reason": "леджер F-021: CONSENTED, outcome non-blocking, resolved_in c1",
+      "source_findings": ["F-021"]
+    }
+  ],
+  "excluded": [
+    {"id": "F-012", "reason": "duplicate_of:F-005"}
+  ],
+  "findings_total": 21,
+  "do_not_change": [
+    "внешний OpenAI-совместимый контракт моста: /v1/chat/completions, /health, /v1/models (формы ответов и коды), допустимы только аддитивные SSE-кадры внутри существующих полей",
+    "флаг serve --disable-write и --disable-shell и включённую песочницу хоста: --disable-sandbox не передавать",
+    "гарантии REQ-MUSE-001 (AD-005): лимит 400000, прунинг до 320000, ровно один контекстный retry до 200000 только до первого контентного кадра, редакцию секретов и отражённых промптов",
+    "решение владельца AD-001: approvalMode=allowAll на session/start (owner-decisions.md, 2026-10-15 05:44 MSK)",
+    "protected docs/adr/0003-muse-serve-approval-allowall.md: изменять только через новую материализацию proposal с read-back sha256, не правкой Coder"
+  ],
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "арх-проход a1, возврат Architect-у 1 из 5 (arch_panel_to_architect); blocking только из instructions[]"
+}

@@ -1,0 +1,86 @@
+{
+  "run_id": "dsh-realtime-streaming",
+  "cycle": 1,
+  "round": 1,
+  "phase": "CODE_PANEL",
+  "seed_input": "df43497d#dsh-realtime-streaming#c1#R1",
+  "seed_hex": "2efbe9be",
+  "artifact_sha256": "df43497ddc2758287e926ad7984b4a3f63cd46d896cb89213fd1285615f50832",
+  "artifact_path": ".ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff.patch",
+  "pool_setup": "default",
+  "pool_ordered": [
+    "muse-spark-1.3",
+    "grok-4.7-high",
+    "gemini-3.8-flash-high",
+    "hermes-glm-5.3-max",
+    "deepseek-v4.1-flash"
+  ],
+  "groups": {
+    "native": [
+      "deepseek-v4.1-flash",
+      "gemini-3.8-flash-high",
+      "hermes-glm-5.3-max",
+      "grok-4.7-high"
+    ],
+    "external": [
+      "muse-spark-1.3"
+    ]
+  },
+  "ranked_order": [
+    "deepseek-v4.1-flash",
+    "muse-spark-1.3",
+    "gemini-3.8-flash-high",
+    "hermes-glm-5.3-max",
+    "grok-4.7-high"
+  ],
+  "anchor_election": {
+    "candidates": [
+      "claude-sonnet-5-5",
+      "gpt-6.1-sol"
+    ],
+    "note": "claude-sonnet-5-5 is coder_slot (models.md 1.0, models.md 98), yielded to gpt-6.1-sol",
+    "winner": "gpt-6.1-sol"
+  },
+  "seats": [
+    {
+      "seat_index": 1,
+      "family": "OpenAI",
+      "slot_id": "gpt-6.1-sol",
+      "transport": "codex exec -m gpt-6.1-sol -c model_reasoning_effort=\"high\"",
+      "group": "anchor",
+      "hat": "Реалист",
+      "status": "READY"
+    },
+    {
+      "seat_index": 2,
+      "family": "DeepSeek",
+      "slot_id": "deepseek-v4.1-flash",
+      "transport": "droid exec -m deepseek-v4.1-flash -r max",
+      "group": "native",
+      "hat": "Скептик",
+      "status": "READY"
+    },
+    {
+      "seat_index": 3,
+      "family": "Google",
+      "slot_id": "gemini-3.8-flash-high",
+      "transport": "droid exec -m gemini-3.8-flash -r high",
+      "group": "native",
+      "hat": "Визионер",
+      "status": "READY"
+    }
+  ],
+  "hats": {
+    "gpt-6.1-sol": "Реалист",
+    "deepseek-v4.1-flash": "Скептик",
+    "gemini-3.8-flash-high": "Визионер"
+  },
+  "hat_index": 0,
+  "k": 1,
+  "rotation_ok": true,
+  "recheck": {
+    "judge_family": "DeepSeek",
+    "slot_id": "deepseek-v4.1-flash"
+  },
+  "quorum_status": "IN_PROGRESS"
+}

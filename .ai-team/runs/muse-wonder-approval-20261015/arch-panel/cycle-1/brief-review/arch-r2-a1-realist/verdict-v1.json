@@ -1,0 +1,32 @@
+{
+ "verdict": "REJECT",
+ "model_verdict": "REJECT",
+ "items_total": 32,
+ "missing_ids": [],
+ "bad_quotes": [],
+ "not_covered": [
+  [
+   "SK-A-07",
+   "missing",
+   "Добавить в бриф указание: FAIL без привязки к разделу пакета / [F-NN] / правилу не засчитывается."
+  ],
+  [
+   "SK-A-08",
+   "missing",
+   "Добавить в бриф указание: FAIL без оговорок: контракт вне envelope; выход за задачу."
+  ]
+ ],
+ "unmapped_requirements": [],
+ "bloat_flags": [],
+ "leakage_flags": [],
+ "tool_calls": 0,
+ "transport": "droid gemini-3.8-flash -r high (без --auto, tools сняты)",
+ "transport_attempts": [
+  {
+   "file": "review-v1-a1.md",
+   "result": "valid"
+  }
+ ],
+ "brief_sha256": "8ae8283719fa5a950df49fe38aa4dab6b0bf571a82a2cf55b6fa28ba26273ea8",
+ "checklist_gen": 1
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "cycle": 1,
+  "pass": "a4",
+  "status": "PASS",
+  "council_verdict": "PASS",
+  "packet_sha256": "9ddc18254368aa868db6bdff1df2fcb91426f87bc6c4fe90fd7be90f73b830c6",
+  "round": 93,
+  "panel_proof_path": "panel/arch/r93/panel-proof.json",
+  "panel_proof_sha256": "2b1dd4eda1dc88035de7eefbd26da43d9a3d1277491cdc93b409865a28294bb3",
+  "seats": [
+    {
+      "k": 1,
+      "hat": "Реалист",
+      "family": "OpenAI",
+      "slot_id": "gpt-6.1-sol-high",
+      "transport": "codex",
+      "verdict": "PASS"
+    },
+    {
+      "k": 2,
+      "hat": "Скептик",
+      "family": "Anthropic",
+      "slot_id": "claude-sonnet-5-5-high",
+      "transport": "claude-p",
+      "verdict": "PASS"
+    },
+    {
+      "k": 3,
+      "hat": "Визионер",
+      "family": "Meta",
+      "slot_id": "muse-wonder-full-1.0",
+      "transport": "muse",
+      "verdict": "PASS"
+    }
+  ],
+  "findings_total": 7,
+  "blocking_open": 0,
+  "brief_review_degraded": true,
+  "brief_review_degradation_reason": "ВРЕМЕННАЯ деградация слота brief-review: Google-маршрут недоступен, Factory Droid 402 недельный лимит; запуск gpt-6.1-sol через codex exec по models.md §1.3",
+  "created_at": "2026-10-16T06:04:00.054153+00:00"
+}

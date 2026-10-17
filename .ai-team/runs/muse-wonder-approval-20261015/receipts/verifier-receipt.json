@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "gate": "VERIFIER",
+  "status": "PASS",
+  "run_id": "muse-wonder-approval-20261015",
+  "checks": [
+    {
+      "id": "VER-001-L1-killpg",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py",
+      "exit_code": 0,
+      "passed": 111,
+      "failed": 0
+    },
+    {
+      "id": "VER-002-L2-cleanroom",
+      "command": "uv run --no-project --with pytest python -m pytest -q tests",
+      "exit_code": 1,
+      "passed": 648,
+      "failed": 1,
+      "known_failures": [
+        "tests/test_b_guard.py::TestTm018Guard::test_tm018_live_check_subprocess (REQ003_SIZE_EXCEEDED block=61367 limit=60000; PASS_WITH_PREEXISTING per verification-integrity §8)"
+      ]
+    },
+    {
+      "id": "VER-003-py_compile",
+      "command": "python3 -B -m py_compile bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-004-ruff-fmt",
+      "command": ".venv/bin/ruff format --check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-005-ruff-chk",
+      "command": ".venv/bin/ruff check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-006-pyright-err",
+      "command": ".venv/bin/basedpyright bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0,
+      "errors": 0,
+      "warnings": 1982
+    },
+    {
+      "id": "VER-007-git-diff-check",
+      "command": "git diff --check 1f1071a..HEAD",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-008-scope-check",
+      "command": "git diff --name-only 9f87eb0..HEAD",
+      "exit_code": 0,
+      "files": [
+        "bridges/muse-bridge/server.py",
+        "tests/test_muse_bridge_killpg.py"
+      ]
+    }
+  ],
+  "verified_at": "2026-10-16T07:12:30Z",
+  "modified_files": {
+    "bridges/muse-bridge/server.py": "ce9fd9c8129924650f2d9f756ffd14a00c612871bc3bd7074d49e755c687f3cc",
+    "tests/test_muse_bridge_killpg.py": "5ca7da36922d396797ce96f68a54c9fa9f23557bbaec4f2b401b99214c50c3c7"
+  },
+  "test_summary": "111/111 passed in test_muse_bridge_killpg.py (0 fail); 648 passed in full tests/ (1 pre-existing fail test_b_guard tm018, PASS_WITH_PREEXISTING); ruff exit 0, basedpyright 0 errors"
+}

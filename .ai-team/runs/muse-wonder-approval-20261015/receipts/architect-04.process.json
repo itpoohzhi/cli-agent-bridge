@@ -1,0 +1,22 @@
+{
+  "pid": 80227,
+  "pgid": 80227,
+  "model": "gemini-4-argon-high",
+  "transport": "Factory Droid",
+  "log": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/architect-04.transport.jsonl",
+  "draw": [
+    "gemini-4-argon-high",
+    "claude-sonnet-5-5",
+    "muse-wonder-full-1.0"
+  ],
+  "excluded": "gpt-6.1-sol same family as orchestrator",
+  "status": "not_started",
+  "failure": "sandbox os.setpgid Operation not permitted; escalation rejected by approval policy Never",
+  "fallback": {
+    "model": "gpt-6.1-sol",
+    "transport": "native collaboration",
+    "task": "/root/architect_a4",
+    "context": "fresh",
+    "reason": "external transports require forbidden process-group isolation; only exact native model eligible for Architect is gpt-6.1-sol"
+  }
+}

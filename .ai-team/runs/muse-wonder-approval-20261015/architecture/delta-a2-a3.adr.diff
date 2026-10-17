@@ -1,0 +1,56 @@
+--- .ai-team/runs/muse-wonder-approval-20261015/architecture/prev/0003-adr.a2.md	2026-10-15 22:17:10
++++ .ai-team/runs/muse-wonder-approval-20261015/architecture/proposals/docs/adr/0003-muse-serve-approval-allowall.md	2026-10-15 22:31:16
+@@ -8,7 +8,7 @@
+ Решение владельца принято 2026-10-15 05:44 MSK в чате: «Авторазрешение (allowAll)»
+ (запись: `/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md`, вопрос OPEN-07).
+ Архитектурный пакет: `.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json`
+-(AD-001, AD-002). Не отменяет ADR 0001/0002 и решения REQ-MUSE-001 (прунинг 400k/320k/200k).
++(AD-001, AD-002, AD-006, AD-007; delta a3). Не отменяет ADR 0001/0002 и решения REQ-MUSE-001 (прунинг 400k/320k/200k).
+ 
+ ## Y-формулировка
+ 
+@@ -139,12 +139,26 @@
+ 
+ - `session/start` моста передаёт `approvalMode: "allowAll"`; эффективный режим и `serverInfo.version`
+   логируются при каждом старте serve. Отказ `-32030` (потолок старых версий) клиентским
+-  автоодобрением не обходится: ход один раз уходит в существующий `exec`-fallback до `turn/start`
+-  с warning, второго старта без поля и `decide`-одобрений поверх серверного `promptUnmatched`
+-  нет (пакет AD-006; обход потолка — только по отдельному явному решению владельца).
++  автоодобрением не обходится: при `allowAll` ход один раз уходит в существующий `exec`-fallback
++  до записи `turn/start` с warning; при `denyUnmatched` `exec` (он всегда с `--yolo`) не запускается,
++  запрос завершается контролируемым отказом 502/SSE error с причиной `exec_fallback_disabled`;
++  второго старта без поля и `decide`-одобрений поверх серверного `promptUnmatched` нет (пакет
++  AD-006; обход потолка — только по отдельному явному решению владельца).
+ - Режим переключается оператором без правки кода: `MUSE_BRIDGE_APPROVAL_MODE` (`allowAll` по
+-  умолчанию, `denyUnmatched` для отката) в env launchd и перезапуск моста (пакет AD-007);
+-  значение по умолчанию и смысл решения владельца этим не меняются.
++  умолчанию, `denyUnmatched` для отката) через `EnvironmentVariables` в
++  `~/Library/LaunchAgents/com.user.dsh-muse-bridge.plist` и `launchctl bootout` +
++  `launchctl bootstrap gui/$(id -u)` из внешней оболочки (пакет AD-007); одного
++  `launchctl kickstart -k` недостаточно — он plist не перечитывает. Значение по умолчанию и смысл
++  решения владельца этим не меняются.
++- Область `denyUnmatched`: мост нигде не разрешает действия модели автоматически — `serve` получает
++  `denyUnmatched`, `approve` не отправляется и `exec --yolo` не запускается ни как fallback, ни как
++  повтор. Цена — доступность: при недоступном `serve` на пре-турновой фазе запрос завершается
++  терминальной ошибкой. Полный откат кода (восстановление `server.py`) возвращает baseline с его
++  `exec --yolo`-путями и откатом политики не является.
++- Автоматический повтор и exec-fallback допускаются только до записи `turn/start` на `serve`
++  (граница возможного действия `ACTION_POSSIBLE`, пакет AD-003): действие модели без наблюдаемых
++  сигналов нельзя исключить, поэтому после неё повтор запрещён; расширение области — только решением
++  владельца (пакет Q-010, переключатель `MUSE_BRIDGE_TRANSIENT_RETRY_SCOPE`).
+ - Флаги serve не меняются: `--disable-write --disable-shell --trust-workspace --no-session-log`;
+   `--disable-sandbox` не передаётся. Путь `exec` (`--yolo --disable-web-tools --disable-reminders`)
+   не меняется.
+@@ -163,7 +177,11 @@
+   `approvalMode: "allowAll"`, на `approval/request` уходят receipt и `approval/decide` с
+   `choiceId` из `availableChoices`, процесс `exec` не запускается, ход завершается `via=serve`;
+   при `-32030` второго `session/start` и `decide` нет, ход доводит один `exec`-fallback;
+-  при `MUSE_BRIDGE_APPROVAL_MODE=denyUnmatched` старт несёт `denyUnmatched` и одобрений нет.
++  при `MUSE_BRIDGE_APPROVAL_MODE=denyUnmatched` старт несёт `denyUnmatched`, одобрений нет, а в
++  комбинации с `-32030` и прочими пре-турновыми сбоями `serve` процесс `exec` (`--yolo`) не
++  запускается и запрос завершается контролируемым отказом; на боевой машине учение
++  `allowAll → denyUnmatched → allowAll` подтверждает эффективный `approvalMode` в `bridge.log`
++  после каждого шага (пакет VER-008).
+ - Живой ход Wonder Full в DSH-слоте владельца (тяжёлый путь пакета, VER-009): в `bridge.log`
+   видны `approvalMode=allowAll`, решения approval безопасными полями и `done via=serve` без
+   `fallback exec` по этому ходу.

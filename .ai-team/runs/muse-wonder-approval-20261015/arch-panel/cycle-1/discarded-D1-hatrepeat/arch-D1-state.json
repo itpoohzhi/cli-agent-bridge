@@ -1,0 +1,42 @@
+{
+ "seed_input": "ebfa59a9#muse-wonder-approval-20261015#c1#R2",
+ "seed_hex": "98a610e4",
+ "ranked": [
+  [
+   "muse-wonder-full-1.0",
+   "Meta",
+   "670ae5b6c92dbbd679b12dd25eb5a2bc6fa8951e632c3eb692867f6f4db79f59"
+  ],
+  [
+   "gemini-4-argon-high",
+   "Google",
+   "b4396c69b99c492660ec8e6dceee998dac95ae273671952fdb465bf06345b585"
+  ],
+  [
+   "claude-sonnet-5-5-high",
+   "Anthropic",
+   "d81e8386e3748a0732dd974c90f12c77ce43bb3439a285531092500bc626ac82"
+  ],
+  [
+   "gpt-6.1-sol-high",
+   "OpenAI",
+   "eb2a7516501f9caa755e2ebad84092a609eebaa4a3708814fac8c725670478d6"
+  ]
+ ],
+ "eligible": [
+  "gemini-4-argon-high",
+  "claude-sonnet-5-5-high",
+  "gpt-6.1-sol-high"
+ ],
+ "hats": {
+  "claude-sonnet-5-5-high": "skeptic",
+  "gemini-4-argon-high": "visionary",
+  "gpt-6.1-sol-high": "realist"
+ },
+ "hat_index": 1,
+ "transports": {
+  "gemini-4-argon-high": "droid",
+  "claude-sonnet-5-5-high": "droid",
+  "gpt-6.1-sol-high": "droid"
+ }
+}

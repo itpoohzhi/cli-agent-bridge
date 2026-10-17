@@ -1,0 +1,19 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+muse-bridge-stream-all-steps-20261017	gpt-6.1-sol-high	panel-judge-k1	92693	92693	2026-10-17T12:34:25.653727+00:00	Sat Oct 17 15:34:25 2026	running
+muse-bridge-stream-all-steps-20261017	muse-wonder-full-1.0	panel-judge-k3	92700	92700	2026-10-17T12:34:25.675118+00:00	Sat Oct 17 15:34:25 2026	running
+muse-bridge-stream-all-steps-20261017	claude-sonnet-5-5-high	panel-judge-k2	92745	92745	2026-10-17T12:34:25.855537+00:00	Sat Oct 17 15:34:25 2026	running
+muse-bridge-stream-all-steps-20261017	gpt-6.1-sol-high	panel-judge-k1	92693	92693	2026-10-17T12:34:25.653727+00:00	Sat Oct 17 15:34:25 2026	rc=1
+muse-bridge-stream-all-steps-20261017	claude-sonnet-5-5-high	panel-judge-k2	92745	92745	2026-10-17T12:34:25.855537+00:00	Sat Oct 17 15:34:25 2026	rc=0
+muse-bridge-stream-all-steps-20261017	muse-wonder-full-1.0	panel-judge-k3	92700	92700	2026-10-17T12:34:25.675118+00:00	Sat Oct 17 15:34:25 2026	rc=0
+muse-bridge-stream-all-steps-20261017	gemini-4-argon-high	panel-judge-k1	38489	38489	2026-10-17T12:39:06.046536+00:00	Sat Oct 17 15:39:06 2026	running
+muse-bridge-stream-all-steps-20261017	muse-wonder-full-1.0	panel-judge-k3	38491	38491	2026-10-17T12:39:06.050320+00:00	Sat Oct 17 15:39:06 2026	running
+muse-bridge-stream-all-steps-20261017	claude-sonnet-5-5-high	panel-judge-k2	38522	38522	2026-10-17T12:39:06.238030+00:00	Sat Oct 17 15:39:06 2026	running
+muse-bridge-stream-all-steps-20261017	muse-wonder-full-1.0	panel-judge-k3	38491	38491	2026-10-17T12:39:06.050320+00:00	Sat Oct 17 15:39:06 2026	rc=0
+muse-bridge-stream-all-steps-20261017	claude-sonnet-5-5-high	panel-judge-k2	38522	38522	2026-10-17T12:39:06.238030+00:00	Sat Oct 17 15:39:06 2026	rc=0
+muse-bridge-stream-all-steps-20261017	gemini-4-argon-high	panel-judge-k1	38489	38489	2026-10-17T12:39:06.046536+00:00	Sat Oct 17 15:39:06 2026	rc=0
+muse-bridge-stream-all-steps-20261017	gemini-4-argon-high	panel-judge-k2	54403	54403	2026-10-17T13:17:59.488282+00:00	Sat Oct 17 16:17:59 2026	running
+muse-bridge-stream-all-steps-20261017	muse-wonder-full-1.0	panel-judge-k3	54402	54402	2026-10-17T13:17:59.488122+00:00	Sat Oct 17 16:17:59 2026	running
+muse-bridge-stream-all-steps-20261017	claude-sonnet-5-5-high	panel-judge-k1	54447	54447	2026-10-17T13:17:59.580697+00:00	Sat Oct 17 16:17:59 2026	running
+muse-bridge-stream-all-steps-20261017	claude-sonnet-5-5-high	panel-judge-k1	54447	54447	2026-10-17T13:17:59.580697+00:00	Sat Oct 17 16:17:59 2026	rc=0
+muse-bridge-stream-all-steps-20261017	gemini-4-argon-high	panel-judge-k2	54403	54403	2026-10-17T13:17:59.488282+00:00	Sat Oct 17 16:17:59 2026	rc=0
+muse-bridge-stream-all-steps-20261017	muse-wonder-full-1.0	panel-judge-k3	54402	54402	2026-10-17T13:17:59.488122+00:00	Sat Oct 17 16:17:59 2026	rc=0

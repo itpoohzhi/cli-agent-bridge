@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-bridge-heal-20261014",
+  "role": "architect",
+  "iteration": 1,
+  "objective": "Design architecture packet and specification for muse-bridge-heal (REQ-01..REQ-08, NFR-01..NFR-07) based on system-analyst handoff",
+  "inputs_read": [
+    "analysis/muse-bridge-heal/handoff-architect.md",
+    "analysis/muse-bridge-heal/evidence-ledger.md",
+    "analysis/muse-bridge-heal/open-questions.md",
+    "bridges/muse-bridge/server.py",
+    "tests/test_muse_bridge_killpg.py"
+  ],
+  "stop_conditions": [
+    "All requirements REQ-01..REQ-08 and NFR-01..NFR-07 traced in architecture-packet.json and arch-spec.md",
+    "validate_architecture_packet.py --phase approved passes with exit code 0",
+    "No product worktree files modified during Architect phase"
+  ],
+  "plan_kind": "full",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Inspect system-analyst handoff, evidence ledger, bridges/muse-bridge/server.py and tests/test_muse_bridge_killpg.py",
+      "expected_evidence": "Exact line ranges and contracts identified for ServeRun, Run, Handler._keepalive_loop, Handler._serve_json, and ALLOWED_MODELS",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Formulate architectural decisions AD-001..AD-005 covering error logging, TurnError/reason extraction, SSE data keepalive, CLI tool flags, and ALLOWED_MODELS sync",
+      "expected_evidence": "Decisions AD-001..AD-005 recorded with alternatives, drivers, consequences, and verification commands",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "report",
+      "action": "Write arch-spec.md, completed plans/architect-v1.json, and architecture-packet.json in .ai-team/runs/muse-bridge-heal-20261014/ and validate packet",
+      "expected_evidence": "validate_architecture_packet.py --phase approved exits 0 with sha256 digest",
+      "status": "PENDING"
+    }
+  ],
+  "deviations": []
+}

@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-bridge-stream-all-steps-20261017",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 1,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-stream-all-steps-20261017/architecture/architecture-packet.json",
+  "artifact_sha256": "cc16c2e2af18c4b74efc0ddb539f322f4e1075bc3220d9cfaa2baca188d8ef60",
+  "seed_input": "cc16c2e2#muse-bridge-stream-all-steps-20261017#c1#R1",
+  "seed_hex": "1ac3bf5d",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "2f636a9b00889231"
+    },
+    {
+      "rank": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "6138a32080f99ae2"
+    },
+    {
+      "rank": 3,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "6e767312005b225d"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Реалист"
+    },
+    {
+      "k": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "claude-p",
+      "hat": "Скептик"
+    },
+    {
+      "k": 3,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "transport": "muse",
+      "hat": "Визионер"
+    }
+  ]
+}

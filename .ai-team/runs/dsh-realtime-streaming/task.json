@@ -1,0 +1,7 @@
+{
+  "task_id": "REQ-STREAM-001",
+  "run_id": "dsh-realtime-streaming",
+  "title": "Real-time SSE delta streaming in cli-agent-bridge for DeepSeek Harness Desktop",
+  "criticality": "S2",
+  "profile": "backend-service"
+}

@@ -1,0 +1,7 @@
+{
+  "task_id": "REQ-MUSE-001",
+  "run_id": "muse-wonder-foreign-session-20261014",
+  "title": "Fix Meta Muse Wonder failure on foreign/long sessions (hard threshold 460800)",
+  "criticality": "S2",
+  "profile": "default"
+}
