@@ -63,7 +63,7 @@ HOST = os.environ.get("MUSE_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = int(os.environ.get("MUSE_BRIDGE_PORT", "9886"))
 AUTH_KEY = os.environ.get("MUSE_BRIDGE_KEY", "").strip()
 
-TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_TIMEOUT_S", "1800"))
+TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_TIMEOUT_S", "3600"))
 MAX_CONCURRENT = int(os.environ.get("MUSE_BRIDGE_MAX_CONCURRENT", "2"))
 
 MUSE_WRAPPER = os.environ.get(
@@ -145,7 +145,7 @@ TRANSIENT_RETRY_SCOPE = os.environ.get(
 ).strip()
 FINISH_RESERVE_S = 35.0
 CLOSE_RESERVE_S = 12.0
-REQUEST_CAP_S = 1800.0
+REQUEST_CAP_S = 3600.0
 MIN_ATTEMPT_REMAINING_S = float(os.environ.get("MUSE_BRIDGE_MIN_ATTEMPT_S", "120"))
 CONTROL_WRITE_TIMEOUT_S = 5.0
 LIVE_WRITE_TIMEOUT_S = 3.0

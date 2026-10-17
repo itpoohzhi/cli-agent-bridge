@@ -3437,7 +3437,15 @@ class ApprovalTest(_BridgeScenario):
         with mock.patch.dict(os.environ, {"MUSE_BRIDGE_TIMEOUT_S": "100"}):
             with self.assertRaises(Exception):
                 load_bridge()
-        with mock.patch.dict(os.environ, {"MUSE_BRIDGE_TIMEOUT_S": "1800"}):
+        # Дефолт без переопределения: потолок хода и запроса — 60 минут.
+        env_wo_timeout = {
+            k: v for k, v in os.environ.items() if k != "MUSE_BRIDGE_TIMEOUT_S"
+        }
+        with mock.patch.dict(os.environ, env_wo_timeout, clear=True):
+            default_mod = load_bridge()
+        self.assertEqual(default_mod.TIMEOUT_S, 3600.0)
+        self.assertEqual(default_mod.REQUEST_CAP_S, 3600.0)
+        with mock.patch.dict(os.environ, {"MUSE_BRIDGE_TIMEOUT_S": "3600"}):
             self.assertIsNotNone(load_bridge())
 
 
