@@ -55,13 +55,40 @@ or script that speaks the OpenAI protocol.
   preflight validator (catalog, profiles, live probes), 476-test `unittest`
   suite, ruff + basedpyright clean.
 
-## Supported backends
+## Table of contents
 
-Two adapters ship in this repo; any other vendor CLI joins the same way
-([Adding a backend](#adding-a-backend)). Models are routed strictly
-`model → backend` by the fleet catalog — no silent cross-backend fallback.
+- [Features](#features)
+- [Supported backends and connected agent CLIs](#supported-backends-and-connected-agent-clis)
+  - [Factory Droid (`droid`)](#droid--factory-droid-cli-in-tree-hub-backend)
+  - [Meta Muse (`muse`)](#muse--meta-muse-cli-in-tree-hub-and-dedicated-bridge)
+  - [Claude Code (`claude -p` and Droid proxy)](#claude--claude-code-cli-native-headless-bridge-and-droid-route)
+  - [Cursor Agent (`cursor-agent -p`)](#cursor--cursor-agent-cli-headless-grok-bridge)
+  - [Google Antigravity (`agy`) and OpenCode Zen](#agy-and-opencode--google-antigravity-and-opencode-zen)
+- [Ecosystem port and architecture map](#ecosystem-port-and-architecture-map)
+- [Connecting Claude Code (guide and options)](#connecting-claude-code)
+- [Connecting Cursor and sibling bridges](#connecting-cursor-cursor-agent-and-sibling-bridges)
+- [Quick start and client configurations](#quick-start-and-client-configurations) (harness, Cursor IDE, Python SDK, cURL)
+- [Configuration and fleet catalog](#configuration-and-fleet-catalog)
+- [Adding a backend](#adding-a-backend)
 
-### `droid` — Factory Droid CLI (enabled by default)
+## Supported backends and connected agent CLIs
+
+One facade, several vendor CLIs. Models are routed strictly `model → backend`
+by the fleet catalog — no silent cross-backend fallback. Two adapters live
+**in-tree** in this hub (`droid`, `muse`); Claude Code, Cursor Agent, Antigravity
+and OpenCode Zen are connected as **sibling bridges** — standalone deployments
+that expose the identical OpenAI facade on their own ports. All of them are
+documented below and in the [port map](#ecosystem-port-and-architecture-map).
+
+| CLI | How it is connected | Port | Models | Details |
+|---|---|---|---|---|
+| Factory Droid `droid` | In-tree hub adapter (enabled by default) | `:9882` | `claude-sonnet-5-5`, `gemini-3.8-flash`, `grok-4.7`, `deepseek-v4.1-flash`, `gpt-6.1-sol`, `glm-5.3` | [below](#droid--factory-droid-cli-in-tree-hub-backend) |
+| Meta Muse `muse` | In-tree hub adapter (opt-in) + dedicated bridge `bridges/muse-bridge/` | `:9882` / `:9886` | `muse-spark-1.3`, `muse-wonder-1.0` | [below](#muse--meta-muse-cli-in-tree-hub-and-dedicated-bridge) |
+| Claude Code `claude -p` | Sibling bridges + Droid route in the hub | `:9884`, `:9881` (+ `:9882`) | `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5` | [guide](#connecting-claude-code) |
+| Cursor Agent `cursor-agent -p` | Sibling bridge `grok46-bridge` | `:9885` | `cursor-grok-4.6-high` (Grok 4.6/4.7) | [guide](#connecting-cursor-cursor-agent-and-sibling-bridges) |
+| Antigravity `agy`, OpenCode Zen | Sibling bridges | `:9885`, `:9887` / `:9883` | `gemini-4-argon`, `gemini-3.8-flash`, free-tier models | [below](#agy-and-opencode--google-antigravity-and-opencode-zen) |
+
+### `droid` — Factory Droid CLI (in-tree hub backend)
 
 - Transport: resident long-lived `droid exec` process per chat
   (stream-JSON-RPC); one chat completion = one turn in that process.
@@ -71,7 +98,7 @@ Two adapters ship in this repo; any other vendor CLI joins the same way
 - Sessions: resident (`hot | restore | rebase | cold` plan), keyed-chat state on
   disk with restricted permissions.
 
-### `muse` — Muse CLI, Meta's coding-agent CLI (opt-in)
+### `muse` — Meta Muse CLI (in-tree hub and dedicated bridge)
 
 - Transport: `muse serve` (MSP — Muse Server Protocol, JSON-RPC over
   stdin/stdout) with `approvalMode: "allowAll"` on `session/start`
@@ -95,15 +122,39 @@ Enable it by flipping `backends.muse.enabled` to `true` in `fleet.json` (binary
 pin and launcher wrapper required), then restart and run
 `python3 fleet_check.py` — `/v1/models` picks the new models up automatically.
 
-### Beyond this repo
+### `claude` — Claude Code CLI (native headless bridge and Droid route)
 
-The same hub pattern fronts other vendor CLIs in the author's setup —
-cursor-agent and Claude Code run as sibling bridges behind the identical
-OpenAI facade. They are separate deployments, not part of this repo; they
-prove the point: one facade, any CLI behind it. How to connect them, and the
-full port map, are in [Connecting Claude Code](#connecting-claude-code),
-[Connecting Cursor and sibling bridges](#connecting-cursor-cursor-agent-and-sibling-bridges)
-and [Ecosystem port and architecture map](#ecosystem-port-and-architecture-map).
+- Models served: Claude Sonnet 5.5 (`claude-sonnet-5-5`), Opus 5.5
+  (`claude-opus-5-5`), Haiku 5.5 (`claude-haiku-5-5`).
+- Transport: `claude -p --output-format stream-json`, once per turn, with
+  built-in tools disabled; **tool-calling is emulated** (tool schemas rendered
+  into the prompt, `<tool_call>` blocks parsed back into `delta.tool_calls`).
+- Ports: `:9884` (`claude-p-sonnet-bridge`, Sonnet) and `:9881`
+  (`claude-p-bridge`, Opus and Haiku); `claude-sonnet-5-5` is also routed through
+  the `droid` backend of this hub on `:9882` for resident multi-turn sessions.
+- Full guide (all three modes, including pointing `claude` at a bridge as a
+  client): [Connecting Claude Code](#connecting-claude-code).
+
+### `cursor` — Cursor Agent CLI (headless Grok bridge)
+
+- Transport: `cursor-agent -p --output-format stream-json --stream-partial-output`
+  per request (`grok46-bridge`, port `:9885`).
+- Models: `cursor-grok-4.6-high` (Grok 4.6/4.7 family).
+- Up to **500k tokens** of context through stdin streaming (no `E2BIG`);
+  progressive live thinking forwarded as `reasoning_content`; structured
+  `402 quota_exhausted` when the Cursor plan runs out.
+- Full guide: [Connecting Cursor](#connecting-cursor-cursor-agent-and-sibling-bridges).
+  To use Cursor IDE *as a client* of a bridge, see
+  [Cursor IDE / AI editors](#cursor-ide--ai-editors).
+
+### `agy` and `opencode` — Google Antigravity and OpenCode Zen
+
+- `agy-bridge` (`agy -p --output-format stream-json`): Gemini 4 Argon
+  (`gemini-4-argon`) and Gemini 3.8 Flash (`gemini-3.8-flash`).
+- `opencode-zen-bridge` (`opencode` CLI, ports `:9887` / `:9883`): free-tier
+  frontier models such as `deepseek-v4.1-flash-free`.
+- Details: [Google Antigravity CLI](#google-antigravity-cli-agy-bridge) and
+  [OpenCode Zen / Go](#opencode-zen--go-opencode-zen-bridge).
 
 ### Your CLI here
 
@@ -115,96 +166,20 @@ arbitrary code, so a new CLI always lands as explicit, reviewable code plus
 `fleet.json` entries — full recipe in
 [Adding a backend](#adding-a-backend).
 
-## Quick start
+## Ecosystem port and architecture map
 
-Requirements: Python 3.10+, and at least one vendor CLI installed
-(e.g. Factory Droid `droid` for the default backend).
+| Port | Service / bridge | Backend CLI / engine | Models served | Key characteristics |
+|---|---|---|---|---|
+| `:9881` | `claude-p-bridge` | `claude -p` | `claude-opus-5-5`, `claude-haiku-5-5` | Dedicated CLI bridge, tool-calling emulation |
+| `:9882` | `cli-agent-bridge` (hub, this repo) | `droid exec` + `muse serve` | `claude-sonnet-5-5`, `gemini-3.8-flash`, `grok-4.7`, `gpt-6.1-sol`, `muse-wonder-1.0` | Multi-binary hub, resident sessions, catalog schema 3 |
+| `:9884` | `claude-p-sonnet-bridge` | `claude -p` | `claude-sonnet-5-5` | Dedicated Sonnet 5.5 bridge |
+| `:9885` | `grok46-bridge` / `agy-bridge` | `cursor-agent -p` / `agy -p` | `cursor-grok-4.6-high`, `gemini-4-argon` | 500k context, stdin streaming, progressive thinking |
+| `:9886` | `muse-bridge` | `muse serve` + `muse exec` | `muse-wonder-1.0`, `muse-spark-1.3` | MSP JSON-RPC, `allowAll` approval, live reasoning |
+| `:9887` (also `:9883`) | `opencode-zen-bridge` | `opencode` CLI | `deepseek-v4.1-flash-free`, etc. | Free-tier models |
+| `:10830` | `model-georouter` | Direct routing | `gemini-4-argon-contributor` | Geo-distributed fallback proxy |
 
-```bash
-git clone https://github.com/itpoohzhi/cli-agent-bridge.git
-cd cli-agent-bridge
-
-# 1. Shared secret for the bridge API (any random string)
-export DROID_DSH_BRIDGE_KEY="change-me"
-
-# 2. Headless credential for the backend CLI, if it needs one
-#    (Factory Droid example — never printed or logged by the bridge)
-export FACTORY_API_KEY="..."
-
-# 3. Start — listens on 127.0.0.1:9882 by default
-./start.sh
-```
-
-Smoke test (no key needed for `/health`):
-
-```bash
-curl -s http://127.0.0.1:9882/health
-curl -s -H "Authorization: Bearer $DROID_DSH_BRIDGE_KEY" \
-  http://127.0.0.1:9882/v1/models
-```
-
-First completion (OpenAI protocol — works with any OpenAI client):
-
-```bash
-curl -s -H "Authorization: Bearer $DROID_DSH_BRIDGE_KEY" \
-     -H "Content-Type: application/json" \
-     -d '{"model": "claude-sonnet-5-5",
-          "messages": [{"role": "user", "content": "Say hi in one sentence."}]}' \
-     http://127.0.0.1:9882/v1/chat/completions
-```
-
-Python example:
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://127.0.0.1:9882/v1", api_key="change-me")
-resp = client.chat.completions.create(
-    model="claude-sonnet-5-5",
-    messages=[{"role": "user", "content": "Say hi in one sentence."}],
-)
-print(resp.choices[0].message.content)
-```
-
-## Configuration
-
-All runtime tuning is environment variables; the model fleet is `fleet.json`.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `DROID_DSH_BRIDGE_KEY` | *(required)* | Bearer key for `/v1/*` |
-| `DROID_DSH_BRIDGE_HOST` / `_PORT` | `127.0.0.1` / `9882` | Listen address |
-| `DROID_DSH_BRIDGE_FLEET` | `./fleet.json` | Model catalog path |
-| `DROID_DSH_BRIDGE_MODEL` | catalog default | Override default model |
-| `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | Global concurrency cap |
-| `DROID_DSH_BRIDGE_IDLE_SECONDS` | `2700` | Resident-session idle TTL |
-
-`fleet.json` declares `backends` (kind, `enabled`, `max_concurrent`, binary
-path + `sha256` pin, wrapper) and `models` (each bound to exactly one
-`backend`, with allowed `reasoning_effort` levels). Unknown models and efforts
-are rejected with `400` before any work starts — nothing is coerced silently.
-Validate any edit before restart:
-
-```bash
-python3 fleet_check.py
-```
-
-Enable the Muse backend by flipping `backends.muse.enabled` to `true` once its
-binary pin and launcher wrapper are in place; `/v1/models` will pick up its
-models automatically.
-
-## Adding a backend
-
-1. Implement the `BackendAdapter` interface from `core/backend_adapter.py`
-   (`qualify()` for binary checks, one method per turn) and register the new
-   `kind` in `ADAPTER_KINDS` (`adapters/__init__.py`) — config alone can never
-   load arbitrary code.
-2. Add the backend entry + its models to `fleet.json`.
-3. Cover it with `unittest` cases under `tests/` and run the full gate:
-   `python3 -m unittest` (476 tests), `ruff check .`, `basedpyright`.
-
-Tool parsing, admission, error taxonomy, and journaling are shared by all
-backends — an adapter only deals with its own CLI transport.
+All bridges authenticate with a bearer key and answer `GET /health`; a client
+needs only a `base_url` and `api_key` per port.
 
 ## Connecting Claude Code
 
@@ -339,27 +314,66 @@ cursor-agent -p --model <id> \
   ([ADR 0004](docs/adr/0004-muse-live-streaming-all-steps.md)).
 - Models: `muse-wonder-1.0`, `muse-spark-1.3`.
 
-## Ecosystem port and architecture map
+## Quick start and client configurations
 
-| Port | Service / bridge | Backend CLI / engine | Models served | Key characteristics |
-|---|---|---|---|---|
-| `:9881` | `claude-p-bridge` | `claude -p` | `claude-opus-5-5`, `claude-haiku-5-5` | Dedicated CLI bridge, tool-calling emulation |
-| `:9882` | `cli-agent-bridge` (hub, this repo) | `droid exec` + `muse serve` | `claude-sonnet-5-5`, `gemini-3.8-flash`, `grok-4.7`, `gpt-6.1-sol`, `muse-wonder-1.0` | Multi-binary hub, resident sessions, catalog schema 3 |
-| `:9884` | `claude-p-sonnet-bridge` | `claude -p` | `claude-sonnet-5-5` | Dedicated Sonnet 5.5 bridge |
-| `:9885` | `grok46-bridge` / `agy-bridge` | `cursor-agent -p` / `agy -p` | `cursor-grok-4.6-high`, `gemini-4-argon` | 500k context, stdin streaming, progressive thinking |
-| `:9886` | `muse-bridge` | `muse serve` + `muse exec` | `muse-wonder-1.0`, `muse-spark-1.3` | MSP JSON-RPC, `allowAll` approval, live reasoning |
-| `:9887` (also `:9883`) | `opencode-zen-bridge` | `opencode` CLI | `deepseek-v4.1-flash-free`, etc. | Free-tier models |
-| `:10830` | `model-georouter` | Direct routing | `gemini-4-argon-contributor` | Geo-distributed fallback proxy |
+### Start the hub
 
-All bridges authenticate with a bearer key and answer `GET /health`; a client
-needs only a `base_url` and `api_key` per port.
+Requirements: Python 3.10+, and at least one vendor CLI installed
+(e.g. Factory Droid `droid` for the default backend).
 
-## Client and harness integration
+```bash
+git clone https://github.com/itpoohzhi/cli-agent-bridge.git
+cd cli-agent-bridge
 
-The snippets below are copy-paste starting points. Replace the key
-placeholders; keep ports as in the [map](#ecosystem-port-and-architecture-map).
+# 1. Shared secret for the bridge API (any random string)
+export DROID_DSH_BRIDGE_KEY="change-me"
 
-### DeepSeek Harness (`cordis.patch.yml`)
+# 2. Headless credential for the backend CLI, if it needs one
+#    (Factory Droid example — never printed or logged by the bridge)
+export FACTORY_API_KEY="..."
+
+# 3. Start — listens on 127.0.0.1:9882 by default
+./start.sh
+```
+
+Smoke test (no key needed for `/health`):
+
+```bash
+curl -s http://127.0.0.1:9882/health
+curl -s -H "Authorization: Bearer $DROID_DSH_BRIDGE_KEY" \
+  http://127.0.0.1:9882/v1/models
+```
+
+First completion (OpenAI protocol — works with any OpenAI client):
+
+```bash
+curl -s -H "Authorization: Bearer $DROID_DSH_BRIDGE_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "claude-sonnet-5-5",
+          "messages": [{"role": "user", "content": "Say hi in one sentence."}]}' \
+     http://127.0.0.1:9882/v1/chat/completions
+```
+
+Python example:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:9882/v1", api_key="change-me")
+resp = client.chat.completions.create(
+    model="claude-sonnet-5-5",
+    messages=[{"role": "user", "content": "Say hi in one sentence."}],
+)
+print(resp.choices[0].message.content)
+```
+
+### Client and harness integration
+
+The snippets below are copy-paste starting points for the harness, Cursor IDE,
+the Python SDK and cURL. Replace the key placeholders; keep ports as in the
+[map](#ecosystem-port-and-architecture-map).
+
+#### DeepSeek Harness (`cordis.patch.yml`)
 
 The harness consumes each bridge as an OpenAI-compatible provider. The keys
 below are a template — adapt field names to your harness version's schema.
@@ -388,7 +402,7 @@ providers:
     models: [deepseek-v4.1-flash-free]
 ```
 
-### Cursor IDE / AI editors
+#### Cursor IDE / AI editors
 
 Cursor takes a custom endpoint in **Settings → Models** (*OpenAI API Key* and
 *Override OpenAI Base URL*). Cursor typically issues custom-endpoint requests
@@ -410,7 +424,7 @@ block (Continue-style `apiBase`) accept the same values:
 }
 ```
 
-### OpenAI Python SDK: streaming and `reasoning_content`
+#### OpenAI Python SDK: streaming and `reasoning_content`
 
 ```python
 from openai import OpenAI
@@ -435,7 +449,7 @@ for chunk in stream:
 print()
 ```
 
-### cURL
+#### cURL
 
 ```bash
 # Streaming chat completion (SSE; thinking arrives as reasoning_content deltas)
@@ -452,6 +466,46 @@ curl -N -s -H "Authorization: Bearer $MUSE_BRIDGE_KEY" \
           "messages": [{"role": "user", "content": "Say hi in one sentence."}]}' \
      http://127.0.0.1:9886/v1/chat/completions
 ```
+
+## Configuration and fleet catalog
+
+All runtime tuning is environment variables; the model fleet is `fleet.json`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DROID_DSH_BRIDGE_KEY` | *(required)* | Bearer key for `/v1/*` |
+| `DROID_DSH_BRIDGE_HOST` / `_PORT` | `127.0.0.1` / `9882` | Listen address |
+| `DROID_DSH_BRIDGE_FLEET` | `./fleet.json` | Model catalog path |
+| `DROID_DSH_BRIDGE_MODEL` | catalog default | Override default model |
+| `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | Global concurrency cap |
+| `DROID_DSH_BRIDGE_IDLE_SECONDS` | `2700` | Resident-session idle TTL |
+
+`fleet.json` declares `backends` (kind, `enabled`, `max_concurrent`, binary
+path + `sha256` pin, wrapper) and `models` (each bound to exactly one
+`backend`, with allowed `reasoning_effort` levels). Unknown models and efforts
+are rejected with `400` before any work starts — nothing is coerced silently.
+Validate any edit before restart:
+
+```bash
+python3 fleet_check.py
+```
+
+Enable the Muse backend by flipping `backends.muse.enabled` to `true` once its
+binary pin and launcher wrapper are in place; `/v1/models` will pick up its
+models automatically.
+
+## Adding a backend
+
+1. Implement the `BackendAdapter` interface from `core/backend_adapter.py`
+   (`qualify()` for binary checks, one method per turn) and register the new
+   `kind` in `ADAPTER_KINDS` (`adapters/__init__.py`) — config alone can never
+   load arbitrary code.
+2. Add the backend entry + its models to `fleet.json`.
+3. Cover it with `unittest` cases under `tests/` and run the full gate:
+   `python3 -m unittest` (476 tests), `ruff check .`, `basedpyright`.
+
+Tool parsing, admission, error taxonomy, and journaling are shared by all
+backends — an adapter only deals with its own CLI transport.
 
 ## Layout
 
