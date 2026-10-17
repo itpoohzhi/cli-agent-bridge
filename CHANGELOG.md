@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Added
+- **README:** разделы Connecting Claude Code, Connecting Cursor и sibling-мосты, карта портов экосистемы,
+  copy-paste конфигурации клиентов (cordis harness, Cursor, OpenAI SDK, cURL).
 - **Live-стриминг всех шагов (ADR 0004, 2026-10-17, EYE-33873):** сквозная трансляция всех шагов рассуждений
   (`summary.*`) и действий модели в `delta.reasoning_content` с маркерами инструментов
   `[Вызов инструмента: ...]` (`docs/adr/0004-muse-live-streaming-all-steps.md`).

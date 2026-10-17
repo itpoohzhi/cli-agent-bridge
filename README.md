@@ -100,7 +100,10 @@ pin and launcher wrapper required), then restart and run
 The same hub pattern fronts other vendor CLIs in the author's setup —
 cursor-agent and Claude Code run as sibling bridges behind the identical
 OpenAI facade. They are separate deployments, not part of this repo; they
-prove the point: one facade, any CLI behind it.
+prove the point: one facade, any CLI behind it. How to connect them, and the
+full port map, are in [Connecting Claude Code](#connecting-claude-code),
+[Connecting Cursor and sibling bridges](#connecting-cursor-cursor-agent-and-sibling-bridges)
+and [Ecosystem port and architecture map](#ecosystem-port-and-architecture-map).
 
 ### Your CLI here
 
@@ -202,6 +205,253 @@ models automatically.
 
 Tool parsing, admission, error taxonomy, and journaling are shared by all
 backends — an adapter only deals with its own CLI transport.
+
+## Connecting Claude Code
+
+Claude Code can be reached three ways. Pick by direction: modes 1 and 2 expose
+Claude **as a model behind** an OpenAI-compatible endpoint; mode 3 points the
+`claude` CLI **at** an endpoint as a client.
+
+### Mode 1: Native headless CLI bridge (`claude -p`)
+
+A dedicated sibling bridge spawns the Claude Code CLI in headless mode, once per
+turn:
+
+```bash
+claude -p --model <id> \
+  --output-format stream-json \
+  --permission-mode bypassPermissions \
+  --tools ""
+```
+
+| Flag | Why |
+|---|---|
+| `-p` | Headless (print) mode: one prompt in, one response out, no TUI. |
+| `--model <id>` | Selects the model, e.g. `claude-sonnet-5-5`. |
+| `--output-format stream-json` | NDJSON event stream the bridge translates into OpenAI SSE chunks. |
+| `--permission-mode bypassPermissions` | No interactive approval prompts — there is nobody to answer them. |
+| `--tools ""` | Disables Claude Code's built-in tools; the model can only emit text. |
+
+**Why tool calling is emulated.** With built-in tools off, the CLI is a
+text-only transport. The bridge therefore:
+
+1. renders the OpenAI `tools` JSON schemas into the system prompt;
+2. instructs the model to answer with
+   `<tool_call>{"name": ..., "arguments": ...}</tool_call>` blocks;
+3. parses those blocks out of the text and re-emits them as OpenAI
+   `delta.tool_calls` with `finish_reason="tool_calls"`.
+
+The calling agent keeps its normal function-calling loop and never sees the
+emulation.
+
+**Port isolation.** Each model family gets its own bridge process and port, so
+local CLI state and session locks never collide:
+
+| Port | Bridge | Models |
+|---|---|---|
+| `:9884` | `claude-p-sonnet-bridge` | `claude-sonnet-5-5` |
+| `:9881` | `claude-p-bridge` | `claude-opus-5-5`, `claude-haiku-5-5` |
+
+### Mode 2: Factory Droid backend routing
+
+The hub on `:9882` (this repo) routes `claude-sonnet-5-5` through the `droid`
+backend (`backend: "droid"` in `fleet.json`, executed as `droid exec`). Unlike
+mode 1 this gives **resident multi-turn sessions**: a stable `prompt_cache_key`
+maps a chat onto one long-lived process (`hot | restore | rebase | cold`), so
+follow-ups resume instead of cold-starting.
+
+```bash
+curl -s -H "Authorization: Bearer $DROID_DSH_BRIDGE_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "claude-sonnet-5-5",
+          "prompt_cache_key": "my-chat-001",
+          "messages": [{"role": "user", "content": "Continue where we left off."}]}' \
+     http://127.0.0.1:9882/v1/chat/completions
+```
+
+### Mode 3: Claude Code as a client
+
+To point the `claude` CLI itself at a bridge:
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:9882/v1"
+export ANTHROPIC_API_KEY="your-bridge-key"
+claude
+```
+
+> **Protocol caveat.** `claude` speaks the Anthropic Messages API
+> (`/v1/messages`). The hub in this repo exposes the OpenAI facade only
+> (`/v1/chat/completions`, `/v1/models`, `/health`), so this setup works only
+> if an Anthropic-compatible endpoint answers on that URL — for example an
+> Anthropic→OpenAI translation proxy placed in front of the bridge. Without
+> one, the CLI will receive `404`. Verify with
+> `curl -i http://127.0.0.1:9882/v1/messages` before relying on it.
+
+## Connecting Cursor (`cursor-agent`) and sibling bridges
+
+Sibling bridges are standalone deployments that expose the same OpenAI facade
+(`/v1/chat/completions`, `/v1/models`, `/health`) on their own ports. They are
+not part of this repo; ports and models are listed in the
+[port map](#ecosystem-port-and-architecture-map).
+
+### Cursor Agent (`grok46-bridge`)
+
+Wraps `cursor-agent -p` per request:
+
+```bash
+cursor-agent -p --model <id> \
+  --output-format stream-json \
+  --stream-partial-output \
+  --force
+```
+
+- **Stdin streaming.** The prompt is fed through stdin, not argv, avoiding
+  `E2BIG` (argument-list too long) on large contexts — up to **500k tokens**.
+- **Live progressive thinking.** NDJSON events `type: thinking,
+  subtype: delta` are forwarded straight into OpenAI SSE `reasoning_content`
+  chunks as they arrive.
+- **Out-of-quota detection.** When the Cursor plan is exhausted the bridge
+  returns a structured `402 quota_exhausted` error instead of corrupted
+  completion text.
+- Models: `cursor-grok-4.6-high` (Grok 4.6/4.7 family).
+
+### Google Antigravity CLI (`agy-bridge`)
+
+- Port `:9885`; models `gemini-4-argon`, `gemini-3.8-flash`.
+- Transport: `agy -p --output-format stream-json`.
+- `grok46-bridge` is also mapped to `:9885`; a port can be bound by one process
+  only, so run one of the two on a host and remap the other.
+
+### OpenCode Zen / Go (`opencode-zen-bridge`)
+
+- Ports `:9887` / `:9883`.
+- Serves free-tier frontier models via the `opencode` CLI (for example
+  `deepseek-v4.1-flash-free`).
+
+### Meta Muse dedicated bridge (`muse-bridge`)
+
+- Port `:9886`; source in `bridges/muse-bridge/` (`server.py`).
+- Transport: MSP `muse serve` (JSON-RPC over stdin/stdout) with
+  `approvalMode: "allowAll"`
+  ([ADR 0003](docs/adr/0003-muse-serve-approval-allowall.md)), plus `muse exec`
+  for one-shot runs.
+- Live reasoning streaming of every step
+  ([ADR 0004](docs/adr/0004-muse-live-streaming-all-steps.md)).
+- Models: `muse-wonder-1.0`, `muse-spark-1.3`.
+
+## Ecosystem port and architecture map
+
+| Port | Service / bridge | Backend CLI / engine | Models served | Key characteristics |
+|---|---|---|---|---|
+| `:9881` | `claude-p-bridge` | `claude -p` | `claude-opus-5-5`, `claude-haiku-5-5` | Dedicated CLI bridge, tool-calling emulation |
+| `:9882` | `cli-agent-bridge` (hub, this repo) | `droid exec` + `muse serve` | `claude-sonnet-5-5`, `gemini-3.8-flash`, `grok-4.7`, `gpt-6.1-sol`, `muse-wonder-1.0` | Multi-binary hub, resident sessions, catalog schema 3 |
+| `:9884` | `claude-p-sonnet-bridge` | `claude -p` | `claude-sonnet-5-5` | Dedicated Sonnet 5.5 bridge |
+| `:9885` | `grok46-bridge` / `agy-bridge` | `cursor-agent -p` / `agy -p` | `cursor-grok-4.6-high`, `gemini-4-argon` | 500k context, stdin streaming, progressive thinking |
+| `:9886` | `muse-bridge` | `muse serve` + `muse exec` | `muse-wonder-1.0`, `muse-spark-1.3` | MSP JSON-RPC, `allowAll` approval, live reasoning |
+| `:9887` (also `:9883`) | `opencode-zen-bridge` | `opencode` CLI | `deepseek-v4.1-flash-free`, etc. | Free-tier models |
+| `:10830` | `model-georouter` | Direct routing | `gemini-4-argon-contributor` | Geo-distributed fallback proxy |
+
+All bridges authenticate with a bearer key and answer `GET /health`; a client
+needs only a `base_url` and `api_key` per port.
+
+## Client and harness integration
+
+The snippets below are copy-paste starting points. Replace the key
+placeholders; keep ports as in the [map](#ecosystem-port-and-architecture-map).
+
+### DeepSeek Harness (`cordis.patch.yml`)
+
+The harness consumes each bridge as an OpenAI-compatible provider. The keys
+below are a template — adapt field names to your harness version's schema.
+
+```yaml
+providers:
+  droid-bridge:
+    base_url: http://127.0.0.1:9882/v1
+    api_key: ${DROID_DSH_BRIDGE_KEY}
+    models: [claude-sonnet-5-5, gemini-3.8-flash, grok-4.7, gpt-6.1-sol]
+  claude-code-bridge:
+    base_url: http://127.0.0.1:9881/v1
+    api_key: ${CLAUDE_P_BRIDGE_KEY}
+    models: [claude-opus-5-5, claude-haiku-5-5]
+  claude-code-sonnet-bridge:
+    base_url: http://127.0.0.1:9884/v1
+    api_key: ${CLAUDE_P_SONNET_BRIDGE_KEY}
+    models: [claude-sonnet-5-5]
+  muse-bridge:
+    base_url: http://127.0.0.1:9886/v1
+    api_key: ${MUSE_BRIDGE_KEY}
+    models: [muse-wonder-1.0, muse-spark-1.3]
+  opencode-zen-bridge:
+    base_url: http://127.0.0.1:9887/v1
+    api_key: ${OPENCODE_ZEN_BRIDGE_KEY}
+    models: [deepseek-v4.1-flash-free]
+```
+
+### Cursor IDE / AI editors
+
+Cursor takes a custom endpoint in **Settings → Models** (*OpenAI API Key* and
+*Override OpenAI Base URL*). Cursor typically issues custom-endpoint requests
+from its own backend, so `127.0.0.1` may be unreachable — expose the bridge
+through a tunnel or reverse proxy if so. Editors that read a JSON provider
+block (Continue-style `apiBase`) accept the same values:
+
+```json
+{
+  "models": [
+    {
+      "title": "Claude Sonnet 5.5 (bridge)",
+      "provider": "openai",
+      "model": "claude-sonnet-5-5",
+      "apiBase": "http://127.0.0.1:9884/v1",
+      "apiKey": "your-bridge-key"
+    }
+  ]
+}
+```
+
+### OpenAI Python SDK: streaming and `reasoning_content`
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:9882/v1", api_key="change-me")
+
+stream = client.chat.completions.create(
+    model="claude-sonnet-5-5",
+    messages=[{"role": "user", "content": "Explain TCP slow start briefly."}],
+    stream=True,
+)
+
+for chunk in stream:
+    if not chunk.choices:  # e.g. the trailing usage chunk
+        continue
+    delta = chunk.choices[0].delta
+    thinking = getattr(delta, "reasoning_content", None)
+    if thinking:
+        print(f"[thinking] {thinking}", end="", flush=True)
+    if delta.content:
+        print(delta.content, end="", flush=True)
+print()
+```
+
+### cURL
+
+```bash
+# Streaming chat completion (SSE; thinking arrives as reasoning_content deltas)
+curl -N -s -H "Authorization: Bearer $DROID_DSH_BRIDGE_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "claude-sonnet-5-5", "stream": true,
+          "messages": [{"role": "user", "content": "Say hi in one sentence."}]}' \
+     http://127.0.0.1:9882/v1/chat/completions
+
+# Same call against the Meta Muse bridge
+curl -N -s -H "Authorization: Bearer $MUSE_BRIDGE_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "muse-wonder-1.0", "stream": true,
+          "messages": [{"role": "user", "content": "Say hi in one sentence."}]}' \
+     http://127.0.0.1:9886/v1/chat/completions
+```
 
 ## Layout
 
