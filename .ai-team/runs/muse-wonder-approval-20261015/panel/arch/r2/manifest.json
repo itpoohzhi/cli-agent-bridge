@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 2,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+  "artifact_sha256": "ebfa59a9869c9deb8390e2fa060ccc980bbafb96ca7cb045a8e3e73e7a78ea22",
+  "seed_input": "ebfa59a9#muse-wonder-approval-20261015#c1#R2",
+  "seed_hex": "98a610e4",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "670ae5b6c92dbbd679b12dd25eb5a2bc6fa8951e632c3eb692867f6f4db79f59"
+    },
+    {
+      "rank": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "b4396c69b99c492660ec8e6dceee998dac95ae273671952fdb465bf06345b585"
+    },
+    {
+      "rank": 3,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "d81e8386e3748a0732dd974c90f12c77ce43bb3439a285531092500bc626ac82"
+    },
+    {
+      "rank": 4,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "eb2a7516501f9caa755e2ebad84092a609eebaa4a3708814fac8c725670478d6"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Скептик"
+    },
+    {
+      "k": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "droid",
+      "hat": "Реалист"
+    },
+    {
+      "k": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Визионер"
+    }
+  ],
+  "hat_index_base": 1,
+  "hat_k": 1,
+  "hat_rotation": "ok",
+  "rotation_ok": "relaxed",
+  "rotation_reason": "пул судей = 3 семьи (слот Architect исключён, SK-A-12); состав раунда не может отличаться от прежнего, меняются ранги, шляпы и транспорты",
+  "label": "D1",
+  "brief_review": {
+    "skeptic": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 2,
+      "checklist_gen": 1,
+      "approved_sha256": "840c4d6c6a2bbe464683881f5991c8a0549ba953e8a7a13d116fd95247580483",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r2-a1-skeptic/verdict-v2.json",
+      "brief_review_calls": 2,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    },
+    "realist": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 2,
+      "checklist_gen": 1,
+      "approved_sha256": "9ecd2c2c871d733f59e48479c84ef3dc0a462fc6242389fadbebee8b1026e4ed",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r2-a1-realist/verdict-v2.json",
+      "brief_review_calls": 1,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    },
+    "visionary": {
+      "verdict": "APPROVE",
+      "blocked_reason": null,
+      "iterations": 2,
+      "checklist_gen": 1,
+      "approved_sha256": "e407d8a0935145a551d496a8182fa68abdf8d7a05ec083b96960e7027fed9f0c",
+      "verdict_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/arch-panel/cycle-1/brief-review/arch-r2-a1-visionary/verdict-v2.json",
+      "brief_review_calls": 1,
+      "wall_seconds": null,
+      "transport": "droid",
+      "owner_override": null
+    }
+  },
+  "status": "aborted",
+  "abort_reason": "launch_seat отказал (exit 2): бриф содержал несколько PANEL-NONCE (дословные вставки вердиктов R1 включали служебные маркеры R1); ни один судья не запущен; одобренные brief-v2 непригодны, бюджет вызовов brief-review места Скептик исчерпан (3/3) -> новый раунд (D8)"
+}

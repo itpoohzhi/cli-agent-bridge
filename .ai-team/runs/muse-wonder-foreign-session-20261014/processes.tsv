@@ -1,0 +1,25 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k1	16672	16672	2026-10-14T14:20:50.312601+00:00	среда, 14 октября 2026 г. 17:20:50	running
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k2	16673	16673	2026-10-14T14:20:50.312728+00:00	среда, 14 октября 2026 г. 17:20:50	running
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k3	16676	16676	2026-10-14T14:20:50.315953+00:00	среда, 14 октября 2026 г. 17:20:50	running
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k2	16673	16673	2026-10-14T14:20:50.312728+00:00	среда, 14 октября 2026 г. 17:20:50	rc=0
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k1	16672	16672	2026-10-14T14:20:50.312601+00:00	среда, 14 октября 2026 г. 17:20:50	rc=0
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k3	16676	16676	2026-10-14T14:20:50.315953+00:00	среда, 14 октября 2026 г. 17:20:50	rc=0
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k1	69270	69270	2026-10-14T14:36:23.954189+00:00	среда, 14 октября 2026 г. 17:36:23	running
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k2	69271	69271	2026-10-14T14:36:23.954323+00:00	среда, 14 октября 2026 г. 17:36:23	running
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k3	69274	69274	2026-10-14T14:36:23.957549+00:00	среда, 14 октября 2026 г. 17:36:23	running
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k1	69270	69270	2026-10-14T14:36:23.954189+00:00	среда, 14 октября 2026 г. 17:36:23	rc=0
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k2	69271	69271	2026-10-14T14:36:23.954323+00:00	среда, 14 октября 2026 г. 17:36:23	rc=0
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k3	69274	69274	2026-10-14T14:36:23.957549+00:00	среда, 14 октября 2026 г. 17:36:23	rc=0
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k2	4673	4673	2026-10-14T15:50:04.974350+00:00	среда, 14 октября 2026 г. 18:50:04	running
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k1	4674	4674	2026-10-14T15:50:04.974454+00:00	среда, 14 октября 2026 г. 18:50:04	running
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k3	4677	4677	2026-10-14T15:50:04.977320+00:00	среда, 14 октября 2026 г. 18:50:04	running
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k1	4674	4674	2026-10-14T15:50:04.974454+00:00	среда, 14 октября 2026 г. 18:50:04	rc=0
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k2	4673	4673	2026-10-14T15:50:04.974350+00:00	среда, 14 октября 2026 г. 18:50:04	rc=0
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k3	4677	4677	2026-10-14T15:50:04.977320+00:00	среда, 14 октября 2026 г. 18:50:04	rc=0
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k2	12706	12706	2026-10-14T16:20:39.255399+00:00	среда, 14 октября 2026 г. 19:20:39	running
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k3	12707	12707	2026-10-14T16:20:39.255964+00:00	среда, 14 октября 2026 г. 19:20:39	running
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k1	12710	12710	2026-10-14T16:20:39.259183+00:00	среда, 14 октября 2026 г. 19:20:39	running
+muse-wonder-foreign-session-20261014	gemini-4-argon-high	panel-judge-k3	12707	12707	2026-10-14T16:20:39.255964+00:00	среда, 14 октября 2026 г. 19:20:39	rc=0
+muse-wonder-foreign-session-20261014	claude-sonnet-5-5-high	panel-judge-k2	12706	12706	2026-10-14T16:20:39.255399+00:00	среда, 14 октября 2026 г. 19:20:39	rc=0
+muse-wonder-foreign-session-20261014	gpt-6.1-sol-high	panel-judge-k1	12710	12710	2026-10-14T16:20:39.259183+00:00	среда, 14 октября 2026 г. 19:20:39	rc=0

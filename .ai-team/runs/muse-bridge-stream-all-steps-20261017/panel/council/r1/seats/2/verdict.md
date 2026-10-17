@@ -1,0 +1,50 @@
+PANEL-NONCE: 27f0c3f46acc8a01
+ARTIFACT-SHA256: 69fac476bef77530cc378f4958f0706be96270bc92af1b230f473873608d7f80
+
+Подтверждение канона: общий канон `~/Мой диск/Context/AGENTS.md` прочитан целиком (до маркера `<!-- КАНОН-КОНЕЦ -->`); в рабочей папке `.ai-team/runs/muse-bridge-stream-all-steps-20261017/panel/council/r1` локальные проектные файлы правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) отсутствуют, проверены целевые артефакты пакета Совета.
+
+# Заключение судьи Кодового Совета (R1, место k=2, шляпа: Визионер)
+
+С позиции **Визионера** решение в [server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py) и [test_muse_bridge_killpg.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/tests/test_muse_bridge_killpg.py) выстроено архитектурно чисто и закладывает правильный фундамент для эволюции протокола MSP и будущих рассуждающих моделей. Вместо ситуативных патчей поверх старого `summary_parts[0]` внедрён единый монотонный append-only поток рассуждений `_stream_text` с композитной индексацией `(item_id, idx)` в [`ServeRun`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1825-L1908), который одновременно служит авторитетным источником для live SSE, финальной сверки в [`Handler._send_sse`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L3094-L3124) и аварийного сброса мыслей перед `502` в [`Handler._flush_reasoning_before_error`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2863-L2893). Контракт OpenAI SSE (`delta.reasoning_content`) и нестриминговый JSON-ответ (`reasoning_summaries`) строго разведены: текстовые маркеры инструментов обогащают UX в DeepSeek Harness только при `stream: true`, не загрязняя структурированный массив `reasoning_summaries` в `stream: false`.
+
+## Оценка по 6 критериям рубрики
+
+### Критерий 1 — PASS (`correctness`)
+Все архитектурные решения `AD-001..AD-003` и требования `S1..S6` реализованы точно по спецификации:
+- **AD-001:** В [`ServeRun.execute`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2360-L2391) полностью удалена установка `self._live_frozen = True` при `idx > 0` и `item/completed`. Дельты `summary.0..N` индексируются составным ключом `(item_id, idx)` в `self._reasoning_items` с учётом длин в `self._item_lengths[(item_id, idx)]` и порядка в `self._reasoning_order` под `self._acc_lock` ([`_accumulate_reasoning`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1853-L1865), [`_accumulate_completed_summary`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1867-L1884)).
+- **AD-002:** Функция [`_sanitize_tool_name`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L238-L250) гарантирует соответствие регулярному выражению `^[A-Za-z0-9_.:-]{1,64}$` с заменой недопустимых символов на `_` и fallback на `"tool"`. Маркеры старта `\n\n[Вызов инструмента: {safe_tool}]\n` и завершения `\n[Инструмент {done_tool} завершён]\n` эмитируются в [`_handle_event`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2330-L2351) через [`_emit_tool_marker`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1900-L1908) только при наличии `self.live_sink` (который привязывается исключительно при `stream: true` на строках `3484–3485`). В [`_send_sse`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L3094-L3100) `accumulated = self._accumulated_reasoning()` согласован с `_live_sent_text`, что устраняет ложный `reasoning_diverged` (S2).
+- **AD-003, S1, S4:** В [`Handler._send`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L3023-L3034) при `self._sse_open` и `int(code) == 502` вызывается [`_flush_reasoning_before_error`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2863-L2893) до отправки кадра ошибки и `[DONE]`. В [`_sse_write`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2725-L2795) и [`_note_write_failure`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2710-L2722) при `fatal=False` сбой сокета переводит поток в `self._live_degraded = True` без вызова `_kill_current_run()`. Перед каждой попыткой в [`run_attempt`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L3479) вызывается [`_reset_live_for_attempt`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2703-L2708).
+
+### Критерий 2 — PASS (`completeness`)
+Покрыты все пограничные сценарии жизненного цикла:
+- Дедупликация стартовых и финальных маркеров инструментов по `itemId` через множества `self._tool_started` и `self._tool_completed` (строки `1834–1835`, `2340–2351`) предотвращает дублирование маркеров при повторных событиях MSP.
+- Сохранение санитизированного имени при старте в `self._tool_names[iid]` (строки `2339`, `2346`) гарантирует консистентное имя в закрывающем маркере, даже если в событии `item/completed` поле `toolName` опущено.
+- При `503 Service Unavailable` (`bridge busy`, когда `ServeRun` ещё не создан) сброс мыслей не вызывается, а при деградации live-канала (`_live_degraded = True`) последующие вызовы [`_live_reasoning_sink`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2828-L2829) мгновенно возвращают `True`, не задерживая чтение stdout дочернего процесса, после чего полный буфер доставляется в финальном [`_send_sse`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L3097-L3123).
+
+### Критерий 3 — PASS (`feasibility`)
+Потокобезопасность и иерархия блокировок спроектированы безупречно, риск дедлоков отсутствует:
+- `ServeRun._acc_lock` является строго листовым замком: в методах [`get_accumulated_reasoning`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1837-L1851), [`_accumulate_reasoning`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1853-L1865), [`_accumulate_completed_summary`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1867-L1884), [`_emit_live`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1886-L1898) и [`_emit_tool_marker`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L1900-L1908) под `_acc_lock` выполняются только быстрые операции в памяти, а вызов `sink(snapshot)` в `_emit_live` происходит уже после освобождения `_acc_lock`.
+- В `Handler` граф захвата замков строго однонаправленный: в [`_flush_reasoning_before_error`](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L2867-L2890) сначала вызывается `_accumulated_reasoning()` (захват и отпускание `_acc_lock`), затем захватывается `_live_lock`, внутри которого вызывается `_sse_emit` -> `_sse_write` с захватом `_wlock`. Обратных вызовов из `_wlock` в `_live_lock` или `_acc_lock` нет.
+
+### Критерий 4 — PASS (`risks`)
+Риск регрессий минимален и полностью купирован:
+- Существующие механизмы управления группами процессов (`killpg`, карантин слотов), `ApprovalPolicy`, проактивная и реактивная компакция контекста (`_prune_messages`, `hard_threshold_retry`) не затронуты.
+- Поведение `_sse_write` по умолчанию (`fatal=True`) полностью сохранено для заголовков, keepalive, контент-чанков и финальных кадров, поэтому детекция обрыва клиента и освобождение слота работают как прежде.
+- Набор из 122 unit-тестов (включая 10 новых целевых регрессионных тестов в классах [`LiveStreamingAllStepsTest`](file:///Users/aazhiry1/work/src/cli-agent-bridge/tests/test_muse_bridge_killpg.py#L4054-L4098), [`ToolCallMarkersTest`](file:///Users/aazhiry1/work/src/cli-agent-bridge/tests/test_muse_bridge_killpg.py#L4100-L4146) и [`TimeoutReasoningFlushTest`](file:///Users/aazhiry1/work/src/cli-agent-bridge/tests/test_muse_bridge_killpg.py#L4148-L4234)), а также проверки `ruff` и `basedpyright` пройдены без ошибок.
+
+### Критерий 5 — PASS (`alternatives`)
+Выбранное решение оптимально по соотношению архитектурной выразительности и минимализма:
+- Использование stdlib (`threading.Lock`, `re`, монотонная конкатенация префиксов) без внешних зависимостей и без усложнения SSE-контракта промежуточными незавершёнными `tool_calls`-дельтами обеспечивает 100% совместимость с парсерами DeepSeek Harness и OpenAI SDK.
+
+### Критерий 6 — PASS (`context_conformance`)
+Решение полностью укладывается в архитектурные границы `cli-agent-bridge`, соблюдает Red Lines брифа, ADR-0004 и[arch-spec.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-stream-all-steps-20261017/architecture/arch-spec.md):
+- Модифицированы исключительно целевые файлы `bridges/muse-bridge/server.py` и `tests/test_muse_bridge_killpg.py`.
+- OpenAI-совместимый SSE-контракт (`delta.reasoning_content`, терминальный кадр `{"error": ...}` + `data: [DONE]\n\n`) и контракт нестримингового JSON-ответа соблюдены без отклонений.
+
+## Сводка субрибрик
+- `SUB architecture: PASS — Единый append-only буфер _stream_text и индексация (item_id, idx) чисто разделяют ответственности между ServeRun и Handler.`
+- `SUB security: PASS — Имена инструментов в live-маркерах проходят жёсткую allowlist-санитизацию ^[A-Za-z0-9_.:-]{1,64}$, исключая инъекцию управляющих символов и разметки.`
+- `SUB performance: PASS — Нефатальная деградация _live_degraded=True изолирует цикл чтения stdout ServeRun от медленных сокетов и исключает повторные 3-секундные блокировки.`
+- `SUB tests: PASS — 122/122 unit-тестов зелёные, 10 новых тестов покрывают многошаговый reasoning, санитизацию маркеров, flush перед 502, backpressure и ретраи.`
+
+ОБЩИЙ ВЕРДИКТ: ACCEPT

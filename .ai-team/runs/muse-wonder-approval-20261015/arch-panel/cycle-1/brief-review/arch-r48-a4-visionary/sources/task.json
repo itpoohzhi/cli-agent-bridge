@@ -1,0 +1,23 @@
+{
+  "task_id": "REQ-MUSE-002",
+  "run_id": "muse-wonder-approval-20261015",
+  "criticality": "S2",
+  "criticality_reason": "боевой мост DSH->Meta Muse (:9886), поведение ходов и протокол serve/exec, деплой через launchd",
+  "title": "muse-bridge: не перезапускать ход с нуля при approval/request, ретрай net-timeout, живость долгих ходов Wonder",
+  "requirement_ids": [
+    "REQ-MUSE-002",
+    "REQ-MUSE-003",
+    "REQ-MUSE-004"
+  ],
+  "branch_policy": "не dev; ветка bugfix/muse-wonder-approval-retry-liveness (создаётся Coder-ом после арх-панели)",
+  "base_sha": "1f1071a2330574bf90b53bbcaa65d3bf5bc29c2b",
+  "downstream_panel": true,
+  "parent_skill": "analyst-teamlead",
+  "setup": "default",
+  "contract_freeze": "внешний OpenAI-совместимый контракт моста (/v1/chat/completions, /health, /v1/models) не менять без явного пункта; допустимы только аддитивные SSE-кадры внутри существующих полей",
+  "architecture_gate": {
+    "packet_sha256": "9ddc18254368aa868db6bdff1df2fcb91426f87bc6c4fe90fd7be90f73b830c6",
+    "verification_surface_sha256": "f51c06e241ef8424d3b98802722fb2e703588f3df11c61b4e791eef2fb056e1b",
+    "protected_paths_sha256": "23b893508ca791df60756570bf930589bd15d122a3a0aa3dceb8d1b4952e58f6"
+  }
+}

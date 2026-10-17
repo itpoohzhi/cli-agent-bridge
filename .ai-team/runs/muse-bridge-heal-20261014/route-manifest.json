@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-bridge-heal-20261014",
+  "criticality": "S2",
+  "criticality_source": "orchestrator",
+  "criticality_reason": "Bridge error logging, MSP TurnError/reason extraction, SSE data keepalive for streamIdleTimeoutMs, and disabling built-in CLI tools in muse-bridge",
+  "profile": "default",
+  "routing_approval": "auto",
+  "entry": "full",
+  "reviewer_skip": true,
+  "downstream_panel": true,
+  "parent_skill": "analyst-teamlead",
+  "roles": [
+    {
+      "role": "explorer",
+      "mode": "agent",
+      "agent": "droid-cli",
+      "backend": "factory-droid",
+      "family": "Anthropic",
+      "requested_model": "claude-sonnet-5-5",
+      "requested_effort": "high",
+      "permissions": "read-only",
+      "fallback": {
+        "agent": "codex-cli",
+        "backend": "codex",
+        "family": "OpenAI",
+        "requested_model": "gpt-6.1-sol",
+        "requested_effort": "high"
+      }
+    },
+    {
+      "role": "architect",
+      "mode": "agent",
+      "agent": "muse-cli",
+      "backend": "muse",
+      "family": "Meta",
+      "requested_model": "muse-wonder-full-1.0",
+      "requested_effort": "max",
+      "permissions": "run-artifacts-write",
+      "fallback": {
+        "agent": "codex-cli",
+        "backend": "codex",
+        "family": "OpenAI",
+        "requested_model": "gpt-6.1-sol",
+        "requested_effort": "high"
+      }
+    },
+    {
+      "role": "coder",
+      "mode": "agent",
+      "agent": "codex-cli",
+      "backend": "codex",
+      "family": "OpenAI",
+      "requested_model": "gpt-6.1-sol",
+      "requested_effort": "high",
+      "permissions": "write",
+      "fallback": {
+        "agent": "droid-cli",
+        "backend": "factory-droid",
+        "family": "Anthropic",
+        "requested_model": "claude-sonnet-5-5",
+        "requested_effort": "high"
+      }
+    },
+    {
+      "role": "verifier",
+      "mode": "deterministic"
+    }
+  ]
+}

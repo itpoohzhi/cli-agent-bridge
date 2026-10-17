@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.1",
+  "role": "coder",
+  "task_id": "muse-wonder-approval-20261015",
+  "iteration": 1,
+  "status": "DONE",
+  "next_role": "reviewer",
+  "role_plan": {
+    "path": ".ai-team/runs/muse-wonder-approval-20261015/plans/coder-01.json",
+    "sha256": "7fe8e9b1ce146f4a113470cbefab645bb7a903ad7e172d4f480fd176a662d484"
+  },
+  "summary": "Реализован пакет a4 REQ-MUSE-002/003/004 в bridges/muse-bridge/server.py: AD-001 approvalMode allowAll (env denyUnmatched AD-007), AD-002 ApprovalPolicy с receipt+decide/cancel в том же serve-ходе и терминальной деградацией с grace, setup-барьер APPROVAL_SEEN/ACTION_POSSIBLE (a4 F-001), AD-006 -32030 без обхода и без exec при denyUnmatched, AD-003 абсолютный бюджет D/E/W от приёма с единым предикатом допуска и транзиентным повтором только pre-action (observed-items по env), AD-004 единый bounded _sse_write и live reasoning через sink с префикс-монотонным согласованием F/P (VER-013 MET). Тесты: расширена фикстура install_fake_msp, добавлены классы Approval/TransientRetry/LiveReasoning полного набора a4, заменён approval-тест и обновлён test_t18 (oracle_changes). Коммиты: 9f87eb0 baseline REQ-MUSE-001 как есть, 4548dd3 реализация; push/MR/деплой не выполнялись. Для ревьюера первым смотреть: ApprovalPolicy и approval-ветку ServeRun (AD-001/002), цикл попыток Handler с предикатом _can_start (AD-003), _sse_write/_live_reasoning_sink/_send_sse (AD-004), два oracle_change теста и новые классы Approval/TransientRetry/LiveReasoning.",
+  "changed_files": [
+    "bridges/muse-bridge/server.py",
+    "tests/test_muse_bridge_killpg.py"
+  ],
+  "commands": [
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py (baseline до правок)", "exit_code": 0},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'Approval' (red на baseline: 19 failed, 3 passed)", "exit_code": 1},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'TransientRetry' (red на baseline: 12 failed, 2 passed)", "exit_code": 1},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'LiveReasoning' (red на baseline: 8 failed, 3 passed)", "exit_code": 1},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'Approval'", "exit_code": 0},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'TransientRetry'", "exit_code": 0},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'LiveReasoning or test_s1'", "exit_code": 0},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py -k 'ContextPrune or ContextRetry or AllowedModelsSync'", "exit_code": 0},
+    {"command": "uv run --no-project --with pytest python -m pytest -q tests/test_muse_bridge_killpg.py", "exit_code": 0},
+    {"command": "uv run --no-project --with pytest python -m pytest --collect-only -q tests/test_muse_bridge_killpg.py -k 'Approval' / -k 'TransientRetry' / -k 'LiveReasoning or test_s1'", "exit_code": 0},
+    {"command": ".venv/bin/ruff format --check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py", "exit_code": 0},
+    {"command": ".venv/bin/ruff check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py", "exit_code": 0},
+    {"command": ".venv/bin/basedpyright bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py (0 errors, 1982 warnings; baseline 0/1448 — прирост от объёма новых тестов, exit 1 из-за warnings как на baseline-конфиге)", "exit_code": 1},
+    {"command": "git diff --name-only 9f87eb0..HEAD (ровно 2 разрешённых файла; protected paths — пустой diff)", "exit_code": 0},
+    {"command": "python3 -I ~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/validate_role_plan.py .ai-team/runs/muse-wonder-approval-20261015/plans/coder-01.json --phase after", "exit_code": 0}
+  ],
+  "acceptance_coverage": [
+    {"criterion": "VER-001 Approval (REQ-MUSE-002): allowAll в session/start, receipt+decide из availableChoices, terminal=false, userInput/cancel, границы 10/3, защёлкивание T-A13, коды T-A08, grace T-A09b/T-A09c, -32030 T-A11, denyUnmatched без exec T-A11b/T-A14, журнал item T-A15, канарейки T-A10, setup-барьер T-A16", "evidence": "-k Approval: 22 passed; red до фикса 19 failed. rpc.jsonl фейка: session/start approvalMode, receipt тем же id, decide choiceId=c-approve с дословным requirementId, exec-argv отсутствует после approval"},
+    {"criterion": "VER-002 TransientRetry (REQ-MUSE-003): маркеры pre-turn T-R01, исчерпание T-R02, запреты T-R03 (+карантин T-R03b, client gone в паузе T-R03c), остаток бюджета T-R05, предикат T-R06, один эффект T-R07, observed-items T-R07b, очередь/дедлайн T-R08, параллельность T-R09, E/D T-R10, setup без переигрывания T-R11 в обеих областях, slow-steady W T-R12", "evidence": "-k TransientRetry: 14 passed; red до фикса 12 failed. Эффект-маркер заглушки ровно один при net-timeout после turn/start и в exec"},
+    {"criterion": "VER-003 LiveReasoning (REQ-MUSE-004, VER-013 MET): живые дельты T-L01, completed-only T-L02, keepalive без комментариев T-L03/test_s1, сбой записи T-L04, modelRetry только в логе T-L05, out-of-order T-L06, diverged без потери T-L07, единый бюджет писателя T-L08a/b/c, отсечка W T-L09", "evidence": "-k 'LiveReasoning or test_s1': 12 passed; red до фикса 8 failed. Конкатенация reasoning-дельт равна сборке F без дубля хвоста"},
+    {"criterion": "VER-004 наследуемое REQ-MUSE-001 без изменений тестов", "evidence": "-k 'ContextPrune or ContextRetry or AllowedModelsSync': 21 passed"},
+    {"criterion": "VER-005 весь файл", "evidence": "111 passed in 102.35s (baseline 67 passed); изменены ровно два существующих теста как oracle_changes, остальные тесты не ослаблялись"},
+    {"criterion": "VER-006 качество", "evidence": "ruff format --check и ruff check exit 0; basedpyright 0 errors, 1982 warnings (baseline замерен тем же способом: 0 errors, 1448 warnings)"},
+    {"criterion": "VER-012 scope и protected paths", "evidence": "git diff --name-only 9f87eb0..HEAD == bridges/muse-bridge/server.py, tests/test_muse_bridge_killpg.py; diff по docs/adr/0003, ruff.toml, pyrightconfig.json, ADR 0001/0002, корневому server.py пуст; .ai-team/analysis/docs/adr/0003 остались untracked"},
+    {"criterion": "Regression red→green по каждому REQ (bugfix.md §3)", "evidence": "Сырые red-логи /tmp/coder-01/red/{Approval,TransientRetry,LiveReasoning,t18}.log (exit 1) сняты на коде baseline-коммита 9f87eb0 с новыми тестами; после реализации те же команды exit 0 (/tmp/coder-01/final/k-*.log)"},
+    {"criterion": "End-to-end ручка brief: фейковый serve с approval после паузы завершает ход без exec", "evidence": "test_t_a07 (delay 2.6с при ужатом окне 2.0с) и test_t_a02: ход via=serve, exec-запусков 0, один turn/start"},
+    {"criterion": "F-004/F-005 (a4): валидация констант старта и карантин слота с периодической перепроверкой", "evidence": "test_startup_constants_validation (TIMEOUT_S=100 — отказ загрузки, 1800 — ок); карантин существовал в baseline (_quarantine_slot с фоновым опросом и /health quarantined), покрыт test_t_r03b + наследуемыми QuarantineSlotTest/test_t22 без изменения внешнего контракта сверх существующего поля"}
+  ],
+  "oracle_changes": [
+    {"test": "test_approval_falls_back_to_exec_without_decide -> заменён классом Approval (T-A01/T-A02...) + test_transport_fallback_exec_flags", "justification": "Смена контракта поведения по REQ-MUSE-002/AD-002, не ослабление: прежний тест закреплял запрещённое теперь поведение (exec-рестарт без decide). Проверки exec-флагов сохранены на транспортном ServeUnavailable до turn/start; новый контракт требует decide и запрещает exec после approval"},
+    {"test": "test_t18_serve_fallback_and_network_retry_preserve_context_retry_budget — обновлён", "justification": "Смена контракта по AD-003, не ослабление: внутренний exec-повтор по NETWORK_RETRY_MARKER упразднён (RISK-009). Утверждение про контекстный бюджет сохранено: транзиентный повтор идёт тем же промптом новым serve, контекстный — прунённым; счётчики раздельны"}
+  ],
+  "assumptions": [
+    "VER-013 MET (16.10): этап 3 live reasoning реализован полностью; stage3_skipped не применяется",
+    "Фейковая MSP-фикстура воспроизводит формы схемы serve 1.4.7/1.4.9 по полям ApprovalDecideParams/UserInputCancelParams/TurnCompletedParams из explorer-D; живой serve в тестах не вызывался",
+    "Тесты T-L08/T-L09/T-R12 детерминированы управляемым транспортом-обёрткой записи с ужатыми константами (как допускает спека для T-L08b), а не fake monotonic clock; W/D оракул задаётся реальными монотонными дедлайнами Handler",
+    "next_role выставлен reviewer по валидатору handoff и прецеденту muse-bridge-heal-20261014 (DONE требует reviewer); возврат управления — оркестратору для запуска ревью"
+  ],
+  "risks": [
+    "basedpyright warnings 1982 против baseline 1448 (+534, 0 errors): прирост пропорционален объёму новых тестов в существующем Any-стиле файла; ревьюеру оценить приемлемость формулировки VER-006",
+    "Тайминг-тесты с ужатыми бюджетами (T-A07, T-R08, T-R10) чувствительны к загрузке машины; запасы расширены после одного флака на полном прогоне, повторный полный прогон 111/111 зелёный",
+    "allowAll авторазрешает инструменты, не отключённые флагами serve (решение владельца OPEN-07): компенсация — аудит-лог approval_decide и откат MUSE_BRIDGE_APPROVAL_MODE=denyUnmatched без exec; живые payload до деплоя не наблюдались",
+    "Mid-turn net-timeout в области pre-action остаётся терминальным отказом без повтора (честная цена AD-003/RISK-009); расширение — только решением владельца Q-010 + env observed-items",
+    "Тяжёлый путь не выполнен (не зона Coder): деплой в ~/.dsh, рестарт launchd и живой ход в DSH VER-009/VER-010 остаются за оркестратором/владельцем; слова «готово/работает» про боевой мост не заявляются"
+  ],
+  "open_questions": [],
+  "parallelism_report": "Параллельно одним батчем: git/VER-013/panel/sha, карта server.py, карта тестов, чтение arch-spec/delta-a4.contracts/delta-a3; затем Handler/ServeRun/фикстура/пакет одним батчем. Фон/ожидание: baseline-прогон (46с) и полные прогоны шли длинными командами с сохранением логов в /tmp/coder-01/*.log, пока готовились план и правки. Записи в server.py и тестовый файл — строго последовательно одним писателем",
+  "file_sha256": {
+    "bridges/muse-bridge/server.py": "ce9fd9c8129924650f2d9f756ffd14a00c612871bc3bd7074d49e755c687f3cc",
+    "tests/test_muse_bridge_killpg.py": "5ca7da36922d396797ce96f68a54c9fa9f23557bbaec4f2b401b99214c50c3c7"
+  },
+  "commits": {
+    "baseline_req_muse_001": "9f87eb083545c0b6fdc5de0827ae50ae9b7c40b9",
+    "implementation": "4548dd30840e42fbba218f36cb0bb23ff81b660e"
+  }
+}

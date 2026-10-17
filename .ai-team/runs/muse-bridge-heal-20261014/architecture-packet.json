@@ -1,0 +1,714 @@
+{
+  "schema_version": "1.0",
+  "task_id": "muse-bridge-heal-20261014",
+  "run_id": "muse-bridge-heal-20261014",
+  "criticality": "S2",
+  "profile": "default",
+  "status": "APPROVED",
+  "role_plan": {
+    "path": ".ai-team/runs/muse-bridge-heal-20261014/plans/architect-v2.json",
+    "sha256": "317096d7121b0d77bc7f89c866c26575d94f10a7b16b6c4b13ffd1fbbd1e302b"
+  },
+  "requirement_ids": [
+    "REQ-01",
+    "REQ-02",
+    "REQ-03",
+    "REQ-04",
+    "REQ-05",
+    "REQ-06",
+    "REQ-07",
+    "REQ-08",
+    "NFR-01",
+    "NFR-02",
+    "NFR-03",
+    "NFR-04",
+    "NFR-05",
+    "NFR-06",
+    "NFR-07"
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1690-1735,1782-1786",
+      "claim": "F-01/F-02: Handler._serve_json has three early HTTP 502/SSE error exits (launcher_missing/spawn_failed at 1690-1701, state!=ok or rc!=0 at 1702-1717, empty_output at 1722-1735) that return without calling _log(); only successful completion at 1782-1786 writes 'done' to bridge.log."
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1188-1196,1219-1241",
+      "claim": "F-04/F-06: ServeRun.execute reads only params.terminal on turn/completed and ignores params.error and params.reason, returning only the last 6 lines of process stderr in err on non-completed turns."
+    },
+    {
+      "id": "EVD-003",
+      "kind": "document",
+      "ref": "/tmp/cel-runs/muse-bridge-heal-20261014/msp-defs.json#TurnCompletedParams,TurnError",
+      "claim": "F-05: MSP 1.4.7 schema defines TurnCompletedParams with optional error (TurnError: required kind, message, retryable, optional quota) and optional free-text reason."
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:522,1307-1360,1406-1484",
+      "claim": "F-16/F-17/F-18: Handler._keepalive_loop emits ': keepalive' comments every KEEPALIVE_S (15s) under _wlock, while _sse_chunk and _sse_emit already construct and write valid chat.completion.chunk frames and _sse_stop_keepalive joins the thread before final SSE frames and [DONE]."
+    },
+    {
+      "id": "EVD-005",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:718-733,980-989,1089-1090,1642-1659",
+      "claim": "F-08/F-09/F-10/F-11: ServeRun.execute and Run.execute spawn muse serve and muse exec without --disable-* tool restriction flags; on approval/request _handle_event raises ServeUnavailable and Handler._serve_json logs fallback to exec."
+    },
+    {
+      "id": "EVD-006",
+      "kind": "command",
+      "ref": "~/.local/bin/muse serve --help && ~/.local/bin/muse exec --help (analysis/muse-bridge-heal/evidence-ledger.md F-12, F-13)",
+      "claim": "F-12/F-13: muse serve supports --disable-write and --disable-shell; muse exec supports --disable-write, --disable-shell, --disable-web-tools, and --disable-reminders alongside --yolo."
+    },
+    {
+      "id": "EVD-007",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:72-77 vs ~/.dsh/bridges/muse-bridge/server.py:72-78",
+      "claim": "F-25/F-26: Repo ALLOWED_MODELS only lists muse-spark-1.3 and muse-spark-1.3-contributor; live copy adds muse-wonder-1.0 and muse-wonder-full-1.0 (context_length=1048576, max_output=131072), which is the sole diff between repo and live copy."
+    },
+    {
+      "id": "EVD-008",
+      "kind": "command",
+      "ref": "python3 -m unittest tests.test_muse_bridge_killpg (analysis/muse-bridge-heal/evidence-ledger.md F-15)",
+      "claim": "F-15: Existing test suite tests/test_muse_bridge_killpg.py has 18 tests covering process group kill, slot quarantine, and client disconnect probes (Ran 18 tests, OK in 16.7s), with no coverage yet for error logging, TurnError extraction, SSE data keepalive, CLI flags, or wonder models."
+    },
+    {
+      "id": "EVD-009",
+      "kind": "document",
+      "ref": "analysis/muse-bridge-heal/evidence-ledger.md#F-19,F-20,F-21,F-22,F-24",
+      "claim": "F-19..F-24: DSH profile sets timeoutMs=1900000 and streamIdleTimeoutMs=1900000 while bridge TIMEOUT_S=1800s; bridge.log recorded 5 approval/request fallbacks to exec and silent turn failures without final done/error records; pi-ai client source is unavailable locally."
+    },
+    {
+      "id": "EVD-010",
+      "kind": "document",
+      "ref": "analysis/muse-bridge-heal/handoff-architect.md & analysis/muse-bridge-heal/open-questions.md",
+      "claim": "System analyst handoff and open questions ledger establish REQ-01..REQ-08, AC-01..AC-11, NFR-01..NFR-07, and classify OPEN-01..OPEN-07 as continuable (МОЖНО ПРОДОЛЖИТЬ) with zero blockers."
+    }
+  ],
+  "risk_triggers": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "OPEN-01: Эмиссия валидного SSE-кадра data с chat.completion.chunk и пустой дельтой {\"content\": \"\"} на тике KEEPALIVE_S сбрасывает streamIdleTimeoutMs в клиенте pi-ai/DSH и не меняет аккумулированный текст ответа или парсинг tool_calls. Исходник pi-ai локально недоступен (F-20); эффект остаётся ASSUMED до живой проверки через DSH (VER-005).",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-004",
+        "EVD-009"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "statement": "OPEN-03: Передача флагов --disable-write --disable-shell в muse serve и --disable-write --disable-shell --disable-web-tools --disable-reminders в muse exec предотвращает попытки модели вызывать встроенные инструменты CLI (и тем самым устраняет триггер approval/request на чтение/запись/шелл), не нарушая текстовую эмуляцию <tool_call>. Проверяется на живом ходе (VER-005).",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-005",
+        "EVD-006"
+      ]
+    },
+    {
+      "id": "ASM-003",
+      "statement": "OPEN-04: При получении серверного запроса approval/request или userInput/request в режиме serve мост не отправляет approval/decide, а немедленно выбрасывает ServeUnavailable с логированием причины и переходом на fallback muse exec. Подтверждено кодом (F-08, F-09), логами успешного спасения ходов (F-24) и архитектурным решением AD-004.",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-005",
+        "EVD-009",
+        "EVD-010"
+      ]
+    },
+    {
+      "id": "ASM-004",
+      "statement": "OPEN-05: Будущая совместимость AD-001..AD-005, включая SSE stop/write, с 18 baseline-тестами ASSUMED до полного VER-001 у Coder/Verifier. EVD-008 доказывает только Ran 18 tests, OK до изменений; lifecycle групп/слотов/probe не менять.",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-008",
+        "EVD-010"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "ASM-005",
+      "statement": "OPEN-02/OPEN-06/OPEN-07: Точный таймлайн утреннего инцидента 08:36-09:08 в логах не сохранился из-за отсутствия логирования ошибок (F-22) и верифицируется косвенно после включения REQ-01; бюджет TIMEOUT_S=1800s (при клиентском streamIdleTimeoutMs=1900s) остаётся без изменений как вне рамок задачи (deferred OPEN-06); синхронизация репо с живой копией ~/.dsh/bridges/muse-bridge/server.py выполняется отдельным авторизованным шагом доставки (REQ-08, VER-005).",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-007",
+        "EVD-009",
+        "EVD-010"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как обеспечить полную наблюдаемость неуспешных ходов в bridge.log на всех ранних выходах Handler._serve_json (1690-1701, 1702-1717, 1722-1735)?",
+      "choice": "Во всех 3 ранних error exits Handler._serve_json перед self._send(502, ...) и return вызывать _log(f\"error model={model} via={via} rc={out.get('rc')} state={state} err={_redact_secrets(str(out.get('err') or ''))[:300]!r} stream={req.get('stream') is True}\"), при этом для ветки пустого вывода (1722-1735) явно записывать state=empty_output; запись done при успехе (1782-1786) не менять. Во всех ранних HTTP 502 JSON / SSE error detail = _redact_secrets(str(out.get(\"err\") or \"\"))[:500]; None/нет err даёт пустую строку вместо \"None\" (CD-001). Stdlib _redact_secrets по arch-spec.md §6.1 применяется до любых срезов, также к message/hint; промпт и MUSE_BRIDGE_KEY никогда не включаются.",
+      "alternatives": [
+        "Логировать ошибки внутри Handler._send при HTTP-коде >= 500 без контекста model/via/rc/state",
+        "Логировать ошибки внутри Run.execute и ServeRun.execute до возврата в Handler._serve_json"
+      ],
+      "drivers": [
+        "REQ-01 и AC-01: каждый неуспешный ход должен оставлять ровно одну запись error в bridge.log",
+        "NFR-03: обрезка err до 300 символов и отсутствие текста промптов или секретов в логах"
+      ],
+      "consequences": [
+        "Все 3 ранних выхода с ошибкой в Handler._serve_json единообразно фиксируются в bridge.log",
+        "Схема ответа 502 / SSE error и успешный done сохраняются; диагностический текст санитизирован, None detail теперь пустой."
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_muse_bridge_killpg",
+        "expected": "Ran N tests, OK"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как извлекать и передавать диагностику отказа из MSP turn/completed (terminal != 'completed') в ServeRun.execute (1188-1196)?",
+      "choice": "ServeRun.execute хранит params.error / params.reason в отдельном локальном turn_diag_lines: list[str], который пишет только основной поток; drain_stderr пишет только err_lines. После _redact_secrets и однострочной нормализации поля ограничены kind[:64], message[:160], quota JSON [:120], reason[:160]; quota json.dumps(ensure_ascii=False, sort_keys=True, default=str, separators=(\",\", \":\")) с fallback str. Не более двух строк; общий терминальный бюджет 300 по детерминированному сокращению quota, затем reason с минимумом min(16,len(reason)), затем message/kind (§4.2). При сборке err turn_diag_lines идут ПЕРВЫМИ, оставшийся бюджет до 500 (включая разделитель) дополняется санитизированным хвостом копии err_lines[-6:]. Если диагностика пуста, сохраняется прежний stderr fallback без новой обрезки err. Шумный/поздний stderr не вытесняет первопричину ни из списка, ни за срезы 300/500. Completed, rc/state, grace/close, ServeUnavailable и fallback/retry неизменны. Handler: detail = _redact_secrets(str(out.get(\"err\") or \"\"))[:500], log err = _redact_secrets(str(out.get(\"err\") or \"\"))[:300]!r (CD-001/CD-002).",
+      "alternatives": [
+        "Диагностика в конкурентном err_lines[-6:] отвергнута: шум вытесняет причину",
+        "stderr перед диагностикой отвергнут: причина исчезает за срезами 300/500",
+        "Полное исключение stderr при наличии диагностики отвергнуто: свободный бюджет до 500 допускает полезный хвост без потери приоритета",
+        "Сырой params или только message отвергнуты: шум / потеря kind и reason"
+      ],
+      "drivers": [
+        "REQ-02, AC-02, AC-03: сохранение kind, message, retryable, quota и reason в detail и bridge.log",
+        "RISK-003 и NFR-03: устойчивость к невалидным структурам error/quota без падения потока и соблюдение лимитов 500/300 символов"
+      ],
+      "consequences": [
+        "Отдельный носитель защищён от drain_stderr; терминальная причина первая и <=300 по §4.2, stderr занимает лишь свободный бюджет до 500",
+        "Невалидный payload не ломает ход; секреты маскируются до полевых и итоговых срезов; completed/fallback/retry сохранены"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_muse_bridge_killpg",
+        "expected": "Ran N tests, OK"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как реализовать SSE keepalive в Handler._keepalive_loop (1347-1352) для сброса idle-таймера клиента без нарушения потокобезопасности и порядка кадров?",
+      "choice": "Каждый KEEPALIVE_S=15s тик эмитирует chat.completion.chunk delta={\"content\":\"\"} через gated-запись под self._wlock: фазу self._sse_phase == \"OPEN\", stop и _client_gone проверить внутри того же удержания, что write/flush. Три фазы OPEN -> FINALIZING -> CLOSED: stop.set(), под _wlock идемпотентно OPEN -> FINALIZING до финальных кадров; join(timeout=2) вне замка только уборка, не барьер. Финальные кадры допустимы до CLOSED, data: [DONE] закрывает фазу CLOSED до освобождения _wlock (также при OSError); после FINALIZING новые тики запрещены, после CLOSED любая запись no-op. Class-level Handler defaults: _sse_phase: str = \"OPEN\", _keepalive_stop = None, _client_gone: bool = False, безопасно для Handler.__new__(Handler). _keepalive_stop заменяет старый _ka_stop, единое Event на экземпляре; setup/_sse_begin сбрасывают фазу под _wlock. Ожидание захвата self._wlock при остановке keepalive ограничено действующим сокетным таймаутом Handler.timeout = 300 и происходит уже после освобождения семафора параллельности. Вложенные захваты/новые потоки запрещены. Обновить module docstring server.py: вместо : keepalive описать SSE data-чанк с пустой дельтой (CD-003).",
+      "alternatives": [
+        "stop.set() + join(timeout=2) как барьер отвергнуты: поздний тик может пережить join",
+        "Бесконечный join или join под нерекурсивным _wlock отвергнуты: зависание/дедлок",
+        "Одновременные комментарий и data-чанк / delta={} без content отвергнуты: избыточность / нарушение заданного кадра"
+      ],
+      "drivers": [
+        "REQ-03, AC-04, AC-05: отправка валидного chat.completion.chunk с пустой дельтой content и отсутствие записей после [DONE]",
+        "NFR-02 и NFR-04: сериализация через существующий _wlock без создания новых потоков и с периодом KEEPALIVE_S"
+      ],
+      "consequences": [
+        "Порядок байт доказуем под одним _wlock: нет новых keepalive после FINALIZING и нет любых байтов после [DONE]/CLOSED; timed join только cleanup",
+        "Ожидание socket write/flush ограничено Handler.timeout=300 после освобождения семафора; успешная доставка при разрыве не обещается",
+        "Class-level defaults поддерживают ручные __new__ unit-тесты; idle-эффект остаётся ASSUMED до обязательной пробы с уменьшенным тестовым порогом VER-005"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_muse_bridge_killpg",
+        "expected": "Ran N tests, OK"
+      }
+    },
+    {
+      "id": "AD-004",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Какими флагами CLI отключить встроенные инструменты в ServeRun.execute (980-989) и Run.execute (718-733) и как обрабатывать approval/request?",
+      "choice": "Добавить --disable-write и --disable-shell в argv muse serve (980-989); добавить --disable-write, --disable-shell, --disable-web-tools и --disable-reminders в argv muse exec (718-733) с сохранением --yolo и всех существующих флагов; сохранить выброс ServeUnavailable при approval/request и логирование fallback на exec (OPEN-04) без реализации approval/decide.",
+      "alternatives": [
+        "Реализовать интерактивный ответ approval/decide с отказом внутри ServeRun вместо выброса ServeUnavailable",
+        "Удалить флаг --yolo из muse exec при добавлении флагов --disable-*"
+      ],
+      "drivers": [
+        "REQ-04, REQ-05, AC-06, AC-07, AC-08: запрет встроенных инструментов CLI при сохранении эмуляции <tool_call> и надёжного fallback на exec",
+        "Ужесточение действующей политики безопасности без изменения границ доверия"
+      ],
+      "consequences": [
+        "Модель в serve и exec не может вызывать встроенные write/shell (и web/reminders в exec)",
+        "Любой остаточный запрос approval/request в serve безопасно логируется и уходит в fallback exec"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_muse_bridge_killpg",
+        "expected": "Ran N tests, OK"
+      }
+    },
+    {
+      "id": "AD-005",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как синхронизировать список поддерживаемых моделей ALLOWED_MODELS (72-77) между репозиторием и живой копией моста?",
+      "choice": "Добавить 'muse-wonder-1.0' и 'muse-wonder-full-1.0' с параметрами {'context_length': 1048576, 'max_output': 131072} в словарь ALLOWED_MODELS в bridges/muse-bridge/server.py.",
+      "alternatives": [
+        "Динамически запрашивать список моделей через вызов muse model-profile при старте сервера",
+        "Вынести список моделей во внешний конфигурационный файл"
+      ],
+      "drivers": [
+        "REQ-06 и AC-09: наличие muse-wonder-1.0 и muse-wonder-full-1.0 в /v1/models с context_length=1048576",
+        "Устранение единственного дрейфа между репозиторной и живой копиями server.py (F-25, F-26)"
+      ],
+      "consequences": [
+        "Репозиторная версия моста полностью совпадает по списку моделей с живым рантаймом",
+        "Эндпоинты /v1/models, /health и валидация запроса в _serve_json поддерживают обе модели линейки Wonder"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_muse_bridge_killpg",
+        "expected": "Ran N tests, OK"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "operability",
+      "source": "Процесс muse serve или muse exec",
+      "stimulus": "Завершение хода с ошибкой (spawn_failed, terminal_failed с TurnError/reason, nonzero_exit или пустой вывод)",
+      "environment": "Штатная эксплуатация моста в режимах stream=false и stream=true",
+      "artifact": "ServeRun.execute и Handler._serve_json в bridges/muse-bridge/server.py",
+      "response": "Мост извлекает kind/message/retryable/quota и reason в err, записывает ровно одну строку error в bridge.log (err до 300 символов) и возвращает HTTP 502 или SSE error + [DONE] (detail до 500 символов); _redact_secrets по §6.1 до полевых/итоговых срезов, turn_diag_lines приоритетны, None detail пустой.",
+      "response_measure": "100% ранних выходов ошибок оставляют запись error в bridge.log без утечки промптов или секретов; длина err в логе <= 300 символов, detail <= 500 символов",
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "reliability",
+      "source": "Клиент DSH / pi-ai",
+      "stimulus": "Длительное размышление модели без генерации текста дольше интервала KEEPALIVE_S и последующее завершение хода",
+      "environment": "Открытый поток SSE (stream=true) при конкурентной работе _keepalive_loop и основного потока Handler",
+      "artifact": "Handler._keepalive_loop и Handler._sse_stop_keepalive в bridges/muse-bridge/server.py",
+      "response": "Каждый KEEPALIVE_S=15s тик эмитирует chat.completion.chunk delta={\"content\":\"\"} через gated-запись под self._wlock: фазу self._sse_phase == \"OPEN\", stop и _client_gone проверить внутри того же удержания, что write/flush. Три фазы OPEN -> FINALIZING -> CLOSED: stop.set(), под _wlock идемпотентно OPEN -> FINALIZING до финальных кадров; join(timeout=2) вне замка только уборка, не барьер. Финальные кадры допустимы до CLOSED, data: [DONE] закрывает фазу CLOSED до освобождения _wlock (также при OSError); после FINALIZING новые тики запрещены, после CLOSED любая запись no-op. Class-level Handler defaults: _sse_phase: str = \"OPEN\", _keepalive_stop = None, _client_gone: bool = False, безопасно для Handler.__new__(Handler). _keepalive_stop заменяет старый _ka_stop, единое Event на экземпляре; setup/_sse_begin сбрасывают фазу под _wlock. Ожидание захвата self._wlock при остановке keepalive ограничено действующим сокетным таймаутом Handler.timeout = 300 и происходит уже после освобождения семафора параллельности. Вложенные захваты/новые потоки запрещены. Обновить module docstring server.py: вместо : keepalive описать SSE data-чанк с пустой дельтой (CD-003).",
+      "response_measure": "0 комментариев ': keepalive', 0 байт после 'data: [DONE]\\n\\n', конкатенированный текст ответа и разбор tool_calls идентичны эталону",
+      "verification_ids": [
+        "VER-001",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "quality": "safety",
+      "source": "Модель Meta Muse внутри CLI-рантайма",
+      "stimulus": "Генерация ответа на запрос с эмуляцией инструментов или попытка обращения к встроенным средствам CLI",
+      "environment": "Выполнение muse serve и muse exec в техническом каталоге моста",
+      "artifact": "ServeRun.execute и Run.execute в bridges/muse-bridge/server.py",
+      "response": "Процесс serve запускается с --disable-write --disable-shell, процесс exec — с --disable-write --disable-shell --disable-web-tools --disable-reminders (сохраняя --yolo); при запросе approval/request в serve мост логирует причину и переключается на exec",
+      "response_measure": "100% вызовов содержат утверждённые флаги --disable-*; отсутствие несанкционированных мутаций или выполнения shell-команд через встроенные инструменты CLI; отдельный AC-07: текстовый <tool_call> сохраняется, нет встроенных CLI вызовов включая чтение (live receipt).",
+      "verification_ids": [
+        "VER-001",
+        "VER-004",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "QA-004",
+      "quality": "compatibility",
+      "source": "Клиент OpenAI API и тестовый раннер unittest",
+      "stimulus": "Запрос GET /v1/models, отправка запросов к muse-wonder-1.0 / muse-wonder-full-1.0 и запуск регрессионного набора тестов",
+      "environment": "Локальное тестовое окружение без живых вызовов Meta и боевой контур DSH",
+      "artifact": "ALLOWED_MODELS, Handler в bridges/muse-bridge/server.py и tests/test_muse_bridge_killpg.py",
+      "response": "Список моделей включает все 4 модели с context_length=1048576; все 18 существующих тестов killpg/quarantine/probe и новые регрессионные тесты проходят",
+      "response_measure": "exit 0 при запуске python3 -m unittest tests.test_muse_bridge_killpg (18 baseline + новые тесты зелёные)",
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-003"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "Handler (bridges/muse-bridge/server.py:1257-1815)",
+      "responsibility": "HTTP/1.1 маршрутизация (/health, /v1/models, /v1/chat/completions), проверка авторизации (_auth_ok), управление потоком SSE и циклом _keepalive_loop под _wlock, надзор за обрывом клиента, оркестрация ServeRun -> Run fallback и единое журналирование итогов хода (done / error) в bridge.log",
+      "allowed_dependencies": [
+        "Python stdlib (http.server, json, select, socket, threading, time, uuid)",
+        "ServeRun",
+        "Run",
+        "ToolCallParser",
+        "_log",
+        "ALLOWED_MODELS",
+        "_redact_secrets (новая stdlib функция по arch-spec.md §6.1)"
+      ],
+      "forbidden_dependencies": [
+        "Прямой запуск subprocess.Popen в обход классов ServeRun и Run",
+        "Внешние сторонние HTTP/SSE-библиотеки вне stdlib",
+        "Модули adapters/ и core/ корневого проекта"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "ServeRun (bridges/muse-bridge/server.py:894-1255)",
+      "responsibility": "Выполнение хода через muse-cli.sh serve (MSP v1 NDJSON JSON-RPC по stdio) с флагами --disable-write и --disable-shell, защитное извлечение TurnError (kind, message, retryable, quota) и недублирующего reason при terminal != 'completed', выброс ServeUnavailable при approval/request и транспортных ошибках",
+      "allowed_dependencies": [
+        "Python stdlib (json, os, select, signal, subprocess, threading, time)",
+        "MUSE_WRAPPER (~/.config/muse-launch/muse-cli.sh)",
+        "_terminate_run",
+        "_log",
+        "ServeUnavailable"
+      ],
+      "forbidden_dependencies": [
+        "Прямая запись в клиентский HTTP/SSE-сокет (Handler.wfile, _wlock)",
+        "Прямой вызов бинарника muse в обход MUSE_WRAPPER",
+        "Отправка интерактивных решений approval/decide"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "BND-003",
+      "component": "Run (bridges/muse-bridge/server.py:658-892)",
+      "responsibility": "Fallback-выполнение хода через muse-cli.sh exec --json с флагами --yolo, --disable-write, --disable-shell, --disable-web-tools, --disable-reminders, разбор JSONL-конвертов, контроль таймаута TIMEOUT_S и гарантированное завершение группы процессов",
+      "allowed_dependencies": [
+        "Python stdlib (json, os, signal, subprocess, tempfile, threading, time, uuid)",
+        "MUSE_WRAPPER (~/.config/muse-launch/muse-cli.sh)",
+        "_terminate_run",
+        "_log",
+        "_active"
+      ],
+      "forbidden_dependencies": [
+        "Прямая запись в клиентский HTTP/SSE-сокет (Handler.wfile, _wlock)",
+        "Прямой вызов бинарника muse в обход MUSE_WRAPPER",
+        "Хранение состояния JSON-RPC сессии MSP"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-004"
+      ]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "behavior",
+      "producer": "ServeRun.execute и Handler._serve_json (bridges/muse-bridge/server.py)",
+      "consumer": "Журнал bridge.log и OpenAI-клиент, получающий поле error.detail в ответе 502 / SSE error",
+      "change": "Во всех 3 ранних error exits Handler._serve_json перед self._send(502, ...) и return вызывать _log(f\"error model={model} via={via} rc={out.get('rc')} state={state} err={_redact_secrets(str(out.get('err') or ''))[:300]!r} stream={req.get('stream') is True}\"), при этом для ветки пустого вывода (1722-1735) явно записывать state=empty_output; запись done при успехе (1782-1786) не менять. Во всех ранних HTTP 502 JSON / SSE error detail = _redact_secrets(str(out.get(\"err\") or \"\"))[:500]; None/нет err даёт пустую строку вместо \"None\" (CD-001). Stdlib _redact_secrets по arch-spec.md §6.1 применяется до любых срезов, также к message/hint; промпт и MUSE_BRIDGE_KEY никогда не включаются.",
+      "compatibility": "HTTP-коды и JSON поля message/detail/type/code, SSE error + [DONE] не меняются; явная диагностическая дельта: detail = _redact_secrets(str(out.get(\"err\") or \"\"))[:500], None/отсутствующий err теперь \"\" вместо \"None\". Секреты маскируются до срезов, журнал <=300 через repr.",
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    },
+    {
+      "id": "CD-002",
+      "type": "behavior",
+      "producer": "ServeRun.execute (bridges/muse-bridge/server.py)",
+      "consumer": "Handler._serve_json, bridge.log и HTTP 502 JSON / SSE error.detail",
+      "change": "ServeRun.execute хранит params.error / params.reason в отдельном локальном turn_diag_lines: list[str], который пишет только основной поток; drain_stderr пишет только err_lines. После _redact_secrets и однострочной нормализации поля ограничены kind[:64], message[:160], quota JSON [:120], reason[:160]; quota json.dumps(ensure_ascii=False, sort_keys=True, default=str, separators=(\",\", \":\")) с fallback str. Не более двух строк; общий терминальный бюджет 300 по детерминированному сокращению quota, затем reason с минимумом min(16,len(reason)), затем message/kind (§4.2). При сборке err turn_diag_lines идут ПЕРВЫМИ, оставшийся бюджет до 500 (включая разделитель) дополняется санитизированным хвостом копии err_lines[-6:]. Если диагностика пуста, сохраняется прежний stderr fallback без новой обрезки err. Шумный/поздний stderr не вытесняет первопричину ни из списка, ни за срезы 300/500. Completed, rc/state, grace/close, ServeUnavailable и fallback/retry неизменны. Handler: detail = _redact_secrets(str(out.get(\"err\") or \"\"))[:500], log err = _redact_secrets(str(out.get(\"err\") or \"\"))[:300]!r (CD-001/CD-002).",
+      "compatibility": "Сохраняются rc/state, via, completed и fallback/retry; только err получает приоритетную санитизированную терминальную причину и stderr в свободном бюджете.",
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    },
+    {
+      "id": "CD-003",
+      "type": "event",
+      "producer": "Handler._keepalive_loop, SSE stop/write internals (bridges/muse-bridge/server.py)",
+      "consumer": "SSE-клиент OpenAI API (DeepSeek Harness / pi-ai SDK)",
+      "change": "Каждый KEEPALIVE_S=15s тик эмитирует chat.completion.chunk delta={\"content\":\"\"} через gated-запись под self._wlock: фазу self._sse_phase == \"OPEN\", stop и _client_gone проверить внутри того же удержания, что write/flush. Три фазы OPEN -> FINALIZING -> CLOSED: stop.set(), под _wlock идемпотентно OPEN -> FINALIZING до финальных кадров; join(timeout=2) вне замка только уборка, не барьер. Финальные кадры допустимы до CLOSED, data: [DONE] закрывает фазу CLOSED до освобождения _wlock (также при OSError); после FINALIZING новые тики запрещены, после CLOSED любая запись no-op. Class-level Handler defaults: _sse_phase: str = \"OPEN\", _keepalive_stop = None, _client_gone: bool = False, безопасно для Handler.__new__(Handler). _keepalive_stop заменяет старый _ka_stop, единое Event на экземпляре; setup/_sse_begin сбрасывают фазу под _wlock. Ожидание захвата self._wlock при остановке keepalive ограничено действующим сокетным таймаутом Handler.timeout = 300 и происходит уже после освобождения семафора параллельности. Вложенные захваты/новые потоки запрещены. Обновить module docstring server.py: вместо : keepalive описать SSE data-чанк с пустой дельтой (CD-003).",
+      "compatibility": "Обратно совместимо с контрактом OpenAI SSE: пустая строка дельты content не меняет конкатенированный текст ответа и не влияет на серверный разбор tool_calls.",
+      "verification_ids": [
+        "VER-001",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "CD-004",
+      "type": "api",
+      "producer": "ALLOWED_MODELS и обработчики GET /v1/models, GET /health, POST /v1/chat/completions (bridges/muse-bridge/server.py:72-77)",
+      "consumer": "Клиенты DeepSeek Harness и пользователи моста muse-bridge",
+      "change": "Добавление моделей 'muse-wonder-1.0' и 'muse-wonder-full-1.0' (context_length=1048576, max_output=131072) в словарь ALLOWED_MODELS репозиторной копии.",
+      "compatibility": "Аддитивное и обратно совместимое расширение списка моделей: существующие модели muse-spark-1.3 и muse-spark-1.3-contributor и модель по умолчанию не меняются; устраняется расхождение с живой копией.",
+      "verification_ids": [
+        "VER-001",
+        "VER-004",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "CD-005",
+      "type": "behavior",
+      "producer": "ServeRun.execute и Run.execute (bridges/muse-bridge/server.py:718-733, 980-989)",
+      "consumer": "Обёртка muse-cli.sh и дочерние процессы muse serve / muse exec",
+      "change": "Добавление флагов '--disable-write', '--disable-shell' в argv запуска muse serve и флагов '--disable-write', '--disable-shell', '--disable-web-tools', '--disable-reminders' в argv запуска muse exec с сохранением '--yolo' и остальных аргументов.",
+      "compatibility": "Обратно совместимо: все флаги штатно поддерживаются установленным CLI muse 1.4.7 (F-12, F-13); текстовая эмуляция <tool_call> и fallback на exec при approval/request сохраняются.",
+      "verification_ids": [
+        "VER-001",
+        "VER-004",
+        "VER-005"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "component",
+      "question": "Как распределена ответственность между компонентами Handler, ServeRun и Run внутри bridges/muse-bridge/server.py и внешними системами (DSH/pi-ai, muse-cli.sh, bridge.log)?",
+      "artifact_ref": "arch-spec.md"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "dynamic",
+      "question": "Как протекает обработка запроса POST /v1/chat/completions в режиме SSE (keepalive-тики под _wlock, обработка turn/completed с TurnError/reason, fallback по approval/request и единое логирование ранних выходов ошибок до [DONE])?",
+      "artifact_ref": "arch-spec.md"
+    }
+  ],
+  "evolution": {
+    "compatibility": "Внешний контракт OpenAI wire, схема аутентификации (MUSE_BRIDGE_KEY) и границы доверия остаются неизменными; добавляемые CLI-флаги ужесточают действующую политику безопасности владельца без расширения поверхности атаки.",
+    "migration": "NOT_APPLICABLE: у моста отсутствует база данных или персистентное хранилище состояния; конфигурация ENV и формат журнала обратно совместимы.",
+    "rollout": "1) Реализация регрессионных тестов (red-before-green) в tests/test_muse_bridge_killpg.py и правок AD-001..AD-005 в bridges/muse-bridge/server.py на ветке задачи; 2) прогон полного набора тестов и статических проверок (VER-001..VER-004); 3) отдельный авторизованный шаг доставки в живую копию ~/.dsh/bridges/muse-bridge/server.py с перезапуском моста и живой проверкой через DSH (REQ-08, VER-005).",
+    "rollback": "Откат в репозитории — git revert коммита изменений; откат в живом рантайме — восстановление предыдущей версии ~/.dsh/bridges/muse-bridge/server.py и перезапуск процесса моста без миграции данных."
+  },
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Гонка между тиком _keepalive_loop (проснувшимся из stop.wait(KEEPALIVE_S)) и завершением хода в _send / _send_sse приводит к записи пустого чанка после финального кадра или после data: [DONE], либо клиент pi-ai не сбрасывает streamIdleTimeoutMs на пустую дельту content (OPEN-01).",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Каждый KEEPALIVE_S=15s тик эмитирует chat.completion.chunk delta={\"content\":\"\"} через gated-запись под self._wlock: фазу self._sse_phase == \"OPEN\", stop и _client_gone проверить внутри того же удержания, что write/flush. Три фазы OPEN -> FINALIZING -> CLOSED: stop.set(), под _wlock идемпотентно OPEN -> FINALIZING до финальных кадров; join(timeout=2) вне замка только уборка, не барьер. Финальные кадры допустимы до CLOSED, data: [DONE] закрывает фазу CLOSED до освобождения _wlock (также при OSError); после FINALIZING новые тики запрещены, после CLOSED любая запись no-op. Class-level Handler defaults: _sse_phase: str = \"OPEN\", _keepalive_stop = None, _client_gone: bool = False, безопасно для Handler.__new__(Handler). _keepalive_stop заменяет старый _ka_stop, единое Event на экземпляре; setup/_sse_begin сбрасывают фазу под _wlock. Ожидание захвата self._wlock при остановке keepalive ограничено действующим сокетным таймаутом Handler.timeout = 300 и происходит уже после освобождения семафора параллельности. Вложенные захваты/новые потоки запрещены. Обновить module docstring server.py: вместо : keepalive описать SSE data-чанк с пустой дельтой (CD-003). Детерминированные S1/S2/S3 и defaults-оракул §7; VER-005 требует уменьшенный тестовый idle-порог, так как 1900s > TIMEOUT_S=1800s.",
+      "verification_ids": [
+        "VER-001",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Флаги --disable-write / --disable-shell / --disable-web-tools / --disable-reminders изменяют поведение модели при текстовой эмуляции <tool_call> или конфликтуют с --yolo в muse exec (OPEN-03).",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Поддержка флагов подтверждена справкой muse 1.4.7 (F-12, F-13); существующий перехват approval/request -> ServeUnavailable -> fallback на exec с записью в bridge.log полностью сохранён (AD-004); проверяется юнит-тестами argv и живым ходом (VER-001, VER-004, VER-005).",
+      "verification_ids": [
+        "VER-001",
+        "VER-004",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "RISK-003",
+      "scenario": "Нестандартная или повреждённая структура params.error, params.error.quota или params.reason в уведомлении turn/completed вызывает исключение внутри ServeRun.execute и ломает обработку ответа.",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Использовать строго защитное (defensive) извлечение полей с проверкой isinstance(..., dict), безопасной сериализацией quota без предположений о внутренней схеме QuotaDetail и покрытием негативными юнит-тестами (AD-002, VER-001).",
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06",
+        "REQ-07",
+        "NFR-01",
+        "NFR-02",
+        "NFR-03",
+        "NFR-04",
+        "NFR-05",
+        "AD-001",
+        "AD-002",
+        "AD-003",
+        "AD-004",
+        "AD-005",
+        "QA-001",
+        "QA-002",
+        "QA-003",
+        "QA-004",
+        "BND-001",
+        "BND-002",
+        "BND-003",
+        "CD-001",
+        "CD-003",
+        "CD-005",
+        "CD-004",
+        "RISK-001",
+        "RISK-002",
+        "RISK-003",
+        "CD-002"
+      ],
+      "kind": "command",
+      "command": "python3 -m unittest tests.test_muse_bridge_killpg",
+      "expected": "exit 0; Ran N tests (N > 18, including all 18 baseline tests and new red-before-green regression tests for REQ-01..REQ-06), OK; ErrorLoggingTest: reflected Bearer/api_key/Authorization/key-value/sk and bare MUSE_BRIDGE_KEY canaries redacted in bridge.log and HTTP 502 error.detail before slices; None detail empty; terminal diagnostic priority and field boundaries; S1/S2/S3 zero bytes after DONE and class-level __new__ defaults.",
+      "environment": "Local repository worktree (/Users/aazhiry1/work/src/cli-agent-bridge) with system python3 and PYTHONDONTWRITEBYTECODE=1, offline without live Meta calls",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-06",
+        "REQ-07",
+        "NFR-01",
+        "NFR-03",
+        "NFR-06",
+        "QA-001",
+        "QA-004",
+        "BND-001",
+        "BND-002",
+        "BND-003",
+        "CD-001",
+        "RISK-003",
+        "CD-002"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "expected": "exit 0; zero syntax or compilation errors in bridges/muse-bridge/server.py and tests/test_muse_bridge_killpg.py",
+      "environment": "Local repository worktree (/Users/aazhiry1/work/src/cli-agent-bridge) with system python3",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-07",
+        "NFR-06",
+        "QA-004"
+      ],
+      "kind": "command",
+      "command": "ruff format --check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py && ruff check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py && basedpyright bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "expected": "exit 0; ruff format, ruff check, and basedpyright pass with 0 errors on touched files",
+      "environment": "Local development environment with ruff and basedpyright installed",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-04",
+        "REQ-06",
+        "QA-003",
+        "BND-002",
+        "BND-003",
+        "CD-005",
+        "CD-004",
+        "RISK-002"
+      ],
+      "kind": "command",
+      "command": "~/.local/bin/muse serve --help && ~/.local/bin/muse exec --help",
+      "expected": "exit 0; CLI help output confirms support for --disable-write and --disable-shell in muse serve, and --disable-write, --disable-shell, --disable-web-tools, --disable-reminders, and --yolo in muse exec",
+      "environment": "Local macOS host with ~/.local/bin/muse 1.4.7 installed",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "REQ-03",
+        "REQ-04",
+        "REQ-06",
+        "REQ-08",
+        "NFR-07",
+        "QA-002",
+        "QA-003",
+        "CD-003",
+        "CD-005",
+        "CD-004",
+        "RISK-001",
+        "RISK-002"
+      ],
+      "kind": "command",
+      "command": "diff -u bridges/muse-bridge/server.py ~/.dsh/bridges/muse-bridge/server.py && curl -fsS http://127.0.0.1:9886/health",
+      "expected": "Light command exit 0 only proves zero diff and /health ok with all 4 models. Heavy live gate arch-spec.md §8.1 requires receipts for existing DSH session/workload, >=2 repeated and >=2 simultaneous turns, correlated done, controlled terminal failure exact nonsensitive kind/message/reason, disconnect/process-group/slot cleanup. Idle reset proof MUST use authorized temporary reduced client streamIdleTimeoutMs > KEEPALIVE_S=15s, silence exceeding that threshold and several ticks within TIMEOUT_S=1800s, paired no-data-keepalive idle failure control, recorded timings and restoration: 1900s > 1800s cannot be tested in one unchanged turn. Separate AC-07 receipt MUST prove unchanged textual <tool_call> name/args and client OpenAI tool_calls plus observed absence of ALL built-in CLI tool calls (including read) and side effects; done/no approval alone insufficient. Missing any receipt = delivery not accepted.",
+      "environment": "Live host runtime (~/.dsh/bridges/muse-bridge) during authorized delivery stage",
+      "owner": "orchestrator"
+    }
+  ],
+  "protected_paths": [
+    "bridges/muse-bridge/README.md"
+  ],
+  "materialization": [],
+  "approval": {
+    "status": "NOT_REQUIRED",
+    "decision_ids": [],
+    "approved_by": null,
+    "evidence_ref": null
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED",
+    "reviewer": null,
+    "evidence_ref": null
+  },
+  "open_questions": [],
+  "deferred": [
+    "OPEN-06: TIMEOUT_S=1800s adjustment remains out of scope"
+  ],
+  "security_sanitization": {
+    "function": "_redact_secrets(text: str) -> str",
+    "target": "bridges/muse-bridge/server.py",
+    "dependencies": "Python stdlib re; существующая конфигурация MUSE_BRIDGE_KEY",
+    "replacement": "[REDACTED]",
+    "patterns": [
+      "Authorization\\s*:\\s*[^\\r\\n]+",
+      "Bearer\\s+\\S+",
+      "(api[_-]?key|token|secret|password|bridge[_-]?key)\\s*[:=]\\s*\\S+",
+      "sk-[A-Za-z0-9_-]{12,}"
+    ],
+    "flags": "IGNORECASE for Authorization, Bearer and key-value patterns; sk token as specified",
+    "known_values": "Exact nonempty MUSE_BRIDGE_KEY literal replacement before regex; never log the key or prompt; known reflected current prompt excluded locally without global prompt storage.",
+    "order": "Sanitize full AD-002 fields before per-field caps; full stderr before budget; sanitize final str(out.get(\"err\") or \"\") before 300/500 and before bridge.log / HTTP 502 detail. Also sanitize reflected diagnostic message/hint.",
+    "log_err": "_redact_secrets(str(out.get(\"err\") or \"\"))[:300]!r",
+    "http_502_detail": "_redact_secrets(str(out.get(\"err\") or \"\"))[:500]",
+    "verification_ids": [
+      "VER-001",
+      "VER-002"
+    ],
+    "oracle": "ErrorLoggingTest reflects Bearer secret-canary-token-123 / api_key=canary_secret_val via params.error.message and stderr: [REDACTED] present, raw secrets absent in bridge.log and HTTP 502 error.detail; also Authorization/key variants/sk/bare bridge key and slice boundary cases."
+  },
+  "architecture_spec": {
+    "path": ".ai-team/runs/muse-bridge-heal-20261014/arch-spec.md",
+    "sha256": "2a51c65c057e5c573e50baa90a1d53b24ea1e98402b67c79538bdbddac4dfa5e"
+  },
+  "delta_iteration": {
+    "iteration": 2,
+    "trigger_ids": [
+      "B1",
+      "B2",
+      "B3",
+      "B4"
+    ],
+    "contract_id_mapping": "CD-001 safe logs/detail; CD-002 terminal diagnostics; CD-003 SSE seal/data; CD-004 models; CD-005 CLI flags (previously CD-003).",
+    "review_gate": "R1 requested rework; repeated independent Council/panel proof and task-envelope fingerprint refresh remain orchestrator responsibilities, outside the three authorized files."
+  }
+}

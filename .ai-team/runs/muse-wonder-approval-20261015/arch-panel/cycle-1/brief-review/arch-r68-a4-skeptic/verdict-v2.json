@@ -1,0 +1,30 @@
+{
+ "verdict": "REJECT",
+ "model_verdict": "REJECT",
+ "items_total": 33,
+ "missing_ids": [],
+ "bad_quotes": [],
+ "not_covered": [
+  [
+   "HY-05",
+   "missing",
+   "Убрать из подаваемой судье копии owner-decisions.md раздел owner_override о транспорте brief-review и обновить SHA256 обёртки."
+  ]
+ ],
+ "unmapped_requirements": [],
+ "bloat_flags": [],
+ "leakage_flags": [],
+ "tool_calls": 0,
+ "transport": "codex gpt-6.1-sol -c model_reasoning_effort=high",
+ "model": "gpt-6.1-sol",
+ "degraded": true,
+ "degraded_reason": "ВРЕМЕННАЯ деградация слота brief-review: Google-маршрут недоступен, Factory Droid 402 недельный лимит; запуск через codex exec по models.md §1.3",
+ "transport_attempts": [
+  {
+   "file": "review-v2-a1.md",
+   "result": "valid"
+  }
+ ],
+ "brief_sha256": "455951c1a25038aa53d9c169b43c5635cd58916009eb1321ac2020f8b131f89a",
+ "checklist_gen": 2
+}

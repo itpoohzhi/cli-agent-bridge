@@ -1,0 +1,282 @@
+{
+ "verdict": "REJECT",
+ "model_verdict": "REJECT",
+ "items_total": 32,
+ "missing_ids": [],
+ "bad_quotes": [
+  "SK-A-13"
+ ],
+ "not_covered": [],
+ "unmapped_requirements": [
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md#решение-18:15",
+   "quote": "- F-005 (откат denyUnmatched обходится exec --yolo, AD-006/AD-007): **blocking**",
+   "fix": "Добавить BR-строку для решений прохода a2 от 18:15, отдельно от решения a1 от 13:39, с сохранением всех пяти назначенных приоритетов."
+  },
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md#Q-010",
+   "quote": "Переключение на `observed-items` — без изменения кода, только после живого аудита ASM-010 (закрытие тяжёлым путём) и отдельной записи здесь.",
+   "fix": "Добавить BR-строку: pre-action по умолчанию, observed-items допускается только после живого аудита ASM-010 и отдельной записи решения."
+  },
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md#Q-009",
+   "quote": "- Q-009 (обход -32030 клиентским approve): НЕТ (exec-fallback по AD-006, при denyUnmatched — без exec).",
+   "fix": "Добавить BR-строку о запрете клиентского обхода ceiling и запрете exec при denyUnmatched."
+  },
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md#Q-001",
+   "quote": "- Q-001 (selective deny по protectedWrite/judgeEscalated): после сбора живых payload; сейчас только логирование.",
+   "fix": "Добавить BR-строку о границе текущего изменения: только логирование признаков, selective deny после сбора живых payload."
+  },
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md#Q-004",
+   "quote": "- Q-004 (summary только в конце хода): решается спайком VER-013 до реализации AD-004; при NOT_MET REQ-MUSE-004 сообщается как не выполнено.",
+   "fix": "Добавить BR-строку о предреализационном спайке и обязательном статусе NOT_MET при отсутствии промежуточных summaries."
+  },
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md#owner_override",
+   "quote": "Метка деградации обязана попасть в route-manifest, вердикт a4 и отчёт сдачи («brief-review degraded: gpt-6.1-sol вместо gemini-3.8-flash-high из-за недоступности Google-маршрута»).",
+   "fix": "Добавить проверку обязательной фиксации деградации в трёх названных артефактах; исполнение проверки отнести оркестратору."
+  },
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md#owner_override",
+   "quote": "Anthropic (claude), Meta (Muse) + добор до ровно 3 по п. 1.8 models.md независимым сабпроцессом работающей модели/транспорта; записать жребий.",
+   "fix": "Добавить проверку состава ровно из трёх мест, независимости добора и записи жребия; исполнение проверки отнести оркестратору."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/handoff-architect.md#6",
+   "quote": "- Каталоги вне зоны: профили DSH `~/.dsh/profiles/{web,desktop}/cordis.patch.yml`; не трогать `muse-spark-*` без явной причины [F-21] [F-19].",
+   "fix": "Добавить BR-строку с явными границами по профилям DSH и изменениям muse-spark-*."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/handoff-architect.md#3",
+   "quote": "Вне границы: логика approval-судьи Meta (в serve отключена, в exec включена по умолчанию, в мосте подавлена `--yolo`) [F-11], политика прокси, UI DSH.",
+   "fix": "Добавить BR-строку о внешних границах: approval-судья Meta, политика прокси и UI DSH."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-09",
+   "quote": "при этом в muse exec дополнительно передаются --yolo --disable-web-tools --disable-reminders",
+   "fix": "Добавить BR-проверку фактических exec-флагов, на которых основаны ограничения fallback и отката политики."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-15",
+   "quote": "таймаут инициализации serve SERVE_SPAWN_TIMEOUT_S = 30.0 с; отдельного idle-таймаута чтения в цикле serve нет",
+   "fix": "Добавить BR-проверку исходных временных границ serve, от которых зависит обработка позднего approval."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-20",
+   "quote": "test_approval_falls_back_to_exec_without_decide проверяет отсутствие approval/decide в rpc.jsonl и переход в exec при approval/request",
+   "fix": "Добавить BR-проверку явной судьбы существующих тестов, закрепляющих заменяемое поведение approval и сохраняемый keepalive."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-21",
+   "quote": "Лимит параллельных запусков моста MAX_CONCURRENT = 2 (ожидание слота до TIMEOUT_S = 1800 с, далее HTTP 503)",
+   "fix": "Добавить BR-проверку квоты двух запусков и исходной семантики ожидания слота."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-23",
+   "quote": "результат обоих RequestReceipt (пустой объект) означает только «показано», решение идёт отдельной клиентской командой approval/decide или userInput/answer",
+   "fix": "Добавить BR-проверку двухшагового протокола receipt и решения, включая сохранение pending при обрыве."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-24",
+   "quote": "мост обрабатывает по имени метода только approval/request и userInput/request и не реагирует на approval/requested",
+   "fix": "Добавить BR-проверку исходного различия запросов и уведомлений approval, используемого при проектировании обработки и дедупликации."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-27",
+   "quote": "ApprovalChoice содержит choiceId (произвольная строка без enum), decision, label, scope, acceptsFeedback, rulePreview",
+   "fix": "Добавить BR-проверку свободного choiceId и выбора по decision из текущих availableChoices."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-28",
+   "quote": "ApprovalDecideParams требует approvalId, choiceId (из текущих availableChoices, иначе -32052), commandId (UUIDv7), requirementId (равен currentRequirementId, устаревший даёт -32053), sessionId",
+   "fix": "Добавить BR-проверку обязательных полей decide, terminal=false и перечисленных ошибок протокола."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-29",
+   "quote": "ApprovalMode задан закрытым enum allowAll, promptUnmatched, onRequest, denyUnmatched",
+   "fix": "Добавить BR-проверку enum режимов и серверного default при отсутствии поля или null."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-30",
+   "quote": "на 1.4.7 и 1.4.8 явные allowAll, promptUnmatched, onRequest, denyUnmatched приняты и вернулись как эффективные режимы",
+   "fix": "Добавить BR-проверку подтверждённой применимости явных режимов на исследованных версиях CLI."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-31",
+   "quote": "Отказ -32030 approval_mode_ceiling в bridge.log встречается только на serve 1.4.2",
+   "fix": "Добавить BR-проверку версии, на которой наблюдался ceiling, и отделения этого факта от текущих 1.4.7/1.4.8."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-32",
+   "quote": "смена режима действует со следующего действия и не решает уже ожидающий approval ретроактивно",
+   "fix": "Добавить BR-проверку ограничения session/setApprovalMode для уже ожидающего approval."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-33",
+   "quote": "влияние turn/cancel и turn/interrupt на запись pending approval в схеме не описано",
+   "fix": "Добавить BR-проверку неопределённой семантики отмены pending approval и её явного статуса допущения."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-34",
+   "quote": "userInput/interrupt прерывает запрос и останавливает ход",
+   "fix": "Добавить BR-проверку различия cancel и interrupt при обработке userInput."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-35",
+   "quote": "turn/completed несёт terminal (completed, failed, cancelled), необязательные durationMs, timeToFirstTokenMs, usage и error с kind, message, retryable, quota",
+   "fix": "Добавить BR-проверку фактических полей терминала и item/delta, включая необязательность телеметрии."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-36",
+   "quote": "1.4.8 добавляет уведомление turn/modelRetryScheduled, описанное как наблюдаемая до завершения хода пауза провайдерского повтора модели с полями attempt, maxAttempts, retryDelayMs, errorKind",
+   "fix": "Добавить BR-проверку автообновления CLI, эквивалентности исследованных схем и версии появления modelRetryScheduled."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-37",
+   "quote": "Реальный payload approval/request (toolName, subject, choiceId) на живом ходе не получен",
+   "fix": "Добавить BR-проверку отсутствующего живого payload и каталога инструментов как ограничения доказательств безопасности."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-39",
+   "quote": "Serve never times them out; tested for 360 s",
+   "fix": "Добавить BR-проверку, что сведения об отсутствии таймера approval относятся к внешнему наблюдению версии 1.3.0."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-40",
+   "quote": "все 27 случаев на muse-spark-* и оба случая на muse-wonder-full-1.0 проходят один и тот же код ServeRun.execute без ветвления по модели",
+   "fix": "Добавить BR-проверку общего пути spark/wonder и обусловленного им регрессионного охвата."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-46",
+   "quote": "Форвардер прокси 127.0.0.1:10816 (общий для нескольких приложений)",
+   "fix": "Добавить BR-проверку общей внешней зависимости форвардера и ограничений выводов о причине net-timeout."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-47",
+   "quote": "влияние пустых чанков, reasoning_content и SSE-комментариев на idle-watchdog клиента pi-ai в документации DSH не найдено",
+   "fix": "Добавить BR-проверку неподтверждённой реакции idle-watchdog и необходимости живой проверки."
+  },
+  {
+   "source": "/Users/aazhiry1/work/src/cli-agent-bridge/analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md#F-51",
+   "quote": "Рабочее дерево ветки dev содержит незакоммиченные изменения моста и тестов (server.py +1018 строк, тесты +1983 строки; 2941 вставок, 60 удалений)",
+   "fix": "Добавить BR-проверку незакоммиченного baseline и сохранения исходного состояния при отделении новой дельты и откате."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Входной-evidence",
+   "quote": "До решения открыть и сослаться в packet минимум на:",
+   "fix": "Добавить SK-T/SK-P-строки для обязательного входного evidence: точки входа, реальные границы, данные, версии, тесты, CI и последний успешный аналог; SK-A-10 проверяет лишь видимость скилла."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Входной-evidence",
+   "quote": "Название файла, класса или метода\nне включать в handoff, если их существование не подтверждено кодом.",
+   "fix": "Добавить SK-P-проверку подтверждения существования упоминаемых файлов, классов и методов."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Python-specific-boundaries",
+   "quote": "В `boundaries[]` указать allowed/forbidden dependencies и `verification_ids`.",
+   "fix": "Добавить SK-P-проверку обязательных полей boundaries, применяя фактическое устройство проекта."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Async-и-failure-semantics",
+   "quote": "Для dynamic/paginated/streaming источника определить аккумуляцию и независимый сигнал\nполноты; один snapshot не считается полным источником.",
+   "fix": "Добавить SK-P-проверку аккумуляции потоковых данных и независимого сигнала полноты."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Contract-deltas",
+   "quote": "Cross-repo mirror, compatibility window и mixed-version behavior указывать явно.",
+   "fix": "Добавить SK-P-проверку зеркала, окна совместимости и поведения смешанных версий."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Contract-deltas",
+   "quote": "Breaking change, auth/security model, новая major dependency и cross-service contract —\none-way decision с человеческим approval.",
+   "fix": "Добавить SK-P-проверку класса решения и человеческого approval для изменения модели безопасности."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Data-и-migrations",
+   "quote": "В `evolution` нельзя писать просто `NOT_APPLICABLE`: добавить проверяемую причину.",
+   "fix": "Добавить SK-P-проверку обоснования неприменимости миграций."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#ADR-и-proposals",
+   "quote": "Формат и путь ADR брать из `.agents/agents/docs.md` и существующего `docs/adr/INDEX.md`.",
+   "fix": "Добавить SK-P-проверку соответствия пути и формата ADR существующим правилам проекта."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#ADR-и-proposals",
+   "quote": "- ADR-full — дорогой откат, несколько репозиториев, NFR/security, спор или ≥3 опции.\n- Sensitivity check и PoC применять по командному ADR-full contract.",
+   "fix": "Добавить SK-P-проверку выбора ADR-full и применимых sensitivity check и PoC."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#ADR-и-proposals",
+   "quote": "Architect пишет proposal только в `architecture/proposals/`. Он не выполняет\n`uv add`, не меняет `pyproject.toml`, lockfile, CI, migrations и product code.",
+   "fix": "Добавить SK-P-проверку зоны записи Architect и отсутствия изменений продуктового дерева."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Views",
+   "quote": "Каждый `views[]` содержит вопрос и artifact reference.",
+   "fix": "Добавить SK-P-проверку минимально достаточных views и обязательных полей каждой view."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Python-verification-surface",
+   "quote": "Включить exact команды из репозитория.",
+   "fix": "Добавить SK-P-проверку существования и точности frozen-команд репозитория."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Python-verification-surface",
+   "quote": "Verifier обязан запустить полный frozen\nнабор; Coder log не заменяет независимое выполнение.",
+   "fix": "Добавить SK-P-проверку независимого выполнения полного frozen-набора Verifier."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Python-verification-surface",
+   "quote": "- bugfix: red без fix → green с fix;\n- новый contract: negative/boundary test;",
+   "fix": "Добавить SK-P-проверки чувствительности bugfix и контрактных проверок."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Python-verification-surface",
+   "quote": "- concurrency/time/network: повтор/seed/fault injection по риску;\n- architecture boundary: нарушение действительно делает arch-test красным.",
+   "fix": "Добавить SK-P-проверки чувствительности concurrency/time/network и применимых архитектурных границ."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Что-Architect-не-делает",
+   "quote": "- Не создаёт ветки и коммиты.\n- Не пишет готовую реализацию и не фиксирует внутренние сигнатуры без контрактной причины.",
+   "fix": "Добавить SK-P-проверку ограничений архитектурной роли на ветки, коммиты, реализацию и внутренние сигнатуры."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Что-Architect-не-делает",
+   "quote": "- Не устанавливает зависимости и не ослабляет существующие gates.\n- Не выдаёт self-eval или grep по заголовкам за architecture review.",
+   "fix": "Добавить SK-P-проверку сохранения gates, отсутствия установки зависимостей и подмены независимого ревью."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Эскалация",
+   "quote": "`BLOCKED`, если отсутствует NFR, schema ownership, compatibility policy, право на\nbreaking/security/dependency decision или способ проверить критичный contract.",
+   "fix": "Добавить SK-P-проверку стоп-условий и запрета передавать условный пакет как approved."
+  },
+  {
+   "source": "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md#Remote-first-контракт-репозитория",
+   "quote": "Для read-only роли это требование к handoff, а не\nразрешение писать в product worktree, пушить или сливать MR.",
+   "fix": "Добавить SK-P-проверку remote-first обязательства в handoff с сохранением read-only границ роли."
+  },
+  {
+   "source": "ЧЕК-ЛИСТ#Исключено/SK-A-11",
+   "quote": "в D/C1 подаются вердикты R1 a2, леджер и протокол",
+   "fix": "Приложить выдержку checklist-sources.md, подтверждающую исключение, и согласовать указание R1 a2 с фактически поданными вердиктами R1 a4."
+  }
+ ],
+ "bloat_flags": [],
+ "leakage_flags": [],
+ "tool_calls": 0,
+ "transport": "codex gpt-6.1-sol -c model_reasoning_effort=high",
+ "model": "gpt-6.1-sol",
+ "degraded": true,
+ "degraded_reason": "ВРЕМЕННАЯ деградация слота brief-review: Google-маршрут недоступен, Factory Droid 402 недельный лимит; запуск через codex exec по models.md §1.3",
+ "transport_attempts": [
+  {
+   "file": "review-v1-a1.md",
+   "result": "valid"
+  }
+ ],
+ "brief_sha256": "0b419da9403bba13e16627b2683f78c5b58be91c7d6087397b43765e899ce9fb",
+ "checklist_gen": 1
+}

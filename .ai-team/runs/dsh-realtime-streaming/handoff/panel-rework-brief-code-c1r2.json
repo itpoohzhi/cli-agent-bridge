@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-realtime-streaming",
+  "teamlead_cycle": 1,
+  "panel_slug": "dsh-realtime-streaming-code-panel-1-r2",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Code panel round 2 returned NEEDS WORK. 3 blocking findings and 1 non-blocking followup to be addressed by Coder.",
+  "findings_total": 4,
+  "instructions": [
+    {
+      "id": "RW-203",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "server.py",
+      "line_hint": "Handler._execute:3737, add_content/add_reasoning; Handler._serve_sse:5095, после _dispatch и до терминальной доставки",
+      "rule_ref": "RW-203; RW-009: прекращение записей мёртвому клиенту и освобождение T/L независимо от клиента; AD-003: честная live-доставка",
+      "action": "Передать состояние client_write_dead из _execute во внешний _serve_sse через состояние Handler либо итог out, сохранив его через промежуточные вызовы. Сбрасывать состояние в начале каждого запроса. После первого отказа live-записи content/reasoning прекращать дальнейшие попытки записи этому клиенту, включая keepalive и внешнюю терминальную доставку. При client_write_dead == True _serve_sse должен завершить доставку до отправки tool_call, finish_reason, usage, error и [DONE]. Сохранить короткий LIVE_WRITE_TIMEOUT_S и существующее завершение вычисления/commit с освобождением ресурсов; не подменять успешное вычисление ложным успехом на проводе.",
+      "acceptance": "При отказе sse_writer после уже отправленного content или reasoning состояние отказа видно в _serve_sse после _dispatch, даже если вычисление завершилось state=done, rc=0. После отказа нет новых попыток _emit: ни keepalive, ни терминальных finish_reason=stop/tool_calls, usage, error или [DONE]. T/L и delivery-budget освобождаются штатно. Следующий запрос не наследует client_write_dead; здоровый live-ход сохраняет успешные терминальные кадры.",
+      "source": "F-203 — «Повторное замечание: флаг client_write_dead остался локальным внутри _execute(), а внешний метод Handler._serve_sse() после выхода из _execute() пытается отправить в сокет терминальный stop, usage и [DONE]».",
+      "evidence": ".ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:423 (server.py:3737, локальный client_write_dead); .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:805 (server.py:5095, _serve_sse после _dispatch)",
+      "source_findings": [
+        "F-203"
+      ]
+    },
+    {
+      "id": "RW-208",
+      "priority": "blocking",
+      "criterion": "СООТВЕТСТВИЕ КОНТЕКСТУ",
+      "file": "server.py",
+      "line_hint": "Run.__init__:2660, создание Run.q; Run._publish:2725; Run._terminal:3396, buffered-публикация terminal",
+      "rule_ref": "AD-002/AD-003: live-поведение только при sse_writer is not None; RW-204: ограничение producer-очереди live-хода; инвариант сохранения non-stream контракта",
+      "action": "Применять RUN_QUEUE_MAXSIZE, неблокирующее отбрасывание события при queue.Full и связанную инвалидацию live_invalidated строго к Run с sse_writer is not None. При sse_writer is None сохранить прежнюю неограниченную очередь и публикацию всех buffered-событий без отбрасывания и без live-инвалидации из-за размера очереди. Исправление внести в Run.__init__/_publish, сохранив _serve_json nonstream flow и существующие общие лимиты памяти.",
+      "acceptance": "Non-stream запрос с sse_writer=None, публикующий на terminal более 1024 отдельных событий, успешно возвращает полный content/reasoning и прежний usage без потерь, зависания и ошибки live_invalidated. Для live-запроса очередь остаётся ограничена RUN_QUEUE_MAXSIZE, переполнение не блокирует producer и приводит к наблюдаемому fail-close без успешного finish/usage. _serve_json nonstream flow остаётся неизменённым.",
+      "source": "F-208 — «Регрессия non-stream контракта: ограничение емкости Run.q (RUN_QUEUE_MAXSIZE) и отбрасывающий put_nowait() применены ко всем вызовам, включая non-stream (sse_writer is None)».",
+      "evidence": ".ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:137 (server.py:2660, безусловная ограниченная очередь); .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:182 (server.py:2725, Run._publish); .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:303 (server.py:3396, terminal)",
+      "source_findings": [
+        "F-208"
+      ]
+    },
+    {
+      "id": "RW-211",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "server.py",
+      "line_hint": "Handler._execute:3936, ветка kind == done; Handler._serve_sse:5095 и 5165, обработка результата/исключения и SSE error-конверт",
+      "rule_ref": "AD-001: инвалидированный live-префикс не завершается успехом; RW-202: fail-close chat.completion.chunk; AD-003: корректный wire-формат live-ответа",
+      "action": "До parser.finish, fallback final_text и возврата успеха в ветке kind == done проверять run.live_invalidated и возвращать fail-close при выставленном флаге, в том числе при rc=0. Распространить error-конверт в _serve_sse на сбой хода/адаптера после отправленного live-префикса, включая state=error и необработанное исключение из dispatch, вместо сырого исключения или плоского объекта error. При доступном сокете отправлять ровно один chat.completion.chunk с теми же id/created/model, choices=[{index:0, delta:{}, finish_reason:null}] и объектом error с message/type/code/param, затем отдельный data: [DONE]. Сохранить код live_prefix_invalidated для этой причины, подавлять успешный finish и usage и не повторять уже отданный префикс. При мёртвом сокете соблюдать RW-203 и ничего больше не записывать.",
+      "acceptance": "После реально отправленного live content/reasoning адаптерный state=error, ненулевой terminal rc или исключение дают клиенту один валидный chat.completion.chunk с объектом error и неизменными id/created/model, пустой delta и finish_reason=null, после него отдельный [DONE]; отсутствуют успешный finish, usage, сырой сбой и повтор префикса. Сценарий run.live_invalidated=True с очередным kind=done и rc=0 завершается live_prefix_invalidated, без parser/fallback-доставки и без успеха. Мёртвый сокет не получает дополнительных попыток записи. Здоровый live-ход и non-stream контракт сохраняются.",
+      "source": "F-211 — «Fail-close envelope при терминальном сбое хода: если после отправки live-префикса произошёл сбой адаптера (state == error или exception), клиенту должен отправляться chat.completion.chunk с объектом error, а не сырой сбой; кроме того, событие kind == done не должно обходить флаг live_invalidated».",
+      "evidence": ".ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:588 (server.py:3936, done без проверки live_invalidated); .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:805 (server.py:5095, dispatch); .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/diff-r2.patch:846 (server.py:5165, конверт только для live_prefix_invalidated)",
+      "source_findings": [
+        "F-211"
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-212",
+      "text": "Расширить tests/test_live_stream.py явными регрессионными тестами: (1) вызвать _serve_sse с отказом live-записи content и отдельно reasoning, затем успешным завершением вычисления, проверить отсутствие любых дальнейших записей, особенно finish/usage/[DONE], и отсутствие переноса client_write_dead на следующий запрос; (2) выполнить non-stream buffered-запрос с более чем 1024 отдельными событиями на terminal и проверить полный ответ без потерь и live_invalidated; (3) гарантировать отправку live-префикса до state=error, ненулевого terminal rc и исключения адаптера, проверить единственный error-конверт chat.completion.chunk, общие id/created/model, finish_reason=null, отдельный [DONE] и отсутствие finish/usage; (4) отдельно воспроизвести live_invalidated=True перед kind=done с rc=0 и проверить fail-close. Добавить контроль здорового live-запроса и сохранения bounded-overflow поведения live-очереди. Синхронизацией доказать, что тесты действительно прошли нужные ветки; показать red до соответствующего фикса и green после него.",
+      "reason": "F-212: существующие тесты не проверяют подавление внешних терминальных кадров при сбое сокета, совместимость non-stream при >1024 событиях и wire-конверт ошибки после уже отданных live-байт; эти пробелы позволили F-203, F-208 и F-211 сохраниться при зелёном сьюте.",
+      "source_findings": [
+        "F-212"
+      ]
+    }
+  ],
+  "excluded": [],
+  "do_not_change": [
+    "server.py:_serve_json nonstream flow",
+    "core/metrics_normalizer.py:normalize_prompt_cache_details",
+    "adapters/muse_adapter.py"
+  ]
+}

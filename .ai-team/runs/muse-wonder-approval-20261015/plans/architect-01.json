@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "role": "architect",
+  "iteration": 1,
+  "objective": "Architecture Packet DRAFT для REQ-MUSE-002/003/004: approval без перезапуска хода (политика allowAll утверждена владельцем 2026-10-15, OPEN-07 закрыт), ограниченный ретрай net-timeout, живость долгих ходов",
+  "inputs_read": [
+    "/Users/aazhiry1/Мой диск/Context/AGENTS.md",
+    "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/protocol.md",
+    "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md",
+    "analysis/muse-wonder-approval-and-upstream-timeouts/handoff-architect.md",
+    "analysis/muse-wonder-approval-and-upstream-timeouts/evidence-ledger.md",
+    "analysis/muse-wonder-approval-and-upstream-timeouts/open-questions.md",
+    "analysis/muse-wonder-approval-and-upstream-timeouts/research-plan.md",
+    "/tmp/cel-runs/muse-wonder-serve-approval/explorer-A-bridge-code.md",
+    "/tmp/cel-runs/muse-wonder-serve-approval/explorer-B-runtime-cli.md",
+    "/tmp/cel-runs/muse-wonder-serve-approval/explorer-C-client-prior.md",
+    "/tmp/cel-runs/muse-wonder-serve-approval/explorer-D-msp-approval.md",
+    "/tmp/cel-runs/muse-wonder-serve-approval/bench/results.tsv",
+    "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md",
+    ".ai-team/runs/muse-wonder-foreign-session-20261014/architecture-packet.json",
+    ".ai-team/runs/muse-wonder-foreign-session-20261014/arch-spec.md",
+    ".ai-team/runs/muse-wonder-approval-20261015/task.json",
+    ".ai-team/runs/muse-wonder-approval-20261015/route-manifest.json",
+    "bridges/muse-bridge/server.py (символы approval, _content_started, TIMEOUT_S, keepalive)",
+    "tests/test_muse_bridge_killpg.py (символы approval, keepalive, install_protocol_wrapper)",
+    "docs/adr/INDEX.md"
+  ],
+  "plan_kind": "full",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сопоставить handoff [F-01]..[F-52] с кодом bridges/muse-bridge/server.py и тестами, перепроверить путь+символ не менее трёх фактов",
+      "expected_evidence": "evidence EVD-NNN в пакете со ссылками путь+символ и отметкой о выборочной перепроверке",
+      "status": "DONE",
+      "actual_evidence": "EVD-001..EVD-022 в architecture-packet.json; перепроверены F-01, F-08, F-12, F-15, F-16/F-17, F-20, F-49 по server.py и тестам 2026-10-15, строки совпадают с ledger"
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Решить ветку REQ-MUSE-002: граница ApprovalPolicy, allowAll на session/start по решению владельца, fallback approval/decide внутри хода, AD one-way APPROVED",
+      "expected_evidence": "AD-001 APPROVED и AD-002 в пакете с alternatives, drivers, consequences и confirmation; ASM по OPEN-07 VALIDATED с evidence на owner-decisions.md",
+      "status": "DONE",
+      "actual_evidence": "AD-001 APPROVED allowAll (approval APPROVED, evidence owner-decisions.md), AD-002 receipt+decide внутри хода с границами 10 и 3, ASM-009 VALIDATED, ADR-proposal 0003 в architecture/proposals с materialization"
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Решить ветки REQ-MUSE-003 и REQ-MUSE-004: бюджеты ретрая и общий дедлайн, граница _content_started, live reasoning_content и keepalive",
+      "expected_evidence": "AD по ретраю и живости в пакете, границы BND и один аддитивный contract delta с обоснованием совместимости",
+      "status": "DONE",
+      "actual_evidence": "AD-003 транзиентный повтор не более 2 в общем бюджете TIMEOUT_S, AD-004 live reasoning при сохранённом keepalive, BND-001..BND-005, единственный CD-001 с обоснованием по клиенту DSH"
+    },
+    {
+      "id": "RP-04",
+      "kind": "decide",
+      "action": "Зафиксировать quality scenarios из таймингов ledger и бенча, threat model, risks, evolution с деплоем launchd и откатом",
+      "expected_evidence": "quality_scenarios с response_measure, threat_model, risks и evolution в пакете; каждое утверждение связано с VER-ID",
+      "status": "DONE",
+      "actual_evidence": "QA-001..QA-008 на цифрах 275/412 с, 20-31.5 с, 51.1-281.3 с, 1800/1900 с; threat_model required THREAT-001..004; RISK-001..008; evolution с kickstart com.user.dsh-muse-bridge и откатом из бэкапа"
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Собрать architecture-packet.json и arch-spec.md, прогнать validate_architecture_packet.py в фазе draft до зелёного результата",
+      "expected_evidence": "вывод валидатора пакета в receipts/architect.json и в финальном отчёте",
+      "status": "DONE",
+      "actual_evidence": "architecture/architecture-packet.json и architecture/arch-spec.md собраны; validate_architecture_packet.py --phase draft PASS в том числе с --run-dir; финальный хэш после записи role_plan в receipts/architect.json"
+    },
+    {
+      "id": "RP-06",
+      "kind": "report",
+      "action": "Закрыть ROLE PLAN фазой after с actual_evidence, записать sha256 плана в packet.role_plan и сформировать receipts/architect.json",
+      "expected_evidence": "validate_role_plan.py --phase after PASS и sha256 плана, совпадающий с packet.role_plan",
+      "status": "DONE",
+      "actual_evidence": "Этот файл закрыт статусами DONE; его sha256 записан в packet.role_plan внешним шагом закрытия, receipts/architect.json содержит хэши плана, пакета, спецификации и ADR"
+    },
+    {
+      "id": "RP-07",
+      "kind": "decide",
+      "action": "Перевести Architecture Packet в APPROVED перед ARCH_GATE: утвердить двусторонние AD-002, AD-003, AD-004, AD-006 в зоне Architect, установить status пакета APPROVED и привести continuable-допущения к требованиям валидатора approved без их валидации",
+      "expected_evidence": "validate_architecture_packet.py --phase approved PASS с --run-dir и --role-plan, validate_role_plan.py --phase after PASS, sha256 этого плана равен packet.role_plan.sha256",
+      "status": "DONE",
+      "actual_evidence": "AD-002, AD-003, AD-004, AD-006 переведены PROPOSED -> APPROVED без изменения choice/alternatives/confirmation, status пакета DRAFT -> APPROVED, ASM-001..ASM-008 continuable переведены OPEN -> ASSUMED по требованию validate_assumptions фазы approved с сохранением statement, class и evidence_ids (не VALIDATED, вопросы Q-001..Q-008 остаются), ASM-009 VALIDATED без изменений; sha256 финального плана записан в packet.role_plan, валидаторы approved и after зелёные, вывод в receipts/architect.json"
+    }
+  ],
+  "stop_conditions": [
+    "отсутствует handoff аналитика (research-plan, evidence-ledger, handoff-architect) - вернуть BLOCKED",
+    "политика approval OPEN-07 решена владельцем 2026-10-15 (allowAll, owner-decisions.md): решение не расширять, флаги --disable-write --disable-shell и песочницу сохранить",
+    "внешний OpenAI-контракт моста заморожен: contract_deltas только аддитивные SSE-кадры внутри существующих полей",
+    "продуктовый код не менять: запись только в .ai-team/runs/muse-wonder-approval-20261015/"
+  ],
+  "deviations": [
+    "Финальный проход перед ARCH_GATE: валидатор approved запрещает любой OPEN (validate_assumptions), поэтому continuable ASM-001..ASM-008 переведены OPEN -> ASSUMED вместо буквального сохранения OPEN из брифа; формулировки, class continuable и отсутствие evidence сохранены, валидацией это не является. Один и тот же файл пакета не может одновременно пройти draft и approved из-за взаимоисключающих требований к status (draft: DRAFT/BLOCKED, approved: APPROVED) — draft PASS зафиксирован на baseline до перевода."
+  ]
+}

@@ -1,0 +1,738 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-CACHE-001",
+  "run_id": "dsh-cache-hit-onboarding",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "DRAFT",
+  "role_plan": {
+    "path": ".ai-team/runs/dsh-cache-hit-onboarding/plans/architect-01.json",
+    "sha256": "c362415ff00997e7d2eae54aac8ad451205c45f22d100165e74dbedce6f6056d"
+  },
+  "requirement_ids": [
+    "REQ-CACHE-001"
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "~/.dsh/bridges/agy-bridge/server.py:584-705,1003-1009,1273-1289",
+      "claim": "[F-01][F-02][F-04][F-05][F-07] agy-bridge берёт result.usage из CLI и отдаёт только prompt/completion/total; cache-ключей на выходе нет, SSE usage идёт только при ненулевых prompt/completion."
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "~/.local/bin/droid (byte offsets 158975683, 158976174); live: /tmp/cel-runs/cache-hit-telemetry-20261012-2326/live-droid-verification.md",
+      "claim": "[F-11][F-36] Droid CLI completion.usage содержит input/output/cache_read_input_tokens/cache_creation_input_tokens; один живой completion дал read=19990, create=0, input=51407, output=13453 (границы накопления и per-turn семантика не доказаны)."
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "~/.local/bin/droid (byte offsets 149448820, 149436940)",
+      "claim": "[F-12][F-13] Upstream-handlers Droid вычитают cache read/create из input (OpenAI Responses) и сводят missing/null к 0 (Anthropic); inclusive/exclusive семантика input_tokens в CLI/RPC не установлена (OPEN-02)."
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "~/.hermes/droid-cli-proxy/server.py:303,346,448,612-669",
+      "claim": "[F-14][F-15][F-16][F-17] Proxy сохраняет completion.usage, но normal-ответ отдаёт 3 ключа без cache, а SSE вообще не содержит usage."
+    },
+    {
+      "id": "EVD-005",
+      "kind": "code",
+      "ref": "server.py:2164-2177 (_map_usage), 3295, 3632",
+      "claim": "[F-18][F-19] Перепроверено 2026-10-12: _map_usage принимает tokenUsage терминального agent_turn_completed и отдаёт input/output/cache_creation_tokens/cache_read_tokens/thinking_tokens; отсутствующее или нецелое значение превращается в 0 (unknown неотличим от измеренного нуля)."
+    },
+    {
+      "id": "EVD-006",
+      "kind": "code",
+      "ref": "core/backend_adapter.py:Usage (input_tokens, output_tokens); adapters/droid_adapter.py:109",
+      "claim": "[F-20] Перепроверено 2026-10-12: DTO Usage содержит только input_tokens/output_tokens, DroidAdapter.execute_turn собирает Usage(usage.get('input_tokens',0), usage.get('output_tokens',0)); cache-поля теряются на границе адаптера."
+    },
+    {
+      "id": "EVD-007",
+      "kind": "code",
+      "ref": "server.py:4527-4540 (_dispatch: asdict(result.usage)), 4575-4607 (_serve_json), 4722-4757 (_serve_sse)",
+      "claim": "[F-21] Перепроверено 2026-10-12: сериализаторы normal и SSE строят usage из трёх ключей; SSE-usage уходит после finish-chunk только при prompt_toks или compl_toks != 0 (комментарий в коде: нулевой usage не должен давать ложные 0 tok/s и 0%); usage не пишется в state чата (server.py: usage встречается только в _map_usage, _execute/_run_once, строке лога usage sess= и сериализаторах)."
+    },
+    {
+      "id": "EVD-008",
+      "kind": "command",
+      "ref": "rg -n 'stream_options|include_usage|prompt_tokens_details|cached_tokens' --glob '*.py' (repo cli-agent-bridge, 2026-10-12)",
+      "claim": "В репозитории нет обработки stream_options/include_usage и нет prompt_tokens_details: SSE-usage мост выдаёт независимо от запроса клиента."
+    },
+    {
+      "id": "EVD-009",
+      "kind": "code",
+      "ref": "/Applications/DeepSeek Harness.app/Contents/Resources/app.asar::dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js:1160-1184,565-582,362-371",
+      "claim": "[F-22][F-24][F-25] DSH 0.2.0-rc.2 (pi-ai 0.87.1) читает cache-read по приоритету prompt_tokens_details.cached_tokens, затем prompt_cache_hit_tokens, затем cached_tokens; uncached = max(0, prompt - read - write); просит stream_options.include_usage и читает chunk.usage до проверки choice."
+    },
+    {
+      "id": "EVD-010",
+      "kind": "code",
+      "ref": "app.asar::dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js:1371-1377,1559-1581; dsh-token-meter/lib/index.js:346-444; dsh-client-ui-chat/lib/client.js:6321-6333,6983-6993; ~/.dsh/profiles/desktop/node_modules/dsh-context/lib/client.js:1492-1514",
+      "claim": "[F-26][F-27][F-28][F-29][F-30] Клиент кладёт cache read/write в usage только при положительном значении, считает cacheRatio = read / (uncached + read + write), скрывает значение при нулевом знаменателе или отсутствующем read; нулевой cache и отсутствие cache на клиенте неразличимы."
+    },
+    {
+      "id": "EVD-011",
+      "kind": "code",
+      "ref": "~/.hermes/config.yaml:496-517",
+      "claim": "[F-34] Hermes droid-cli потребляет мосты как api_mode=chat_completions; renderer Hermes Desktop не установлен (OPEN-06)."
+    },
+    {
+      "id": "EVD-012",
+      "kind": "code",
+      "ref": "server.py:3666,3355,4374",
+      "claim": "[F-35] Repo bridge держит chat lock на prompt_cache_key и выбирает hot/restore/cold-rebase; reuse ветки не доказывает provider cache hit."
+    },
+    {
+      "id": "EVD-013",
+      "kind": "document",
+      "ref": "README.md:51,186; ruff.toml; pyrightconfig.json (pyproject.toml отсутствует; tests/ — stdlib unittest)",
+      "claim": "Командный гейт репозитория: python3 -m unittest, ruff check, basedpyright. pytest/uv в репозитории не заведены; бриф упоминает pytest, фактический раннер — unittest. Базовая линия 2026-10-12: .venv/bin/ruff format --check = 45 files already formatted, ruff check = All checks passed."
+    },
+    {
+      "id": "EVD-014",
+      "kind": "document",
+      "ref": "tests/fake_droid.py:537-678; tests/test_rpc_core.py:62",
+      "claim": "Тестовый fake_droid отдаёт tokenUsage только с inputTokens/outputTokens (cache-полей нет); комментарий test_rpc_core фиксирует, что usage берётся из tokenUsage терминального события ПО ХОДУ, а не кумулятив реестра."
+    },
+    {
+      "id": "EVD-015",
+      "kind": "document",
+      "ref": ".ai-team/runs/dsh-cache-hit-onboarding (бриф architect, раздел 4-5, 2026-10-12)",
+      "claim": "Текущая задача явно требует расширить usage-объект OpenAI-ответа (prompt_tokens_details.cached_tokens), поэтому contract_deltas непуст по разрешению scope-and-contracts.md; других изменений согласованного внешнего контракта нет."
+    },
+    {
+      "id": "EVD-016",
+      "kind": "command",
+      "ref": "~/.config/agy-launch/agy-cli.sh --help (rc=42, proxy DOWN); open-questions.md OPEN-01",
+      "claim": "[F-09] Актуального sample agy result.usage нет: штатный launcher остановлен guard. Семантика agy cache не установлена."
+    }
+  ],
+  "risk_triggers": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "input_tokens/inputTokens из Droid RPC/CLI включают cache read (prompt inclusive), поэтому prompt_tokens=input_tokens остаётся знаменателем и cached_tokens <= prompt_tokens. Класс: continuable. Проверка: VER-005, VER-007; при опровержении меняется одна точка (core/usage_wire.py) новым Architect delta.",
+      "status": "OPEN",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-002",
+        "EVD-003"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "statement": "Для моделей Droid клиент DSH/Hermes ходит через repo bridge (cli-agent-bridge), а не через ~/.hermes/droid-cli-proxy (OPEN-05). Класс: continuable. Проверка: VER-007 (активный base URL/порт чата владельца).",
+      "status": "OPEN",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-004",
+        "EVD-009",
+        "EVD-011"
+      ]
+    },
+    {
+      "id": "ASM-003",
+      "statement": "agy upstream не публикует cache-поля в result.usage, либо их семантика неизвестна; ветка agy cache остаётся вне реализации до ответа на OPEN-01. Класс: blocker (только для agy-ветки).",
+      "status": "OPEN",
+      "class": "blocker",
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-016"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "В каком wire-формате мост отдаёт cache hit клиентам OpenAI-compatible (DSH, Hermes)?",
+      "choice": "Добавить в объект usage (normal и SSE) необязательное поле prompt_tokens_details.cached_tokens (int >= 0) при известном значении; prompt_tokens, completion_tokens, total_tokens не меняются; cache creation на wire не выдаётся.",
+      "alternatives": [
+        "Верхнеуровневые Anthropic-ключи usage.cache_read_input_tokens / cache_creation_input_tokens",
+        "DeepSeek-ключ usage.prompt_cache_hit_tokens",
+        "Нестандартные HTTP-заголовки или отдельное SSE-событие с телеметрией"
+      ],
+      "drivers": [
+        "DSH читает prompt_tokens_details.cached_tokens первым по приоритету [F-24]",
+        "Совместимость со спецификацией OpenAI: поле аддитивно и опционально",
+        "Контракт расширяется только по явному указанию текущей задачи (EVD-015)",
+        "Семантика cache creation не доказана (OPEN-02), выдавать её клиенту нельзя"
+      ],
+      "consequences": [
+        "Клиенты, игнорирующие неизвестные поля usage, не затронуты",
+        "cache creation остаётся только во внутреннем DTO до ответа на OPEN-02",
+        "Hermes Desktop получает поле, но его отображение неизвестно (OPEN-06)"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_cache_usage tests.test_bridge_http -v",
+        "expected": "exit 0; normal и SSE ответы содержат usage.prompt_tokens_details.cached_tokens при известном cache read и не содержат при unknown"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Как сохранить cache-счётчики на внутренней границе от RPC mapper до HTTP serializer, не теряя различия unknown и измеренного нуля?",
+      "choice": "Расширить DTO core.backend_adapter.Usage полями cache_read_tokens и cache_creation_tokens типа int | None (None = unknown, по умолчанию None); _map_usage возвращает None для отсутствующих или нецелых cache-значений и int для явных; DroidAdapter переносит поля в Usage; muse и прочие адаптеры остаются на None; в существующую строку журнала usage sess= добавляется cache_read как целое число или '-'.",
+      "alternatives": [
+        "Передавать сырой dict usage мимо TurnResult (минуя типизированный DTO)",
+        "Оставить 0 по умолчанию для cache-полей и различать unknown флагом",
+        "Читать cache из побочного канала out['result'] без изменения DTO"
+      ],
+      "drivers": [
+        "Честная обработка missing/zero: фиктивные данные запрещены",
+        "Однонаправленная зависимость adapters -> core и типизированный seam адаптера (ADR 0002)",
+        "usage берётся из tokenUsage терминального события по ходу, не кумулятив (EVD-014)"
+      ],
+      "consequences": [
+        "Все потребители Usage получают значения по умолчанию None, существующие вызовы Usage(a, b) не ломаются",
+        "asdict(result.usage) в _dispatch начинает нести cache-поля в out['usage'] без смены остального контракта",
+        "Журнал получает только целые числа или '-', содержимое сообщений в него не попадает"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_cache_usage tests.test_backend_contract -v",
+        "expected": "exit 0; _map_usage сохраняет None/0/N раздельно; Usage по умолчанию без cache; граница core не импортирует server"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Как финализировать usage в SSE так, чтобы cache hit дошёл до клиента, не ломая существующий поток?",
+      "choice": "Оставить текущие место и условие SSE-usage (один chunk после finish-chunk, до [DONE], только при ненулевых prompt/completion) и построить его тем же сериализатором, что и normal-ответ; gating по stream_options.include_usage не вводить.",
+      "alternatives": [
+        "Строгий OpenAI-режим: отдельный chunk с пустым choices и gating по stream_options.include_usage",
+        "Выдавать usage-chunk при любом известном cache, даже если prompt/completion нулевые",
+        "Отдельное SSE-событие телеметрии вне стандарта OpenAI"
+      ],
+      "drivers": [
+        "DSH читает chunk.usage до проверки choice и принимает текущую форму [F-25]",
+        "Скрытое ограничение: нулевой usage не должен превращаться в ложные 0 tok/s и 0% (комментарий server.py)",
+        "Минимальное изменение: меняется только содержимое usage, не последовательность кадров"
+      ],
+      "consequences": [
+        "Мост по-прежнему выдаёт usage и клиентам без include_usage (поведение сохраняется)",
+        "Невозможность отличить завершение потока по пустому choices остаётся прежней",
+        "Для proxy (SSE без usage) требуется отдельная доработка вне репозитория (AD-005)"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_bridge_http -v",
+        "expected": "exit 0; ровно один usage-chunk перед [DONE]; порядок кадров неизменен; при нулевых токенах usage-chunk отсутствует"
+      }
+    },
+    {
+      "id": "AD-004",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Как вычислять wire-значение cached_tokens и что делать с unknown, zero и нарушением инварианта?",
+      "choice": "Чистая функция core/usage_wire.py (без I/O, не импортирует server): prompt_tokens=input_tokens без изменений; prompt_tokens_details.cached_tokens выдаётся только если cache_read_tokens является int >= 0 и <= prompt_tokens; явный ноль выдаётся как 0; None даёт отсутствие prompt_tokens_details; при cache_read > prompt_tokens details не выдаётся, пишется строка журнала со slug usage_cache_inconsistent; значения не зажимаются и не выводятся из других полей; hit percentage мост не считает.",
+      "alternatives": [
+        "Зажимать cached_tokens до prompt_tokens (clamp)",
+        "Выдавать prompt_tokens = input_tokens + cache_read + cache_creation (exclusive-режим)",
+        "Всегда выдавать prompt_tokens_details с нулём при unknown"
+      ],
+      "drivers": [
+        "Клиент вычисляет ratio сам и вычитает cache из prompt [F-24][F-28]; искажённый знаменатель даёт ложный процент",
+        "Семантика input_tokens не доказана (ASM-001/OPEN-02): нарушение инварианта должно быть видимым, а не маскироваться",
+        "Единая точка изменения, если ASM-001 опровергнут"
+      ],
+      "consequences": [
+        "Если input окажется exclusive, wire-значение отсутствует до нового Architect delta, а не искажено",
+        "Клиент DSH положительно фильтрует cache (positive-only), поэтому явный ноль на клиенте неотличим от отсутствия [F-26]; это ограничение клиента вне scope",
+        "Все сериализаторы моста используют одну функцию, расхождение normal и SSE исключено по построению"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_cache_usage -v",
+        "expected": "exit 0; таблица случаев None/0/N/N>prompt/bool/str/отрицательное даёт ожидаемые wire-значения; строка журнала usage_cache_inconsistent при N>prompt"
+      }
+    },
+    {
+      "id": "AD-005",
+      "status": "PROPOSED",
+      "kind": "two-way",
+      "question": "Где и кем реализуются изменения в мостах вне этого репозитория (~/.hermes/droid-cli-proxy, ~/.dsh/bridges/agy-bridge)?",
+      "choice": "В этом репозитории реализуется только repo bridge. Proxy и agy-bridge — отдельные развёрнутые артефакты: изменения идут отдельными задачами с авторизацией владельцев, по тому же wire-контракту (CD-001) и общим контрактным фикстурам; agy-ветка ждёт ответа на OPEN-01.",
+      "alternatives": [
+        "Править proxy и agy-bridge в рамках этой же задачи",
+        "Сделать proxy тонким клиентом repo bridge (общая сериализация)"
+      ],
+      "drivers": [
+        "Запись вне репозитория и вне scope требует отдельного права",
+        "OPEN-05: активный путь DSH неизвестен, репо-мост покрывает приоритетный путь",
+        "OPEN-01 блокирует agy-семантику"
+      ],
+      "consequences": [
+        "Если DSH на самом деле ходит через proxy (ASM-002 неверно), клиентский эффект будет нулевым до отдельной задачи",
+        "Контракт CD-001 служит эталоном для зеркал, расхождение версий контролируется контрактным тестом"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "manual",
+        "command": null,
+        "expected": "Владелец подтверждает разбиение на отдельные задачи и роли владельцев proxy и agy-bridge; активный путь DSH установлен по VER-007"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "Droid CLI/RPC терминальное событие хода с cache read = N",
+      "stimulus": "ход завершается и клиент получает normal-ответ или SSE",
+      "environment": "repo bridge, модель Droid, keyed-чат (hot/restore/cold)",
+      "artifact": "RPC mapper -> DTO Usage -> HTTP serializer",
+      "response": "wire usage.prompt_tokens_details.cached_tokens равен N; полей prompt/completion/total не меняется",
+      "response_measure": "Совпадение на 100% фикстур (cache N>0, явный 0, N=prompt) для normal и SSE; потерь значения 0; значение на живом ходе равно значению в журнале моста для того же хода",
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "reliability",
+      "source": "Клиент DSH с stream=true и include_usage=true",
+      "stimulus": "поток завершается успешно, в том числе при параллельных чатах",
+      "environment": "repo bridge под нагрузкой до MAX_CONCURRENT параллельных keyed-чатов",
+      "artifact": "SSE serializer (_serve_sse)",
+      "response": "ровно один usage-chunk после finish-chunk и до [DONE]; [DONE] последний кадр; порядок кадров не изменился",
+      "response_measure": "0 нарушений порядка и числа usage-chunk в тестовых 20 последовательных и 4 параллельных потоках (размеры прогонов — тестовый дизайн, не NFR: численные пороги не заданы, OPEN-07)",
+      "verification_ids": [
+        "VER-002",
+        "VER-006",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "quality": "compatibility",
+      "source": "Существующие клиенты и адаптеры без cache-данных (muse, старые клиенты OpenAI)",
+      "stimulus": "ответ строится при cache unknown",
+      "environment": "repo bridge, все зарегистрированные адаптеры",
+      "artifact": "usage-объект normal и SSE ответов",
+      "response": "usage байт-в-байт идентичен текущему; существующие тесты проходят без правок ожиданий",
+      "response_measure": "Полный python3 -m unittest exit 0; snapshot-сравнение usage при cache unknown даёт равенство; Hermes Desktop без регрессии на живом ходе",
+      "verification_ids": [
+        "VER-002",
+        "VER-003",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "QA-004",
+      "quality": "testability",
+      "source": "Разработчик/Verifier",
+      "stimulus": "подача граничных значений cache read в mapper и serializer",
+      "environment": "unit-тесты без запуска CLI",
+      "artifact": "_map_usage, Usage, core/usage_wire.py",
+      "response": "unknown, явный 0, N, N>prompt, bool, строка, отрицательное обрабатываются по таблице AD-004 без синтеза данных",
+      "response_measure": "100% строк таблицы дают ожидаемый результат; каждый тест краснеет на нетронутом коде (red -> green)",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "QA-005",
+      "quality": "operability",
+      "source": "Владелец, разбирающий cache hit по журналу моста",
+      "stimulus": "завершён ход Droid",
+      "environment": "рабочий журнал repo bridge",
+      "artifact": "строка журнала usage sess=",
+      "response": "строка содержит cache_read как целое или '-', без содержимого сообщений и ключей",
+      "response_measure": "Каждая строка usage содержит поле cache_read; в журнале нет текста prompt/ответа (проверка тестом на фикстуре)",
+      "verification_ids": [
+        "VER-002",
+        "VER-005"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "CLI stream parser: server.py::_map_usage и разбор terminal-события agent_turn_completed",
+      "responsibility": "Извлечь числовой usage хода из события Droid и сохранить различие unknown (None) и измеренного значения; не форматировать HTTP и не вычислять проценты.",
+      "allowed_dependencies": [
+        "Payload tokenUsage терминального RPC-события Droid",
+        "Стандартная библиотека Python"
+      ],
+      "forbidden_dependencies": [
+        "HTTP serializer и форматы OpenAI",
+        "Синтез cache-значений из других полей",
+        "Клиент-специфичная логика DSH/Hermes"
+      ],
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "DTO/Internal TurnResult: core/backend_adapter.py::Usage и adapters/droid_adapter.py",
+      "responsibility": "Нести типизированный usage хода между адаптером и фасадом, включая cache_read_tokens и cache_creation_tokens как int | None.",
+      "allowed_dependencies": [
+        "dataclasses и typing",
+        "adapters.* -> core.* (однонаправленно)"
+      ],
+      "forbidden_dependencies": [
+        "Импорт server из core или adapters",
+        "Производные величины (ratio, hit percentage)",
+        "Значения по умолчанию 0 для cache-полей"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "BND-003",
+      "component": "HTTP/SSE serializer: server.py::_serve_json, _serve_sse и core/usage_wire.py",
+      "responsibility": "Превратить Usage в wire-объект usage единой чистой функцией и встроить его в normal-ответ и единственный SSE usage-chunk; порядок кадров и условие ненулевых токенов сохраняются.",
+      "allowed_dependencies": [
+        "core/usage_wire.py (чистая функция, без I/O)",
+        "Существующий HTTP-слой фасада"
+      ],
+      "forbidden_dependencies": [
+        "Нестандартные верхнеуровневые поля usage",
+        "Вычисление hit percentage",
+        "Gating по stream_options без отдельного решения",
+        "Логирование содержимого сообщений"
+      ],
+      "verification_ids": [
+        "VER-002",
+        "VER-006"
+      ]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "api",
+      "producer": "cli-agent-bridge HTTP POST /v1/chat/completions (normal usage и SSE usage-chunk)",
+      "consumer": "DeepSeek Harness Desktop, Hermes Desktop, прочие OpenAI-compatible клиенты",
+      "change": "В объект usage добавляется необязательное prompt_tokens_details: {cached_tokens: int >= 0}; присутствует только при известном cache read не больше prompt_tokens; существующие ключи prompt_tokens, completion_tokens, total_tokens и условие выдачи SSE-usage не меняются.",
+      "compatibility": "Аддитивно и обратно совместимо со спецификацией OpenAI; при cache unknown (muse, старые данные) usage идентичен текущему; откат удалением поля без преобразования данных; зеркала в proxy и agy-bridge вне репозитория (AD-005).",
+      "verification_ids": [
+        "VER-002",
+        "VER-005",
+        "VER-006"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "context",
+      "question": "Через какие слои проходят cache-счётчики от CLI до клиента и где они теряются сейчас?",
+      "artifact_ref": "architecture/architecture-packet.md#view-001"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "dynamic",
+      "question": "В каком порядке мост завершает SSE-поток и где вставляется usage с cached_tokens?",
+      "artifact_ref": "architecture/architecture-packet.md#view-002"
+    },
+    {
+      "id": "VIEW-003",
+      "type": "component",
+      "question": "Какие компоненты repo bridge меняются и какие зависимости между ними разрешены?",
+      "artifact_ref": "architecture/architecture-packet.md#view-003"
+    }
+  ],
+  "evolution": {
+    "compatibility": "Аддитивное необязательное поле usage.prompt_tokens_details.cached_tokens; все существующие ключи и порядок SSE-кадров сохраняются; при cache unknown usage идентичен текущему; клиенты, игнорирующие неизвестные поля, не затронуты.",
+    "migration": "NOT_APPLICABLE: usage не хранится в state чатов и нигде не персистится (server.py: usage встречается только в _map_usage, _execute/_run_once, строке лога и сериализаторах, EVD-007), схемы данных и миграций нет.",
+    "rollout": "1) Coder пишет красные тесты (tests/test_cache_usage.py, расширение tests/fake_droid.py cache-полями, кейсы в tests/test_bridge_http.py); 2) core/usage_wire.py, DTO, _map_usage, DroidAdapter; 3) сериализаторы normal и SSE, строка журнала; 4) полный unittest, ruff, basedpyright; 5) перезапуск repo bridge в согласованное владельцем окно (рестарт закрывает резидентные процессы Droid, горячие сессии восстанавливаются по plan restore); 6) живые проверки VER-005..009.",
+    "rollback": "Откатить коммит и перезапустить repo bridge: поле prompt_tokens_details исчезает, данные не преобразуются, state чатов не затронут."
+  },
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "ASM-001 неверен: input_tokens в RPC/CLI exclusive от cache, wire-знаменатель искажает ratio или cached_tokens > prompt_tokens.",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Инвариант cached <= prompt в core/usage_wire.py: при нарушении поле не выдаётся и пишется usage_cache_inconsistent; живая проверка на повторном ходе; смена формулы одной точкой через новый Architect delta.",
+      "verification_ids": [
+        "VER-001",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Клиент DSH фильтрует cache положительными значениями и скрывает 0/unknown, поэтому честный ноль выглядит как отсутствие; пользователь ожидает видеть 0%.",
+      "probability": "high",
+      "impact": "low",
+      "mitigation": "Ограничение клиента вынесено за scope и описано; значение доступно в журнале моста (cache_read); живая проверка отображения.",
+      "verification_ids": [
+        "VER-007"
+      ]
+    },
+    {
+      "id": "RISK-003",
+      "scenario": "Hermes Desktop или другой клиент неожиданно реагирует на новое поле usage (renderer не изучен, OPEN-06).",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Поле аддитивно по спецификации OpenAI; живая проверка Hermes; откат удалением поля.",
+      "verification_ids": [
+        "VER-008"
+      ]
+    },
+    {
+      "id": "RISK-004",
+      "scenario": "DSH фактически ходит к Droid через proxy, а не через repo bridge (OPEN-05): правка репозитория не даёт клиентского эффекта.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "До сдачи установить активный endpoint чата (VER-007); proxy-ветка вынесена отдельной задачей (AD-005) по тому же контракту.",
+      "verification_ids": [
+        "VER-007"
+      ]
+    },
+    {
+      "id": "RISK-005",
+      "scenario": "Правка сериализатора ломает порядок SSE-кадров, число usage-chunk или нулевой usage превращается в ложные 0 tok/s.",
+      "probability": "low",
+      "impact": "high",
+      "mitigation": "Меняется только содержимое usage; кадры и условие ненулевых токенов сохранены; тесты порядка кадров и нулевого usage; параллельный живой прогон.",
+      "verification_ids": [
+        "VER-002",
+        "VER-006",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "RISK-006",
+      "scenario": "fake_droid не эмитит cache-поля, тесты зелёные вхолостую и не ловят потерю данных.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Coder расширяет fake_droid cache-полями; каждый новый тест обязан краснеть на нетронутом коде (red -> green).",
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    },
+    {
+      "id": "RISK-007",
+      "scenario": "cache_read в tokenUsage окажется накопительным по процессу, а не по ходу (OPEN-02), и wire-значение завысит cache хода.",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Живой повторный ход в hot-сессии с сравнением значений хода 1 и хода 2 с логом моста; расхождение возвращает вопрос Architect.",
+      "verification_ids": [
+        "VER-005"
+      ]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-CACHE-001",
+        "QA-001",
+        "QA-004",
+        "BND-001",
+        "BND-002",
+        "RISK-001",
+        "RISK-006"
+      ],
+      "kind": "command",
+      "command": "python3 -m unittest tests.test_cache_usage -v",
+      "expected": "exit 0; таблица unknown/0/N/N>prompt/bool/str/отрицательное для _map_usage, Usage, core/usage_wire.py и DroidAdapter; каждый тест краснеет на нетронутом коде",
+      "environment": "python3 (3.14, как в tests/__pycache__) из корня репозитория, без запуска CLI",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-CACHE-001",
+        "QA-001",
+        "QA-002",
+        "QA-003",
+        "QA-005",
+        "BND-003",
+        "CD-001",
+        "RISK-005",
+        "RISK-006"
+      ],
+      "kind": "command",
+      "command": "python3 -m unittest tests.test_bridge_http -v",
+      "expected": "exit 0; normal и SSE ответы с fake_droid несут prompt_tokens_details.cached_tokens при cache read и не несут при unknown; один usage-chunk перед [DONE]; нулевой usage без chunk; строка журнала usage содержит cache_read и не содержит текста",
+      "environment": "python3 из корня репозитория, fake_droid с cache-полями",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "QA-003"
+      ],
+      "kind": "command",
+      "command": "python3 -m unittest",
+      "expected": "exit 0; все тесты репозитория зелёные (базовая линия README: 476, плюс новые)",
+      "environment": "python3 из корня репозитория, полный frozen набор",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-CACHE-001"
+      ],
+      "kind": "command",
+      "command": ".venv/bin/ruff format --check . && .venv/bin/ruff check . && .venv/bin/basedpyright",
+      "expected": "exit 0; базовая линия ruff на 2026-10-12: 45 files already formatted, All checks passed; basedpyright без новых ошибок",
+      "environment": "репозиторий cli-agent-bridge, .venv репозитория",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "REQ-CACHE-001",
+        "QA-001",
+        "QA-005",
+        "CD-001",
+        "RISK-001",
+        "RISK-007",
+        "AD-004"
+      ],
+      "kind": "command",
+      "command": "for i in 1 2; do curl -s -m 900 -H \"Authorization: Bearer $DROID_DSH_BRIDGE_KEY\" -H 'Content-Type: application/json' -d '{\"model\":\"claude-sonnet-5-5\",\"prompt_cache_key\":\"cache-probe-001\",\"messages\":[{\"role\":\"user\",\"content\":\"Ответь одним словом: ок\"}]}' \"http://127.0.0.1:${DROID_DSH_BRIDGE_PORT:-9882}/v1/chat/completions\" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)[\"usage\"]))'; done; grep 'usage sess=' logs/*.log | tail -2",
+      "expected": "Для обоих ходов usage содержит prompt_tokens_details.cached_tokens (int) либо поле честно отсутствует при unknown; значение равно cache_read в строке журнала того же хода; cached_tokens <= prompt_tokens; значение на втором ходе hot-сессии не является накопленной суммой хода 1 и хода 2; фактические числа фиксируются, положительное значение зависит от provider cache и не является критерием отказа моста",
+      "environment": "живой repo bridge на 127.0.0.1 (DROID_DSH_BRIDGE_PORT, по умолчанию 9882), ключ из окружения, модель по умолчанию из fleet.json; путь журнала уточняется по start.sh при проверке",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": [
+        "QA-002",
+        "BND-003",
+        "CD-001",
+        "RISK-005"
+      ],
+      "kind": "command",
+      "command": "curl -sN -m 900 -H \"Authorization: Bearer $DROID_DSH_BRIDGE_KEY\" -H 'Content-Type: application/json' -d '{\"model\":\"claude-sonnet-5-5\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"prompt_cache_key\":\"cache-probe-sse\",\"messages\":[{\"role\":\"user\",\"content\":\"Ответь одним словом: ок\"}]}' \"http://127.0.0.1:${DROID_DSH_BRIDGE_PORT:-9882}/v1/chat/completions\" | grep -E '\"usage\"|\\[DONE\\]'",
+      "expected": "Ровно одна строка с usage (с prompt_tokens_details.cached_tokens при известном значении), затем [DONE] последней",
+      "environment": "живой repo bridge, SSE через curl -N",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": [
+        "REQ-CACHE-001",
+        "RISK-002",
+        "RISK-004",
+        "AD-005"
+      ],
+      "kind": "manual",
+      "command": null,
+      "expected": "Бинарный gate: в существующем рабочем чате DSH Desktop владельца на модели Droid (активный base URL/порт чата равен repo bridge) выполнены 2 хода подряд в одной сессии; Turn/Session cache hit в UI равен значению cache_read из журнала моста либо клиент честно скрывает 0/unknown; фиксируются скриншот или факт и значения; если активный endpoint — proxy, gate = FAIL с переходом на AD-005",
+      "environment": "DeepSeek Harness Desktop 0.2.0-rc.2 владельца, рабочий чат, не virgin",
+      "owner": "owner"
+    },
+    {
+      "id": "VER-008",
+      "requirement_ids": [
+        "QA-003",
+        "RISK-003"
+      ],
+      "kind": "manual",
+      "command": null,
+      "expected": "Бинарный gate: Hermes Desktop на droid-cli (chat_completions) выполняет ход через repo bridge без ошибок и регрессий отображения; фиксируется факт и вывод журнала",
+      "environment": "Hermes Desktop владельца, рабочий слот",
+      "owner": "owner"
+    },
+    {
+      "id": "VER-009",
+      "requirement_ids": [
+        "QA-002",
+        "RISK-005"
+      ],
+      "kind": "command",
+      "command": "for i in 1 2 3 4; do (curl -sN -m 900 -H \"Authorization: Bearer $DROID_DSH_BRIDGE_KEY\" -H 'Content-Type: application/json' -d \"{\\\"model\\\":\\\"claude-sonnet-5-5\\\",\\\"stream\\\":true,\\\"stream_options\\\":{\\\"include_usage\\\":true},\\\"prompt_cache_key\\\":\\\"cache-probe-par-$i\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Ответь одним словом: ок\\\"}]}\" \"http://127.0.0.1:${DROID_DSH_BRIDGE_PORT:-9882}/v1/chat/completions\" | grep -c '\"usage\"') & done; wait",
+      "expected": "Четыре параллельных потока: каждый печатает 1 (ровно один usage-chunk); ошибок и обрывов нет",
+      "environment": "живой repo bridge, 4 параллельных keyed-чата (в пределах MAX_CONCURRENT)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-010",
+      "requirement_ids": [
+        "BND-002"
+      ],
+      "kind": "command",
+      "command": "python3 -m unittest tests.test_backend_contract -v",
+      "expected": "exit 0; контракт адаптера и однонаправленная зависимость adapters -> core сохраняются",
+      "environment": "python3 из корня репозитория",
+      "owner": "verifier"
+    }
+  ],
+  "protected_paths": [],
+  "materialization": [],
+  "approval": {
+    "status": "APPROVED",
+    "decision_ids": [
+      "AD-001",
+      "AD-005"
+    ],
+    "approved_by": "owner",
+    "evidence_ref": "2026-10-13 00:28 MSK «да»"
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED",
+    "reviewer": null,
+    "evidence_ref": null
+  },
+  "open_questions": [
+    {
+      "id": "Q-001",
+      "question": "OPEN-01 (БЛОКЕР для agy): какие cache hit/miss поля и единицы приходят в agy result.usage? Без обезличенного sample ветка agy не проектируется; решение Совета: ответить на OPEN-01 или явно вынести agy из scope (тогда в approved-версии blocking=false).",
+      "blocking": false
+    },
+    {
+      "id": "Q-002",
+      "question": "OPEN-02: охват getInclusiveTokenUsage, inclusive/exclusive семантика input_tokens, границы накопления и смысл cache_creation (ASM-001).",
+      "blocking": false
+    },
+    {
+      "id": "Q-003",
+      "question": "OPEN-05: через какой endpoint (repo bridge или proxy) активный чат DSH ходит к Droid (ASM-002, VER-007).",
+      "blocking": false
+    },
+    {
+      "id": "Q-004",
+      "question": "OPEN-06: как Hermes Desktop отображает null/zero cache и новое поле usage (VER-008).",
+      "blocking": false
+    },
+    {
+      "id": "Q-005",
+      "question": "OPEN-09 и AD-005: кто владелец и даёт право на изменения в ~/.hermes/droid-cli-proxy и ~/.dsh/bridges/agy-bridge; auth, версионирование и тестовый контур этих HTTP-границ не подтверждены.",
+      "blocking": false
+    },
+    {
+      "id": "Q-006",
+      "question": "OPEN-07: целевых NFR (p95/p99, TTFT, hit ratio) и baseline нет; quality scenarios используют только бинарные инварианты.",
+      "blocking": false
+    }
+  ],
+  "deferred": [
+    "agy-bridge: cache-поля в usage (ждёт ответа на OPEN-01)",
+    "Proxy ~/.hermes/droid-cli-proxy: usage в SSE и prompt_tokens_details (отдельная задача, AD-005)",
+    "Выдача cache creation (write) на wire (ждёт ответа на OPEN-02)",
+    "Вычисление hit percentage на стороне моста: не делается, формула остаётся клиентской",
+    "Gating SSE-usage по stream_options.include_usage в repo bridge",
+    "Численные NFR и baseline (OPEN-07)"
+  ]
+}

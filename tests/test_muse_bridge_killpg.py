@@ -1565,6 +1565,7 @@ class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
     """Реальные argv фейка; транспортный fallback до turn/start сохранён."""
 
     def test_serve_argv_allows_write_shell_by_default(self) -> None:
+        argv: list[str] = []
         install_protocol_wrapper(self, {"terminal": "completed"})
         for model in self.mod.ALLOWED_MODELS:
             with self.subTest(model=model):
@@ -1587,6 +1588,7 @@ class CliDisableFlagsAndApprovalFallbackTest(_BridgeScenario):
         # oracle_change (REQ-MUSE-002): approval больше не уходит в exec;
         # проверки exec-флагов сохранены на транспортном ServeUnavailable
         # (EOF рукопожатия до turn/start), approval-контракт — класс Approval.
+        argv: list[str] = []
         install_fake_msp(self, serve_plans=[{"handshake_eof": True}])
         for model in self.mod.ALLOWED_MODELS:
             with self.subTest(model=model):
@@ -3876,7 +3878,10 @@ class LiveReasoningTest(_BridgeScenario):
         handler._sse_open = True
         handler._live_sent_text = ""
         self.assertFalse(handler._live_reasoning_sink("thinking"))
-        self.assertTrue(handler._client_gone)
+        # oracle_change (ADR-0004/S1): live-запись нефатальна — деградация,
+        # а не client_gone/kill; ход продолжается, буфер уйдёт в финале.
+        self.assertTrue(handler._live_degraded)
+        self.assertFalse(handler._client_gone)
 
     def test_t_l05_model_retry_scheduled_log_only(self) -> None:
         plan = ok_plan(
@@ -3907,12 +3912,15 @@ class LiveReasoningTest(_BridgeScenario):
         install_fake_msp(self, serve_plans=[plan])
         status, body = bridge_request(self, turn_request(stream=True))
         self.assertEqual(status, 200, body)
-        self.assertEqual("".join(sse_deltas(body, "reasoning_content")), "ac\n\nb")
+        # oracle_change (ADR-0004/AD-001): без заморозки live — append-only
+        # stream в порядке поступления дельт; монотонность префикса сохранена,
+        # сортировка по idx остаётся только в финальных summaries.
+        self.assertEqual("".join(sse_deltas(body, "reasoning_content")), "a\n\nbc")
         plan = ok_plan({"summary": [1, "b"]}, {"summary": [0, "a"]})
         install_fake_msp(self, serve_plans=[plan])
         status, body = bridge_request(self, turn_request(stream=True))
         self.assertEqual(status, 200, body)
-        self.assertEqual("".join(sse_deltas(body, "reasoning_content")), "a\n\nb")
+        self.assertEqual("".join(sse_deltas(body, "reasoning_content")), "b\n\na")
 
     def test_t_l07_diverged_snapshot_sends_authoritative_full(self) -> None:
         handler = self.mod.Handler.__new__(self.mod.Handler)
@@ -3968,7 +3976,9 @@ class LiveReasoningTest(_BridgeScenario):
         started = time.monotonic()
         self.assertFalse(handler._live_reasoning_sink("thinking"))
         self.assertLess(time.monotonic() - started, 1.0)
-        self.assertTrue(handler._client_gone)
+        # oracle_change (ADR-0004/S1): таймаут live-записи — деградация, не kill.
+        self.assertTrue(handler._live_degraded)
+        self.assertFalse(handler._client_gone)
 
     def test_t_l08b_keepalive_blocking_first_bounds_sink(self) -> None:
         self.mod.LIVE_WRITE_TIMEOUT_S = 0.25
@@ -4039,6 +4049,188 @@ class LiveReasoningTest(_BridgeScenario):
         self.assertNotIn(b"data: [DONE]", writer.getvalue())
         self.assertTrue(all(s <= w + 0.06 for s in starts), starts)
         self.assertNotIn(b'"finish_reason": "stop"', writer.getvalue())
+
+
+class LiveStreamingAllStepsTest(_BridgeScenario):
+    """ADR-0004/AD-001: непрерывный стриминг summary.0..N без заморозки."""
+
+    def test_all_summary_steps_stream_live_without_freeze(self) -> None:
+        plan = ok_plan(
+            {"summary": [0, "step0-"]},
+            {"summary": [1, "step1-"]},
+            {"summary": [2, "step2"]},
+            {"summary": [0, "tail0"]},
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        snapshots: list[str] = []
+        run = self.mod.ServeRun("muse-spark-1.3", "p", "max", self.tmp / "workspace")
+        run.live_sink = lambda text: snapshots.append(text) or True
+        out = run.execute()
+        self.assertEqual(out["state"], "ok", out)
+        self.assertFalse(run._live_frozen)
+        # Аккумулятор по составному ключу (item_id, idx) + инкрементные длины.
+        self.assertEqual(run._reasoning_items[("r1", 0)], "step0-tail0")
+        self.assertEqual(run._reasoning_items[("r1", 1)], "step1-")
+        self.assertEqual(run._reasoning_items[("r1", 2)], "step2")
+        self.assertEqual(run._item_lengths[("r1", 0)], len("step0-tail0"))
+        self.assertEqual(run._item_lengths[("r1", 2)], len("step2"))
+        acc = run.get_accumulated_reasoning()
+        for piece in ("step0-", "step1-", "step2", "tail0"):
+            self.assertIn(piece, acc)
+        # Каждый снимок sink монотонно расширяет предыдущий, шаги 1..N видны
+        # до финала (не одним блоком в конце).
+        self.assertGreaterEqual(len(snapshots), 4)
+        for prev, cur in zip(snapshots, snapshots[1:]):
+            self.assertTrue(cur.startswith(prev), (prev, cur))
+        self.assertTrue(any("step1-" in s for s in snapshots[:-1]))
+
+    def test_stream_concat_includes_all_steps_via_http(self) -> None:
+        plan = ok_plan(
+            {"summary": [0, "a"]},
+            {"summary": [1, "b"]},
+            {"summary": [2, "c"]},
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        self.assertEqual("".join(sse_deltas(body, "reasoning_content")), "a\n\nb\n\nc")
+        self.assertNotIn("reasoning_diverged", self.mod.LOG_PATH.read_text())
+
+
+class ToolCallMarkersTest(_BridgeScenario):
+    """ADR-0004/AD-002: маркеры инструментов и строгая санитизация."""
+
+    def test_sanitize_tool_name(self) -> None:
+        sanitize = self.mod._sanitize_tool_name
+        self.assertEqual(sanitize("bash"), "bash")
+        self.assertEqual(sanitize("muse.bash:run-1_2"), "muse.bash:run-1_2")
+        self.assertEqual(sanitize("a/b c"), "a_b_c")
+        self.assertEqual(sanitize("x]\n[evil"), "x___evil")
+        self.assertEqual(sanitize(""), "tool")
+        self.assertEqual(sanitize(None), "tool")
+        self.assertEqual(sanitize(123), "tool")
+        self.assertEqual(len(sanitize("a" * 100)), 64)
+
+    def test_tool_markers_only_in_stream(self) -> None:
+        plan = ok_plan(
+            {"summary": [0, "think"]},
+            {"tool_item": {"kind": "toolCall", "toolName": "web_search"}},
+            {"summary": [0, "-done"]},
+        )
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        joined = "".join(sse_deltas(body, "reasoning_content"))
+        self.assertIn("\n\n[Вызов инструмента: web_search]\n", joined)
+        self.assertIn("\n[Инструмент web_search завершён]\n", joined)
+        self.assertLess(joined.index("[Вызов инструмента:"), joined.index("завершён]"))
+        self.assertIn("think", joined)
+        self.assertIn("-done", joined)
+        # S2: маркеры в live не вызывают ложный diverged и повторный полный текст.
+        self.assertNotIn("reasoning_diverged", self.mod.LOG_PATH.read_text())
+        self.assertEqual(joined.count("think"), 1)
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request())
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("Вызов инструмента", body.decode("utf-8"))
+        self.assertEqual(json.loads(body)["reasoning_summaries"], ["think-done"])
+
+    def test_tool_marker_name_sanitized_in_stream(self) -> None:
+        plan = ok_plan({"tool_item": {"kind": "toolCall", "toolName": "a/b]evil name"}})
+        install_fake_msp(self, serve_plans=[plan])
+        status, body = bridge_request(self, turn_request(stream=True))
+        self.assertEqual(status, 200, body)
+        joined = "".join(sse_deltas(body, "reasoning_content"))
+        self.assertIn("[Вызов инструмента: a_b_evil_name]", joined)
+        self.assertNotIn("a/b]evil", joined)
+
+
+class TimeoutReasoningFlushTest(_BridgeScenario):
+    """ADR-0004/AD-003+S1/S4: flush перед 502, нефатальная деградация, ретрай."""
+
+    def _handler(self) -> Any:
+        handler = self.mod.Handler.__new__(self.mod.Handler)
+        handler._wlock = threading.Lock()
+        handler.wfile = io.BytesIO()
+        handler._sse_open = True
+        handler._stream = True
+        handler._live_sent_text = ""
+        handler._live_degraded = False
+        handler._client_gone = False
+        handler._write_deadline = float("inf")
+        return handler
+
+    def test_flush_reasoning_before_502_error_frame(self) -> None:
+        handler = self._handler()
+        handler._live_sent_text = "think-"
+        handler._current_serve_run = SimpleNamespace(
+            get_accumulated_reasoning=lambda: "think-more-and-more"
+        )
+        handler._send(502, {"error": {"message": "boom", "type": "proxy_error"}})
+        raw = handler.wfile.getvalue()
+        self.assertEqual(sse_deltas(raw, "reasoning_content"), ["more-and-more"])
+        text = raw.decode("utf-8")
+        self.assertLess(text.index("more-and-more"), text.index('"error"'))
+        self.assertIn("data: [DONE]", text)
+        self.assertEqual(handler._live_sent_text, "think-more-and-more")
+
+    def test_no_flush_for_503_without_run(self) -> None:
+        handler = self._handler()
+        handler._current_serve_run = None
+        handler._current_run = None
+        handler._send(503, {"error": {"message": "bridge busy"}})
+        self.assertEqual(sse_deltas(handler.wfile.getvalue(), "reasoning_content"), [])
+
+    def test_slow_socket_live_write_degrades_without_kill(self) -> None:
+        handler = self._handler()
+        killed: list[bool] = []
+        handler._current_run = SimpleNamespace(close=lambda: killed.append(True))
+
+        class TimeoutWriter(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                raise TimeoutError("socket timeout")
+
+        handler.wfile = TimeoutWriter()
+        self.assertFalse(handler._sse_write("data: x\n\n", fatal=False))
+        self.assertTrue(handler._live_degraded)
+        self.assertFalse(handler._client_gone)
+        self.assertEqual(killed, [])
+        # Sink после деградации не блокирует reader повторными записями.
+        self.assertTrue(handler._live_reasoning_sink("thinking-more"))
+        # Фатальный режим по умолчанию сохраняет прежний контракт.
+        handler2 = self._handler()
+        killed2: list[bool] = []
+        handler2._current_run = SimpleNamespace(close=lambda: killed2.append(True))
+        handler2.wfile = TimeoutWriter()
+        self.assertFalse(handler2._sse_write("data: x\n\n"))
+        self.assertTrue(handler2._client_gone)
+        self.assertEqual(killed2, [True])
+
+    def test_final_sse_delivers_buffer_after_live_degraded(self) -> None:
+        handler = self._handler()
+        handler._live_degraded = True
+        handler._current_serve_run = SimpleNamespace(
+            get_accumulated_reasoning=lambda: "buffered-thoughts"
+        )
+        handler._send_sse("muse-spark-1.3", "hello", [], 1, 1, 0, ["buffered-thoughts"])
+        raw = handler.wfile.getvalue()
+        self.assertEqual(sse_deltas(raw, "reasoning_content"), ["buffered-thoughts"])
+        self.assertIn(b"data: [DONE]", raw)
+
+    def test_reset_live_for_retry_attempt(self) -> None:
+        handler = self._handler()
+        handler._live_sent_text = "old-prefix"
+        handler._live_reasoning_sent = "old-prefix"
+        handler._live_degraded = True
+        handler._reset_live_for_attempt()
+        self.assertEqual(handler._live_sent_text, "")
+        self.assertEqual(handler._live_reasoning_sent, "")
+        self.assertFalse(handler._live_degraded)
+        self.assertTrue(handler._live_reasoning_sink("fresh"))
+        self.assertEqual(
+            sse_deltas(handler.wfile.getvalue(), "reasoning_content"),
+            ["fresh"],
+        )
 
 
 if __name__ == "__main__":

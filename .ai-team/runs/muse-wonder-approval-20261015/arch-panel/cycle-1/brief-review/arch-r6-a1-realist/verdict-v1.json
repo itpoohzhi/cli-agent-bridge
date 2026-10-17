@@ -1,0 +1,23 @@
+{
+ "verdict": "REJECT",
+ "model_verdict": "APPROVE",
+ "items_total": 33,
+ "missing_ids": [],
+ "bad_quotes": [
+  "JD-05"
+ ],
+ "not_covered": [],
+ "unmapped_requirements": [],
+ "bloat_flags": [],
+ "leakage_flags": [],
+ "tool_calls": 0,
+ "transport": "droid gemini-3.8-flash -r high (без --auto, tools сняты)",
+ "transport_attempts": [
+  {
+   "file": "review-v1-a1.md",
+   "result": "valid"
+  }
+ ],
+ "brief_sha256": "b06011e9efff8a203f59daef96bc07390b344b9ef89ed957c6e870bc9fbd514e",
+ "checklist_gen": 1
+}

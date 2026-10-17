@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "gate": "ARCH_GATE",
+  "status": "PASS",
+  "run_id": "muse-wonder-approval-20261015",
+  "criticality": "S2",
+  "packet_sha256": "38f4662021162360c22138888a86cc2d2156faba7b61ee95cda18468c952754c",
+  "verification_surface_sha256": "b3e1c7beacd1efc55a183920762f330d54f2dcc6f6d9e0634306aa70a4b70c6b",
+  "protected_paths_sha256": "23b893508ca791df60756570bf930589bd15d122a3a0aa3dceb8d1b4952e58f6",
+  "architect_worktree_sha256": "ed90872d5f4866e6dc5f6985e09b91076839b4427d88287e1e228f2e8da21463",
+  "materialized_targets": 1
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "role": "coder",
+  "plan_kind": "full",
+  "iteration": 1,
+  "objective": "Реализовать утверждённый пакет a4 REQ-MUSE-002/003/004 (AD-001..AD-007) в bridges/muse-bridge/server.py и tests/test_muse_bridge_killpg.py: approval без рестарта хода, ограниченный повтор транзиентов до ACTION_POSSIBLE, абсолютный бюджет W/D выдачи, live reasoning; внешний контракт заморожен",
+  "inputs_read": [
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/bugfix.md",
+    ".ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json (sha256 9ddc18254368aa868db6bdff1df2fcb91426f87bc6c4fe90fd7be90f73b830c6)",
+    ".ai-team/runs/muse-wonder-approval-20261015/architecture/arch-spec.md (полностью, включая §9)",
+    ".ai-team/runs/muse-wonder-approval-20261015/architecture/delta-a4.contracts.md",
+    ".ai-team/runs/muse-wonder-approval-20261015/architecture/delta-a3.md",
+    ".ai-team/runs/muse-wonder-approval-20261015/receipts/arch-panel.json (PASS)",
+    "/tmp/cel-runs/muse-wonder-serve-approval/ver-013-result.md (VERDICT: MET)",
+    "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md",
+    "bridges/muse-bridge/server.py (структура и зоны Handler/ServeRun/Run)",
+    "tests/test_muse_bridge_killpg.py (карта тестов, install_protocol_wrapper, test_t18)"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить гейты пакета a4 (панель PASS, VER-013 MET, sha256 пакета/спеки/ADR) и снять baseline ruff/pytest 67 на незакоммиченном REQ-MUSE-001 до любых правок",
+      "expected_evidence": "arch-panel.json PASS, ver-013 MET, shasum пакета 9ddc1825, baseline ruff exit 0 и 67 passed в /tmp/coder-01/baseline-checks.log",
+      "status": "DONE",
+      "actual_evidence": "arch-panel.json PASS (packet 9ddc1825), ver-013 VERDICT: MET, shasum packet/spec/ADR совпали с брифом; baseline ruff format/check exit 0, pytest файла 67 passed in 45.97s (/tmp/coder-01/baseline-checks.log)"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Создать ветку bugfix/muse-wonder-approval-retry-liveness и baseline-коммит №1 ровно из двух файлов REQ-MUSE-001 без собственных правок",
+      "expected_evidence": "git log показывает baseline-коммит, git show --stat содержит только server.py и тестовый файл",
+      "status": "DONE",
+      "actual_evidence": "Ветка bugfix/muse-wonder-approval-retry-liveness; baseline-коммит 9f87eb0 ровно 2 файла (2941 insertions, 60 deletions), .ai-team/analysis/docs/adr не добавлены"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Расширить фикстуру фейкового MSP и добавить классы Approval/TransientRetry/LiveReasoning полного набора a4; заменить approval-тест и обновить test_t18 как oracle_change; снять сырой red на коде baseline",
+      "expected_evidence": "Команды -k Approval/TransientRetry/LiveReasoning падают на baseline-коде, имена тестов и хвосты FAIL сохранены для handoff",
+      "status": "DONE",
+      "actual_evidence": "install_fake_msp + классы Approval/TransientRetry/LiveReasoning; red на baseline: Approval 19 failed/3 passed, TransientRetry 12 failed/2 passed, LiveReasoning 8 failed/3 passed, test_t18 1 failed (/tmp/coder-01/red/*.log); замена approval-теста и test_t18 помечены oracle_change в coder.json"
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Реализовать в server.py ApprovalPolicy и approval-обработку ServeRun (AD-001/002/006/007) с request-wide APPROVAL_SEEN/ACTION_POSSIBLE, включая setup-барьер a4 и деградацию с grace",
+      "expected_evidence": "-k Approval зелёный: approvalMode в session/start, receipt+decide в rpc.jsonl, exec отсутствует после approval, denyUnmatched без exec",
+      "status": "DONE",
+      "actual_evidence": "ApprovalPolicy/ServeRun реализованы; -k Approval: 22 passed (approvalMode в rpc.jsonl, receipt+decide, exec=0 после approval, denyUnmatched без exec, setup T-A16)"
+    },
+    {
+      "id": "RP-05",
+      "kind": "change",
+      "action": "Реализовать единый цикл попыток AD-003: бюджеты E/W/D, предикат допуска, классификация транзиентов, паузы, счётчики и упразднение baseline exec-повтора; общий bounded _sse_write всем писателям",
+      "expected_evidence": "-k TransientRetry зелёный: повтор только pre-action, один эффект заглушки, дедлайн от t0, карантин слота без ложного освобождения",
+      "status": "DONE",
+      "actual_evidence": "AD-003 реализован; -k TransientRetry: 14 passed (pre-action повтор, один эффект T-R07, очередь/дедлайн T-R08/T-R10, карантин с периодическим освобождением)"
+    },
+    {
+      "id": "RP-06",
+      "kind": "change",
+      "action": "Реализовать live reasoning AD-004 (sink, префикс-монотонная публикация, заморозка, финальное согласование F/P с diverged-веткой) поверх ограниченного писателя",
+      "expected_evidence": "-k 'LiveReasoning or test_s1' зелёный: несколько reasoning-дельт, конкатенация равна F без дубля, : keepalive отсутствует",
+      "status": "DONE",
+      "actual_evidence": "AD-004 реализован при VER-013 MET; -k LiveReasoning or test_s1: 12 passed (live-дельты, F/P согласование, bounded writers T-L08a/b/c, slow-steady T-L09)"
+    },
+    {
+      "id": "RP-07",
+      "kind": "verify",
+      "action": "Прогнать полный self-check: -k 1-4, весь тестовый файл, collect-only по трём классам, ruff format/check, basedpyright по двум файлам и проверку scope git diff baseline..HEAD",
+      "expected_evidence": "Сырые хвосты команд с exit 0, basedpyright 0 errors, diff --name-only ровно два разрешённых файла",
+      "status": "DONE",
+      "actual_evidence": "Полный файл 111 passed in 102.35s; -k 1-4 все exit 0 (22/14/12/21); collect-only 22/14/12; ruff format/check exit 0; basedpyright 0 errors, 1982 warnings (baseline 1448); git diff baseline..HEAD ровно 2 файла, protected diff пуст"
+    }
+  ],
+  "stop_conditions": [
+    "Менять только bridges/muse-bridge/server.py и tests/test_muse_bridge_killpg.py; docs/adr/0003, .ai-team, analysis и ~/.dsh не трогать",
+    "Внешний контракт /v1/chat/completions, /health, /v1/models заморожен; допустима только фрагментация delta.reasoning_content CD-001",
+    "Этап 3 только при VER-013 MET; при гейте не PASS или расхождении sha пакета — стоп и BLOCKED оркестратору",
+    "Не пушить, не открывать MR, не деплоить в ~/.dsh; два коммита с тегом [agent] без Co-Authored-By"
+  ],
+  "deviations": []
+}

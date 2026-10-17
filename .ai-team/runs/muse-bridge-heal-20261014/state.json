@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.2",
+  "task_id": "muse-bridge-heal-20261014",
+  "criticality": "S2",
+  "entry": "full",
+  "reviewer_skip": true,
+  "parent_skill": "analyst-teamlead",
+  "phase": "READY_FOR_PR",
+  "iteration": 1,
+  "status": "COMPLETE",
+  "budgets": {
+    "code_gate_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "reviewer_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "arch_panel_to_architect": {
+      "used": 1,
+      "max": 5
+    }
+  },
+  "last_transition": "FINAL_PASS",
+  "last_blocker_id": null,
+  "same_blocker_count": 0,
+  "updated_at": "2026-10-14T10:03:36.339909+00:00",
+  "panel_proofs": {
+    "arch": {
+      "round_dir": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-heal-20261014/panel/arch/r2",
+      "manifest_sha256": "d3bf74bb69fa5198bc06e2cc618536e3bb82266cf87cf335e9ee03696be3eed7",
+      "artifact_sha256": "2a51c65c057e5c573e50baa90a1d53b24ea1e98402b67c79538bdbddac4dfa5e",
+      "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-heal-20261014/arch-spec.md",
+      "receipt_sha256": "cdd3e19299786a758605187fcda46d54c37e6b1eb56e89a5e7b29efc447e3472",
+      "verified_at": "2026-10-14T09:11:26.552959+00:00"
+    },
+    "council": {
+      "round_dir": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-heal-20261014/panel/council/r3",
+      "manifest_sha256": "7becc8a0544873e3a63cfb2807fad91c77ff005aabf99f340d2cdc1521748a03",
+      "artifact_sha256": "4eb0228394ace6dbbe4c6fee16638cdb00ccd6a875f6662bb77eeaf097794636",
+      "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-heal-20261014/code-review-package.md",
+      "receipt_sha256": "ccf781b012946181df9dfaa95eccdc4a2d22f1eec872bd8d4ca628e77be772a0",
+      "verified_at": "2026-10-14T10:03:36.339433+00:00"
+    }
+  }
+}

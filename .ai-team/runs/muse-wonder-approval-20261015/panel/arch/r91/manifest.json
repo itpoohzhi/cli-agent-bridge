@@ -1,0 +1,86 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-approval-20261015",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 91,
+  "pass": "a4",
+  "pass_round": 67,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json",
+  "artifact_sha256": "9ddc18254368aa868db6bdff1df2fcb91426f87bc6c4fe90fd7be90f73b830c6",
+  "seed_input": "9ddc1825#muse-wonder-approval-20261015#c4#R67",
+  "seed_hex": "0ff8518c",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "111ebadefc3050e6dbd47c7dbe34304384d018e482c772a5c895de0b354e234b"
+    },
+    {
+      "rank": 2,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "25828ebfc4cab0e2d15b6cbfa6b6a859f29be823ce13c563cfc4b647c3042415"
+    },
+    {
+      "rank": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "6e68db15adb89eca46309e155d9ca171d91e80f80c5b35c9b1024a3440929196"
+    },
+    {
+      "rank": 4,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "9b11d7d75941e306e61f345e2f0d242b7c91f2fbb342390a075a3b8c681f4134"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "transport": "muse",
+      "hat": "Скептик"
+    },
+    {
+      "k": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "claude-p",
+      "hat": "Визионер"
+    },
+    {
+      "k": 3,
+      "slot_id": "muse-wonder-1.0",
+      "family": "Meta",
+      "transport": "muse",
+      "hat": "Реалист"
+    }
+  ],
+  "hat_index_base": 5,
+  "hat_k": 0,
+  "hat_rotation": "ok",
+  "rotation_ok": "relaxed",
+  "rotation_reason": "пул судей = 3 семьи (слот Architect gpt-6.1-sol-high исключён, SK-A-12; Muse допущен как судья); состав раунда фиксирован пулом, меняются ранги, шляпы и транспорты",
+  "label": "C1",
+  "brief_review": {},
+  "pool_note": "⚠️ пул N/3: Google недоступен, Architect=gpt исключён (SK-A-12); 2 живых семьи + добор п.1.8",
+  "added_judges": [
+    {
+      "requested": "gemini-4-argon-high",
+      "actual": "muse-wonder-1.0",
+      "source": "список Coder (models.md); уже подтверждённая рабочая модель/транспорт muse",
+      "transport": "muse",
+      "reason": "Google-маршрут (Droid model_request_rejected, agy Eligibility check failed) недоступен; gpt-6.1-sol исключён как слот Architect (SK-A-12); уникальных живых семей < 3 — добор независимым сабпроцессом (п.1.8); состояние: owner_override оркестратора 2026-10-16 08:10 MSK"
+    }
+  ],
+  "brief_review_degraded": {
+    "model": "gpt-6.1-sol",
+    "transport": "droid -r high",
+    "reason": "ВРЕМЕННАЯ деградация слота brief-review (Google недоступен), owner_override оркестратора 2026-10-16 08:10 MSK"
+  }
+}

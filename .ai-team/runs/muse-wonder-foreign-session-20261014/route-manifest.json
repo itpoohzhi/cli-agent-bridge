@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-foreign-session-20261014",
+  "criticality": "S2",
+  "criticality_source": "orchestrator",
+  "criticality_reason": "Context window alignment (400k vs 1M), message history compaction and pruning in muse-bridge, and retry recovery for Meta Muse hard threshold 460800",
+  "profile": "default",
+  "routing_approval": "auto",
+  "preset": "analyst-teamlead",
+  "child_preset": "teamlead-with-architect",
+  "analyst_required": true,
+  "architect_required": true,
+  "reviewer_skip": true,
+  "downstream_panel": true,
+  "parent_skill": "analyst-teamlead",
+  "arch_panel_verdict": "ACCEPT",
+  "arch_panel_round": 2,
+  "arch_panel_receipt": ".ai-team/runs/muse-wonder-foreign-session-20261014/receipts/arch-panel.json",
+  "arch_panel_receipt_sha256": "c40a484581b552acfb4af6ceb67ae1676b7321f086d6fbeb02a8434e5bba5947",
+  "arch_panel_verified_at": "2026-10-14T14:39:58.371970+00:00",
+  "code_panel_verdict": "ACCEPT",
+  "code_panel_round": 2,
+  "code_panel_receipt": ".ai-team/runs/muse-wonder-foreign-session-20261014/receipts/code-panel.json",
+  "code_panel_receipt_sha256": "ae53347ca3a3a855cb4672ceee05808fdc8c4106dbaee4834bf8d626c8fe992d",
+  "code_panel_verified_at": "2026-10-14T16:28:50.753560+00:00",
+  "roles": [
+    {
+      "role": "explorer",
+      "mode": "agent",
+      "family": "OpenAI",
+      "requested_model": "gpt-6.1-sol",
+      "requested_effort": "high",
+      "permissions": "read-only"
+    },
+    {
+      "role": "architect",
+      "mode": "agent",
+      "family": "Anthropic",
+      "requested_model": "claude-sonnet-5-5",
+      "requested_effort": "high",
+      "permissions": "run-artifacts-write"
+    },
+    {
+      "role": "coder",
+      "mode": "agent",
+      "family": "Google",
+      "requested_model": "gemini-4-argon-high",
+      "requested_effort": "high",
+      "permissions": "write"
+    },
+    {
+      "role": "verifier",
+      "mode": "deterministic"
+    }
+  ]
+}

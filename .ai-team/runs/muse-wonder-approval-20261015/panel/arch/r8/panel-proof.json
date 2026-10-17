@@ -1,0 +1,54 @@
+{
+  "artifact_sha256": "ebfa59a9869c9deb8390e2fa060ccc980bbafb96ca7cb045a8e3e73e7a78ea22",
+  "expect_seats": 3,
+  "manifest_sha256": "40d5bf1d0ff0ec5aa185511bbdefb382edee092e538b63e04cec623e1ee672fa",
+  "min_seconds": 8.0,
+  "min_verdict_chars": 200,
+  "result": "PASS",
+  "round": 8,
+  "schema": "pol-receipt/1",
+  "seats": [
+    {
+      "duration_s": 109.360746,
+      "family": "Google",
+      "k": 1,
+      "launch_sha256": "551320c671f6aa6ffe7921493761d29ee088033bcf13948ba5d31bef0caafa5a",
+      "raw_out_sha256": "8b1170e752484e6ceb4c9d95e79ef56d37beaa0e824272daef9449e67dcf883c",
+      "rc": 0,
+      "slot_id": "gemini-4-argon-high",
+      "transport": "droid",
+      "verdict": "NEEDS WORK",
+      "verdict_sha256": "0378a04e931bb5d5709c69c2270b49259cb507996741befd806ee9c218dc58a4"
+    },
+    {
+      "duration_s": 62.76537,
+      "family": "OpenAI",
+      "k": 2,
+      "launch_sha256": "073bc081579549a736e3c7e1f23ccfcfd054bbf28e95a911fda357c7eaa3e96f",
+      "raw_out_sha256": "54cc976af6fb8864be21ad1dbd72e6e21d4dd507ffa3988663cf29fefa7ef212",
+      "rc": 0,
+      "slot_id": "gpt-6.1-sol-high",
+      "transport": "codex",
+      "verdict": "NEEDS WORK",
+      "verdict_sha256": "d8dabfd1fc05299d34860e0f87a29df154b5fdda997550609f4fca6389b41f49"
+    },
+    {
+      "duration_s": 18.158397,
+      "family": "Anthropic",
+      "k": 3,
+      "launch_sha256": "79a4a8755c580dbfd1d11e0818f37e647db1ffcc0bd2b1e6b7119d32953c9b38",
+      "raw_out_sha256": "b874b29a24fb359ecd6e5f948cb2594c5fd62320ee2a5af46a7a05b4f6fa1a72",
+      "rc": 0,
+      "slot_id": "claude-sonnet-5-5-high",
+      "transport": "claude-p",
+      "verdict": "NEEDS WORK",
+      "verdict_sha256": "33ae79f5341e0b6221318c85001d3815b0a24a1c1bc82fdcc51b60a35ea27829"
+    }
+  ],
+  "stage": "arch",
+  "verdict_counts": {
+    "NEEDS_WORK": 3
+  },
+  "verified_at": "2026-10-15T08:00:24.443480+00:00",
+  "verifier_sha256": "8f2efa2a30ae95817de5331dd4bac9771f8fe398bb5489b2d807b757814afe09"
+}

@@ -1,0 +1,119 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-STREAM-001",
+  "run_id": "dsh-realtime-streaming",
+  "role": "architect",
+  "revision": 2,
+  "verdict": "DRAFT_VALIDATED",
+  "status": "DRAFT_VALIDATED",
+  "packet_status": "DRAFT",
+  "approval": "APPROVED",
+  "updated_at": "2026-10-13T07:59:31.239279+00:00",
+  "previous_receipt_ref": "architecture/revision-1/architect.json",
+  "role_plan": {
+    "path": ".ai-team/runs/dsh-realtime-streaming/plans/architect-01.json",
+    "sha256": "42683c28f85aefd375d23c6a89d110cfb1a017724c63d576ef6d9110b009c2ea"
+  },
+  "sha256_files": {
+    ".ai-team/runs/dsh-realtime-streaming/plans/architect-01.json": "42683c28f85aefd375d23c6a89d110cfb1a017724c63d576ef6d9110b009c2ea",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json": "50c615a487279f1c6a4e3ac630ea5c200db266284dc724abb97d387181ca6cff",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.md": "5f575f104be54fa7d65481ec315e27dd23da067815235acc021c0106e8c5c2a5",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.delta.diff": "618a932385d1a1935761480b0910651c3ad2e14cd673a1326a258b6620ccae69",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/validation-revision-2.json": "2b8415968bc3a9ea01621ff86eef3f7df509da91db4898398a71d7587ceebc3a",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/validation-revision-2-pre.json": "7254427193107932a3a614ec66de7926ce2bc2e278a8f9a4fb4dd38a29c04a59",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/revision-2-integrity.json": "ad889ec5aa5a9a1f6f0081fd40cf3d23beb60b4f8767bab9931d6e44bf9ef761",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/revision-2-product-before.json": "1c395406942f9ec9474a4d4e4ad0f290c2f0db7dc4633e9b2a7ef071f7584416",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/revision-2-product-after.json": "1c395406942f9ec9474a4d4e4ad0f290c2f0db7dc4633e9b2a7ef071f7584416",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/revision-1/architecture-packet.json": "45ad8ef8babd776ca0f755c2c1c98fa045281879f0e15795459287bfcbb9cc8c",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/revision-1/architecture-packet.md": "b2b15c6fef39a174106e0826d9abd88e9713701186f02dbf599cbe0aa57cbd6e",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/revision-1/architect-01.json": "7ab8ceb917a3db0934df95c1b30fe70df2281d80ea90e6c989f8e114be01277d",
+    ".ai-team/runs/dsh-realtime-streaming/architecture/revision-1/architect.json": "3a8c8629c38f99ceb7c5fd64b2a819916112878bf32eba63e8e8a35763d92abb"
+  },
+  "receipt_self_hash_excluded": true,
+  "validation": {
+    "argv": [
+      "python3",
+      "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py",
+      ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+      "--phase",
+      "draft",
+      "--run-dir",
+      ".ai-team/runs/dsh-realtime-streaming",
+      "--role-plan",
+      ".ai-team/runs/dsh-realtime-streaming/plans/architect-01.json"
+    ],
+    "exit_code": 0,
+    "stdout": "PASS: architecture packet is valid for draft; sha256=50c615a487279f1c6a4e3ac630ea5c200db266284dc724abb97d387181ca6cff\n",
+    "stderr": ""
+  },
+  "role_plan_binding_validation": {
+    "validator": "validate_architecture_packet.py --phase draft --role-plan plans/architect-01.json",
+    "exit_code": 0,
+    "sha256_matches": true,
+    "all_steps_done": true
+  },
+  "product_fingerprint": {
+    "unchanged": true,
+    "scope": "54 tracked/untracked nonignored product files excluding .ai-team, plus git index and branch; prior baseline M fleet.json and analysis/ retained",
+    "manifest_before_ref": "architecture/revision-2-product-before.json",
+    "manifest_after_ref": "architecture/revision-2-product-after.json",
+    "product_file_count": 54,
+    "index_before_sha256": "f02ca97cb638950700e166dada35571ad3c9c9a9015364b423a05b8c5128aa32",
+    "index_after_sha256": "f02ca97cb638950700e166dada35571ad3c9c9a9015364b423a05b8c5128aa32",
+    "baseline_branch": "dev",
+    "final_branch": "dev",
+    "checked_again_after_final_validator": true
+  },
+  "finding_ids_addressed": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005",
+    "RW-006",
+    "RW-007",
+    "RW-008",
+    "RW-009",
+    "RW-010",
+    "RW-011",
+    "FU-001",
+    "FU-002"
+  ],
+  "finding_acceptance": "SPECIFICATION_UPDATED; council re-review PENDING",
+  "runtime_acceptance": "NOT_RUN",
+  "product_checks_run": [],
+  "product_implementation": "NOT_PERFORMED",
+  "subagents_started": 0,
+  "open_approval_decisions": [],
+  "background_commands": [
+    {
+      "command": [
+        "python3",
+        "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py",
+        ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+        "--phase",
+        "draft",
+        "--run-dir",
+        ".ai-team/runs/dsh-realtime-streaming",
+        "--role-plan",
+        ".ai-team/runs/dsh-realtime-streaming/plans/architect-01.json"
+      ],
+      "pid": 40204,
+      "pgid": 40204,
+      "result_ref": ".ai-team/runs/dsh-realtime-streaming/architecture/validation-revision-2.json",
+      "exit_code": 0
+    },
+    {
+      "result_ref": ".ai-team/runs/dsh-realtime-streaming/architecture/validation-revision-2-pre.json",
+      "exit_code": 0,
+      "purpose": "Draft prevalidation before ROLE PLAN hash-link"
+    }
+  ],
+  "risks": [
+    "DSH recognition of chat.completion.chunk error extension and null-finish usage not runtime-verified.",
+    "Fence2+1+1s, CAS races, queue/control budgets, tool continuation and full resource reclaim NOT_RUN. Unconfirmed death is explicit failure/quarantine.",
+    "Requested TTFT/token rate not measured.",
+    "Repeat council and approved architecture gate still required before Coder; this receipt is not ARCH_GATE_PASS."
+  ],
+  "remote_mr": "NOT_APPLICABLE: artifact-only Architect handoff; no product commit/push/merge"
+}

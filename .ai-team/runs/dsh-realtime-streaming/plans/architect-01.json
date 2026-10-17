@@ -1,0 +1,124 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-STREAM-001",
+  "run_id": "dsh-realtime-streaming",
+  "role": "architect",
+  "iteration": 2,
+  "plan_kind": "delta",
+  "objective": "Выпустить Delta Architecture Packet редакции 2 по RW-001..RW-011 и FU-001..FU-002; валидировать draft, hash-lock receipt, сохранить product/index baseline.",
+  "inputs_read": [
+    "architecture/proposals/ops/architect-brief.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/protocol.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/references/protocol.md",
+    "README.md",
+    "docs/adr/INDEX.md",
+    "server.py:Run/_execute/_dispatch/_serve_sse",
+    "core/tool_emulation.py:ToolCallParser",
+    "core/backend_adapter.py:StreamSink",
+    "adapters/droid_adapter.py:DroidAdapter.execute_turn",
+    "tests/test_rpc_core.py",
+    "tests/test_bridge_http.py",
+    "tests/test_rpc_rework.py",
+    "tests/test_rpc_lifecycle.py",
+    "tests/test_cache_usage.py",
+    "tests/test_tool_parser.py",
+    "tests/test_cycle5_rework.py",
+    "handoff/panel-rework-brief-arch-a1.json",
+    "arch-panel/cycle-1/verdict-a1.md",
+    "arch-panel/cycle-1/a1/findings-ledger.md",
+    "chat instruction 2026-10-13 10:15 MSK"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Прочитать handoff/verdict/ledger, сохранить редакцию 1 и fingerprint.",
+      "expected_evidence": "architecture/revision-1/*; revision-2-product-before.json",
+      "status": "DONE",
+      "finding_ids": [
+        "RW-001",
+        "RW-003"
+      ],
+      "actual_evidence": "Входы прочитаны; исходные bytes сохранены в architecture/revision-1; product/index fingerprint снят; продуктовые правки и сабагенты запрещены текущим запросом."
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Зафиксировать делегирование, APPROVED AD-001/002, strict-live и nonstream isolation, plumbing/error/usage.",
+      "expected_evidence": "AD-001/002/004,EVD-004,ASM-002/003,Q-001/002,approval,CD-001",
+      "status": "DONE",
+      "finding_ids": [
+        "RW-001",
+        "RW-003",
+        "RW-004",
+        "RW-005",
+        "RW-007",
+        "RW-011"
+      ],
+      "actual_evidence": "architecture-packet.json AD-001/002/004, EVD-004/017, ASM-002/003, Q-001/002, approval APPROVED; strict-live/nonstream isolated."
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Уточнить fence, CAS outcome, bounded budgets и request worker ownership.",
+      "expected_evidence": "AD-003,BND-001..003,VIEW-001/002,QA-003,VER-005/009/011",
+      "status": "DONE",
+      "finding_ids": [
+        "RW-002",
+        "RW-006",
+        "RW-008",
+        "RW-009",
+        "RW-010"
+      ],
+      "actual_evidence": "architecture-packet.json AD-003 detailed fence 2+1+1s, CAS READY|DIRTY, budgets/ownership; BND-001..003 and VIEW-001/002 synchronized."
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Связать именованные регрессии, test author/executor и tool continuation; синхронизировать Markdown, сформировать diff -u.",
+      "expected_evidence": "VER-001/004/006/007/010/011,QA-005,architecture-packet.delta.diff",
+      "status": "DONE",
+      "finding_ids": [
+        "FU-001",
+        "FU-002"
+      ],
+      "actual_evidence": "architecture-packet.json + .md synchronized and revision-2-integrity.json: all RW-001..011 and FU-001..002 mapped. Future delayed-delta and paired parser tests named; Coder author/Verifier executor; QA-005 tool continuation."
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Закрыть ROLE PLAN, hash-link packet, запустить draft validator, сверить fingerprint и обновить receipt DRAFT_VALIDATED.",
+      "expected_evidence": "validation-revision-2.json,revision-2-product-after.json,receipts/architect.json",
+      "status": "DONE",
+      "finding_ids": [
+        "RW-001",
+        "RW-002",
+        "RW-003",
+        "RW-004",
+        "RW-005",
+        "RW-006",
+        "RW-007",
+        "RW-008",
+        "RW-009",
+        "RW-010",
+        "RW-011"
+      ],
+      "actual_evidence": "validation-revision-2-pre.json exit0; revision-2-integrity.json, revision-2-product-after.json equal before (54 product files + git index/branch). Final hash-linked validation and diff hashes recorded in receipts/architect.json; runtime/council NOT_RUN/PENDING."
+    }
+  ],
+  "stop_conditions": [
+    "Product fingerprint или git index отличаются от baseline; чужие изменения не откатывать.",
+    "Писатель старого внешнего вызова не завершён: финальные пути закрыты, только native-staging.",
+    "Validator draft или ROLE PLAN before/after exit != 0: handoff не сдавать.",
+    "Не менять API схемы, auth, fleet, зависимости, persisted format или принимать one-way decision без решения человека."
+  ],
+  "deviations": [
+    "По указанию Orchestrator сначала только native-staging; после process-exit evidence 2026-10-13T07:13:25Z перенос exact bytes на финальные пути.",
+    ".ai-team исключена из product fingerprint как agent artifacts; includes all tracked/untracked nonignored product files and baseline analysis/. No ignored runtime coverage.",
+    "Общая ROLE PLAN записана после целевых входных чтений и baseline, до решений/packet; before validator exit0 3cc38979cf513c365893a24397d3c988ff7981a5c9fd764a238c5a0237b70409.",
+    "Редакция 2: прямой запрос роли Architect без сабагентов; только run-artifacts-write; approval делегирован владельцем. Исторические факты итерации 1 сохранены отдельно, runtime NOT_RUN."
+  ],
+  "prior_iteration_ref": "architecture/revision-1/architect-01.json"
+}

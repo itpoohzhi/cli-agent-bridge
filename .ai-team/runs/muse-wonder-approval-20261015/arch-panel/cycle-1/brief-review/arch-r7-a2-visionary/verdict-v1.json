@@ -1,0 +1,33 @@
+{
+ "verdict": "REJECT",
+ "model_verdict": "REJECT",
+ "items_total": 32,
+ "missing_ids": [],
+ "bad_quotes": [],
+ "not_covered": [
+  [
+   "JD-03",
+   "partial",
+   "Добавить «, не подтверждай прошлый вердикт автоматически» после «Суди ЗАНОВО»."
+  ]
+ ],
+ "unmapped_requirements": [
+  {
+   "source": "/tmp/cel-runs/muse-wonder-serve-approval/owner-decisions.md",
+   "quote": "2026-10-15 13:39 MSK | находки арх-панели F-002, F-003, F-004, F-006 (OBJECT автора при C1, PAUSED_OWNER) | владелец выбрал в чате по каждой: «blocking (Рекомендуется)» | опции: blocking / non-blocking / excluded | итог: все четыре blocking, входят в instructions для Architect delta",
+   "fix": "Добавить в чек-лист пункт BR по решению владельца от 2026-10-15 13:39 MSK о классификации находок F-002, F-003, F-004, F-006 как blocking."
+  }
+ ],
+ "bloat_flags": [],
+ "leakage_flags": [],
+ "tool_calls": 0,
+ "transport": "droid gemini-3.8-flash -r high (без --auto, tools сняты)",
+ "transport_attempts": [
+  {
+   "file": "review-v1-a1.md",
+   "result": "valid"
+  }
+ ],
+ "brief_sha256": "7697d0f8d78e3d94be491d6879870642b6e57726e831fa46a9174b57fc68e815",
+ "checklist_gen": 1
+}

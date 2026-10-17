@@ -1,0 +1,22 @@
+{
+  "preset": "analyst-teamlead",
+  "child_preset": "teamlead-with-architect",
+  "analyst_required": true,
+  "architect_required": true,
+  "run_id": "muse-bridge-stream-all-steps-20261017",
+  "task_id": "EYE-33873",
+  "jira_url": "https://tasks.sberdevices.ru/browse/EYE-33873",
+  "criticality": "S2",
+  "architect_slot": {
+    "model": "claude-sonnet-5-5",
+    "effort": "high",
+    "transport": "claude -p --model claude-sonnet-5-5 --effort high"
+  },
+  "coder_slot": {
+    "model": "muse-wonder-full-1.0",
+    "effort": "high",
+    "transport": "~/.config/muse-launch/muse-cli.sh exec --provider meta --model muse-wonder-full-1.0 --reasoning-effort high --yolo --trust-workspace --workspace /Users/aazhiry1/work/src/cli-agent-bridge"
+  },
+  "downstream_panel": true,
+  "reviewer_skip": true
+}

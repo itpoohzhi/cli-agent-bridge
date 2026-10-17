@@ -1,0 +1,107 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-realtime-streaming",
+  "teamlead_cycle": 1,
+  "panel_slug": "dsh-realtime-streaming-code-panel-1-r1",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Code panel round 1 returned NEEDS WORK. 6 blocking findings to be addressed by Coder.",
+  "findings_total": 7,
+  "instructions": [
+    {
+      "id": "RW-201",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "server.py",
+      "line_hint": "Handler._execute: ветка queue.Empty/keepalive, строки 3770–3774; Handler._serve_sse.keepalive, строки 4984–4985",
+      "rule_ref": "RW-009: медленный клиент не удерживает L/T длительной записью в сокет",
+      "action": "В живом Droid-ходе проверять client_write_dead перед отправкой keepalive. Ограничить запись keepalive тем же LIVE_WRITE_TIMEOUT_S, что и content/reasoning, с восстановлением предыдущего таймаута в finally. Сбой keepalive учитывать как сбой живой доставки; после него не повторять записи мёртвому клиенту. Согласовать обработку с RW-203, сохранив освобождение L/T и завершение вычисления независимо от скорости клиента.",
+      "acceptance": "Регрессионный сценарий с заполненным сокетным буфером и очередью без событий подтверждает: keepalive ограничен LIVE_WRITE_TIMEOUT_S (по умолчанию 3 с), после client_write_dead он не вызывается, прежний таймаут восстановлен, L/T не удерживаются на 300 с и следующий ход получает слот.",
+      "source": "F-201: «Утечка таймаута в keepalive и нарушение RW-009»; Seat 1 и Seat 2, BLOCKING",
+      "evidence": "server.py:3773; server.py:4985; .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/findings-ledger.md:20",
+      "source_findings": ["F-201"]
+    },
+    {
+      "id": "RW-202",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "server.py",
+      "line_hint": "Handler._error_body: live_invalidated, строки 4318–4327; Handler._serve_sse: ветка err, строки 5073–5077",
+      "rule_ref": "AD-001: явный fail-close при инвалидировании уже показанного live-префикса",
+      "action": "Для ошибки инвалидирования live-префикса заменить плоский SSE JSON с error на конверт chat.completion.chunk. Сохранить id, created и model текущего потока; в choices оставить delta={} и finish_reason=null. В объекте error передать message, type=stream_error, code=live_prefix_invalidated и param=null. Не отправлять успешный finish или usage после такой ошибки.",
+      "acceptance": "Тесты retract и malformed/unclosed tool_call разбирают кадр ошибки как JSON и подтверждают object=chat.completion.chunk, совпадение id/created/model с предыдущими кадрами, finish_reason=null и точные type/code/param объекта error; плоский кадр error, успешный stop и usage отсутствуют.",
+      "source": "F-202: «Wire-формат чанка ошибки fail-close по AD-001»; Seat 1 и Seat 2, BLOCKING",
+      "evidence": "server.py:4325; server.py:5075; .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/findings-ledger.md:21",
+      "source_findings": ["F-202"]
+    },
+    {
+      "id": "RW-203",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "server.py",
+      "line_hint": "Handler._execute: client_write_dead и add_content/add_reasoning, строки 3688–3717; Handler._serve_sse: финальная доставка, строки 5012–5077",
+      "rule_ref": "AD-001: потеря live-доставки не маскируется успешным завершением; RW-009: освобождение L/T независимо от клиента",
+      "action": "Передать факт сбоя live-записи из _execute в финализацию SSE отдельно от результата вычисления. При таймауте или обрыве доставки запретить успешный finish_reason=stop/tool_calls и usage. Завершить клиентский поток явной fail-close ошибкой, если запись ещё возможна, либо закрыть соединение; не отправлять [DONE] как единственный успешный финал после усечения. Не возобновлять доставку пропущенного остатка как успешный ответ и не препятствовать завершению вычисления/checkpoint и освобождению ресурсов.",
+      "acceptance": "Регрессионные тесты таймаута и обрыва после первого live-куска подтверждают отсутствие успешного finish и usage: клиент получает явную ошибку либо закрытие соединения. Сценарий с MAX_CONCURRENT=1 подтверждает завершение вычисления/checkpoint и доступность следующего слота без ожидания 300-секундного таймаута клиента.",
+      "source": "F-203: «Тихая потеря данных у медленного клиента»; Seat 1 и Seat 2, BLOCKING",
+      "evidence": "server.py:3703; server.py:3716; server.py:5018; server.py:5077; .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/findings-ledger.md:22",
+      "source_findings": ["F-203"]
+    },
+    {
+      "id": "RW-204",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "server.py",
+      "line_hint": "Run.__init__: инициализация self.q, строка 2656; Run._live_diff и остальные производители событий Run.q",
+      "rule_ref": "F-103 Архитектурной панели: ограниченная промежуточная очередь Run.q",
+      "action": "Задать Run.q как queue.Queue(maxsize=1024) и явно обработать overflow во всех путях публикации событий. Переполнение не должно вести к неограниченному накоплению, вечной блокировке producer или тихой потере live-данных с успешным финалом. Обеспечить обнаружение overflow потребителем и ошибочное завершение/освобождение ресурсов даже при полной очереди.",
+      "acceptance": "Тест медленного потребителя с более чем 1024 событиями подтверждает maxsize=1024, ограниченный размер очереди и определённую обработку overflow без зависания producer. Ошибка не теряется при заполненной очереди; усечённый поток не завершается успешным finish/usage, ресурсы освобождаются.",
+      "source": "F-204: «Ограничение промежуточной очереди Run.q»; Seat 1 и Seat 2, BLOCKING",
+      "evidence": "server.py:2656; server.py:3097; .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/findings-ledger.md:23",
+      "source_findings": ["F-204"]
+    },
+    {
+      "id": "RW-205",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "server.py",
+      "line_hint": "Run._live_diff, строки 3077–3097; обработка create_message/backfill и assistant_text_complete/thinking_text_complete",
+      "rule_ref": "AD-001: ранее опубликованный префикс должен оставаться валидным; AD-002: identity сообщения и инкрементальная доставка",
+      "action": "Хранить фактически опубликованный префикс отдельно для каждой identity mid и каждого поля text/thinking. При complete или create_message/backfill проверять text.startswith(sent_prefix) до проверки длины и до среза text[sent:]. Несовпадающий либо укороченный complete после публикации префикса должен выставлять live_invalidated и приводить к fail-close без выдачи нового хвоста. Валидное расширение префикса отдавать ровно один раз.",
+      "acceptance": "Регрессионные тесты для content и reasoning покрывают complete с несовпадающим префиксом, укороченный complete, несовпадающий create_message и несколько mid. При несовпадении нет молчаливого среза или успешного finish/usage, есть live_invalidated; равный текст не дублируется, валидный хвост отправляется один раз.",
+      "source": "F-205: «Identity и проверка префикса при complete»; Seat 1 и Seat 2, BLOCKING",
+      "evidence": "server.py:3088; server.py:3090; server.py:3092; .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/findings-ledger.md:24",
+      "source_findings": ["F-205"]
+    },
+    {
+      "id": "RW-206",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "server.py",
+      "line_hint": "Handler._execute.add_content/add_reasoning, строки 3695–3717; Handler._reserve_delivery, строки 4353–4370; Handler._serve_sse usage, строка 5061",
+      "rule_ref": "RW-011: бюджет доставки в байтах UTF-8; AD-004: usage без повторного finish только в Droid live stream",
+      "action": "В обоих live-путях content/reasoning считать размер piece через len(piece.encode('utf-8')) и использовать один и тот же байтовый размер при reserve и увеличении _delivery_reserved. Согласовать остаточное резервирование и освобождение бюджета, исключив двойной учёт или утечку. Ограничить finish_reason=null в usage-кадре живым Droid-стримингом; для остальных бэкендов сохранить прежний finish_reason=finish. Не менять защищённые nonstream flow и normalize_prompt_cache_details.",
+      "acceptance": "Тесты кириллицы и emoji подтверждают резервирование реальных UTF-8 байтов до выдачи, fail-close при превышении бюджета и возврат резерва после завершения/ошибки. В Droid live stream usage имеет finish_reason=null и один предыдущий finish; контрольный stream другого бэкенда сохраняет прежний finish_reason в usage. Nonstream и нормализация prompt cache не изменены.",
+      "source": "F-206: «Бюджетирование в байтах UTF-8 и изоляция Droid»; Seat 1, BLOCKING",
+      "evidence": "server.py:3699; server.py:3701; server.py:3712; server.py:3714; server.py:5061; .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/findings-ledger.md:25",
+      "source_findings": ["F-206"]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-207",
+      "text": "В tests/test_live_stream.py сохранить исходный server.MAX_CONCURRENT до изменения на 1 и гарантированно восстановить его в tearDown, включая завершение теста по исключению/assertion. Проверить восстановление и отсутствие зависимости результатов соседних тестов от порядка запуска.",
+      "reason": "F-207 — NON-BLOCKING, Seat 2: тест меняет глобальный server.MAX_CONCURRENT без гарантированного восстановления в tearDown; follow-up для изоляции тестов.",
+      "file": "tests/test_live_stream.py",
+      "line_hint": "TestImmediateLockRelease.test_non_reading_client_does_not_prevent_commit_or_next_slot, строка 244; setUp/tearDown",
+      "evidence": "tests/test_live_stream.py:244; .ai-team/runs/dsh-realtime-streaming/code-panel/cycle-1/findings-ledger.md:26",
+      "source_findings": ["F-207"]
+    }
+  ],
+  "excluded": [],
+  "do_not_change": [
+    "server.py:_serve_json nonstream flow",
+    "core/metrics_normalizer.py:normalize_prompt_cache_details"
+  ]
+}

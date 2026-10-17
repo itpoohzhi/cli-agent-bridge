@@ -1,0 +1,361 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-001",
+  "run_id": "muse-bridge-stream-all-steps-20261017",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "APPROVED",
+  "role_plan": {
+    "path": ".ai-team/runs/muse-bridge-stream-all-steps-20261017/plans/architect-01.json",
+    "sha256": "3c43897e0c3c42febbecfcced18ac7b4b5322a4b8170ced0a72cb35c9e503821"
+  },
+  "spec_path": ".ai-team/runs/muse-bridge-stream-all-steps-20261017/architecture/arch-spec.md",
+  "requirement_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004"
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2248-2260",
+      "claim": "F-01: Метод item/delta в Meta CLI ServeRun присылает чанки размышлений в поле summary.N с kind reasoning"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2229-2231,2261-2263",
+      "claim": "F-02: Мост искусственно замораживает live-стриминг размышлений при idx > 0 или item/completed для reasoning"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2642-2657",
+      "claim": "F-03: Метод _live_reasoning_sink принимает только summary.0 и прекращает отправку при нарушении префикса full_text"
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2854-2875",
+      "claim": "F-04: Оставшиеся шаги summary.1..N отправляются единым блоком в _send_sse только после полного завершения хода модели"
+    },
+    {
+      "id": "EVD-005",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2220-2228",
+      "claim": "F-05: Вызовы инструментов tool_item фиксируются в _handle_event но не передаются в live SSE поток клиенту"
+    },
+    {
+      "id": "EVD-006",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2784-2794,3513-3524",
+      "claim": "F-06: При таймауте хода или ошибке метод _send с кодом 502 сразу закрывает поток кадром error и DONE без сброса накопленного reasoning"
+    },
+    {
+      "id": "EVD-007",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:66,2998-3000",
+      "claim": "F-07: Дедлайн хода TIMEOUT_S составляет 1800 секунд за вычетом FINISH_RESERVE_S 35 секунд"
+    },
+    {
+      "id": "EVD-008",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2624-2631,2652-2654",
+      "claim": "F-08: DeepSeek Harness отображает поток размышлений из SSE-поля delta.reasoning_content чанка chat.completion.chunk"
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "kind": "command",
+      "command": "pytest tests/test_muse_bridge_killpg.py",
+      "expected": "passed",
+      "environment": "local venv",
+      "owner": "Verifier",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-004"
+      ]
+    },
+    {
+      "id": "VER-002",
+      "kind": "command",
+      "command": "python3 -c 'import sys; sys.path.insert(0, \"bridges/muse-bridge\"); import server; assert server.TIMEOUT_S == 1800'",
+      "expected": "exit 0",
+      "environment": "local venv",
+      "owner": "Verifier",
+      "requirement_ids": [
+        "REQ-003"
+      ]
+    },
+    {
+      "id": "VER-003",
+      "kind": "command",
+      "command": "ruff check bridges/muse-bridge/server.py",
+      "expected": "All checks passed!",
+      "environment": "local venv",
+      "owner": "Verifier",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "APPROVED",
+      "kind": "one-way",
+      "question": "Как транслировать поток рассуждений модели без искусственной заморозки при 150+ инструментах (REQ-001)?",
+      "choice": "Снять флаг _live_frozen при idx > 0 и item/completed reasoning; ввести составной ключ (item_id, idx) для раздельной буферизации блоков reasoning; стримить все дельты summary.* в delta.reasoning_content в реальном времени",
+      "alternatives": [
+        "Заморозка после summary.0 (статус-кво)",
+        "Отправка reasoning только в конце хода"
+      ],
+      "drivers": [
+        "REQ-001",
+        "EVD-002"
+      ],
+      "consequences": [
+        "Непрерывный стриминг мыслей без задержек и без склейки разных блоков",
+        "Небольшой рост числа чанков SSE"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_muse_bridge_killpg.py -k 'LiveReasoning'",
+        "expected": "passed"
+      },
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "AD-002",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как информировать пользователя о вызове инструментов в UI DSH безопасно (REQ-002)?",
+      "choice": "Транслировать текстовые маркеры запуска и завершения инструментов с обязательной санитизацией имени инструмента ([A-Za-z0-9_.:-]{1,64}) в reasoning_content исключительно в стриминговом режиме (stream: true)",
+      "alternatives": [
+        "Не отправлять статусы инструментов",
+        "Отправлять незаконченные дельты tool_calls"
+      ],
+      "drivers": [
+        "REQ-002",
+        "EVD-005"
+      ],
+      "consequences": [
+        "Пользователь видит текущую выполняемую команду в UI",
+        "Исключены инъекции markdown или фальшивых шагов в reasoning"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_muse_bridge_killpg.py -k 'ToolCall'",
+        "expected": "passed"
+      },
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "AD-003",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как сохранять контекст рассуждений при сбоях и таймаутах без риска убийства процесса (REQ-003)?",
+      "choice": "Перед отправкой кадра error в _send(502) отдавать накопленные summaries через current_serve_run.get_accumulated_reasoning(); сделать ошибку live-записи reasoning в сокет нефатальной для процесса ServeRun (защита от backpressure)",
+      "alternatives": [
+        "Сбрасывать соединение без отдачи мыслей",
+        "Убивать ход при таймауте live-записи"
+      ],
+      "drivers": [
+        "REQ-003",
+        "EVD-006"
+      ],
+      "consequences": [
+        "Пользователь сохраняет контекст рассуждений при сбоях и таймаутах",
+        "Медленный клиент не убивает длительный рабочий ход ServeRun"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_muse_bridge_killpg.py -k 'TimeoutReasoning'",
+        "expected": "passed"
+      },
+      "verification_ids": [
+        "VER-002"
+      ]
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "performance",
+      "source": "Пользователь DSH",
+      "stimulus": "Генерация моделью длинных шагов рассуждений summary.0..N",
+      "environment": "Рабочий мост muse-bridge под нагрузкой",
+      "artifact": "bridges/muse-bridge/server.py",
+      "response": "Каждый поступивший фрагмент мысли отправляется в SSE без задержек",
+      "response_measure": "Задержка доставки дельты reasoning < 100 мс",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "reliability",
+      "source": "Дедлайн хода",
+      "stimulus": "Превышение TIMEOUT_S при выполнении 150+ инструментов",
+      "environment": "Длительный ход модели",
+      "artifact": "bridges/muse-bridge/server.py",
+      "response": "Накопленные мысли передаются в SSE перед завершением соединения",
+      "response_measure": "Число потерянных символов reasoning = 0",
+      "verification_ids": [
+        "VER-002"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "ServeRun._handle_event",
+      "responsibility": "Разбор JSON-RPC событий serve и диспетчеризация дельт в live_sink с разделением по (item_id, idx)",
+      "allowed_dependencies": [
+        "json",
+        "time",
+        "logging",
+        "typing",
+        "re"
+      ],
+      "forbidden_dependencies": [
+        "urllib",
+        "requests",
+        "http.client"
+      ],
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "Handler._send_sse",
+      "responsibility": "Формирование и отправка SSE-чанков клиенту DSH с защитой от сокетных ошибок",
+      "allowed_dependencies": [
+        "json",
+        "time",
+        "socket"
+      ],
+      "forbidden_dependencies": [
+        "subprocess"
+      ],
+      "verification_ids": [
+        "VER-001"
+      ]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "behavior",
+      "producer": "bridges/muse-bridge/server.py",
+      "consumer": "DSH client",
+      "change": "Непрерывная трансляция всех summary.* и санитизированных маркеров вызова инструментов вместо обрыва после summary.0",
+      "compatibility": "BACKWARD_COMPATIBLE",
+      "verification_ids": [
+        "VER-001"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "dynamic",
+      "question": "Как передаются рассуждения и вызовы инструментов в реальном времени?",
+      "artifact_ref": ".ai-team/runs/muse-bridge-stream-all-steps-20261017/architecture/arch-spec.md#3-диаграмма-динамики-sequence"
+    }
+  ],
+  "risk_triggers": [],
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Рассинхронизация накопленного live_sent и финального reasoning в _send_sse",
+      "impact": "medium",
+      "probability": "low",
+      "mitigation": "Сверка live_sent_text с финальным reasoning и отсылка только непереданного суффикса",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Задержка или таймаут записи в медленный сокет клиента во время хода",
+      "impact": "medium",
+      "probability": "low",
+      "mitigation": "Пометка live_degraded без прерывания и завершения хода ServeRun",
+      "verification_ids": [
+        "VER-001"
+      ]
+    }
+  ],
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "deferred": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "Трансляция текстовых маркеров вызова инструментов в reasoning_content одобрена владельцем для немедленной видимости в DSH UI",
+      "status": "VALIDATED",
+      "evidence_ids": [
+        "EVD-005"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "statement": "Опережающий сброс накопленного reasoning перед error-кадром одобрен владельцем для сохранения контекста",
+      "status": "VALIDATED",
+      "evidence_ids": [
+        "EVD-006"
+      ]
+    }
+  ],
+  "evolution": {
+    "compatibility": "Полная обратная совместимость: OpenAI-совместимый контракт SSE сохраняется",
+    "migration": "Не требуется: изменение поведения моста в рантайме",
+    "rollout": "Деплой в ~/.dsh/bridges/muse-bridge/server.py и перезапуск моста через kill PID",
+    "rollback": "Откат коммита в git и повторный перезапуск моста"
+  },
+  "approval": {
+    "status": "APPROVED",
+    "decision_ids": [
+      "AD-001"
+    ],
+    "approved_by": "owner (approved in chat 2026-10-17 15:26 MSK)",
+    "evidence_ref": "/tmp/cel-runs/muse-bridge-stream-all-steps/owner-decisions.md"
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED"
+  },
+  "open_questions": [
+    {
+      "id": "Q-001",
+      "question": "Формат отображения вызовов инструментов в reasoning_content",
+      "blocking": false
+    },
+    {
+      "id": "Q-002",
+      "question": "Сброс буфера reasoning перед error кадром",
+      "blocking": false
+    }
+  ],
+  "materialization": [],
+  "protected_paths": [
+    "bridges/muse-bridge/server.py"
+  ]
+}

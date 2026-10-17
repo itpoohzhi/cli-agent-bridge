@@ -1,0 +1,206 @@
+{
+ "items": [
+  {
+   "id": "BR-01",
+   "evidence_quote": "Результат: muse-bridge (:9886, ~/work/src/cli-agent-bridge/bridges/muse-bridge/server.py) на моделях Wonder не теряет ход при `serve needs interaction (approval/request)` — не перезапускает его с нуля (exec-fallback = x2 времени + выброс 7 мин мышления) и не выглядит зависшим в DSH (\"Deep diving 8m48s\")",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-02",
+   "evidence_quote": "Критерий (тяжёлый путь): ПАНЕЛЬ ACCEPT (panel-proof.json PASS, pol-receipt/1) по коду + clean-room + ЖИВОЙ ход в DSH-слоте владельца (muse-wonder-full-1.0 Max, сессия «ai dizrapt»/длинная): ход завершается без fallback-рестарта с нуля, тайминги записаны; регрессий нет (67+ тестов).",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-03",
+   "evidence_quote": "- **REQ-MUSE-002:** При получении `approval/request` или `userInput/request` от `muse serve` ход не должен перезапускаться с нуля через `muse exec` с потерей накопленного времени мышления [F-01], [F-02], [F-03], [F-06], [F-07].",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-04",
+   "evidence_quote": "- **REQ-MUSE-003:** Транзиентная ошибка транспорта `transport error [net-timeout]: timed out waiting for response data (meta stream)` не должна приводить к немедленному отказу хода без контролируемого повтора, когда повтор допустим [F-12], [F-13], [F-14].",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-05",
+   "evidence_quote": "- **REQ-MUSE-004:** Во время длительного мышления модели (`muse-wonder-full-1.0`, `effort=max`) клиент DSH по SSE должен получать признаки жизни и прогресса мышления в реальном времени, а не только буферизованный в конце хода блок `reasoning_content` [F-16], [F-17], [F-18], [F-19].",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-06",
+   "evidence_quote": "Требование **REQ-MUSE-001** (прунинг контекста 400k/320k/200k для чужих/длинных сессий) уже реализовано в рабочем дереве `bridges/muse-bridge/server.py` и подтверждено логами `context_prune` [F-07], в рамках данного пакета выступает как ограничение совместимости [F-49].",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-07",
+   "evidence_quote": "\"contract_freeze\": \"внешний OpenAI-совместимый контракт моста (/v1/chat/completions, /health, /v1/models) не менять без явного пункта; допустимы только аддитивные SSE-кадры внутри существующих полей\",",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-08",
+   "evidence_quote": "\"branch_policy\": \"не dev; ветка bugfix/muse-wonder-approval-retry-liveness (создаётся Coder-ом после арх-панели)\",",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-09",
+   "evidence_quote": "\"criticality_reason\": \"боевой мост DSH->Meta Muse (:9886), поведение ходов и протокол serve/exec, деплой через launchd\",",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "BR-10",
+   "evidence_quote": "2026-10-15 05:44 MSK | OPEN-07 (политика approval для неинтерактивного моста) | владелец выбрал в чате: «Авторазрешение (allowAll)» | вопрос и варианты: denyUnmatched(рек.)/allowAll/передача пользователю DSH/сначала узнать payload | риск принят владельцем: модель получает свободу действий в рамках того",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-01",
+   "evidence_quote": "<<<ARTIFACT ~/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/architecture/architecture-packet.json sha256=ebfa59a9869c9deb8390e2fa060ccc980bbafb96ca7cb045a8e3e73e7a78ea22",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-03",
+   "evidence_quote": "Проверь, что решения опираются на факты [F-NN], и что каждый [F-NN] найден в приложенном evidence ledger",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-04",
+   "evidence_quote": "РЕЖИМ: architecture. Сравни с ≥2 альтернативными архитектурами; назови, что ломается при росте нагрузки.",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-05",
+   "evidence_quote": "В пакете у каждого нового решения должны быть ≥2 альтернативы с причиной выбора; их отсутствие — FAIL по критерию АЛЬТЕРНАТИВЫ.",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-06",
+   "evidence_quote": "Проверь пакет по существу: границы и слои, внешние контракты (HTTP, SSE, MSP JSON-RPC, CLI), сценарии качества (NFR) и их измеримость, модель угроз и trust boundary, evolution (совместимость, rollout, rollback), verification surface и protected_paths.",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-07",
+   "evidence_quote": "FAIL без привязки к разделу пакета, [F-NN] или правилу не засчитывается.",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-08",
+   "evidence_quote": "FAIL без оговорок: изменение согласованного внешнего контракта моста без явного указания в task envelope; выход за задачу.",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-09",
+   "evidence_quote": "Оцени ВСЕ 6 критериев. При FAIL давай СРАЗУ ВСЕ советы по исправлению (список действий).",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-10",
+   "evidence_quote": "пункты Python-overlay architecture.md и правила проекта приложены ниже.",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-13",
+   "evidence_quote": "ПОЛНОТА ВЫДАЧИ — ВСЕ ЗАМЕЧАНИЯ ЗА ОДИН ПРОХОД (обязательно, оба режима):",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-14",
+   "evidence_quote": "ЯКОРЯ ПАКЕТА (арх-проход; предмет — Architecture Packet, не diff)",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "SK-A-15",
+   "evidence_quote": "ПРАВИЛА ДЕБАТОВ (номер раунда, признак «последний» и твоё место — в строке РАУНД выше; слот, транспорт и шляпа — по жребию этого раунда)",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "JD-02",
+   "evidence_quote": "",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "JD-03",
+   "evidence_quote": "Суди ЗАНОВО, чужой вердикт автоматически не подтверждай; позиция меняется только с ARG или NEW.",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "JD-04",
+   "evidence_quote": "ФОРМАТ ОТВЕТА (строго):",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "JD-05",
+   "evidence_quote": "Обязанность места (независимый пересчёт жребия): пересчитай по формулам и приведи строку «RECHECK: seed_hex=<8 hex> ranked_order=<4 слота через запятую> результат=OK|MISMATCH». Формулы: seed_input дословно «ebfa59a9#muse-wonder-approval-20261015#c1#R6» (без перевода строки); SEED = первые 8 hex SHA-256 от seed_input;",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "JD-06",
+   "evidence_quote": "ВЕРДИКТ ТВОЕЙ РОЛИ В РАУНДЕ 1 (Реалист):",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "JD-07",
+   "evidence_quote": "ФАКТ-КАРТА (проверено оркестратором 2026-10-15; источники — в приложенном ledger):",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "JD-08",
+   "evidence_quote": "",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "HY-02",
+   "evidence_quote": "",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "HY-04",
+   "evidence_quote": "",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "HY-05",
+   "evidence_quote": "",
+   "status": "covered",
+   "fix": ""
+  },
+  {
+   "id": "HY-06",
+   "evidence_quote": "",
+   "status": "covered",
+   "fix": ""
+  }
+ ],
+ "unmapped_requirements": [],
+ "bloat_flags": [],
+ "leakage_flags": [],
+ "verdict": "APPROVE"
+}

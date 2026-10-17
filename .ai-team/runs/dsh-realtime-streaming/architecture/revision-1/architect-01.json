@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-STREAM-001",
+  "run_id": "dsh-realtime-streaming",
+  "role": "architect",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Подготовить проверяемый DRAFT architecture packet live Droid SSE без продуктовых правок и runtime acceptance.",
+  "inputs_read": [
+    "architecture/proposals/ops/architect-brief.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/protocol.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/references/protocol.md",
+    "README.md",
+    "docs/adr/INDEX.md",
+    "server.py:Run/_execute/_dispatch/_serve_sse",
+    "core/tool_emulation.py:ToolCallParser",
+    "core/backend_adapter.py:StreamSink",
+    "adapters/droid_adapter.py:DroidAdapter.execute_turn",
+    "tests/test_rpc_core.py",
+    "tests/test_bridge_http.py",
+    "tests/test_rpc_rework.py",
+    "tests/test_rpc_lifecycle.py",
+    "tests/test_cache_usage.py",
+    "tests/test_tool_parser.py",
+    "tests/test_cycle5_rework.py"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Зафиксировать продуктовый baseline и подтвердить реальные RPC, SSE, parser и lifecycle швы REQ-STREAM-001.",
+      "expected_evidence": "product-before.json, code evidence EVD-001..016 с символами и строками.",
+      "status": "DONE",
+      "actual_evidence": "product-before.json:54 product files,digest08c2a0bde562ea7755e49084d483fe0165076c8976bd0eabe345412559fb2436; branch dev; confirmed symbols EVD-001..016 in staged packet. Read universal/Python/protocol validators; local .agents/AGENTS.md and root AGENTS.md absent."
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Описать AD-001..004, BND-001..003, CD-001 и approval limits для live prefix/retract и malformed XML.",
+      "expected_evidence": "DRAFT packet decisions, boundaries, contract_deltas, assumptions и open_questions.",
+      "status": "DONE",
+      "actual_evidence": "Staged architecture-packet.json has AD-001..004,BND-001..003,CD-001,ASM-001..004,Q-001..004 and approval PENDING with AD-001/002 human decision required."
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Заморозить проверки latency, parser, ownership, budgets, ordering и неизменного nonstream JSON.",
+      "expected_evidence": "verification_surface VER-001..012 с точными существующими unittest-командами и manual owner gates.",
+      "status": "DONE",
+      "actual_evidence": "Staged JSON verification_surface VER-001..012; QA-001..005,all decisions/boundaries/contracts/risks/threats linked. Exact existing unittest,ruff,basedpyright commands frozen; runtime gates NOT_RUN."
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Собрать JSON и Markdown packet с Component и Dynamic Mermaid без обещания runtime acceptance.",
+      "expected_evidence": "architecture-packet.json, architecture-packet.md в native-staging с финальными artifact refs.",
+      "status": "DONE",
+      "actual_evidence": "Staged architecture-packet.json and architecture-packet.md exist; VIEW-001 component and VIEW-002 dynamic Mermaid; final refs .ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.md."
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Провалидировать draft и ROLE PLAN after, hash-lock receipt, сверить product fingerprint и index.",
+      "expected_evidence": "validator logs exit0, product-after.json equal before, receipts/architect.json DRAFT_VALIDATED; exact final validator после разрешения переноса.",
+      "status": "DONE",
+      "actual_evidence": "First staged draft validator exit0 at tool chunk385203 SHA25676899a35f1797c534349ec3f4d9c151daebfb4416c947cb44e03d628eba32eda. product-after.json matches all54 product hashes,index and branch baseline. Final byte transfer and exact user validator recorded separately in receipts/architect.json; no product tests/live/model calls."
+    }
+  ],
+  "stop_conditions": [
+    "Product fingerprint или git index отличаются от baseline; чужие изменения не откатывать.",
+    "Писатель старого внешнего вызова не завершён: финальные пути закрыты, только native-staging.",
+    "Validator draft или ROLE PLAN before/after exit != 0: handoff не сдавать.",
+    "Не менять API схемы, auth, fleet, зависимости, persisted format или принимать one-way decision без решения человека."
+  ],
+  "deviations": [
+    "По указанию Orchestrator сначала только native-staging; после process-exit evidence 2026-10-13T07:13:25Z перенос exact bytes на финальные пути.",
+    ".ai-team исключена из product fingerprint как agent artifacts; includes all tracked/untracked nonignored product files and baseline analysis/. No ignored runtime coverage.",
+    "Общая ROLE PLAN записана после целевых входных чтений и baseline, до решений/packet; before validator exit0 3cc38979cf513c365893a24397d3c988ff7981a5c9fd764a238c5a0237b70409."
+  ]
+}

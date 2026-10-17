@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-bridge-heal-20261014",
+  "stage": "council",
+  "cycle": 1,
+  "round": 1,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/skils/panel-backends/references/role-setups.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-heal-20261014/code-review-package.md",
+  "artifact_sha256": "45905654733fd19ee8911b86033bd395b14c6f3ad5066803c58d0cb4b7f2f0ed",
+  "seed_input": "45905654#muse-bridge-heal-20261014#c1#R1",
+  "seed_hex": "eb0a9ddb",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "0f2d3b3608a6be7bacf25c922d4f46ba72eb5ecd9e9e6f96310a3954ffeb5bc6"
+    },
+    {
+      "rank": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "5a1d0c36ec046e014db5728cec5e511b6a50b87da4554fe2c10db7fe033ee6c7"
+    },
+    {
+      "rank": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "7a6664c83d1420afe5e88a964f0061fe531bcdc1f53a3872a4b0726473093d13"
+    },
+    {
+      "rank": 4,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "aa21d7ad1fedeb88143b7dfe00f37feeef1dd9e53ad857929be1aff0ca787de1"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Реалист"
+    },
+    {
+      "k": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "droid",
+      "hat": "Визионер"
+    },
+    {
+      "k": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Скептик"
+    }
+  ],
+  "replacements": []
+}

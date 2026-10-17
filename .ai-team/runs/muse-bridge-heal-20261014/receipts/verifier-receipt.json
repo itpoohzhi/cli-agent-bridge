@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "gate": "VERIFIER",
+  "status": "PASS",
+  "run_id": "muse-bridge-heal-20261014",
+  "checks": [
+    {
+      "id": "VER-001",
+      "command": "python3 -B -m unittest -v tests.test_muse_bridge_killpg",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-002",
+      "command": "python3 -B -m py_compile bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-003-ruff-fmt",
+      "command": ".venv/bin/ruff format --check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-003-ruff-chk",
+      "command": ".venv/bin/ruff check bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-003-pyright-err",
+      "command": ".venv/bin/basedpyright --level error bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-004-serve-help",
+      "command": "/Users/aazhiry1/.local/bin/muse serve --help",
+      "exit_code": 0
+    },
+    {
+      "id": "VER-004-exec-help",
+      "command": "/Users/aazhiry1/.local/bin/muse exec --help",
+      "exit_code": 0
+    },
+    {
+      "id": "git-diff-check",
+      "command": "git diff --check -- bridges/muse-bridge/server.py tests/test_muse_bridge_killpg.py",
+      "exit_code": 0
+    }
+  ],
+  "server_py_sha256": "7d02f13c475c5b205198a268ee9407539c27e9a6e26b45cd25c644e3e66af846",
+  "test_py_sha256": "5ef6d3cd155347e7ea9f84d3040d592d67569a87567ad53a2ceac314d4fb7378",
+  "verified_at": "2026-10-14T09:57:11.938734+00:00",
+  "modified_files": {
+    "bridges/muse-bridge/server.py": "084089ce29bacd8c248735473a5fea8f50c5fff9f73ee29746e60ed836cfc5b5",
+    "tests/test_muse_bridge_killpg.py": "1dcb4a0861bfe149bda9e64aa9b3b5a500fbcc830c723ad96a30d686b01a9a7f"
+  },
+  "test_summary": "Ran 37 tests in clean-room L2 verifier (18 baseline + 19 new, including 4 regressions for F-001 escaped quotes and F-002 reflected user message scrubbing before truncation + short message protection): OK (exit 0)"
+}

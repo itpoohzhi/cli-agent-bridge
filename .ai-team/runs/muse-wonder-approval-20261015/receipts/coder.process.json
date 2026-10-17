@@ -1,0 +1,28 @@
+{
+  "pid": 54220,
+  "pgid": 54220,
+  "role": "coder",
+  "model": "muse-wonder-full-1.0",
+  "transport": "muse-cli.sh exec",
+  "cmd": [
+    "/Users/aazhiry1/.config/muse-launch/muse-cli.sh",
+    "exec",
+    "--provider",
+    "meta",
+    "--model",
+    "muse-wonder-full-1.0",
+    "--reasoning-effort",
+    "max",
+    "--yolo",
+    "--trust-workspace",
+    "--workspace",
+    "/Users/aazhiry1/work/src/cli-agent-bridge",
+    "--prompt-file",
+    "/tmp/cel-runs/muse-wonder-serve-approval/brief-coder.md",
+    "--json"
+  ],
+  "start_utc": "2026-10-16T06:17:33.515945+00:00",
+  "log": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-approval-20261015/receipts/coder.transport.jsonl",
+  "status": "completed",
+  "finished_utc": "2026-10-16T07:05:23.233862+00:00"
+}

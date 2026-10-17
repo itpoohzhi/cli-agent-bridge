@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-wonder-foreign-session-20261014",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 2,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/skils/panel-backends/references/role-setups.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-wonder-foreign-session-20261014/arch-spec.md",
+  "artifact_sha256": "93b6fc42a3206d46482c5a09044666a45ac108e26542644dd552f09129b48c8f",
+  "seed_input": "93b6fc42#muse-wonder-foreign-session-20261014#c1#R2",
+  "seed_hex": "dfee2069",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "3fe525246f8e71be9787d69c0039ff361cc66bf8dc1bc019641d72360df0afcb"
+    },
+    {
+      "rank": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "c7b96e0d2c4553cfdf36c44da982af9beec7e5dbc78911d1a471be2be68ef033"
+    },
+    {
+      "rank": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "dac635444f04c81f5b9471f5dc0695e6eb89ff2143ef0b7e391328ab205781f2"
+    },
+    {
+      "rank": 4,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "586dcb3e66755939b07b9b5a1294895d0d835589f9c83b55d9d9ab61472231a5"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "droid",
+      "hat": "Реалист"
+    },
+    {
+      "k": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Визионер"
+    },
+    {
+      "k": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Скептик"
+    }
+  ]
+}

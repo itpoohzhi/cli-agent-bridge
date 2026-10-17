@@ -231,6 +231,24 @@ def _render_tool_token(value: Any) -> str:
     return f"redacted(len={len(text)})"
 
 
+_TOOL_MARKER_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_TOOL_MARKER_INVALID_RE = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def _sanitize_tool_name(value: Any) -> str:
+    """Санитизация имени инструмента для live-маркеров reasoning (AD-002).
+
+    Допустимо только `^[A-Za-z0-9_.:-]{1,64}$`; недопустимые символы
+    заменяются на `_`, длина обрезается до 64, пустое/None — `tool`.
+    """
+    if not isinstance(value, str) or not value:
+        return "tool"
+    if _TOOL_MARKER_RE.match(value):
+        return value
+    cleaned = _TOOL_MARKER_INVALID_RE.sub("_", value)[:64]
+    return cleaned or "tool"
+
+
 class ApprovalPolicy:
     """Чистая политика решения по снимку approval (BND-001): без I/O.
 
@@ -1804,6 +1822,89 @@ class ServeRun:
         self.request_deadline = float("inf")
         self.turn_started_at: float | None = None
         self._live_frozen = False
+        # Сквозной live-стриминг всех шагов (ADR-0004): аккумулятор по
+        # составному ключу (item_id, idx), единый append-only stream-текст
+        # для live/final/flush (S2), доступ — только под _acc_lock (S3).
+        self._acc_lock = threading.Lock()
+        self._reasoning_items: dict[tuple[str, int], str] = {}
+        self._item_lengths: dict[tuple[str, int], int] = {}
+        self._reasoning_order: list[tuple[str, int]] = []
+        self._stream_text = ""
+        self._tool_names: dict[str, str] = {}
+        self._tool_started: set[str] = set()
+        self._tool_completed: set[str] = set()
+
+    def get_accumulated_reasoning(self) -> str:
+        """Потокобезопасный снимок накопленного reasoning (AD-003, S3).
+
+        Единый append-only stream-текст: дельты summary.* в порядке
+        поступления + live-маркеры инструментов (только при stream).
+        Тот же текст — база live, финала `_send_sse` и flush перед 502.
+        """
+        with self._acc_lock:
+            if self._stream_text:
+                return self._stream_text
+            return "\n\n".join(
+                self._reasoning_items[key]
+                for key in self._reasoning_order
+                if self._reasoning_items.get(key)
+            )
+
+    def _accumulate_reasoning(self, item_id: str, idx: int, piece: str) -> str:
+        """Добавить дельту в аккумулятор (item_id, idx); вернуть stream-текст."""
+        with self._acc_lock:
+            key = (item_id, idx)
+            is_new = key not in self._reasoning_items
+            self._reasoning_items[key] = self._reasoning_items.get(key, "") + piece
+            self._item_lengths[key] = len(self._reasoning_items[key])
+            if is_new:
+                self._reasoning_order.append(key)
+                if self._stream_text and not self._stream_text.endswith("\n"):
+                    self._stream_text += "\n\n"
+            self._stream_text += piece
+            return self._stream_text
+
+    def _accumulate_completed_summary(self, item_id: str, idx: int, full: str) -> str:
+        """Сверить завершённый summary[idx] с аккумулятором; дослать хвост."""
+        with self._acc_lock:
+            key = (item_id, idx)
+            existing = self._reasoning_items.get(key, "")
+            if full == existing:
+                return self._stream_text
+            is_new = key not in self._reasoning_items
+            self._reasoning_items[key] = full
+            self._item_lengths[key] = len(full)
+            if is_new:
+                self._reasoning_order.append(key)
+                if self._stream_text and not self._stream_text.endswith("\n"):
+                    self._stream_text += "\n\n"
+                self._stream_text += full
+            elif full.startswith(existing):
+                self._stream_text += full[len(existing) :]
+            return self._stream_text
+
+    def _emit_live(self) -> None:
+        """Отправить текущий stream-текст в live_sink; сбой не замораживает ход."""
+        sink = self.live_sink
+        if sink is None:
+            return
+        with self._acc_lock:
+            snapshot = self._stream_text
+        if not snapshot:
+            return
+        try:
+            sink(snapshot)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    def _emit_tool_marker(self, item_id: str, marker: str) -> None:
+        """Дописать маркер инструмента в stream-текст и отправить live (AD-002)."""
+        del item_id
+        if self.live_sink is None:
+            return
+        with self._acc_lock:
+            self._stream_text += marker
+        self._emit_live()
 
     def close(self) -> None:
         """Убить группу процессов хода и коротко дождаться её ухода (идемпотентно)."""
@@ -2226,8 +2327,28 @@ class ServeRun:
                         f"tool_item kind={_render_tool_token(kind)} "
                         f"tool={_render_tool_token(item.get('toolName'))}"
                     )
-                if method == "item/completed" and kind == "reasoning":
-                    self._live_frozen = True
+                    # AD-002: live-маркеры инструментов только при stream
+                    # (live_sink ставится Handler только для stream=true).
+                    raw_tool = (
+                        item.get("toolName")
+                        or item.get("tool")
+                        or (kind if kind != "toolCall" else None)
+                    )
+                    safe_tool = _sanitize_tool_name(raw_tool)
+                    if iid and method == "item/started":
+                        self._tool_names[iid] = safe_tool
+                        if iid not in self._tool_started:
+                            self._tool_started.add(iid)
+                            self._emit_tool_marker(
+                                iid, f"\n\n[Вызов инструмента: {safe_tool}]\n"
+                            )
+                    elif iid and method == "item/completed":
+                        done_tool = self._tool_names.get(iid, safe_tool)
+                        if iid not in self._tool_completed:
+                            self._tool_completed.add(iid)
+                            self._emit_tool_marker(
+                                iid, f"\n[Инструмент {done_tool} завершён]\n"
+                            )
                 if (
                     method == "item/completed"
                     and turn_id is not None
@@ -2236,9 +2357,13 @@ class ServeRun:
                     if kind == "agentMessage" and isinstance(item.get("text"), str):
                         final_text = item["text"]
                     if kind == "reasoning" and isinstance(item.get("summary"), list):
-                        summaries.extend(
+                        completed_parts = [
                             str(p) for p in item["summary"] if isinstance(p, str)
-                        )
+                        ]
+                        summaries.extend(completed_parts)
+                        for c_idx, c_part in enumerate(completed_parts):
+                            self._accumulate_completed_summary(iid, c_idx, c_part)
+                        self._emit_live()
             elif method == "item/delta":
                 iid = str(params.get("itemId") or "")
                 field = str(params.get("field") or "text")
@@ -2249,7 +2374,8 @@ class ServeRun:
                     try:
                         idx = int(field.split(".", 1)[1])
                     except (IndexError, ValueError):
-                        idx = len(summary_parts)
+                        with self._acc_lock:
+                            idx = len([k for k in self._reasoning_items if k[0] == iid])
                     if not first_summary_logged[0]:
                         first_summary_logged[0] = True
                         _t0 = self.turn_started_at or _now0
@@ -2258,15 +2384,10 @@ class ServeRun:
                             f"after_s={time.monotonic() - _t0:.2f}"
                         )
                     summary_parts[idx] = summary_parts.get(idx, "") + piece
-                    if idx > 0:
-                        self._live_frozen = True
-                    elif not self._live_frozen and self.live_sink is not None:
-                        try:
-                            delivered = bool(self.live_sink(summary_parts.get(0, "")))
-                        except Exception:  # noqa: BLE001, S112
-                            delivered = False
-                        if not delivered:
-                            self._live_frozen = True
+                    # AD-001: заморозки нет — все summary.0..N стримятся
+                    # непрерывно; сбой live-записи ход не останавливает (S1).
+                    self._accumulate_reasoning(iid, idx, piece)
+                    self._emit_live()
                 elif (
                     kinds.get(iid, "agentMessage") == "agentMessage" and field == "text"
                 ):
@@ -2427,9 +2548,24 @@ class ServeRun:
                     pass
                 self.close()
                 serve_rc = self.proc.returncode
-            ordered = [
-                summary_parts[i] for i in sorted(summary_parts) if summary_parts[i]
-            ]
+            with self._acc_lock:
+                _items_snapshot = dict(self._reasoning_items)
+                _order_snapshot = list(self._reasoning_order)
+            if _items_snapshot:
+                _item_sequence: list[str] = []
+                for _key in _order_snapshot:
+                    if _key[0] not in _item_sequence:
+                        _item_sequence.append(_key[0])
+                ordered = [
+                    _items_snapshot[(_iid, _idx)]
+                    for _iid in _item_sequence
+                    for _idx in sorted(k[1] for k in _items_snapshot if k[0] == _iid)
+                    if _items_snapshot.get((_iid, _idx))
+                ]
+            else:
+                ordered = [
+                    summary_parts[i] for i in sorted(summary_parts) if summary_parts[i]
+                ]
             for part in ordered:
                 if part not in summaries:
                     summaries.append(part)
@@ -2518,6 +2654,11 @@ class Handler(BaseHTTPRequestHandler):
     _keepalive_stop: threading.Event | None = None
     _ka_thread: threading.Thread | None = None
     _live_sent_text: str = ""
+    _live_reasoning_sent: str = ""
+    _live_degraded: bool = False
+    _live_lock: threading.Lock = threading.Lock()
+    _current_serve_run: ServeRun | None = None
+    _stream: bool = False
     _write_deadline: float = float("inf")
     _exec_deadline: float = float("inf")
     _request_deadline: float = float("inf")
@@ -2539,6 +2680,11 @@ class Handler(BaseHTTPRequestHandler):
         self._keepalive_stop: threading.Event | None = None
         self._ka_thread: threading.Thread | None = None
         self._live_sent_text = ""
+        self._live_reasoning_sent = ""
+        self._live_degraded = False
+        self._live_lock = threading.Lock()
+        self._current_serve_run = None
+        self._stream = False
         self._write_deadline = float("inf")
         self._exec_deadline = float("inf")
         self._request_deadline = float("inf")
@@ -2546,32 +2692,63 @@ class Handler(BaseHTTPRequestHandler):
         self._req_done = None
         super().setup()
 
+    def _get_live_lock(self) -> threading.Lock:
+        """Замок live-состояния; лениво для Handler без setup() в тестах."""
+        lock = self.__dict__.get("_live_lock")
+        if lock is None:
+            lock = threading.Lock()
+            self._live_lock = lock
+        return lock
+
+    def _reset_live_for_attempt(self) -> None:
+        """Сброс live-префикса перед новым ServeRun в ретрае (S4)."""
+        with self._get_live_lock():
+            self._live_sent_text = ""
+            self._live_reasoning_sent = ""
+            self._live_degraded = False
+
+    def _note_write_failure(self, fatal: bool, message: str) -> bool:
+        """Сбой записи SSE: fatal — клиент ушёл+kill; иначе live-деградация (S1)."""
+        if not fatal:
+            if not getattr(self, "_live_degraded", False):
+                _log(f"live_degraded {message}")
+            self._live_degraded = True
+            return False
+        if not self._client_gone:
+            self._client_gone = True
+            self._delivery_failed = True
+            _log(message)
+            self._kill_current_run()
+        return False
+
     # ---- ранний SSE: заголовки сразу, keepalive во время хода ---------------------
     def _sse_write(
-        self, text: str, *, keepalive: bool = False, mark_content: bool = False
+        self,
+        data: str,
+        fatal: bool = True,
+        *,
+        keepalive: bool = False,
+        mark_content: bool = False,
     ) -> bool:
         """Один ограниченный бюджет L=min(s+LIVE_WRITE_TIMEOUT_S, W) (AD-004).
 
-        Ожидание замка, запись и flush делят единый остаток; исчерпание =
-        зависший клиент (client_gone + killpg). Действует на всех писателей.
+        Ожидание замка, запись и flush делят единый остаток. При
+        `fatal=True` исчерпание = зависший клиент (client_gone + killpg).
+        При `fatal=False` (live reasoning, S1) сбой лишь ставит
+        `_live_degraded`: ход ServeRun не убивается, буфер уйдёт в финале.
         """
+        text = data
         started = time.monotonic()
         w_deadline = getattr(self, "_write_deadline", float("inf"))
         limit = min(started + LIVE_WRITE_TIMEOUT_S, w_deadline)
         if limit <= started:
-            if not self._client_gone:
-                self._client_gone = True
-                self._delivery_failed = True
-                _log("delivery_deadline write budget exhausted before frame")
-                self._kill_current_run()
-            return False
+            return self._note_write_failure(
+                fatal, "delivery_deadline write budget exhausted before frame"
+            )
         if not self._wlock.acquire(timeout=max(0.0, limit - time.monotonic())):
-            if not self._client_gone:
-                self._client_gone = True
-                self._delivery_failed = True
-                _log("client gone mid-stream (sse lock wait budget)")
-                self._kill_current_run()
-            return False
+            return self._note_write_failure(
+                fatal, "client gone mid-stream (sse lock wait budget)"
+            )
         try:
             if self._sse_phase == "CLOSED" or self._client_gone:
                 return False
@@ -2612,12 +2789,7 @@ class Handler(BaseHTTPRequestHandler):
                         pass
             return True
         except (BrokenPipeError, ConnectionResetError, OSError):
-            if not self._client_gone:
-                self._client_gone = True
-                self._delivery_failed = True
-                _log("client gone mid-stream")
-                self._kill_current_run()
-            return False
+            return self._note_write_failure(fatal, "client gone mid-stream")
         finally:
             self._wlock.release()
 
@@ -2631,30 +2803,93 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _sse_emit(
-        self, obj: dict, *, keepalive: bool = False, mark_content: bool = False
+        self,
+        obj: dict,
+        *,
+        keepalive: bool = False,
+        mark_content: bool = False,
+        fatal: bool = True,
     ) -> bool:
         return self._sse_write(
             "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n",
+            fatal,
             keepalive=keepalive,
             mark_content=mark_content,
         )
 
     def _live_reasoning_sink(self, full_text: str) -> bool:
-        """Sink ServeRun: публикует только прирост summary.0 до заморозки."""
+        """Sink ServeRun: публикует прирост всего stream-текста (summary.*+маркеры).
+
+        Запись нефатальна (S1): при сбое `_live_degraded=True`, ход жив,
+        повторные вызовы коротко возвращают True, буфер уйдёт в финале.
+        """
         if not full_text or not getattr(self, "_sse_open", False):
             return True
-        sent = getattr(self, "_live_sent_text", "")
-        if full_text == sent or not full_text.startswith(sent):
+        if getattr(self, "_live_degraded", False):
             return True
-        delta = full_text[len(sent) :]
-        if not delta:
-            return True
-        ok = self._sse_emit(
-            self._sse_chunk({"reasoning_content": delta}), mark_content=True
+        with self._get_live_lock():
+            sent = getattr(self, "_live_sent_text", "")
+            if full_text == sent or not full_text.startswith(sent):
+                return True
+            delta = full_text[len(sent) :]
+            if not delta:
+                return True
+            ok = self._sse_emit(
+                self._sse_chunk({"reasoning_content": delta}),
+                mark_content=True,
+                fatal=False,
+            )
+            if ok:
+                self._live_sent_text = full_text
+                self._live_reasoning_sent = full_text
+            else:
+                self._live_degraded = True
+            return ok
+
+    def _accumulated_reasoning(self) -> str:
+        """Накопленный reasoning текущего ServeRun или пустая строка."""
+        run = getattr(self, "_current_serve_run", None) or getattr(
+            self, "_current_run", None
         )
-        if ok:
-            self._live_sent_text = full_text
-        return ok
+        getter = getattr(run, "get_accumulated_reasoning", None)
+        if run is None or not callable(getter):
+            return ""
+        try:
+            acc = getter()
+        except Exception:  # noqa: BLE001
+            return ""
+        return acc if isinstance(acc, str) else ""
+
+    def _flush_reasoning_before_error(self) -> None:
+        """Опережающий сброс неотправленного reasoning перед 502 (AD-003)."""
+        if not (getattr(self, "_sse_open", False) or getattr(self, "_stream", False)):
+            return
+        acc = self._accumulated_reasoning()
+        if not acc:
+            return
+        with self._get_live_lock():
+            sent = getattr(self, "_live_sent_text", "")
+            if acc == sent or sent.startswith(acc):
+                return
+            if acc.startswith(sent):
+                tail = acc[len(sent) :]
+            else:
+                common = 0
+                for a_ch, b_ch in zip(sent, acc):
+                    if a_ch != b_ch:
+                        break
+                    common += 1
+                tail = acc[common:]
+            if not tail:
+                return
+            _log(f"flush_reasoning_before_502 chars={len(tail)}")
+            if self._sse_emit(
+                self._sse_chunk({"reasoning_content": tail}),
+                mark_content=True,
+                fatal=False,
+            ):
+                self._live_sent_text = acc if acc.startswith(sent) else sent + tail
+                self._live_reasoning_sent = self._live_sent_text
 
     def _force_close_connection(self) -> None:
         """Закрытие соединения надзором W без ожидания _wlock (a4)."""
@@ -2678,6 +2913,9 @@ class Handler(BaseHTTPRequestHandler):
             self._client_gone = True
             return False
         self._live_sent_text = ""
+        self._live_reasoning_sent = ""
+        self._live_degraded = False
+        self._stream = True
         self._sse_id = f"chatcmpl-muse-{uuid.uuid4().hex[:12]}"
         self._sse_created = int(time.time())
         self._sse_model = model
@@ -2785,6 +3023,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._sse_open:
             # Заголовки 200 уже ушли: ошибка — кадром SSE, как у OpenAI-совместимых прокси.
             self._sse_stop_keepalive()
+            if int(code) == 502:
+                self._flush_reasoning_before_error()
             error = payload.get("error") if isinstance(payload, dict) else None
             if isinstance(error, dict):
                 error = dict(error)
@@ -2852,6 +3092,11 @@ class Handler(BaseHTTPRequestHandler):
         self._sse_stop_keepalive()
         chunk = self._sse_chunk
         reasoning = "\n\n".join(s for s in (summaries or []) if s)
+        # S2: единый stream-буфер ServeRun (с маркерами) авторитетен для
+        # live/final — сравнение с _live_sent_text не даёт ложного diverged.
+        accumulated = self._accumulated_reasoning()
+        if accumulated:
+            reasoning = accumulated
         live_sent = getattr(self, "_live_sent_text", "")
         if reasoning:
             if not live_sent:
@@ -2873,6 +3118,9 @@ class Handler(BaseHTTPRequestHandler):
                 chunk({"reasoning_content": tail}), mark_content=True
             ):
                 return
+            if tail:
+                self._live_sent_text = live_sent + tail
+                self._live_reasoning_sent = self._live_sent_text
         for tc in tool_calls:
             fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
             delta = {
@@ -3002,6 +3250,10 @@ class Handler(BaseHTTPRequestHandler):
         self._exec_deadline = _exec_deadline
         self._write_deadline = _write_deadline
         self._live_sent_text = ""
+        self._live_reasoning_sent = ""
+        self._live_degraded = False
+        self._current_serve_run = None
+        self._stream = req.get("stream") is True
         self._delivery_failed = False
         _req_done = threading.Event()
         self._req_done = _req_done
@@ -3223,6 +3475,8 @@ class Handler(BaseHTTPRequestHandler):
             if not ok_gate:
                 _log(f"new serve process blocked reason={gate_reason}")
                 return _blocked_out(f"new process blocked: {gate_reason}"), "blocked"
+            # S4: новый ServeRun (в т.ч. ретрай) стартует с чистого live-префикса.
+            self._reset_live_for_attempt()
             serve_run = ServeRun(model, attempt_prompt, effort, WORKSPACE)
             serve_run.exec_deadline = _exec_deadline
             serve_run.write_deadline = _write_deadline
@@ -3231,6 +3485,7 @@ class Handler(BaseHTTPRequestHandler):
                 serve_run.live_sink = self._live_reasoning_sink
             runs.append(serve_run)
             self._current_run = serve_run
+            self._current_serve_run = serve_run
             try:
                 attempt_out = serve_run.execute()
                 _update_agg(serve_run, attempt_out)

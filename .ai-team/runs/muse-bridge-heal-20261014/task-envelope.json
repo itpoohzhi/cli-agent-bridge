@@ -1,0 +1,7 @@
+{
+  "architecture_gate": {
+    "packet_sha256": "ab0b4851a6d408dd8efe29148f0f7cc275e166dfef852b37a816755bc244bed1",
+    "verification_surface_sha256": "2fb69e73afc36050c4d1c6e62f8606d11307d5206b13998570522db7ef25ed43",
+    "protected_paths_sha256": "6f3ced81bc8c095e42ce772bb8db567f7ea761fd89dca50913c2515ecdfb29ce"
+  }
+}

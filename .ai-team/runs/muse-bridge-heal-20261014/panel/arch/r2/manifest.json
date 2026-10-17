@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0",
+  "run_id": "muse-bridge-heal-20261014",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 2,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/skils/panel-backends/references/role-setups.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/muse-bridge-heal-20261014/arch-spec.md",
+  "artifact_sha256": "2a51c65c057e5c573e50baa90a1d53b24ea1e98402b67c79538bdbddac4dfa5e",
+  "seed_input": "2a51c65c#muse-bridge-heal-20261014#c1#R2",
+  "seed_hex": "68c84230",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "49fd638553acfa1b580f6d722fe3f4a3987273ed3e2b88d8ecfd64c7ddaf3271"
+    },
+    {
+      "rank": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "d55b639ab21a06cb74be0895a5feae76e986401ffd34a95a0aa1b5fd623d022f"
+    },
+    {
+      "rank": 3,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "d6a7f856a64fb98ae95f45736c3b365447ab1d5ea7096c3772d55feeb304b131"
+    },
+    {
+      "rank": 4,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "rank_hash": "fc9f01108a8b0dad153129f4093c4ebd73df709bb4c5ca1a362b0d25fce9f2ab"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "droid",
+      "hat": "Реалист"
+    },
+    {
+      "k": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "droid",
+      "hat": "Визионер"
+    },
+    {
+      "k": 3,
+      "slot_id": "gpt-6.1-sol-high",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Скептик",
+      "replaced_slot": "muse-wonder-full-1.0",
+      "reason": "upstream Meta stream timeout after retry (transport error [net-timeout]: timed out waiting for response data (meta stream)) in /tmp/cel-runs/muse-bridge-heal-20261014/architect-retry.err"
+    }
+  ],
+  "replacements": [
+    {
+      "replaced_slot": "muse-wonder-full-1.0",
+      "replaced_family": "Meta",
+      "new_slot": "gpt-6.1-sol-high",
+      "new_family": "OpenAI",
+      "reason": "upstream Meta stream timeout after retry (transport error [net-timeout]: timed out waiting for response data (meta stream)) in /tmp/cel-runs/muse-bridge-heal-20261014/architect-retry.err"
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "run_id": "dsh-realtime-streaming",
+  "cycle": 1,
+  "round": 1,
+  "pass": "a2",
+  "seed_input": "50c615a4#dsh-realtime-streaming#c1#R1",
+  "seed_hex": "4adcf124",
+  "artifact_sha256": "50c615a487279f1c6a4e3ac630ea5c200db266284dc724abb97d387181ca6cff",
+  "artifact_path": ".ai-team/runs/dsh-realtime-streaming/architecture/architecture-packet.json",
+  "pool_setup": "default",
+  "pool_source_rev": "db749125",
+  "pool_ordered": [
+    "muse-spark-1.3",
+    "grok-4.7-high",
+    "gemini-3.8-flash-high",
+    "hermes-glm-5.3-max",
+    "deepseek-v4.1-flash"
+  ],
+  "groups": {
+    "native": [
+      "grok-4.7-high",
+      "gemini-3.8-flash-high",
+      "hermes-glm-5.3-max",
+      "deepseek-v4.1-flash"
+    ],
+    "external": [
+      "muse-spark-1.3"
+    ]
+  },
+  "ranked_order": [
+    "hermes-glm-5.3-max",
+    "deepseek-v4.1-flash",
+    "grok-4.7-high",
+    "gemini-3.8-flash-high",
+    "muse-spark-1.3"
+  ],
+  "anchor_election": {
+    "candidates": [
+      "claude-sonnet-5-5",
+      "gpt-6.1-sol"
+    ],
+    "hashes": {
+      "claude-sonnet-5-5": "c538682dad7207b3e27c8ad750091dc9a9d8cf093fd8dcd187ec19dc16f771da",
+      "gpt-6.1-sol": "4e073da13d1b649b24fe97e470378f185cd6bca9f3a38d79d93b329ff98a5fb1"
+    },
+    "note": "gpt-6.1-sol is architect_slot (models.md 1.0, arch-council.md 7), yielded to claude-sonnet-5-5 per anchor fallback rule (models.md 1.4/1.2)",
+    "winner": "claude-sonnet-5-5"
+  },
+  "seats": [
+    {
+      "seat_index": 1,
+      "family": "Anthropic",
+      "slot_id": "claude-sonnet-5-5",
+      "transport": "droid exec -m claude-sonnet-5 -r high",
+      "group": "anchor",
+      "hat": "Скептик",
+      "status": "RUNNING",
+      "pid": 16184
+    },
+    {
+      "seat_index": 2,
+      "family": "Zhipu",
+      "slot_id": "hermes-glm-5.3-max",
+      "transport": "hermes chat -m glm-5.3 --reasoning max",
+      "group": "native",
+      "hat": "Реалист",
+      "status": "RUNNING",
+      "pid": 17126
+    },
+    {
+      "seat_index": 3,
+      "family": "DeepSeek",
+      "slot_id": "deepseek-v4.1-flash",
+      "transport": "droid exec -m deepseek-v4.1-flash -r max",
+      "group": "native",
+      "hat": "Визионер",
+      "status": "RUNNING",
+      "pid": 17956
+    }
+  ],
+  "hats": {
+    "claude-sonnet-5-5": "Скептик",
+    "hermes-glm-5.3-max": "Реалист",
+    "deepseek-v4.1-flash": "Визионер"
+  },
+  "hat_index": 1,
+  "k": 0,
+  "rotation_ok": true,
+  "fallbacks": [],
+  "recheck": {
+    "judge_family": "Zhipu",
+    "slot_id": "hermes-glm-5.3-max"
+  },
+  "quorum_status": "IN_PROGRESS"
+}

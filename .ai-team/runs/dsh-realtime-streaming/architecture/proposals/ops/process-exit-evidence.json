@@ -1,0 +1,9 @@
+{
+  "checked_at": "2026-10-13 07:13:25 UTC",
+  "pid_90960_present": false,
+  "pid_2816_present": false,
+  "process_count": 1231,
+  "source": "mcp__desktop_commander__list_processes",
+  "termination_evidence": "PID absence in successful inventory; no external writer remains",
+  "external_cli_result": "API retries unknown; no assistant/tool result"
+}
