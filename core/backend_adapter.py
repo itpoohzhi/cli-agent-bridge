@@ -97,6 +97,15 @@ class TurnContext:
     handler: object | None = None
     keepalive: PollCallback | None = None
     client_gone: PollCallback | None = None
+    rid: str = ""
+    turn_id: str = ""
+    idle_timeout_s: float = 300.0
+    safety_cap_s: float = 3600.0
+    on_activity: Callable[[str], None] | None = None
+    register_pgid: Callable[[int], None] | None = None
+    managed_turn: Any = None
+    detach_on_disconnect: bool = False
+    cancel_event: Any = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +180,8 @@ BACKEND_KEYS = frozenset(
         "wrapper",
         "technical_ref",
         "proxy_port",
+        "idle_timeout_s",
+        "safety_cap_s",
     }
 )
 TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
@@ -221,6 +232,15 @@ def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -
             or not PROXY_PORT_MIN <= port <= PROXY_PORT_MAX
         ):
             return "backend_proxy_port_invalid"
+    for timeout_key in ("idle_timeout_s", "safety_cap_s"):
+        if timeout_key in entry and entry[timeout_key] is not None:
+            timeout_val = entry[timeout_key]
+            if (
+                isinstance(timeout_val, bool)
+                or not isinstance(timeout_val, (int, float))
+                or timeout_val <= 0
+            ):
+                return f"backend_{timeout_key}_invalid"
     if "technical_ref" not in entry:
         return "backend_technical_ref_missing" if kind in PIN_REQUIRED_KINDS else ""
     ref = entry.get("technical_ref")

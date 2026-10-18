@@ -1,0 +1,1227 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-EYE-33873-RESILIENCE",
+  "run_id": "dsh-bridge-resilience-20261017",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "DRAFT",
+  "role_plan": {
+    "path": ".ai-team/runs/dsh-bridge-resilience-20261017/plans/architect-01.json",
+    "sha256": "6c79c834bc937b8e99006e81344d5e597dc3703ab07e516d940fc9262f08d3a2"
+  },
+  "spec_path": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md",
+  "adr_path": "docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md",
+  "requirement_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004",
+    "REQ-005"
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:3896-3922",
+      "claim": "[F-01] main() запускает server.serve_forever() внутри try с единственным except KeyboardInterrupt (SIGINT); обработчика SIGTERM нет, вызова signal.signal в файле нет — SIGTERM завершает процесс действием по умолчанию мгновенно."
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:3920-3922",
+      "claim": "[F-02] Блок finally в main() выполняет только server.server_close(); ожидания завершения активных запросов и чтения реестра _active перед выходом нет."
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:3891-3893",
+      "claim": "[F-03] Класс Server наследует ThreadingHTTPServer с daemon_threads=True — потоки запросов (SSE-ходы) демонические и умирают вместе с процессом."
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:346-348,1613-1633,1718-1727,3165-3168",
+      "claim": "[F-04] Реестр _active (dict run_id -> время старта) под _active_lock заполняется в ServeRun/ExecRun ДО Popen и очищается после kill группы; читается только эндпоинтом /health для поля active и для карантина слотов, на остановку не влияет."
+    },
+    {
+      "id": "EVD-005",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:3163-3185",
+      "claim": "[F-05] Эндпоинт /health возвращает ok, active, quarantined, max_concurrent, uptime_s; поля draining или ready нет."
+    },
+    {
+      "id": "EVD-006",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:67,350,3355-3382",
+      "claim": "[F-06] Статус 503 в мосте выдаётся только как 'bridge busy' при исчерпании бюджета ожидания слота семафора _slots (MAX_CONCURRENT по умолчанию 2); режима отказа новым запросам из-за остановки процесса нет."
+    },
+    {
+      "id": "EVD-007",
+      "kind": "document",
+      "ref": "~/Library/LaunchAgents/com.user.dsh-muse-bridge.plist",
+      "claim": "[F-07] launchd-задание com.user.dsh-muse-bridge: KeepAlive=true, ThrottleInterval=5, ключа ExitTimeOut в plist нет."
+    },
+    {
+      "id": "EVD-008",
+      "kind": "command",
+      "ref": "launchctl print gui/501/com.user.dsh-muse-bridge",
+      "claim": "[F-08] launchctl print показывает для задания exit timeout = 5 (секунды между SIGTERM и SIGKILL), pid 81768."
+    },
+    {
+      "id": "EVD-009",
+      "kind": "command",
+      "ref": "launchctl list (com.user.dsh-muse-bridge)",
+      "claim": "[F-09] launchctl list показывает для com.user.dsh-muse-bridge статус последнего выхода -15 (SIGTERM)."
+    },
+    {
+      "id": "EVD-010",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.err:4060-4104",
+      "claim": "[F-10] Ход id 01a14a8e стартовал в 18:49:56, последняя запись tool_item в 18:52:16, строка start host=127.0.0.1 port=9886 (новый процесс) в 18:52:23; записей done или error для этого хода между ними нет — ход оборван без итоговой записи."
+    },
+    {
+      "id": "EVD-011",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.err:4103-4104",
+      "claim": "[F-11] Запуск команды launchctl kickstart -k в 18:52:23 в логах моста не записан; сопоставление с рестартом процесса идёт по времени записи start (18:52:23) и данным брифа."
+    },
+    {
+      "id": "EVD-012",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.err:4106-4109",
+      "claim": "[F-12] Следующий POST /v1/chat/completions в 18:55:19 открыл новую serve-сессию 01a14a93 (новый serve init, новый session/start); продолжения оборванной сессии 01a14a8e нет."
+    },
+    {
+      "id": "EVD-013",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1391,2012",
+      "claim": "[F-13] Процесс muse serve порождается с start_new_session=True (собственная сессия и группа процессов), поэтому SIGTERM на мост не доходит до потомка по группе."
+    },
+    {
+      "id": "EVD-014",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1368,2947-2953",
+      "claim": "[F-14] Поток keepalive (_keepalive_loop) шлёт каждые KEEPALIVE_S=15 с пустой data-чанк {'content': ''}; SSE-комментариев вида ': keepalive' в коде muse-bridge нет."
+    },
+    {
+      "id": "EVD-015",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1365-1368",
+      "claim": "[F-15] Комментарий в коде фиксирует причину keepalive: без раннего SSE клиент (OpenAI SDK в DeepSeek Harness) рвал долгий ход как 'Request timed out' примерно через 600 с."
+    },
+    {
+      "id": "EVD-016",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2052-2087",
+      "claim": "[F-16] read_msg(timeout_at) опрашивает stdout потомка через select с шагом до 0.5 с и бросает ServeUnavailable('serve read timeout') только когда time.monotonic() достиг timeout_at; таймера простоя (отсутствия кадров) нет, timeout_at — абсолютный дедлайн."
+    },
+    {
+      "id": "EVD-017",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:2060-2066",
+      "claim": "[F-17] Внутри read_msg живость потомка проверяется лишь через self.proc.poll() в ветке 'данных нет'; метрик CPU, I/O или дочерних PID в server.py нет."
+    },
+    {
+      "id": "EVD-018",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:146,2037-2044,2470-2482,3246-3250",
+      "claim": "[F-18] Цикл хода вызывает read_msg(_limit), где _limit = deadline = min(now0 + TIMEOUT_S, exec_deadline); exec_deadline = t0 + min(TIMEOUT_S, REQUEST_CAP_S) - FINISH_RESERVE_S, FINISH_RESERVE_S = 35 с."
+    },
+    {
+      "id": "EVD-019",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:66,148",
+      "claim": "[F-19] В развёрнутой копии TIMEOUT_S по умолчанию 1800 и REQUEST_CAP_S = 1800.0; в рабочем дереве репозитория те же константы 3600 и 3600.0 (незакоммиченная правка, расхождение ровно 2 строки)."
+    },
+    {
+      "id": "EVD-020",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/server.py.bak-1792243392:66,146,148",
+      "claim": "[F-20] Старая копия server.py.bak-1792243392 содержит TIMEOUT_S=1800, REQUEST_CAP_S=1800.0, FINISH_RESERVE_S=35.0 — те же значения, что действовали во всех трёх сбоях."
+    },
+    {
+      "id": "EVD-021",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.err:3151,3355-3356",
+      "claim": "[F-21] Сбой 2026-10-16 22:58:26: ход serve turn стартовал 22:29:01, таймаут через 1765 с = 1800 - 35; после 'serve read timeout' резервный exec заблокирован (reason=content_started)."
+    },
+    {
+      "id": "EVD-022",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.err:3475,3763-3764",
+      "claim": "[F-22] Сбой 2026-10-17 02:03:36: ход стартовал 01:34:11, таймаут через 1765 с = 1800 - 35."
+    },
+    {
+      "id": "EVD-023",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.err:3842-3845,4036-4037",
+      "claim": "[F-23] Сбой 2026-10-17 14:06:27: POST в 13:37:02, ход стартовал 13:37:03, таймаут через 1765 с от POST = 1800 - 35."
+    },
+    {
+      "id": "EVD-024",
+      "kind": "document",
+      "ref": "~/.dsh/bridges/muse-bridge/logs/bridge.err:3342-3355,3750-3763,4021-4036",
+      "claim": "[F-24] Во всех трёх сбоях потомок оставался активным: последние записи tool_item (toolCall) зафиксированы за 8 с, 16 с и 79 с до таймаута; записи tool_item не содержат rid запроса, при MAX_CONCURRENT=2 лог двух ходов перемешан."
+    },
+    {
+      "id": "EVD-025",
+      "kind": "command",
+      "ref": "grep -c 'serve read timeout' ~/.dsh/bridges/muse-bridge/logs/bridge.err",
+      "claim": "[F-25] В bridge.err 18 записей 'serve read timeout' с 2026-10-05; три последних (2026-10-16 и 2026-10-17) завершились ошибкой клиенту, потому что резервный exec заблокирован после начала контента."
+    },
+    {
+      "id": "EVD-026",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:3328",
+      "claim": "[F-26] Клиентскому сообщению 'muse turn failed (rc=1, state=terminal_failed): <detail>' соответствует формат err_msg в _serve_json; detail для сбоя 2 равен 'serve read timeout'."
+    },
+    {
+      "id": "EVD-027",
+      "kind": "document",
+      "ref": "~/.dsh/profiles/desktop/cordis.patch.yml:797-804",
+      "claim": "[F-27] Профиль desktop: плагин persona внутри preset-standard содержит только prefix 'You are a coding agent powered by the {{model}} model.' — ключа suffix нет."
+    },
+    {
+      "id": "EVD-028",
+      "kind": "document",
+      "ref": "~/.dsh/profiles/web/cordis.patch.yml:51-55",
+      "claim": "[F-28] Профиль web: тот же плагин persona содержит suffix 'Your working directory is {{cwd}}.' и prefix с {{model}}."
+    },
+    {
+      "id": "EVD-029",
+      "kind": "document",
+      "ref": "/tmp/cel-runs/dsh-bridge-resilience-analyst-20261017/brief.md",
+      "claim": "[F-29] Текст ошибки шаблонизатора (unknown prompt variable '{{cwd}}' in section 'deployment:persona-suffix'; registered variables: provider, model) получен из брифа; исходник проверки лежит в упакованном коде DSH."
+    },
+    {
+      "id": "EVD-030",
+      "kind": "document",
+      "ref": "~/.dsh/profiles/web/cordis.patch.yml:34-46",
+      "claim": "[F-30] Копия preset-standard в профиле web названа в комментарии замороженным снимком бандла dsh-web-app; строки внутри preset-*.config.plugins патчами верхнего уровня не адресуются."
+    },
+    {
+      "id": "EVD-031",
+      "kind": "document",
+      "ref": "~/.dsh/profiles/desktop/package.json",
+      "claim": "[F-31] Пакеты профиля desktop: бандлы @deepseek-ai/dsh-base и @deepseek-ai/dsh-web-app включены в package.json; пакет dsh-persona поставляется внутри приложения."
+    },
+    {
+      "id": "EVD-032",
+      "kind": "command",
+      "ref": "grep -rIlF 'upstream stream ended before a completion event' /Applications/DeepSeek\\ Harness.app/Contents/Resources",
+      "claim": "[F-32] Строка 'upstream stream ended before a completion event' в ресурсах DeepSeek Harness.app и ~/.dsh текстовым поиском не найдена — источник формулировки TRANSPORT находится в упакованном клиентском коде."
+    },
+    {
+      "id": "EVD-033",
+      "kind": "command",
+      "ref": "grep -c ' start host=' ~/.dsh/bridges/muse-bridge/logs/bridge.err",
+      "claim": "[F-33] В bridge.err 24 записи start host= (рестарты процесса моста) с 2026-10-05; в 2026-10-17 рестарты в 16:23:15 и 18:52:23."
+    },
+    {
+      "id": "EVD-034",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1996-2016,2431-2437",
+      "claim": "[F-34] Каждый запрос открывает отдельный процесс muse serve со сменой session/start; запись sessionId берётся из ответа session/start, режим --no-session-log включён в командной строке потомка."
+    }
+  ],
+  "risk_triggers": [
+    "auth",
+    "security",
+    "external-attack-surface",
+    "trust-boundary"
+  ],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "OPEN-01: Потомок muse serve / droid exec живёт в собственной группе процессов (start_new_session=True); при истечении дедлайна drain (110 с) HubLifecycleManager явно завершает группы оставшихся активных ходов, а при аварийной гибели моста по SIGKILL осиротевшие группы зачищаются при следующем старте хаба процедурой orphan reaper по реестру children.json (RW-004).",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-013"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "statement": "OPEN-02: Клиент DSH формирует ошибку TRANSPORT ('upstream stream ended before a completion event') при закрытии TCP/SSE-сокета без финального чанка и data: [DONE]; отправка корректного error-чанка + [DONE] перед закрытием устраняет необработанный обрыв.",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-010",
+        "EVD-032"
+      ]
+    },
+    {
+      "id": "ASM-003",
+      "statement": "OPEN-03: Клиент DSH может повторять оборванный запрос или инициировать перегенерацию; TurnSessionManager дедуплицирует повтор по точному turn_key (workspace, model_id, session_id/rid, digest истории включая последнее user-сообщение) только для активных (нетерминальных) ходов, а для явной отмены при нажатии Stop предоставляет POST /v1/turns/<turn_id>/cancel (RW-001, RW-003).",
+      "status": "ASSUMED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-012",
+        "EVD-034"
+      ]
+    },
+    {
+      "id": "ASM-004",
+      "statement": "OPEN-04: Директивой владельца №2 и замечанием Совета RW-005 утверждены адаптивный таймер неактивности IDLE_TIMEOUT_S = 300 с и предохранительный потолок SAFETY_CAP_S = 3600 с с контролем реального приращения cputime в ProcessWatchdog (спящие потомки без прироста CPU таймер не сбрасывают; при сбое ps действует fail-closed).",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-016",
+        "EVD-019",
+        "EVD-024"
+      ]
+    },
+    {
+      "id": "ASM-005",
+      "statement": "OPEN-05: Директивой владельца №5 утверждено удаление {{cwd}} из deployment:persona-suffix в ~/.dsh/profiles/web/cordis.patch.yml (где зарегистрированы только provider и model) и передача рабочей директории через AGENTS.md проекта или DSH_CWD.",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-027",
+        "EVD-028",
+        "EVD-029"
+      ]
+    },
+    {
+      "id": "ASM-006",
+      "statement": "OPEN-06: Директивой владельца №1 выбрано фоновое доведение уже запущенного процесса (detached execution) с буферизацией событий в TurnSessionManager, явной отменой через POST /v1/turns/<turn_id>/cancel и ответом 410 Gone (GAP_DETECTED) при вытеснении запрошенного from_seq из кольцевого буфера 10 МиБ (RW-001, RW-006).",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-012",
+        "EVD-013",
+        "EVD-034"
+      ]
+    },
+    {
+      "id": "ASM-007",
+      "statement": "OPEN-07: Директивой владельца №3 и RW-008 утверждена реализация всех механизмов в общем слое хаба (core/ и server.py) без зависимости TurnSessionManager от core.tool_emulation и с автоматическим подключением корня cli-agent-bridge в sys.path внутри bridges/muse-bridge/server.py.",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-016"
+      ]
+    },
+    {
+      "id": "ASM-008",
+      "statement": "OPEN-08: Директивой владельца №4 и RW-007 утверждено увеличение ExitTimeOut в launchd plist до 120 секунд и неблокирующий перехват SIGTERM/SIGINT через threading.Event с запуском процедуры drain (110 с) в выделенном фоновом потоке.",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-007",
+        "EVD-008"
+      ]
+    },
+    {
+      "id": "ASM-009",
+      "statement": "OPEN-09: Включение поля rid (request ID) и turn_id в каждую запись журнала (включая tool_item, watchdog и терминальные записи) в общем слое хаба устраняет перемешивание логов при MAX_CONCURRENT >= 2.",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-024"
+      ]
+    },
+    {
+      "id": "ASM-010",
+      "statement": "OPEN-10: Вместо платформенно-зависимого SO_REUSEPORT на macOS Darwin выбран детерминированный механизм Graceful Shutdown & Drain с ответом 503 Retry-After: 5, окном ExitTimeOut=120s в launchd и kill-switch флагами DSH_BRIDGE_*_ENABLED (RW-009).",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-003",
+        "EVD-007",
+        "EVD-008"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "APPROVED",
+      "kind": "one-way",
+      "question": "Как предотвратить уничтожение активного хода модели при разрыве TCP/SSE-сокета клиентом, сохранив возможность явной отмены по кнопке Stop, точную дедупликацию и защиту от переполнения буфера (REQ-001, RW-001, RW-002, RW-003, RW-006, RW-010, FU-002)?",
+      "choice": "Ввести модуль core/turn_session_manager.py (TurnSessionManager, ManagedTurn, TurnBuffer): 1) выполнять BackendAdapter.execute_turn в фоновом воркере ManagedTurn без убийства процесса при разрыве сокета; 2) специфицировать эндпоинт явной отмены POST /v1/turns/<turn_id>/cancel (и DELETE /v1/turns/<turn_id>), который переводит ход в состояние CANCELLED, гасит процессную группу (SIGTERM -> 2 с -> SIGKILL), немедленно освобождает слот семафора MAX_CONCURRENT=2 и возвращает 200 {'ok': true, 'turn_id': turn_id, 'status': 'cancelled'}; 3) вычислять turn_key как SHA-256 от кортежа (workspace, model_id, session_id/rid, digest_history_including_last_user_message) и выполнять автоматический re-attach только к нетерминальным ходам; 4) в BufferedTurnEvent разрешить passthrough неизвестных типов событий (kind: str), в SSE передавать заголовок X-Turn-Id и поле id: <seq>, а дисковые снимки сохранять с полем schema_version: '1.0' и правами 0600 в каталоге 0700; 5) при запросе вытесненного из 10 МиБ кольцевого буфера from_seq возвращать HTTP 410 Gone с кодом GAP_DETECTED, заголовком X-Oldest-Available-Seq и ссылкой на снимок состояния.",
+      "alternatives": [
+        "Убивать процесс модели при разрыве клиентского сокета (статус-кво, приводит к потере вычислений)",
+        "Оставить фоновый ход без эндпоинта отмены и с молчаливым пропуском вытесненных чанков (блокирует слоты MAX_CONCURRENT=2 при нажатии Stop и искажает поток при переполнении буфера)"
+      ],
+      "drivers": [
+        "REQ-001: Фоновая автономия хода (detached execution) и буферизация результата",
+        "RW-001, RW-002, RW-003, RW-006, RW-010, FU-002: Освобождение семафора при Stop, защита эндпоинтов, точный turn_key, честный 410 GAP_DETECTED и расширяемость событий",
+        "EVD-006, EVD-010, EVD-012, EVD-034: Потеря длительных ходов и риск исчерпания MAX_CONCURRENT=2"
+      ],
+      "consequences": [
+        "Ход гарантированно доходит до завершения в фоне при обрыве сети, но мгновенно отменяется и освобождает слот MAX_CONCURRENT=2 при вызове POST /v1/turns/<turn_id>/cancel",
+        "При переполнении 10 МиБ кольцевого буфера клиент получает детерминированный 410 Gone (GAP_DETECTED) с возможностью забрать полный снимок"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_detached_turn_execution.py -q",
+        "expected": "exit 0; detached turn survives socket close, cancel endpoint stops pgid and frees semaphore slot with 200 cancelled, regenerate starts new turn, evicted seq returns 410 GAP_DETECTED, turn_id regex and 0600 permissions enforced"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "APPROVED",
+      "kind": "one-way",
+      "question": "Как избежать ложных обрывов длительных ходов с активными инструментами на 1765-й секунде и одновременно гарантировать прерывание спящих зависших подпроцессов (REQ-002, RW-005, FU-004)?",
+      "choice": "Ввести модуль core/watchdog.py (AdaptiveTimeoutController и ProcessWatchdog): заменить фиксированный дедлайн двухуровневым таймером — IDLE_TIMEOUT_S = 300 с и SAFETY_CAP_S = 3600 с (с FINISH_RESERVE_S = 35 с). Опрашивать группу процессов каждые 5 с командой 'ps -o pid=,ppid=,pgid=,stat=,cputime=,command= -g <pgid>' (таймаут 2 с) и сбрасывать idle_timeout ТОЛЬКО при поступлении протокольных событий, при положительном приросте CPU-времени (cputime delta > 0) или однократно при появлении нового дочернего PID. Спящие процессы без приращения cputime не сбрасывают таймер простоя; при ошибке или таймауте ps на Darwin действует fail-closed режим (таймер простоя не сбрасывается). Включить rid и turn_id во все записи лога.",
+      "alternatives": [
+        "Оставить только фиксированный абсолютный дедлайн 1800 с или 3600 с без проверки активности",
+        "Сбрасывать idle_timeout при простом наличии любого живого дочернего PID без проверки прироста cputime (приводит к утечке активности на зависшем sleep/stdin до 3600 с)"
+      ],
+      "drivers": [
+        "REQ-002: Адаптивный таймер неактивности (300 с) + предохранительный потолок (3600 с) + ProcessWatchdog",
+        "RW-005, FU-004: Исключение утечки активности на спящих потомках и fail-closed поведение при сбое ps",
+        "EVD-016..EVD-026: Три боевых обрыва на 1765 с при живом потомке"
+      ],
+      "consequences": [
+        "Активные ходы с вызовами инструментов и ростом CPU работают без ложных обрывов до 3600 с",
+        "Спящие зависшие подпроцессы (sleep, блокировка на stdin) без прироста cputime прерываются ровно через 300 с с кодом idle_timeout"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_adaptive_idle_watchdog.py -q",
+        "expected": "exit 0; CPU-active child resets idle timer, sleeping child with 0 cputime delta times out at idle_timeout, ps failure/timeout acts fail-closed, absolute_cap triggers at 3600s"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "APPROVED",
+      "kind": "one-way",
+      "question": "В каком архитектурном слое разместить механизмы отказоустойчивости и как обеспечить поставку пакетов core.* для изолированного процесса bridges/muse-bridge/server.py (REQ-003, RW-008, FU-003)?",
+      "choice": "Реализовать все механизмы отказоустойчивости в общем слое хаба (core/turn_session_manager.py, core/watchdog.py, core/lifecycle.py, расширение core/backend_adapter.py и фасада server.py) без зависимости TurnSessionManager от core.tool_emulation (FU-003). В bridges/muse-bridge/server.py зафиксировать автоматическое разрешение импортов core.* через добавление корня cli-agent-bridge в sys.path при старте (с поддержкой переменной DSH_BRIDGE_ROOT и симлинка ~/.dsh/bridges/muse-bridge/core -> <repo>/core, RW-008).",
+      "alternatives": [
+        "Реализовать изолированные копии логики отдельно в bridges/muse-bridge/server.py, adapters/muse_adapter.py и server.py",
+        "Вынести управление во внешний процесс-брокер с внешними зависимостями (Redis/SQLite)"
+      ],
+      "drivers": [
+        "REQ-003: Реализация в общем слое хаба (Common Hub Layer)",
+        "RW-008, FU-003: Гарантированный импорт core.* в изолированном каталоге muse-bridge и чистая граница модулей без tool_emulation в менеджере сессий",
+        "ADR-0002: Единый мульти-бинарный хаб"
+      ],
+      "consequences": [
+        "Единая реализация и единое тестовое покрытие для всех бэкендов хаба (DroidAdapter, MuseAdapter)",
+        "Безошибочный запуск bridges/muse-bridge/server.py как из репозитория, так и из ~/.dsh/bridges/muse-bridge/"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_backend_contract.py tests/test_hub_integration.py -q",
+        "expected": "exit 0; common hub layer serves both droid and muse adapters, core.turn_session_manager has no import of core.tool_emulation, and muse-bridge resolves core.* imports"
+      }
+    },
+    {
+      "id": "AD-004",
+      "status": "APPROVED",
+      "kind": "one-way",
+      "question": "Как обеспечить плавную остановку (Graceful Shutdown & Drain) без дедлоков в обработчике сигналов, зачистку осиротевших процессов после SIGKILL и оперативное отключение при регрессиях (REQ-004, RW-004, RW-007, RW-009)?",
+      "choice": "Ввести модуль core/lifecycle.py (HubLifecycleManager): 1) при старте хаба выполнять процедуру orphan reaper (reap_orphans_on_startup) — читать workspace/state/children.json, проверять живые PID через os.kill(pid, 0) и имя команды в ps, отправлять SIGTERM->SIGKILL осиротевшим группам от упавших предыдущих инстансов; 2) в обработчике SIGTERM/SIGINT главного потока только выставлять threading.Event (shutdown_requested) без захвата замков и без блокирующих вызовов, а процедуру drain (DRAIN_TIMEOUT_S = 110 с при ExitTimeOut = 120 с в launchd plist) и server.shutdown() запускать в выделенном фоновом потоке; 3) в состоянии DRAINING отвечать на новые запросы HTTP 503 с Retry-After: 5, а по истечении 110 с отправлять терминальный SSE error-чанк и data: [DONE]\\n\\n; 4) добавить фичефлаги окружения DSH_BRIDGE_DETACHED_ENABLED, DSH_BRIDGE_WATCHDOG_ENABLED, DSH_BRIDGE_DRAIN_ENABLED (по умолчанию true) для мгновенного перехода в консервативный режим без отката кода.",
+      "alternatives": [
+        "Вызывать server.shutdown() и захватывать замки прямо внутри signal handler основного потока (приводит к риску дедлока с serve_forever)",
+        "Не вести реестр children.json и оставлять дочерние группы с start_new_session=True сиротами после SIGKILL моста"
+      ],
+      "drivers": [
+        "REQ-004: Плавная остановка (Graceful Shutdown & Drain)",
+        "RW-004, RW-007, RW-009: Зачистка сирот на старте, неблокирующий сигнальный цикл и kill-switch флаги окружения",
+        "EVD-001..EVD-013: Мгновенный обрыв активных ходов при рестарте и отвязка групп start_new_session=True"
+      ],
+      "consequences": [
+        "Перезапуск моста в окне drain (до 110 с) не обрывает активные ходы и не вызывает дедлоков в обработчике сигналов",
+        "Осиротевшие процессы от предыдущих аварийных падений гарантированно убираются при старте хаба, а любой новый механизм отключается через env-флаг"
+      ],
+      "approval_required": true,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_graceful_shutdown_drain.py -q",
+        "expected": "exit 0; signal handler sets threading.Event non-blockingly, background worker drains active turns and returns 503 Retry-After: 5 to new requests, orphan reaper cleans stale PIDs from children.json on startup, and kill-switch env flags disable features cleanly"
+      }
+    },
+    {
+      "id": "AD-005",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как устранить ошибку шаблонизатора unknown prompt variable '{{cwd}}' в deployment:persona-suffix профиля DSH Web (REQ-005)?",
+      "choice": "Удалить 'suffix: Your working directory is {{cwd}}.' из секции плагина persona в ~/.dsh/profiles/web/cordis.patch.yml (где зарегистрированы только provider и model), приведя его к формату профиля desktop; передавать контекст рабочего каталога через AGENTS.md проекта и переменную окружения DSH_CWD в системном промпте моста.",
+      "alternatives": [
+        "Патчить упакованный бинарный архив app.asar приложения DeepSeek Harness",
+        "Жёстко прописать абсолютный путь одного проекта в глобальном профиле web"
+      ],
+      "drivers": [
+        "REQ-005: Исправление конфигурации DSH ({{cwd}})",
+        "EVD-027..EVD-031: Ошибка старта сессии в профиле web из-за отсутствия cwd в реестре deployment:persona-suffix"
+      ],
+      "consequences": [
+        "0 ошибок unknown prompt variable при старте сессии в профиле web",
+        "Полная совместимость при обновлениях бандла DeepSeek Harness"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_dsh_profile_config.py -q",
+        "expected": "exit 0; cordis.patch.yml validation confirms no unregistered {{cwd}} variable in deployment:persona-suffix"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "Оператор / launchd (QS-1: Доступность при рестарте, неблокирующий drain и уборка сирот)",
+      "stimulus": "Перезапуск моста командой launchctl kickstart -k / SIGTERM во время выполнения хода либо старт хаба после аварийного SIGKILL",
+      "environment": "Штатная работа хаба (server.py / muse-bridge) под управлением launchd с ExitTimeOut = 120 с",
+      "artifact": "core/lifecycle.py (HubLifecycleManager), server.py, bridges/muse-bridge/server.py",
+      "response": "На старте orphan reaper зачищает зависшие PID из children.json; при SIGTERM обработчик неблокирующе выставляет threading.Event, фоновый поток переводит хаб в DRAINING, новые запросы получают HTTP 503 с Retry-After: 5, активный ход доводится в окне 110 с (при таймауте получает финальный SSE error-чанк и [DONE])",
+      "response_measure": "0 оборванных без финального кадра ходов при рестарте в окне drain (до 110 с); 0 осиротевших процессов после рестарта; 100% новых запросов во время drain получают 503 Retry-After: 5",
+      "verification_ids": [
+        "VER-003",
+        "VER-006"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "reliability",
+      "source": "Клиент DSH / Пользователь (QS-2: Фоновая автономия хода, явная отмена Stop и контроль Gap Replay)",
+      "stimulus": "Разрыв TCP/SSE-соединения до completion event, переподключение с from_seq / Last-Event-ID либо нажатие кнопки Stop в UI DSH",
+      "environment": "Активный ход модели в мульти-бинарном хабе при лимите MAX_CONCURRENT=2",
+      "artifact": "core/turn_session_manager.py (TurnSessionManager, ManagedTurn, TurnBuffer), server.py",
+      "response": "Разрыв сокета переводит ход в RUNNING_DETACHED без убийства процесса; повторное подключение воспроизводит события (либо возвращает 410 GAP_DETECTED с X-Oldest-Available-Seq при вытеснении из 10 МиБ буфера); вызов POST /v1/turns/<turn_id>/cancel переводит ход в CANCELLED, гасит группу SIGTERM->SIGKILL и немедленно освобождает слот MAX_CONCURRENT=2",
+      "response_measure": "Доля убитых при разрыве сокета процессов = 0%; время освобождения слота семафора при вызове /cancel <= 2.5 с; 100% вытесненных from_seq возвращают 410 GAP_DETECTED",
+      "verification_ids": [
+        "VER-001",
+        "VER-006"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "quality": "performance",
+      "source": "Пользователь (QS-3: Точный контроль активности длительных ходов по cputime)",
+      "stimulus": "Ход с вызовами инструментов длительностью свыше 1765 с при активном потреблении CPU либо зависание спящего подпроцесса (sleep / ожидание stdin) без CPU",
+      "environment": "Выполнение хода через BackendAdapter под контролем AdaptiveTimeoutController и ProcessWatchdog",
+      "artifact": "core/watchdog.py (AdaptiveTimeoutController, ProcessWatchdog)",
+      "response": "Таймер неактивности (300 с) сбрасывается только по приходу событий протокола, по приросту cputime (cpu_delta > 0) или появлению нового дочернего PID; спящие потомки без прироста cputime и ошибки ps (fail-closed) таймер не сбрасывают",
+      "response_measure": "0 ложных обрывов CPU-активных ходов до 3600 с; спящие процессы с 0 прироста CPU прерываются через 300 +- 5 с с кодом idle_timeout",
+      "verification_ids": [
+        "VER-002",
+        "VER-006"
+      ]
+    },
+    {
+      "id": "QA-004",
+      "quality": "operability",
+      "source": "Оператор (QS-4: Наблюдаемость параллельных ходов и операционный kill-switch)",
+      "stimulus": "Разбор сбоя по журналу при MAX_CONCURRENT >= 2 или экстренное отключение нового механизма при нештатном поведении",
+      "environment": "Конкурентная эксплуатация хаба",
+      "artifact": "core/watchdog.py, core/turn_session_manager.py, core/lifecycle.py, server.py",
+      "response": "Каждая запись журнала содержит rid, turn_id, pgid, age_s, idle_s и код причины; переменные DSH_BRIDGE_DETACHED_ENABLED, DSH_BRIDGE_WATCHDOG_ENABLED, DSH_BRIDGE_DRAIN_ENABLED позволяют переключить любой модуль в консервативный режим без отката кода",
+      "response_measure": "100% записей хода содержат rid и turn_id; переключение любого из 3 фичефлагов в false меняет поведение без изменения кода",
+      "verification_ids": [
+        "VER-002",
+        "VER-003",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "QA-005",
+      "quality": "maintainability",
+      "source": "Администратор профиля / Пользователь DSH (QS-5: Сопровождаемость конфигурации профилей DSH)",
+      "stimulus": "Запуск новой сессии в клиенте DeepSeek Harness с профилем web или desktop",
+      "environment": "Инициализация плагина persona в DSH",
+      "artifact": "~/.dsh/profiles/web/cordis.patch.yml и обработка DSH_CWD / AGENTS.md",
+      "response": "Секция deployment:persona-suffix содержит только зарегистрированные переменные (provider, model) без {{cwd}}; рабочий каталог передаётся через AGENTS.md или DSH_CWD",
+      "response_measure": "0 ошибок unknown prompt variable '{{cwd}}' при старте сессии во всех профилях DSH",
+      "verification_ids": [
+        "VER-005"
+      ]
+    },
+    {
+      "id": "QA-006",
+      "quality": "usability",
+      "source": "Клиент DSH (QS-6: Устойчивость SSE-клиента при паузах генерации и стандартизация SSE id)",
+      "stimulus": "Пауза генерации текста 60 с и более во время выполнения тяжёлого инструмента и последующее переподключение по Last-Event-ID",
+      "environment": "Открытый поток SSE (/v1/chat/completions и /v1/turns/<turn_id>/stream)",
+      "artifact": "core/lifecycle.py (KeepaliveController), core/turn_session_manager.py и server.py",
+      "response": "Контроллер keepalive отправляет кадры жизни с интервалом <= 10 с под защитой _wlock в фазе OPEN; все ответы содержат заголовок X-Turn-Id, а каждый SSE-чанк содержит поле id: <seq>",
+      "response_measure": "Интервал между кадрами жизни <= 10 с; 100% информационных SSE-кадров содержат id: <seq>; 0 записей после перехода потока в фазу CLOSED",
+      "verification_ids": [
+        "VER-001",
+        "VER-003",
+        "VER-004"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "HTTP Server & Handler Facade (server.py и bridges/muse-bridge/server.py)",
+      "responsibility": "Приём HTTP-соединений, валидация turn_id регулярным выражением ^[a-zA-Z0-9_-]{1,64}$, проверка Bearer-авторизации и привязки к клиенту, проверка статуса draining, маршрутизация в TurnSessionManager, выдача заголовка X-Turn-Id и SSE-поля id: <seq>, обработка эндпоинтов /v1/chat/completions, GET /v1/turns/<turn_id>, GET /v1/turns/<turn_id>/stream, POST /v1/turns/<turn_id>/cancel (DELETE /v1/turns/<turn_id>), /v1/models, /health, а также авторазрешение импорта core.* через sys.path в bridges/muse-bridge/server.py.",
+      "allowed_dependencies": [
+        "Python stdlib (http.server, json, socket, threading, time, uuid, re, hmac, hashlib, sys, os, pathlib)",
+        "core.backend_adapter",
+        "core.turn_session_manager",
+        "core.watchdog",
+        "core.lifecycle",
+        "core.tool_emulation",
+        "adapters"
+      ],
+      "forbidden_dependencies": [
+        "Прямое уничтожение дочернего процесса (_kill_current_run / killpg) из обработчика ошибки клиентского сокета при DSH_BRIDGE_DETACHED_ENABLED=true",
+        "Внешние не-stdlib HTTP-фреймворки"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-003",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "TurnSessionManager & TurnBuffer (core/turn_session_manager.py)",
+      "responsibility": "Управление жизненным циклом отвязанных ходов (ManagedTurn), формирование детерминированного turn_key (workspace, model_id, session_id/rid, digest истории с последним сообщением), буферизация событий BufferedTurnEvent (с открытым kind: str для passthrough) в пределах 10 МиБ на ход / 128 МиБ глобально, возврат 410 GAP_DETECTED при вытеснении запрошенного from_seq, явная отмена хода (cancel_turn -> CANCELLED, SIGTERM->2s->SIGKILL, освобождение слота семафора), атомарное сохранение снимков со schema_version: '1.0' и правами 0600 в каталоге 0700.",
+      "allowed_dependencies": [
+        "Python stdlib (threading, queue, json, time, uuid, hashlib, hmac, pathlib, os, signal, re, dataclasses, typing)",
+        "core.backend_adapter",
+        "core.watchdog"
+      ],
+      "forbidden_dependencies": [
+        "core.tool_emulation",
+        "http.server",
+        "socket",
+        "server",
+        "adapters.droid_adapter",
+        "adapters.muse_adapter"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-004",
+        "VER-007"
+      ]
+    },
+    {
+      "id": "BND-003",
+      "component": "AdaptiveTimeoutController & ProcessWatchdog (core/watchdog.py)",
+      "responsibility": "Отслеживание времени простоя (IDLE_TIMEOUT_S = 300 с) и общего возраста хода (SAFETY_CAP_S = 3600 с), периодический опрос группы процессов pgid через 'ps -o pid=,ppid=,pgid=,stat=,cputime=,command= -g <pgid>' (таймаут 2 с), сброс idle-таймера только по событиям протокола, положительному приросту cputime (cpu_delta > 0) или появлению нового дочернего PID, fail-closed поведение при сбое/таймауте ps, логирование с rid и turn_id.",
+      "allowed_dependencies": [
+        "Python stdlib (subprocess, os, signal, time, threading, dataclasses, re)"
+      ],
+      "forbidden_dependencies": [
+        "core.tool_emulation",
+        "http.server",
+        "server",
+        "adapters.*",
+        "Сторонние пакеты вне stdlib (psutil)"
+      ],
+      "verification_ids": [
+        "VER-002",
+        "VER-004",
+        "VER-007"
+      ]
+    },
+    {
+      "id": "BND-004",
+      "component": "HubLifecycleManager & KeepaliveController (core/lifecycle.py)",
+      "responsibility": "Зачистка осиротевших процессов на старте хаба (reap_orphans_on_startup) по реестру children.json (os.kill(pid, 0) + проверка имени процесса + SIGTERM/SIGKILL); неблокирующий перехват SIGTERM/SIGINT через установку threading.Event (shutdown_requested) без захвата замков; проведение drain (DRAIN_TIMEOUT_S = 110 с) и server.shutdown() в выделенном фоновом потоке; отказ новым запросам в состоянии DRAINING (503 Retry-After: 5); управление фичефлагами DSH_BRIDGE_*_ENABLED и генерация SSE keepalive <= 10 с.",
+      "allowed_dependencies": [
+        "Python stdlib (signal, threading, time, json, os, subprocess, pathlib, dataclasses)",
+        "core.turn_session_manager"
+      ],
+      "forbidden_dependencies": [
+        "adapters.*",
+        "Захват threading.Lock или блокирующий I/O внутри обработчика сигнала SIGTERM/SIGINT",
+        "Вызов os._exit() до завершения окна drain или принудительного сброса финальных SSE-кадров"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-004",
+        "VER-007"
+      ]
+    },
+    {
+      "id": "BND-005",
+      "component": "BackendAdapter Contract & Adapters (core/backend_adapter.py, adapters/droid_adapter.py, adapters/muse_adapter.py)",
+      "responsibility": "Единый типизированный интерфейс запуска консольных бинарников, регистрация PGID дочерней группы в ProcessWatchdog и children.json, уведомление AdaptiveTimeoutController о входящих кадрах (on_activity) и подчинение сигналу отмены хаба (cancel / drain_timeout).",
+      "allowed_dependencies": [
+        "Python stdlib",
+        "core.backend_adapter",
+        "core.watchdog"
+      ],
+      "forbidden_dependencies": [
+        "Прямой импорт server в core/* или adapters/*",
+        "Прямое чтение состояния клиентского TCP-сокета внутри адаптера"
+      ],
+      "verification_ids": [
+        "VER-004",
+        "VER-006",
+        "VER-007"
+      ]
+    }
+  ],
+  "contracts": {
+    "turn_cancel_endpoint": {
+      "routes": [
+        "POST /v1/turns/<turn_id>/cancel",
+        "DELETE /v1/turns/<turn_id>"
+      ],
+      "auth": "Bearer token required + owner_token_hash match",
+      "turn_id_validation": "^[a-zA-Z0-9_-]{1,64}$",
+      "state_transition": "QUEUED | RUNNING_ATTACHED | RUNNING_DETACHED -> CANCELLED",
+      "process_termination": "os.killpg(pgid, SIGTERM) -> wait up to 2.0s -> os.killpg(pgid, SIGKILL)",
+      "semaphore_release": "Immediate release of MAX_CONCURRENT=2 slot upon cancellation",
+      "response_status": 200,
+      "response_body": {
+        "ok": true,
+        "turn_id": "<turn_id>",
+        "status": "cancelled"
+      }
+    },
+    "turn_key": {
+      "components": [
+        "workspace (normpath of ctx.cwd or default workspace)",
+        "model_id (canonical model identifier)",
+        "session_id_or_rid (X-Turn-Resume-Id, prompt_cache_key, session_id, or rid)",
+        "digest_history_including_last_user_message (SHA-256 of canonical JSON of full messages array including last user message and tool calls/results)"
+      ],
+      "dedup_policy": "Automatic re-attach on POST /v1/chat/completions applies ONLY to non-terminal turns (QUEUED, RUNNING_ATTACHED, RUNNING_DETACHED) unless X-Turn-Resume-Id header is explicitly provided; completed/cancelled/failed turns always start a fresh turn on new POST (Regenerate safe)."
+    },
+    "BufferedTurnEvent": {
+      "fields": {
+        "seq": "int (monotonically increasing 1..N)",
+        "ts": "float (monotonic timestamp)",
+        "kind": "str (open string type; canonical values: 'reasoning', 'content', 'tool_call', 'error', 'done', 'status'; unknown event kinds are preserved and forwarded via passthrough)",
+        "payload": "Any (JSON-serializable event payload)",
+        "byte_len": "int (UTF-8 serialized byte size)"
+      },
+      "disk_snapshot_schema": {
+        "schema_version": "1.0",
+        "path_pattern": "workspace/state/turns/<turn_id>.json",
+        "dir_mode": "0700",
+        "file_mode": "0600"
+      }
+    },
+    "gap_replay": {
+      "ring_buffer_limit_bytes": 10485760,
+      "condition": "requested from_seq < buffer.oldest_available_seq - 1",
+      "http_status": 410,
+      "error_code": "GAP_DETECTED",
+      "headers": {
+        "X-Turn-Id": "<turn_id>",
+        "X-Oldest-Available-Seq": "<oldest_available_seq>"
+      },
+      "snapshot_recovery": "Client fetches full aggregated state at GET /v1/turns/<turn_id> (or workspace/state/turns/<turn_id>.json) and resumes stream from last_seq"
+    },
+    "sse_and_headers": {
+      "response_header": "X-Turn-Id: <turn_id>",
+      "sse_event_id": "id: <seq> emitted in every SSE frame",
+      "resume_sources": [
+        "query param ?from_seq=<seq>",
+        "HTTP header Last-Event-ID: <seq>",
+        "HTTP header X-Turn-Resume-Id: <turn_id>"
+      ]
+    },
+    "feature_flags": {
+      "DSH_BRIDGE_DETACHED_ENABLED": {
+        "default": "true",
+        "fallback_when_false": "Immediate termination of child run on client socket disconnect; /v1/turns/* returns 501"
+      },
+      "DSH_BRIDGE_WATCHDOG_ENABLED": {
+        "default": "true",
+        "fallback_when_false": "Disables ps polling and idle_timeout; uses fixed SAFETY_CAP_S - FINISH_RESERVE_S deadline"
+      },
+      "DSH_BRIDGE_DRAIN_ENABLED": {
+        "default": "true",
+        "fallback_when_false": "Disables 110s drain wait on SIGTERM; immediately stops active runs and shuts down HTTP server"
+      }
+    }
+  },
+  "security": {
+    "threat_model_required": true,
+    "turn_id_validation_regex": "^[a-zA-Z0-9_-]{1,64}$",
+    "path_traversal_protection": "Strict regex match before any path join + Path.resolve().parent == turns_dir.resolve() check; rejects invalid turn_id with HTTP 400 Bad Request",
+    "authentication_and_authorization": "Bearer token verified via hmac.compare_digest on all /v1/turns/<turn_id>, /v1/turns/<turn_id>/stream, and /v1/turns/<turn_id>/cancel (DELETE) endpoints; turn access restricted to matching owner_token_hash (HTTP 401/403 on mismatch)",
+    "filesystem_permissions": {
+      "state_dir_mode": "0700",
+      "turns_dir_mode": "0700",
+      "snapshot_file_mode": "0600",
+      "children_file_mode": "0600"
+    },
+    "secret_sanitization": "All logged errors, SSE error chunks, and persisted turn state snapshots pass through _mask_secrets before write"
+  },
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "api",
+      "producer": "core/backend_adapter.py (TurnContext, BACKEND_KEYS, backend_entry_error) и bridges/muse-bridge/server.py",
+      "consumer": "server.py, core/turn_session_manager.py, adapters/droid_adapter.py, adapters/muse_adapter.py, bridges/muse-bridge/server.py, fleet_check.py",
+      "change": "Аддитивное расширение TurnContext полями со значениями по умолчанию: rid: str = '', turn_id: str = '', idle_timeout_s: float = 300.0, safety_cap_s: float = 3600.0, on_activity: Callable[[str], None] | None = None, register_pgid: Callable[[int], None] | None = None. Расширение BACKEND_KEYS опциональными ключами 'idle_timeout_s' и 'safety_cap_s'. Автоматическое добавление корня cli-agent-bridge в sys.path при старте bridges/muse-bridge/server.py (RW-008).",
+      "compatibility": "Полностью обратно совместимо: сигнатура execute_turn(ctx: TurnContext, sse_writer: Optional[StreamSink]) -> TurnResult неизменна; все новые поля TurnContext опциональны.",
+      "verification_ids": [
+        "VER-004",
+        "VER-006",
+        "VER-007"
+      ]
+    },
+    {
+      "id": "CD-002",
+      "type": "behavior",
+      "producer": "server.py и core/turn_session_manager.py",
+      "consumer": "Клиент DeepSeek Harness / OpenAI API",
+      "change": "Отвязка времени жизни хода от TCP-сокета (Detached Execution): при разрыве соединения ход переходит в RUNNING_DETACHED. В ответах передаётся заголовок X-Turn-Id: <turn_id>, а в каждом SSE-кадре — стандартное поле id: <seq> (FU-002). Введены эндпоинты GET /v1/turns/<turn_id>, GET /v1/turns/<turn_id>/stream?from_seq=N (с возвратом 410 Gone / GAP_DETECTED и X-Oldest-Available-Seq при вытеснении чанков из буфера 10 МиБ, RW-006) и дедупликация по точному turn_key (workspace, model_id, session_id/rid, digest истории с последним сообщением, RW-003) только для активных ходов.",
+      "compatibility": "Полностью обратно совместимо со стандартным клиентом OpenAI/DSH; снимки на диске включают schema_version: '1.0' и открытый kind: str (RW-010).",
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "CD-003",
+      "type": "behavior",
+      "producer": "core/watchdog.py, server.py, adapters/muse_adapter.py, bridges/muse-bridge/server.py",
+      "consumer": "Клиент DeepSeek Harness и журнал моста (stderr / bridge.err)",
+      "change": "Переход от фиксированного дедлайна 1765/1800 с к двухуровневому AdaptiveTimeoutController (IDLE_TIMEOUT_S = 300 с + SAFETY_CAP_S = 3600 с - 35 с) с ProcessWatchdog (опрос 'ps -o pid=,ppid=,pgid=,stat=,cputime=,command= -g <pgid>' каждые 5 с). Сброс idle_timeout выполняется только при приросте cputime (cpu_delta > 0), появлении нового дочернего PID или событиях протокола; спящие потомки без прироста CPU и ошибки ps (fail-closed) таймер не сбрасывают (RW-005, FU-004). Все строки лога маркируются rid=<id> turn_id=<id>.",
+      "compatibility": "Обратно совместимо по HTTP/SSE кодам (504 timeout / 502 proxy_error / stream_error chunk); уточняет диагностический текст detail и обогащает структурированный лог.",
+      "verification_ids": [
+        "VER-002",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "CD-004",
+      "type": "api",
+      "producer": "core/lifecycle.py, server.py, bridges/muse-bridge/server.py, launchd plist",
+      "consumer": "Клиент DeepSeek Harness и супервизор macOS launchd",
+      "change": "Неблокирующий перехват SIGTERM/SIGINT через threading.Event с запуском процедуры drain (DRAIN_TIMEOUT_S = 110 с, ExitTimeOut = 120 с) в выделенном фоновом потоке (RW-007); зачистка осиротевших процессов на старте хаба по children.json (RW-004); ответ 503 Service Unavailable с Retry-After: 5 для новых запросов во время drain; фичефлаги DSH_BRIDGE_DETACHED_ENABLED, DSH_BRIDGE_WATCHDOG_ENABLED, DSH_BRIDGE_DRAIN_ENABLED (RW-009); интервал SSE keepalive <= 10 с.",
+      "compatibility": "Обратно совместимо: /health в корневом server.py строго сохраняет 7 канонических ключей JSON (ok=False при draining) + заголовок X-Bridge-Draining: true.",
+      "verification_ids": [
+        "VER-003",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "CD-005",
+      "type": "data",
+      "producer": "~/.dsh/profiles/web/cordis.patch.yml и окружение процесса моста (DSH_CWD)",
+      "consumer": "Шаблонизатор плагина persona в DeepSeek Harness Web",
+      "change": "Удаление строки 'suffix: Your working directory is {{cwd}}.' из секции deployment:persona-suffix в ~/.dsh/profiles/web/cordis.patch.yml; передача рабочего каталога через AGENTS.md проекта либо переменную окружения DSH_CWD.",
+      "compatibility": "Устраняет фатальную ошибку старта сессии в веб-профиле DSH, полностью совместимо с реестром переменных deployment:persona-suffix (provider, model).",
+      "verification_ids": [
+        "VER-005"
+      ]
+    },
+    {
+      "id": "CD-006",
+      "type": "api",
+      "producer": "server.py, bridges/muse-bridge/server.py и core/turn_session_manager.py",
+      "consumer": "Клиент DeepSeek Harness (кнопка Stop) и диагностические утилиты оператора",
+      "change": "Введение явного эндпоинта отмены хода POST /v1/turns/<turn_id>/cancel (и синонима DELETE /v1/turns/<turn_id>) с проверкой Bearer-токена и валидацией turn_id (^[a-zA-Z0-9_-]{1,64}$): переводит ход в CANCELLED, останавливает процессную группу (SIGTERM -> 2 с -> SIGKILL), немедленно освобождает слот семафора MAX_CONCURRENT=2 и возвращает 200 {'ok': true, 'turn_id': turn_id, 'status': 'cancelled'} (RW-001, RW-002).",
+      "compatibility": "Аддитивный HTTP-эндпоинт; не меняет существующие маршруты /v1/chat/completions, /v1/models и /health.",
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "container",
+      "question": "Как взаимодействуют клиент DSH, launchd, общий слой хаба (server.py + core/*), адаптеры бэкендов, дочерние группы процессов CLI и механизм поставки core.* в muse-bridge?",
+      "artifact_ref": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md#21-c4-container-diagram-и-механизм-поставки-core-rw-008"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "component",
+      "question": "Как распределены обязанности и чистые границы зависимостей (без core.tool_emulation в TurnSessionManager) между модулями core/turn_session_manager.py, core/watchdog.py, core/lifecycle.py, core/backend_adapter.py и фасадом server.py?",
+      "artifact_ref": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md#22-c4-component-view-и-чистые-границы-модулей-core-и-serverpy-fu-003"
+    },
+    {
+      "id": "VIEW-003",
+      "type": "dynamic",
+      "question": "Как выполняется ход в фоновом режиме (detached execution) после разрыва TCP-сокета, как происходит re-attach по SSE id и как обрабатывается явная отмена POST /v1/turns/<id>/cancel?",
+      "artifact_ref": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md#3-диаграмма-последовательности-detached-execution-re-attach-и-явная-отмена-req-001-rw-001-fu-002"
+    },
+    {
+      "id": "VIEW-004",
+      "type": "dynamic",
+      "question": "Через какие состояния проходит управляемый ход (ManagedTurn) включая CANCELLED, TIMED_OUT_IDLE, TIMED_OUT_CAP и INTERRUPTED_DRAIN?",
+      "artifact_ref": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md#4-диаграмма-состояний-хода-managedturn-state-machine"
+    }
+  ],
+  "evolution": {
+    "compatibility": "Полная обратная совместимость внешнего OpenAI HTTP/SSE контракта (/v1/chat/completions, /v1/models, 7 канонических ключей /health в server.py), сигнатуры BackendAdapter.execute_turn(ctx: TurnContext, sse_writer: Optional[StreamSink]) -> TurnResult и схемы fleet.json. В BufferedTurnEvent разрешён passthrough неизвестных видов событий (kind: str), а снимки на диске содержат явное поле schema_version: '1.0' (RW-010).",
+    "migration": "Внешняя СУБД отсутствует (чистый Python stdlib). Персистентные снимки ходов сохраняются в workspace/state/turns/<turn_id>.json (права 0600 в каталоге 0700, schema_version: '1.0', TTL 3600 с), а реестр активных PGID — в workspace/state/children.json для зачистки сирот при старте (RW-004). Для изолированного запуска bridges/muse-bridge/server.py пролог модуля автоматически добавляет корень cli-agent-bridge в sys.path (плюс симлинк ~/.dsh/bridges/muse-bridge/core -> <repo>/core и переменная DSH_BRIDGE_ROOT в plist, RW-008).",
+    "rollout": "1) Реализация core/watchdog.py, core/turn_session_manager.py, core/lifecycle.py и подключение в server.py, adapters/* и bridges/muse-bridge/server.py под управлением фичефлагов DSH_BRIDGE_DETACHED_ENABLED=true, DSH_BRIDGE_WATCHDOG_ENABLED=true, DSH_BRIDGE_DRAIN_ENABLED=true (RW-009); 2) прогон полного набора тестов VER-001..VER-007; 3) обновление ExitTimeOut=120 и DSH_BRIDGE_ROOT в launchd plist, создание симлинка core в ~/.dsh/bridges/muse-bridge/ и удаление {{cwd}} из ~/.dsh/profiles/web/cordis.patch.yml; 4) плавный перезапуск мостов и верификация тяжёлым путём.",
+    "rollback": "Двухуровневый откат: 1) Мгновенный операционный kill-switch без отката кода (RW-009) — установка DSH_BRIDGE_DETACHED_ENABLED=false, DSH_BRIDGE_WATCHDOG_ENABLED=false или DSH_BRIDGE_DRAIN_ENABLED=false в окружении launchd переводит соответствующую подсистему в консервативный легаси-режим; 2) Полный откат git-коммита и возврат plist / cordis.patch.yml (каталог workspace/state/turns/ удаляется безопасно без влияния на conversations.v1/)."
+  },
+  "threat_model": {
+    "required": true,
+    "assets": [
+      "Содержимое активных и завершённых ходов (reasoning_content, content, tool_calls, аргументы инструментов) в памяти TurnBuffer и в файлах workspace/state/turns/<turn_id>.json",
+      "Пул слотов конкурентности моста (семафор MAX_CONCURRENT=2) и дочерние группы процессов CLI-агентов (muse serve, droid exec)",
+      "Файловая система рабочей области моста (workspace/state/turns/, workspace/state/children.json) и секреты окружения (Bearer-токены API)"
+    ],
+    "trust_boundaries": [
+      "TB-001: Граница между HTTP-клиентами на локальном интерфейсе (DSH Web/Desktop, локальные процессы пользователя) и HTTP-фасадом моста (server.py / bridges/muse-bridge/server.py)",
+      "TB-002: Граница между HTTP-обработчиком параметров запроса (turn_id, headers) и локальной файловой системой хранения состояния (workspace/state/)",
+      "TB-003: Граница между процессом хаба (HubLifecycleManager / ProcessWatchdog) и изолированными группами дочерних процессов ОС (start_new_session=True, pgid)"
+    ],
+    "threats": [
+      {
+        "id": "THREAT-001",
+        "scenario": "Path Traversal через параметр turn_id в эндпоинтах GET /v1/turns/<turn_id>, GET /v1/turns/<turn_id>/stream, POST /v1/turns/<turn_id>/cancel (DELETE /v1/turns/<turn_id>) или заголовке X-Turn-Resume-Id для чтения/перезаписи произвольных файлов на диске.",
+        "mitigation": "Строгая валидация turn_id регулярным выражением ^[a-zA-Z0-9_-]{1,64}$ на входе HTTP-фасада и внутри TurnSessionManager до любых файловых операций (при несовпадении — немедленный HTTP 400 Bad Request), а также проверка Path.resolve().parent == turns_dir.resolve().",
+        "verification_ids": [
+          "VER-001",
+          "VER-004"
+        ]
+      },
+      {
+        "id": "THREAT-002",
+        "scenario": "Неавторизованное чтение потока размышлений/ответа (reasoning, content, tool_calls) или несанкционированная отмена чужого хода через эндпоинты /v1/turns/* без валидного токена.",
+        "mitigation": "Обязательная проверка заголовка Authorization: Bearer <token> через hmac.compare_digest на всех маршрутах /v1/turns/* и привязка каждого ManagedTurn к owner_token_hash (SHA-256 токена клиента) с возвратом HTTP 401/403 при несовпадении.",
+        "verification_ids": [
+          "VER-001",
+          "VER-004"
+        ]
+      },
+      {
+        "id": "THREAT-003",
+        "scenario": "Несанкционированное чтение или подмена дампов состояния ходов (turns/<turn_id>.json) и реестра процессов (children.json) на диске локальными процессами.",
+        "mitigation": "Создание каталогов workspace/state и workspace/state/turns с правами 0700 и атомарная запись всех файлов состояния через os.open(..., 0o600) + os.replace с принудительными правами 0600, а также фильтрация секретов через _mask_secrets.",
+        "verification_ids": [
+          "VER-001",
+          "VER-003"
+        ]
+      },
+      {
+        "id": "THREAT-004",
+        "scenario": "Отказ в обслуживании (DoS) пула слотов MAX_CONCURRENT=2 из-за зависания отсоединённых (RUNNING_DETACHED) ходов после нажатия кнопки Stop пользователем или при генерации сверхбольших потоков.",
+        "mitigation": "Предоставление эндпоинта явной отмены POST /v1/turns/<turn_id>/cancel (DELETE /v1/turns/<turn_id>), немедленно убивающего группу pgid (SIGTERM->2s->SIGKILL) и освобождающего слот семафора, в сочетании с квотой памяти 10 МиБ на ход / 128 МиБ глобально и адаптивным idle_timeout = 300 с.",
+        "verification_ids": [
+          "VER-001",
+          "VER-002"
+        ]
+      }
+    ]
+  },
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Исчерпание оперативной памяти при накоплении множества фоновых (detached) ходов с большими ответами, которые никто не забирает.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Двухуровневое квотирование в TurnSessionManager: кольцевой буфер не более MAX_TURN_TEXT_BYTES (10 МиБ) на один ход и не более MAX_TURN_BUFFER_TOTAL_BYTES (128 МиБ) / MAX_BUFFERED_TURNS (128) суммарно в памяти, с выгрузкой завершённых ходов на диск (права 0600) и уборкой старше 3600 с.",
+      "verification_ids": [
+        "VER-001",
+        "VER-006"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Гонка при повторном подключении (re-attach) клиента или выпадение клиента за пределы кольцевого окна 10 МиБ (gap replay).",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Монотонная сквозная нумерация событий seq (передаваемая в SSE-поле id: <seq>) под единым условием синхронизации TurnBuffer._cond; если запрошенный клиентом from_seq уже вытеснен из 10 МиБ буфера (from_seq < oldest_available_seq - 1), возвращается детерминированный HTTP 410 Gone с кодом GAP_DETECTED, заголовком X-Oldest-Available-Seq и ссылкой на полный снимок состояния (RW-006).",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "RISK-003",
+      "scenario": "Утечка активности в ProcessWatchdog на спящих дочерних процессах (sleep, bash в ожидании stdin) или бесконечный цикл CPU (spinlock), продлевающий ход до 3600 с.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "ProcessWatchdog отслеживает по-процессное приращение cputime в 'ps -o pid=,ppid=,pgid=,stat=,cputime=,command= -g <pgid>' и сбрасывает idle_timeout (300 с) только при cpu_delta > 0, появлении нового дочернего PID или событиях протокола; спящие процессы с нулевым приростом CPU прерываются через 300 с (RW-005), а процессы со 100% CPU ограничиваются потолком SAFETY_CAP_S = 3600 с.",
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "RISK-004",
+      "scenario": "Дедлок в основном потоке при захвате блокировок внутри обработчика сигнала SIGTERM/SIGINT или превышение системного окна ExitTimeOut в launchd.",
+      "probability": "low",
+      "impact": "high",
+      "mitigation": "Неблокирующий обработчик сигнала в главном потоке только устанавливает threading.Event (shutdown_requested) без захвата замков (RW-007); процедура drain (DRAIN_TIMEOUT_S = 110 с при ExitTimeOut = 120 с в plist) и вызов server.shutdown() выполняются в выделенном фоновом потоке с 10-секундным резервом до SIGKILL.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "RISK-005",
+      "scenario": "Утечка секретов или токенов в новые диагностические поля лога (rid, detail) или в дисковые снимки состояния ходов.",
+      "probability": "low",
+      "impact": "high",
+      "mitigation": "Все сообщения об ошибках, строки лога и сохраняемые в workspace/state/turns/<turn_id>.json (права 0600) снимки проходят через санитайзер _mask_secrets / _err_summary.",
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-003",
+        "VER-006"
+      ]
+    },
+    {
+      "id": "RISK-006",
+      "scenario": "Накопление осиротевших групп процессов (muse serve / droid exec с start_new_session=True) после аварийной гибели процесса моста по SIGKILL.",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Процедура orphan reaper (HubLifecycleManager.reap_orphans_on_startup) при старте хаба читает workspace/state/children.json, проверяет живые PID через os.kill(pid, 0) и соответствие имени команды в ps, после чего принудительно завершает осиротевшие группы (SIGTERM -> SIGKILL) и очищает реестр (RW-004).",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "RISK-007",
+      "scenario": "Зависание или ошибка системной утилиты ps на macOS Darwin во время опроса группы процессов в ProcessWatchdog.",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Вызов ps выполняется с жёстким таймаутом 2.0 с в режиме fail-closed (FU-004): при TimeoutExpired, OSError или ненулевом коде возврата ошибка логируется (watchdog_ps_degraded), но таймер простоя last_activity_ts НЕ сбрасывается (полагаясь только на события протокола).",
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "RISK-008",
+      "scenario": "Ошибка ModuleNotFoundError: No module named 'core' при запуске изолированного скрипта bridges/muse-bridge/server.py вне корня репозитория.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Автоматический bootstrap sys.path в начале bridges/muse-bridge/server.py (проверка DSH_BRIDGE_ROOT, локального каталога и Path(__file__).resolve().parents[2]) в сочетании с симлинком core в ~/.dsh/bridges/muse-bridge/ (RW-008).",
+      "verification_ids": [
+        "VER-004",
+        "VER-006",
+        "VER-007"
+      ]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-001",
+        "AD-001",
+        "QA-002",
+        "QA-006",
+        "BND-001",
+        "BND-002",
+        "CD-002",
+        "CD-006",
+        "RISK-001",
+        "RISK-002",
+        "RISK-005",
+        "THREAT-001",
+        "THREAT-002",
+        "THREAT-003",
+        "THREAT-004"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 pytest tests/test_detached_turn_execution.py -q",
+      "expected": "exit 0; подтверждено: при разрыве сокета ход переходит в RUNNING_DETACHED и завершается в фоне; POST /v1/turns/<id>/cancel (и DELETE) переводит ход в CANCELLED, гасит pgid (SIGTERM->SIGKILL), немедленно освобождает слот MAX_CONCURRENT=2 и возвращает 200 cancelled; turn_key учитывает (workspace, model_id, session_id/rid, digest истории с последним сообщением) и не склеивает перегенерацию завершённого хода; при вытеснении from_seq из 10 МиБ буфера отдаётся 410 Gone (GAP_DETECTED, X-Oldest-Available-Seq); проверены валидация turn_id (^[a-zA-Z0-9_-]{1,64}$), Bearer-авторизация, права 0600/0700, schema_version: '1.0', SSE id: <seq> и passthrough неизвестных kind",
+      "environment": "local Python venv (.venv)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-002",
+        "AD-002",
+        "QA-003",
+        "QA-004",
+        "BND-003",
+        "CD-003",
+        "RISK-003",
+        "RISK-005",
+        "RISK-007",
+        "THREAT-004"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 pytest tests/test_adaptive_idle_watchdog.py -q",
+      "expected": "exit 0; подтверждено: таймер простоя (300 с) сбрасывается только по событиям протокола, по положительному приросту cputime (cpu_delta > 0) или появлению нового дочернего PID; спящий потомок без прироста cputime прерывается по idle_timeout; при сбое/таймауте ps действует fail-closed режим; потолок срабатывает по absolute_cap (3600 с); все логи содержат rid и turn_id",
+      "environment": "local Python venv (.venv)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-004",
+        "AD-004",
+        "QA-001",
+        "QA-004",
+        "QA-006",
+        "BND-001",
+        "BND-004",
+        "CD-004",
+        "RISK-004",
+        "RISK-005",
+        "RISK-006",
+        "THREAT-003"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 pytest tests/test_graceful_shutdown_drain.py -q",
+      "expected": "exit 0; подтверждено: на старте хаба orphan reaper читает children.json и уничтожает осиротевшие процессы через os.kill(pid, 0) + SIGTERM/SIGKILL; обработчик SIGTERM/SIGINT неблокирующе выставляет threading.Event без захвата замков, а фоновый поток проводит drain (503 Retry-After: 5 новым запросам, доведение активных ходов или финальный SSE error-чанк + [DONE]); проверены фичефлаги DSH_BRIDGE_DETACHED_ENABLED, DSH_BRIDGE_WATCHDOG_ENABLED, DSH_BRIDGE_DRAIN_ENABLED и интервал keepalive <= 10 с",
+      "environment": "local Python venv (.venv)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-003",
+        "AD-003",
+        "QA-004",
+        "QA-006",
+        "BND-001",
+        "BND-002",
+        "BND-003",
+        "BND-004",
+        "BND-005",
+        "CD-001",
+        "CD-002",
+        "CD-003",
+        "CD-004",
+        "CD-006",
+        "RISK-008",
+        "THREAT-001",
+        "THREAT-002"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 pytest tests/test_backend_contract.py tests/test_hub_integration.py -q",
+      "expected": "exit 0; подтверждено: все механизмы живут в общем слое хаба (core/ и server.py), core/turn_session_manager.py не зависит от core.tool_emulation, bridges/muse-bridge/server.py автоматически разрешает импорт core.* через sys.path, оба адаптера (DroidAdapter, MuseAdapter) работают единообразно",
+      "environment": "local Python venv (.venv)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "REQ-005",
+        "AD-005",
+        "QA-005",
+        "CD-005"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 pytest tests/test_dsh_profile_config.py -q",
+      "expected": "exit 0; подтверждено: в ~/.dsh/profiles/web/cordis.patch.yml отсутствует переменная {{cwd}} в секции deployment:persona-suffix, контекст рабочего каталога передаётся через AGENTS.md или DSH_CWD",
+      "environment": "local Python venv (.venv)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "QA-001",
+        "QA-002",
+        "QA-003",
+        "BND-005",
+        "CD-001",
+        "RISK-001",
+        "RISK-005",
+        "RISK-008"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 pytest tests/test_muse_bridge_killpg.py tests/test_muse_adapter.py -q",
+      "expected": "exit 0; полный регрессионный сьют адаптера Muse и моста muse-bridge проходит без регрессий",
+      "environment": "local Python venv (.venv)",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": [
+        "REQ-003",
+        "BND-002",
+        "BND-003",
+        "BND-004",
+        "BND-005",
+        "CD-001",
+        "RISK-008"
+      ],
+      "kind": "command",
+      "command": "ruff check core/ server.py adapters/ bridges/muse-bridge/server.py && python3 fleet_check.py",
+      "expected": "exit 0; статический анализ ruff и проверка каталога fleet_check.py проходят без ошибок",
+      "environment": "local Python venv (.venv)",
+      "owner": "verifier"
+    }
+  ],
+  "protected_paths": [
+    "docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md"
+  ],
+  "materialization": [
+    {
+      "source": "architecture/proposals/docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md",
+      "target": "docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md",
+      "sha256": "71ef425000c1baad74245956c5ef81929db1c76553e8952fbde13c791ebcc820"
+    }
+  ],
+  "approval": {
+    "status": "APPROVED",
+    "decision_ids": [
+      "AD-001",
+      "AD-002",
+      "AD-003",
+      "AD-004"
+    ],
+    "approved_by": "owner (mandatory input directives 1-5 in REQ-EYE-33873-RESILIENCE brief + Arch Council rework brief a1)",
+    "evidence_ref": ".ai-team/runs/dsh-bridge-resilience-20261017/handoff/panel-rework-brief-arch-a1.json"
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED",
+    "reviewer": null,
+    "evidence_ref": null
+  },
+  "open_questions": [
+    {
+      "id": "Q-001",
+      "question": "OPEN-01: Завершается ли потомок muse serve по EOF stdin при гибели моста или остаётся сиротой (закрыто явным погашением групп при истечении drain-таймаута и процедурой orphan reaper по children.json при старте хаба, RW-004)",
+      "blocking": false
+    },
+    {
+      "id": "Q-002",
+      "question": "OPEN-02: Точное место формирования строки TRANSPORT в упакованном коде клиента DSH (закрыто отправкой валидного SSE error-чанка и [DONE] перед закрытием потока)",
+      "blocking": false
+    },
+    {
+      "id": "Q-003",
+      "question": "OPEN-03: Наличие автоповтора и кнопки Stop в клиенте DSH (закрыто поддержкой идемпотентного re-attach по точному turn_key для активных ходов и явным эндпоинтом отмены POST /v1/turns/<turn_id>/cancel, RW-001, RW-003)",
+      "blocking": false
+    },
+    {
+      "id": "Q-004",
+      "question": "OPEN-04: Параметры таймера простоя и предохранительного потолка (зафиксировано директивой владельца №2 и RW-005: idle=300 с по приросту cputime и протокольным событиям, safety_cap=3600 с)",
+      "blocking": false
+    },
+    {
+      "id": "Q-005",
+      "question": "OPEN-05: Набор переменных в deployment:persona-suffix DSH (зафиксировано директивой владельца №5: убрать {{cwd}}, передавать через AGENTS.md или DSH_CWD)",
+      "blocking": false
+    },
+    {
+      "id": "Q-006",
+      "question": "OPEN-06: Поддержка session/resume в muse serve (закрыто директивой владельца №1 и RW-006: фоновое доведение уже запущенного процесса в TurnSessionManager с ответом 410 GAP_DETECTED при вытеснении из 10 МиБ буфера)",
+      "blocking": false
+    },
+    {
+      "id": "Q-007",
+      "question": "OPEN-07: Применимость к остальным бэкендам моста и поставка core.* в muse-bridge (зафиксировано директивой владельца №3 и RW-008: общий слой хаба core/ и server.py + автодобавление корня в sys.path в bridges/muse-bridge/server.py)",
+      "blocking": false
+    },
+    {
+      "id": "Q-008",
+      "question": "OPEN-08: Увеличение ExitTimeOut в launchd plist и неблокирующий перехват сигналов (зафиксировано директивой владельца №4 и RW-007: ExitTimeOut=120 с, threading.Event в signal handler, drain в фоновом потоке)",
+      "blocking": false
+    },
+    {
+      "id": "Q-009",
+      "question": "OPEN-09: Корреляция параллельных ходов в логе при MAX_CONCURRENT >= 2 (закрыто сквозной передачей rid и turn_id во все записи лога)",
+      "blocking": false
+    },
+    {
+      "id": "Q-010",
+      "question": "OPEN-10: Поведение SO_REUSEPORT на macOS Darwin (отложено: выбран детерминированный Graceful Shutdown & Drain с 503 Retry-After: 5 и фичефлагами DSH_BRIDGE_*_ENABLED, RW-009)",
+      "blocking": false
+    }
+  ],
+  "deferred": [
+    "OPEN-10: Zero-downtime reload через SO_REUSEPORT или передачу сокета launchd отложен в пользу детерминированного Graceful Shutdown & Drain (DRAIN_TIMEOUT_S = 110 с, 503 Retry-After: 5)"
+  ]
+}

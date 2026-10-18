@@ -1,0 +1,202 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-bridge-resilience-20261017",
+  "teamlead_cycle": 1,
+  "panel_slug": "dsh-bridge-resilience-20261017-arch-1",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gemini-4-argon-high",
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "проход arch a1 -> a2",
+  "do_not_change": [
+    "инварианты Python stdlib без внешних зависимостей (Redis, SQLite, psutil запрещены)",
+    "обратная совместимость сигнатуры execute_turn(ctx: TurnContext, sse_writer: Optional[StreamSink]) -> TurnResult",
+    "сохранение 7 канонических ключей ответа /health корневого сервера"
+  ],
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "architecture-packet.json#contracts",
+      "rule_ref": "AD-001/REQ-001",
+      "action": "Специфицировать явный эндпоинт отмены хода POST /v1/turns/<turn_id>/cancel (или DELETE /v1/turns/<turn_id>) для освобождения слота семафора MAX_CONCURRENT=2 при нажатии кнопки Stop в интерфейсе DSH.",
+      "acceptance": "Эндпоинт отмены описан в контрактах пакета, переводит ManagedTurn в состояние CANCELLED и завершает процессную группу через SIGTERM->SIGKILL.",
+      "source": "claude-sonnet-5-5-high (k=1)",
+      "evidence": "arch-spec.md#3.1",
+      "source_findings": [
+        "F-001"
+      ]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "architecture-packet.json#security",
+      "rule_ref": "AD-001/REQ-003",
+      "action": "Установить threat_model.required = true, зафиксировать модель угроз для эндпоинтов /v1/turns/*, валидацию turn_id регулярным выражением ^[a-zA-Z0-9_-]{1,64}$ против path traversal, авторизацию по токену и права 0600 на сохраняемые файлы состояния.",
+      "acceptance": "В пакете заполнен раздел security с threat_model, валидацией turn_id и проверкой авторизации.",
+      "source": "claude-sonnet-5-5-high (k=1), muse-wonder-full-1.0 (k=3)",
+      "evidence": "architecture-packet.json#security",
+      "source_findings": [
+        "F-002"
+      ]
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "architecture-packet.json#turn_key",
+      "rule_ref": "AD-001/REQ-001",
+      "action": "Зафиксировать точный состав turn_key для дедупликации (модель, сессия/rid, хеш истории сообщений, workspace), исключающий склейку разных ходов при повторных попытках или перегенерации.",
+      "acceptance": "Алгоритм формирования turn_key однозначно специфицирован и учитывает хеш последнего сообщения.",
+      "source": "claude-sonnet-5-5-high (k=1), muse-wonder-full-1.0 (k=3)",
+      "evidence": "arch-spec.md#4.1",
+      "source_findings": [
+        "F-003"
+      ]
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "architecture-packet.json#risks",
+      "rule_ref": "AD-004/REQ-004",
+      "action": "Специфицировать процедуру очистки осиротевших процессов (orphan reaper) при запуске хаба по записям children.json при аварийном завершении предыдущего процесса моста.",
+      "acceptance": "В HubLifecycleManager добавлен шаг проверки и зачистки зависших PID из предыдущих запусков.",
+      "source": "claude-sonnet-5-5-high (k=1)",
+      "evidence": "arch-spec.md#5.2",
+      "source_findings": [
+        "F-004"
+      ]
+    },
+    {
+      "id": "RW-005",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "arch-spec.md#6.2",
+      "rule_ref": "AD-003/REQ-002",
+      "action": "Уточнить алгоритм ProcessWatchdog: сбрасывать idle_timeout только при изменении cputime потомков или при поступлении протокольных событий; спящие потомки без утилизации CPU не должны отменять idle-таймер.",
+      "acceptance": "Спецификация ProcessWatchdog требует проверки приращения CPU-тиков для учёта активности дочерних процессов.",
+      "source": "claude-sonnet-5-5-high (k=1)",
+      "evidence": "arch-spec.md#6.2",
+      "source_findings": [
+        "F-005"
+      ]
+    },
+    {
+      "id": "RW-006",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "arch-spec.md#4.2",
+      "rule_ref": "AD-002/REQ-001",
+      "action": "Специфицировать семантику gap replay: если клиент запрашивает from_seq, вытесненный из кольцевого буфера, сервер возвращает статус 410 Gone с кодом ошибки GAP_DETECTED и актуальным seq.",
+      "acceptance": "Контракт Replay явно описывает поведение при переполнении буфера и выпадении клиента за пределы окна.",
+      "source": "claude-sonnet-5-5-high (k=1), muse-wonder-full-1.0 (k=3)",
+      "evidence": "arch-spec.md#4.2",
+      "source_findings": [
+        "F-006"
+      ]
+    },
+    {
+      "id": "RW-007",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "arch-spec.md#5.3",
+      "rule_ref": "AD-004/REQ-004",
+      "action": "Зафиксировать неблокирующий перехват сигналов: обработчик SIGTERM/SIGINT устанавливает threading.Event, а процедура drain/shutdown запускается в фоновом потоке во избежание дедлока с блокировками в основном цикле.",
+      "acceptance": "В архитектуре описан неблокирующий сигнальный цикл через threading.Event.",
+      "source": "claude-sonnet-5-5-high (k=1)",
+      "evidence": "arch-spec.md#5.3",
+      "source_findings": [
+        "F-007"
+      ]
+    },
+    {
+      "id": "RW-008",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "arch-spec.md#2.1",
+      "rule_ref": "AD-001/REQ-003",
+      "action": "Зафиксировать механизм поставки core.* для bridges/muse-bridge/server.py через добавление корня cli-agent-bridge в sys.path или установку в общее окружение.",
+      "acceptance": "В плане миграции и спецификации зафиксирован способ разрешения импорта core.* в изолированном каталоге muse-bridge.",
+      "source": "claude-sonnet-5-5-high (k=1), muse-wonder-full-1.0 (k=3)",
+      "evidence": "arch-spec.md#2.1",
+      "source_findings": [
+        "F-008"
+      ]
+    },
+    {
+      "id": "RW-009",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "architecture-packet.json#rollout",
+      "rule_ref": "AD-001/REQ-001",
+      "action": "Добавить переменные окружения (kill-switch) DSH_BRIDGE_DETACHED_ENABLED, DSH_BRIDGE_WATCHDOG_ENABLED, DSH_BRIDGE_DRAIN_ENABLED для оперативного отключения новых механизмов без отката кода.",
+      "acceptance": "В пакете специфицированы флаги окружения и стратегия fallback.",
+      "source": "claude-sonnet-5-5-high (k=1)",
+      "evidence": "architecture-packet.json#rollout",
+      "source_findings": [
+        "F-009"
+      ]
+    },
+    {
+      "id": "RW-010",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+      "line_hint": "architecture-packet.json#BufferedTurnEvent",
+      "rule_ref": "AD-001/REQ-001",
+      "action": "Разрешить passthrough неизвестных видов событий в BufferedTurnEvent и добавить явное версионирование schema_version: '1.0' в снимки состояния на диске.",
+      "acceptance": "Контракт BufferedTurnEvent открыт для расширения новыми бэкендами, в JSON-снимках зафиксировано поле schema_version.",
+      "source": "muse-wonder-full-1.0 (k=3)",
+      "evidence": "arch-spec.md#4.1",
+      "source_findings": [
+        "F-011"
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Выровнять нумерацию архитектурных решений AD-001..AD-005 между брифом Совета и пакетом архитектора для полной взаимной трассируемости.",
+      "reason": "Вопрос чистоты нотации и документации, не блокирует исполнение.",
+      "source_findings": [
+        "F-010"
+      ]
+    },
+    {
+      "id": "FU-002",
+      "text": "Стандартизировать заголовок X-Turn-Id и передачу id в каждом SSE-кадре для совместимости со стандартным Last-Event-ID.",
+      "reason": "Улучшение протокольной совместимости с будущими SSE-клиентами.",
+      "source_findings": [
+        "F-012"
+      ]
+    },
+    {
+      "id": "FU-003",
+      "text": "Устранить прямую зависимость TurnSessionManager от core.tool_emulation.",
+      "reason": "Рефакторинг внутренней модульности без изменения внешних контрактов.",
+      "source_findings": [
+        "F-013"
+      ]
+    },
+    {
+      "id": "FU-004",
+      "text": "Специфицировать fail-closed поведение при отказе или таймауте команды ps на Darwin.",
+      "reason": "Защитный тайм-аут и деградация при сбоях утилиты мониторинга.",
+      "source_findings": [
+        "F-014"
+      ]
+    }
+  ],
+  "findings_total": 14
+}

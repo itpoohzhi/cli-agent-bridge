@@ -1,0 +1,27 @@
+PANEL-NONCE: cedf53b3af90ad65
+ARTIFACT-SHA256: af748f7bada2dc24d0b720c3e1763bdd1a0c6cbf5c7ac2e729500e35a8382183
+
+Шляпа: Визионер (k=3). Проверены [architecture-packet.json](/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json) (sha256 сверена локально, совпала), [arch-spec.md](/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md) и [ADR 0005](/Users/aazhiry1/work/src/cli-agent-bridge/docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md). Файлы `analysis/bridge-resilience/*` в рабочем каталоге отсутствуют; факты F-01..F-34 встроены в пакет как EVD-001..EVD-034, по ним и судил.
+
+Визионерский итог: направление верное и будущее у архитектуры есть. Вынос в `core/` (AD-003 пакета), запрет импортов `http.server`/`adapters.*` в BND-002..BND-004, аддитивный `TurnContext` (`on_activity`, `register_pgid`, дефолты в CD-001) и pgid-ориентированный watchdog делают новый бэкенд (Claude/Codex/OpenCode/Kimi) вопросом одного адаптера, а не переписывания жизненного цикла. Но несколько one-way решений фиксируются до того, как специфицированы их эволюционные швы; дёшево закрыть сейчас, дорого — после Coder.
+
+Критерий 1 — PASS (problem_and_boundaries). Три класса отказов привязаны к EVD, границы BND-001..BND-005 с разрешёнными/запрещёнными зависимостями явны, red lines (stdlib, `threading.Lock`, совместимость `BackendAdapter`) не нарушены. Замечание: нумерация AD в брифе Совета и в пакете расходится (централизация — AD-001 брифа vs AD-003 пакета); трассируемость для будущих читателей стоит выровнять.
+
+Критерий 2 — NEEDS_WORK (contracts_and_invariants). (a) `BufferedTurnEvent.kind` — закрытый `Literal[reasoning, content, tool_call, error, done]` при `payload: Any`: у будущих бэкендов иные таксономии (approval, patch/diff, usage-only, binary); нужен unknown-kind passthrough и версионирование события. (b) Нет `schema_version` у `workspace/state/turns/<turn_id>.json` — миграция при апгрейде хаба с живым detached-ходом не определена. (c) Переполнение 10 МиБ и replay с вытесненного `seq` (gap semantics) не специфицированы: truncate, drop-oldest или seal-error? (d) Имена заголовков плавают: `X-Turn-Id` vs `X-Turn-Resume-Id`; SSE-кадры без поля `id:`/`Last-Event-ID` — нативная SSE-реконнекция будущих клиентов не заработает, только кастомный `from_seq`. (e) Состав `turn_key` для дедупликации (backend_id? workspace? principal?) не зафиксирован. (f) `TurnSessionManager` зависит от `core.tool_emulation` — утечка частной логики в общий менеджер, границу обосновать или убрать. (g) Два фасада (`server.py` и `bridges/muse-bridge/server.py`) уже расходятся в `/health` (7 ключей vs поле `draining`); срок/критерий консолидации не назван.
+
+Критерий 3 — PASS (risks_and_degradation). RISK-001..005 с квотами 10/128 МиБ, атомарной подпиской под `TurnBuffer._cond`, потолком 3600 с против CPU-спина и резервом drain 110<120 с — проработка сильная. Дополнить стоит: поведение при падении/таймауте самого `ps` (fail-open или fail-closed для idle), зависший, но живой descendant (`sleep`), бесконечно сбрасывающий idle-таймер, и второй SIGTERM во время drain.
+
+Критерий 4 — NEEDS_WORK (security_and_secrets). `threat_model.required=false` при новых эндпоинтах `GET /v1/turns/<id>(/stream)`, отдающих reasoning/content/tool_calls: авторизация этих эндпоинтов и непредсказуемость `turn_id` в пакете явно не зафиксированы, а прозрачный re-attach по `turn_key` при коллизии дайджеста может отдать чужой ход. Диск 0600 и `_mask_secrets` заявлены, но буфер на диске хранит payload как есть — применимость маскирования к снимку нужно подтвердить. Для локального хаба это CONCERN, не RED_FLAG.
+
+Критерий 5 — PASS (observability_and_ops). QA-004: `rid`+`turn_id`+`pgid`+`age_s`/`idle_s` и разделённые причины `idle_timeout|absolute_cap|child_exited|drain_timeout` закрывают именно ту слепоту F-24, что породила задачу. Портативность watchdog — слабое место эксплуатации: парсинг `ps -g`/cputime и allowlist команд (`rg, git, python3, bash`) привязаны к macOS и текущим инструментам; для Linux/новых бэкендов нужен платформенный шов, а не правка ядра.
+
+Критерий 6 — NEEDS_WORK (implementation_and_test_plan). VER-001..VER-007 покрывают REQ-001..005, но для one-way решений не хватает: contract-теста на третьем stub-бэкенде (доказательство расширяемости, а не только droid+muse), теста чтения снимка хода предыдущей версии схемы, теста переполнения буфера и gap-replay, теста отказа `ps`. В верификации нет полного сьюта и basedpyright (VER-007 — только ruff+fleet_check). Rollout без поэтапного включения по бэкендам (env/feature-flag на detached-режим) усложнит откат при регрессии одного адаптера.
+
+SUB architecture: CONCERN — ядро `core/` чисто и расширяемо, но нет версионирования событий/снимков и канонического SSE-resume контракта.
+SUB security: CONCERN — threat model пуст при новых turns-эндпоинтах и дедупликации по дайджесту.
+SUB performance: PASS — квоты буфера и опрос pgid раз в 5 с адекватны при MAX_CONCURRENT=2; масштабирование `ps`-на-ход отметить на будущее.
+SUB tests: CONCERN — VER-001..007 сильны по REQ, но нет тестов эволюции: stub-бэкенд, миграция схемы, переполнение, отказ `ps`, полный сьют.
+
+Итог Визионера: архитектуру не перепроектировать — доработать контракты эволюции (версии, заголовки, gap/overflow, turn_key, auth turns) и расширить план тестов; после этого путь к Claude/Codex/OpenCode/Kimi через один адаптер станет доказанным, а не декларированным.
+
+ОБЩИЙ ВЕРДИКТ: NEEDS_WORK

@@ -1,0 +1,65 @@
+PANEL-NONCE: 2930adaf699fb208
+ARTIFACT-SHA256: 86de86783a9eaba1d866955443f59cc31da128d715585456898b9590100ed206
+
+Подтверждение правил: общий канон `~/Мой диск/Context/AGENTS.md` прочитан целиком до маркера `<!-- КАНОН-КОНЕЦ -->`; локальные проектные файлы правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочем каталоге `~/work/src/cli-agent-bridge` проверены (отсутствуют).
+
+# Архитектурное ревью (Раунд R2, место `k=2`, шляпа: Реалист)
+
+В раунде R2 пакет [architecture-packet.json](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json), спецификация [arch-spec.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md) и [ADR-0005](file:///Users/aazhiry1/work/src/cli-agent-bridge/docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md) проверены со шляпой **Реалист** против замечаний первого раунда ([panel-rework-brief-arch-a1.json](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-bridge-resilience-20261017/handoff/panel-rework-brief-arch-a1.json): `RW-001`..`RW-010`, `FU-001`..`FU-004`) и фактического кода репозитория ([server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/server.py), [bridges/muse-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py), [core/backend_adapter.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/backend_adapter.py), [adapters/muse_adapter.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/adapters/muse_adapter.py), [adapters/droid_adapter.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/adapters/droid_adapter.py)). Все 10 блокирующих замечаний и 4 follow-up полностью и непротиворечиво закрыты.
+
+---
+
+## Оценка по 6 критериям рубрики
+
+### 1. Проблема и границы (`problem_and_boundaries`)
+**Критерий 1 — PASS**
+- **Обоснование (шляпа Реалист):** Границы компонентов `BND-001`..`BND-005` чётко разделяют транспортный HTTP/SSE-фасад ([server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/server.py) и [bridges/muse-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py)) и модули общего слоя `core/` (`core/turn_session_manager.py`, `core/watchdog.py`, `core/lifecycle.py`, [core/backend_adapter.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/backend_adapter.py)).
+- Закрыт `FU-003`: из `core/turn_session_manager.py` полностью убрана зависимость от `core.tool_emulation` (`forbidden_dependencies` в `BND-002`); разбор `<tool_call>` остаётся в фасаде (`finalize_turn` в [server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/server.py#L4930-L4932) и `_split_tool_calls` в [bridges/muse-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py#L3783)).
+- Закрыт `RW-008`: для изолированного процесса [bridges/muse-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/muse-bridge/server.py) специфицирован детерминированный bootstrap `sys.path` (проверка `DSH_BRIDGE_ROOT`, `Path(__file__).resolve().parent` и `Path(__file__).resolve().parents[2]` на наличие `core/backend_adapter.py`) в сочетании с симлинком `~/.dsh/bridges/muse-bridge/core -> <repo>/core`, что гарантирует безошибочный импорт `core.*` как из дерева репозитория, так и из `~/.dsh/bridges/muse-bridge/`.
+- Выровнена нумерация `AD-001`..`AD-005` один-к-одному с `REQ-001`..`REQ-005` (`FU-001`), решение укладывается строго в Python stdlib без внешних runtime-зависимостей (`psutil`, `redis`, `sqlite` не используются).
+
+### 2. Контракты и инварианты (`contracts_and_invariants`)
+**Критерий 2 — PASS**
+- **Обоснование (шляпа Реалист):** Расширение [`TurnContext`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/backend_adapter.py#L77-L100) (`rid`, `turn_id`, `idle_timeout_s`, `safety_cap_s`, `on_activity`, `register_pgid`) и [`BACKEND_KEYS`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/backend_adapter.py#L164-L175) в `CD-001` строго аддитивно и не нарушает проверку сигнатуры в [`AdapterRegistry.register`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/backend_adapter.py#L667-L678) (`execute_turn(ctx: TurnContext, sse_writer: Optional[StreamSink]) -> TurnResult`) и конвертацию `fields(ctx)` в [`DroidAdapter.execute_turn`](file:///Users/aazhiry1/work/src/cli-agent-bridge/adapters/droid_adapter.py#L78).
+- Закрыт `RW-001`: специфицирован контракт явной отмены хода `POST /v1/turns/<turn_id>/cancel` (и `DELETE /v1/turns/<turn_id>`), который переводит `ManagedTurn` в `CANCELLED`, завершает группу процессов (`os.killpg(pgid, SIGTERM)` -> ожидание до `2.0 с` -> `SIGKILL`), немедленно освобождает слот семафора `MAX_CONCURRENT=2` и возвращает идемпотентный `200 {"ok": true, "turn_id": "<turn_id>", "status": "cancelled"}`.
+- Закрыт `RW-003`: формула `turn_key` фиксирует `sha256` от канонического JSON кортежа `(workspace, model_id, session_id_or_rid, sha256_canonical_json(messages_including_last))`, а автоматический re-attach при `POST /v1/chat/completions` ограничен только нетерминальными состояниями (`QUEUED`, `RUNNING_ATTACHED`, `RUNNING_DETACHED`), что исключает склейку ходов при нажатии Regenerate.
+- Закрыты `RW-006`, `RW-010`, `FU-002`: в `BufferedTurnEvent` тип `kind: str` открыт для passthrough неизвестных событий; снимки состояния `workspace/state/turns/<turn_id>.json` и `children.json` содержат `"schema_version": "1.0"`; каждый SSE-кадр несёт `id: <seq>` и ответ сопровождается заголовком `X-Turn-Id`; при вытеснении запрошенного `from_seq` из 10 МиБ кольцевого буфера (`from_seq < oldest_available_seq - 1`) возвращается детерминированный `HTTP 410 Gone` с `code: "GAP_DETECTED"` и заголовком `X-Oldest-Available-Seq`. Сохранены 7 канонических ключей `/health` в корневом [server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/server.py).
+
+### 3. Риски, отказы и деградация (`risks_and_degradation`)
+**Критерий 3 — PASS**
+- **Обоснование (шляпа Реалист):** Проверены реалистичность поведения на macOS Darwin и защита от граничных сбоев (`RISK-001`..`RISK-008`):
+- Закрыты `RW-005` и `FU-004`: `ProcessWatchdog.sample(pgid)` опрашивает группу каждые `5.0 с` через `ps -o pid=,ppid=,pgid=,stat=,cputime=,command= -g <pgid>` с таймаутом `2.0 с`, парсит `cputime` (`[[dd-]hh:]mm:ss.xx`) и сбрасывает `idle_timeout` (`300 с`) **только** при событиях протокола (`on_activity`), положительном приросте CPU (`cpu_delta > 0.0`) или однократно при появлении нового дочернего PID (`len(new_descendants) > 0`). Спящие процессы (`sleep`, зависший `bash` на `stdin`) с `cpu_delta == 0.0` таймер не сбрасывают и гарантированно прерываются через `300 с`. При ошибке или таймауте `ps` на Darwin действует строгий fail-closed режим (`watchdog_ps_degraded` в лог, `last_activity_ts` не обновляется от `ps`).
+- Закрыт `RW-007`: обработчик `SIGTERM`/`SIGINT` в главном потоке выполняет исключительно `self.shutdown_requested.set()` (`threading.Event`) без захвата `threading.Lock` и без вызова `server.shutdown()`, предотвращая дедлок с `serve_forever()`. Ожидание `DRAIN_TIMEOUT_S = 110 с` (при `ExitTimeOut = 120 с` в `launchd` plist) и `server.shutdown()` выполняются в выделенном фоновом потоке `_drain_worker_thread`.
+- Закрыт `RW-004`: процедура `reap_orphans_on_startup()` на старте хаба читает `workspace/state/children.json`, проверяет живость через `os.kill(pid, 0)` и верифицирует имя процесса через `ps -o comm=,command= -p <pid>` перед отправкой `SIGTERM -> 1.0s -> SIGKILL`, что безопасно стыкуется с механизмом `reconcile_children()` в [server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/server.py#L5359) и `_register_child` в [adapters/muse_adapter.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/adapters/muse_adapter.py#L412-L446).
+
+### 4. Безопасность и секреты (`security_and_secrets`)
+**Критерий 4 — PASS**
+- **Обоснование (шляпа Реалист):** Полностью закрыт `RW-002`: в [architecture-packet.json](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json#L857-L906) установлен `threat_model.required = true`, специфицированы границы доверия `TB-001`..`TB-003` и угрозы `THREAT-001`..`THREAT-004`:
+  1. Защита от Path Traversal: строгая валидация `turn_id` регулярным выражением `^[a-zA-Z0-9_-]{1,64}$` до любых файловых операций (отказ `400 Bad Request`) плюс проверка `target_path.resolve().parent == turns_dir.resolve()`.
+  2. Аутентификация и авторизация: все маршруты `/v1/turns/<turn_id>[/stream|/cancel]` требуют `Authorization: Bearer <token>` (проверка через `hmac.compare_digest`) и сверяют `owner_token_hash` хода (`401`/`403` при несовпадении).
+  3. Права ФС и секреты: каталоги `workspace/state` и `workspace/state/turns` создаются с правами `0700`, файлы снимков `turns/<turn_id>.json` и `children.json` пишутся атомарно через `os.open(..., 0o600)` + `os.replace`, все диагностические поля проходят через `_mask_secrets` / `_redact_secrets`.
+
+### 5. Наблюдаемость и эксплуатация (`observability_and_ops`)
+**Критерий 5 — PASS**
+- **Обоснование (шляпа Реалист):** Все записи лога (`tool_item`, `watchdog`, терминальные события) маркируются сквозными `rid=<id> turn_id=<id> pgid=<pgid> age_s=<...> idle_s=<...>`, что устраняет перемешивание логов при `MAX_CONCURRENT >= 2` (`EVD-024`).
+- Закрыт `RW-009`: введены три операционных фичефлага окружения (`DSH_BRIDGE_DETACHED_ENABLED`, `DSH_BRIDGE_WATCHDOG_ENABLED`, `DSH_BRIDGE_DRAIN_ENABLED`, по умолчанию `"true"`), позволяющих мгновенно переключить любую из трёх подсистем в консервативный legacy-режим без отката кода.
+- В состоянии `DRAINING` новые запросы получают `503 Service Unavailable` с заголовком `Retry-After: 5`, а `/health` отдаёт `ok: False` и заголовок `X-Bridge-Draining: true`.
+
+### 6. План реализации, миграции и тестов (`implementation_and_test_plan`)
+**Критерий 6 — PASS**
+- **Обоснование (шляпа Реалист):** Поверхность верификации `VER-001`..`VER-007` покрывает все целевые сценарии и граничные условия R2:
+  - `VER-001` (`tests/test_detached_turn_execution.py`): выживание хода при закрытии сокета, отмена через `POST /v1/turns/<id>/cancel` с освобождением слота семафора за `<= 2.5 с`, отсутствие ложной дедупликации при Regenerate, возврат `410 GAP_DETECTED` при вытеснении `from_seq`, проверка regex `turn_id`, Bearer-авторизации, прав `0600`/`0700`, `schema_version: "1.0"`, SSE `id: <seq>` и passthrough неизвестных `kind`.
+  - `VER-002` (`tests/test_adaptive_idle_watchdog.py`): сброс `idle_timeout` по приросту `cputime` и событиям протокола, срабатывание `idle_timeout` на спящем потомке с нулевым приростом CPU, fail-closed режим при сбое/таймауте `ps`, потолок `absolute_cap` (`3600 с`).
+  - `VER-003` (`tests/test_graceful_shutdown_drain.py`): неблокирующий signal handler через `threading.Event`, фоновый drain (`503 Retry-After: 5`), уборка сирот `reap_orphans_on_startup` по `children.json`, проверка kill-switch флагов `DSH_BRIDGE_*_ENABLED`.
+  - `VER-004`..`VER-007`: контрактные тесты адаптеров, проверка отсутствия импорта `core.tool_emulation` в `core/turn_session_manager.py`, резолюция `core.*` в `bridges/muse-bridge/server.py`, валидация `cordis.patch.yml` без `{{cwd}}` и линтер `ruff check` + `fleet_check.py`.
+
+---
+
+## Сводка субрибрик
+
+- `SUB architecture: PASS — Чистое разделение фасада и core/* без tool_emulation в TurnSessionManager, неблокирующий drain через threading.Event и авторазрешение sys.path в muse-bridge.`
+- `SUB security: PASS — Модель угроз зафиксирована, валидация turn_id через ^[a-zA-Z0-9_-]{1,64}$, Bearer-авторизация с owner_token_hash и атомарные дампы 0600 в каталоге 0700.`
+- `SUB performance: PASS — Квотированный кольцевой буфер 10 МиБ/ход (128 МиБ глобально), контроль реального прироста cputime в ps с fail-closed деградацией и немедленное освобождение слота при /cancel.`
+- `SUB tests: PASS — Полная матрица верификации VER-001..VER-007 покрывает detached turns, /cancel, 410 GAP_DETECTED, спящие процессы в watchdog, orphan reaper и kill-switch флаги.`
+
+ОБЩИЙ ВЕРДИКТ: ACCEPT

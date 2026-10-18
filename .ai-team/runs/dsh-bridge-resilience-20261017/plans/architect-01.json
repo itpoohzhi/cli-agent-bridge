@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-bridge-resilience-20261017",
+  "role": "architect",
+  "iteration": 1,
+  "status": "DONE",
+  "plan_kind": "full",
+  "objective": "Спроектировать сквозную отказоустойчивость мостов консольных агентов (cli-agent-bridge) в общем слое хаба (core/ и server.py): detached execution с буферизацией ходов, адаптивный idle timeout (300 с) + safety cap (3600 с) + ProcessWatchdog, graceful shutdown & drain по SIGTERM/SIGINT и устранение ошибки {{cwd}} в профиле DSH Web.",
+  "tools": [
+    "view_file",
+    "write_to_file",
+    "run_command"
+  ],
+  "outputs": [
+    ".ai-team/runs/dsh-bridge-resilience-20261017/plans/architect-01.json",
+    ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md",
+    "docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md",
+    ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json"
+  ],
+  "inputs_read": [
+    "/tmp/cel-runs/dsh-bridge-resilience-analyst-20261017/analysis/bridge-resilience/handoff-architect.md",
+    "/tmp/cel-runs/dsh-bridge-resilience-analyst-20261017/analysis/bridge-resilience/evidence-ledger.md",
+    "/tmp/cel-runs/dsh-bridge-resilience-analyst-20261017/analysis/bridge-resilience/open-questions.md",
+    "/tmp/cel-runs/dsh-bridge-resilience-analyst-20261017/analysis/bridge-resilience/research-plan.md",
+    "server.py",
+    "core/backend_adapter.py",
+    "adapters/muse_adapter.py",
+    "adapters/droid_adapter.py",
+    "fleet.json",
+    "docs/adr/0002-multi-binary-hub.md",
+    "docs/adr/0004-muse-live-streaming-all-steps.md"
+  ],
+  "stop_conditions": [
+    "Модификация продуктового кода (server.py, core/*.py, adapters/*.py) в фазе архитектора запрещена",
+    "Любое расхождение между arch-spec.md, ADR-0005 и architecture-packet.json",
+    "Ненулевой код возврата скрипта validate_architecture_packet.py"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Изучить handoff системного аналитика, 34 факта evidence-ledger (F-01..F-34), открытые вопросы (OPEN-01..OPEN-10) и текущие границы core/backend_adapter.py, server.py и adapters/*",
+      "tools": [
+        "view_file"
+      ],
+      "outputs": [
+        "EVD-001..EVD-034",
+        "ASM-001..ASM-010"
+      ],
+      "expected_evidence": "Все 34 факта F-01..F-34 и 10 открытых вопросов OPEN-01..OPEN-10 сопоставлены с точками расширения в core/ и server.py",
+      "status": "DONE",
+      "actual_evidence": "Прочитаны handoff-architect.md, evidence-ledger.md (F-01..F-34), open-questions.md (OPEN-01..OPEN-10), research-plan.md (INV-01..INV-05), server.py, core/backend_adapter.py, adapters/muse_adapter.py, adapters/droid_adapter.py, fleet.json и ADR 0002/0004. Подтверждены точки привязки в общем слое хаба: Handler.do_POST/_dispatch/_serve_sse/_serve_json, TurnContext, BACKEND_KEYS, shutdown_all и сигналы в main()."
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Спроектировать архитектуру общего слоя хаба (TurnSessionManager, AdaptiveTimeoutController, ProcessWatchdog, HubLifecycleManager) в arch-spec.md и формальном ADR-0005",
+      "tools": [
+        "write_to_file"
+      ],
+      "outputs": [
+        ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md",
+        "docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md"
+      ],
+      "expected_evidence": "Записаны arch-spec.md (C4 container/component, sequence diagram для detached execution, state machine хода, контракт буфера) и ADR-0005",
+      "status": "DONE",
+      "actual_evidence": "Спроектированы и записаны .ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md и docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md (а также копия в proposals/), фиксирующие AD-001..AD-005, C4-диаграммы, sequence-диаграмму detached execution и re-attach, диаграмму состояний хода и контракты core/turn_session_manager.py, core/watchdog.py и core/lifecycle.py."
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Сформировать машинный пакет architecture-packet.json со всеми 34 фактами EVD-001..EVD-034, решениями AD-001..AD-005, сценариями качества QA-001..QA-006 (QS-1..QS-6), границами BND-001..BND-005, contract_deltas и поверхностью верификации VER-001..VER-007",
+      "tools": [
+        "write_to_file"
+      ],
+      "outputs": [
+        ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json"
+      ],
+      "expected_evidence": "Создан валидный JSON-пакет .ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json с хэшем role_plan и полной трассировкой REQ-001..REQ-005",
+      "status": "DONE",
+      "actual_evidence": "Собран пакет .ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json с полной трассировкой REQ-001..REQ-005, EVD-001..EVD-034, ASM-001..ASM-010, AD-001..AD-005, QA-001..QA-006 (QS-1..QS-6), BND-001..BND-005, CD-001..CD-005, RISK-001..RISK-005 и VER-001..VER-007."
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Выполнить самопроверку role-plan и architecture-packet.json валидаторами validate_role_plan.py и validate_architecture_packet.py --phase draft и выдать итоговый архитектурный отчёт",
+      "tools": [
+        "run_command"
+      ],
+      "outputs": [
+        "PASS: architect role plan is valid",
+        "PASS: architecture packet is valid for draft"
+      ],
+      "expected_evidence": "Оба валидатора (validate_role_plan.py --phase after и validate_architecture_packet.py --phase draft) завершаются с кодом 0 и выводом PASS",
+      "status": "DONE",
+      "actual_evidence": "План роли и пакет архитектуры проверены скриптами validate_role_plan.py --phase after и validate_architecture_packet.py --phase draft --run-dir .ai-team/runs/dsh-bridge-resilience-20261017 --role-plan .ai-team/runs/dsh-bridge-resilience-20261017/plans/architect-01.json: оба завершились с кодом возврата 0 (PASS)."
+    }
+  ],
+  "deviations": []
+}
