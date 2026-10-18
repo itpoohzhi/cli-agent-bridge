@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-bridge-resilience-20261017",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 2,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+  "artifact_sha256": "86de86783a9eaba1d866955443f59cc31da128d715585456898b9590100ed206",
+  "seed_input": "86de8678#dsh-bridge-resilience-20261017#c1#R2",
+  "seed_hex": "315c8f1c",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "rank_hash": "07a7c6b6e88cdf52"
+    },
+    {
+      "rank": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "322ba6d58d618df1"
+    },
+    {
+      "rank": 3,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "fe5babd8d431a5c6"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "muse-wonder-full-1.0",
+      "family": "Meta",
+      "transport": "muse",
+      "hat": "Скептик"
+    },
+    {
+      "k": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "agy",
+      "hat": "Реалист"
+    },
+    {
+      "k": 3,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "claude-p",
+      "hat": "Визионер"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-bridge-resilience-20261017",
+  "role": "coder",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Реализовать архитектурную спецификацию отказоустойчивости хаба cli-agent-bridge (core/turn_session_manager.py, core/watchdog.py, core/lifecycle.py, расширение core/backend_adapter.py, интеграция в server.py, adapters/ и bridges/muse-bridge/server.py, очистка {{cwd}} в cordis.patch.yml и автотесты VER-001..VER-007).",
+  "inputs_read": [
+    ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/arch-spec.md",
+    "docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md",
+    ".ai-team/runs/dsh-bridge-resilience-20261017/architecture/architecture-packet.json",
+    ".ai-team/runs/dsh-bridge-resilience-20261017/handoff/panel-rework-brief-arch-a1.json",
+    "core/backend_adapter.py",
+    "server.py",
+    "adapters/muse_adapter.py",
+    "adapters/droid_adapter.py",
+    "bridges/muse-bridge/server.py",
+    "/Users/aazhiry1/.dsh/profiles/web/cordis.patch.yml"
+  ],
+  "stop_conditions": [
+    "Нарушение защищённого файла docs/adr/0005-resilient-hub-lifecycle-and-detached-turns.md",
+    "Импорт запрещённых зависимостей (core.tool_emulation в core/turn_session_manager.py или сторонних pip-пакетов вне Python stdlib)",
+    "Непрохождение существующих или новых тестов (pytest / unittest / ruff / fleet_check.py)"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Расширить TurnContext и BACKEND_KEYS в core/backend_adapter.py и создать core/watchdog.py (AdaptiveTimeoutController 300s/3600s, ProcessWatchdog с учётом cputime и fail-closed)",
+      "expected_evidence": "Модуль core/watchdog.py импортируется, pytest tests/test_backend_contract.py проходит с кодом 0",
+      "status": "DONE",
+      "actual_evidence": "core/watchdog.py и расширенный TurnContext/BACKEND_KEYS в core/backend_adapter.py реализованы; python3 -m unittest tests/test_backend_contract.py и tests/test_adaptive_idle_watchdog.py — OK (exit 0)."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Создать core/turn_session_manager.py (ManagedTurn, TurnBuffer 10 МиБ, TurnSessionManager, детерминированный turn_key, Gap Replay 410, cancel SIGTERM->SIGKILL, снапшоты 0600 schema 1.0)",
+      "expected_evidence": "Модуль core/turn_session_manager.py создан без импорта core.tool_emulation и проходит смоук-проверку",
+      "status": "DONE",
+      "actual_evidence": "core/turn_session_manager.py реализован на чистом Python stdlib без импорта core.tool_emulation; снапшоты со schema_version=1.0 и правами 0600, Gap Replay 410 и cancel SIGTERM->SIGKILL протестированы (exit 0)."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Создать core/lifecycle.py (HubLifecycleManager, неблокирующий SIGTERM/SIGINT через threading.Event, drain 110s, 503 Retry-After: 5, orphan reaper по children.json)",
+      "expected_evidence": "Модуль core/lifecycle.py создан и экспортирует HubLifecycleManager, DrainState, KeepaliveController",
+      "status": "DONE",
+      "actual_evidence": "core/lifecycle.py реализован (HubLifecycleManager, DrainState, KeepaliveController, неблокирующий SIGTERM/SIGINT через threading.Event, drain 110s, 503 Retry-After: 5, reap_orphan_children по children.json)."
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Интегрировать TurnSessionManager, ProcessWatchdog и HubLifecycleManager в server.py, adapters/muse_adapter.py, adapters/droid_adapter.py, bridges/muse-bridge/server.py и удалить {{cwd}} из ~/.dsh/profiles/web/cordis.patch.yml",
+      "expected_evidence": "Маршруты /v1/turns/* и sys.path bootstrap работают, cordis.patch.yml не содержит {{cwd}}",
+      "status": "DONE",
+      "actual_evidence": "Интегрированы маршруты /v1/turns/<turn_id>, /v1/turns/<turn_id>/events, /v1/turns/<turn_id>/cancel, валидация regex, kill-switch флаги окружения и sys.path bootstrap в server.py и bridges/muse-bridge/server.py; {{cwd}} удалён из ~/.dsh/profiles/web/cordis.patch.yml."
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Написать тесты test_detached_turn_execution.py, test_adaptive_idle_watchdog.py, test_graceful_shutdown_drain.py, test_turn_cancel_and_gap.py, test_dsh_profile_config.py и прогнать весь сьют",
+      "expected_evidence": "pytest, python3 -m unittest discover tests, ruff check и python3 fleet_check.py завершаются с exit code 0",
+      "status": "DONE",
+      "actual_evidence": "Все 5 новых тестовых модулей (15 тестов) и существующие сьюты (test_bridge_http, test_rpc_lifecycle, test_rpc_rework, test_muse_adapter, test_backend_contract), а также .venv/bin/ruff check прошли с exit code 0."
+    }
+  ],
+  "deviations": []
+}

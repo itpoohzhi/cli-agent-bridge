@@ -57,6 +57,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, NamedTuple
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from core.backend_adapter import ToolCall, TurnResult, Usage  # noqa: E402
+from core.lifecycle import HubLifecycleManager  # noqa: E402
+from core.turn_session_manager import (  # noqa: E402
+    GapDetectedError,
+    ManagedTurn,
+    TurnSessionManager,
+    validate_turn_id,
+)
+
 logger = logging.getLogger("muse-bridge")
 
 HOST = os.environ.get("MUSE_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
@@ -64,6 +77,7 @@ PORT = int(os.environ.get("MUSE_BRIDGE_PORT", "9886"))
 AUTH_KEY = os.environ.get("MUSE_BRIDGE_KEY", "").strip()
 
 TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_TIMEOUT_S", "3600"))
+IDLE_TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_IDLE_TIMEOUT_S", "300"))
 MAX_CONCURRENT = int(os.environ.get("MUSE_BRIDGE_MAX_CONCURRENT", "2"))
 
 MUSE_WRAPPER = os.environ.get(
@@ -364,11 +378,54 @@ def _log(msg: str) -> None:
         pass
 
 
-def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
-    hdr = handler.headers.get("Authorization", "")
+def _is_detached_enabled() -> bool:
+    return os.environ.get("BRIDGE_ENABLE_DETACHED_TURNS", "1") not in (
+        "0",
+        "false",
+        "False",
+    )
+
+
+def _is_watchdog_enabled() -> bool:
+    return os.environ.get("BRIDGE_ENABLE_ADAPTIVE_WATCHDOG", "1") not in (
+        "0",
+        "false",
+        "False",
+    )
+
+
+def _is_drain_enabled() -> bool:
+    return os.environ.get("BRIDGE_ENABLE_GRACEFUL_DRAIN", "1") not in (
+        "0",
+        "false",
+        "False",
+    )
+
+
+def _extract_auth_token(handler: BaseHTTPRequestHandler) -> str:
+    hdrs = getattr(handler, "headers", None) or {}
+    hdr = hdrs.get("Authorization", "")
     if hdr.startswith("Bearer "):
-        return hdr[7:].strip() == AUTH_KEY
-    return handler.headers.get("x-api-key", "") == AUTH_KEY or hdr.strip() == AUTH_KEY
+        return hdr[7:].strip()
+    return hdrs.get("x-api-key", "") or hdr.strip()
+
+
+def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
+    return _extract_auth_token(handler) == AUTH_KEY
+
+
+def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
+    tok = _extract_auth_token(handler) or AUTH_KEY or "anon"
+    return hashlib.sha256(tok.encode("utf-8", "replace")).hexdigest()
+
+
+TURN_MANAGER = TurnSessionManager(state_root=WORKSPACE / "turns", log_fn=_log)
+LIFECYCLE = HubLifecycleManager(turn_manager=TURN_MANAGER, log_fn=_log)
+
+
+def _reset_state() -> None:
+    TURN_MANAGER.reset()
+    LIFECYCLE.reset_for_tests()
 
 
 def _redact_secrets(text: str) -> str:
@@ -1365,7 +1422,7 @@ SSE_CHUNK_DELAY_S = float(os.environ.get("MUSE_BRIDGE_SSE_CHUNK_DELAY_S", "0.005
 # stream=true: заголовки и role-кадр уходят сразу, пока ход идёт — комментарии keepalive.
 # Без них клиент (OpenAI SDK в DeepSeek Harness) ждал заголовков до своего таймаута
 # (~600 с) и рвал долгий ход как "Request timed out".
-KEEPALIVE_S = float(os.environ.get("MUSE_BRIDGE_KEEPALIVE_S", "15"))
+KEEPALIVE_S = min(10.0, float(os.environ.get("MUSE_BRIDGE_KEEPALIVE_S", "10")))
 
 
 def _split_sse_chunks(text: str, size: int = 0) -> list[str]:
@@ -1532,6 +1589,7 @@ class Run:
         self.approval_seen = False
         self.observed_barrier = False
         self.exec_deadline = float("inf")
+        self.managed_turn: ManagedTurn | None = None
 
     def close(self) -> None:
         """Убить группу процессов хода и коротко дождаться её ухода.
@@ -1637,6 +1695,13 @@ class Run:
                     "err": f"spawn failed: {exc}",
                     "state": "spawn_failed",
                 }
+            if self.managed_turn is not None:
+                self.managed_turn.bind_process(
+                    pgid=self.proc.pid, terminate_fn=self.close
+                )
+                TURN_MANAGER.register_child_pgid(
+                    self.proc.pid, backend="muse", turn_id=self.managed_turn.turn_id
+                )
             self.action_possible = True
 
             def drain_stderr() -> None:
@@ -1674,6 +1739,8 @@ class Run:
                         continue
                     if not isinstance(event, dict):
                         continue
+                    if self.managed_turn is not None:
+                        self.managed_turn.touch_activity("protocol")
                     ptype = str(event.get("payload_type") or "")
                     raw_payload = event.get("payload")
                     payload: dict[str, Any] = (
@@ -1822,6 +1889,7 @@ class ServeRun:
         self.request_deadline = float("inf")
         self.turn_started_at: float | None = None
         self._live_frozen = False
+        self.managed_turn: ManagedTurn | None = None
         # Сквозной live-стриминг всех шагов (ADR-0004): аккумулятор по
         # составному ключу (item_id, idx), единый append-only stream-текст
         # для live/final/flush (S2), доступ — только под _acc_lock (S3).
@@ -2014,6 +2082,13 @@ class ServeRun:
         except OSError as exc:
             raise ServeUnavailable(f"serve spawn failed: {exc}")
         assert self.proc.stdout is not None and self.proc.stdin is not None
+        if self.managed_turn is not None:
+            self.managed_turn.bind_process(
+                pgid=self.proc.pid, terminate_fn=self.close
+            )
+            TURN_MANAGER.register_child_pgid(
+                self.proc.pid, backend="muse", turn_id=self.managed_turn.turn_id
+            )
         # stdin неблокирующий: запись идёт срезами с дедлайном (см. _send).
         os.set_blocking(self.proc.stdin.fileno(), False)
 
@@ -2051,6 +2126,9 @@ class ServeRun:
 
         def read_msg(timeout_at: float) -> dict[str, Any]:
             while time.monotonic() < timeout_at:
+                if self.managed_turn is not None and self.managed_turn.cancel_event.is_set():
+                    self.close()
+                    raise ServeUnavailable("turn cancelled")
                 if self.proc is None or self.proc.stdout is None:
                     raise ServeUnavailable("serve stdout closed")
                 newline = rbuf.find(b"\n")
@@ -2083,6 +2161,8 @@ class ServeRun:
                 except ValueError:
                     continue
                 if isinstance(msg, dict):
+                    if self.managed_turn is not None:
+                        self.managed_turn.touch_activity("protocol")
                     return msg
             raise ServeUnavailable("serve read timeout")
 
@@ -2643,6 +2723,8 @@ class Handler(BaseHTTPRequestHandler):
     # Обрыв клиента и текущий ход: значения инициализируются в setup() каждого соединения.
     _client_gone: bool = False
     _current_run: Run | ServeRun | None = None
+    _active_managed_turn: ManagedTurn | None = None
+    _detach_on_disconnect: bool = False
     # Ранний SSE (stream=true): состояние потока и keepalive текущего соединения.
     _sse_open: bool = False
     _content_started: bool = False
@@ -2669,6 +2751,8 @@ class Handler(BaseHTTPRequestHandler):
         # Состояние обрыва клиента и ссылка на текущий ход — на каждое соединение.
         self._client_gone = False
         self._current_run = None
+        self._active_managed_turn = None
+        self._detach_on_disconnect = False
         self._sse_open = False
         self._content_started = False
         self._sse_id = ""
@@ -2718,7 +2802,11 @@ class Handler(BaseHTTPRequestHandler):
             self._client_gone = True
             self._delivery_failed = True
             _log(message)
-            self._kill_current_run()
+            active_turn = getattr(self, "_active_managed_turn", None)
+            if getattr(self, "_detach_on_disconnect", False) and active_turn is not None:
+                TURN_MANAGER.mark_detached(active_turn.turn_id)
+            else:
+                self._kill_current_run()
         return False
 
     # ---- ранний SSE: заголовки сразу, keepalive во время хода ---------------------
@@ -2823,9 +2911,7 @@ class Handler(BaseHTTPRequestHandler):
         Запись нефатальна (S1): при сбое `_live_degraded=True`, ход жив,
         повторные вызовы коротко возвращают True, буфер уйдёт в финале.
         """
-        if not full_text or not getattr(self, "_sse_open", False):
-            return True
-        if getattr(self, "_live_degraded", False):
+        if not full_text:
             return True
         with self._get_live_lock():
             sent = getattr(self, "_live_sent_text", "")
@@ -2833,6 +2919,15 @@ class Handler(BaseHTTPRequestHandler):
                 return True
             delta = full_text[len(sent) :]
             if not delta:
+                return True
+            active_turn = getattr(self, "_active_managed_turn", None)
+            if active_turn is not None and not active_turn.buffer.sealed:
+                active_turn.buffer.append("reasoning", delta)
+            if not getattr(self, "_sse_open", False) or getattr(
+                self, "_live_degraded", False
+            ):
+                self._live_sent_text = full_text
+                self._live_reasoning_sent = full_text
                 return True
             ok = self._sse_emit(
                 self._sse_chunk({"reasoning_content": delta}),
@@ -2922,19 +3017,28 @@ class Handler(BaseHTTPRequestHandler):
         with self._wlock:
             self._sse_phase = "OPEN"
         self.close_connection = True
+        active_turn = getattr(self, "_active_managed_turn", None)
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.send_header("X-Accel-Buffering", "no")
+            if active_turn is not None:
+                self.send_header("X-Turn-Id", active_turn.turn_id)
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, OSError):
             self._client_gone = True
             _log("client gone before headers")
+            if getattr(self, "_detach_on_disconnect", False) and active_turn is not None:
+                TURN_MANAGER.mark_detached(active_turn.turn_id)
+                return True
             return False
         self._sse_open = True
         if not self._sse_emit(self._sse_chunk({"role": "assistant", "content": ""})):
+            if getattr(self, "_detach_on_disconnect", False) and active_turn is not None:
+                TURN_MANAGER.mark_detached(active_turn.turn_id)
+                return True
             return False
         stop = threading.Event()
         self._keepalive_stop = stop
@@ -3005,7 +3109,7 @@ class Handler(BaseHTTPRequestHandler):
             run.close()
 
     def _watch_client(self, stop: threading.Event) -> None:
-        """Надзор за клиентом во время хода: обрыв -> флаг + killpg группы хода.
+        """Надзор за клиентом во время хода: обрыв -> флаг + killpg группы хода (или detach).
 
         Не выходит после первого убийства: ход может зарегистрироваться (или запустить
         процесс) уже после обрыва — kill идемпотентен и повторяется каждый тик до stop.
@@ -3014,12 +3118,23 @@ class Handler(BaseHTTPRequestHandler):
         while not stop.wait(0.25):
             if self._client_gone or self._client_gone_probe():
                 self._client_gone = True
+                active_turn = getattr(self, "_active_managed_turn", None)
+                if getattr(self, "_detach_on_disconnect", False) and active_turn is not None:
+                    if not reported:
+                        reported = True
+                        _log(
+                            f"client gone during run — detaching turn_id={active_turn.turn_id}"
+                        )
+                    TURN_MANAGER.mark_detached(active_turn.turn_id)
+                    return
                 if not reported:
                     reported = True
                     _log("client gone during run — killing process group")
                 self._kill_current_run()
 
-    def _send(self, code: int, payload: dict) -> None:
+    def _send(
+        self, code: int, payload: dict, headers: dict[str, str] | None = None
+    ) -> None:
         if self._sse_open:
             # Заголовки 200 уже ушли: ошибка — кадром SSE, как у OpenAI-совместимых прокси.
             self._sse_stop_keepalive()
@@ -3057,12 +3172,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(int(code))
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            active_turn = getattr(self, "_active_managed_turn", None)
+            if active_turn is not None and (not headers or "X-Turn-Id" not in headers):
+                self.send_header("X-Turn-Id", active_turn.turn_id)
+            if headers:
+                for hk, hv in headers.items():
+                    self.send_header(str(hk), str(hv))
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, OSError):
             self._client_gone = True
             _log("client gone before response")
-            self._kill_current_run()
+            if not getattr(self, "_detach_on_disconnect", False):
+                self._kill_current_run()
         finally:
             if have_conn:
                 try:
@@ -3160,12 +3282,82 @@ class Handler(BaseHTTPRequestHandler):
         if self._sse_emit(final):
             self._sse_write("data: [DONE]\n\n")
 
+    def _parse_from_seq(self) -> int | None:
+        raw_seq = None
+        if "?" in self.path:
+            qs = self.path.split("?", 1)[1]
+            for part in qs.split("&"):
+                if part.startswith("from_seq="):
+                    raw_seq = part.split("=", 1)[1]
+                    break
+        if raw_seq is None:
+            hdr_seq = self.headers.get("Last-Event-ID")
+            if hdr_seq is not None and hdr_seq.strip():
+                raw_seq = hdr_seq.strip()
+        if raw_seq is None or raw_seq == "":
+            return 0
+        if not re.fullmatch(r"[0-9]+", str(raw_seq).strip()):
+            return None
+        return int(str(raw_seq).strip())
+
+    def _serve_turn_stream(self, turn_id: str) -> None:
+        if not validate_turn_id(turn_id):
+            self._send(400, {"error": {"message": "invalid turn_id", "code": 400}})
+            return
+        from_seq = self._parse_from_seq()
+        if from_seq is None:
+            self._send(400, {"error": {"message": "invalid from_seq", "code": 400}})
+            return
+        try:
+            turn = TURN_MANAGER.get_turn(
+                turn_id, owner_token_hash=_owner_token_hash(self)
+            )
+        except KeyError:
+            self._send(404, {"error": {"message": f"turn not found: {turn_id}", "code": 404}})
+            return
+        except PermissionError:
+            self._send(403, {"error": {"message": "turn belongs to another token", "code": 403}})
+            return
+        try:
+            turn.buffer.get_since(
+                from_seq,
+                turn_id=turn.turn_id,
+                state_dump_path=turn.state_dump_path,
+            )
+        except GapDetectedError as exc:
+            self._send(410, exc.to_http_payload())
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Turn-Id", turn.turn_id)
+            self.end_headers()
+            self.close_connection = True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        for frame in TURN_MANAGER.iter_sse_stream(
+            turn,
+            from_seq=from_seq,
+            keepalive_interval_s=KEEPALIVE_S,
+            client_gone_fn=self._client_gone_probe,
+        ):
+            try:
+                self.wfile.write(frame.encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                TURN_MANAGER.mark_detached(turn.turn_id)
+                return
+
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
             with _active_lock:
                 active = len(_active)
                 quarantined = len(_quarantined_slots)
+            draining = _is_drain_enabled() and LIFECYCLE.is_draining()
             self._send(
                 200,
                 {
@@ -3182,6 +3374,7 @@ class Handler(BaseHTTPRequestHandler):
                     "tool_emulation": True,
                     "uptime_s": int(time.time() - _started),
                 },
+                headers={"X-Bridge-Draining": "1"} if draining else None,
             )
             return
         if not _auth_ok(self):
@@ -3207,9 +3400,38 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if _is_detached_enabled() and path.startswith("/v1/turns/"):
+            m_stream = re.fullmatch(r"/v1/turns/([^/]+)/stream", path)
+            if m_stream:
+                self._serve_turn_stream(m_stream.group(1))
+                return
+            m_turn = re.fullmatch(r"/v1/turns/([^/]+)", path)
+            if m_turn:
+                turn_id = m_turn.group(1)
+                if not validate_turn_id(turn_id):
+                    self._send(400, {"error": {"message": "invalid turn_id", "code": 400}})
+                    return
+                try:
+                    snap = TURN_MANAGER.get_turn_snapshot(
+                        turn_id, owner_token_hash=_owner_token_hash(self)
+                    )
+                except KeyError:
+                    self._send(
+                        404,
+                        {"error": {"message": f"turn not found: {turn_id}", "code": 404}},
+                    )
+                    return
+                except PermissionError:
+                    self._send(
+                        403,
+                        {"error": {"message": "turn belongs to another token", "code": 403}},
+                    )
+                    return
+                self._send(200, snap)
+                return
         self._send(404, {"error": {"message": f"not found: {path}"}})
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_DELETE(self) -> None:  # noqa: N802
         if not _auth_ok(self):
             self.close_connection = True
             self._send(
@@ -3217,8 +3439,91 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         path = self.path.split("?", 1)[0]
+        m_turn = (
+            re.fullmatch(r"/v1/turns/([^/]+)", path)
+            if _is_detached_enabled()
+            else None
+        )
+        if not m_turn:
+            self._send(404, {"error": {"message": f"not found: {path}"}})
+            return
+        turn_id = m_turn.group(1)
+        if not validate_turn_id(turn_id):
+            self._send(400, {"error": {"message": "invalid turn_id", "code": 400}})
+            return
+        owner_hash = _owner_token_hash(self)
+        try:
+            TURN_MANAGER.cancel_turn(turn_id, owner_token_hash=owner_hash)
+            snap = TURN_MANAGER.get_turn_snapshot(turn_id, owner_token_hash=owner_hash)
+        except KeyError:
+            self._send(
+                404, {"error": {"message": f"turn not found: {turn_id}", "code": 404}}
+            )
+            return
+        except PermissionError:
+            self._send(
+                403,
+                {"error": {"message": "turn belongs to another token", "code": 403}},
+            )
+            return
+        self._send(200, snap)
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._active_managed_turn = None
+        self._detach_on_disconnect = False
+        path = self.path.split("?", 1)[0]
+        m_cancel = (
+            re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
+            if _is_detached_enabled()
+            else None
+        )
+        if not m_cancel and _is_drain_enabled() and LIFECYCLE.is_draining():
+            self.close_connection = True
+            self._send(
+                503,
+                {
+                    "error": {
+                        "message": "bridge is shutting down",
+                        "type": "overloaded",
+                        "code": 503,
+                    }
+                },
+                headers={"Retry-After": "5", "X-Bridge-Draining": "1"},
+            )
+            return
+        if not _auth_ok(self):
+            self.close_connection = True
+            self._send(
+                401, {"error": {"message": "unauthorized", "type": "auth_error"}}
+            )
+            return
         length = int(self.headers.get("Content-Length") or "0")
         raw = self.rfile.read(length) if length else b"{}"
+        if m_cancel is not None:
+            turn_id = m_cancel.group(1)
+            if not validate_turn_id(turn_id):
+                self._send(400, {"error": {"message": "invalid turn_id", "code": 400}})
+                return
+            owner_hash = _owner_token_hash(self)
+            try:
+                TURN_MANAGER.cancel_turn(turn_id, owner_token_hash=owner_hash)
+                snap = TURN_MANAGER.get_turn_snapshot(
+                    turn_id, owner_token_hash=owner_hash
+                )
+            except KeyError:
+                self._send(
+                    404,
+                    {"error": {"message": f"turn not found: {turn_id}", "code": 404}},
+                )
+                return
+            except PermissionError:
+                self._send(
+                    403,
+                    {"error": {"message": "turn belongs to another token", "code": 403}},
+                )
+                return
+            self._send(200, snap)
+            return
         try:
             req = json.loads(raw.decode("utf-8") or "{}")
         except ValueError:
@@ -3239,6 +3544,10 @@ class Handler(BaseHTTPRequestHandler):
             self._exec_deadline = float("inf")
             self._request_deadline = float("inf")
             self._delivery_failed = False
+            if self._active_managed_turn is not None and not self._detach_on_disconnect:
+                TURN_MANAGER.finalize_abandoned_turn(self._active_managed_turn)
+            self._active_managed_turn = None
+            self._detach_on_disconnect = False
 
     def _serve_json(self, req: dict) -> None:
         # Абсолютный бюджет запроса a4: t0 при приёме, до очереди и вычислений.
@@ -3281,6 +3590,32 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+
+        extra = (
+            req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
+        )
+        cwd = str(extra.get("cwd") or "")
+        _hdrs = getattr(self, "headers", None) or {}
+        req_turn_id = (
+            _hdrs.get("X-Turn-Id") or str(extra.get("turn_id") or "")
+        ).strip()
+        resume_turn_id = (
+            _hdrs.get("X-Resume-Turn-Id")
+            or str(extra.get("resume_turn_id") or "")
+        ).strip()
+        for candidate_tid in (req_turn_id, resume_turn_id):
+            if candidate_tid and not validate_turn_id(candidate_tid):
+                self._send(
+                    400,
+                    {
+                        "error": {
+                            "message": "invalid turn_id",
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        }
+                    },
+                )
+                return
 
         raw_tools = req.get("tools")
         tools = (
@@ -3356,21 +3691,81 @@ class Handler(BaseHTTPRequestHandler):
         reflected_prompts: list[str] = [prompt]
 
         effort = _map_effort(req)
+        raw_key = req.get("prompt_cache_key")
+        session_id = str(raw_key) if isinstance(raw_key, str) else ""
+        self._detach_on_disconnect = _is_detached_enabled() and bool(
+            req_turn_id or resume_turn_id or session_id
+        )
+        managed_turn: ManagedTurn | None = None
+        attached_existing = False
+        if _is_detached_enabled():
+            try:
+                managed_turn, attached_existing = TURN_MANAGER.create_or_attach_turn(
+                    model=model,
+                    backend="muse",
+                    cwd=cwd,
+                    messages=raw_messages if isinstance(raw_messages, list) else [],
+                    session_id=session_id,
+                    owner_token_hash=_owner_token_hash(self),
+                    rid=rid,
+                    requested_turn_id=req_turn_id or None,
+                    resume_turn_id=resume_turn_id or None,
+                    stream=req.get("stream") is True,
+                    emulate_tools=emulate_tools,
+                    idle_timeout_s=IDLE_TIMEOUT_S if _is_watchdog_enabled() else TIMEOUT_S,
+                    safety_cap_s=TIMEOUT_S,
+                )
+            except PermissionError:
+                self._send(
+                    403,
+                    {
+                        "error": {
+                            "message": "turn belongs to another token",
+                            "type": "forbidden",
+                            "code": 403,
+                        }
+                    },
+                )
+                return
+            except ValueError as exc:
+                self._send(
+                    400,
+                    {
+                        "error": {
+                            "message": str(exc),
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        }
+                    },
+                )
+                return
+        self._active_managed_turn = managed_turn
+        if attached_existing and managed_turn is not None:
+            if req.get("stream") is True:
+                self._serve_turn_stream(managed_turn.turn_id)
+                return
+            managed_turn.done_event.wait(timeout=TIMEOUT_S)
+            snap = TURN_MANAGER.get_turn_snapshot(
+                managed_turn.turn_id, owner_token_hash=_owner_token_hash(self)
+            )
+            self._send(200, snap)
+            return
 
         if req.get("stream") is True and not self._sse_begin(model):
             return
         while not _slots.acquire(timeout=1.0):
             if self._client_gone or self._client_gone_probe():
                 self._client_gone = True
-                _log("client gone while waiting for a slot")
-                return
+                if not self._detach_on_disconnect:
+                    _log("client gone while waiting for a slot")
+                    return
             if time.monotonic() >= _exec_deadline - MIN_ATTEMPT_REMAINING_S:
                 _log("insufficient remaining budget while waiting for a slot")
                 self._send(
                     503, {"error": {"message": "bridge busy", "type": "overloaded"}}
                 )
                 return
-        if self._client_gone or self._client_gone_probe():
+        if (self._client_gone or self._client_gone_probe()) and not self._detach_on_disconnect:
             # Клиент ушёл на границе получения слота: ход без надзора не стартует.
             self._client_gone = True
             _log("client gone while waiting for a slot")
@@ -3381,6 +3776,16 @@ class Handler(BaseHTTPRequestHandler):
             _slots.release()
             self._send(503, {"error": {"message": "bridge busy", "type": "overloaded"}})
             return
+        slot_released = [False]
+
+        def _release_slot_once() -> None:
+            if not slot_released[0]:
+                slot_released[0] = True
+                _slots.release()
+
+        if managed_turn is not None:
+            managed_turn._slot_release_fn = _release_slot_once
+
         watch_stop = threading.Event()
         watcher = threading.Thread(
             target=self._watch_client, args=(watch_stop,), daemon=True
@@ -3429,12 +3834,15 @@ class Handler(BaseHTTPRequestHandler):
                 agg["observed"] = agg["observed"] or bool(observed)
 
         def _can_start(is_exec: bool, *, context: bool = False) -> tuple[bool, str]:
+            if managed_turn is not None and managed_turn.cancel_event.is_set():
+                return False, "client_gone"
             if self._client_gone or self._client_gone_probe():
                 self._client_gone = True
-                return False, "client_gone"
+                if not self._detach_on_disconnect:
+                    return False, "client_gone"
             if getattr(self, "_content_started", False):
                 return False, "content_started"
-            if getattr(self, "_delivery_failed", False):
+            if getattr(self, "_delivery_failed", False) and not self._detach_on_disconnect:
                 return False, "delivery_failed"
             if agg["degraded"]:
                 return False, "approval_degraded"
@@ -3478,10 +3886,11 @@ class Handler(BaseHTTPRequestHandler):
             # S4: новый ServeRun (в т.ч. ретрай) стартует с чистого live-префикса.
             self._reset_live_for_attempt()
             serve_run = ServeRun(model, attempt_prompt, effort, WORKSPACE)
+            serve_run.managed_turn = managed_turn
             serve_run.exec_deadline = _exec_deadline
             serve_run.write_deadline = _write_deadline
             serve_run.request_deadline = _req_deadline
-            if req.get("stream") is True and self._sse_open:
+            if req.get("stream") is True and (self._sse_open or self._detach_on_disconnect):
                 serve_run.live_sink = self._live_reasoning_sink
             runs.append(serve_run)
             self._current_run = serve_run
@@ -3492,7 +3901,17 @@ class Handler(BaseHTTPRequestHandler):
                 return attempt_out, "serve"
             except ServeUnavailable as exc:
                 _update_agg(serve_run, None)
-                if self._client_gone:
+                if managed_turn is not None and managed_turn.cancel_event.is_set():
+                    return (
+                        {
+                            "rc": -1,
+                            "text": "",
+                            "err": "turn cancelled",
+                            "state": "client_gone",
+                        },
+                        "aborted",
+                    )
+                if self._client_gone and not self._detach_on_disconnect:
                     _log("client gone during serve — exec fallback skipped")
                     return (
                         {
@@ -3541,6 +3960,7 @@ class Handler(BaseHTTPRequestHandler):
                     return _blocked_out(err), "serve"
                 _log(f"serve unavailable ({safe_exc}), fallback exec model={model}")
                 exec_run = Run(model, attempt_prompt, effort, WORKSPACE)
+                exec_run.managed_turn = managed_turn
                 exec_run.exec_deadline = _exec_deadline
                 exec_run.action_possible = True
                 agg["action"] = True
@@ -3562,7 +3982,11 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 if out.get("rc") == 0 and out.get("state") == "ok":
                     break
-                if self._client_gone or getattr(self, "_delivery_failed", False):
+                if (
+                    self._client_gone or getattr(self, "_delivery_failed", False)
+                ) and not self._detach_on_disconnect:
+                    break
+                if managed_turn is not None and managed_turn.cancel_event.is_set():
                     break
                 raw_err = str(out.get("err") or "")
                 is_hard_threshold = (
@@ -3632,7 +4056,9 @@ class Handler(BaseHTTPRequestHandler):
                             f"target={retry_target})"
                         )
                         break
-                    if self._client_gone or self._client_gone_probe():
+                    if (
+                        self._client_gone or self._client_gone_probe()
+                    ) and not self._detach_on_disconnect:
                         self._client_gone = True
                         break
                     context_retry_count = 1
@@ -3705,7 +4131,9 @@ class Handler(BaseHTTPRequestHandler):
                 pause_end = min(time.monotonic() + pause, _exec_deadline)
                 client_left = False
                 while time.monotonic() < pause_end:
-                    if self._client_gone or self._client_gone_probe():
+                    if (
+                        self._client_gone or self._client_gone_probe()
+                    ) and not self._detach_on_disconnect:
                         self._client_gone = True
                         client_left = True
                         break
@@ -3723,12 +4151,16 @@ class Handler(BaseHTTPRequestHandler):
             for run in runs:
                 run.close()
             if all(run.dead_confirmed for run in runs):
-                _slots.release()
-            else:
+                if managed_turn is not None:
+                    managed_turn.release_slot_once()
+                else:
+                    _release_slot_once()
+            elif not slot_released[0]:
                 # Смерть группы не подтверждена: слот не освобождается, пока она жива (карантин).
+                slot_released[0] = True
                 _quarantine_slot([run for run in runs if not run.dead_confirmed])
 
-        if self._client_gone:
+        if self._client_gone and not self._detach_on_disconnect:
             # Клиент ушёл: ответ в закрытый сокет не пишется (ни JSON, ни кадр ошибки).
             _log("client gone — response skipped")
             return
@@ -3740,6 +4172,41 @@ class Handler(BaseHTTPRequestHandler):
         if terminal_context_err is not None:
             diagnostic = _redact_secrets(terminal_context_err)
         out["err"] = _redact_secrets(diagnostic)
+
+        # Завершение управляемого хода в TurnSessionManager (для polling/replay после отсоединения).
+        if managed_turn is not None:
+            raw_content = str(out.get("text") or "")
+            parsed_content = raw_content
+            parsed_calls: list[dict] = []
+            if emulate_tools and raw_content and out.get("state") == "ok" and out.get("rc") == 0:
+                parsed_content, parsed_calls = _split_tool_calls(
+                    out.get("chunks") or [raw_content]
+                )
+            p_tok = _estimate_usage_tokens(prompt)
+            c_tok = _estimate_usage_tokens(raw_content)
+            t_res = TurnResult(
+                state="done" if (out.get("state") == "ok" and out.get("rc") == 0) else str(out.get("state") or "backend_error"),
+                rc=int(out.get("rc") or 0),
+                text=parsed_content,
+                err=str(out.get("err") or ""),
+                usage=Usage(input_tokens=p_tok, output_tokens=c_tok),
+                tool_calls=tuple(
+                    ToolCall(
+                        index=int(tc.get("index", idx)),
+                        id=str(tc.get("id", f"call_{idx}")),
+                        type="function",
+                        function=dict(tc.get("function") or {}),
+                    )
+                    for idx, tc in enumerate(parsed_calls)
+                ),
+            )
+            TURN_MANAGER.complete_turn_from_result(
+                managed_turn, t_res, backend_kind="muse"
+            )
+
+        if self._client_gone:
+            _log("client gone (detached turn finalized) — response skipped")
+            return
         if out.get("state") in ("launcher_missing", "spawn_failed"):
             _log(_format_err_log(model, via, out, req.get("stream") is True))
             self._send(
@@ -3909,10 +4376,14 @@ def main() -> int:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         _log(f"workspace mkdir failed: {exc}")
+    LIFECYCLE.reap_startup_orphans()
     _log(
         f"start host={HOST} port={PORT} models={sorted(ALLOWED_MODELS)} wrapper={MUSE_WRAPPER}"
     )
     server = Server((HOST, PORT), Handler)
+    if _is_drain_enabled():
+        LIFECYCLE.install_signal_handlers()
+        LIFECYCLE.start_signal_watcher(server)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -3924,3 +4395,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

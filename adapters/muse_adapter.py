@@ -57,6 +57,8 @@ from core.backend_adapter import (
     TurnResult,
     Usage,
 )
+from core.watchdog import AdaptiveTimeoutController
+
 
 DEFAULT_WRAPPER = "~/.config/muse-launch/muse-cli.sh"
 DEFAULT_PROXY_PORT = 10816
@@ -529,10 +531,18 @@ class MuseAdapter(BackendAdapter):
         waited = self._acquire_slot(ctx)
         if waited:
             return self._result(waited, 1)
+        managed_turn = getattr(ctx.handler, "_active_managed_turn", None)
+        if managed_turn is not None:
+            with managed_turn._lock:
+                managed_turn._slot_released = False
+                managed_turn._slot_release_fn = self._slots.release
         try:
             return self._run_exec(ctx, prompt)
         finally:
-            self._slots.release()
+            if managed_turn is not None:
+                managed_turn.release_slot_once()
+            else:
+                self._slots.release()
 
     def _run_exec(self, ctx: TurnContext, prompt: str) -> TurnResult:
         model = ctx.model
@@ -565,6 +575,36 @@ class MuseAdapter(BackendAdapter):
         threads: list[threading.Thread] = []
         state = "done"
         timeout_s = self._setting("TIMEOUT_S", 1800.0)
+        cfg_idle = self.config.get("idle_timeout_s")
+        cfg_cap = self.config.get("safety_cap_s")
+        idle_s = (
+            float(cfg_idle)
+            if isinstance(cfg_idle, (int, float)) and not isinstance(cfg_idle, bool)
+            else self._setting("IDLE_TIMEOUT_S", min(300.0, timeout_s))
+        )
+        idle_s = min(idle_s, timeout_s)
+        safety_s = (
+            float(cfg_cap)
+            if isinstance(cfg_cap, (int, float)) and not isinstance(cfg_cap, bool)
+            else self._setting("SAFETY_CAP_S", timeout_s)
+        )
+        if (
+            timeout_s < 300.0
+            and cfg_cap is None
+            and not hasattr(self.host, "SAFETY_CAP_S")
+        ):
+            safety_s = timeout_s
+        watchdog_enabled = os.environ.get(
+            "BRIDGE_ADAPTIVE_WATCHDOG_ENABLED", "true"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        timeout_ctrl = AdaptiveTimeoutController(
+            idle_timeout_s=idle_s,
+            safety_cap_s=safety_s,
+            finish_reserve_s=0.0 if safety_s <= 60.0 else 35.0,
+            watchdog_enabled=watchdog_enabled,
+            turn_id=ctx.turn_id,
+            log_fn=self._log,
+        )
         pipe_fds: list[int] = []
         try:
             try:
@@ -600,15 +640,19 @@ class MuseAdapter(BackendAdapter):
                 raise OSError("group witness handshake timed out")
             member = int(os.read(ready_r, 32).strip())
             self._register_child(proc.pid, member)
+            if callable(ctx.register_pgid):
+                ctx.register_pgid(proc.pid)
             os.write(gate_w, b"1")
             for fd in (ready_r, gate_w):
                 os.close(fd)
                 pipe_fds.remove(fd)
             if self._shutting_down:  # shutdown успел пройти до регистрации ребёнка
                 self._kill_group(proc)
-            keepalive_s = self._setting("KEEPALIVE_S", 15.0)
+            keepalive_s = min(10.0, self._setting("KEEPALIVE_S", 10.0))
             gone = ctx.client_gone
             keepalive = ctx.keepalive
+            cancel_ev = ctx.cancel_event
+            detach_ok = bool(ctx.detach_on_disconnect)
             stdout, stderr = proc.stdout, proc.stderr
             assert stdout is not None and stderr is not None
             child = proc
@@ -617,24 +661,51 @@ class MuseAdapter(BackendAdapter):
             leader_exited: list[float] = []
 
             def watch() -> None:
-                deadline = time.monotonic() + timeout_s
                 last_ka = time.monotonic()
+                seeded = False
+                detached = False
                 while not done.wait(0.25):
                     now = time.monotonic()
+                    if not seeded:
+                        seeded = True
+                        timeout_ctrl.register_pgid(child.pid)
+                    if cancel_ev is not None and cancel_ev.is_set():
+                        flags["cancelled"] = True
+                        self._kill_group(child)
+                        return
                     if child.poll() is not None:
                         if not leader_exited:
                             leader_exited.append(now)
                         if now - leader_exited[0] >= STDERR_DRAIN_GRACE_S:
                             self._kill_group(child)
                             return
-                    elif now > deadline:
-                        flags["timeout"] = True
-                    elif callable(gone) and gone():
-                        flags["client_gone"] = True
-                    elif callable(keepalive) and now - last_ka >= keepalive_s:
-                        last_ka = now
-                        if not keepalive():
-                            flags["client_gone"] = True
+                    else:
+                        should_stop, wd_reason, _ = timeout_ctrl.check(child.pid)
+                        if should_stop and wd_reason in (
+                            "idle_timeout",
+                            "absolute_cap",
+                        ):
+                            flags["timeout"] = True
+                        elif not detached and callable(gone) and gone():
+                            if detach_ok:
+                                detached = True
+                                if callable(ctx.on_activity):
+                                    ctx.on_activity("detached")
+                            else:
+                                flags["client_gone"] = True
+                        elif (
+                            not detached
+                            and callable(keepalive)
+                            and now - last_ka >= keepalive_s
+                        ):
+                            last_ka = now
+                            if not keepalive():
+                                if detach_ok:
+                                    detached = True
+                                    if callable(ctx.on_activity):
+                                        ctx.on_activity("detached")
+                                else:
+                                    flags["client_gone"] = True
                     if flags:
                         self._kill_group(child)
                         return
@@ -705,6 +776,9 @@ class MuseAdapter(BackendAdapter):
                     line = bytes(pending[:size]).decode("utf-8", "strict")
                     del pending[:size]
                     events.feed_line(line)
+                    timeout_ctrl.record_activity("protocol")
+                    if callable(ctx.on_activity):
+                        ctx.on_activity("protocol")
                     if events.text_bytes > MAX_TURN_TEXT_BYTES:
                         raise ValueError("turn text exceeds the limit")
                 if len(pending) > MAX_LINE_BYTES:
@@ -724,6 +798,7 @@ class MuseAdapter(BackendAdapter):
                 f"muse pump failed: {type(exc).__name__}: {str(exc)[:MAX_ERR_CHARS]}"
             )
         finally:
+            timeout_ctrl.close()
             if proc is not None:
                 # Владение начинается сразу после Popen: даже отказ первого Thread.start
                 # не может обойти kill/wait. Реестр и слот освобождаются ПОСЛЕ группы.
@@ -756,6 +831,8 @@ class MuseAdapter(BackendAdapter):
         err = "\n".join(events.errors + err_lines)[-1000:]
         if events.reason:
             err = (err + f"\nreason: {events.reason}").strip()
+        if flags.get("cancelled"):
+            return self._result("cancelled", 1, err="turn cancelled by user")
         if flags.get("client_gone"):
             return self._result("client_gone", 1)
         if flags.get("timeout"):
@@ -778,6 +855,7 @@ class MuseAdapter(BackendAdapter):
         if rc != 0:
             return self._result("backend_error", rc, err=err)
         return self._result("done", 0, text=events.text, err=err, prompt=prompt)
+
 
     def shutdown(self) -> None:
         """Убить группы процессов собственных детей (только свои PID из реестра адаптера)."""
