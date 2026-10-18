@@ -90,6 +90,7 @@ from core.backend_adapter import (  # noqa: E402
     TurnContext,
     build_catalog,
 )
+from core import context_resilience as ctxres  # noqa: E402
 from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
@@ -257,6 +258,16 @@ _started = time.time()
 _last_ok = [0.0]
 # Байтовый бюджет admission; включается в main() (в тестах/импорте — None).
 _budget = None
+
+# ---- ОТКАЗОУСТОЙЧИВОСТЬ КОНТЕКСТА (EYE-33873, ADR-0006): общее ядро core/context_resilience.
+# Флаги читаются из локального снимка GigaRC (дефолт false = прежнее поведение хаба).
+CONTEXT_FLAGS = ctxres.FlagSource()
+CONTEXT_EPOCHS = ctxres.EpochStore()
+# Droid-маршрут хаба не квалифицирован (VER-006): строгий admission включается только флагом
+# DYNAMIC_PRUNER_ENABLED; после паспорта счётчика владелец переводит маршрут в enrolled.
+CONTEXT_ENROLLED = False
+CONTEXT_DEFAULT_MAX_OUTPUT = 65536
+_CONTEXT_OWNER_SECRET = os.urandom(32)
 _sha_cache = {}
 _sha_cache_lock = threading.Lock()
 
@@ -3679,6 +3690,37 @@ def _client_gone(sock: socket.socket) -> bool:
 _DEFAULT_CLIENT_GONE = _client_gone
 
 
+def _context_max_output(model_id: str) -> int:
+    """Допущенный максимум выходных токенов модели из сырого fleet.json (catalog его не хранит)."""
+    try:
+        raw = json.loads(FLEET_PATH.read_text(encoding="utf-8"))
+        for item in raw.get("models", []):
+            if item.get("id") == model_id and isinstance(item.get("max_tokens"), int):
+                return int(item["max_tokens"])
+    except (OSError, ValueError, AttributeError):
+        pass
+    return CONTEXT_DEFAULT_MAX_OUTPUT
+
+
+def _context_entry(model_id: str, model: dict) -> ctxres.RouteEntry:
+    """Запись каталога маршрутов ядра для модели хаба: окно из каталога, паспорт BYTE-V1."""
+    window = int(model.get("context_window") or 0)
+    target = (
+        ctxres.TargetBudget(window, min(_context_max_output(model_id), window))
+        if window > 0
+        else None
+    )
+    return ctxres.RouteEntry(
+        backend=str(model.get("backend") or ""),
+        ingress="droid-hub",
+        route="/v1/chat/completions",
+        model=model_id,
+        target=target,
+        protocol="openai",
+        enrolled=CONTEXT_ENROLLED,
+    )
+
+
 class _ByteBudget:
     """Резерв байт admission по заявленному Content-Length (C-11)."""
 
@@ -3713,6 +3755,7 @@ class Handler(BaseHTTPRequestHandler):
     _client_write_dead = False  # RW-203: живая запись отвергнута — терминал не шлём
     _active_managed_turn: ManagedTurn | None = None
     _detach_on_disconnect = False
+    _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
@@ -4960,6 +5003,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self._active_managed_turn = None
+        self._context_pruned = None
         managed_turn: ManagedTurn | None = None
         attached_existing = False
         path = self.path.split("?", 1)[0]
@@ -5188,6 +5232,11 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
+            # (10a) отказоустойчивость контекста: история вмещается в окно модели до всего прочего.
+            gated = self._context_gate(req, model_id, model, model_len)
+            if gated is None:
+                return
+            req, self._context_pruned = gated
             # (11) изображения (C-08…C-11).
             try:
                 images = _collect_images(req, model, effort)
@@ -5377,6 +5426,46 @@ class Handler(BaseHTTPRequestHandler):
                 budget.release(reserved)
             _DELIVERY_BUDGET.release(self._delivery_reserved)
             self._delivery_reserved = 0
+
+    def _context_gate(
+        self, req: dict, model_id: str, model: dict, model_len: int
+    ) -> tuple[dict, str | None] | None:
+        """Допуск истории в окно модели до images/prompt/адаптера (I-07); None = отказ уже отправлен.
+
+        Возвращает (запрос для дальнейшей обработки, значение X-DSH-Context-Pruned | None).
+        Исходный `req` не мутируется; при выключенных флагах возвращается как есть.
+        """
+        if not isinstance(req.get("messages"), list):
+            return req, None
+        try:
+            flags = CONTEXT_FLAGS.current()
+        except Exception:  # noqa: BLE001 - снимок флагов не должен ронять запрос
+            flags = ctxres.Flags()
+        entry = _context_entry(model_id, model)
+        if ctxres.decide_mode(entry, flags) == "off":
+            return req, None
+        identity = ctxres.build_identity(
+            ctxres.owner_scope(_owner_token_hash(self), _CONTEXT_OWNER_SECRET),
+            "droid-hub",
+            self.headers.items(),
+        )
+        try:
+            prepared = ctxres.prepare(
+                req,
+                entry,
+                flags,
+                protocol="openai",
+                identity=identity,
+                store=CONTEXT_EPOCHS,
+                serialize=False,
+            )
+        except ctxres.ContextError as exc:
+            _log(f"context_resilience reject reason={exc.reason} model={model_id}")
+            self._reject(exc.status, exc.error_type, exc.message(), model_id, model_len)
+            return None
+        _log(prepared.report.log_line())
+        header = prepared.header
+        return dict(prepared.body), (header[1] if header else None)
 
     def _prompt_guard(
         self,
@@ -5596,6 +5685,8 @@ class Handler(BaseHTTPRequestHandler):
         active_turn = getattr(self, "_active_managed_turn", None)
         if active_turn is not None:
             self.send_header("X-Turn-Id", active_turn.turn_id)
+        if self._context_pruned:
+            self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
         self.end_headers()
         for index, value in enumerate(values):
             self.wfile.write(segments[index] + b'"')
@@ -5643,6 +5734,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             if managed_turn is not None:
                 self.send_header("X-Turn-Id", managed_turn.turn_id)
+            if self._context_pruned:
+                # CD-003: сигнал до первого SSE-байта, после старта потока не меняется.
+                self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
             self.end_headers()
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
