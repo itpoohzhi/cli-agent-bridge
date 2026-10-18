@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-agy-bridge-resilience-20261018",
+  "stage": "arch",
+  "cycle": 1,
+  "round": 2,
+  "pool_setup": "default",
+  "pool_source": "/Users/aazhiry1/Мой диск/Context/models.md",
+  "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/architecture-packet.json",
+  "artifact_sha256": "f8c6c18e746af5cd92d39f12886354608aa099591845a851b6f66bdd722149e6",
+  "seed_input": "f8c6c18e#dsh-agy-bridge-resilience-20261018#c1#R2",
+  "seed_hex": "3485144f",
+  "ranked_order": [
+    {
+      "rank": 1,
+      "slot_id": "gpt-6.1-sol",
+      "family": "OpenAI",
+      "rank_hash": "e659a637"
+    },
+    {
+      "rank": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "rank_hash": "bbb0235b"
+    },
+    {
+      "rank": 3,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "rank_hash": "8445147f"
+    }
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gpt-6.1-sol",
+      "family": "OpenAI",
+      "transport": "codex",
+      "hat": "Скептик"
+    },
+    {
+      "k": 2,
+      "slot_id": "gemini-4-argon-high",
+      "family": "Google",
+      "transport": "agy",
+      "hat": "Визионер"
+    },
+    {
+      "k": 3,
+      "slot_id": "claude-sonnet-5-5-high",
+      "family": "Anthropic",
+      "transport": "claude-p",
+      "hat": "Реалист"
+    }
+  ]
+}

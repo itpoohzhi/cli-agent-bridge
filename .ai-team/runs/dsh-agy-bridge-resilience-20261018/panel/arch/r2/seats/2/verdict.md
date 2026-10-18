@@ -1,0 +1,80 @@
+PANEL-NONCE: 29eafd2f9e38bbcb
+ARTIFACT-SHA256: f8c6c18e746af5cd92d39f12886354608aa099591845a851b6f66bdd722149e6
+
+Подтверждение правил: общий канон `~/Мой диск/Context/AGENTS.md` прочитан; в рабочей папке R2 работаю как листовой судья Архитектурного Совета (место `k=2`, шляпа **Визионер**) строго по брифу без запуска сабагентов и оркестрации.
+
+---
+
+# Архитектурное ревью Раунда 2 (R2) — Шляпа: Визионер (`k=2`)
+
+Проанализированы переработанные артефакты ревизии `REVISED_R2`:
+- Главный пакет: [architecture-packet.json](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/architecture-packet.json) (`sha256: f8c6c18e746af5cd92d39f12886354608aa099591845a851b6f66bdd722149e6`)
+- Спецификация: [arch-spec.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/arch-spec.md)
+- ADR: [0007-agy-bridge-resilience-watchdog.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/docs/adr/0007-agy-bridge-resilience-watchdog.md)
+- Материалы анализа и кодовая база: [handoff-architect.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/analysis/agy-bridge-resilience/handoff-architect.md), [evidence-ledger.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/analysis/agy-bridge-resilience/evidence-ledger.md), [watchdog.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/watchdog.py), [lifecycle.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/lifecycle.py), [server.py](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py).
+
+---
+
+## 1. Проверка устранения замечаний Раунда 1 (Verify-Fixed по `RW-001..RW-008`)
+
+| ID | Требование Совета R1 | Статус в R2 | Подтверждение (Verify-Fixed) |
+|---|---|---|---|
+| **RW-001** | Реальный контракт [`AdaptiveTimeoutController`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/watchdog.py#L332-L449) и троттлинг `check()` | **VERIFY-FIXED** | Псевдокод с несуществующим `ProcessWatchdog(pgid=..., interval_s=...)` полностью убран. В [arch-spec.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/arch-spec.md#L53-L84) зафиксированы `register_pgid(self.proc.pid)` в [`Run.__init__`](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py#L641-L688), `on_activity(kind)` на `init`/`text`/`reasoning`/`tool_trace`, вызов `check(run.proc.pid)` строго в `except queue.Empty:` не чаще раз в `WATCHDOG_INTERVAL_S = 5.0` с и `controller.close()` в [`Run.close()`](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py#L781-L794). Корректно обработан `reason == "child_exited"` (не ошибка, ожидание терминального события `done` из очереди). |
+| **RW-002** | Явная передача `safety_cap_s=TIMEOUT_S` | **VERIFY-FIXED** | В конструктор контроллера явно передаются `safety_cap_s=TIMEOUT_S` (`1800.0` с) и `finish_reserve_s=0.0`, что предотвращает скрытое удвоение лимита хода до дефолтных `3600.0` с из [watchdog.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/watchdog.py#L28). |
+| **RW-003** | Kill-Switch через `BRIDGE_ENABLE_ADAPTIVE_WATCHDOG` | **VERIFY-FIXED** | Введена функция `_is_watchdog_enabled()`, синхронизированная с эталоном `muse-bridge`. При выключении выставляется `idle_timeout_s=TIMEOUT_S` и `watchdog_enabled=False` (полный отказ от вызовов `ps`). |
+| **RW-004** | Клиентский контракт ошибки `idle_timeout` (HTTP 504 + SSE) | **VERIFY-FIXED** | В [`Handler._error_body`](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py#L1091-L1117) добавлен маппинг `st == "idle_timeout"` в HTTP `504` (`type: "idle_timeout"`), автоматически транслируемый существующей SSE-веткой ([server.py](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py#L1388-L1389)) в `data: {"error": ...}\n\ndata: [DONE]\n\n`. |
+| **RW-005** | Гарантированная зачистка группы и сборка зомби | **VERIFY-FIXED** | Алгоритм [`_kill_group`](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py#L489-L500) перепроектирован: `SIGTERM` группе -> ожидание до `2.0` с -> эскалация до `SIGKILL` -> **безусловный** `proc.wait(timeout=5.0)` даже после `ProcessLookupError`, что исключает появление зомби-лидера (`Z`). |
+| **RW-006** | Bootstrap `sys.path`, деплой симлинком, `fleet.json`, `KNOWN_CHILD_BINARIES` | **VERIFY-FIXED** | Зафиксирован bootstrap `_REPO_ROOT = Path(__file__).resolve().parents[2]`, экспорт `PYTHONPATH` в `start.sh`, перенос `fleet.json` в `bridges/agy-bridge/`, регистрация `"agy"` и `"agy-cli.sh"` в [`KNOWN_CHILD_BINARIES`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/lifecycle.py#L42-L58) и порядок деплоя симлинком с бэкапом в `~/work/backups/agy-bridge-<ts>/`. |
+| **RW-007** | Hotfix `fetch_via_playwright.py` | **VERIFY-FIXED** | Вызов `fn(...)` внутри `_track_fetch_one` обёрнут в `asyncio.wait_for(..., timeout=60.0)` с перехватом `(asyncio.TimeoutError, TimeoutError)` и возвратом `(src_id, [], "timeout after 60s")` без обрушения `asyncio.gather()`. Все 7 голых `await page.close()` защищены `wait_for(..., timeout=5.0)`, плюс добавлен `AbortSignal.timeout(15000)` в `EXTRACT_JS`. |
+| **RW-008** | Тест-план на мок-часах | **VERIFY-FIXED** | В [arch-spec.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/arch-spec.md#L141-L164) специфицированы 15 конкретных тестовых сценариев в `tests/test_agy_bridge_resilience.py` с мок-часами (`clock=_FakeClock`) и малыми порогами (`idle_timeout_s=0.2`). |
+
+---
+
+## 2. Взгляд Визионера: стратегическая целостность и архитектурное единство
+
+1. **Конвергенция мостов хаба (`Droid`, `Muse`, `AGY`):** Интеграция `bridges/agy-bridge` в монорепозиторий `cli-agent-bridge` с переиспользованием [`AdaptiveTimeoutController`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/watchdog.py#L332-L449) и [`KNOWN_CHILD_BINARIES`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/lifecycle.py#L42-L58) ликвидирует последний «островной» неверсионируемый мост в `~/.dsh/bridges/`. Все три моста теперь опираются на единый фундамент `core/watchdog.py` и единый операционный паттерн kill-switch (`BRIDGE_ENABLE_ADAPTIVE_WATCHDOG`).
+2. **Отсутствие скрытого архитектурного долга:** В R2 архитектор не просто механически вписал требования R1, но и верифицировал их против реального кода:
+   - вскрыто и обработано поведение `reason == "child_exited"` в [`AdaptiveTimeoutController.check`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/watchdog.py#L423-L426), которое при наивной проверке `if should_stop:` превратило бы быстрое штатное завершение процесса в ложную ошибку `124`;
+   - в конструктор контроллера явно проброшен `watchdog_enabled=enabled`, без которого при `BRIDGE_ENABLE_ADAPTIVE_WATCHDOG=0` контроллер продолжал бы каждые 5 секунд запускать подпроцесс `ps`;
+   - честно зафиксирован факт `[F-17]` о том, что `muse-bridge` и `droid-bridge` в `~/.dsh/bridges/` пока развёрнуты копиями, поэтому в `start.sh` добавлена защита через `export PYTHONPATH`.
+3. **Эшелонированная защита (Defense-in-Depth):** Решение устраняет проблему зависаний сразу на трёх уровнях: внутри браузерного JS (`AbortSignal.timeout(15000)`), на уровне воркера Python-скрипта (`asyncio.wait_for(..., 60.0)` + `page.close()` за `5.0` с) и на уровне процессной группы моста (`IDLE_TIMEOUT_S = 300.0` с + каскад `SIGTERM -> SIGKILL -> proc.wait`).
+
+---
+
+## 3. Оценка по 6 критериям рубрики
+
+### Критерий 1 — PASS (`problem_and_boundaries`)
+Проблема декомпозирована на основе верифицированных фактов `[F-01]..[F-19]` в [architecture-packet.json](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/architecture-packet.json#L16-L131). Чётко разграничены зона ответственности моста `bridges/agy-bridge` (контур процесса и протокола в монорепозитории `cli-agent-bridge`) и сопутствующий hotfix клиентского скрипта `fetch_via_playwright.py` в репозитории `aibunker-workshop`. Блокирующих открытых вопросов нет.
+
+### Критерий 2 — PASS (`contracts_and_invariants`)
+Контракты с [`AdaptiveTimeoutController`](file:///Users/aazhiry1/work/src/cli-agent-bridge/core/watchdog.py#L332-L449) выверены до сигнатур и возвращаемых кортежей `(should_stop, reason, metrics)`. Сохранены внешние инварианты OpenAI-совместимого API (`POST /v1/chat/completions`, порт `127.0.0.1:9887`, каталог `fleet.json`, канонический лончер `~/.config/agy-launch/agy-cli.sh`, потолок хода `1800.0` с). Контракт ошибки `idle_timeout` (HTTP 504 и терминальный SSE-кадр перед `[DONE]`) полностью консистентен с существующими ошибками моста.
+
+### Критерий 3 — PASS (`risks_and_degradation`)
+Определена предсказуемая модель отказов и деградации:
+- политика `fail-closed` при зависании или ошибке `ps` (`ps_degraded=True` не сбрасывает `last_activity_ts`, логируя `watchdog_ps_degraded`);
+- бюджет времени обнаружения зависания строго ограничен сверху: `300 + 5 + 2 + 1 = 308` с (`<= 310` с, `NFR-RES-01`);
+- каскадное гашение группы `SIGTERM -> 2.0s -> SIGKILL -> proc.wait(5.0s)` гарантирует отсутствие сирот и зомби (`NFR-RES-02`);
+- изоляция таймаута одного источника в `fetch_via_playwright.py` сохраняет результаты остальных воркеров в `asyncio.gather()` (`NFR-RES-06`).
+
+### Критерий 4 — PASS (`security_and_secrets`)
+Инварианты безопасности [`server.py`](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py#L289-L310) сохранены в неприкосновенности: ключ авторизации `AGY_BRIDGE_KEY` читается только из памяти окружения, удаляется перед запуском дочернего процесса в `_launch_env()` и маскируется в логах функцией `_mask_secrets()`. При симлинк-деплое рантайм-артефакты (`logs/`, `workspace/`, `backups/`) изолируются через `.gitignore`, исключая утечку логов и дампов сессий в git.
+
+### Критерий 5 — PASS (`observability_and_ops`)
+Обеспечена прозрачная эксплуатация и мгновенный откат:
+- структурное логирование событий `watchdog idle_timeout pgid=...`, `watchdog_ps_degraded`, `kill_group_wait_timeout`;
+- операционный kill-switch `BRIDGE_ENABLE_ADAPTIVE_WATCHDOG=0` и настраиваемый порог `AGY_BRIDGE_IDLE_TIMEOUT` (с защитой от невалидных значений `<= 0`);
+- безопасная процедура миграции `~/.dsh/bridges/agy-bridge` в симлинк с предварительным полным бэкапом в `~/work/backups/agy-bridge-<ts>/` и проверкой что рестарт службы `com.user.dsh-agy-bridge` выполняется только после приёмки.
+
+### Критерий 6 — PASS (`implementation_and_test_plan`)
+План реализации и верификации исчерпывающий: 15 детерминированных тестов в `tests/test_agy_bridge_resilience.py` ([arch-spec.md](file:///Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/arch-spec.md#L145-L162)) покрывают все ветки контроллера (`idle_timeout`, `cpu_delta`, `on_activity`, `ps_degraded`, `child_exited`, `absolute_cap`), троттлинг `check()` в `_execute`, kill-switch, HTTP 504 / SSE-ошибку, эскалацию `_kill_group` + reap зомби, а также изоляцию таймаута `fetch_via_playwright.py` и `page.close()`. Условие импорта `server.py` без побочных эффектов (`if __name__ == "__main__":`) явно зафиксировано в спецификации (и уже соблюдается в текущем [server.py](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/server.py#L1474-L1475), при условии передачи `AGY_BRIDGE_FLEET` или наличия `fleet.json` рядом с `server.py`).
+
+---
+
+## 4. Сводка субрибрик
+
+SUB architecture: PASS — Полная конвергенция `agy-bridge` с ядром `cli-agent-bridge` (`AdaptiveTimeoutController`, `lifecycle.py`) и точное устранение всех замечаний R1 (`RW-001..RW-008`).
+SUB security: PASS — Сохранён запрет проброса `AGY_BRIDGE_KEY` в дочернее окружение, маскирование секретов в логах и изоляция рантайм-каталогов в `.gitignore`.
+SUB performance: PASS — Троттлинг `controller.check()` в `except queue.Empty:` (не чаще 1 раза в 5.0 с) и отключение `ps` при `watchdog_enabled=False` полностью исключают шторм подпроцессов при стриминге.
+SUB tests: PASS — Специфицированы 15 быстрых детерминированных юнит- и интеграционных тестов на мок-часах и малых таймаутах со 100% покрытием новых веток.
+
+ОБЩИЙ ВЕРДИКТ: ACCEPT

@@ -1,0 +1,309 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-EYE-33873-AGY-RESILIENCE",
+  "run_id": "dsh-agy-bridge-resilience-20261018",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "REVISED_R2",
+  "spec_path": ".ai-team/runs/dsh-agy-bridge-resilience-20261018/architecture/arch-spec.md",
+  "adr_path": "docs/adr/0007-agy-bridge-resilience-watchdog.md",
+  "requirement_ids": [
+    "REQ-AGY-001",
+    "REQ-AGY-002",
+    "REQ-AGY-003",
+    "REQ-AGY-004"
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "~/.dsh/bridges/agy-bridge/server.py:905-950",
+      "claim": "[F-01] В ~/.dsh/bridges/agy-bridge/server.py:905,936-937 сквозной дедлайн хода равен time.monotonic() + TIMEOUT_S (TIMEOUT_S = 1800), а цикл while True опрашивает очередь run.q.get(timeout=1.0) и отправляет keepalive без проверки CPU-активности или прогресса дочерних процессов."
+    },
+    {
+      "id": "EVD-002",
+      "kind": "log",
+      "ref": "~/.dsh/bridges/agy-bridge/logs/bridge.err:100",
+      "claim": "[F-02] В 19:19:21 мост agy-bridge зафиксировал rc=124 state=timeout conversation=8dd79fe3 turns=None tool_events=59 out_bytes=0 wall_s=1800.8 err='proxy timeout after 1800s' после 30-минутного отсутствия событий от CLI."
+    },
+    {
+      "id": "EVD-003",
+      "kind": "log",
+      "ref": "~/.gemini/antigravity-cli/brain/8dd79fe3-0c98-4566-9059-1e048faa1279/.system_generated/logs/transcript.jsonl:289-293",
+      "claim": "[F-03] В транскрипте сессии 8dd79fe3 на шаге 291 вызван run_command со скриптом bash scripts/run_fetch.sh all --cloud-mode --workers 10, который переведен в фоновую задачу task-292 из-за WaitMsBeforeAsync: 10000, после чего модель на шаге 293 завершила генерацию ответа, но CLI остался активным в ожидании задачи."
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "~/.dsh/bridges/agy-bridge/server.py:34-36,750-779",
+      "claim": "[F-04] В ~/.dsh/bridges/agy-bridge/server.py:34-36 и server.py:760-779 при наличии tools в запросе мост ожидает терминального события result от agy и выхода процесса (self.proc.wait()), не отдавая промежуточный текст в pieces, если text_delta не сопровождается agent_response."
+    },
+    {
+      "id": "EVD-005",
+      "kind": "log",
+      "ref": "~/.gemini/antigravity-cli/brain/8dd79fe3-0c98-4566-9059-1e048faa1279/.system_generated/tasks/task-292.log:10-34",
+      "claim": "[F-05] В логе задачи task-292.log heartbeat в течение 1502 секунд фиксировал зависание воркера на источнике claude_status (выполнено 37/75 (49%), elapsed 1502s, ещё в работе: claude_status)."
+    },
+    {
+      "id": "EVD-006",
+      "kind": "runtime",
+      "ref": "curl -I -sS -m 10 https://status.claude.com/history.rss",
+      "claim": "[F-06] Команда curl -I -sS -m 10 https://status.claude.com/history.rss завершается с ошибкой curl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to status.claude.com:443."
+    },
+    {
+      "id": "EVD-007",
+      "kind": "code",
+      "ref": "/Users/aazhiry1/Мой диск/Workshop/aibunker-workshop/scripts/fetch_via_playwright.py:508-511,1314-1324",
+      "claim": "[F-07] В scripts/fetch_via_playwright.py:1314-1324 сбор источников через worker не обернут во внешний asyncio.wait_for, а внутри EXTRACT_JS (строки 508-511) вызов fetch(url) не имеет таймаута через AbortSignal.timeout, что приводит к бесконечному зависанию страницы и Chromium при сбое TCP/TLS."
+    },
+    {
+      "id": "EVD-008",
+      "kind": "code",
+      "ref": "core/watchdog.py:27-99",
+      "claim": "[F-08] В core/watchdog.py:27-29,77-99 реализован ProcessWatchdog с IDLE_TIMEOUT_S = 300.0, отслеживающий прирост CPU (cpu_delta_s > 0) и появление новых дочерних PID в группе pgid; при отсутствии прогресса в течение 300с инициируется fail-closed прерывание."
+    },
+    {
+      "id": "EVD-009",
+      "kind": "code",
+      "ref": "core/lifecycle.py:1-120",
+      "claim": "[F-09] В core/lifecycle.py и server.py:670-685 реализовано корректное управление группами процессов (start_new_session=True, os.killpg(pgid, signal.SIGKILL)), предотвращающее утечку дочерних зомби-процессов при таймауте хода."
+    },
+    {
+      "id": "EVD-010",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:1-40",
+      "claim": "[F-10] В репозитории cli-agent-bridge мост bridges/muse-bridge/server.py находится под версионным контролем git, интегрирован с общими зависимостями и слушает порт :9886, управляясь launchd com.user.dsh-muse-bridge."
+    },
+    {
+      "id": "EVD-011",
+      "kind": "code",
+      "ref": "~/.dsh/bridges/agy-bridge/server.py",
+      "claim": "[F-11] Мост ~/.dsh/bridges/agy-bridge (порт :9887, служба com.user.dsh-agy-bridge) в настоящее время не включен в репозиторий cli-agent-bridge, не имеет юнит-тестов и не использует общие модули core/watchdog.py и core/context_resilience.py."
+    },
+    {
+      "id": "EVD-012",
+      "kind": "code",
+      "ref": "core/watchdog.py:332-449",
+      "claim": "[F-12] Реальный API: AdaptiveTimeoutController(idle_timeout_s, safety_cap_s, finish_reserve_s, watchdog, watchdog_enabled, clock, rid, turn_id, log_fn) с register_pgid/on_activity/record_activity/check/close; check() возвращает (should_stop, reason, metrics), reason ∈ {absolute_cap, idle_timeout, child_exited}. Класса ProcessWatchdog(pgid=, interval_s=) с poll()/idle_seconds нет."
+    },
+    {
+      "id": "EVD-013",
+      "kind": "code",
+      "ref": "core/watchdog.py:27-31",
+      "claim": "[F-13] Дефолты core: IDLE_TIMEOUT_S=300.0, SAFETY_CAP_S=3600.0, FINISH_RESERVE_S=35.0, WATCHDOG_INTERVAL_S=5.0, PS_TIMEOUT_S=2.0 — без явной передачи safety_cap_s=TIMEOUT_S потолок хода agy-bridge удвоился бы до 3600 с."
+    },
+    {
+      "id": "EVD-014",
+      "kind": "code",
+      "ref": "bridges/muse-bridge/server.py:61-62,389-392,3715",
+      "claim": "[F-14] Эталон muse-bridge: bootstrap _REPO_ROOT=Path(__file__).resolve().parents[2]; _is_watchdog_enabled() по BRIDGE_ENABLE_ADAPTIVE_WATCHDOG; idle_timeout_s=IDLE_TIMEOUT_S if _is_watchdog_enabled() else TIMEOUT_S."
+    },
+    {
+      "id": "EVD-015",
+      "kind": "code",
+      "ref": "~/.dsh/bridges/agy-bridge/server.py:489-500",
+      "claim": "[F-15] Текущий _kill_group agy-bridge делает ранний return при ProcessLookupError без proc.wait(), что допускает зомби-лидера; SIGKILL не гарантирован ожиданием 2.0 с."
+    },
+    {
+      "id": "EVD-016",
+      "kind": "code",
+      "ref": "~/.dsh/bridges/agy-bridge/server.py:1091-1110,1370-1389",
+      "claim": "[F-16] _error_body не знает состояния idle_timeout; SSE-ветка уже эмитит data:{error:...} + data:[DONE] для любого err — новый тип наследует её."
+    },
+    {
+      "id": "EVD-017",
+      "kind": "runtime",
+      "ref": "ls -la ~/.dsh/bridges/",
+      "claim": "[F-17] ~/.dsh/bridges/muse-bridge и droid-bridge — обычные каталоги с копиями server.py (не симлинки); симлинк для agy-bridge — целевое решение Совета, а не существующий стандарт."
+    },
+    {
+      "id": "EVD-018",
+      "kind": "code",
+      "ref": "/Users/aazhiry1/Мой диск/Workshop/aibunker-workshop/scripts/fetch_via_playwright.py:508,641,661,844,885,926,970,1031,1167,1212-1225,1324",
+      "claim": "[F-18] _track_fetch_one(src, ctx, ctx_r, cutoff, fn) вызывает fn(...) без таймаута; функции _fetch_one_url нет; голые await page.close() в 7 местах (строка 844 уже ограничена); worker'ы собираются через asyncio.gather."
+    },
+    {
+      "id": "EVD-019",
+      "kind": "code",
+      "ref": "core/lifecycle.py:42-57,377-379",
+      "claim": "[F-19] KNOWN_CHILD_BINARIES — frozenset (muse, droid, node, python, bash, sh, sleep …) без agy/agy-cli.sh; используется как подстрочный фильтр вывода ps при reap_orphans."
+    }
+  ],
+  "blocking_open_questions": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "question_id": "OPEN-01",
+      "assumption": "bridges/agy-bridge добавляется в состав репозитория cli-agent-bridge, использует общие core/watchdog.py и core/lifecycle.py, версионируется в git и деплоится в ~/.dsh/bridges/agy-bridge"
+    },
+    {
+      "id": "ASM-002",
+      "question_id": "OPEN-02",
+      "assumption": "Дефолтный порог IDLE_TIMEOUT_S равен 300с с переопределением через env AGY_BRIDGE_IDLE_TIMEOUT (невалидное/≤0 -> 300); safety_cap_s=TIMEOUT_S=1800с, finish_reserve_s=0.0"
+    },
+    {
+      "id": "ASM-003",
+      "question_id": "OPEN-03",
+      "assumption": "Фикс fetch_via_playwright.py (wait_for 60s вокруг fn(...), page.close wait_for 5s; AbortSignal.timeout(15000) как эшелонированная защита) вносится как сопутствующий hotfix"
+    },
+    {
+      "id": "ASM-004",
+      "question_id": "OPEN-04",
+      "assumption": "Деплой ~/.dsh/bridges/agy-bridge — симлинк на bridges/agy-bridge репозитория по решению Совета (RW-006); при копировании вместо симлинка PYTHONPATH экспортируется в start.sh. Подтвердить владельцем при деплое (muse/droid сейчас — обычные каталоги)."
+    }
+  ],
+  "boundaries_and_contracts": {
+    "api_endpoint": "POST /v1/chat/completions",
+    "port": "127.0.0.1:9887",
+    "service_label": "com.user.dsh-agy-bridge",
+    "launcher": "~/.config/agy-launch/agy-cli.sh",
+    "watchdog_idle_timeout_s": 300.0,
+    "watchdog_safety_cap_s": 1800.0,
+    "watchdog_finish_reserve_s": 0.0,
+    "watchdog_check_interval_s": 5.0,
+    "controller": "core.watchdog.AdaptiveTimeoutController",
+    "feature_flags": {
+      "BRIDGE_ENABLE_ADAPTIVE_WATCHDOG": "1 (по умолчанию); 0/false/no/off -> idle_timeout_s=TIMEOUT_S, без ps",
+      "AGY_BRIDGE_IDLE_TIMEOUT": "300"
+    },
+    "error_contract": {
+      "idle_timeout": {
+        "http": 504,
+        "type": "idle_timeout",
+        "sse": "data: {\"error\": {...}}\\n\\ndata: [DONE]\\n\\n"
+      },
+      "absolute_cap": "state timeout (прежний контракт 504 timeout)"
+    },
+    "deploy": "~/.dsh/bridges/agy-bridge -> /Users/aazhiry1/work/src/cli-agent-bridge/bridges/agy-bridge (симлинк); backup прежнего каталога в ~/work/backups/agy-bridge-<ts>/",
+    "kill_group": "SIGTERM -> wait <=2.0s -> SIGKILL если жива -> proc.wait(timeout=5.0) всегда"
+  },
+  "quality_scenarios": [
+    {
+      "id": "NFR-RES-01",
+      "metric": "time_to_abort_hung_process",
+      "target": "<= 310s",
+      "description": "Зависание без CPU-прогресса и протокольных событий -> idle_timeout за 300 + <=5 (троттлинг) + <=2 (ps) + 1 (тик очереди) с вместо 1800 с"
+    },
+    {
+      "id": "NFR-RES-02",
+      "metric": "orphan_and_zombie_processes_count",
+      "target": "0",
+      "description": "После прерывания хода нет живых потомков (Chromium, node, python) и нет зомби-лидера группы (ps stat != Z)"
+    },
+    {
+      "id": "NFR-RES-03",
+      "metric": "test_coverage",
+      "target": "100% новых веток watchdog/_kill_group/_error_body",
+      "description": "15 тестов tests/test_agy_bridge_resilience.py (arch-spec §6)"
+    },
+    {
+      "id": "NFR-RES-04",
+      "metric": "ps_invocations_per_turn",
+      "target": "<= 1 вызов check() за 5 с",
+      "description": "Троттлинг check(): нет шторма ps при быстром стриминге"
+    },
+    {
+      "id": "NFR-RES-05",
+      "metric": "rollback_time",
+      "target": "1 рестарт службы",
+      "description": "BRIDGE_ENABLE_ADAPTIVE_WATCHDOG=0 возвращает прежнее поведение без перевыкладки"
+    },
+    {
+      "id": "NFR-RES-06",
+      "metric": "fetch_source_isolation",
+      "target": "<= 60s на источник",
+      "description": "Зависший источник не срывает asyncio.gather; page.close <= 5s"
+    }
+  ],
+  "revision": {
+    "rev": "r2",
+    "date": "2026-10-18",
+    "basis": "Council Round 1 (Скептик, Реалист, Визионер): RW-001..RW-008",
+    "awaiting": "Council Round 2"
+  },
+  "council_requirements": [
+    {
+      "id": "RW-001",
+      "title": "Реальный API core.watchdog",
+      "resolution": "AdaptiveTimeoutController(idle_timeout_s=IDLE_TIMEOUT_S, safety_cap_s=TIMEOUT_S, finish_reserve_s=0.0, log_fn=_log); register_pgid в Run.__init__; on_activity на init/text/reasoning/tool_trace; check() только в except queue.Empty и не чаще WATCHDOG_INTERVAL_S=5.0 с; close() в Run.close(). Уточнение: reason=child_exited — штатное завершение, не ошибка; absolute_cap -> state('timeout').",
+      "spec_ref": "arch-spec.md §2, §3.1",
+      "adr_ref": "ADR-0007 Decision Outcome §1"
+    },
+    {
+      "id": "RW-002",
+      "title": "Явный бюджет SAFETY_CAP_S",
+      "resolution": "safety_cap_s=TIMEOUT_S (1800 с), finish_reserve_s=0.0; дефолт core 3600 с не используется",
+      "spec_ref": "arch-spec.md §3.1",
+      "adr_ref": "ADR-0007 §1"
+    },
+    {
+      "id": "RW-003",
+      "title": "Фичефлаг kill-switch",
+      "resolution": "_is_watchdog_enabled() по BRIDGE_ENABLE_ADAPTIVE_WATCHDOG (по умолчанию 1); выключено -> idle_timeout_s=TIMEOUT_S, watchdog_enabled=False",
+      "spec_ref": "arch-spec.md §3.1, §4",
+      "adr_ref": "ADR-0007 §1, Rollback"
+    },
+    {
+      "id": "RW-004",
+      "title": "Клиентский контракт idle_timeout",
+      "resolution": "Handler._error_body: state idle_timeout -> HTTP 504, type idle_timeout; SSE: data:{error{...,type:idle_timeout,code:504}} + data:[DONE] через существующую ветку else",
+      "spec_ref": "arch-spec.md §3.1",
+      "adr_ref": "ADR-0007 §3"
+    },
+    {
+      "id": "RW-005",
+      "title": "Зачистка процессов и зомби",
+      "resolution": "_kill_group: SIGTERM группе -> ожидание до 2.0 с -> SIGKILL, если жива -> ВСЕГДА proc.wait(timeout=5.0)",
+      "spec_ref": "arch-spec.md §3.1",
+      "adr_ref": "ADR-0007 §2"
+    },
+    {
+      "id": "RW-006",
+      "title": "Деплой и импорт core",
+      "resolution": "bootstrap sys.path через parents[2]; симлинк ~/.dsh/bridges/agy-bridge -> репозиторий; PYTHONPATH в start.sh; fleet.json в bridges/agy-bridge; 'agy','agy-cli.sh' в KNOWN_CHILD_BINARIES. Расхождение: muse-bridge/droid-bridge в ~/.dsh сейчас обычные каталоги, не симлинки",
+      "spec_ref": "arch-spec.md §3.2",
+      "adr_ref": "ADR-0007 §4"
+    },
+    {
+      "id": "RW-007",
+      "title": "Hotfix fetch_via_playwright.py",
+      "resolution": "asyncio.wait_for(fn(...), 60.0) в _track_fetch_one -> (src_id, [], 'timeout after 60s'); page.close() через wait_for(…, 5.0). Функции _fetch_one_url в скрипте нет — оборачивается вызов fn(...)",
+      "spec_ref": "arch-spec.md §3.3",
+      "adr_ref": "ADR-0007 §5"
+    },
+    {
+      "id": "RW-008",
+      "title": "Спецификация тестового пакета",
+      "resolution": "15 тестов с idle_timeout_s=0.2 / мок-часами: idle, cpu_delta, on_activity, fail-closed ps, троттлинг, 504+SSE, kill_group+zombie, изоляция таймаута fetch",
+      "spec_ref": "arch-spec.md §6",
+      "adr_ref": "ADR-0007 §6"
+    }
+  ],
+  "risks": [
+    {
+      "id": "RSK-001",
+      "risk": "Fail-closed при деградации ps может прервать CPU-активный «тихий» ход через 300 с",
+      "mitigation": "kill-switch BRIDGE_ENABLE_ADAPTIVE_WATCHDOG=0; AGY_BRIDGE_IDLE_TIMEOUT"
+    },
+    {
+      "id": "RSK-002",
+      "risk": "Клиент DSH не знает type idle_timeout",
+      "mitigation": "код 504 + читаемое сообщение; отображается как общая 504 до обновления клиента"
+    },
+    {
+      "id": "RSK-003",
+      "risk": "Симлинк-деплой кладёт logs/workspace в каталог репозитория",
+      "mitigation": "logs/, workspace/, backups/ в .gitignore; backup прежнего каталога"
+    },
+    {
+      "id": "RSK-004",
+      "risk": "Hotfix лежит вне репозитория (aibunker-workshop)",
+      "mitigation": "тест 14 грузит скрипт по пути и skip при отсутствии; правка отдельным коммитом в своём репозитории"
+    },
+    {
+      "id": "RSK-005",
+      "risk": "server.py с побочными эффектами при импорте блокирует тесты",
+      "mitigation": "запуск под if __name__ == '__main__'; проверить при переносе"
+    }
+  ]
+}
