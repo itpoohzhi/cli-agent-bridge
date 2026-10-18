@@ -1,0 +1,166 @@
+{
+  "schema_version": 2,
+  "catalogue": "agy-bridge-fleet",
+  "policy_ref": {
+    "path": "~/Мой диск/Context/models.md",
+    "sha256": "3141a93a6b7ac562055da02b82121b866f1633e791175db316e77bea7cc07c67",
+    "reviewed_at": "2026-10-12T21:15:03+03:00"
+  },
+  "default_model": "gemini-3.8-flash",
+  "technical_ref": {
+    "agy_version": "1.3.1",
+    "agy_binary_path": "~/.local/bin/agy",
+    "launcher_path": "~/.config/agy-launch/agy-cli.sh",
+    "launcher_egress": "xray HTTP 127.0.0.1:10815 (резерв hy2 :10811; прямой вызов запрещён — гео РФ)",
+    "models_source": "agy models (live, 1.3.1)",
+    "invocation": "printf NDJSON | launcher --input-format stream-json --output-format stream-json --dangerously-skip-permissions --model <BASE_MODEL_ID> --effort <EFFORT> --print-timeout=0",
+    "note": "effort-суффикс (-high/-medium/-low) в fleet.json БОЛЬШЕ НЕ часть id: id = база (`gemini-3.8-flash`), уровень — отдельная ось `--effort`, значение берётся из `efforts` модели. Мост передаёт `--effort` ВСЕГДА (в т.ч. при пустом reasoning_effort — `default_effort`): база без effort у agy отвергается (`--model \"gemini-3.8-flash\" requires --effort (available: low, medium, high)`).",
+    "effort_ladders": "agy models 1.3.1: gemini-4-argon = low|medium|high; gemini-3.8/3.7/3.6-flash = low|medium|high; gemini-3.1-pro = low|high; gpt-oss-120b = medium (только)"
+  },
+  "image_limits": {
+    "max_images": 0,
+    "max_image_bytes": 1,
+    "max_total_image_bytes": 1,
+    "max_body_bytes": 33554432,
+    "types": [
+      "image/png"
+    ]
+  },
+  "admission": {
+    "max_http_connections": 32,
+    "max_inflight_body_bytes": 67108864,
+    "overload_error": {
+      "http": 503,
+      "type": "overloaded"
+    },
+    "oversize_error": {
+      "http": 413,
+      "type": "payload_too_large"
+    }
+  },
+  "models": [
+    {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon (agy)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+      }
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash (agy)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+      }
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "name": "Gemini 3.7 Flash (agy)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "name": "Gemini 3.6 Flash (agy)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+      }
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "name": "Gemini 3.1 Pro (agy)",
+      "efforts": [
+        "low",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 2097152,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+      }
+    },
+    {
+      "id": "gpt-oss-120b",
+      "name": "GPT-OSS 120B (agy)",
+      "efforts": [
+        "medium"
+      ],
+      "default_effort": "medium",
+      "context_window": 131072,
+      "max_tokens": 32768,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+      }
+    }
+  ]
+}

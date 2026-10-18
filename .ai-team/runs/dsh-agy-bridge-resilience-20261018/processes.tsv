@@ -1,0 +1,19 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+dsh-agy-bridge-resilience-20261018	gemini-4-argon-high	panel-judge-k3	53512	53512	2026-10-18T19:44:06.393832+00:00	Sun Oct 18 22:44:06 2026	running
+dsh-agy-bridge-resilience-20261018	gpt-6.1-sol	panel-judge-k1	53513	53513	2026-10-18T19:44:06.393833+00:00	Sun Oct 18 22:44:06 2026	running
+dsh-agy-bridge-resilience-20261018	claude-sonnet-5-5-high	panel-judge-k2	53530	53530	2026-10-18T19:44:06.489388+00:00	Sun Oct 18 22:44:06 2026	running
+dsh-agy-bridge-resilience-20261018	claude-sonnet-5-5-high	panel-judge-k2	53530	53530	2026-10-18T19:44:06.489388+00:00	Sun Oct 18 22:44:06 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gpt-6.1-sol	panel-judge-k1	53513	53513	2026-10-18T19:44:06.393833+00:00	Sun Oct 18 22:44:06 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gemini-4-argon-high	panel-judge-k3	53512	53512	2026-10-18T19:44:06.393832+00:00	Sun Oct 18 22:44:06 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gemini-4-argon-high	panel-judge-k2	59461	59461	2026-10-18T19:53:09.701582+00:00	Sun Oct 18 22:53:09 2026	running
+dsh-agy-bridge-resilience-20261018	gpt-6.1-sol	panel-judge-k1	59462	59462	2026-10-18T19:53:09.701930+00:00	Sun Oct 18 22:53:09 2026	running
+dsh-agy-bridge-resilience-20261018	claude-sonnet-5-5-high	panel-judge-k3	59488	59488	2026-10-18T19:53:09.796201+00:00	Sun Oct 18 22:53:09 2026	running
+dsh-agy-bridge-resilience-20261018	claude-sonnet-5-5-high	panel-judge-k3	59488	59488	2026-10-18T19:53:09.796201+00:00	Sun Oct 18 22:53:09 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gemini-4-argon-high	panel-judge-k2	59461	59461	2026-10-18T19:53:09.701582+00:00	Sun Oct 18 22:53:09 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gpt-6.1-sol	panel-judge-k1	59462	59462	2026-10-18T19:53:09.701930+00:00	Sun Oct 18 22:53:09 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gemini-4-argon-high	panel-judge-k3	47829	47829	2026-10-18T20:10:52.773498+00:00	Sun Oct 18 23:10:52 2026	running
+dsh-agy-bridge-resilience-20261018	gpt-6.1-sol	panel-judge-k2	47830	47830	2026-10-18T20:10:52.773550+00:00	Sun Oct 18 23:10:52 2026	running
+dsh-agy-bridge-resilience-20261018	claude-sonnet-5-5-high	panel-judge-k1	47847	47847	2026-10-18T20:10:52.871356+00:00	Sun Oct 18 23:10:52 2026	running
+dsh-agy-bridge-resilience-20261018	claude-sonnet-5-5-high	panel-judge-k1	47847	47847	2026-10-18T20:10:52.871356+00:00	Sun Oct 18 23:10:52 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gemini-4-argon-high	panel-judge-k3	47829	47829	2026-10-18T20:10:52.773498+00:00	Sun Oct 18 23:10:52 2026	rc=0
+dsh-agy-bridge-resilience-20261018	gpt-6.1-sol	panel-judge-k2	47830	47830	2026-10-18T20:10:52.773550+00:00	Sun Oct 18 23:10:52 2026	rc=0

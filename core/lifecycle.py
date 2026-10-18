@@ -44,6 +44,8 @@ KNOWN_CHILD_BINARIES = frozenset(
         "muse",
         "muse-cli",
         "muse-cli.sh",
+        "agy",
+        "agy-cli.sh",
         "droid",
         "fake_droid",
         "fake_serve",
