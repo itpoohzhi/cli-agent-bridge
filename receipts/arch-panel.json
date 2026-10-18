@@ -1,7 +1,7 @@
 {
-  "artifact_sha256": "75eab5226b549adc06c133e6072c26054d825784ba7bf3c48db903ff61e0e172",
+  "artifact_sha256": "86de86783a9eaba1d866955443f59cc31da128d715585456898b9590100ed206",
   "expect_seats": 3,
-  "manifest_sha256": "bdea91f72a809a2be841795a34ef5cb13c82bd205816cc9f5dddef087f3b36fa",
+  "manifest_sha256": "d06a7635b625b133acac0129c48fb3afa4a389c751cbe74d33646edc181f7a8a",
   "min_seconds": 8.0,
   "min_verdict_chars": 200,
   "result": "PASS",
@@ -9,40 +9,40 @@
   "schema": "pol-receipt/1",
   "seats": [
     {
-      "duration_s": 119.410948,
-      "family": "Google",
-      "k": 1,
-      "launch_sha256": "82645dded9e1aa091db06e64b85103b00e88c1dd425800883d812269a98c33ba",
-      "raw_out_sha256": "c1e591bf425d4f19cd7893ac2eee710c8600e16764e75d94b46991305e5ff1c9",
-      "rc": 0,
-      "slot_id": "gemini-4-argon-high",
-      "transport": "agy",
-      "verdict": "ACCEPT",
-      "verdict_sha256": "9549bede489868e302641d8486b2e3b55acb97fb2510e3541e5c3dfd8857cf53"
-    },
-    {
-      "duration_s": 77.746952,
-      "family": "Anthropic",
-      "k": 2,
-      "launch_sha256": "bfe6ac86922b9ea2cf58b6005030035108fa7f75bb68da6f526a7d56d4f8ee5f",
-      "raw_out_sha256": "fc9398bf151eab020e1659f09e882d61f5640f77aa90ab2e5b2081d30e976cdd",
-      "rc": 0,
-      "slot_id": "claude-sonnet-5-5-high",
-      "transport": "claude-p",
-      "verdict": "NEEDS_WORK",
-      "verdict_sha256": "e83ae2b7fabb717c6a638b77de4c4c5bdcd9c1d60f067e09b3acd23945e51c9e"
-    },
-    {
-      "duration_s": 77.4156,
+      "duration_s": 131.080734,
       "family": "Meta",
-      "k": 3,
-      "launch_sha256": "919b9749011cc5e88c5a48aeb1172704795198a25e08272f0f33d935c928e4b7",
-      "raw_out_sha256": "ecbad8b697ed75047984a576bc7210fc52df3419aa9a8071723926209017bc88",
+      "k": 1,
+      "launch_sha256": "dba58da844f26b72f6ddcfc730c2baa88894124cce379338b43603f2511226eb",
+      "raw_out_sha256": "cc435a8984e112eb260dfb5278cd44e749bd48ae38eb2da328419bc644831761",
       "rc": 0,
       "slot_id": "muse-wonder-full-1.0",
       "transport": "muse",
       "verdict": "ACCEPT",
-      "verdict_sha256": "f092d641137eacf77a57382677244d94fb98e530cb40b30a125feb675597ab5e"
+      "verdict_sha256": "72b1b1f393c3a7ff7d981757ea50b47dfb99f30e506be6c2f88f289cc4633a29"
+    },
+    {
+      "duration_s": 127.977531,
+      "family": "Google",
+      "k": 2,
+      "launch_sha256": "ae6dc0a8d31f0ea5a967d386dda69f6d99cd9a86e8b840083b081f4b7f5e48dd",
+      "raw_out_sha256": "a95261b29f939bd268d7c71ca7abceb86a099581244290427d49854c68d92141",
+      "rc": 0,
+      "slot_id": "gemini-4-argon-high",
+      "transport": "agy",
+      "verdict": "ACCEPT",
+      "verdict_sha256": "338b58841b601225b6f87c94d21c153d2c296b78daeb230109ff9e4b554aa646"
+    },
+    {
+      "duration_s": 76.357816,
+      "family": "Anthropic",
+      "k": 3,
+      "launch_sha256": "49affe1275b8bb527c2aa7cd75273a92a08ca2b226566b5aa0a0c7db4df4bbfe",
+      "raw_out_sha256": "b315a7371239c78f13ef27de7e28d5c861cb429fd128414970d1f30811adae66",
+      "rc": 0,
+      "slot_id": "claude-sonnet-5-5-high",
+      "transport": "claude-p",
+      "verdict": "NEEDS_WORK",
+      "verdict_sha256": "346c181d9e2ad73e0cd52db86cfc748ec783414e22a0b7351aeca006a0bbc115"
     }
   ],
   "stage": "arch",
@@ -50,6 +50,6 @@
     "ACCEPT": 2,
     "NEEDS_WORK": 1
   },
-  "verified_at": "2026-10-17T12:41:23.924364+00:00",
+  "verified_at": "2026-10-17T17:46:44.826408+00:00",
   "verifier_sha256": "8138eae56e674689aecd15c5eacc7ebfdda952ce806231ca2f8c4c3f17bae996"
 }

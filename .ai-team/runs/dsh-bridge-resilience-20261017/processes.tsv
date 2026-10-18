@@ -1,0 +1,25 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k1	44371	44371	2026-10-17T17:29:19.546449+00:00	Sat Oct 17 20:29:19 2026	running
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k2	44493	44493	2026-10-17T17:29:21.456029+00:00	Sat Oct 17 20:29:21 2026	running
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k3	44892	44892	2026-10-17T17:29:23.463074+00:00	Sat Oct 17 20:29:23 2026	running
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k1	44371	44371	2026-10-17T17:29:19.546449+00:00	Sat Oct 17 20:29:19 2026	rc=0
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k3	44892	44892	2026-10-17T17:29:23.463074+00:00	Sat Oct 17 20:29:23 2026	rc=0
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k2	44493	44493	2026-10-17T17:29:21.456029+00:00	Sat Oct 17 20:29:21 2026	rc=0
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k1	597	597	2026-10-17T17:44:24.794807+00:00	Sat Oct 17 20:44:24 2026	running
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k2	1475	1475	2026-10-17T17:44:26.812073+00:00	Sat Oct 17 20:44:26 2026	running
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k3	2002	2002	2026-10-17T17:44:28.978695+00:00	Sat Oct 17 20:44:28 2026	running
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k3	2002	2002	2026-10-17T17:44:28.978695+00:00	Sat Oct 17 20:44:28 2026	rc=0
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k2	1475	1475	2026-10-17T17:44:26.812073+00:00	Sat Oct 17 20:44:26 2026	rc=0
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k1	597	597	2026-10-17T17:44:24.794807+00:00	Sat Oct 17 20:44:24 2026	rc=0
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k2	51253	51253	2026-10-17T19:51:34.808876+00:00	Sat Oct 17 22:51:34 2026	running
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k1	51254	51254	2026-10-17T19:51:34.809110+00:00	Sat Oct 17 22:51:34 2026	running
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k3	51305	51305	2026-10-17T19:51:34.906202+00:00	Sat Oct 17 22:51:34 2026	running
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k3	51305	51305	2026-10-17T19:51:34.906202+00:00	Sat Oct 17 22:51:34 2026	rc=1
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k1	51254	51254	2026-10-17T19:51:34.809110+00:00	Sat Oct 17 22:51:34 2026	rc=0
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k2	51253	51253	2026-10-17T19:51:34.808876+00:00	Sat Oct 17 22:51:34 2026	rc=0
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k3	42665	42665	2026-10-17T20:00:56.766103+00:00	Sat Oct 17 23:00:56 2026	running
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k1	42664	42664	2026-10-17T20:00:56.766176+00:00	Sat Oct 17 23:00:56 2026	running
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k2	42697	42697	2026-10-17T20:00:56.866866+00:00	Sat Oct 17 23:00:56 2026	running
+dsh-bridge-resilience-20261017	claude-sonnet-5-5-high	panel-judge-k2	42697	42697	2026-10-17T20:00:56.866866+00:00	Sat Oct 17 23:00:56 2026	rc=0
+dsh-bridge-resilience-20261017	muse-wonder-full-1.0	panel-judge-k3	42665	42665	2026-10-17T20:00:56.766103+00:00	Sat Oct 17 23:00:56 2026	rc=0
+dsh-bridge-resilience-20261017	gemini-4-argon-high	panel-judge-k1	42664	42664	2026-10-17T20:00:56.766176+00:00	Sat Oct 17 23:00:56 2026	rc=0

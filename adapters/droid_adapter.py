@@ -80,7 +80,20 @@ class DroidAdapter(BackendAdapter):
         legacy["rpc"]["items"] = [asdict(item) for item in ctx.rpc.items]
         legacy["images"] = [asdict(image) for image in ctx.images]
         handler = cast(Any, ctx.handler)
-        raw = handler._run_once(legacy, ctx.keepalive, sse_writer)
+        if callable(ctx.on_activity):
+            ctx.on_activity("start")
+        wrapped_writer: Optional[StreamSink] = None
+        if sse_writer is not None:
+
+            def _wrapped_writer(kind: str, text: str) -> bool:
+                if callable(ctx.on_activity):
+                    ctx.on_activity(kind)
+                return sse_writer(kind, text)
+
+            wrapped_writer = _wrapped_writer
+        raw = handler._run_once(legacy, ctx.keepalive, wrapped_writer)
+        if callable(ctx.on_activity):
+            ctx.on_activity("done")
         usage = raw.get("usage") or {}
 
         def tool_call(call: dict) -> ToolCall:
