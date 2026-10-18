@@ -5,6 +5,13 @@
 ## [Unreleased]
 
 ### Added
+- **Отказоустойчивость контекста (EYE-33873, ADR-0006 v3.0):** общее stdlib-ядро `core/context_resilience.py`
+  (бюджет `C−R−H−S`, граф неделимых tool-компонент, прунинг до 78% `B_input` с маркером `[context pruned]`,
+  эпохи с гистерезисом для чатов с доверенными `x-session-id`/`x-dsh-chat-id`, строгий admission 400
+  `context_required_exceeds_budget`, точный legacy-класс native compaction, читатель снимка флагов GigaRC).
+  Хаб :9882 вызывает ядро до адаптера; заголовок `X-DSH-Context-Pruned: true|false` уходит до первого SSE-байта.
+  Поведение хаба по умолчанию не меняется (флаги `DYNAMIC_PRUNER_ENABLED`/`CONTEXT_RESILIENCE_SHADOW_ENABLED` = false).
+  Живой Muse :9886: потолок тела 32 MiB, `413 payload_too_large` до JSON-декодирования (CD-004).
 - **README:** раздел «Why official vendor CLIs instead of OAuth proxies (CLIProxyAPI)»: отличие моста (официальные бинарники вендоров) от OAuth-прокси и риски не-вендорных клиентов (баны аккаунтов, подделка клиента, смена серверной детекции).
 - **README:** разделы Connecting Claude Code, Connecting Cursor и sibling-мосты, карта портов экосистемы,
   copy-paste конфигурации клиентов (cordis harness, Cursor, OpenAI SDK, cURL).
