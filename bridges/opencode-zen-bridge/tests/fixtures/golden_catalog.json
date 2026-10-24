@@ -1,0 +1,288 @@
+[
+ {
+  "id": "beam-free",
+  "api_name": "Beam Free",
+  "effort_values": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "cordis": {
+   "contextWindow": 1048576,
+   "maxTokens": 131072,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max"
+   }
+  },
+  "bridge": {
+   "context_length": 1048576,
+   "max_output": 131072,
+   "supports_variant": true,
+   "variant_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+    "ultra": "max",
+    "off": "",
+    "none": ""
+   }
+  }
+ },
+ {
+  "id": "big-pickle",
+  "api_name": "Big Pickle",
+  "effort_values": [],
+  "cordis": {
+   "contextWindow": 160000,
+   "maxTokens": 32000,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max"
+   }
+  },
+  "bridge": {
+   "context_length": 160000,
+   "max_output": 32000,
+   "supports_variant": false,
+   "variant_map": null
+  }
+ },
+ {
+  "id": "deepseek-v4.1-flash-free",
+  "api_name": "DeepSeek V4.1 Flash Free",
+  "effort_values": [
+   "low",
+   "high",
+   "max"
+  ],
+  "cordis": {
+   "contextWindow": 200000,
+   "maxTokens": 32000,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max"
+   }
+  },
+  "bridge": {
+   "context_length": 200000,
+   "max_output": 32000,
+   "supports_variant": true,
+   "variant_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max",
+    "ultra": "max",
+    "off": "",
+    "none": ""
+   }
+  }
+ },
+ {
+  "id": "flint-40b-free",
+  "api_name": "Flint 40B Free",
+  "effort_values": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "cordis": {
+   "contextWindow": 262144,
+   "maxTokens": 65536,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max"
+   }
+  },
+  "bridge": {
+   "context_length": 262144,
+   "max_output": 65536,
+   "supports_variant": true,
+   "variant_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+    "ultra": "max",
+    "off": "",
+    "none": ""
+   }
+  }
+ },
+ {
+  "id": "glm-5.3-flash-free",
+  "api_name": "GLM-5.3-Flash Free",
+  "effort_values": [
+   "low",
+   "high",
+   "max"
+  ],
+  "cordis": {
+   "contextWindow": 200000,
+   "maxTokens": 32000,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max"
+   }
+  },
+  "bridge": {
+   "context_length": 200000,
+   "max_output": 32000,
+   "supports_variant": true,
+   "variant_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max",
+    "ultra": "max",
+    "off": "",
+    "none": ""
+   }
+  }
+ },
+ {
+  "id": "mimo-v2.6-flash-free",
+  "api_name": "MiMo-V2.6-Flash Free",
+  "effort_values": [],
+  "cordis": {
+   "contextWindow": 200000,
+   "maxTokens": 32000,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max"
+   }
+  },
+  "bridge": {
+   "context_length": 200000,
+   "max_output": 32000,
+   "supports_variant": false,
+   "variant_map": null
+  }
+ },
+ {
+  "id": "nemotron-3.5-lightning-free",
+  "api_name": "Nemotron 3.5 Lightning Free",
+  "effort_values": [],
+  "cordis": {
+   "contextWindow": 262144,
+   "maxTokens": 262144,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max"
+   }
+  },
+  "bridge": {
+   "context_length": 262144,
+   "max_output": 262144,
+   "supports_variant": false,
+   "variant_map": null
+  }
+ },
+ {
+  "id": "nemotron-3.5-super-vl-free",
+  "api_name": "Nemotron 3.5 Super VL Free",
+  "effort_values": [
+   "none",
+   "minimal",
+   "low",
+   "medium",
+   "high",
+   "xhigh"
+  ],
+  "cordis": {
+   "contextWindow": 1048576,
+   "maxTokens": 131072,
+   "input": [
+    "text"
+   ],
+   "reasoningEfforts": {
+    "off": "off",
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "xhigh"
+   }
+  },
+  "bridge": {
+   "context_length": 1048576,
+   "max_output": 131072,
+   "supports_variant": true,
+   "variant_map": {
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "xhigh",
+    "ultra": "xhigh",
+    "off": "",
+    "none": ""
+   }
+  }
+ }
+]
