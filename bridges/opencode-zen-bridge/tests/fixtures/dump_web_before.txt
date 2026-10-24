@@ -1,0 +1,139 @@
+# excerpt of `dsh --profile web --dump-config` BEFORE autosync (old 8 cards)
+providers:
+      opencode-zen-bridge:
+        displayName: OpenCode Zen free (bridge)
+        api: openai-completions
+        baseURL: http://127.0.0.1:9883/v1
+        apiKeyEnv: OPENCODE_ZEN_BRIDGE_KEY
+        timeoutMs: 1900000
+        streamIdleTimeoutMs: 1900000
+        retryPolicy:
+          mode: normal
+          maxRetries: 0
+        reasoning: high
+        compat:
+          supportsDeveloperRole: false
+          maxTokensField: max_tokens
+          supportsReasoningEffort: true
+        models:
+          - id: deepseek-v4.1-flash-free
+            name: DeepSeek V4.1 Flash (Zen)
+            contextWindow: 200000
+            maxTokens: 32000
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: glm-5.3-flash-free
+            name: GLM-5.3 Flash (Zen)
+            contextWindow: 200000
+            maxTokens: 32000
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: minimax-m3.1-flash-free
+            name: MiniMax M3.1 Flash (Zen)
+            contextWindow: 1000000
+            maxTokens: 512000
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: beam-free
+            name: Beam (Zen)
+            contextWindow: 1048576
+            maxTokens: 131072
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: nemotron-3.5-super-vl-free
+            name: Nemotron 3.5 Super VL (Zen)
+            contextWindow: 1048576
+            maxTokens: 131072
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: longcat-2.5-preview-free
+            name: LongCat 2.5 Preview (Zen)
+            contextWindow: 1000000
+            maxTokens: 131072
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: mimo-v2.6-flash-free
+            name: MiMo V2.6 Flash (Zen)
+            contextWindow: 200000
+            maxTokens: 32000
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: big-pickle
+            name: Big Pickle (Zen)
+            contextWindow: 200000
+            maxTokens: 32000
+            input:
+              - text
+            reasoningEfforts:
+              'off': 'off'
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+allowedModels:
+      - provider: opencode-zen-bridge
+        model: minimax-m3.1-flash-free
+      - provider: opencode-zen-bridge
+        model: deepseek-v4.1-flash-free
+      - provider: opencode-zen-bridge
+        model: glm-5.3-flash-free
+      - provider: opencode-zen-bridge
+        model: beam-free
+      - provider: opencode-zen-bridge
+        model: nemotron-3.5-super-vl-free
+      - provider: opencode-zen-bridge
+        model: longcat-2.5-preview-free
+      - provider: opencode-zen-bridge
+        model: mimo-v2.6-flash-free
+      - provider: opencode-zen-bridge
+        model: big-pickle

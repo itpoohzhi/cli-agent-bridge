@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "role": "architect",
+  "run_id": "analyst-teamlead-zen-step-20261024",
+  "task_id": "ZEN-STEP-INTERRUPTION-001",
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "permissions": "run-artifacts-write",
+  "steps": [
+    {
+      "id": "S1",
+      "title": "Прочитать handoff-architect, evidence-ledger, open-questions, handoff-qa и скиллы architect-software-product + aisdlc-gcge/skills/architecture.md",
+      "status": "DONE",
+      "actual_evidence": "Прочитаны analysis/zen-step-interruption/{handoff-architect.md,evidence-ledger.md (F-01..F-16),open-questions.md (OPEN-01 МОЖНО ПРОДОЛЖИТЬ),handoff-qa.md}, SKILL.md, architecture.md §HL-RESILIENCE-GATES-V5, validate_architecture_packet.py."
+    },
+    {
+      "id": "S2",
+      "title": "Выборочно перепроверить свежесть ключевых фактов в продуктовом коде (read-only)",
+      "status": "DONE",
+      "actual_evidence": "bridges/opencode-zen-bridge/server.py: TOOL_CALL_OPEN=<tool_call> (стр.179), NATIVE_TOOL_ALIASES без ключа shell (стр.206-224), NATIVE_RETRY_LIMIT=2 (стр.233), FAIL_RETRY_LIMIT=3 (стр.238), _stop_proc killpg SIGTERM->SIGKILL (стр.435), _StartupGate/STARTUP_GATE_S=12 (стр.692-720), _slots (стр.725), etype==error без остановки (стр.1977); _StdoutFeed/_is_incomplete_tool_step/keepalive отсутствуют — фикса ещё нет, факты F-03..F-06 актуальны."
+    },
+    {
+      "id": "S3",
+      "title": "Принять решения AD-001..AD-003 (two-way), границы BND-001..003, contract delta CD-001, риски и threat model",
+      "status": "DONE",
+      "actual_evidence": "architecture/architecture-packet.json: decisions AD-001 (<tool_invoke>+<tool_call>, shell alias; EVD-005/008), AD-002 (_stop_proc на error + _strip_interrupted_notice + 5-сигнальный _is_incomplete_tool_step с non_reasoning_output = max(0, output_tokens - reasoning_tokens), NATIVE_RETRY_LIMIT=2), AD-003 (_StdoutFeed + KEEPALIVE_INTERVAL_S=15.0); RISK-001..004; THREAT-001; ASM-001/002 VALIDATED."
+    },
+    {
+      "id": "S4",
+      "title": "Заполнить HL-ENV/v1 (46 полей), гейты C-MULT/S-HERD/H-CPU/R-BULK и 21 стоп-код gcge",
+      "status": "DONE",
+      "actual_evidence": "hl_env_v1: подсчёт полей = 46, gcge_stop_codes_checked = 21 (python3 json-проверка); resilience_gates C-MULT/S-HERD/H-CPU/R-BULK = PASS с evidence_ids."
+    },
+    {
+      "id": "S5",
+      "title": "Заморозить verification surface VER-001..003 (owner=verifier) и провалидировать draft-пакет",
+      "status": "DONE",
+      "actual_evidence": "validate_architecture_packet.py --phase draft -> PASS: architecture packet is valid for draft; sha256=67f60635127400edfa2166916b6a4e99ec3912edfa0e63eaef17153881e16e9a (rc=0)."
+    },
+    {
+      "id": "S6",
+      "title": "Перевести пакет в APPROVED с role_plan.sha256, пройти approved-gate, записать receipts architect.json и arch-gate.json",
+      "status": "DONE",
+      "actual_evidence": "Approved-валидация с --run-dir и --role-plan выполняется по этому плану; результат и sha256 пакета фиксируются в receipts/architect.json и receipts/arch-gate.json (ARCH_GATE_PASS)."
+    }
+  ]
+}

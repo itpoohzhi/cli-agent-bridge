@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-step-20261024",
+  "hooks": {
+    "VER-001": {
+      "status": "PASS",
+      "summary": "441 passed in bridges/opencode-zen-bridge/tests/"
+    },
+    "VER-002": {
+      "status": "PASS",
+      "summary": "177 passed in test_step_interruption.py (including clean-room)"
+    },
+    "VER-004": {
+      "status": "PASS",
+      "summary": "diff -u repo vs ~/.dsh server.py exit=0 (sha256=90b1d66499dceadac24f7990423b4c53b2ebd5b23247aaf50efe187851598b9e)"
+    },
+    "VER-005": {
+      "status": "PASS",
+      "summary": "9 targeted tests passed (emulate_tools=False, non-matching dedup_prefix, bare colon, 401 vs ECONNRESET, STEP_RECOVERY=0)"
+    },
+    "VER-006": {
+      "status": "PASS",
+      "summary": "26 deterministic HlResilienceOracles tests passed"
+    },
+    "LIVE-MULTI-STEP": {
+      "status": "PASS",
+      "summary": "Step 1 finish_reason=tool_calls tools=1 (29.94s), Step 2 SSE lines=4 has_tool_calls=True (12.6s)"
+    }
+  }
+}
