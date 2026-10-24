@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "role": "architect",
+  "run_id": "analyst-teamlead-zen-step-20261024",
+  "task_id": "ZEN-STEP-INTERRUPTION-001",
+  "cycle": "cycle-2 (Rework v5)",
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "transport": "claude-cli",
+  "permissions": "run-artifacts-write",
+  "worktree_fingerprint": {
+    "method": "sha256 bridges/opencode-zen-bridge/server.py",
+    "expected_before_after": "03eadced631e090a73bcada5579f60bc71ad02858c6e0a72e1f615bd5838673b"
+  },
+  "steps": [
+    {
+      "id": "S1",
+      "title": "Прочитать skills/architecture.md, handoff-architect.md v5, arch-panel/cycle-1/rework-brief.md, architecture-packet.json v4 и SSoT agents/architecture.md §3.0–3.4, §7.2–7.3",
+      "status": "DONE",
+      "actual_evidence": "Прочитаны все 4 обязательных входа + SSoT (46 полей REQUIRED_HL_ENV_FIELDS, формулы C-MULT/S-HERD/H-CPU/R-BULK, оракулы 7.2, реестр 7.3)."
+    },
+    {
+      "id": "S2",
+      "title": "Сверить факты handoff с кодом server.py (read-only)",
+      "status": "DONE",
+      "actual_evidence": "server.py sha256=03eadced…673b: _slots.acquire(timeout=TIMEOUT_S=1800) стр.2196; _STARTUP_LOCK.acquire() без таймаута стр.705; FAIL_RETRY_BACKOFF_S*n стр.2386; MAX_CONCURRENT default 2 стр.44 (plist 6); функций _complete_response/_stream_response/_run_opencode нет — граф do_POST -> _stream_sse | _serve_json -> Run.execute -> _execute_once (EVD-017). bridges/opencode-zen-bridge/ untracked в HEAD; ~/.dsh server.py sha256=d619476e… отличается от репо."
+    },
+    {
+      "id": "S3",
+      "title": "Пересчитать гейты честной подстановкой",
+      "status": "DONE",
+      "actual_evidence": "Найдено: S-HERD-I1 по формуле B=5.24 > 1.0 (FAIL) и R-BULK-I1 с T_wait=1800 с (FAIL) — handoff §4 их не замыкал. Закрыто AD-004: SLOT_WAIT_S=15/SLOT_MAX_WAITERS=12, STARTUP_WAIT_S=5 fail-open, _SpawnRateLimiter 1.0/с (GCRA), _RetryBudget (6, +0.2/req, +0.05/с), _UpstreamBreaker (5, 10×U(0.8,1.2), HALF_OPEN=1). Итог R-BULK-I1 = 48.0 <= 54.0; memory 1275068416 <= 1717986918.4."
+    },
+    {
+      "id": "S4",
+      "title": "Обновить пакет v5: high_load_envelope (46 полей + источники), resilience_gates (21+3, DFM, N/A-доказательства), AD-001..AD-004, REQ-001..006, CD-001..003, QA-007/008, RISK-001..005, VER-004..006, привязка EVD-001..016",
+      "status": "DONE",
+      "actual_evidence": "Генератор ~/work/tmp/arch-v5/gen_packet.py (assert: 46 полей, 24 кода FAIL=0, EVD-001..016 ⊆ evidence AD/RISK); draft-валидация validate_architecture_packet.py --phase draft -> PASS, sha256=b1a1236cea1af8707fe70461c17d175438e26019ebd2100b0803df45a6f42a8e (rc=0)."
+    },
+    {
+      "id": "S5",
+      "title": "Перевести пакет в APPROVED с role_plan.sha256 этого плана и пройти approved-валидацию с --run-dir и --role-plan; сверить fingerprint",
+      "status": "DONE",
+      "actual_evidence": "Команда: validate_architecture_packet.py .ai-team/runs/analyst-teamlead-zen-step-20261024/architecture/architecture-packet.json --phase approved --run-dir .ai-team/runs/analyst-teamlead-zen-step-20261024 --role-plan .ai-team/runs/analyst-teamlead-zen-step-20261024/plans/architect-02.json; результат и sha256 — в отчёте Architect оркестратору; fingerprint server.py до/после = 03eadced…673b."
+    }
+  ],
+  "deviations_from_brief": [
+    "Добавлен AD-004 и CD-003: без них неснимаемые S-HERD-I1 и R-BULK-I1 при честной подстановке FAIL (EVD-017).",
+    "VER-005 ссылается на Handler._serve_json(emulate_tools=False) вместо несуществующей _complete_response.",
+    "Limit_dep_share[d]=10 по brief/§4.1 (YAML §3 handoff содержит 6 — расхождение отмечено в field_sources).",
+    "Receipts (architect.json, arch-gate.json) не перезаписаны — по ограничению брифа пишутся только 2 файла."
+  ]
+}

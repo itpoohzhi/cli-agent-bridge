@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-step-20261024",
+  "stage": "coder",
+  "cycle": 2,
+  "status": "PASS",
+  "model_id": "claude-sonnet-5-5",
+  "provider": "anthropic",
+  "family": "Anthropic",
+  "transport": "claude-cli",
+  "effort": "high",
+  "role_plan": "plans/coder-01.json",
+  "role_plan_sha256": "7c9e39bfbde86036c3b4f2b34e34fb0119f2b043705153496193b399191d8fd4",
+  "architecture_packet_sha256": "1053a4ca2e97d0eba0f350c3a71e13d8810c1a716e3b1e66a6c7ff0097e4f565",
+  "modified_files": {
+    "bridges/opencode-zen-bridge/server.py": "90b1d66499dceadac24f7990423b4c53b2ebd5b23247aaf50efe187851598b9e",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py": "1bb4ae56cfb87765c18dd09837d19cb7d82e051c8b7f1fa92a103a8ef43af0dd"
+  },
+  "timestamp": "2026-10-24T20:39:15+03:00"
+}
