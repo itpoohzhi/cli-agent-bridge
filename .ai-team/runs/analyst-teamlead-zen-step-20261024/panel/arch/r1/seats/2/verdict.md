@@ -1,0 +1,55 @@
+PANEL-NONCE: fcd1d781c1cc88c4
+ARTIFACT-SHA256: 490bc2f863e75c451c0fcf4bbae710958f7941d3d2db09e8779f703fad6ca0b1
+ARCH_PACKET_SHA256: 490bc2f863e75c451c0fcf4bbae710958f7941d3d2db09e8779f703fad6ca0b1
+
+Подтверждаю: прочитал общий канон `~/Мой диск/Context/AGENTS.md` целиком (до `<!-- КАНОН-КОНЕЦ -->`); проектных файлов правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочей папке не обнаружено.
+
+1. КОРРЕКТНОСТЬ: VERDICT=PASS
+   WHY=Архитектурные решения `AD-001..AD-003` напрямую устраняют все четыре доказанных механизма обрыва цепочек из `[F-01]..[F-16]` (`EVD-001..EVD-016`). В `AD-002` детектор `_is_incomplete_tool_step` строго учитывает факт `[F-09]`, что `tokens.output` в `opencode` включает `tokens.reasoning`: формула `non_reasoning_output = max(0, output_tokens - reasoning_tokens)` (при `reasoning_tokens > 0 and output_tokens >= reasoning_tokens`, иначе `output_tokens`) и условие `non_reasoning_output - max(1, len(stripped)//3) >= SWALLOWED_TOKENS_MIN (35)` при `len(stripped) <= 600` дают 100% детекцию на реальных инцидентах (Turn 10: `350 - 46 = 304 >= 35`; Turn 12: `133 - 56 = 77 >= 35`) и исключают ложные дозапросы на коротких финальных ответах с большим `reasoning` (`400 - 385 = 15 < 35`, `QA-NEG-01`). Немедленный вызов `_stop_proc(proc)` при `etype == "error"` предотвращает запуск внутреннего синтетического шага `opencode run` (`[F-04]`, `[F-09]`).
+
+2. ПОЛНОТА: VERDICT=PASS
+   WHY=Пакет полностью покрывает требования `REQ-001..REQ-006`, связывает все 16 фактов `EVD-001..EVD-016` (`[F-01]..[F-16]`), определяет чистые границы компонентов `BND-001..BND-003`, дельту внутреннего prompt-контракта `CD-001`, сценарии качества `QA-001..QA-006`, поверхность верификации `VER-001..VER-003` (`owner: verifier`), модель угроз (`THREAT-001`), план выкатки и отката (`evolution`), а также содержит все 46 полей конверта `HL-ENV/v1`, формулу `memory_closure`, 4 гейта отказоустойчивости (`C-MULT`, `S-HERD`, `H-CPU`, `R-BULK`) и 21 стоп-код GCGE.
+
+3. РЕАЛИЗУЕМОСТЬ: VERDICT=PASS
+   WHY=С точки зрения практического внедрения («что нужно, чтобы взлетело») решение локализовано в одном файле `bridges/opencode-zen-bridge/server.py` и тестовом модуле `bridges/opencode-zen-bridge/tests/test_step_interruption.py`. Внешних библиотечных или инфраструктурных зависимостей не требуется — используются только примитивы стандартной библиотеки Python (`re`, `json`, `threading`, `queue`, `subprocess`). Фоновый поток `_StdoutFeed` с `queue.Queue` и таймаутами `0.25s`/`1.0s` (`AD-003`) обходит проблемы буферизации `select`/`selectors` на текстовом `proc.stdout` в macOS и реализуется минимальным объёмом кода. Поверхность верификации (`VER-001..VER-003`) полностью автономна (использует `tests/_fake_cli.py`, без сети) и выполняется через `uvx pytest` и `python3 -m unittest`. Выкатка сводится к синхронизации `server.py` в `~/.dsh/bridges/opencode-zen-bridge/server.py` и перезапуску `LaunchAgent com.user.dsh-opencode-zen-bridge`.
+
+4. РИСКИ: VERDICT=PASS
+   WHY=Все эксплуатационные риски (`RISK-001..RISK-004`) и угроза `THREAT-001` идентифицированы и закрыты техническими мерами: ложные срабатывания эвристик ограничены вычитанием `reasoning_tokens`, порогами длины `420`/`600` символов, бюджетом `NATIVE_RETRY_LIMIT = 2` и fallback на накопленный текст; рост латентности при ретраях ограничен общим дедлайном `TIMEOUT_S = 1800s` в рамках одного уже захваченного слота `_slots`; дублирование текста в SSE при дозапросе подавляется через `dedup_prefix` (`QA-POS-03`). Вопросы `Q-001` (`OPEN-01`) и `Q-002` обоснованно классифицированы как `МОЖНО ПРОДОЛЖИТЬ` и не блокируют поставку.
+
+5. АЛЬТЕРНАТИВЫ: VERDICT=PASS
+   WHY=По каждому из трёх ключевых решений (`AD-001..AD-003`) рассмотрены реалистичные альтернативы и доказана их несостоятельность: отказ от `<tool_invoke>` оставляет гарантированную потерю тулов на GLM и тратит ретраи; полный отказ от `<tool_call>` ломает обратную совместимость; детектор без вычитания `reasoning_tokens` вызывает ложные ретраи на коротких ответах с большим `reasoning`; перевод моста на `asyncio` несоразмерен задаче `python-bridge-bugfix` на базе `ThreadingHTTPServer`.
+
+6. СООТВЕТСТВИЕ КОНТЕКСТУ: VERDICT=PASS
+   WHY=Архитектура строго учитывает реальный деплой на машине владельца (`[F-14]..[F-16]`): однопроцессный `ThreadingHTTPServer` на `127.0.0.1:9883` под управлением `LaunchAgent`, `MAX_CONCURRENT = 6`, сериализацию старта SQLite `opencode.db` через `_StartupGate` (`STARTUP_GATE_S = 12s`) и неизменность внешнего OpenAI-совместимого контракта для DSH Desktop (`cordis.patch.yml`).
+
+ОБЩИЙ ВЕРДИКТ: PASS
+
+---
+
+## Детальный разбор Реалиста (`realist`, место 2)
+
+### 1. Полнота связки с фактами `[F-01]..[F-16]` (`EVD-001..EVD-016`)
+Все 16 фактов из `evidence-ledger.md` перенесены в `architecture-packet.json` без искажений и напрямую определяют дизайн:
+- **`[F-01]..[F-03]` (`EVD-001..EVD-003`)** — учёт токенов `step_finish` и точка встраивания дозапроса в `Handler._stream_sse` и `Handler._serve_json` в рамках существующих лимитов `NATIVE_RETRY_LIMIT = 2` и `FAIL_RETRY_LIMIT = 3`.
+- **`[F-04]` (`EVD-004`)** — немедленный `_stop_proc(proc)` при `etype == "error"` посреди стрима + зачистка `_INTERRUPTED_RE` (`_strip_interrupted_notice`).
+- **`[F-05]`, `[F-08]` (`EVD-005`, `EVD-008`)** — двойная схема тегов `<tool_invoke>` (в системной инструкции) и `<tool_invoke>`/`<tool_call>` (в `ToolCallParser` и `_parse_tool_call_blocks`) + добавление алиаса `"shell"` в `NATIVE_TOOL_ALIASES` для OpenCode v2.1.2.
+- **`[F-06]`, `[F-14]..[F-16]` (`EVD-006`, `EVD-014..EVD-016`)** — сохранение stateless-модели, семафора `_slots = Semaphore(6)`, `_StartupGate(12s)`, порта `127.0.0.1:9883` и введение `_StdoutFeed` + `: keepalive\n\n` каждые `15.0s`.
+- **`[F-07]`, `[F-09]..[F-13]` (`EVD-007`, `EVD-009..EVD-013`)** — калибровка 5 признаков `_is_incomplete_tool_step` по реальным данным `opencode.db`, `session.v4.jsonl.zstd` и `bridge.log` (Turn 10, 11, 12).
+
+### 2. Корректность и реализуемость `AD-001..AD-003`
+- **`AD-001` (Двойная схема `<tool_invoke>`/`<tool_call>` + алиас `"shell"`):** Внедряется в чистый парсерный слой `BND-001`. Потоковый `ToolCallParser` удерживает префиксы обоих открывающих/закрывающих тегов, пакетный `_parse_tool_call_blocks` разбирает оба варианта. Трудоёмкость минимальная, внешние контракты не затрагиваются (`CD-001`).
+- **`AD-002` (Остановка `proc` на mid-stream error + детектор `_is_incomplete_tool_step` с вычитанием `reasoning_tokens` + дозапрос):** Чистый слой `BND-002` не имеет зависимостей от I/O или сокетов. Вычитание `reasoning_tokens` из `output_tokens` (`non_reasoning_output = max(0, output_tokens - reasoning_tokens)`) математически закрывает проблему объединённого счётчика `tokens.output` в `opencode` (`[F-09]`). В `BND-003` цикл дозапроса использует уже существующий механизм `attempt < NATIVE_RETRY_LIMIT` и `dedup_prefix`.
+- **`AD-003` (`_StdoutFeed` + SSE keepalive):** Использование одного daemon-потока на активный `proc` (максимум 6 потоков при `MAX_CONCURRENT = 6`) и `queue.Queue.get(timeout=0.25 / 1.0)` гарантирует отзывчивость к `TIMEOUT_S` и отправку `: keepalive\n\n` каждые `15.0s` без переписывания сервера на `asyncio`.
+
+### 3. Покрытие `HL-ENV/v1` (46 полей), 4 гейтов и 21 стоп-кода GCGE
+- **`HL-ENV/v1`:** Заполнены все 46 полей (включая `schema` и 7 секций: `workload`, `slo`, `resources`, `timeouts_retries`, `backpressure_limits`, `data_storage`, `observability_degradation`), проверено условие `memory_closure` (`PASS`).
+- **4 гейта отказоустойчивости:**
+  - `C-MULT`: `PASS` — жёсткий потолок `1 + NATIVE_RETRY_LIMIT (2)` и `FAIL_RETRY_LIMIT (3)` под единым `deadline = monotonic() + TIMEOUT_S (1800s)`, без рекурсии и межсервисного умножения.
+  - `S-HERD`: `PASS` — сериализация первых `12s` старта `opencode run` через `_StartupGate` (`_STARTUP_LOCK`) + `FAIL_RETRY_BACKOFF_S = 0.8`.
+  - `H-CPU`: `PASS` — блокирующее чтение в `_StdoutFeed` и ожидание на `Queue.get(timeout=0.25/1.0)`, отсутствие `busy-wait`, ~0% CPU в простое.
+  - `R-BULK`: `PASS` — ретраи работают внутри одного захваченного слота `Semaphore(6)`, уборка дочерних групп процессов через `_stop_proc` (`killpg SIGTERM -> wait(5) -> SIGKILL`) на всех путях выхода.
+- **21 стоп-код GCGE:** Все 21 стоп-код проверены и обоснованы (`20 PASS`, `1 N/A` для `BLOCKING_IO_IN_ASYNC`, так как используется синхронный `ThreadingHTTPServer` с выносом чтения pipe в `_StdoutFeed`).
+
+FINDINGS: NONE
+
+VERDICT: ACCEPT

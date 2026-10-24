@@ -1,0 +1,1 @@
+{"$schema":"https://opencode.ai/config.json","permission":{"*":"ask"},"provider":{"opencode":{"options":{"baseURL":"http://127.0.0.1:10830/v1"}},"opencode-go":{"options":{"baseURL":"http://127.0.0.1:10830/go/v1/v1beta"}}}}

@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-step-20261024",
+  "preset": "analyst-teamlead",
+  "child_preset": "teamlead-with-architect",
+  "parent_skill": "analyst-teamlead",
+  "analyst_required": true,
+  "architect_required": true,
+  "downstream_panel": true,
+  "reviewer_skip": true,
+  "criticality": "S2",
+  "criticality_source": "orchestrator",
+  "criticality_reason": "Багфикс протокола стриминга и детекции оборванных tool-шагов в opencode-zen-bridge (S2: изменение логики оркестрации шагов и контракта ответа моста при swallowed tool call).",
+  "profile": "python-bridge-bugfix",
+  "routing_approval": "auto",
+  "approved_by_user": true,
+  "entry": "full",
+  "roles": {
+    "explorer": {
+      "role": "explorer",
+      "mode": "agent",
+      "agent": "agy-research",
+      "backend": "agy",
+      "family": "gemini",
+      "requested_model": "gemini-4-argon-high",
+      "requested_effort": "high",
+      "permissions": "read-only",
+      "fallback": {
+        "agent": "claude-cli",
+        "backend": "claude-cli",
+        "family": "claude",
+        "requested_model": "claude-sonnet-5-5",
+        "requested_effort": "medium"
+      }
+    },
+    "architect": {
+      "role": "architect",
+      "mode": "agent",
+      "agent": "claude-cli",
+      "backend": "claude-cli",
+      "family": "claude",
+      "requested_model": "claude-opus-5-5",
+      "requested_effort": "high",
+      "permissions": "run-artifacts-write",
+      "fallback": {
+        "agent": "codex-cli",
+        "backend": "codex-cli",
+        "family": "gpt",
+        "requested_model": "gpt-6.1-sol",
+        "requested_effort": "high"
+      }
+    },
+    "coder": {
+      "role": "coder",
+      "mode": "agent",
+      "agent": "codex-cli",
+      "backend": "codex-cli",
+      "family": "gpt",
+      "requested_model": "gpt-6.1-sol",
+      "requested_effort": "high",
+      "permissions": "write",
+      "fallback": {
+        "agent": "claude-cli",
+        "backend": "claude-cli",
+        "family": "claude",
+        "requested_model": "claude-sonnet-5-5",
+        "requested_effort": "high"
+      }
+    },
+    "verifier": {
+      "role": "verifier",
+      "mode": "deterministic"
+    }
+  },
+  "arch_panel_verdict": "PASS",
+  "arch_panel_cycle": 2,
+  "arch_panel_receipt": "receipts/arch-panel.json",
+  "coder_fallback_activated": true,
+  "coder_fallback_reason": "gpt-6.1-sol (codex-cli) returned HTTP 503 No available accounts on 127.0.0.1:2455 (evidence: panel/arch/r1/seats/3.failed-1/launch.json, panel/arch/r2/seats/3.failed-1/launch.json); activating declared fallback claude-sonnet-5-5 high via claude-cli."
+}
