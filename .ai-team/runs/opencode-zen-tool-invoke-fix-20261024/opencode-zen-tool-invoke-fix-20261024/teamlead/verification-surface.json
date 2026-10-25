@@ -1,0 +1,74 @@
+{
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-003",
+        "REQ-004",
+        "AD-001",
+        "AD-003",
+        "AD-004",
+        "BND-002",
+        "CD-001"
+      ],
+      "kind": "command",
+      "command": "python3 -m unittest tests.test_tool_parser -v",
+      "expected": "exit 0; 44 existing + new cross-bridge cases (trailing }}} and }}}}\\n, OpenAI function wrapper, name wins, malformed stays text) pass for core/tool_emulation.py and muse-bridge",
+      "environment": "local-python3",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "AD-001",
+        "AD-002",
+        "AD-003",
+        "BND-001",
+        "QA-001",
+        "CD-001"
+      ],
+      "kind": "command",
+      "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t .",
+      "expected": "exit 0, or the failure set exactly equals receipts/baseline-failures.txt recorded at Coder step 0 on the re-baselined live copy (currently 3 test_unmapped_* tests); test count = baseline + new tests; 0 errors",
+      "environment": "local-python3",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "AD-002",
+        "AD-003",
+        "BND-001",
+        "RISK-001",
+        "RISK-002"
+      ],
+      "kind": "command",
+      "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t . -k negative_control -k unparsed_block_returned_as_text -k closed_batch_without_intermediate_close_kept -k sanitize_closed_alt_batch_kept -k broken_block -k history_renders_tool_calls",
+      "expected": "exit 0, Ran >= 6: F-07 negative controls, kept-batch sanitizer tests, id rendering and the new broken_block stream/json/sanitize/prompt tests all pass",
+      "environment": "local-python3",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "QA-002",
+        "AD-001",
+        "AD-002",
+        "RISK-002"
+      ],
+      "kind": "command",
+      "command": "cd bridges/opencode-zen-bridge && python3 -c \"import json,sys,time; sys.path.insert(0,'.'); import server as s; ok=json.dumps(dict(name='bash',arguments=dict(command='x'*60000))); big=ok+'}}}'; bad=ok[:-4]; blk='<tool_invoke>'+bad+'</tool_invoke>'; f=lambda fn,a: (lambda t: ([fn(a) for _ in range(20)], (time.perf_counter()-t)/20*1000)[1])(time.perf_counter()); a=f(s._parse_tool_call_blocks,big); b=f(s._parse_tool_call_blocks,bad); c=f(s._strip_broken_tool_blocks,blk); print(round(a,3),round(b,3),round(c,3)); sys.exit(0 if s._parse_tool_call_blocks(big) and s._parse_tool_call_blocks(bad) is None and s._strip_broken_tool_blocks(blk)==('',1) and max(a,b,c)<5 else 1)\"",
+      "expected": "exit 0; per-call time < 5 ms for 60 KiB parse with }}}, 60 KiB unterminated parse (None) and 60 KiB broken-block strip (('',1)); prototype pre-flight 0.23/0.16/1.97 ms",
+      "environment": "local-python3",
+      "owner": "verifier"
+    }
+  ]
+}

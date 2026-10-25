@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "run_id": "opencode-zen-tool-invoke-fix-20261024",
+  "role": "coder",
+  "iteration": 1,
+  "objective": "Re-baseline untracked bridges/opencode-zen-bridge/ on live ~/.dsh/bridges/opencode-zen-bridge/, implement AD-001..AD-004 (including ARCH_PANEL Skeptic hardening) across opencode-zen-bridge, core/tool_emulation.py, and muse-bridge, add unit tests, and pass VER-001..VER-004",
+  "inputs_read": [
+    ".ai-team/runs/opencode-zen-tool-invoke-fix-20261024/architecture/arch-spec.md",
+    ".ai-team/runs/opencode-zen-tool-invoke-fix-20261024/architecture/architecture-packet.json",
+    "analysis/opencode-zen-tool-invoke-fix/handoff-architect.md",
+    "bridges/opencode-zen-bridge/server.py",
+    "core/tool_emulation.py",
+    "bridges/muse-bridge/server.py"
+  ],
+  "stop_conditions": [
+    "Any modification to protected_paths (analysis/opencode-zen-tool-invoke-fix/handoff-architect.md, analysis/opencode-zen-tool-invoke-fix/evidence-ledger.md, or frozen verification_surface)",
+    "Any regression in existing unit tests in tests/test_tool_parser.py or bridges/opencode-zen-bridge/tests/"
+  ],
+  "plan_kind": "full",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Re-baseline bridges/opencode-zen-bridge/ from live ~/.dsh/bridges/opencode-zen-bridge/ (including tests/dsh_tools_fixture.json and tests/fixtures/), record BASELINE_SHA and baseline-failures.txt",
+      "expected_evidence": "SHA-256 of re-baselined bridges/opencode-zen-bridge/server.py and receipts/baseline-failures.txt recorded",
+      "status": "DONE",
+      "actual_evidence": "Re-baselined bridges/opencode-zen-bridge/ from live ~/.dsh (server.py, zen_catalog.py, sync_dsh_models.py, opencode-go.json, pyproject.toml, tests/ incl. dsh_tools_fixture.json and fixtures/; no logs/state/workspace/__pycache__). Live moved again vs arch-spec (sha 90b1d66499dceadac24f7990423b4c53b2ebd5b23247aaf50efe187851598b9e, 3902 lines, mtime 20:38); BASELINE_SHA recorded in receipts/baseline-live-sha256.txt, clean copy at /tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/baseline-live-server.py. Baseline VER-002: Ran 360, failures=3 (the 3 test_unmapped_* tests), errors=0 -> receipts/baseline-failures.txt."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Add failing regression tests in tests/test_tool_parser.py, bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py, and bridges/opencode-zen-bridge/tests/test_step_interruption.py covering REQ-001..REQ-004 and ARCH_PANEL Skeptic items",
+      "expected_evidence": "New tests fail on unpatched baseline as expected (red phase)",
+      "status": "DONE",
+      "actual_evidence": "Red phase before any fix: tests.test_tool_parser 52 tests, 476 subtest failures (new trailing-brace/wrapper cases for core and muse); bridges/opencode-zen-bridge: test_lenient_tool_call.TestTrailingBraceRecovery 14 failures + TestStripBrokenBlocks 6 errors/failures; live TestStepInterruptionLive: 8 failures + 2 errors (5 new + 3 baseline). New tests: tests/test_tool_parser.py (5 contract cases + TestTrailingBraceRecovery), test_lenient_tool_call.py (TestTrailingBraceRecovery: 7 tests), test_step_interruption.py (TestStripBrokenBlocks: 5 tests; live: 7 stream/json tests + fake-CLI modes emit_raw/raw_then_calls)."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Implement AD-001..AD-004 in bridges/opencode-zen-bridge/server.py, core/tool_emulation.py, and bridges/muse-bridge/server.py (with extra-brace cap <=16, RecursionError catch, fail-closed tail after 16 broken tags, and quiet=True for sanitizer)",
+      "expected_evidence": "Modified server.py, core/tool_emulation.py, and bridges/muse-bridge/server.py",
+      "status": "DONE",
+      "actual_evidence": "Implemented in bridges/opencode-zen-bridge/server.py (_recover_trailing_braces cap 1..16, _loads_lenient catches RecursionError, quiet kw threaded through _parse_tool_call_block(s), OpenAI function unwrap, _find_close_in, _strip_broken_tool_blocks fail-closed at 17th candidate, _BROKEN_BLOCK_NOTICE, wired into _sanitize_assistant_text, _incomplete_tool_step_prompt, _stream_sse (emit_parsed_content + notice), _serve_json (strip + notice)); core/tool_emulation.py and bridges/muse-bridge/server.py (_recover_trailing_braces, _loads_tolerant, function unwrap). ruff check clean on core/muse/test_tool_parser; ruff format applied to core and tests (muse HEAD was already unformatted, so only my hunks were added, no reformat churn)."
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Run frozen verification surface commands VER-001, VER-002, VER-003, and VER-004 and verify all pass",
+      "expected_evidence": "Exact exit codes and test counts for VER-001..VER-004",
+      "status": "DONE",
+      "actual_evidence": "VER-001: python3 -m unittest tests.test_tool_parser -v -> Ran 52 OK, rc=0 (44 + 8 new). VER-002: Ran 378 (=360+18 new), failures=3 identical to baseline set (test_unmapped_retries_do_not_exhaust_incomplete_budget_json/_stream, test_unmapped_then_error_stops_proc_json), errors=0. VER-003: Ran 12 OK, rc=0. VER-004: 0.318 / 0.15 / 1.992 ms (<5 ms), rc=0. Extra: root suite python3 -m unittest discover -s tests: Ran 899, 2 failures (test_b_guard.test_tm018_live_check_subprocess, test_muse_bridge_killpg.test_t00_models_and_health_include_wonder_models_400k) - both reproduce identically on clean HEAD in a detached worktree (depend on live KB canon size and ~/.dsh cordis.patch.yml), unrelated."
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Update plans/coder-01.json to DONE, write coder.json handoff, and validate both with validate_role_plan.py and validate_handoff.py",
+      "expected_evidence": "validate_role_plan.py --phase after and validate_handoff.py coder exit 0",
+      "status": "DONE",
+      "actual_evidence": "plans/coder-01.json set to DONE; coder.json written; validate_role_plan.py --phase after and validate_handoff.py coder run (see coder.json commands)."
+    }
+  ],
+  "deviations": []
+}

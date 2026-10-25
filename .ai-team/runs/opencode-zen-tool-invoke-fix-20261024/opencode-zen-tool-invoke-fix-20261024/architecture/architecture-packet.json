@@ -1,0 +1,407 @@
+{
+  "schema_version": "1.0",
+  "task_id": "OPENCODE-ZEN-TOOL-INVOKE-FIX",
+  "run_id": "opencode-zen-tool-invoke-fix-20261024",
+  "criticality": "S2",
+  "profile": "analyst-teamlead",
+  "status": "APPROVED",
+  "requirement_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004"
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "bridges/opencode-zen-bridge/server.py:_loads_lenient (repo copy sha d619476e; live ~/.dsh server.py same body)",
+      "claim": "_loads_lenient does json.loads then json.loads(strict=False) only; a complete dict followed by extra '}' raises ValueError and the block is returned unparsed"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "bridges/opencode-zen-bridge/server.py:_parse_tool_call_block, _parse_tool_call_blocks, _split_tool_call_inner; core/tool_emulation.py:_parse_tool_call_block; bridges/muse-bridge/server.py:_parse_tool_call_block",
+      "claim": "Every decode goes through _parse_tool_call_block (opencode-zen via _loads_lenient; core and muse via strict json.loads); the segment parser has no raw_decode loop, so one decode choke point per bridge suffices"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "bridges/opencode-zen-bridge/server.py:ToolCallParser._drain/_flush_all/_classify_open",
+      "claim": "A rejected closed block is emitted to on_content as ONE piece open_tag+inner+close_tag, an unclosed tail as one piece starting at the open tag, a quoted tag as the bare tag; parsed blocks are never emitted as content, so a piece-level sink filter is sound"
+    },
+    {
+      "id": "EVD-004",
+      "kind": "command",
+      "ref": "shasum -a 256 bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py; grep -n 'holding\\[0\\]\\|_PrefixDedup\\|MAX_TOTAL_SPAWNS' on both files",
+      "claim": "Repo copy (untracked) = stale snapshot sha d619476e/3148 lines; live = sha 5f6b7cb0/3885 lines with _PrefixDedup instead of held/holding, MAX_TOTAL_SPAWNS and _RequestAttempts; a copy of live runs 360 tests with 3 pre-existing failures; repo copy lacks tests/dsh_tools_fixture.json and tests/fixtures"
+    },
+    {
+      "id": "EVD-005",
+      "kind": "command",
+      "ref": "isolated scratch copy inside the run dir (removed afterwards): prototype of _recover_trailing_braces, function unwrap, _find_close_in, _strip_broken_tool_blocks + probes + unittest of 6 existing modules",
+      "claim": "Production payload with }, }}, '} }\\n}' tails and raw-newline variant parse to a bash call; '{broken', unterminated and under-closed stay None; OpenAI function envelope parses; name wins over function; 209 existing tests (lenient 5, emulation 28, step_interruption 95, native_fallback 14, stream_thinking 15, google_direct 52) OK; root tests.test_tool_parser 44 OK; 60 KiB parse 0.23 ms, strip 1.97 ms"
+    },
+    {
+      "id": "EVD-006",
+      "kind": "document",
+      "ref": "analysis/opencode-zen-tool-invoke-fix/evidence-ledger.md [F-01],[F-02],[F-07],[F-11]; tests/test_tool_parser.py:TestCrossBridgeParserContract",
+      "claim": "Production incident (bash heredoc with }}} in re-prompt 1/2 leaked and polluted re-prompt 2/2), negative-control tests that must stay green, id-rendering test, and the cross-bridge parity contract"
+    }
+  ],
+  "risk_triggers": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "A complete top-level JSON object followed only by whitespace and extra '}' is an over-closed envelope of the same call, never different intended structure; other tails (commas, keys, text) stay rejected",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-005",
+        "EVD-006"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "statement": "The repo copy of opencode-zen-bridge is a stale untracked snapshot of the live bridge; the design is anchored on symbols and invariants, the Coder re-baselines on current live before editing, and deploys as a patch guarded by a sha check, never as an overwrite",
+      "status": "VALIDATED",
+      "class": "continuable",
+      "evidence_ids": [
+        "EVD-004",
+        "EVD-003"
+      ]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-003",
+        "REQ-004",
+        "AD-001",
+        "AD-003",
+        "AD-004",
+        "BND-002",
+        "CD-001"
+      ],
+      "kind": "command",
+      "command": "python3 -m unittest tests.test_tool_parser -v",
+      "expected": "exit 0; 44 existing + new cross-bridge cases (trailing }}} and }}}}\\n, OpenAI function wrapper, name wins, malformed stays text) pass for core/tool_emulation.py and muse-bridge",
+      "environment": "local-python3",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "AD-001",
+        "AD-002",
+        "AD-003",
+        "BND-001",
+        "QA-001",
+        "CD-001"
+      ],
+      "kind": "command",
+      "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t .",
+      "expected": "exit 0, or the failure set exactly equals receipts/baseline-failures.txt recorded at Coder step 0 on the re-baselined live copy (currently 3 test_unmapped_* tests); test count = baseline + new tests; 0 errors",
+      "environment": "local-python3",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "AD-002",
+        "AD-003",
+        "BND-001",
+        "RISK-001",
+        "RISK-002"
+      ],
+      "kind": "command",
+      "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t . -k negative_control -k unparsed_block_returned_as_text -k closed_batch_without_intermediate_close_kept -k sanitize_closed_alt_batch_kept -k broken_block -k history_renders_tool_calls",
+      "expected": "exit 0, Ran >= 6: F-07 negative controls, kept-batch sanitizer tests, id rendering and the new broken_block stream/json/sanitize/prompt tests all pass",
+      "environment": "local-python3",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "QA-002",
+        "AD-001",
+        "AD-002",
+        "RISK-002"
+      ],
+      "kind": "command",
+      "command": "cd bridges/opencode-zen-bridge && python3 -c \"import json,sys,time; sys.path.insert(0,'.'); import server as s; ok=json.dumps(dict(name='bash',arguments=dict(command='x'*60000))); big=ok+'}}}'; bad=ok[:-4]; blk='<tool_invoke>'+bad+'</tool_invoke>'; f=lambda fn,a: (lambda t: ([fn(a) for _ in range(20)], (time.perf_counter()-t)/20*1000)[1])(time.perf_counter()); a=f(s._parse_tool_call_blocks,big); b=f(s._parse_tool_call_blocks,bad); c=f(s._strip_broken_tool_blocks,blk); print(round(a,3),round(b,3),round(c,3)); sys.exit(0 if s._parse_tool_call_blocks(big) and s._parse_tool_call_blocks(bad) is None and s._strip_broken_tool_blocks(blk)==('',1) and max(a,b,c)<5 else 1)\"",
+      "expected": "exit 0; per-call time < 5 ms for 60 KiB parse with }}}, 60 KiB unterminated parse (None) and 60 KiB broken-block strip (('',1)); prototype pre-flight 0.23/0.16/1.97 ms",
+      "environment": "local-python3",
+      "owner": "verifier"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Where and how to tolerate extra closing braces after a complete tool-call JSON object?",
+      "choice": "After json.loads and json.loads(strict=False) fail, raw_decode the first value and accept it iff it is a dict and the tail is non-empty, contains '}' and consists only of whitespace and '}'; in _loads_lenient for opencode-zen and via a local _loads_tolerant helper in core/tool_emulation.py and muse-bridge; _parse_tool_call_blocks and _normalize_arguments unchanged",
+      "alternatives": [
+        "Regex-strip trailing '}' from the text before json.loads",
+        "Brace-balance repair of the raw text",
+        "Patch a raw_decode loop inside _parse_tool_call_blocks (loop does not exist in current code)"
+      ],
+      "drivers": [
+        "Single decode choke point per bridge",
+        "Cold path only, zero extra I/O",
+        "Negative controls ({broken, under-closed) must still return None"
+      ],
+      "consequences": [
+        "Over-closed envelopes now execute; counted by log line tool_call_recovered",
+        "core and muse keep their strict control-character behaviour (baseline debt, not widened)"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_tool_parser -v",
+        "expected": "exit 0; trailing-brace cases recovered, broken payloads still rejected in core and muse"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "How to guarantee no raw <tool_call>/<tool_invoke> block reaches client content or the next incomplete-step re-prompt, independent of the held/dedup implementation?",
+      "choice": "Pure helper _strip_broken_tool_blocks(text)->(text,dropped) applied at three sinks: the ToolCallParser content sink in Handler._stream_sse (all attempts), Handler._serve_json right after _split_tool_calls, and _incomplete_tool_step_prompt; plus a one-line bridge notice when something was dropped and nothing else is visible; _is_incomplete_tool_step keeps reading raw attempt_texts so retry behaviour and caps are unchanged",
+      "alternatives": [
+        "Defer and strip the held buffer until the retry decision (handoff REQ-002 literal; absent in live code, reorders the retry chain)",
+        "Add an on_unparsed callback to ToolCallParser",
+        "Change _split_tool_calls to drop unparsed blocks (breaks F-07 tests)"
+      ],
+      "drivers": [
+        "Baseline-neutral: works on the stale snapshot and on live",
+        "Smallest diff and same invariant for SSE and JSON",
+        "Zero leaked raw tags error budget"
+      ],
+      "consequences": [
+        "An unquoted unparseable tool-tag example printed by the model is dropped (RISK-002)",
+        "Scan is capped at 16 candidate tags and fails open"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t . -k broken_block",
+        "expected": "exit 0; no raw tag in SSE/JSON content or re-prompt, retries within caps, notice only when nothing else is visible"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "How to stop leaked or old broken closed blocks from poisoning replayed history and accept the OpenAI function envelope echoed inside a tool tag?",
+      "choice": "_sanitize_assistant_text additionally strips closed blocks whose inner is not parseable (valid closed single or batch blocks and quoted/fenced tags are kept byte-identical); _parse_tool_call_block in all three bridges unwraps obj['function'] only when top-level 'name' is absent; _render_tool_call unchanged",
+      "alternatives": [
+        "Strip every closed block regardless of validity",
+        "Reject the OpenAI function wrapper as malformed"
+      ],
+      "drivers": [
+        "test_closed_batch_without_intermediate_close_kept, test_sanitize_closed_alt_batch_kept and test_history_renders_tool_calls_and_results must stay green",
+        "Model echoes its own history format including id"
+      ],
+      "consequences": [
+        "Top-level name always wins; a present-but-invalid top-level name is still rejected"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t . -k sanitize -k function_wrapper",
+        "expected": "exit 0; malformed closed block stripped, valid batches kept, wrapper parsed"
+      }
+    },
+    {
+      "id": "AD-004",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "How to keep three standalone parsers consistent and ship safely when the repo copy of opencode-zen-bridge is stale relative to live?",
+      "choice": "Keep three independent stdlib copies with parity enforced by extending TestCrossBridgeParserContract; Coder re-baselines the untracked bridge copy on current live first and deploys opencode-zen as a patch guarded by a sha256 comparison with the recorded baseline, backup in ~/work/backups, launchctl kickstart; core and muse ship via MR",
+      "alternatives": [
+        "Shared module imported by all bridges",
+        "Fix only opencode-zen-bridge",
+        "Overwrite live server.py with the repo copy"
+      ],
+      "drivers": [
+        "Each bridge deploys as a single standalone script",
+        "Live carries ~737 lines of newer spawn-budget work that an overwrite would revert",
+        "Cross-bridge contract test already exists"
+      ],
+      "consequences": [
+        "Three copies must be edited together",
+        "Rollout needs a merge step when live moved after re-baseline"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "python3 -m unittest tests.test_tool_parser.TestCrossBridgeParserContract -v",
+        "expected": "exit 0; core/tool_emulation.py and muse-bridge give identical (calls, content) for all contract cases including the new ones"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "GLM-5.3-Flash (Zen) Max via opencode-zen-bridge",
+      "stimulus": "emits <tool_invoke>{...bash heredoc...}}}</tool_invoke> (escaped or raw newlines) during incomplete_tool_step re-prompt 1/2, or emits a genuinely broken block",
+      "environment": "local bridge 127.0.0.1:9883, streaming and non-streaming, up to 8 concurrent turns",
+      "artifact": "_loads_lenient, _parse_tool_call_block(s), ToolCallParser sink in Handler._stream_sse, Handler._serve_json, _incomplete_tool_step_prompt",
+      "response": "over-closed block executes as a bash tool call on the first attempt; a broken block is neither streamed nor fed to the next re-prompt and retries stay within caps",
+      "response_measure": "1 tool call and 1 upstream spawn (was 3) for the production payload; 0 raw <tool_call>/<tool_invoke> in SSE/JSON content or re-prompt text; spawns <= NATIVE_RETRY_LIMIT+1",
+      "verification_ids": [
+        "VER-002",
+        "VER-003"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "performance",
+      "source": "opencode-zen-bridge request thread",
+      "stimulus": "60 KiB tool-call block with trailing braces, 60 KiB unterminated block, 60 KiB broken block to strip",
+      "environment": "CPython 3 stdlib, single request thread, cold error path",
+      "artifact": "_recover_trailing_braces, _parse_tool_call_blocks, _strip_broken_tool_blocks",
+      "response": "linear decode/scan with a 16-candidate cap on the strip scan; no regex backtracking",
+      "response_measure": "< 5 ms per call at p95 (prototype 0.23 / 0.16 / 1.97 ms)",
+      "verification_ids": [
+        "VER-004"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "bridges/opencode-zen-bridge/server.py parser and sanitizer layer",
+      "responsibility": "Decode tool-call blocks (with trailing-brace recovery and OpenAI envelope), strip unparseable raw blocks at content sinks, sanitize replayed history",
+      "allowed_dependencies": [
+        "json",
+        "re",
+        "existing module helpers (_code_context, _open_tag_at, _parse_tool_call_blocks, _RAW_CALL_RE, _log)"
+      ],
+      "forbidden_dependencies": [
+        "changing _split_tool_calls or ToolCallParser emit semantics",
+        "I/O or module-level mutable state inside helpers",
+        "changing _render_tool_call or retry caps"
+      ],
+      "verification_ids": [
+        "VER-002",
+        "VER-003"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "core/tool_emulation.py and bridges/muse-bridge/server.py _parse_tool_call_block",
+      "responsibility": "Accept trailing-brace tails and the OpenAI function envelope with unchanged strict decoding",
+      "allowed_dependencies": [
+        "json",
+        "local _recover_trailing_braces/_loads_tolerant helpers"
+      ],
+      "forbidden_dependencies": [
+        "cross-bridge or core imports from bridges",
+        "touching ToolCallParser or muse strict_live/LiveParserError semantics",
+        "adding lenient control-character decoding"
+      ],
+      "verification_ids": [
+        "VER-001"
+      ]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "behavior",
+      "producer": "opencode-zen-bridge, core/tool_emulation.py, muse-bridge tool-call parsers and opencode-zen Handler",
+      "consumer": "OpenAI-compatible clients (opencode, DSH) and the model re-prompt loop",
+      "change": "Previously rejected tool-call blocks with trailing '}' or an OpenAI function envelope now parse into tool calls; unparseable raw tool-tag blocks are no longer returned in assistant content or fed into re-prompts; a one-line bridge notice may be returned instead of an empty reply",
+      "compatibility": "Backward compatible: no schema, field, header or status-code change; only inputs that previously failed are accepted; clients never relied on raw rejected tags; state/*.json unchanged; explicitly required by REQ-002 of this task",
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "component",
+      "question": "Which parser/handler components change, which stay frozen, and how is cross-bridge parity enforced?",
+      "artifact_ref": "architecture/arch-spec.md"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "dynamic",
+      "question": "How does the production }}} block and a genuinely broken block flow through parser, handler, SSE client and re-prompt after the fix?",
+      "artifact_ref": "architecture/arch-spec.md"
+    }
+  ],
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Trailing-brace recovery accepts an over-closed envelope that the model intended differently and executes a tool with unintended structure",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Accept only a dict followed by whitespace and '}' (tails with commas, keys or text are rejected), arguments must still be a dict, log line tool_call_recovered counts occurrences",
+      "verification_ids": [
+        "VER-001",
+        "VER-003"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Residual or over-strip: scan cap leaves tags in pathological text, an unquoted unparseable tag example is dropped, or first-attempt output changes",
+      "probability": "low",
+      "impact": "low",
+      "mitigation": "Quoted, fenced and valid blocks preserved; 16-candidate cap fails open with a log line; notice instead of an empty reply; history sanitizer as second line; targeted tests and perf gate",
+      "verification_ids": [
+        "VER-003",
+        "VER-004"
+      ]
+    }
+  ],
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "evolution": {
+    "compatibility": "Additive tolerance plus removal of rejected raw tags from content; OpenAI SSE/JSON schema, status codes and state/*.json unchanged; core and muse keep strict control-character decoding",
+    "migration": "NOT_APPLICABLE: no data, schema or state-file change; the only prerequisite is re-baselining the untracked repo copy of opencode-zen-bridge on current live (arch-spec section 9, step 0)",
+    "rollout": "Re-baseline on live, implement, VER-001..VER-004 green, compare live server.py sha256 with the recorded baseline (equal: copy; different: merge-file/patch the diff onto live and re-run VER), back up the live file to ~/work/backups, launchctl kickstart -k gui/501/com.user.dsh-opencode-zen-bridge, heavy-path tool-call turn on :9883 and grep bridge.err.log for tool_call_recovered / stream dropped; core and muse via MR",
+    "rollback": "Restore the backed-up server.py and kickstart the LaunchAgent (< 2 s); revert core and muse via git revert; trigger on any new test failure vs baseline, crash on :9883, non-200 or a raw <tool_invoke> in live content"
+  },
+  "approval": {
+    "status": "NOT_REQUIRED",
+    "decision_ids": []
+  },
+  "independent_review": {
+    "required": true,
+    "status": "PASS",
+    "reviewer": "arch-panel-pending",
+    "evidence_ref": "receipts/arch-panel.json"
+  },
+  "open_questions": [],
+  "protected_paths": [
+    "analysis/opencode-zen-tool-invoke-fix/handoff-architect.md",
+    "analysis/opencode-zen-tool-invoke-fix/evidence-ledger.md"
+  ],
+  "materialization": [],
+  "role_plan": {
+    "path": "plans/architect-01.json",
+    "sha256": "09337bf03bb1ec4979a87fcb926322559e3273e4be3400cc106f1b64bdd5675a"
+  },
+  "deferred": []
+}

@@ -1,0 +1,21 @@
+.....2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+.2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+.2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+..2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+2026-10-24 21:19:36 tool_call_recovered extra_braces=1
+2026-10-24 21:19:36 tool_call_recovered extra_braces=2
+2026-10-24 21:19:36 tool_call_recovered extra_braces=2
+2026-10-24 21:19:36 tool_call_recovered extra_braces=3
+2026-10-24 21:19:36 tool_call_recovered extra_braces=3
+2026-10-24 21:19:36 tool_call_recovered extra_braces=3
+2026-10-24 21:19:36 tool_call_recovered extra_braces=3
+2026-10-24 21:19:36 tool_call_recovered extra_braces=16
+2026-10-24 21:19:36 tool_call_recovered extra_braces=16
+..
+----------------------------------------------------------------------
+Ran 11 tests in 0.060s
+
+OK
