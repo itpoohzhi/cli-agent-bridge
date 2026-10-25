@@ -1,0 +1,125 @@
+.....2026-10-24 21:19:36 tool_call_unparsed bytes=119 head='{"name": "bash", "arguments": {"command": "ls"}} <tool_call>{"name": "read", "arguments": {"file_path": "/etc/hosts"}}}'
+FF2026-10-24 21:19:36 tool_call_unparsed bytes=125 head='{"id": "call_1", "name": "bash", "arguments": {"command": "cat > a.py <<\'EOF\'\\nprint({1: 2})\\nEOF", "description": "writ'
+F2026-10-24 21:19:36 tool_call_unparsed bytes=125 head='{"id": "call_1", "name": "bash", "arguments": {"command": "cat > a.py <<\'EOF\'\\nprint({1: 2})\\nEOF", "description": "writ'
+F2026-10-24 21:19:36 tool_call_unparsed bytes=123 head='{"id": "call_1", "name": "bash", "arguments": {"command": "cat > a.py <<\'EOF\'\nprint({1: 2})\nEOF", "description": "write"'
+F2026-10-24 21:19:36 tool_call_unparsed bytes=123 head='{"id": "call_1", "name": "bash", "arguments": {"command": "cat > a.py <<\'EOF\'\nprint({1: 2})\nEOF", "description": "write"'
+FFFFFFF.
+======================================================================
+FAIL: test_batch_segment_with_extra_brace (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_batch_segment_with_extra_brace)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 129, in test_batch_segment_with_extra_brace
+    self.assertEqual([c["function"]["name"] for c in calls], ["bash", "read"])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [] != ['bash', 'read']
+
+Second list contains 2 additional elements.
+First extra element 0:
+'bash'
+
+- []
++ ['bash', 'read']
+
+======================================================================
+FAIL: test_openai_function_wrapper (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_openai_function_wrapper)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 110, in test_openai_function_wrapper
+    self.assertEqual(server._parse_tool_call_block(wrapper), _BASH_LS)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != {'name': 'bash', 'arguments': {'command': 'ls'}}
+
+======================================================================
+FAIL: test_production_payload_single_call (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_production_payload_single_call) (payload='escaped', tag='<tool_call>')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 75, in test_production_payload_single_call
+    self.assertEqual(len(calls), 1)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_production_payload_single_call (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_production_payload_single_call) (payload='escaped', tag='<tool_invoke>')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 75, in test_production_payload_single_call
+    self.assertEqual(len(calls), 1)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_production_payload_single_call (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_production_payload_single_call) (payload='raw_newlines', tag='<tool_call>')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 75, in test_production_payload_single_call
+    self.assertEqual(len(calls), 1)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_production_payload_single_call (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_production_payload_single_call) (payload='raw_newlines', tag='<tool_invoke>')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 75, in test_production_payload_single_call
+    self.assertEqual(len(calls), 1)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_recovered_logged_unless_quiet (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_recovered_logged_unless_quiet)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 101, in test_recovered_logged_unless_quiet
+    self.assertIn("tool_call_recovered extra_braces=2", err.getvalue())
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'tool_call_recovered extra_braces=2' not found in ''
+
+======================================================================
+FAIL: test_trailing_braces_recovered (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_trailing_braces_recovered) (tail='}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 67, in test_trailing_braces_recovered
+    self.assertEqual(server._parse_tool_call_block(_BASE + tail), _BASH_LS)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != {'name': 'bash', 'arguments': {'command': 'ls'}}
+
+======================================================================
+FAIL: test_trailing_braces_recovered (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_trailing_braces_recovered) (tail='}}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 67, in test_trailing_braces_recovered
+    self.assertEqual(server._parse_tool_call_block(_BASE + tail), _BASH_LS)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != {'name': 'bash', 'arguments': {'command': 'ls'}}
+
+======================================================================
+FAIL: test_trailing_braces_recovered (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_trailing_braces_recovered) (tail='} }\n}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 67, in test_trailing_braces_recovered
+    self.assertEqual(server._parse_tool_call_block(_BASE + tail), _BASH_LS)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != {'name': 'bash', 'arguments': {'command': 'ls'}}
+
+======================================================================
+FAIL: test_trailing_braces_recovered (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_trailing_braces_recovered) (tail='}}}\n')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 67, in test_trailing_braces_recovered
+    self.assertEqual(server._parse_tool_call_block(_BASE + tail), _BASH_LS)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != {'name': 'bash', 'arguments': {'command': 'ls'}}
+
+======================================================================
+FAIL: test_trailing_braces_recovered (tests.test_lenient_tool_call.TestTrailingBraceRecovery.test_trailing_braces_recovered) (tail='}}}}}}}}}}}}}}}}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/cel-runs/opencode-zen-tool-invoke-fix-20261024/cleanroom-l2/bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py", line 67, in test_trailing_braces_recovered
+    self.assertEqual(server._parse_tool_call_block(_BASE + tail), _BASH_LS)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != {'name': 'bash', 'arguments': {'command': 'ls'}}
+
+----------------------------------------------------------------------
+Ran 11 tests in 0.042s
+
+FAILED (failures=12)

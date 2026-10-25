@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "task_id": "OPENCODE-ZEN-TOOL-INVOKE-FIX",
+  "run_id": "opencode-zen-tool-invoke-fix-20261024",
+  "criticality": "S2",
+  "criticality_source": "user",
+  "criticality_reason": "User explicitly requested analyst-teamlead preset to fix the 4-part <tool_invoke>{...}}}</tool_invoke> leak across opencode-zen-bridge, core/tool_emulation.py, and muse-bridge",
+  "profile": "analyst-teamlead",
+  "routing_approval": "manual",
+  "approved_by_user": true,
+  "entry": "full",
+  "reviewer_skip": true,
+  "downstream_panel": true,
+  "parent_skill": "analyst-teamlead",
+  "roles": {
+    "explorer": {
+      "role": "explorer",
+      "mode": "agent",
+      "agent": "research",
+      "backend": "antigravity-native",
+      "family": "Google",
+      "requested_model": "gemini-4-argon",
+      "requested_effort": "high",
+      "permissions": "read-only"
+    },
+    "architect": {
+      "role": "architect",
+      "mode": "agent",
+      "agent": "architect-software-product",
+      "backend": "claude-cli",
+      "family": "Anthropic",
+      "requested_model": "claude-sonnet-5-5",
+      "requested_effort": "high",
+      "permissions": "run-artifacts-write"
+    },
+    "coder": {
+      "role": "coder",
+      "mode": "agent",
+      "agent": "coder-bugfix",
+      "backend": "codex-cli",
+      "family": "OpenAI",
+      "requested_model": "gpt-6.1-sol",
+      "requested_effort": "high",
+      "permissions": "write"
+    },
+    "verifier": {
+      "role": "verifier",
+      "mode": "deterministic"
+    }
+  }
+}

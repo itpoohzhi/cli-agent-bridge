@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "OPENCODE-ZEN-TOOL-INVOKE-FIX",
+  "iteration": 1,
+  "status": "DONE",
+  "summary": "Re-baselined the untracked opencode-zen-bridge copy on current live (sha 90b1d664…, 3902 lines), wrote red tests first, then implemented AD-001..AD-004 with the ARCH_PANEL Skeptic hardening: trailing-brace recovery (1..16 extra '}', RecursionError-safe, quiet flag against log amplification) and OpenAI 'function' unwrap in opencode-zen/core/muse; _strip_broken_tool_blocks (fail-closed at the 17th candidate) wired into _sanitize_assistant_text, _incomplete_tool_step_prompt, _stream_sse and _serve_json with a one-line notice when nothing else is visible. VER-001/003/004 green, VER-002 failure set identical to the 3-test baseline. Nothing committed or deployed; live ~/.dsh bridge and ~/work/src/cli-agent-bridge untouched.",
+  "changed_files": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+    "core/tool_emulation.py",
+    "bridges/muse-bridge/server.py",
+    "tests/test_tool_parser.py"
+  ],
+  "commands": [
+    {
+      "command": "python3 -m unittest tests.test_tool_parser -v",
+      "exit_code": 0
+    },
+    {
+      "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t . (failure set == baseline: 3 test_unmapped_* tests; Ran 378, errors=0)",
+      "exit_code": 1
+    },
+    {
+      "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -t . -k negative_control -k unparsed_block_returned_as_text -k closed_batch_without_intermediate_close_kept -k sanitize_closed_alt_batch_kept -k broken_block -k history_renders_tool_calls (Ran 12)",
+      "exit_code": 0
+    },
+    {
+      "command": "cd bridges/opencode-zen-bridge && python3 -c <VER-004 verbatim logic> (0.318/0.15/1.992 ms)",
+      "exit_code": 0
+    },
+    {
+      "command": "uvx ruff check core/tool_emulation.py bridges/muse-bridge/server.py tests/test_tool_parser.py",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 -m unittest discover -s tests (repo root, Ran 899; 2 failures reproduce on clean HEAD: test_b_guard.test_tm018_live_check_subprocess, test_muse_bridge_killpg.test_t00_models_and_health_include_wonder_models_400k)",
+      "exit_code": 1
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "requirement_id": "REQ-001",
+      "status": "COVERED",
+      "evidence": "_loads_lenient/_recover_trailing_braces (+core/muse _loads_tolerant); tests test_trailing_braces_recovered, test_production_payload_single_call, test_trailing_garbage_not_recovered, contract cases trailing_braces*; stream/json single-spawn tests"
+    },
+    {
+      "requirement_id": "REQ-002",
+      "status": "COVERED",
+      "evidence": "_strip_broken_tool_blocks at _stream_sse sink, _serve_json and _incomplete_tool_step_prompt; test_stream_broken_block_not_in_sse_nor_reprompt, test_json_broken_block_not_in_content_nor_reprompt, test_stream_notice_when_only_broken_block, test_serve_json_*; fail-closed cap test_strip_cap_is_fail_closed and test_strip_scan_is_bounded_broken_block"
+    },
+    {
+      "requirement_id": "REQ-003",
+      "status": "COVERED",
+      "evidence": "_sanitize_assistant_text strips closed malformed blocks (quiet); test_sanitize_strips_malformed_closed_tool_invoke; kept-batch tests unchanged and green; OpenAI function wrapper parity in all three parsers"
+    },
+    {
+      "requirement_id": "REQ-004",
+      "status": "COVERED",
+      "evidence": "18 new tests in bridges/opencode-zen-bridge (VER-002 378 = 360 + 18), 8 new in tests/test_tool_parser.py (VER-001 52 = 44 + 8), red phase observed before the fix"
+    }
+  ],
+  "assumptions": [
+    "Live opencode-zen server.py changed again between arch-spec (sha 5f6b7cb0, 3885 lines) and re-baseline (sha 90b1d664, 3902 lines); all anchors were re-resolved by symbol. The rollout sha guard must compare live against 90b1d66499dceadac24f7990423b4c53b2ebd5b23247aaf50efe187851598b9e and merge-file if it moved again.",
+    "Fail-closed cap (brief/ARCH_PANEL k=1) supersedes the fail-open wording of arch-spec 4.3 step 2: the 17th candidate outside markdown code drops the rest of the text.",
+    "The three pre-existing baseline failures (test_unmapped_*) are baseline debt: neither fixed nor regressed.",
+    "The log label for the cap is tool_strip_cap_hit (not tool_block_strip_cap_reached): the 28-char label was masked to '***' by _mask_secrets (24+ char token rule)."
+  ],
+  "risks": [
+    "The cap counts every candidate outside markdown code, valid ones included: a replayed history message with more than 16 separately closed blocks loses the 17th and later ones in _sanitize_assistant_text (sinks never see valid blocks).",
+    "Google-direct stream path (_stream_google, own ToolCallParser/emit_content) is not routed through the strip sink; out of scope of arch-spec 4.4 and of the incident (GLM via opencode CLI).",
+    "opencode-zen _normalize_arguments now also accepts a string-encoded arguments object with extra trailing '}' because it goes through _loads_lenient (core/muse _normalize_arguments stay strict).",
+    "Root-suite failures test_b_guard.test_tm018_live_check_subprocess and test_muse_bridge_killpg.test_t00_models_and_health_include_wonder_models_400k are environment-dependent and fail identically on clean HEAD.",
+    "Not deployed: heavy-path check on :9883 and launchctl kickstart (arch-spec 9 rollout steps 2-5) remain for the orchestrator/verifier; bridges/opencode-zen-bridge/ is git-untracked, nothing committed."
+  ],
+  "open_questions": [],
+  "next_role": "reviewer",
+  "role_plan": {
+    "path": "plans/coder-01.json",
+    "sha256": "6c47bd81d6c0468e8b03b93199bc919d3d80a3744097cefe2d1c8e3720bfe5bb"
+  }
+}

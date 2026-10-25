@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "gate": "ARCH_GATE",
+  "status": "PASS",
+  "run_id": "opencode-zen-tool-invoke-fix-20261024",
+  "criticality": "S2",
+  "packet_sha256": "42c8a5c77d48ae612b8bda503bcb31577b22222fad54767715975e1c0c3e85b4",
+  "verification_surface_sha256": "4ce0fcd10bbf89437c4351213b466154770c0ae05efaad4d5205e5ce0e3e0a3d",
+  "protected_paths_sha256": "41f1bf4746b2f7d6fbecca7b304fd154154c24b99109aca0e5ac35fdd4b5d1b6",
+  "architect_worktree_sha256": "3187df83689b58eb4fbf9336314fafea65007eee35f1cb0d62d78960fb7ac00c",
+  "materialized_targets": 0
+}

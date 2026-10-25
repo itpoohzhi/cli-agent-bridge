@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "run_id": "opencode-zen-tool-invoke-fix-20261024",
+  "role": "architect",
+  "iteration": 1,
+  "objective": "Design and specify the 4-part fix for <tool_invoke>{...}}}</tool_invoke> leak in opencode-zen-bridge, core/tool_emulation.py, and muse-bridge, producing architecture-packet.json and arch-spec.md",
+  "inputs_read": [
+    "analysis/opencode-zen-tool-invoke-fix/research-plan.md",
+    "analysis/opencode-zen-tool-invoke-fix/evidence-ledger.md",
+    "analysis/opencode-zen-tool-invoke-fix/open-questions.md",
+    "analysis/opencode-zen-tool-invoke-fix/handoff-architect.md",
+    "bridges/opencode-zen-bridge/server.py",
+    "core/tool_emulation.py",
+    "bridges/muse-bridge/server.py"
+  ],
+  "stop_conditions": [
+    "Any modification to product files outside .ai-team/runs/opencode-zen-tool-invoke-fix-20261024/",
+    "Any requirement REQ-001..REQ-004 left without an explicit architectural decision and verification surface entry"
+  ],
+  "plan_kind": "full",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Inspect handoff-architect.md, bridges/opencode-zen-bridge/server.py, core/tool_emulation.py, and bridges/muse-bridge/server.py to verify parser and retry loop boundaries",
+      "expected_evidence": "Confirmed line ranges and function contracts for _loads_lenient, _parse_tool_call_blocks, _sanitize_assistant_text, _stream_sse, and _serve_json",
+      "status": "DONE",
+      "actual_evidence": "Read all inputs plus the symbols _loads_lenient, _parse_tool_call_block(s), _split_tool_call_inner, ToolCallParser._drain/_find_close_outside_string, _split_tool_calls, _sanitize_assistant_text, _strip_unclosed_tool_calls, _incomplete_tool_step_prompt, Handler._stream_sse/_serve_json in the repo copy (sha d619476e, 3148 lines), and core/tool_emulation.py + muse-bridge parsers. Found ledger drift: repo copy is a stale snapshot of live ~/.dsh server.py (live sha 5f6b7cb0, 3885 lines, held/holding replaced by _PrefixDedup, MAX_TOTAL_SPAWNS added); no raw_decode loop in _parse_tool_call_blocks; _sanitize_assistant_text has no has_tool_calls; repo tests lack dsh_tools_fixture.json; live copy runs 360 tests with 3 pre-existing failures. Recorded as D-01..D-09 in architecture/arch-spec.md section 1."
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Formulate architectural decisions AD-001..AD-004 covering trailing brace recovery, deferred held flush on retry, malformed closed tag sanitization, and cross-bridge parity",
+      "expected_evidence": "Decisions AD-001..AD-004 recorded with alternatives, drivers, consequences, and confirmation commands",
+      "status": "DONE",
+      "actual_evidence": "AD-001 (trailing-brace recovery in the single decode choke _loads_lenient / core+muse helper), AD-002 (sink-level removal via pure _strip_broken_tool_blocks instead of deferring held; baseline-neutral because live has no held), AD-003 (closed-malformed sanitize + OpenAI function unwrap), AD-004 (independent copies + contract tests + patch-on-live rollout) recorded with >=2 alternatives, drivers, consequences and test confirmations in arch-spec.md section 3 and in the packet. Core design prototyped in an isolated scratch copy inside the run dir: production payload recovered, negative controls stay None, 209 existing tests across 6 modules OK, 60 KiB parse 0.23 ms."
+    },
+    {
+      "id": "RP-03",
+      "kind": "report",
+      "action": "Write architecture/arch-spec.md, architecture/architecture-packet.json (status=APPROVED), and update plans/architect-01.json to DONE",
+      "expected_evidence": "validate_role_plan.py --phase after and validate_architecture_packet.py --phase approved exit 0",
+      "status": "DONE",
+      "actual_evidence": "Wrote architecture/arch-spec.md (reconciliation D-01..D-09, views, AD-001..AD-004, function-level design for opencode-zen server.py, core/tool_emulation.py and muse-bridge, gates C-MULT/S-HERD/H-CPU/R-BULK, frozen VER-001..VER-004, rollout/rollback) and architecture/architecture-packet.json; this plan is closed before its sha256 is recorded in the packet."
+    }
+  ],
+  "deviations": [
+    "Handoff REQ-002 prescribes deferring/stripping the held buffer; live code has no held buffer, so AD-002 enforces the same invariant (no raw tags in client content or re-prompt) at the content sinks instead.",
+    "Handoff REQ-001 names a raw_decode loop in _parse_tool_call_blocks and _normalize_arguments; neither needs a change (single decode choke point _loads_lenient; no evidence for string-encoded arguments)."
+  ]
+}
