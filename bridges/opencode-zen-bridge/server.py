@@ -777,7 +777,7 @@ def _incomplete_tool_step_prompt(prompt: str, partial_text: str, tools: list[dic
     open_tag, close_tag = _tool_tags_for_model(model_id)
     names = ", ".join(_tool_schemas(tools)) or "(none)"
     parts = [prompt]
-    partial = _strip_interrupted(partial_text).strip()
+    partial = _strip_broken_tool_blocks(_strip_interrupted(partial_text), quiet=True)[0].strip()
     if partial:
         parts.append(f"Assistant: {partial}")
     forced = ""
@@ -1698,17 +1698,47 @@ def _mask_secrets(text: str) -> str:
     return _SECRET.sub(keep_model_ids, text)
 
 
-def _loads_lenient(text: str) -> Any:
-    """json.loads с допуском сырых управляющих символов (\\n, \\t) внутри строк.
+_MAX_EXTRA_BRACES = 16  # предел лишних `}` после полного объекта вызова
+
+
+def _recover_trailing_braces(text: str, strict: bool, quiet: bool = False) -> dict[str, Any] | None:
+    """Первый JSON-объект, за которым идут только пробелы и 1..16 лишних `}`; иначе None (холодный путь)."""
+    body = text.lstrip()
+    try:
+        obj, end = json.JSONDecoder(strict=strict).raw_decode(body)
+    except (ValueError, RecursionError):
+        return None
+    tail = body[end:]
+    extra = tail.count("}")
+    if isinstance(obj, dict) and 1 <= extra <= _MAX_EXTRA_BRACES and not tail.strip(" \t\r\n}"):
+        if not quiet:
+            _log(f"tool_call_recovered extra_braces={extra}")
+        return obj
+    return None
+
+
+def _loads_lenient(text: str, *, quiet: bool = False) -> Any:
+    """json.loads с допуском сырых управляющих символов (\\n, \\t) внутри строк и лишних `}` в хвосте.
 
     Порт из droid-bridge (08.10): модели кладут многострочные команды в JSON-строку
     без экранирования переводов строк; строгий json.loads их отвергает, и вызов
-    утекал в content текстом. Сначала строгий разбор, затем strict=False.
+    утекал в content текстом. Сначала строгий разбор, затем strict=False, затем
+    полный объект с хвостом из пробелов и `}` (модель закрыла скобок больше нужного).
+    Слишком глубокая вложенность (RecursionError) — это тоже невалидный JSON (ValueError).
     """
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
+        pass
+    try:
         return json.loads(text, strict=False)
+    except (ValueError, RecursionError) as exc:
+        recovered = _recover_trailing_braces(text, strict=False, quiet=quiet)
+        if recovered is None:
+            if isinstance(exc, RecursionError):
+                raise ValueError("JSON is nested too deeply") from exc
+            raise
+        return recovered
 
 
 def _normalize_arguments(value: Any) -> dict[str, Any] | None:
@@ -1871,19 +1901,23 @@ def _strip_code_fence(text: str) -> str:
     return body.strip()
 
 
-def _parse_tool_call_block(inner: str) -> dict[str, Any] | None:
+def _parse_tool_call_block(inner: str, *, quiet: bool = False) -> dict[str, Any] | None:
     """Содержимое блока -> {"name","arguments"}; None, если блок невалиден.
 
     Отсутствие ключа arguments — допустимый вызов с {}; присутствующее, но
     не-объектное значение (строка-не-JSON, список, число, null) — вызов
     отклоняем, чтобы не запускать инструмент с пустыми аргументами.
+    OpenAI-обёртка {"id","type","function":{"name","arguments"}} разворачивается,
+    только если name верхнего уровня отсутствует (он всегда побеждает).
     """
     try:
-        obj = _loads_lenient(_strip_code_fence(inner))
+        obj = _loads_lenient(_strip_code_fence(inner), quiet=quiet)
     except ValueError:
         return None
     if not isinstance(obj, dict):
         return None
+    if "name" not in obj and isinstance(obj.get("function"), dict):
+        obj = obj["function"]
     name = obj.get("name")
     if not isinstance(name, str) or not name.strip():
         return None
@@ -1943,14 +1977,14 @@ def _split_tool_call_inner(inner: str) -> list[str]:
     return segments
 
 
-def _parse_tool_call_blocks(inner: str) -> list[dict[str, Any]] | None:
+def _parse_tool_call_blocks(inner: str, *, quiet: bool = False) -> list[dict[str, Any]] | None:
     """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден.
 
     Обычный блок даёт один вызов. Если он не разбирается, но внутри есть
     несколько открывающих тегов без промежуточных закрывающих, блок делится на
     сегменты; пачка принимается только целиком (все сегменты валидны).
     """
-    single = _parse_tool_call_block(inner)
+    single = _parse_tool_call_block(inner, quiet=quiet)
     if single is not None:
         return [single]
     if not any(open_tag in inner for open_tag, _ in TOOL_CALL_TAGS):
@@ -1960,7 +1994,7 @@ def _parse_tool_call_blocks(inner: str) -> list[dict[str, Any]] | None:
         return None
     calls: list[dict[str, Any]] = []
     for segment in segments:
-        call = _parse_tool_call_block(segment)
+        call = _parse_tool_call_block(segment, quiet=quiet)
         if call is None:
             return None
         calls.append(call)
@@ -2091,6 +2125,91 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
     return "text"
 
 
+def _find_close_in(text: str, start: int, close_tag: str = TOOL_CALL_CLOSE) -> int:
+    """Позиция закрывающего тега вне строковых литералов JSON в `text[start:]`, или -1.
+
+    Закрывающий тег внутри JSON-строки (например, значение аргумента содержит
+    `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
+    строку не закрывают.
+    """
+    index = start
+    length = len(text)
+    in_string = False
+    escaped = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif text.startswith(close_tag, index):
+            return index
+        index += 1
+    return -1
+
+
+_STRIP_SCAN_MAX_TAGS = 16  # граница CPU: `_code_context` — O(len) на кандидата
+_BROKEN_BLOCK_NOTICE = "[opencode-zen-bridge: невалидный блок вызова инструмента отброшен]"
+
+
+def _strip_broken_tool_blocks(text: str, *, quiet: bool = False) -> tuple[str, int]:
+    """Вырезать сырые блоки вызова, которые не разбираются; (текст, число вырезанных).
+
+    Валидные блоки (одиночный, пачка без промежуточных закрытий), теги в markdown-коде
+    и текст без тегов остаются как есть (тот же объект, если ничего не вырезано).
+    Незакрытый хвост и закрытый невалидный блок отбрасываются. После `_STRIP_SCAN_MAX_TAGS`
+    кандидатов остаток отбрасывается целиком (fail-closed): битый тег не утекает ни при каком вводе.
+    """
+    match = _RAW_CALL_RE.search(text)
+    if match is None:
+        return text, 0
+    parts: list[str] = []
+    cursor = 0
+    dropped = 0
+    scanned = 0
+    while match is not None:
+        start = match.start()
+        pair = _open_tag_at(text, start)
+        if pair is None:  # недостижимо: _RAW_CALL_RE начинается с тега
+            break
+        open_tag, close_tag = pair
+        pos = start + len(open_tag)
+        if _code_context(text, start, True) == "text":
+            if scanned >= _STRIP_SCAN_MAX_TAGS:
+                if not quiet:
+                    _log(f"tool_strip_cap_hit max={_STRIP_SCAN_MAX_TAGS} dropping tail")
+                parts.append(text[cursor:start])
+                cursor = len(text)
+                dropped += 1
+                break
+            scanned += 1
+            end = _find_close_in(text, pos, close_tag)
+            if end == -1:  # незакрытый хвост
+                parts.append(text[cursor:start])
+                cursor = len(text)
+                dropped += 1
+                break
+            try:
+                calls = _parse_tool_call_blocks(text[pos:end], quiet=True)
+            except RecursionError:
+                calls = None
+            pos = end + len(close_tag)
+            if calls is None:
+                parts.append(text[cursor:start])
+                cursor = pos
+                dropped += 1
+        match = _RAW_CALL_RE.search(text, pos)
+    if not dropped:
+        return text, 0
+    parts.append(text[cursor:])
+    return "".join(parts), dropped
+
+
 class ToolCallParser:
     """Поток текстовых дельт -> content и завершённые вызовы инструментов.
 
@@ -2190,31 +2309,8 @@ class ToolCallParser:
         return best
 
     def _find_close_outside_string(self, start: int, close_tag: str = TOOL_CALL_CLOSE) -> int:
-        """Позиция закрывающего тега вне строковых литералов JSON, или -1.
-
-        Закрывающий тег внутри JSON-строки (например, значение аргумента содержит
-        `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
-        строку не закрывают.
-        """
-        index = start
-        length = len(self._buf)
-        in_string = False
-        escaped = False
-        while index < length:
-            char = self._buf[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-            elif char == '"':
-                in_string = True
-            elif self._buf.startswith(close_tag, index):
-                return index
-            index += 1
-        return -1
+        """Позиция закрывающего тега вне строковых литералов JSON буфера, или -1 (см. `_find_close_in`)."""
+        return _find_close_in(self._buf, start, close_tag)
 
     def _pending_prefix(self) -> int:
         """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
@@ -2630,6 +2726,7 @@ def _sanitize_assistant_text(text: str) -> str:
     text = _THOUGHT_OPEN_RE.sub("", text)
     text = _strip_interrupted(text)
     text = _strip_unclosed_tool_calls(text)
+    text = _strip_broken_tool_blocks(text, quiet=True)[0]
     if _detect_repetition_loop(text) is not None or text.count("]]>") >= 4:
         text = _CDATA_LOOP_RE.sub("", text)
         while (loop_idx := _detect_repetition_loop(text)) is not None:
@@ -3253,6 +3350,16 @@ class Handler(BaseHTTPRequestHandler):
                         return
                 send_text(text)
 
+            dropped_blocks = [0]  # вырезано нераспарсенных блоков вызова (счётчик на запрос)
+
+            def emit_parsed_content(text: str) -> None:
+                # Нераспарсенный блок ToolCallParser отдаёт одним куском: сырой тег не уходит ни в SSE, ни в повтор.
+                cleaned, dropped = _strip_broken_tool_blocks(text)
+                if dropped:
+                    dropped_blocks[0] += dropped
+                    _log(f"stream dropped {dropped} unparsed tool block(s) from content")
+                emit_content(cleaned)
+
             seen_calls: set[str] = set()
 
             def emit_tool_call(call: dict[str, Any]) -> None:
@@ -3313,7 +3420,7 @@ class Handler(BaseHTTPRequestHandler):
                 err_thread = threading.Thread(target=_drain_stderr, args=(proc, err_lines), daemon=True)
                 err_thread.start()
 
-                parser = ToolCallParser(emit_content, emit_tool_call) if emulate_tools else None
+                parser = ToolCallParser(emit_parsed_content, emit_tool_call) if emulate_tools else None
                 attempt_texts: list[str] = []
                 attempt_reasonings: list[str] = []
                 unmapped: list[str] = []
@@ -3538,6 +3645,8 @@ class Handler(BaseHTTPRequestHandler):
                     + (f": {failure['tail']}" if failure["tail"] else ""), failure["tail"]))
                 return
 
+            if dropped_blocks[0] and not tool_calls and not "".join(collected_texts).strip():
+                emit_content(_BROKEN_BLOCK_NOTICE)  # иначе клиент получил бы пустой ответ
             full_text = "".join(collected_texts)
             prompt_tokens = int(usage.get("input") or 0) or _estimate_tokens(prompt)
             completion_tokens = int(usage.get("output") or 0) or _estimate_tokens(full_text)
@@ -3603,6 +3712,7 @@ class Handler(BaseHTTPRequestHandler):
         incomplete_retries = 0
         incomplete_retry = False
         out: dict[str, Any] = {}
+        dropped_blocks = 0  # вырезано нераспарсенных блоков вызова
         res = self._res()
         if not self._acquire_slot(res):
             return
@@ -3635,6 +3745,13 @@ class Handler(BaseHTTPRequestHandler):
                 if emulate_tools and content:
                     content, calls = _split_tool_calls(out.get("chunks") or [content])
                     tool_calls.extend(calls)
+                    # Безусловно (и при calls): пачка из валидного и битого блока не вернёт битый в content.
+                    content, dropped = _strip_broken_tool_blocks(content)
+                    if dropped:
+                        dropped_blocks += dropped
+                        _log(f"dropped {dropped} unparsed tool block(s) from content")
+                        if not content.strip():
+                            content = ""
                 if incomplete_retry:
                     # Уже отданная преамбула подавляется, переформулированный текст сохраняется целиком.
                     content = _dedup_retry_text("\n\n".join(c for c in contents if c), content)
@@ -3714,6 +3831,8 @@ class Handler(BaseHTTPRequestHandler):
         for i, tc in enumerate(tool_calls):
             tc["index"] = i
         content = "\n\n".join(c for c in contents if c)
+        if dropped_blocks and not content.strip() and not tool_calls:
+            content = _BROKEN_BLOCK_NOTICE  # иначе клиент получил бы пустой ответ или 502
         if not content and not tool_calls:
             # Пустой текст с ненулевым rc/ошибкой провайдера — честная 502, не выдуманный ответ.
             tail = _clean_err(str(out.get("err") or ""), 500)

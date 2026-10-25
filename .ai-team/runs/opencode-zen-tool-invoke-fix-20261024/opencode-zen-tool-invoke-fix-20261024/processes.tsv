@@ -1,0 +1,17 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+opencode-zen-tool-invoke-fix-20261024	gpt-6.1-sol-high	panel-judge-k1	34827	34827	2026-10-24T17:47:28.447946+00:00	Sat Oct 24 20:47:28 2026	running
+opencode-zen-tool-invoke-fix-20261024	grok-4.7-high	panel-judge-k2	34829	34829	2026-10-24T17:47:28.448313+00:00	Sat Oct 24 20:47:28 2026	running
+opencode-zen-tool-invoke-fix-20261024	gemini-4-argon-high	panel-judge-k3	34828	34828	2026-10-24T17:47:28.448368+00:00	Sat Oct 24 20:47:28 2026	running
+opencode-zen-tool-invoke-fix-20261024	gpt-6.1-sol-high	panel-judge-k1	34827	34827	2026-10-24T17:47:28.447946+00:00	Sat Oct 24 20:47:28 2026	rc=1
+opencode-zen-tool-invoke-fix-20261024	gemini-4-argon-high	panel-judge-k3	34828	34828	2026-10-24T17:47:28.448368+00:00	Sat Oct 24 20:47:28 2026	rc=0
+opencode-zen-tool-invoke-fix-20261024	grok-4.7-high	panel-judge-k2	34829	34829	2026-10-24T17:47:28.448313+00:00	Sat Oct 24 20:47:28 2026	rc=0
+opencode-zen-tool-invoke-fix-20261024	muse-wonder-full-1.0	panel-judge-k1	13489	13489	2026-10-24T17:55:00.110757+00:00	Sat Oct 24 20:55:00 2026	running
+opencode-zen-tool-invoke-fix-20261024	muse-wonder-full-1.0	panel-judge-k1	13489	13489	2026-10-24T17:55:00.110757+00:00	Sat Oct 24 20:55:00 2026	rc=0
+opencode-zen-tool-invoke-fix-20261024	gpt-6.1-sol-high	panel-probe	4929	4929	2026-10-24T18:22:43.573216+00:00	Sat Oct 24 21:22:43 2026	running
+opencode-zen-tool-invoke-fix-20261024	gpt-6.1-sol-high	panel-probe	4929	4929	2026-10-24T18:22:43.573216+00:00	Sat Oct 24 21:22:43 2026	rc=1
+opencode-zen-tool-invoke-fix-20261024	muse-wonder-full-1.0	panel-judge-k3	38863	38863	2026-10-24T18:25:55.642839+00:00	Sat Oct 24 21:25:55 2026	running
+opencode-zen-tool-invoke-fix-20261024	gemini-4-argon-high	panel-judge-k2	38862	38862	2026-10-24T18:25:55.642634+00:00	Sat Oct 24 21:25:55 2026	running
+opencode-zen-tool-invoke-fix-20261024	grok-4.7-high	panel-judge-k1	38864	38864	2026-10-24T18:25:55.642964+00:00	Sat Oct 24 21:25:55 2026	running
+opencode-zen-tool-invoke-fix-20261024	muse-wonder-full-1.0	panel-judge-k3	38863	38863	2026-10-24T18:25:55.642839+00:00	Sat Oct 24 21:25:55 2026	rc=0
+opencode-zen-tool-invoke-fix-20261024	gemini-4-argon-high	panel-judge-k2	38862	38862	2026-10-24T18:25:55.642634+00:00	Sat Oct 24 21:25:55 2026	rc=0
+opencode-zen-tool-invoke-fix-20261024	grok-4.7-high	panel-judge-k1	38864	38864	2026-10-24T18:25:55.642964+00:00	Sat Oct 24 21:25:55 2026	rc=0

@@ -1,0 +1,76 @@
+test_negative_control_garbage_still_text_and_logged (tests.test_lenient_tool_call.TestLenientToolCall.test_negative_control_garbage_still_text_and_logged) ... ok
+test_sanitize_closed_alt_batch_kept (tests.test_step_interruption.TestDualTagParser.test_sanitize_closed_alt_batch_kept) ... ok
+test_unparsed_block_returned_as_text (tests.test_step_interruption.TestDualTagParser.test_unparsed_block_returned_as_text) ... 2026-10-24 21:18:56 tool_call_unparsed bytes=7 head='{broken'
+ok
+test_closed_batch_without_intermediate_close_kept (tests.test_step_interruption.TestSanitizeAssistantHistory.test_closed_batch_without_intermediate_close_kept) ... ok
+test_json_broken_block_not_in_content_nor_reprompt (tests.test_step_interruption.TestStepInterruptionLive.test_json_broken_block_not_in_content_nor_reprompt) ... 2026-10-24 21:18:56 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp3hv8bh70/ws
+2026-10-24 21:18:57 exec: step with tool call finished, stopping opencode run
+2026-10-24 21:18:57 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:18:57 dropped 1 unparsed tool block(s) from content
+2026-10-24 21:18:57 incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-24 21:18:57 exec retry=1 (incomplete tool step) total_spawns=1/3
+2026-10-24 21:18:57 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1868 cwd=/var/folders/2f/***/T/tmp3hv8bh70/ws
+2026-10-24 21:18:57 exec: step with tool call finished, stopping opencode run
+2026-10-24 21:18:57 done model=glm-5.3-flash-free rc=-15 state=nonzero_exit tools=2 out_chars=78 retries=1 total_spawns=2
+2026-10-24 21:18:57 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-24 21:18:57 O-EXIT/v1 mode=json model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=2 tools=2 out_chars=78 duration_s=1.05
+ok
+test_serve_json_broken_block_stripped_and_notice (tests.test_step_interruption.TestStepInterruptionLive.test_serve_json_broken_block_stripped_and_notice) ... 2026-10-24 21:18:57 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp3hv8bh70/ws
+2026-10-24 21:18:58 exec: step with tool call finished, stopping opencode run
+2026-10-24 21:18:58 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:18:58 dropped 1 unparsed tool block(s) from content
+2026-10-24 21:18:59 incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-24 21:18:59 exec retry=1 (incomplete tool step) total_spawns=1/3
+2026-10-24 21:18:59 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1777 cwd=/var/folders/2f/***/T/tmp3hv8bh70/ws
+2026-10-24 21:18:59 exec: step with tool call finished, stopping opencode run
+2026-10-24 21:18:59 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:18:59 dropped 1 unparsed tool block(s) from content
+2026-10-24 21:19:01 incomplete tool step: re-prompt 2/2 signal=2 total_spawns=2/3
+2026-10-24 21:19:01 exec retry=2 (incomplete tool step) total_spawns=2/3
+2026-10-24 21:19:01 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1777 cwd=/var/folders/2f/***/T/tmp3hv8bh70/ws
+2026-10-24 21:19:01 exec: step with tool call finished, stopping opencode run
+2026-10-24 21:19:01 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:19:01 dropped 1 unparsed tool block(s) from content
+2026-10-24 21:19:01 incomplete tool step: retries exhausted (2) signal=2
+2026-10-24 21:19:01 done model=glm-5.3-flash-free rc=-15 state=nonzero_exit tools=0 out_chars=66 retries=2 total_spawns=3
+2026-10-24 21:19:01 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-24 21:19:01 O-EXIT/v1 mode=json model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=3 retries=2 signal=2 tools=0 out_chars=66 duration_s=3.57
+ok
+test_stream_broken_block_not_in_sse_nor_reprompt (tests.test_step_interruption.TestStepInterruptionLive.test_stream_broken_block_not_in_sse_nor_reprompt) ... 2026-10-24 21:19:01 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp3hv8bh70/ws
+2026-10-24 21:19:01 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-24 21:19:02 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:19:02 stream dropped 1 unparsed tool block(s) from content
+2026-10-24 21:19:03 stream incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-24 21:19:03 stream exec retry=1 fail_retries=0 model=opencode/glm-5.3-flash-free prompt_chars=1868 total_spawns=1/3
+2026-10-24 21:19:03 stream: step with tool call finished, stopping opencode run
+2026-10-24 21:19:03 stream done model=glm-5.3-flash-free rc=-15 tools=2 out_chars=78 emulate_tools=True retries=1 total_spawns=2
+2026-10-24 21:19:03 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=2 tools=2 out_chars=78 duration_s=2.00
+ok
+test_stream_notice_when_only_broken_block (tests.test_step_interruption.TestStepInterruptionLive.test_stream_notice_when_only_broken_block) ... 2026-10-24 21:19:03 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp3hv8bh70/ws
+2026-10-24 21:19:03 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-24 21:19:04 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:19:04 stream dropped 1 unparsed tool block(s) from content
+2026-10-24 21:19:05 stream incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-24 21:19:05 stream exec retry=1 fail_retries=0 model=opencode/glm-5.3-flash-free prompt_chars=1777 total_spawns=1/3
+2026-10-24 21:19:05 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:19:05 stream dropped 1 unparsed tool block(s) from content
+2026-10-24 21:19:06 stream incomplete tool step: re-prompt 2/2 signal=2 total_spawns=2/3
+2026-10-24 21:19:06 stream exec retry=2 fail_retries=0 model=opencode/glm-5.3-flash-free prompt_chars=1777 total_spawns=2/3
+2026-10-24 21:19:06 tool_call_unparsed bytes=7 head='{broken'
+2026-10-24 21:19:06 stream dropped 1 unparsed tool block(s) from content
+2026-10-24 21:19:06 stream incomplete tool step: retries exhausted (2) signal=2
+2026-10-24 21:19:06 stream done model=glm-5.3-flash-free rc=0 tools=0 out_chars=66 emulate_tools=True retries=2 total_spawns=3
+2026-10-24 21:19:06 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=0 total_spawns=3 retries=2 signal=2 tools=0 out_chars=66 duration_s=3.25
+ok
+test_incomplete_prompt_has_no_broken_block (tests.test_step_interruption.TestStripBrokenBlocks.test_incomplete_prompt_has_no_broken_block) ... ok
+test_strip_broken_blocks_helper (tests.test_step_interruption.TestStripBrokenBlocks.test_strip_broken_blocks_helper) ... ok
+test_strip_scan_is_bounded_broken_block (tests.test_step_interruption.TestStripBrokenBlocks.test_strip_scan_is_bounded_broken_block) ... 2026-10-24 21:19:07 tool_strip_cap_hit max=16 dropping tail
+2026-10-24 21:19:07 tool_strip_cap_hit max=16 dropping tail
+2026-10-24 21:19:07 tool_strip_cap_hit max=16 dropping tail
+ok
+test_history_renders_tool_calls_and_results (tests.test_tool_emulation.TestToolEmulation.test_history_renders_tool_calls_and_results) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 10.177s
+
+OK

@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.2",
+  "task_id": "OPENCODE-ZEN-TOOL-INVOKE-FIX",
+  "run_id": "opencode-zen-tool-invoke-fix-20261024",
+  "criticality": "S2",
+  "entry": "full",
+  "reviewer_skip": true,
+  "parent_skill": "analyst-teamlead",
+  "phase": "READY_FOR_PR",
+  "iteration": 1,
+  "status": "COMPLETE",
+  "budgets": {
+    "code_gate_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "reviewer_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "arch_panel_to_architect": {
+      "used": 0,
+      "max": 5
+    }
+  },
+  "last_transition": "FINAL_PASS",
+  "last_blocker_id": null,
+  "same_blocker_count": 0,
+  "updated_at": "2026-10-24T18:39:41.671617+00:00",
+  "panel_proofs": {
+    "arch": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/opencode-zen-tool-invoke-fix/.ai-team/runs/opencode-zen-tool-invoke-fix-20261024/panel/arch/r1",
+      "manifest_sha256": "cbcca0d7bc18b80bf61cb8b94826f2ac35a884946af53a84ab463d519247fde0",
+      "artifact_sha256": "42c8a5c77d48ae612b8bda503bcb31577b22222fad54767715975e1c0c3e85b4",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/opencode-zen-tool-invoke-fix/.ai-team/runs/opencode-zen-tool-invoke-fix-20261024/architecture/architecture-packet.json",
+      "receipt_sha256": "07d4990083bdd8c2bfbda36e63615c6f1fffb0513346f2d4a1913d7fddb22cac",
+      "verified_at": "2026-10-24T17:57:34.983209+00:00"
+    },
+    "council": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/opencode-zen-tool-invoke-fix/.ai-team/runs/opencode-zen-tool-invoke-fix-20261024/panel/council/r1",
+      "manifest_sha256": "19aa63950ed6bc743227ac7b4cc067444439b25bd046d741ae4cdbe14c4959d0",
+      "artifact_sha256": "d736aad93aceb28a508c81975ab089eb3920aff6f4711a52bcbdcc0d63b19e7e",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/opencode-zen-tool-invoke-fix/.ai-team/runs/opencode-zen-tool-invoke-fix-20261024/teamlead/package.md",
+      "receipt_sha256": "44e68638e4abc2dd6977844070b3151d1070b445f92127ff2adb4b6f548780bf",
+      "verified_at": "2026-10-24T18:39:41.670747+00:00"
+    }
+  }
+}

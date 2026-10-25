@@ -1,0 +1,30 @@
+{
+  "task_id": "OPENCODE-ZEN-TOOL-INVOKE-FIX",
+  "run_id": "opencode-zen-tool-invoke-fix-20261024",
+  "title": "Fix 4-part <tool_invoke>{...}}}</tool_invoke> leak in opencode-zen-bridge and shared parser contract",
+  "criticality": "S2",
+  "preset": "analyst-teamlead",
+  "child_preset": "teamlead-with-architect",
+  "parent_skill": "analyst-teamlead",
+  "reviewer_skip": true,
+  "downstream_panel": true,
+  "requirements": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004"
+  ],
+  "allowed_paths": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+    "core/tool_emulation.py",
+    "bridges/muse-bridge/server.py",
+    "tests/test_tool_parser.py"
+  ],
+  "architecture_gate": {
+    "packet_sha256": "42c8a5c77d48ae612b8bda503bcb31577b22222fad54767715975e1c0c3e85b4",
+    "verification_surface_sha256": "4ce0fcd10bbf89437c4351213b466154770c0ae05efaad4d5205e5ce0e3e0a3d",
+    "protected_paths_sha256": "41f1bf4746b2f7d6fbecca7b304fd154154c24b99109aca0e5ac35fdd4b5d1b6"
+  }
+}

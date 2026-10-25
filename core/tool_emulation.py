@@ -238,14 +238,50 @@ def _messages_to_prompt(
 
 
 def _strip_code_fence(text: str) -> str:
-    """Снять обёртку ```…``` (в т.ч. ```json) вокруг JSON внутри блока."""
+    """Снять обёртку ```…``` или ~~~…~~~ (в т.ч. ```json) вокруг JSON внутри блока."""
     body = text.strip()
-    if body.startswith("```"):
+    if body.startswith(("```", "~~~")):
         newline = body.find("\n")
         body = body[newline + 1 :] if newline != -1 else body[3:]
-    if body.rstrip().endswith("```"):
+    if body.rstrip().endswith(("```", "~~~")):
         body = body.rstrip()[:-3]
     return body.strip()
+
+
+_MAX_EXTRA_BRACES = 16  # предел лишних `}` после полного объекта вызова
+
+
+def _recover_trailing_braces(text: str) -> dict | None:
+    """Первый JSON-объект, за которым идут только пробелы и 1..16 лишних `}`; иначе None (холодный путь)."""
+    body = text.lstrip()
+    try:
+        obj, end = json.JSONDecoder().raw_decode(body)
+    except (ValueError, RecursionError):
+        return None
+    tail = body[end:]
+    if (
+        isinstance(obj, dict)
+        and 1 <= tail.count("}") <= _MAX_EXTRA_BRACES
+        and not tail.strip(" \t\r\n}")
+    ):
+        return obj
+    return None
+
+
+def _loads_tolerant(text: str) -> Any:
+    """json.loads, допускающий лишние `}` после полного объекта (модель закрыла скобок больше нужного).
+
+    Слишком глубокая вложенность (RecursionError) — невалидный JSON (ValueError).
+    """
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        recovered = _recover_trailing_braces(text)
+        if recovered is None:
+            if isinstance(exc, RecursionError):
+                raise ValueError("JSON is nested too deeply") from exc
+            raise
+        return recovered
 
 
 def _parse_tool_call_block(inner: str) -> dict | None:
@@ -256,11 +292,14 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     отклоняем, чтобы не запускать инструмент с пустыми аргументами.
     """
     try:
-        obj = json.loads(_strip_code_fence(inner))
+        obj = _loads_tolerant(_strip_code_fence(inner))
     except ValueError:
         return None
     if not isinstance(obj, dict):
         return None
+    if "name" not in obj and isinstance(obj.get("function"), dict):
+        # OpenAI tool_calls: {"id", "type", "function": {"name", "arguments"}}
+        obj = obj["function"]
     name = obj.get("name")
     if not isinstance(name, str) or not name.strip():
         return None
@@ -283,6 +322,199 @@ class LiveParserError(Exception):
     """
 
 
+def _is_quoted_open(text: str, start: int) -> bool:
+    """`<tool_call>` в inline-коде markdown (`` `<tool_call>` ``) — не тег."""
+    if start > 0 and text[start - 1] == "`":
+        return True
+    tail = text[start + len(TOOL_CALL_OPEN) : start + len(TOOL_CALL_OPEN) + 3]
+    return bool(tail) and tail[0] == "`" and tail != "```"
+
+
+def _split_tool_call_inner(inner: str) -> list[str]:
+    """Разбить содержимое блока по вложенным `<tool_call>` вне строковых литералов JSON.
+
+    Модель иногда пропускает `</tool_call>` между соседними вызовами пачки и ставит
+    один общий закрывающий тег в конце. Литерал `<tool_call>` внутри JSON-строки
+    границей не считается (та же логика, что в `_find_close_outside_string`).
+    Пустые сегменты сохраняются: пустой элемент делает всю пачку невалидной.
+    """
+    segments: list[str] = []
+    seg_start = 0
+    index = 0
+    length = len(inner)
+    in_string = False
+    escaped = False
+    while index < length:
+        char = inner[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif inner.startswith(TOOL_CALL_OPEN, index) and not _is_quoted_open(
+            inner, index
+        ):
+            segments.append(inner[seg_start:index])
+            index += len(TOOL_CALL_OPEN)
+            seg_start = index
+            continue
+        index += 1
+    segments.append(inner[seg_start:])
+    return segments
+
+
+def _parse_tool_call_blocks(inner: str) -> list[dict] | None:
+    """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден.
+
+    Обычный блок даёт один вызов. Если он не разбирается, но внутри есть
+    несколько `<tool_call>` без промежуточных закрывающих тегов, блок делится на
+    сегменты; пачка принимается только целиком (все сегменты валидны).
+    """
+    single = _parse_tool_call_block(inner)
+    if single is not None:
+        return [single]
+    if TOOL_CALL_OPEN not in inner:
+        return None
+    segments = _split_tool_call_inner(inner)
+    if len(segments) < 2:
+        return None
+    calls: list[dict] = []
+    for segment in segments:
+        call = _parse_tool_call_block(segment)
+        if call is None:
+            return None
+        calls.append(call)
+    return calls
+
+
+_OPAQUE_BLOCK = "￼"  # в `_history` на месте разобранного блока вызова
+
+
+def _fence_run(line: str) -> tuple[str, int, str]:
+    """Строка -> (символ, длина серии, остаток), если это строка-забор fenced-блока.
+
+    Забор — серия от 3 одинаковых бэктиков или тильд после отступа до 3 пробелов;
+    ("", 0, "") — не забор.
+    """
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3 or stripped[:1] not in ("`", "~"):
+        return "", 0, ""
+    char = stripped[0]
+    rest = stripped.lstrip(char)
+    run = len(stripped) - len(rest)
+    return (char, run, rest) if run >= 3 else ("", 0, "")
+
+
+def _is_fence_open(char: str, run: int, rest: str) -> bool:
+    """Строка-забор открывает блок: в info-строке бэктик-забора нет бэктиков."""
+    return bool(run) and (char == "~" or "`" not in rest)
+
+
+def _find_closing_run(doc: str, start: int, end: int, ticks: int) -> int:
+    """Конец первой серии ровно из `ticks` бэктиков в `doc[start:end]`, или -1."""
+    index = start
+    while index < end:
+        if doc[index] != "`":
+            index += 1
+            continue
+        run_start = index
+        while index < end and doc[index] == "`":
+            index += 1
+        if index - run_start == ticks:
+            return index
+    return -1
+
+
+def _is_atx_heading(line: str) -> bool:
+    """Строка — ATX-заголовок: отступ до 3 пробелов, 1-6 `#`, затем пробел/таб/конец."""
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3:
+        return False
+    rest = stripped.lstrip("#")
+    return 1 <= len(stripped) - len(rest) <= 6 and (
+        not rest.rstrip("\r") or rest[0] in " \t"
+    )
+
+
+def _code_context(doc: str, pos: int, final: bool) -> str:
+    """Положение `pos` в `doc` относительно markdown-кода: "code" | "text" | "wait".
+
+    "code" — внутри fenced-блока (CommonMark: забор с отступом до 3 пробелов, закрывает
+    серия того же символа (``` или ~~~) не короче открывающей, без текста после неё) или парного inline-кода (серия из
+    k бэктиков и ближайшая серия ровно из k в том же абзаце; абзац обрывают пустая
+    строка, забор и ATX-заголовок — он сам отдельный блок). Непарная серия — обычный
+    текст. "wait" — ответ зависит от ещё не пришедшего текста (только при `final=False`).
+    Результат определяется одним `doc`, поэтому не зависит от нарезки потока на чанки.
+    """
+    line_start = doc.rfind("\n", 0, pos) + 1
+    fence_char, fence_len, para, index = "", 0, 0, 0
+    while index < line_start:
+        eol = doc.index("\n", index)
+        line = doc[index:eol]
+        char, run, rest = _fence_run(line)
+        if fence_len:
+            if char == fence_char and run >= fence_len and not rest.strip(" \t\r"):
+                fence_len, para = 0, eol + 1
+        elif _is_fence_open(char, run, rest):
+            fence_char, fence_len = char, run
+        elif not line.strip() or _is_atx_heading(line):
+            para = eol + 1
+        index = eol + 1
+    if fence_len:
+        return "code"
+    eol = doc.find("\n", pos)
+    char, run, rest = _fence_run(doc[line_start : len(doc) if eol == -1 else eol])
+    if _is_fence_open(char, run, rest):  # тег в info-строке забора
+        return "code" if eol != -1 or final else "wait"
+    para_end, decided = len(doc), final
+    index = len(doc) if eol == -1 else eol + 1
+    if _is_atx_heading(doc[line_start : len(doc) if eol == -1 else eol]):
+        para = line_start  # заголовок — отдельный однострочный блок
+        if eol != -1:
+            para_end, decided, index = eol, True, len(doc)
+    while index < len(doc):  # абзац кончается пустой строкой, забором или заголовком
+        nxt = doc.find("\n", index)
+        line = doc[index : len(doc) if nxt == -1 else nxt]
+        # заголовок с текстом после `#` решён по префиксу, не дожидаясь конца строки
+        if (
+            nxt == -1
+            and not final
+            and not (_is_atx_heading(line) and line.lstrip(" ").lstrip("#"))
+        ):
+            break
+        char, run, rest = _fence_run(line)
+        if not line.strip() or _is_fence_open(char, run, rest) or _is_atx_heading(line):
+            para_end, decided = index, True
+            break
+        if nxt == -1:
+            break
+        index = nxt + 1
+    index = para
+    while index < pos:
+        char = doc[index]
+        if char == "\\":
+            index += 2
+        elif char != "`":
+            index += 1
+        else:
+            open_start = index
+            while index < para_end and doc[index] == "`":
+                index += 1
+            close_end = _find_closing_run(doc, index, para_end, index - open_start)
+            if close_end == -1:
+                if not decided:  # пара может прийти позже
+                    return "wait"
+            elif close_end > pos:
+                return "wait" if close_end == len(doc) and not final else "code"
+            else:
+                index = close_end
+    return "text"
+
+
 class ToolCallParser:
     """Поток текстовых дельт -> content и завершённые вызовы инструментов.
 
@@ -300,6 +532,7 @@ class ToolCallParser:
         self._on_content = on_content
         self._on_tool_call = on_tool_call
         self.strict_live = strict_live
+        self._history = ""  # весь текст, ушедший в content
 
     def feed(self, text: str) -> None:
         self._buf += text
@@ -308,12 +541,31 @@ class ToolCallParser:
     def finish(self) -> None:
         self._drain(final=True)
 
+    def _classify_open(self, after: int, final: bool) -> str:
+        """`<tool_call>` в буфере: "real" | "quoted" (inline-код markdown) | "wait" (нужен следующий символ)."""
+        context = _code_context(self._history + self._buf, len(self._history), final)
+        if context != "text":
+            return "quoted" if context == "code" else "wait"
+        tail = self._buf[after : after + 3]
+        if not tail:
+            return "real" if final else "wait"
+        # ```json-обёртка внутри блока — настоящий вызов
+        if tail[0] != "`" or tail == "```":
+            return "real"
+        if not final and tail == "`" * len(tail) and len(tail) < 3:
+            return "wait"
+        return "quoted"
+
     def _drain(self, final: bool) -> None:
         while True:
             start = self._buf.find(TOOL_CALL_OPEN)
             if start == -1:
                 if final:
-                    if self.strict_live and self._pending_prefix():
+                    if (
+                        self.strict_live
+                        and self._pending_prefix()
+                        and not self._tail_in_code()
+                    ):
                         raise LiveParserError("unresolved tool_call prefix at finish")
                     self._flush_all()
                     return
@@ -325,8 +577,17 @@ class ToolCallParser:
                     self._flush_all()
                 return
             if start > 0:
+                # всё до тега завершено: текст уходит в content и в `_history`
                 self._emit(self._buf[:start])
                 self._buf = self._buf[start:]
+            after = len(TOOL_CALL_OPEN)
+            verdict = self._classify_open(after, final)
+            if verdict == "quoted":
+                self._emit(self._buf[:after])
+                self._buf = self._buf[after:]
+                continue
+            if verdict == "wait":
+                return
             end = self._find_close_outside_string(len(TOOL_CALL_OPEN))
             if end == -1:
                 if final:
@@ -336,13 +597,15 @@ class ToolCallParser:
                 return
             inner = self._buf[len(TOOL_CALL_OPEN) : end]
             self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
-            call = _parse_tool_call_block(inner)
-            if call is None:
+            calls = _parse_tool_call_blocks(inner)
+            if calls is None:
                 if self.strict_live:
                     raise LiveParserError("malformed tool_call block")
                 self._emit(TOOL_CALL_OPEN + inner + TOOL_CALL_CLOSE)
             else:
-                self._on_tool_call(call)
+                self._history += _OPAQUE_BLOCK
+                for call in calls:
+                    self._on_tool_call(call)
 
     def _find_close_outside_string(self, start: int) -> int:
         """Позиция `</tool_call>` вне строковых литералов JSON, или -1.
@@ -379,14 +642,20 @@ class ToolCallParser:
                 return length
         return 0
 
+    def _tail_in_code(self) -> bool:
+        """Хвост-префикс тега в буфере лежит внутри markdown-кода."""
+        doc = self._history + self._buf
+        return _code_context(doc, len(doc) - self._pending_prefix(), True) == "code"
+
     def _emit(self, text: str) -> None:
         if text:
+            self._history += text
             self._on_content(text)
 
     def _flush_all(self) -> None:
         if self._buf:
             text, self._buf = self._buf, ""
-            self._on_content(text)
+            self._emit(text)
 
 
 def finalize_turn(raw: TurnResult, emulate_tools: bool) -> TurnResult:

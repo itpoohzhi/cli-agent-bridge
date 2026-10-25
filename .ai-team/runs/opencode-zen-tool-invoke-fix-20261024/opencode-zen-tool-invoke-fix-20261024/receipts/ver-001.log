@@ -1,0 +1,64 @@
+test_batch_fed_in_chunks (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_batch_fed_in_chunks) ... ok
+test_batch_with_single_shared_close_tag (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_batch_with_single_shared_close_tag) ... ok
+test_empty_member_rejects_whole_batch_as_text (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_empty_member_rejects_whole_batch_as_text) ... ok
+test_malformed_member_rejects_whole_batch_as_text (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_malformed_member_rejects_whole_batch_as_text) ... ok
+test_mixed_closed_and_unclosed_calls (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_mixed_closed_and_unclosed_calls) ... ok
+test_open_tag_inside_string_is_not_separator (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_open_tag_inside_string_is_not_separator) ... ok
+test_strict_live_batch_without_intermediate_close (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_strict_live_batch_without_intermediate_close) ... ok
+test_strict_live_empty_member_raises_no_calls (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_strict_live_empty_member_raises_no_calls) ... ok
+test_strict_live_malformed_and_empty_batches_across_chunkings (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_strict_live_malformed_and_empty_batches_across_chunkings)
+strict_live=True: испорченная пачка атомарно отклоняется при любой нарезке потока. ... ok
+test_strict_live_malformed_member_raises_no_partial_calls (tests.test_tool_parser.TestBatchWithoutIntermediateClose.test_strict_live_malformed_member_raises_no_partial_calls) ... ok
+test_core_and_muse_parsers_follow_same_contract (tests.test_tool_parser.TestCrossBridgeParserContract.test_core_and_muse_parsers_follow_same_contract) ... ok
+test_muse_bridge_uses_same_markers (tests.test_tool_parser.TestCrossBridgeParserContract.test_muse_bridge_uses_same_markers) ... ok
+test_atx_heading_ends_inline_code_block (tests.test_tool_parser.TestInlineCodeBatch.test_atx_heading_ends_inline_code_block) ... ok
+test_escaped_tick_and_long_delimiter (tests.test_tool_parser.TestInlineCodeBatch.test_escaped_tick_and_long_delimiter) ... ok
+test_fence_blocks_and_unpaired_ticks (tests.test_tool_parser.TestInlineCodeBatch.test_fence_blocks_and_unpaired_ticks) ... ok
+test_inline_code_batch_is_plain_text (tests.test_tool_parser.TestInlineCodeBatch.test_inline_code_batch_is_plain_text) ... ok
+test_json_fence_inside_block_is_real_call (tests.test_tool_parser.TestInlineCodeBatch.test_json_fence_inside_block_is_real_call) ... ok
+test_nested_ticks_and_multiline_inline_code (tests.test_tool_parser.TestInlineCodeBatch.test_nested_ticks_and_multiline_inline_code) ... ok
+test_real_call_after_closed_inline_code_still_parsed (tests.test_tool_parser.TestInlineCodeBatch.test_real_call_after_closed_inline_code_still_parsed) ... ok
+test_real_call_after_closed_text_inline_code_parsed (tests.test_tool_parser.TestInlineCodeBatch.test_real_call_after_closed_text_inline_code_parsed) ... ok
+test_strict_live_inline_code_batch_does_not_raise (tests.test_tool_parser.TestInlineCodeBatch.test_strict_live_inline_code_batch_does_not_raise) ... ok
+test_tilde_fence_blocks (tests.test_tool_parser.TestInlineCodeBatch.test_tilde_fence_blocks) ... ok
+test_tilde_json_fence_inside_block_is_real_call (tests.test_tool_parser.TestInlineCodeBatch.test_tilde_json_fence_inside_block_is_real_call) ... ok
+test_tool_choice_none_omits_section (tests.test_tool_parser.TestPromptRendering.test_tool_choice_none_omits_section) ... ok
+test_tool_history_roundtrip (tests.test_tool_parser.TestPromptRendering.test_tool_history_roundtrip) ... ok
+test_close_tag_inside_string_is_not_boundary (tests.test_tool_parser.TestToolCallParser.test_close_tag_inside_string_is_not_boundary) ... ok
+test_code_fence_stripped (tests.test_tool_parser.TestToolCallParser.test_code_fence_stripped) ... ok
+test_escaped_quote_does_not_end_string (tests.test_tool_parser.TestToolCallParser.test_escaped_quote_does_not_end_string) ... ok
+test_invalid_block_falls_back_to_text (tests.test_tool_parser.TestToolCallParser.test_invalid_block_falls_back_to_text) ... ok
+test_multiple_calls_in_row (tests.test_tool_parser.TestToolCallParser.test_multiple_calls_in_row) ... ok
+test_non_object_arguments_rejected (tests.test_tool_parser.TestToolCallParser.test_non_object_arguments_rejected) ... ok
+test_nonstream_malformed_xml_fallback_unchanged (tests.test_tool_parser.TestToolCallParser.test_nonstream_malformed_xml_fallback_unchanged)
+Legacy (strict_live=False): невалидный блок — текстом, без исключения. ... ok
+test_nonstream_unclosed_xml_finish_fallback_unchanged (tests.test_tool_parser.TestToolCallParser.test_nonstream_unclosed_xml_finish_fallback_unchanged)
+Legacy (strict_live=False): незакрытый блок на finish() — текстом, без исключения. ... ok
+test_pending_prefix_not_emitted_early (tests.test_tool_parser.TestToolCallParser.test_pending_prefix_not_emitted_early) ... ok
+test_plain_text_passthrough (tests.test_tool_parser.TestToolCallParser.test_plain_text_passthrough) ... ok
+test_single_call_split_across_deltas (tests.test_tool_parser.TestToolCallParser.test_single_call_split_across_deltas) ... ok
+test_strict_live_malformed_xml_error_no_leak (tests.test_tool_parser.TestToolCallParser.test_strict_live_malformed_xml_error_no_leak)
+strict_live=True: невалидный блок — LiveParserError, сырой XML не уходит в content. ... ok
+test_strict_live_unclosed_xml_error_no_leak (tests.test_tool_parser.TestToolCallParser.test_strict_live_unclosed_xml_error_no_leak)
+strict_live=True: незакрытый блок на finish() — LiveParserError, не текст. ... ok
+test_strict_live_unresolved_prefix_error_no_leak (tests.test_tool_parser.TestToolCallParser.test_strict_live_unresolved_prefix_error_no_leak)
+strict_live=True: оборванный префикс открывающего тега на finish() — тоже ошибка. ... ok
+test_strict_live_well_formed_call_unaffected (tests.test_tool_parser.TestToolCallParser.test_strict_live_well_formed_call_unaffected)
+strict_live=True не меняет поведение для валидного блока (только malformed/unclosed). ... ok
+test_unclosed_block_flushed_as_text_on_finish (tests.test_tool_parser.TestToolCallParser.test_unclosed_block_flushed_as_text_on_finish) ... ok
+test_forced_function (tests.test_tool_parser.TestToolsSection.test_forced_function) ... ok
+test_protocol_and_schema_present (tests.test_tool_parser.TestToolsSection.test_protocol_and_schema_present) ... ok
+test_tool_choice_required (tests.test_tool_parser.TestToolsSection.test_tool_choice_required) ... ok
+test_batch_segment_with_extra_brace (tests.test_tool_parser.TestTrailingBraceRecovery.test_batch_segment_with_extra_brace) ... ok
+test_function_not_dict_is_rejected (tests.test_tool_parser.TestTrailingBraceRecovery.test_function_not_dict_is_rejected) ... ok
+test_name_wins_over_function (tests.test_tool_parser.TestTrailingBraceRecovery.test_name_wins_over_function) ... ok
+test_openai_function_wrapper (tests.test_tool_parser.TestTrailingBraceRecovery.test_openai_function_wrapper) ... ok
+test_present_but_blank_name_is_not_unwrapped (tests.test_tool_parser.TestTrailingBraceRecovery.test_present_but_blank_name_is_not_unwrapped) ... ok
+test_trailing_braces_recovered (tests.test_tool_parser.TestTrailingBraceRecovery.test_trailing_braces_recovered) ... ok
+test_trailing_garbage_not_recovered (tests.test_tool_parser.TestTrailingBraceRecovery.test_trailing_garbage_not_recovered) ... ok
+test_valid_block_untouched (tests.test_tool_parser.TestTrailingBraceRecovery.test_valid_block_untouched) ... ok
+
+----------------------------------------------------------------------
+Ran 52 tests in 0.154s
+
+OK
