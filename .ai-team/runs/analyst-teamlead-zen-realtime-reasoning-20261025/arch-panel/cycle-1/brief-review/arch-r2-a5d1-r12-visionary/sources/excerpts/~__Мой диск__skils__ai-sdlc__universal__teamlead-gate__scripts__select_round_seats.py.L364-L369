@@ -1,0 +1,6 @@
+        "hat_level": level,
+        "pool_constrained_3of3": constrained,
+        "status": "PAUSED_OWNER" if repeated else "READY",
+        "constrained_mode": "3of3_derangement" if repeated else None,
+    }
+

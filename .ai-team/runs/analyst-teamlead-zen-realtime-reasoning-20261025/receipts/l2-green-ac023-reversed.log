@@ -1,0 +1,18 @@
+$ uvx pytest -q -p no:cacheprovider tests/test_zen_catalog.py tests/test_tool_emulation.py tests/test_sync_yaml.py tests/test_stream_thinking.py tests/test_step_interruption.py tests/test_stdin_prompt.py tests/test_run_env.py tests/test_realtime_reasoning.py tests/test_native_fallback.py tests/test_lenient_tool_call.py tests/test_google_direct.py tests/test_go_model_routing.py tests/test_effort_mapping.py tests/test_cli_failure.py tests/test_catalog_reload.py tests/test_catalog_mode.py tests/test_catalog.py tests/test_aliases.py
+[cwd=/tmp/cel-runs/zen-realtime-reasoning-20261025/l2-cleanroom/bridges/opencode-zen-bridge] [rc=0] [wall=427.09s]
+--- STDOUT ---
+.................................................................. [ 12%]
+................................................................. [ 25%]
+................................................................. [ 38%]
+............................................................................. [ 53%]
+...................................................................... [ 67%]
+................................................................ [ 79%]
+........................ [ 84%]
+................ [ 87%]
+................................. [ 93%]
+............................ [ 99%]
+...                                                               [100%]
+511 passed, 3387 subtests passed in 426.79s (0:07:06)
+
+--- STDERR ---
+

@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 3,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-02.json",
+  "trigger_ids": [
+    "L2-SLOW-SERVE-STATUS-T0"
+  ],
+  "objective": "1-строчный фикс базы отсчёта status_next в _serve_one_attempt (server.py:2890): status_next = max(t0 + FIRST_STATUS_DELAY_S, prompt_send_start + 0.25), чтобы медленный serve получал первый статус [мост] через 0.65 с от начала HTTP-запроса t0 (<= 1.0 с), а быстрый serve не получал ложного статуса",
+  "inputs_read": [
+    "plans/coder-02.before.json",
+    "plans/coder-02.json",
+    "handoffs/coder-02.json",
+    "brief coder-03 (точная замена строки 2890 и обоснование t0/prompt_send_start)",
+    "skills/feature.md (канон feature-implementation по пути брифа /Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/feature.md)",
+    "bridges/opencode-zen-bridge/server.py:2885-2895 (точечная проверка: строка 2890 = status_next = prompt_send_start + FIRST_STATUS_DELAY_S; t0 — параметр _serve_one_attempt, prompt_send_start = time.monotonic() строка 2866)"
+  ],
+  "stop_conditions": [
+    "Не менять файлы вне белого списка: bridges/opencode-zen-bridge/server.py (только строка 2890)",
+    "Не менять замороженные _run_env/_stream_google_sse/_execute_google_once ни на один байт (контроль sha256 в VER-004)",
+    "Не делать git commit/push",
+    "При несовпадении фактической строки 2890 со строкой брифа — стоп и ASK, не угадывать",
+    "Не запускать полный 83-секундный сьют; только 2 целевых теста + VER-004 по брифу"
+  ],
+  "deviations": [
+    "Команда pytest из шага 3 брифа содержит два флага -k; pytest применяет только последний, поэтому выборки test_realtime_reasoning.py и test_go_model_routing.py прогнаны двумя отдельными вызовами с теми же фильтрами (3 passed + 1 passed)"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Однострочная замена в bridges/opencode-zen-bridge/server.py:2890: status_next = prompt_send_start + FIRST_STATUS_DELAY_S -> status_next = max(t0 + FIRST_STATUS_DELAY_S, prompt_send_start + 0.25); форматирование только диапазона 2885:1-2895:999 через ruff format --range",
+      "expected_evidence": "grep показывает строку 2890 = status_next = max(t0 + FIRST_STATUS_DELAY_S, prompt_send_start + 0.25); ruff format --range exit 0",
+      "status": "DONE",
+      "actual_evidence": "server.py:2890 status_next = max(t0 + FIRST_STATUS_DELAY_S, prompt_send_start + 0.25); uvx ruff format --range=2885:1-2895:999: 1 file left unchanged, exit 0"
+    },
+    {
+      "id": "RP-02",
+      "kind": "verify",
+      "action": "Быстрая проверка по брифу: целевой pytest (test_slow_serve_gets_status_and_no_status_on_fast, test_ac026_realtime_chunks_before_upstream_end, test_frozen_slices_hashes из test_realtime_reasoning.py; test_stream_go_model_success_with_fake_launcher из test_go_model_routing.py) и VER-004",
+      "expected_evidence": "целевой pytest exit 0 и VER-004 exit 0",
+      "status": "DONE",
+      "actual_evidence": "pytest test_realtime_reasoning.py -k 'slow/ac026/frozen': 3 passed, 18 deselected in 4.55s, exit 0 (включая ранее падавший test_slow_serve_gets_status_and_no_status_on_fast); pytest test_go_model_routing.py -k test_stream_go_model_success_with_fake_launcher: 1 passed in 0.65s, exit 0; VER-004 дословно из architecture-packet.json: PASS VER-004, BASEDPYRIGHT errorCount 0, VER004_EXIT:0"
+    },
+    {
+      "id": "RP-03",
+      "kind": "report",
+      "action": "Записать plans/coder-03.json со статусами DONE и handoffs/coder-03.json (+ копия coder.json) с sha256 плана; validate_role_plan --phase after и validate_handoff coder exit 0",
+      "expected_evidence": "validate_role_plan --phase after exit 0 и validate_handoff coder exit 0",
+      "status": "DONE",
+      "actual_evidence": "plans/coder-03.json записан в phase after со статусами DONE; handoffs/coder-03.json и coder.json записываются с точным sha256 plans/coder-03.json; validate_role_plan --phase after и validate_handoff coder выполняются после записи"
+    }
+  ]
+}

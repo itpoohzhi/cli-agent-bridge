@@ -1,0 +1,136 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "source_cycle": 10,
+  "target_cycle": 11,
+  "source_rounds": [
+    "panel/council/r149",
+    "panel/council/r154"
+  ],
+  "panel_proofs": [
+    {
+      "round": "r149",
+      "receipt": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/council-r149-proof.json",
+      "sha256": "f9f9bdf6d93bdec7bb812d3dd0c23b88058d8523189fbe6b211244e2586bfa20"
+    },
+    {
+      "round": "r154",
+      "receipt": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/council-r154-proof.json",
+      "sha256": "275e60054117978dbd95944e654320e49a133633223309b925a865a0bc608c36"
+    }
+  ],
+  "blocking_rework_items": [
+    {
+      "id": "RW-001",
+      "ledger_ids": [
+        "F-001",
+        "F-005"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:3562-3564",
+        "bridges/opencode-zen-bridge/server.py:6573",
+        "bridges/opencode-zen-bridge/server.py:7961",
+        "bridges/opencode-zen-bridge/server.py:8121"
+      ],
+      "summary": "Доставка текстовых дельт `session.text.delta` из окна `_drain_serve_step_usage` через `text_cb` и при `emulate_tools=True` (с прохождением через `ToolCallParser` в SSE и `texts.append` в JSON при сохранении удержания нативных `tool_calls` до `session.step.ended`).",
+      "required_oracle": "SSE и JSON оракулы при включённых инструментах: `tool.called -> session.text.delta ('хвост') -> session.step.ended` доставляет текст 'хвост' клиенту ровно один раз и ровно один `tool_call` с `finish_reason='tool_calls'`."
+    },
+    {
+      "id": "RW-002",
+      "ledger_ids": [
+        "F-002",
+        "F-008"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:1587",
+        "bridges/opencode-zen-bridge/server.py:2472",
+        "bridges/opencode-zen-bridge/server.py:3331",
+        "bridges/opencode-zen-bridge/server.py:3857",
+        "bridges/opencode-zen-bridge/server.py:3900",
+        "bridges/opencode-zen-bridge/server.py:3996",
+        "bridges/opencode-zen-bridge/server.py:4045-4068"
+      ],
+      "summary": "Применение остатка `_AuxIoBudget` (`_AUX_IO_BUDGET_S = 54.0` с) к фазе ожидания заголовков prompt в `_prompt_worker` (`deadline=aux.deadline(attempt_deadline)`, отказ от старта при `aux.exhausted()`), списание ожидания подписки `_open_serve_events` вплоть до первого SSE-события (`first_event_timeout`) и управляющих `permission`/`form` вызовов (вне резерва `cleanup()`).",
+      "required_oracle": "Тест реальных точек вызова prompt и подписки с управляемыми часами: при остатке `aux = 1.0` с зависший prompt обрывается по `aux.deadline` быстрее `2.0` с, суммарный `spent_s <= 54.0` с через несколько попыток, при `aux.exhausted()` новый I/O не стартует."
+    },
+    {
+      "id": "RW-003",
+      "ledger_ids": [
+        "F-003",
+        "F-009"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:6997",
+        "bridges/opencode-zen-bridge/server.py:7004-7005",
+        "bridges/opencode-zen-bridge/server.py:7032-7047"
+      ],
+      "summary": "Ограничение downstream-записи (`_LockedWfile` с таймаутом `min(_DOWNSTREAM_WRITE_TIMEOUT_S, remaining_deadline)`) до `self.end_headers()`, первого `role='assistant'` чанка и в таймере `_initial_status` (без повторного захвата нерекурсивного замка), с переводом ошибок/таймаутов в `_downstream_client_gone` + `abort_socket()` и освобождением слота/группы `serve` быстрее `7.0` с.",
+      "required_oracle": "Тесты инъекции блокировки/ошибки отдельно на отправке заголовков, `role`-чанка и `_initial_status` + сокетный тест медленного клиента с полным окном до первого токена модели (слот `in_use == 0` и группа `serve` остановлена быстрее `7.0` с)."
+    },
+    {
+      "id": "RW-004",
+      "ledger_ids": [
+        "F-004",
+        "F-010"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:6194-6197"
+      ],
+      "summary": "Устранение `except Exception: pass` в `_LockedWfile._mark_client_gone`: логировать сбой callback через `_log` с `_mask_secrets` и гарантированно выполнять `abort_socket()` в `finally:`.",
+      "required_oracle": "Тест: callback `_on_client_gone`, бросающий `RuntimeError`, логирует маскированную диагностику в `bridge.log` и не мешает закрытию сокета через `abort_socket()`."
+    },
+    {
+      "id": "RW-005",
+      "ledger_ids": [
+        "F-006"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:6751",
+        "bridges/opencode-zen-bridge/server.py:8169-8171",
+        "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py:1593"
+      ],
+      "summary": "Согласование классификации `_incomplete_step_signal` на `serve` (SSE и JSON) с `run`: передавать в `_incomplete_step_signal` очищенную через `_strip_interrupted` копию `reasoning`, сохраняя сырые байты `reasoning_content` для клиента.",
+      "required_oracle": "Тест SSE и JSON при включённом `STEP_RECOVERY_ENABLED=true`, доступных `tools`, обычном `tool_choice`, готовом текстовом ответе и `reasoning` с маркером прерывания: `serve` и `run` делают одинаковое число попыток (`1`), а `reasoning_content` клиенту сохраняется побайтово."
+    },
+    {
+      "id": "RW-006",
+      "ledger_ids": [
+        "F-007"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:3237",
+        "bridges/opencode-zen-bridge/server.py:3679-3704"
+      ],
+      "summary": "Включение UTF-8 размеров ключей `call_id` и полей `name` в байтовый бюджет `_serve_tool_state_bytes` / `_serve_accumulated_bytes` (`_MAX_SERVE_ACCUMULATED_BYTES`), чтобы превышение через `call_id`/`name` в main и drain вызывало `ServeProtocolError` с `cleanup()`.",
+      "required_oracle": "Тест превышения байтового лимита через крупные `name`/`call_id` в основном цикле и в окне дренажа: `ServeProtocolError`, `cleanup()`, `0` опубликованных pending tool calls."
+    }
+  ],
+  "non_blocking_follow_ups": [
+    {
+      "id": "FU-001",
+      "ledger_ids": [
+        "F-013"
+      ],
+      "priority": "non-blocking",
+      "summary": "Уточнение в `teamlead/verification-traceability.md` фактических событий `session.*` (`session.reasoning.delta`, `session.text.delta`, `permission.asked`, `form.created`) и default-политики `ask_reject`."
+    }
+  ],
+  "dismissed_findings": [
+    {
+      "ledger_id": "F-011",
+      "orig_id": "realist-F-007",
+      "resolution": "DISMISSED (2/3 majority: realist WITHDRAW + skeptic DISPUTE out_of_scope per council.md §3 and mandatory VER-002 unittest discover AC-022)."
+    },
+    {
+      "ledger_id": "F-012",
+      "orig_id": "realist-F-008",
+      "resolution": "DISMISSED (2/3 majority: realist WITHDRAW + skeptic DISPUTE out_of_scope per council.md §3, ADR-0001 dynamic_config.json, and 0 external runtime dependencies stdlib constraint)."
+    }
+  ]
+}

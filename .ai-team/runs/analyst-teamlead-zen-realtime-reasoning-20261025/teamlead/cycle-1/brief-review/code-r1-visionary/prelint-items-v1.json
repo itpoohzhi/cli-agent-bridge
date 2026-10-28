@@ -1,0 +1,532 @@
+{
+  "brief_sha256": "79cb7c3f0c33a1b0fa42488b2f26d46e9e4ae07ff1183d24013d900cfe2d075e",
+  "pyfirst_seconds": 0.006862,
+  "prefilled_items": [
+    {
+      "id": "BR-01",
+      "evidence_quote": "При запуске DeepSeek (`deepseek-v4.1-flash-free` High) через `opencode-zen-bridge` в DSH Desktop размышления (`reasoning_content` / блок `Think`) и прогресс шагов стримятся в реалтайме по мере генерации, без «немой",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-02",
+      "evidence_quote": "Полный цикл `analyst-teamlead` пройден с двумя `PANEL PROOF` (`verify_panel_proof.py` exit=0, `panel-proof.json` PASS на `arch` и `code`), всеми L1/L2 проверками (`ruff`, `basedpyright`, `pytest`) и открытым PR в `origin/dev` (без merge).",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-03",
+      "evidence_quote": "Проведена живая проверка тяжёлым путём на реальном мосту и DSH.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-04",
+      "evidence_quote": "\"criticality\": \"S2\"",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-05",
+      "evidence_quote": "Подтверждены три независимые причины; устранять надо все три, иначе пользователь по-прежнему не увидит «процесс идёт",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-06",
+      "evidence_quote": "Вне периметра: правка кода, деплой, изменение DSH, смена модели, чужие мосты (кроме эталона muse-bridge).",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-07",
+      "evidence_quote": "Модификатор режима `code`: Перечисли конкретные проверки: типы, ошибки, граничные случаи, тесты, безопасность, гонки ресурсов и обратную совместимость контрактов. Усиленные критерии режима `code` (вес ×1.5 на агрегации): 1. КОРРЕКТНОСТЬ и 4",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-08",
+      "evidence_quote": "AC-002: накладные расходы моста между приходом дельты и записью в сокет не больше 250 мс",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-09",
+      "evidence_quote": "| REQ-002 | MUST | Публичный контракт не меняется: `/health`, `/v1/models`, `/v1/chat/completions`, формат OpenAI SSE, `finish_reason`, `usage`, порт :9883 | F-35, F-34 | AC-003: побайтовое совпадение формы чанков с текущей на наборе сущест",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-10",
+      "evidence_quote": "| REQ-003 | MUST | Прежний путь `opencode run --format json` остаётся рабочим как переключаемый запасной вариант и kill-switch (имя переменной и дефолт задаёт Архитектор); существующие тесты на fake-CLI остаются зелёными | F-43, F-40, F-42",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-11",
+      "evidence_quote": "| REQ-004 | MUST | Первая видимая реакция моста в течение 1.0 с после открытия SSE: непустой `reasoning_content`, оканчивающийся `\\n` (статус подключения/ожидания модели), независимо от состояния апстрима | F-36, F-37, F-04, F-33 | AC-005:",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-12",
+      "evidence_quote": "| REQ-005 | MUST | Статусные строки моста отделены от текста модели, имеют префикс «[мост]» и завершаются `\\n`; текст размышления модели не модифицируется; статусные строки не попадают в промпт при реплее | F-37, F-38, F-07, F-39 | AC-006:",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-13",
+      "evidence_quote": "AC-007: `_messages_to_prompt` не содержит статусных строк при реплее",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-14",
+      "evidence_quote": "| REQ-006 | MUST | Watchdog первого события: нет ни одного события транспорта в течение порога (допущение 20 с, OPEN-11) — группа процессов убивается, попытка повторяется по общему бюджету либо клиент получает явную ошибку | F-09, F-30, F-3",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-15",
+      "evidence_quote": "| REQ-007 | MUST | Watchdog первого токена (reasoning или text, допущение 60 с) и watchdog паузы между чанками (допущение 60 с); пороги настраиваются переменными окружения | F-09, F-19, F-32 | AC-009: пауза больше порога после первого токен",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-16",
+      "evidence_quote": "AC-010: порог первого токена даёт `first_token_timeout`",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-17",
+      "evidence_quote": "| REQ-008 | MUST | Отсутствие осиротевших процессов: при отключении клиента, таймауте и watchdog убивается вся группа (включая дочерний `opencode serve`); отключение клиента обнаруживается не позже 5 с | F-14, F-30, F-33 | AC-011: после зак",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-18",
+      "evidence_quote": "AC-012: ход 1 образца (24.4 с на обнаружение) не воспроизводится",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-19",
+      "evidence_quote": "| REQ-009 | MUST | Потолок `MAX_TOTAL_SPAWNS=3`, `FAIL_RETRY_LIMIT`, `_RetryBudget`, Full Jitter и Circuit Breaker сохраняются; повторы по watchdog считаются в общий потолок; при повторе после отданного размышления вставляется отдельная ста",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-20",
+      "evidence_quote": "AC-014: размышление не дедуплицируется, между попытками ровно одна статусная строка",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-21",
+      "evidence_quote": "| REQ-010 | MUST | `ToolCallParser` на потоковых дельтах: текст вне тегов выдаётся инкрементально (удерживается не более `len(\"<tool_invoke>\")-1` символов хвоста и открытый блок), блоки `<tool_call>`/`<tool_invoke>` не попадают в `content`",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-22",
+      "evidence_quote": "| REQ-011 | MUST | Завершение шага с вызовом инструмента останавливает процесс или сессию и даёт `finish_reason=\"tool_calls\"`; детектор оборванного шага (`STEP_RECOVERY`), классификация `etype=error` и маркеры `_INTERRUPTED_RE` работают на",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-23",
+      "evidence_quote": "| REQ-012 | MUST | Встроенные инструменты `opencode` на новом транспорте запрещены (политика `deny` для всех) либо эквивалентно изолированы; события встроенных инструментов приводятся к текущему внутреннему виду (`tool_use`, unmapped, nativ",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-24",
+      "evidence_quote": "| REQ-013 | MUST | Ротация чистых IP на каждый новый запуск, `_StartupGate`, `SPAWN_RATE_PER_S`, bulkhead слотов и Circuit Breaker действуют и для нового транспорта | F-10, F-11, F-15, F-32 | AC-018: два последовательных запуска получают ра",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-25",
+      "evidence_quote": "| REQ-014 | SHOULD | `usage` собирается из токенов завершения шага нового транспорта и совпадает по полям (`input`, `output`, `cached`, `reasoning`) с текущим | F-19, F-02 | AC-019: поле `usage` финального чанка совпадает с эталонными значе",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-26",
+      "evidence_quote": "| REQ-015 | MUST | Секреты не пишутся в логи и артефакты: пароль `opencode serve` (случайный на процесс), ключи, креды прокси; применяется существующее маскирование | F-21, F-27 | AC-020: `bridge.log` после прогона не содержит пароля serve",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-27",
+      "evidence_quote": "| REQ-016 | MUST | Наблюдаемость `O-EXIT/v1`: новые значения `exit_reason` (`first_event_timeout`, `first_token_timeout`, `stall_timeout`, `client_gone`) и поля `transport`, `first_event_ms`, `ttft_ms` в строке выхода | F-32, F-30 | AC-021:",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-28",
+      "evidence_quote": "| REQ-017 | SHOULD | Базовая линия тестов приводится в зелёное: два теста ждут 4 запуска при потолке 3, третий страдает от общего `_RetryBudget` на класс | F-45, F-46, F-47, F-48, F-49 | AC-022: `uvx pytest -q -p no:cacheprovider tests/` бе",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-29",
+      "evidence_quote": "AC-023: результат не зависит от порядка тестов",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-30",
+      "evidence_quote": "| REQ-018 | MUST | Прямой Google-маршрут (`_stream_google_sse`, `_execute_google_once`) не затрагивается | F-16 | AC-024: `test_google_direct.py` проходит без правок |",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-31",
+      "evidence_quote": "| REQ-019 | SHOULD | Развёрнутая копия `~/.dsh/bridges/opencode-zen-bridge/server.py` синхронизируется с репозиторием и проверяется сверкой | F-34, OPEN-17 | AC-025: побайтовое совпадение после деплоя |",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-32",
+      "evidence_quote": "Модификатор режима `code`: Перечисли конкретные проверки: типы, ошибки, граничные случаи, тесты, безопасность, гонки ресурсов и обратную совместимость контрактов. Усиленные критерии режима `code` (вес ×1.5 на агрегации): 1. КОРРЕКТНОСТЬ и 4",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-33",
+      "evidence_quote": "operational_profile",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-34",
+      "evidence_quote": "Не менять публичный HTTP-контракт моста, порт и формат OpenAI SSE (REQ-002).",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-35",
+      "evidence_quote": "Не менять DSH (бандл `app.asar`), профиль `cordis.patch.yml` и поведение `ReasoningRow`.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-36",
+      "evidence_quote": "Не модифицировать текст размышления модели ради превью (OPEN-13).",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-37",
+      "evidence_quote": "Не менять модель, список моделей, логику выбора эффорта и каталог Zen.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-38",
+      "evidence_quote": "Не трогать `muse-bridge`, другие мосты и общий `~/.config/opencode/opencode.json` / конфиг `model_georouter`.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-39",
+      "evidence_quote": "Не вводить новые внешние зависимости Python вне стандартной библиотеки, если Architect не обоснует иное.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-40",
+      "evidence_quote": "Изменение чужих файлов репозитория вне `bridges/opencode-zen-bridge/` и тестов этого моста.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-41",
+      "evidence_quote": "Запись секретов (ключи, пароль serve, креды прокси, значения `apiKey`) в логи, артефакты, код и тесты.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-42",
+      "evidence_quote": "Мутирующие действия на боевом контуре без отката: правка `~/.dsh` и перезапуск LaunchAgent допустимы только в живой приёмке по протоколу из `handoff-qa.md`.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-43",
+      "evidence_quote": "Использование `security find-generic-password`.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-44",
+      "evidence_quote": "Правка `opencode.db` и общего каталога состояния `opencode` напрямую.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-45",
+      "evidence_quote": "Коммит в `main`, `master`, `dev`; merge выполняет человек.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-46",
+      "evidence_quote": "evidence-ledger.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-47",
+      "evidence_quote": "Цели отзывчивости владельцем не заданы числами (OPEN-11); рабочие значения: первая видимая строка до 1.0 с, первая дельта размышления до 3.0 с, пауза до 15 с, молчание до 20 с.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-48",
+      "evidence_quote": "research-plan.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-49",
+      "evidence_quote": "aisdlc-gcge/AGENTS.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-50",
+      "evidence_quote": "aisdlc-gcge/AGENTS.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-51",
+      "evidence_quote": "aisdlc-gcge/AGENTS.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-52",
+      "evidence_quote": "## 5. Инвентарь контрактов (as-is)",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-53",
+      "evidence_quote": "Локальный `model_georouter` (`127.0.0.1:10830`) и пул ротации чистых IP ProxyRack",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-54",
+      "evidence_quote": "всё ниже `parse_opencode_event` оперирует кортежами `(etype, payload)`",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-55",
+      "evidence_quote": "выполнимо с условиями",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-56",
+      "evidence_quote": "и общего каталога состояния",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "BR-57",
+      "evidence_quote": "| REQ-006 | MUST | Watchdog первого события: нет ни одного события транспорта в течение порога (допущение 20 с, OPEN-11) — группа процессов убивается, попытка повторяется по общему бюджету либо клиент получает явную ошибку | F-09, F-30, F-3",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-02",
+      "evidence_quote": "FAIL без привязки к файлу/строке/правилу не засчитывается.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-03",
+      "evidence_quote": "- diff меняет согласованный внешний контракт (HTTP/event/data/CLI/SDK), а в",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-04",
+      "evidence_quote": "- работа, diff или отчёт выходит за текущую задачу (чужие Jira-KEY, чужой",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-05",
+      "evidence_quote": "Нет содержательного наблюдения по критерию — ставь PASS/INCONCLUSIVE, не выдумывай FAIL.",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-06",
+      "evidence_quote": "Модификатор режима `code`: Перечисли конкретные проверки: типы, ошибки, граничные случаи, тесты",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-07",
+      "evidence_quote": "Анти-галлюцинация: перед тем как выставить FAIL «нет X», перечитай приложенный пакет приёмки и diff целиком",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-08",
+      "evidence_quote": "Результаты тестов и статических проверок бери только как факт из валидных строк `execution-evidence.md`",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-09",
+      "evidence_quote": "Проверь соответствие кандидата каждому требованию `REQ-001..REQ-020`, каждому приёмочному критерию `AC-001..AC-026`",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-12",
+      "evidence_quote": "<<<ARTIFACT .ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/coder.json",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-13",
+      "evidence_quote": "<<<ARTIFACT .ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/execution-evidence.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-14",
+      "evidence_quote": "<<<ARTIFACT .ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/reverse-spec.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-16",
+      "evidence_quote": "<<<ARTIFACT ~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/AGENTS.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-17",
+      "evidence_quote": "📋 ФАКТ-КАРТА (проверено оркестратором на целевой машине и дополнено логами гейтов, 2026-10-26):",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-18",
+      "evidence_quote": "<<<ARTIFACT ~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/scope-and-contracts.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-C-20",
+      "evidence_quote": "Обязательное указание судье перед обёртками стандартов (вне тела обёрток `ARTIFACT`):",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-T-01",
+      "evidence_quote": "<<<ARTIFACT ~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/feature.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-T-02",
+      "evidence_quote": "aisdlc-gcge/skills/feature.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-T-03",
+      "evidence_quote": "aisdlc-gcge/skills/feature.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-01",
+      "evidence_quote": "aisdlc-gcge/AGENTS.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-02",
+      "evidence_quote": "aisdlc-gcge/agents/scope-and-contracts.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-03",
+      "evidence_quote": "aisdlc-gcge/agents/code.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-04",
+      "evidence_quote": "aisdlc-gcge/agents/python-standards.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-05",
+      "evidence_quote": "Зелёный прогон ≠ корректно",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-06",
+      "evidence_quote": "aisdlc-gcge/agents/security.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-07",
+      "evidence_quote": "aisdlc-gcge/agents/error-handling.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "SK-P-08",
+      "evidence_quote": "aisdlc-gcge/agents/logging.md",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "JD-03",
+      "evidence_quote": "суди ЗАНОВО, не подтверждай прошлый вердикт автоматически",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "JD-04",
+      "evidence_quote": "ФОРМАТ ОТВЕТА (строго):",
+      "status": "covered",
+      "fix": ""
+    },
+    {
+      "id": "JD-07",
+      "evidence_quote": "РЕШЕНИЕ ДЛЯ ОЦЕНКИ:",
+      "status": "covered",
+      "fix": ""
+    }
+  ],
+  "residual_ids": [
+    "JD-02",
+    "JD-05",
+    "JD-06",
+    "JD-08",
+    "HY-02",
+    "HY-04",
+    "HY-05",
+    "HY-06"
+  ]
+}

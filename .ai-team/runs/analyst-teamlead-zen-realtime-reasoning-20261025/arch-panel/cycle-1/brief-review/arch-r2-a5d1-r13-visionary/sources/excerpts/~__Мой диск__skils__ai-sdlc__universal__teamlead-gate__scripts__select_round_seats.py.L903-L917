@@ -1,0 +1,15 @@
+        check(is_hex(manifest.get("artifact_sha256")), "invalid artifact_sha256")
+        expected_input = f"{manifest['run_id']}:{stage}:r{number}:{manifest['artifact_sha256']}:{gen['prev_entry_sha256']}"
+        seed = digest(expected_input.encode())
+        ranked = rank_slots(seed, table["setups"][setup])
+        check(
+            manifest.get("seed_input") == expected_input
+            and manifest.get("seed_hex") == seed
+            and manifest.get("ranked_order") == ranked,
+            "seed/ranked_order reconstruction mismatch",
+        )
+        check(
+            manifest.get("debate_roster_mode")
+            == ("initial" if number == 1 else "rotated"),
+            "debate_roster_mode mismatch",
+        )

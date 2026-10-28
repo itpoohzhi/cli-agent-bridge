@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/panel/council/r266","session_id":"d9d4f261-fde1-4e49-96ef-633beceb2cc4","model":"Grok 4.7 256K High","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Проба доступности транспорта. Ответь одним словом: OK."}]},"session_id":"d9d4f261-fde1-4e49-96ef-633beceb2cc4"}

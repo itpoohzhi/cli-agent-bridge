@@ -1,0 +1,26 @@
+{
+  "available": false,
+  "family": "Google",
+  "ladder": [
+    {
+      "argv_sha256": "45ab28b0f23e53b0c2c95b6ebbb5c8ac388a4c8a70fed304eafdafed73855b3e",
+      "end_utc": null,
+      "error": null,
+      "pgid": "27769",
+      "pid": 27769,
+      "raw_err_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_out_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rc": null,
+      "start_utc": "2026-10-27T03:17:59.341040+00:00",
+      "status": "inconclusive",
+      "transport": "agy"
+    }
+  ],
+  "launcher_sha256": "2123a3a8c508864327a1b9cf19460f5383194cab4f9c9581204157190c84c5d1",
+  "round": 30,
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "schema": "pol-probe/1",
+  "setup": "default",
+  "slot_id": "gemini-4-argon-high",
+  "stage": "council"
+}

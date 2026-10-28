@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "zen-realtime-reasoning",
+  "role": "architect",
+  "iteration": 1,
+  "plan_kind": "full",
+  "goal": "Спроектировать проверяемый realtime-транспорт и отзывчивость Zen-моста без изменения продукта",
+  "objective": "Architecture Packet S2 с замороженной verification surface и неизменным продуктовым worktree",
+  "scope_paths": [
+    "analysis/zen-realtime-reasoning/",
+    "bridges/opencode-zen-bridge/",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/"
+  ],
+  "inputs_read": [
+    "Brief Stage 2 Software Product Architect",
+    "analysis/zen-realtime-reasoning/handoff-architect.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/validate_role_plan.py",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py"
+  ],
+  "stop_conditions": [
+    "Любая запись вне разрешённого run_dir запрещена",
+    "Неустранённый blocker, one-way без approval или FAIL валидатора запрещает handoff",
+    "Неизвестная семантика инструмента — fail-closed; никаких секретов в артефактах"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить handoff аналитика, требования и реальный контракт валидаторов",
+      "expected_evidence": "F-01..F-49, REQ-001..020, схемы role plan и packet",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-02",
+      "kind": "inspect",
+      "action": "Проверить точки расширения транспорта, fake CLI и baseline lint/type без правок продукта",
+      "expected_evidence": "Символы server.py, точные тесты и вывод ruff/basedpyright",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Зафиксировать AD-001..004 с альтернативами, откатом и fail-safe семантикой",
+      "expected_evidence": "Четыре проверяемых решения с trade-offs и VER-ссылками",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-04",
+      "kind": "decide",
+      "action": "Заморозить VER-001..005, HL-ENV/v1 и 21 resilience stop-code",
+      "expected_evidence": "46 атомарных полей, семь гейтов и матрица test-oracle",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Собрать Architecture Packet, закрыть план и проверить hash-связь валидаторами",
+      "expected_evidence": "PASS role plan after и architecture packet approved",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-06",
+      "kind": "report",
+      "action": "Сверить исходный fingerprint продуктового worktree и передать хеши артефактов",
+      "expected_evidence": "PASS worktree_fingerprint без изменений продукта",
+      "status": "PENDING",
+      "actual_evidence": ""
+    }
+  ],
+  "deviations": []
+}

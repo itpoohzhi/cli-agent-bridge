@@ -1,0 +1,2564 @@
+diff --git acycle-1/bridges/opencode-zen-bridge/server.py bcycle-2/bridges/opencode-zen-bridge/server.py
+index 488b800..9918673 100755
+--- acycle-1/bridges/opencode-zen-bridge/server.py
++++ bcycle-2/bridges/opencode-zen-bridge/server.py
+@@ -57,7 +57,8 @@ def _run_serve_helper_cli(args: list[str]) -> int:
+ 
+     _ = signal.signal(signal.SIGTERM, _on_term)
+     try:
+-        lease_dir.mkdir(parents=True, exist_ok=True)
++        lease_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
++        os.chmod(lease_dir, 0o700)
+     except OSError:
+         return 2
+     lease_path = lease_dir / f"lease-{attempt_id}.json"
+@@ -90,8 +91,15 @@ def _run_serve_helper_cli(args: list[str]) -> int:
+         try:
+             ready, _w, _x = select.select([0], [], [], 0)
+             return bool(ready)
+-        except (OSError, ValueError):
++        except BlockingIOError:
+             return False
++        except (OSError, ValueError) as _gone_exc:
++            if isinstance(_gone_exc, OSError) and _gone_exc.errno in (
++                errno.EAGAIN,
++                errno.EWOULDBLOCK,
++            ):
++                return False
++            return True
+ 
+     _write_lease({})
+     if _fd_ready():
+@@ -172,15 +180,44 @@ def _run_serve_helper_cli(args: list[str]) -> int:
+             if stopped["flag"]:
+                 break
+     finally:
+-        if serve_proc.poll() is None:
+-            try:
+-                serve_proc.terminate()
+-                _ = serve_proc.wait(timeout=0.5)
+-            except (OSError, subprocess.SubprocessError):
++        # Убить всю собственную группу (serve и внуков), lease — только после смерти группы.
++        _pgid = os.getpgrp()
++        try:
++            os.killpg(_pgid, signal.SIGTERM)
++        except OSError:
++            if serve_proc.poll() is None:
+                 try:
+-                    serve_proc.kill()
++                    serve_proc.terminate()
+                 except OSError:
+                     pass
++        try:
++            _ = serve_proc.wait(timeout=1.0)
++        except (OSError, subprocess.SubprocessError):
++            pass
++        if serve_proc.poll() is None:
++            # Эскалация: SIGKILL всем членам группы, кроме самого помощника.
++            try:
++                _ps = subprocess.run(
++                    ["ps", "-o", "pid=", "-g", str(_pgid)],
++                    capture_output=True,
++                    text=True,
++                    timeout=2,
++                )
++                for _line in _ps.stdout.splitlines():
++                    _pid_text = _line.strip()
++                    if _pid_text.isdecimal():
++                        _pid = int(_pid_text)
++                        if _pid != os.getpid():
++                            try:
++                                os.kill(_pid, signal.SIGKILL)
++                            except OSError:
++                                pass
++            except (OSError, subprocess.SubprocessError):
++                pass
++            try:
++                _ = serve_proc.wait(timeout=1.0)
++            except (OSError, subprocess.SubprocessError):
++                pass
+         # Дренировать остаток пайпов, чтобы потомок не остался с полным буфером.
+         for fd in pipes:
+             try:
+@@ -191,10 +228,11 @@ def _run_serve_helper_cli(args: list[str]) -> int:
+                     _ = sys.stderr.write(chunk.decode("utf-8", "replace"))
+             except OSError:
+                 pass
+-        try:
+-            lease_path.unlink()
+-        except OSError:
+-            pass
++        if serve_proc.poll() is not None:
++            try:
++                lease_path.unlink()
++            except OSError:
++                pass
+     return code
+ 
+ 
+@@ -202,6 +240,8 @@ if sys.argv[1:2] == ["--serve-helper"]:
+     raise SystemExit(_run_serve_helper_cli(sys.argv[2:]))
+ else:
+     import base64
++    import collections
++    import errno
+     import hmac
+     import http.client
+     import queue
+@@ -276,7 +316,9 @@ ALLOWED_MODELS: dict[str, dict[str, Any]] = {}
+ MODEL_ALIASES: dict[str, str] = dict(DEPRECATED_MODEL_ALIASES)
+ 
+ _catalog_lock = threading.RLock()
+-_catalog_ids: set[str] = set()           # id, добавленные каталогом (тестовые/Go-записи не трогаем)
++_catalog_ids: set[str] = (
++    set()
++)  # id, добавленные каталогом (тестовые/Go-записи не трогаем)
+ _catalog_mtime: int | None = None
+ _catalog_checked_at = float("-inf")
+ CATALOG_SOURCE = "static"
+@@ -1025,14 +1067,25 @@ def _call_key(name: str, arguments: Any) -> str:
+     return name + "\x00" + json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+ 
+ 
+-def _drain_stderr(proc: subprocess.Popen[str], sink: list[str]) -> None:
+-    """Вычитать stderr дочернего процесса построчно в `sink` (до EOF)."""
++def _drain_stderr(
++    proc: subprocess.Popen[str], sink: collections.deque[str] | list[str]
++) -> None:
++    """Вычитать stderr в ограниченный буфер (кольцо на 64 строки, без секретов в лог)."""
++    # Дренаж stderr помощника/CLI в ограниченный буфер; содержимое не логируется.
+     try:
+         assert proc.stderr is not None
+         for line in proc.stderr:
+-            line = line.strip()
++            line_text: str = cast(str, line).strip()
++            line = line_text
+             if line:
+-                sink.append(line)
++                if isinstance(sink, list):
++                    sink_list: list[str] = sink
++                    _ = sink_list.append(line)
++                    while len(sink_list) > 64:
++                        _ = sink_list.pop(0)
++                else:
++                    sink_deque: collections.deque[str] = sink
++                    _ = sink_deque.append(line)
+     except (OSError, ValueError):
+         pass
+ 
+@@ -1119,7 +1172,11 @@ class _StdoutFeed:
+                         return
+                 else:
+                     now = time.monotonic()
+-                    if idle_s > 0 and on_idle is not None and now - last_activity >= idle_s:
++                    if (
++                        idle_s > 0
++                        and on_idle is not None
++                        and now - last_activity >= idle_s
++                    ):
+                         on_idle()
+                         last_activity = now
+                     continue
+@@ -1127,6 +1184,10 @@ class _StdoutFeed:
+             if last_activity > deadline:
+                 self.timed_out = True
+                 return
++            if idle_s > 0 and on_idle is not None:
++                # Watchdog проверяется и при поступлении строк, а не только на Empty:
++                # служебный поток без токенов должен прерываться по тем же часам.
++                on_idle()
+             yield item
+ 
+     def close(self) -> None:
+@@ -1370,6 +1431,8 @@ _SERVE_ALLOWLIST = (
+ )
+ _dynamic_config_cache: dict[str, object] = {"key": None, "value": False, "path": ""}
+ _LSOF_CALLS: list[int] = []
++_PORT_ALLOC_LOCK = threading.Lock()
++_ACTIVE_SERVE_PORTS: set[int] = set()
+ 
+ 
+ class ServeUnavailable(Exception):
+@@ -1548,6 +1611,8 @@ class _ServeResult(TypedDict):
+     step_closed: bool
+     first_event_ms: int | None
+     ttft_ms: int | None
++    prompt_status: int | None
++    transient_error: bool
+ 
+ 
+ def _as_dict(value: object) -> dict[str, object]:
+@@ -1557,153 +1622,38 @@ def _as_dict(value: object) -> dict[str, object]:
+     return {}
+ 
+ 
+-class _JsonParser:
+-    """Минимальный JSON-парсер в object."""
+-
+-    def __init__(self, raw: str) -> None:
+-        self.raw = raw
+-        self.pos = 0
+-
+-    def parse(self) -> object:
+-        """Разобрать одно JSON-значение целиком."""
+-        value = self._value()
+-        self._ws()
+-        if self.pos != len(self.raw):
+-            raise ValueError("trailing data")
+-        return value
+-
+-    def _ws(self) -> None:
+-        """Пропустить пробелы."""
+-        while self.pos < len(self.raw) and self.raw[self.pos] in " \t\r\n":
+-            self.pos += 1
+-
+-    def _value(self) -> object:
+-        """Значение по первому символу."""
+-        self._ws()
+-        if self.pos >= len(self.raw):
+-            raise ValueError("eof")
+-        ch = self.raw[self.pos]
+-        if ch == "{":
+-            return self._object()
+-        if ch == "[":
+-            return self._array()
+-        if ch == '"':
+-            return self._string()
+-        if self.raw.startswith("true", self.pos):
+-            self.pos += 4
+-            return True
+-        if self.raw.startswith("false", self.pos):
+-            self.pos += 5
+-            return False
+-        if self.raw.startswith("null", self.pos):
+-            self.pos += 4
+-            return None
+-        return self._number()
+-
+-    def _object(self) -> dict[str, object]:
+-        """JSON-объект."""
+-        out: dict[str, object] = {}
+-        self.pos += 1
+-        self._ws()
+-        if self.pos < len(self.raw) and self.raw[self.pos] == "}":
+-            self.pos += 1
+-            return out
+-        while True:
+-            key = self._string()
+-            self._ws()
+-            if self.pos >= len(self.raw) or self.raw[self.pos] != ":":
+-                raise ValueError("colon")
+-            self.pos += 1
+-            out[key] = self._value()
+-            self._ws()
+-            if self.pos < len(self.raw) and self.raw[self.pos] == ",":
+-                self.pos += 1
+-                continue
+-            if self.pos < len(self.raw) and self.raw[self.pos] == "}":
+-                self.pos += 1
+-                return out
+-            raise ValueError("object end")
+-
+-    def _array(self) -> list[object]:
+-        """JSON-массив."""
+-        out: list[object] = []
+-        self.pos += 1
+-        self._ws()
+-        if self.pos < len(self.raw) and self.raw[self.pos] == "]":
+-            self.pos += 1
+-            return out
+-        while True:
+-            out.append(self._value())
+-            self._ws()
+-            if self.pos < len(self.raw) and self.raw[self.pos] == ",":
+-                self.pos += 1
+-                continue
+-            if self.pos < len(self.raw) and self.raw[self.pos] == "]":
+-                self.pos += 1
+-                return out
+-            raise ValueError("array end")
+-
+-    def _string(self) -> str:
+-        """JSON-строка с escape-последовательностями."""
+-        self._ws()
+-        if self.pos >= len(self.raw) or self.raw[self.pos] != '"':
+-            raise ValueError("string")
+-        self.pos += 1
+-        parts: list[str] = []
+-        while self.pos < len(self.raw):
+-            ch = self.raw[self.pos]
+-            self.pos += 1
+-            if ch == '"':
+-                return "".join(parts)
+-            if ch != "\\":
+-                parts.append(ch)
+-                continue
+-            if self.pos >= len(self.raw):
+-                break
+-            esc = self.raw[self.pos]
+-            self.pos += 1
+-            mapping = {
+-                '"': '"',
+-                "\\": "\\",
+-                "/": "/",
+-                "b": "\b",
+-                "f": "\f",
+-                "n": "\n",
+-                "r": "\r",
+-                "t": "\t",
+-            }
+-            if esc == "u":
+-                hex_part = self.raw[self.pos : self.pos + 4]
+-                if len(hex_part) != 4:
+-                    raise ValueError("unicode escape")
+-                parts.append(chr(int(hex_part, 16)))
+-                self.pos += 4
+-            elif esc in mapping:
+-                parts.append(mapping[esc])
+-            else:
+-                raise ValueError("escape")
+-        raise ValueError("unterminated string")
+-
+-    def _number(self) -> object:
+-        """JSON-число: int или float."""
+-        start = self.pos
+-        while self.pos < len(self.raw) and self.raw[self.pos] in "-+0123456789.eE":
+-            self.pos += 1
+-        text = self.raw[start : self.pos]
+-        if not text:
+-            raise ValueError("number")
++def _combine_surrogates(value: object) -> object:
++    """Склеить суррогатные пары UTF-16 в строках после json.loads."""
++    if isinstance(value, str):
+         try:
+-            return int(text)
+-        except ValueError:
+-            return float(text)
++            return value.encode("utf-16", "surrogatepass").decode("utf-16")
++        except (UnicodeError, ValueError):
++            return value
++    if isinstance(value, dict):
++        return {str(k): _combine_surrogates(v) for k, v in value.items()}
++    if isinstance(value, list):
++        return [_combine_surrogates(v) for v in value]
++    return value
+ 
+ 
+-def _loads_object(raw: str) -> object:
+-    """JSON в object собственным парсером."""
++def _loads_object(raw: str) -> dict[str, object] | None:
++    """JSON-объект стандартным json.loads; не-объект или битый JSON — None."""
+     try:
+-        return _JsonParser(raw).parse()
+-    except (ValueError, IndexError):
+-        return {}
++        parsed: object = cast(object, json.loads(raw))
++    except (ValueError, TypeError):
++        return None
++    if isinstance(parsed, dict):
++        combined = _combine_surrogates({str(k): v for k, v in parsed.items()})
++        return combined if isinstance(combined, dict) else None
++    return None
++
++
++def _loads_serve_object(raw: str) -> dict[str, object]:
++    """JSON-объект события serve; битый JSON — ServeProtocolError."""
++    parsed = _loads_object(raw)
++    if parsed is None:
++        raise ServeProtocolError("invalid_serve_event: json")
++    return parsed
+ 
+ 
+ def _as_int(value: object) -> int:
+@@ -1785,11 +1735,7 @@ def _is_native_opencode_bin(path: str) -> bool:
+         return False
+     if head.startswith(b"#!"):
+         return False
+-    return (
+-        head[:2] in (b"\xcf\xfa", b"\xfa\xed")
+-        or head.startswith(b"\x7fELF")
+-        or len(head) == 4
+-    )
++    return head[:2] in (b"\xcf\xfa", b"\xfa\xed") or head.startswith(b"\x7fELF")
+ 
+ 
+ def _select_transport(res: _Resilience | None = None) -> str:
+@@ -1822,14 +1768,24 @@ def _select_transport(res: _Resilience | None = None) -> str:
+     return "serve" if _is_native_opencode_bin(OPENCODE_BIN) else "run"
+ 
+ 
+-def _map_serve_event(event: dict[str, object]) -> tuple[str, dict[str, object]]:
+-    """Wire-событие serve v2.1.2 -> канонический кортеж legacy-пути."""
++def _map_serve_event(
++    event: dict[str, object],
++) -> tuple[str, dict[str, object]] | None:
++    """Wire-событие serve v2.1.2 -> канонический кортеж legacy-пути или None для служебных."""
+     etype_obj = event.get("type")
+     etype = etype_obj if isinstance(etype_obj, str) else ""
+     data = _as_dict(event.get("data"))
+     if etype == "server.connected":
+         return etype, data
+     if not data:
++        # Служебные/неизвестные события serve без данных игнорируются, а не рвут попытку.
++        if etype in (
++            "server.heartbeat",
++            "integration.updated",
++            "session.idle",
++            "server.connected",
++        ) or not etype.startswith("session."):
++            return None
+         raise ServeProtocolError("invalid_serve_event: data")
+     if etype in ("session.reasoning.delta", "session.text.delta"):
+         delta = data.get("delta")
+@@ -1841,8 +1797,8 @@ def _map_serve_event(event: dict[str, object]) -> tuple[str, dict[str, object]]:
+         ):
+             raise ServeProtocolError("invalid_serve_event: delta")
+         if etype.startswith("session.reasoning"):
+-            return "reasoning", {"reasoning_content": delta}
+-        return "text", {"content": delta}
++            return "reasoning", {"reasoning_content": delta, "sessionID": session_id}
++        return "text", {"content": delta, "sessionID": session_id}
+     if etype == "session.step.ended":
+         tokens = _as_dict(data.get("tokens"))
+         cache = _as_dict(tokens.get("cache"))
+@@ -1856,6 +1812,9 @@ def _map_serve_event(event: dict[str, object]) -> tuple[str, dict[str, object]]:
+                 raise ServeProtocolError(f"invalid_serve_event: tokens.{key}")
+             out[key] = value
+         out["cached"] = read_obj
++        sid_obj = data.get("sessionID")
++        if isinstance(sid_obj, str):
++            out["sessionID"] = sid_obj
+         return "step_finish", out
+     if etype in ("session.execution.failed", "session.step.failed"):
+         err = _as_dict(data.get("error"))
+@@ -1872,7 +1831,11 @@ def _map_serve_event(event: dict[str, object]) -> tuple[str, dict[str, object]]:
+             err_type_obj = err.get("type")
+             err_type = err_type_obj if isinstance(err_type_obj, str) else ""
+             status = {"provider.free-limit": 429, "provider.auth": 401}.get(err_type)
+-        return "error", {"statusCode": status, "message": message}
++        err_out: dict[str, object] = {"statusCode": status, "message": message}
++        sid_err = data.get("sessionID")
++        if isinstance(sid_err, str):
++            err_out["sessionID"] = sid_err
++        return "error", err_out
+     if etype == "permission.asked":
+         return "permission", data
+     if etype == "form.created":
+@@ -2255,6 +2218,12 @@ class _RequestAttempts:
+     def note_spawn(self) -> None:
+         self.total_spawns += 1
+ 
++    def can_spawn(self) -> bool:
++        """Можно ли ещё запускать: суммарный потолок спавнов на запрос."""
++        return (
++            self.total_spawns < MAX_TOTAL_SPAWNS and self.total_spawns < self.max_total
++        )
++
+     def remaining_s(self) -> float:
+         return max(0.0, self.deadline - time.monotonic())
+ 
+@@ -2405,6 +2374,10 @@ def _serve_http(
+         if conn is not None
+         else http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+     )
++    if conn is not None:
++        conn.timeout = timeout
++        if conn.sock is not None:
++            _ = conn.sock.settimeout(timeout)
+     try:
+         payload = json.dumps(body).encode("utf-8") if body is not None else None
+         auth = base64.b64encode(f"opencode:{password}".encode("utf-8")).decode("ascii")
+@@ -2433,6 +2406,7 @@ class _ServeLease:
+         lease_dir: Path,
+         attempt_id: str,
+         state_dir: str,
++        port: int = 0,
+     ) -> None:
+         self.helper = helper
+         self.serve_pid = serve_pid
+@@ -2441,6 +2415,7 @@ class _ServeLease:
+         self.lease_dir = lease_dir
+         self.attempt_id = attempt_id
+         self.state_dir = state_dir
++        self.port = port
+         self._closed = False
+         self._lock = threading.Lock()
+ 
+@@ -2454,33 +2429,44 @@ class _ServeLease:
+             os.close(self.lifeline_w)
+         except OSError:
+             pass
+-        if self.helper.poll() is None or _pid_alive(self.pgid):
++        _deadline = time.monotonic() + 5.0
++        if self.helper.poll() is None or _pid_alive(-self.pgid):
+             try:
+                 if os.getpgid(self.pgid) == self.pgid:
+                     os.killpg(self.pgid, signal.SIGTERM)
+             except OSError:
+                 pass
+-            try:
+-                _ = self.helper.wait(timeout=0.5)
+-            except (OSError, subprocess.SubprocessError):
++            while time.monotonic() < _deadline:
++                if not _pid_alive(-self.pgid) and self.helper.poll() is not None:
++                    break
++                time.sleep(0.05)
++            if _pid_alive(-self.pgid) or self.helper.poll() is None:
+                 try:
+                     os.killpg(self.pgid, signal.SIGKILL)
+                 except OSError:
+                     pass
+-                try:
+-                    _ = self.helper.wait(timeout=0.5)
+-                except (OSError, subprocess.SubprocessError):
+-                    pass
++                while time.monotonic() < _deadline:
++                    if not _pid_alive(-self.pgid) and self.helper.poll() is not None:
++                        break
++                    time.sleep(0.05)
++            try:
++                _ = self.helper.wait(timeout=max(0.1, _deadline - time.monotonic()))
++            except (OSError, subprocess.SubprocessError):
++                pass
+         for stream in (self.helper.stdout, self.helper.stderr):
+             try:
+                 if stream is not None:
+                     stream.close()
+             except OSError:
+                 pass
+-        try:
+-            (self.lease_dir / f"lease-{self.attempt_id}.json").unlink()
+-        except OSError:
+-            pass
++        if not _pid_alive(-self.pgid):
++            try:
++                (self.lease_dir / f"lease-{self.attempt_id}.json").unlink()
++            except OSError:
++                pass
++            if self.port:
++                with _PORT_ALLOC_LOCK:
++                    _ACTIVE_SERVE_PORTS.discard(self.port)
+         if self.state_dir and Path(self.state_dir).name.startswith("zen-serve-state-"):
+             shutil.rmtree(self.state_dir, ignore_errors=True)
+ 
+@@ -2490,22 +2476,31 @@ def _spawn_serve(
+ ) -> tuple[_ServeLease, int, str]:
+     """Запуск helper->serve, проверка слушателя и рукопожатия."""
+     lease_dir = Path(LEASE_DIR)
+-    lease_dir.mkdir(parents=True, exist_ok=True)
++    lease_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
++    try:
++        os.chmod(lease_dir, 0o700)
++    except OSError:
++        pass
+     port = 0
+-    for candidate in range(20000 + (os.getpid() % 20000), 60000):
+-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+-        try:
+-            probe.bind(("127.0.0.1", candidate))
+-            port = candidate
+-            break
+-        except OSError:
+-            continue
+-        finally:
+-            probe.close()
++    with _PORT_ALLOC_LOCK:
++        for candidate in range(20000 + (os.getpid() % 20000), 60000):
++            if candidate in _ACTIVE_SERVE_PORTS:
++                continue
++            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++            try:
++                probe.bind(("127.0.0.1", candidate))
++                port = candidate
++                _ACTIVE_SERVE_PORTS.add(candidate)
++                break
++            except OSError:
++                continue
++            finally:
++                probe.close()
+     if not port:
+         raise ServeUnavailable("no free serve port")
+     password = serve_env.get("OPENCODE_SERVER_PASSWORD", "")
+     lifeline_r, lifeline_w = os.pipe()
++    lease_holder: list[_ServeLease | None] = [None]
+     try:
+         helper: subprocess.Popen[str] = subprocess.Popen(
+             [
+@@ -2541,15 +2536,29 @@ def _spawn_serve(
+         lease_dir,
+         attempt_id,
+         serve_env.get("XDG_STATE_HOME", ""),
++        port,
+     )
++    lease_holder[0] = lease
+     try:
+         assert helper.stdout is not None
+         out_fd = helper.stdout.fileno()
+-        ready, _w, _x = select.select([out_fd], [], [], 3.0)
++        _hs_deadline = time.monotonic() + 3.0
++        ready, _w, _x = select.select(
++            [out_fd], [], [], max(0.0, _hs_deadline - time.monotonic())
++        )
+         if not ready:
+-            raise ServeUnavailable("serve handshake timeout")
++            raise ServeUnavailable("serve helper handshake timeout")
+         line_bytes = b""
+         while not line_bytes.endswith(b"\n"):
++            if time.monotonic() >= _hs_deadline:
++                lease.cleanup()
++                raise ServeUnavailable("serve helper handshake timeout")
++            _ready, _w2, _x2 = select.select(
++                [out_fd], [], [], max(0.0, _hs_deadline - time.monotonic())
++            )
++            if not _ready:
++                lease.cleanup()
++                raise ServeUnavailable("serve helper handshake timeout")
+             chunk_b = os.read(out_fd, 1)
+             if not chunk_b:
+                 break
+@@ -2561,17 +2570,39 @@ def _spawn_serve(
+         lease.serve_pid = serve_pid
+         if not serve_pid or pgid != helper.pid or helper.poll() is not None:
+             raise ServeUnavailable("serve ownership handshake mismatch")
++        _listener_deadline = time.monotonic() + 3.0
+         listener_pid = _lsof_listener_pid(port)
+-        if listener_pid is not None and (
+-            listener_pid != serve_pid or os.getpgid(listener_pid) != pgid
++        while (
++            listener_pid is None
++            and time.monotonic() < _listener_deadline
++            and helper.poll() is None
++        ):
++            time.sleep(0.05)
++            listener_pid = _lsof_listener_pid(port)
++        if not (
++            listener_pid is not None
++            and listener_pid == serve_pid
++            and _pid_pgid(listener_pid) == pgid
++            and helper.poll() is None
+         ):
+-            raise ServeUnavailable("foreign listener on serve port")
+-        # stderr помощника дренируется в лог, stdout после рукопожатия молчит.
+-        threading.Thread(target=_drain_stderr, args=(helper, []), daemon=True).start()
++            lease.cleanup()
++            raise ServeUnavailable(
++                "listener ownership verification failed: foreign listener on serve port"
++            )
++        # stderr помощника дренируется в ограниченный буфер без логирования секретов.
++        threading.Thread(
++            target=_drain_stderr,
++            args=(helper, collections.deque(maxlen=64)),
++            daemon=True,
++        ).start()
+         return lease, port, password
+-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
++    except BaseException as exc:
+         lease.cleanup()
+-        raise ServeUnavailable(str(exc)) from exc
++        if isinstance(exc, ServeUnavailable):
++            raise
++        if isinstance(exc, (OSError, ValueError, subprocess.SubprocessError)):
++            raise ServeUnavailable(str(exc)) from exc
++        raise
+ 
+ 
+ def _startup_reaper(lease_dir: Path | None = None) -> int:
+@@ -2590,6 +2621,31 @@ def _startup_reaper(lease_dir: Path | None = None) -> int:
+             pgid = _as_int(data.get("pgid"))
+         except (OSError, ValueError, TypeError):
+             continue
++        if _as_int(data.get("owner_uid")) != os.getuid():
++            continue
++        # Сверка lstart живого родителя/помощника с lease: переиспользованный PID не трогаем.
++        _lstart_ok = True
++        for _pid_key, _ts_key in (
++            ("parent_pid", "parent_start_ts"),
++            ("helper_pid", "helper_lstart"),
++        ):
++            _pid_v = _as_int(data.get(_pid_key))
++            _ts_v = str(data.get(_ts_key) or "")
++            if _pid_v > 0 and _ts_v and _pid_alive(_pid_v):
++                try:
++                    _live = subprocess.run(
++                        ["ps", "-o", "lstart=", "-p", str(_pid_v)],
++                        capture_output=True,
++                        text=True,
++                        timeout=2,
++                    ).stdout.strip()
++                except (OSError, subprocess.SubprocessError):
++                    _live = ""
++                # helper_lstart записан epoch-секундами, parent_start_ts — lstart: сверяем только lstart-формат.
++                if _live and not _ts_v.isdecimal() and _live != _ts_v:
++                    _lstart_ok = False
++        if not _lstart_ok:
++            continue
+         parent_alive = parent_pid > 0 and _pid_alive(parent_pid)
+         if parent_alive:
+             continue
+@@ -2609,16 +2665,27 @@ def _startup_reaper(lease_dir: Path | None = None) -> int:
+                 os.killpg(pgid, signal.SIGTERM)
+             except OSError:
+                 pass
+-        try:
+-            path.unlink()
+-            removed += 1
+-        except OSError:
+-            pass
++            _reap_deadline = time.monotonic() + 2.0
++            while _pid_alive(-pgid) and time.monotonic() < _reap_deadline:
++                time.sleep(0.05)
++            if _pid_alive(-pgid):
++                try:
++                    os.killpg(pgid, signal.SIGKILL)
++                except OSError:
++                    pass
++                while _pid_alive(-pgid) and time.monotonic() < _reap_deadline + 2.0:
++                    time.sleep(0.05)
++        if pgid <= 0 or not _pid_alive(-pgid):
++            try:
++                path.unlink()
++                removed += 1
++            except OSError:
++                pass
+     return removed
+ 
+ 
+ def _pid_alive(pid: int) -> bool:
+-    """Жив ли процесс."""
++    """Жив ли процесс; отрицательный pid — проверка группы через kill(-pgid, 0)."""
+     try:
+         os.kill(pid, 0)
+         return True
+@@ -2626,6 +2693,17 @@ def _pid_alive(pid: int) -> bool:
+         return False
+ 
+ 
++def _pid_pgid(pid: int) -> int:
++    """PGID процесса или -1 при ошибке."""
++    try:
++        return os.getpgid(pid)
++    except OSError:
++        return -1
++
++
++_find_listener_pid = _lsof_listener_pid
++
++
+ class _ToolItem(TypedDict):
+     """Накопленный native вызов serve."""
+ 
+@@ -2657,8 +2735,10 @@ class _ServeToolState:
+         if isinstance(input_value, dict):
+             item["input"] = _as_dict(input_value)
+ 
+-    def complete(self, call_id: str) -> tuple[str, dict[str, object]] | None:
+-        """Готовый вызов из called.input или input.ended.text."""
++    def complete(
++        self, call_id: str, event_type: str = ""
++    ) -> tuple[str, dict[str, object]] | None:
++        """Готовый вызов из called.input или input.ended.text; статус — из типа события."""
+         if call_id in self.emitted:
+             return None
+         item = self.tools.get(call_id)
+@@ -2675,12 +2755,22 @@ class _ServeToolState:
+                 return None
+             args = _as_dict(parsed)
+         self.emitted.add(call_id)
++        _status = (
++            "completed"
++            if any(
++                k in event_type for k in ("completed", "succeeded", "success", "called")
++            )
++            else "error"
++        )
+         return "tool_use", {
+-            "part": {"tool": item["name"], "state": {"input": args, "status": "error"}},
++            "part": {"tool": item["name"], "state": {"input": args, "status": _status}},
+             "call_id": call_id,
+         }
+ 
+ 
++_ToolInputAccumulator = _ServeToolState
++
++
+ def _native_call_as_dsh(
+     payload: dict[str, object], tools: list[dict[str, object]] | None
+ ) -> list[dict[str, object]]:
+@@ -2717,6 +2807,8 @@ def _serve_one_attempt(
+     is_client_gone: Callable[[], bool] | None = None,
+     on_status: Callable[[str], None] | None = None,
+     thinking_enabled: bool = True,
++    deadline: float | None = None,
++    proxy_url: str | None = None,
+ ) -> _ServeResult:
+     """Одна попытка serve: helper, сессия, SSE, prompt и канонические события."""
+     result: _ServeResult = {
+@@ -2733,8 +2825,13 @@ def _serve_one_attempt(
+         "step_closed": False,
+         "first_event_ms": None,
+         "ttft_ms": None,
++        "prompt_status": None,
++        "transient_error": False,
+     }
+     serve_env = _serve_env(model)
++    if proxy_url:
++        serve_env["HTTP_PROXY"] = proxy_url
++        serve_env["HTTPS_PROXY"] = proxy_url
+     password = serve_env.get("OPENCODE_SERVER_PASSWORD", "")
+     attempt_id = uuid.uuid4().hex
+     lease, port, _pw = _spawn_serve(attempt_id, serve_env)
+@@ -2840,12 +2937,31 @@ def _serve_one_attempt(
+         if sse_resp.status != 200:
+             raise ServeUnavailable(f"serve event HTTP {sse_resp.status}")
+         events: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=4096)
++        stop_event = threading.Event()
++        if sse_conn.sock is not None:
++            _ = sse_conn.sock.settimeout(0.5)
++
++        def _put_event(item: dict[str, object] | None) -> bool:
++            """Неблокирующая постановка с проверкой stop_event."""
++            while not stop_event.is_set():
++                try:
++                    events.put(item, timeout=0.25)
++                    return True
++                except queue.Full:
++                    continue
++            return False
+ 
+         def _reader() -> None:
+-            """Читатель SSE в очередь событий."""
++            """Читатель SSE в очередь событий; тишина сокета не рвёт поток."""
+             try:
+-                while True:
+-                    line = sse_resp.readline()
++                while not stop_event.is_set():
++                    try:
++                        line = sse_resp.readline()
++                    except (TimeoutError, OSError):
++                        # Короткий timeout сокета: watchdog главного цикла решает судьбу попытки.
++                        if stop_event.is_set():
++                            break
++                        continue
+                     if not line:
+                         break
+                     text_line = line.decode("utf-8", "replace").strip()
+@@ -2854,15 +2970,19 @@ def _serve_one_attempt(
+                     payload = text_line[5:].strip()
+                     if not payload or payload == "[DONE]":
+                         continue
+-                    obj = _loads_object(payload)
+-                    if isinstance(obj, dict):
+-                        events.put(_as_dict(obj))
++                    try:
++                        obj: dict[str, object] | None = _loads_serve_object(payload)
++                    except ServeProtocolError:
++                        _ = _put_event({"type": "__invalid_json__", "data": {}})
++                        continue
++                    _ = _put_event(obj)
+             except (OSError, ValueError):
+                 pass
+             finally:
+-                events.put(None)
++                _ = _put_event(None)
+ 
+-        threading.Thread(target=_reader, daemon=True).start()
++        reader_thread = threading.Thread(target=_reader, daemon=True)
++        reader_thread.start()
+         prompt_send_start = time.monotonic()
+ 
+         def _prompt_worker() -> None:
+@@ -2883,11 +3003,16 @@ def _serve_one_attempt(
+             except (OSError, http.client.HTTPException) as exc:
+                 prompt_status["error"] = str(exc)
+ 
+-        threading.Thread(target=_prompt_worker, daemon=True).start()
++        prompt_thread = threading.Thread(target=_prompt_worker, daemon=True)
++        prompt_thread.start()
+         tool_state = _ServeToolState()
+         seen_steps: set[str] = set()
+-        deadline = prompt_send_start + TIMEOUT_S
++        deadline = min(
++            deadline if deadline is not None else prompt_send_start + TIMEOUT_S,
++            prompt_send_start + TIMEOUT_S,
++        )
+         status_next = max(t0 + FIRST_STATUS_DELAY_S, prompt_send_start + 0.25)
++        _status_emitted = [0]
+         last_token_at = prompt_send_start
+         while time.monotonic() < deadline:
+             if is_client_gone is not None and is_client_gone():
+@@ -2916,7 +3041,10 @@ def _serve_one_attempt(
+                 return result
+             if thinking_enabled and on_status is not None and now >= status_next:
+                 if result["first_token_at"] is None:
+-                    on_status(STATUS_WAITING)
++                    on_status(
++                        STATUS_INITIAL if _status_emitted[0] == 0 else STATUS_WAITING
++                    )
++                    _status_emitted[0] += 1
+                     status_next = now + STATUS_WAITING_INTERVAL_S
+                 elif now - last_token_at >= float(STALL_HEARTBEAT_INTERVAL_S):
+                     on_status(STATUS_CONTINUATION)
+@@ -2925,6 +3053,23 @@ def _serve_one_attempt(
+                 event = events.get(timeout=0.05)
+             except queue.Empty:
+                 continue
++            # Классификация HTTP-статуса prompt по FALLBACK_DECISION_TABLE до барьера доставки.
++            _ps = prompt_status.get("status")
++            if isinstance(_ps, int) and _ps != 200 and result["prompt_status"] is None:
++                result["prompt_status"] = _ps
++                if _ps in (401, 403):
++                    raise ServeSecurityError(f"serve prompt HTTP {_ps}")
++                _delivered_now = bool(
++                    result["texts"] or result["reasonings"] or result["native_calls"]
++                )
++                result["delivered"] = _delivered_now
++                if _ps == 429:
++                    result["exit_reason"] = "prompt_status_429"
++                    result["transient_error"] = True
++                    return result
++                if _ps in (400, 404, 422) or 500 <= _ps <= 599:
++                    result["exit_reason"] = f"prompt_status_{_ps}"
++                    return result
+             if event is None:
+                 if not result["terminal"]:
+                     result["exit_reason"] = "invalid_serve_event"
+@@ -2933,7 +3078,19 @@ def _serve_one_attempt(
+                     )
+                 break
+             etype_raw = str(event.get("type") or "")
++            if etype_raw == "__invalid_json__":
++                result["exit_reason"] = "invalid_serve_event"
++                result["delivered"] = True
++                return result
+             data_raw = _as_dict(event.get("data"))
++            _raw_sid = data_raw.get("sessionID")
++            if (
++                etype_raw not in ("server.connected", "form.created")
++                and isinstance(_raw_sid, str)
++                and _raw_sid
++                and _raw_sid != session_id
++            ):
++                continue
+             # form.created: безопасность до любой проверки title/fields/схемы.
+             if etype_raw == "form.created":
+                 form = _as_dict(data_raw.get("form"))
+@@ -2965,11 +3122,14 @@ def _serve_one_attempt(
+             if prompt_status.get("security"):
+                 raise ServeSecurityError("serve prompt auth failed")
+             try:
+-                etype, payload = _map_serve_event(event)
++                _mapped = _map_serve_event(event)
+             except ServeProtocolError:
+                 result["exit_reason"] = "invalid_serve_event"
+                 result["delivered"] = True
+                 return result
++            if _mapped is None:
++                continue
++            etype, payload = _mapped
+             event_session = (
+                 payload.get("sessionID") if isinstance(payload, dict) else None
+             )
+@@ -3015,7 +3175,7 @@ def _serve_one_attempt(
+                 continue
+             if etype == "reasoning":
+                 text_value = str(payload.get("reasoning_content") or "")
+-                if text_value.strip():
++                if text_value:
+                     if result["first_token_at"] is None:
+                         result["first_token_at"] = time.monotonic()
+                         result["ttft_ms"] = int(
+@@ -3026,7 +3186,7 @@ def _serve_one_attempt(
+                     on_reasoning(text_value)
+             elif etype == "text":
+                 text_value = str(payload.get("content") or "")
+-                if text_value.strip():
++                if text_value:
+                     if result["first_token_at"] is None:
+                         result["first_token_at"] = time.monotonic()
+                         result["ttft_ms"] = int(
+@@ -3036,6 +3196,11 @@ def _serve_one_attempt(
+                     last_token_at = time.monotonic()
+                     on_text(text_value)
+             elif etype == "tool_event":
++                if (
++                    etype_raw == "session.tool.input.delta"
++                    and result["first_token_at"] is not None
++                ):
++                    last_token_at = time.monotonic()
+                 tool_state.feed(payload)
+                 call_id = str(payload.get("id") or "")
+                 if etype_raw in (
+@@ -3043,7 +3208,7 @@ def _serve_one_attempt(
+                     "session.tool.failed",
+                     "session.tool.success",
+                 ):
+-                    done = tool_state.complete(call_id)
++                    done = tool_state.complete(call_id, etype_raw)
+                     if done is not None:
+                         result["native_calls"].append(done[1])
+                         on_tool(done[1])
+@@ -3066,22 +3231,47 @@ def _serve_one_attempt(
+                     )
+                 # Завершить native вызовы без called: аргументы из input.ended.text.
+                 for call_id in list(tool_state.tools):
+-                    done = tool_state.complete(call_id)
++                    done = tool_state.complete(call_id, etype_raw)
+                     if done is not None:
+                         result["native_calls"].append(done[1])
+                         on_tool(done[1])
++                if result["native_calls"]:
++                    result["terminal"] = "tool_calls"
++                    break
+             elif etype == "error":
+                 result["error"] = payload
++                result["transient_error"] = _is_transient_stream_error(payload)
+                 result["terminal"] = "failed"
+                 break
+             elif etype_raw == "session.execution.succeeded":
+                 result["terminal"] = "succeeded"
+                 break
++        if (
++            not result["terminal"]
++            and not result["exit_reason"]
++            and time.monotonic() >= deadline
++        ):
++            result["exit_reason"] = "timeout"
+         return result
+     finally:
++        _se = locals().get("stop_event")
++        if isinstance(_se, threading.Event):
++            _se.set()
++        if sse_conn is not None:
++            try:
++                sse_conn.close()
++            except OSError:
++                pass
++        for _th_name in ("reader_thread", "prompt_thread"):
++            _th = locals().get(_th_name)
++            if isinstance(_th, threading.Thread):
++                _th.join(timeout=0.5)
+         if session_id:
++            # Не более одной быстрой попытки interrupt/DELETE (<= 0.25 с), затем lease.cleanup().
+             try:
+-                _ = _ctrl_http(
++                _ = _serve_http(
++                    port,
++                    password,
+                     "POST",
+                     f"/api/session/{session_id}/interrupt",
+                     None,
+@@ -3090,7 +3280,9 @@ def _serve_one_attempt(
+             except (OSError, http.client.HTTPException):
+                 pass
+             try:
+-                _ = _ctrl_http(
++                _ = _serve_http(
++                    port,
++                    password,
+                     "DELETE",
+                     f"/api/session/{session_id}",
+                     None,
+@@ -4390,7 +4582,9 @@ class Run:
+         self.prompt = prompt
+         self.effort = effort
+         self.workdir = workdir
+-        self.res = resilience or (attempts.res if attempts is not None else _DEFAULT_RESILIENCE)
++        self.res = resilience or (
++            attempts.res if attempts is not None else _DEFAULT_RESILIENCE
++        )
+         self.attempts = attempts
+         self.proc: subprocess.Popen[str] | None = None
+         self.feed: _StdoutFeed | None = None
+@@ -4644,7 +4838,11 @@ class Run:
+             with _active_lock:
+                 _active.pop(run_id, None)
+ 
+-        rc = self.proc.returncode if self.proc and self.proc.returncode is not None else -1
++        rc = (
++            self.proc.returncode
++            if self.proc and self.proc.returncode is not None
++            else -1
++        )
+         if stopped_on_error and rc < 0:
+             rc = 1  # остановили сами после ошибки провайдера: для классификации отказа — как собственный выход CLI
+         if rc != 0 and state == "ok":
+@@ -4704,7 +4902,9 @@ class Handler(BaseHTTPRequestHandler):
+         verdict = res.slots.acquire_ex()
+         if verdict == "ok":
+             return True
+-        self._exit()["exit_reason"] = "slot_timeout" if verdict == "timeout" else "slot_overflow"
++        self._exit()["exit_reason"] = (
++            "slot_timeout" if verdict == "timeout" else "slot_overflow"
++        )
+         self._send(503, {"error": {"message": "bridge busy", "type": "overloaded"}})
+         return False
+ 
+@@ -4727,8 +4927,12 @@ class Handler(BaseHTTPRequestHandler):
+         (openai-node/ai-sdk) бросают исключение на чанке с полем error. finish_reason
+         не отправляем: пустого успешного завершения быть не должно.
+         """
+-        self.wfile.write(("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
+-        self.wfile.write(b"data: [DONE]\n\n")
++        _ = self.wfile.write(
++            ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode(
++                "utf-8"
++            )
++        )
++        _ = self.wfile.write(b"data: [DONE]\n\n")
+         self.wfile.flush()
+ 
+     def _client_gone_check(self) -> bool:
+@@ -4767,6 +4971,7 @@ class Handler(BaseHTTPRequestHandler):
+         res: _Resilience,
+         xs: dict[str, object],
+         collected_texts: list[str],
++        tool_choice: object = None,
+     ) -> bool:
+         """Serve-попытки для SSE; True — запрос завершён, False — fallback на run."""
+         thinking = effort.strip().lower() not in ("", "off", "none")
+@@ -4845,6 +5050,56 @@ class Handler(BaseHTTPRequestHandler):
+                 if emulate_tools
+                 else None
+             )
++            if attempts.total_spawns >= MAX_TOTAL_SPAWNS or not attempts.can_spawn():
++                xs["exit_reason"] = "upstream_failed"
++                self._sse_error(_error_payload("serve spawn limit reached"))
++                return True
++            # RW-011: первый видимый статус не позднее 1.0 с даже при ожидании гейта/спавна.
++            _model_seen = threading.Event()
++            _orig_reasoning, _orig_text = on_reasoning, on_text
++
++            def _reasoning_seen(
++                text: str, _f: Callable[[str], None] = _orig_reasoning
++            ) -> None:
++                _model_seen.set()
++                _f(text)
++
++            _prior_text = "".join(collected_texts)
++            _dedup_text = (
++                _PrefixDedup(_prior_text) if serve_attempts and _prior_text else None
++            )
++
++            def _text_seen(text: str, _f: Callable[[str], None] = _orig_text) -> None:
++                _model_seen.set()
++                if _dedup_text is not None:
++                    text = _dedup_text.push(text)
++                    if not text:
++                        return
++                _f(text)
++
++            _t0_req = attempts.deadline - TIMEOUT_S
++
++            def _initial_status_timer() -> None:
++                _wait = max(0.0, _t0_req + FIRST_STATUS_DELAY_S - time.monotonic())
++                if not _model_seen.wait(timeout=_wait) and thinking:
++                    try:
++                        on_status(STATUS_INITIAL)
++                    except (OSError, ValueError):
++                        pass
++
++            threading.Thread(target=_initial_status_timer, daemon=True).start()
++            gate = _StartupGate()
++            gate.acquire()
++            _limiter_ok = res.spawn_limiter.acquire(
++                max_wait_s=min(SPAWN_WAIT_MAX_S, attempts.remaining_s())
++            )
++            if not _limiter_ok:
++                gate.release()
++                if not force_serve:
++                    return False
++                xs["exit_reason"] = "upstream_failed"
++                self._sse_error(_error_payload("serve spawn limiter timeout"))
++                return True
+             attempts.note_spawn()
+             serve_attempts += 1
+             try:
+@@ -4853,15 +5108,18 @@ class Handler(BaseHTTPRequestHandler):
+                     current_prompt,
+                     effort,
+                     workdir,
+-                    on_reasoning,
+-                    on_text,
++                    _reasoning_seen,
++                    _text_seen,
+                     on_tool,
+                     attempts.deadline - TIMEOUT_S,
+                     is_client_gone=self._client_gone_check,
+                     on_status=on_status,
+                     thinking_enabled=thinking,
++                    deadline=attempts.deadline,
++                    proxy_url=_next_standalone_proxy(),
+                 )
+             except ServeUnavailable as exc:
++                gate.release()
+                 res.serve_health.record_failure()
+                 if not force_serve:
+                     xs["transport"] = "run"
+@@ -4871,18 +5129,24 @@ class Handler(BaseHTTPRequestHandler):
+                 self._sse_error(_error_payload(f"serve unavailable: {exc}"))
+                 return True
+             except ServeSecurityError as exc:
++                gate.release()
+                 xs["exit_reason"] = "provider_fatal"
+                 self._sse_error(_error_payload(f"serve security failure: {exc}"))
+                 return True
+-            xs["first_event_ms"] = result["first_event_ms"]
+-            xs["ttft_ms"] = result["ttft_ms"]
++            gate.release()
++            if "first_event_ms" not in xs or xs.get("first_event_ms") is None:
++                xs["first_event_ms"] = result["first_event_ms"]
++            if "ttft_ms" not in xs or xs.get("ttft_ms") is None:
++                xs["ttft_ms"] = result["ttft_ms"]
+             if parser_box[0] is not None:
+                 parser_box[0].finish()
+             if result.get("exit_reason") == "client_gone":
+                 xs["exit_reason"] = "client_gone"
+                 return True
+-            xs["first_event_ms"] = result["first_event_ms"]
+-            xs["ttft_ms"] = result["ttft_ms"]
++            if "first_event_ms" not in xs or xs.get("first_event_ms") is None:
++                xs["first_event_ms"] = result["first_event_ms"]
++            if "ttft_ms" not in xs or xs.get("ttft_ms") is None:
++                xs["ttft_ms"] = result["ttft_ms"]
+             if result.get("exit_reason") in (
+                 "first_event_timeout",
+                 "first_token_timeout",
+@@ -4899,6 +5163,11 @@ class Handler(BaseHTTPRequestHandler):
+                     xs["transport_history"] = ["serve", "run"]
+                     return False
+                 if attempts.allow_retry(reason):
++                    _u = result["usage"]
++                    _acc = self._serve_stream_usage or {}
++                    for _k in ("input", "output", "cached", "reasoning"):
++                        _acc[_k] = int(_acc.get(_k) or 0) + int(_u.get(_k) or 0)
++                    self._serve_stream_usage = _acc
+                     on_status(
+                         f"[мост] Повтор попытки {attempts.total_spawns + 1}/{attempts.max_total}…\n"
+                     )
+@@ -4906,12 +5175,67 @@ class Handler(BaseHTTPRequestHandler):
+                 xs["exit_reason"] = reason
+                 self._sse_error(_error_payload(f"serve {reason}"))
+                 return True
++            if result.get("prompt_status") is not None:
++                _ps_code = int(result["prompt_status"] or 0)
++                if _ps_code == 429:
++                    attempts.attempt_done(True, False)
++                if not result.get("delivered") and not force_serve:
++                    xs["transport"] = "run"
++                    xs["transport_history"] = ["serve", "run"]
++                    return False
++                if attempts.allow_retry(f"prompt_status_{_ps_code}"):
++                    on_status("[мост] Повтор попытки\n")
++                    continue
++                xs["exit_reason"] = f"prompt_status_{_ps_code}"
++                self._sse_error(_error_payload(f"serve prompt HTTP {_ps_code}"))
++                return True
++            if result.get("exit_reason") in ("prompt_status_429",):
++                attempts.attempt_done(True, False)
++                if attempts.allow_retry("prompt_status_429"):
++                    continue
++                xs["exit_reason"] = "prompt_status_429"
++                self._sse_error(_error_payload("serve prompt HTTP 429"))
++                return True
+             if result["error"] is not None:
+                 err = result["error"]
++                if result.get("transient_error"):
++                    _delivered_err = bool(collected_texts or result.get("texts"))
++                    if not _delivered_err and not force_serve:
++                        xs["transport"] = "run"
++                        xs["transport_history"] = ["serve", "run"]
++                        return False
++                    if not _delivered_err and attempts.allow_retry(
++                        "serve_transient_error"
++                    ):
++                        continue
++                    # После частичной доставки: step-interruption recovery ниже по incomplete-сигналу.
++                    signal_t = _incomplete_step_signal(
++                        "".join(result["texts"]),
++                        "".join(result["reasonings"]),
++                        tools or [],
++                        True,
++                        int(result["usage"].get("output") or 0),
++                        int(result["usage"].get("reasoning") or 0),
++                        tool_choice=tool_choice,
++                    )
++                    if signal_t and attempts.allow_retry("incomplete_step"):
++                        attempts.signal = signal_t
++                        current_prompt = _rewrite_tool_tags_for_model(
++                            _incomplete_tool_step_prompt(
++                                prompt,
++                                "".join(collected_texts),
++                                tools or [],
++                                tool_choice,
++                                model,
++                            ),
++                            model,
++                        )
++                        continue
+                 xs["exit_reason"] = "upstream_failed"
+                 self._sse_error(_error_payload(f"serve error: {err.get('message')}"))
+                 return True
+             res.serve_health.record_success()
++            attempts.attempt_done(False, True)
+             usage_cur = result["usage"]
+             usage_acc = self._serve_stream_usage or {}
+             for key in ("input", "output", "cached", "reasoning"):
+@@ -4947,7 +5271,7 @@ class Handler(BaseHTTPRequestHandler):
+                     False,
+                     int(usage_cur.get("output") or 0),
+                     int(usage_cur.get("reasoning") or 0),
+-                    tool_choice=None,
++                    tool_choice=tool_choice,
+                 )
+                 if (
+                     signal
+@@ -4958,7 +5282,11 @@ class Handler(BaseHTTPRequestHandler):
+                     attempts.signal = signal
+                     current_prompt = _rewrite_tool_tags_for_model(
+                         _incomplete_tool_step_prompt(
+-                            prompt, "".join(collected_texts), tools or [], None, model
++                            prompt,
++                            "".join(collected_texts),
++                            tools or [],
++                            tool_choice,
++                            model,
+                         ),
+                         model,
+                     )
+@@ -5149,7 +5477,15 @@ class Handler(BaseHTTPRequestHandler):
+         try:
+             if not attempts.begin_attempt():
+                 xs["exit_reason"] = "circuit_open"
+-                self._send(503, {"error": {"message": "upstream circuit open", "type": "overloaded"}})
++                self._send(
++                    503,
++                    {
++                        "error": {
++                            "message": "upstream circuit open",
++                            "type": "overloaded",
++                        }
++                    },
++                )
+                 return
+ 
+             # 1. Отправляются HTTP-заголовки 200 SSE
+@@ -5178,7 +5514,9 @@ class Handler(BaseHTTPRequestHandler):
+             dedup: list[_PrefixDedup | None] = [None]
+ 
+             def send_text(text: str) -> None:
+-                chunk = format_sse_chunk(resp_id, created, shown_model, {"content": text})
++                chunk = format_sse_chunk(
++                    resp_id, created, shown_model, {"content": text}
++                )
+                 self.wfile.write(chunk.encode("utf-8"))
+                 self.wfile.flush()
+                 collected_texts.append(text)  # только реально отданное клиенту
+@@ -5193,14 +5531,18 @@ class Handler(BaseHTTPRequestHandler):
+                         return
+                 send_text(text)
+ 
+-            dropped_blocks = [0]  # вырезано нераспарсенных блоков вызова (счётчик на запрос)
++            dropped_blocks = [
++                0
++            ]  # вырезано нераспарсенных блоков вызова (счётчик на запрос)
+ 
+             def emit_parsed_content(text: str) -> None:
+                 # Нераспарсенный блок ToolCallParser отдаёт одним куском: сырой тег не уходит ни в SSE, ни в повтор.
+                 cleaned, dropped = _strip_broken_tool_blocks(text)
+                 if dropped:
+                     dropped_blocks[0] += dropped
+-                    _log(f"stream dropped {dropped} unparsed tool block(s) from content")
++                    _log(
++                        f"stream dropped {dropped} unparsed tool block(s) from content"
++                    )
+                 emit_content(cleaned)
+ 
+             seen_calls: set[str] = set()
+@@ -5215,8 +5557,10 @@ class Handler(BaseHTTPRequestHandler):
+                     "index": len(tool_calls),
+                     "id": "call_" + uuid.uuid4().hex[:24],
+                     "type": "function",
+-                    "function": {"name": call["name"],
+-                                 "arguments": json.dumps(call["arguments"], ensure_ascii=False)},
++                    "function": {
++                        "name": call["name"],
++                        "arguments": json.dumps(call["arguments"], ensure_ascii=False),
++                    },
+                 }
+                 tool_calls.append(tc)
+                 chunk = format_sse_chunk(resp_id, created, shown_model, {"tool_calls": [tc]})
+@@ -5246,6 +5590,9 @@ class Handler(BaseHTTPRequestHandler):
+                     res,
+                     xs,
+                     collected_texts,
++                    tool_choice=tool_choice
++                    if isinstance(tool_choice, (str, dict)) or tool_choice is None
++                    else None,
+                 )
+                 if handled:
+                     if xs.get("exit_reason"):
+@@ -5289,14 +5636,21 @@ class Handler(BaseHTTPRequestHandler):
+             incomplete_retry = False
+             failure: dict[str, Any] | None = None
+             while True:
++                if attempts.total_spawns >= MAX_TOTAL_SPAWNS:
++                    failure = {"rc": -1, "tail": "", "timeout": False}
++                    break
+                 # 3. Запускается proc (повтор — встроенный инструмент без DSH-двойника,
+                 #    незавершённый шаг или транзиторный отказ CLI без вывода) под потолком MAX_TOTAL_SPAWNS
+                 if attempts.total_spawns:
+-                    _log(f"stream exec retry={retries} fail_retries={fail_retries} model={model_route} "
+-                         f"prompt_chars={len(attempt_prompt)} total_spawns={attempts.total_spawns}/{attempts.max_total}")
++                    _log(
++                        f"stream exec retry={retries} fail_retries={fail_retries} model={model_route} "
++                        f"prompt_chars={len(attempt_prompt)} total_spawns={attempts.total_spawns}/{attempts.max_total}"
++                    )
+                 gate = _StartupGate()
+                 gate.acquire()
+-                if not res.spawn_limiter.acquire(max_wait_s=min(SPAWN_WAIT_MAX_S, attempts.remaining_s())):
++                if not res.spawn_limiter.acquire(
++                    max_wait_s=min(SPAWN_WAIT_MAX_S, attempts.remaining_s())
++                ):
+                     gate.release()
+                     _log(
+                         "stream spawn skipped: spawn rate limiter wait exceeds the request deadline"
+@@ -5453,10 +5807,14 @@ class Handler(BaseHTTPRequestHandler):
+                     if etype:
+                         if watchdog_state["first_event_at"] is None:
+                             watchdog_state["first_event_at"] = time.monotonic()
+-                            xs["first_event_ms"] = int(
+-                                (time.monotonic() - (attempts.deadline - TIMEOUT_S))
+-                                * 1000
+-                            )
++                            if (
++                                "first_event_ms" not in xs
++                                or xs.get("first_event_ms") is None
++                            ):
++                                xs["first_event_ms"] = int(
++                                    (time.monotonic() - (attempts.deadline - TIMEOUT_S))
++                                    * 1000
++                                )
+                         _token_text = str(
+                             payload.get("reasoning_content")
+                             or payload.get("content")
+@@ -5465,10 +5823,14 @@ class Handler(BaseHTTPRequestHandler):
+                         if _token_text.strip():
+                             if watchdog_state["first_token_at"] is None:
+                                 watchdog_state["first_token_at"] = time.monotonic()
+-                                xs["ttft_ms"] = int(
+-                                    (time.monotonic() - (attempts.deadline - TIMEOUT_S))
+-                                    * 1000
+-                                )
++                                if "ttft_ms" not in xs or xs.get("ttft_ms") is None:
++                                    xs["ttft_ms"] = int(
++                                        (
++                                            time.monotonic()
++                                            - (attempts.deadline - TIMEOUT_S)
++                                        )
++                                        * 1000
++                                    )
+                             watchdog_state["last_token_at"] = time.monotonic()
+                             if etype == "reasoning":
+                                 watchdog_state["last_reasoning"] = _token_text
+@@ -5493,7 +5855,12 @@ class Handler(BaseHTTPRequestHandler):
+                             ttext = _strip_interrupted(ttext)
+                         if isinstance(ttext, str) and ttext:
+                             attempt_output = True
+-                            if retries and not incomplete_retry and not attempt_texts and collected_texts:
++                            if (
++                                retries
++                                and not incomplete_retry
++                                and not attempt_texts
++                                and collected_texts
++                            ):
+                                 emit_content("\n\n")
+                             attempt_texts.append(ttext)
+                             if parser is not None:
+@@ -5588,8 +5955,12 @@ class Handler(BaseHTTPRequestHandler):
+                     rc = 1  # остановили сами после ошибки провайдера: для классификации отказа — как выход CLI
+                 tail = _clean_err(err_lines[-6:])
+                 transient_failure = had_provider_error or (
+-                    not attempt_output and _is_retryable_failure(rc, tail, provider_status, False))
+-                attempts.attempt_done(transient_failure, attempt_output and not transient_failure)
++                    not attempt_output
++                    and _is_retryable_failure(rc, tail, provider_status, False)
++                )
++                attempts.attempt_done(
++                    transient_failure, attempt_output and not transient_failure
++                )
+                 if watchdog_state.get("reason"):
+                     reason_w = str(watchdog_state["reason"])
+                     if attempts.allow_retry(reason_w):
+@@ -5629,35 +6000,72 @@ class Handler(BaseHTTPRequestHandler):
+                     retries += 1
+                     unmapped_retries += 1
+                     incomplete_retry = False
+-                    _log(f"stream unmapped built-in tools={unmapped}: re-prompt "
+-                         f"{unmapped_retries}/{NATIVE_RETRY_LIMIT}")
+-                    attempt_prompt = _rewrite_tool_tags_for_model(_unavailable_tools_prompt(
+-                        attempt_prompt, "".join(attempt_texts), unmapped, tools or [], model), model)
++                    _log(
++                        f"stream unmapped built-in tools={unmapped}: re-prompt "
++                        f"{unmapped_retries}/{NATIVE_RETRY_LIMIT}"
++                    )
++                    attempt_prompt = _rewrite_tool_tags_for_model(
++                        _unavailable_tools_prompt(
++                            attempt_prompt,
++                            "".join(attempt_texts),
++                            unmapped,
++                            tools or [],
++                            model,
++                        ),
++                        model,
++                    )
+                     continue
+-                signal = 0 if provider_status in _FATAL_HTTP else _incomplete_step_signal(
+-                    "".join(attempt_texts), "".join(attempt_reasonings), tools or [],
+-                    had_provider_error, attempt_output_tokens, attempt_reasoning_tokens,
+-                    tool_choice=tool_choice)
++                signal = (
++                    0
++                    if provider_status in _FATAL_HTTP
++                    else _incomplete_step_signal(
++                        "".join(attempt_texts),
++                        "".join(attempt_reasonings),
++                        tools or [],
++                        had_provider_error,
++                        attempt_output_tokens,
++                        attempt_reasoning_tokens,
++                        tool_choice=tool_choice,
++                    )
++                )
+                 if not signal:
+                     break
+-                if incomplete_retries >= NATIVE_RETRY_LIMIT or not attempts.allow_retry("incomplete_step"):
+-                    _log(f"stream incomplete tool step: retries exhausted ({incomplete_retries}) signal={signal}")
++                if incomplete_retries >= NATIVE_RETRY_LIMIT or not attempts.allow_retry(
++                    "incomplete_step"
++                ):
++                    _log(
++                        f"stream incomplete tool step: retries exhausted ({incomplete_retries}) signal={signal}"
++                    )
+                     break
+                 retries += 1
+                 incomplete_retries += 1
+                 incomplete_retry = True
+                 attempts.signal = signal
+-                _log(f"stream incomplete tool step: re-prompt {incomplete_retries}/{NATIVE_RETRY_LIMIT} "
+-                     f"signal={signal} total_spawns={attempts.total_spawns}/{attempts.max_total}")
+-                attempt_prompt = _rewrite_tool_tags_for_model(_incomplete_tool_step_prompt(
+-                    prompt, "".join(collected_texts), tools or [], tool_choice, model), model)
++                _log(
++                    f"stream incomplete tool step: re-prompt {incomplete_retries}/{NATIVE_RETRY_LIMIT} "
++                    f"signal={signal} total_spawns={attempts.total_spawns}/{attempts.max_total}"
++                )
++                attempt_prompt = _rewrite_tool_tags_for_model(
++                    _incomplete_tool_step_prompt(
++                        prompt,
++                        "".join(collected_texts),
++                        tools or [],
++                        tool_choice,
++                        model,
++                    ),
++                    model,
++                )
+ 
+             if failure is not None:
+-                _log(f"stream failed model={model} rc={failure['rc']} fail_retries={fail_retries} "
+-                     f"total_spawns={attempts.total_spawns}")
++                _log(
++                    f"stream failed model={model} rc={failure['rc']} fail_retries={fail_retries} "
++                    f"total_spawns={attempts.total_spawns}"
++                )
+                 if failure.get("timeout"):
+                     xs["exit_reason"] = "timeout"
+-                    self._sse_error(_error_payload(f"opencode timed out after {TIMEOUT_S:.0f}s"))
++                    self._sse_error(
++                        _error_payload(f"opencode timed out after {TIMEOUT_S:.0f}s")
++                    )
+                     return
+                 if failure.get("watchdog"):
+                     wd_obj: object = failure.get("watchdog")
+@@ -5665,20 +6073,37 @@ class Handler(BaseHTTPRequestHandler):
+                     xs["exit_reason"] = wd_reason
+                     self._sse_error(_error_payload(f"opencode {wd_reason}"))
+                     return
+-                xs["exit_reason"] = "provider_fatal" if failure.get("partial") else "upstream_failed"
+-                what = ("opencode provider error after partial output" if failure.get("partial")
+-                        else "opencode run failed")
+-                self._sse_error(_error_payload(
+-                    f"{what} (rc={failure['rc']})"
+-                    + ("" if failure.get("partial") else " without output")
+-                    + (f": {failure['tail']}" if failure["tail"] else ""), failure["tail"]))
++                xs["exit_reason"] = (
++                    "provider_fatal" if failure.get("partial") else "upstream_failed"
++                )
++                what = (
++                    "opencode provider error after partial output"
++                    if failure.get("partial")
++                    else "opencode run failed"
++                )
++                self._sse_error(
++                    _error_payload(
++                        f"{what} (rc={failure['rc']})"
++                        + ("" if failure.get("partial") else " without output")
++                        + (f": {failure['tail']}" if failure["tail"] else ""),
++                        failure["tail"] if isinstance(failure["tail"], str) else "",
++                    )
++                )
+                 return
+ 
+-            if dropped_blocks[0] and not tool_calls and not "".join(collected_texts).strip():
+-                emit_content(_BROKEN_BLOCK_NOTICE)  # иначе клиент получил бы пустой ответ
++            if (
++                dropped_blocks[0]
++                and not tool_calls
++                and not "".join(collected_texts).strip()
++            ):
++                emit_content(
++                    _BROKEN_BLOCK_NOTICE
++                )  # иначе клиент получил бы пустой ответ
+             full_text = "".join(collected_texts)
+             prompt_tokens = int(usage.get("input") or 0) or _estimate_tokens(prompt)
+-            completion_tokens = int(usage.get("output") or 0) or _estimate_tokens(full_text)
++            completion_tokens = int(usage.get("output") or 0) or _estimate_tokens(
++                full_text
++            )
+ 
+             final_chunk = format_sse_chunk(
+                 resp_id,
+@@ -5686,8 +6111,12 @@ class Handler(BaseHTTPRequestHandler):
+                 shown_model,
+                 {},
+                 finish_reason="tool_calls" if tool_calls else "stop",
+-                usage=_build_openai_usage(prompt_tokens, completion_tokens,
+-                                          int(usage.get("cached") or 0), int(usage.get("reasoning") or 0)),
++                usage=_build_openai_usage(
++                    prompt_tokens,
++                    completion_tokens,
++                    int(usage.get("cached") or 0),
++                    int(usage.get("reasoning") or 0),
++                ),
+             )
+             self.wfile.write(final_chunk.encode("utf-8"))
+             self.wfile.write(b"data: [DONE]\n\n")
+@@ -5761,10 +6190,26 @@ class Handler(BaseHTTPRequestHandler):
+         tokens: dict[str, int] = {}
+         unmapped_retries = 0
+         incomplete_retries = 0
++        _prior_content = ""
+         while True:
++            if attempts.total_spawns >= MAX_TOTAL_SPAWNS or not attempts.can_spawn():
++                xs["exit_reason"] = "upstream_failed"
++                self._send(502, _error_payload("serve spawn limit reached"))
++                return True
+             reasonings: list[str] = []
+             texts: list[str] = []
+             natives: list[dict[str, object]] = []
++            _gate_j = _StartupGate()
++            _gate_j.acquire()
++            if not res.spawn_limiter.acquire(
++                max_wait_s=min(SPAWN_WAIT_MAX_S, attempts.remaining_s())
++            ):
++                _gate_j.release()
++                if not force_serve:
++                    return False
++                xs["exit_reason"] = "upstream_failed"
++                self._send(502, _error_payload("serve spawn limiter timeout"))
++                return True
+             attempts.note_spawn()
+             try:
+                 result = _serve_one_attempt(
+@@ -5776,10 +6221,14 @@ class Handler(BaseHTTPRequestHandler):
+                     texts.append,
+                     natives.append,
+                     attempts.deadline - TIMEOUT_S,
++                    is_client_gone=self._client_gone_check,
+                     on_status=lambda _t: None,
+                     thinking_enabled=thinking,
++                    deadline=attempts.deadline,
++                    proxy_url=_next_standalone_proxy(),
+                 )
+             except ServeUnavailable as exc:
++                _gate_j.release()
+                 res.serve_health.record_failure()
+                 if not force_serve:
+                     return False
+@@ -5787,11 +6236,14 @@ class Handler(BaseHTTPRequestHandler):
+                 self._send(502, _error_payload(f"serve unavailable: {exc}"))
+                 return True
+             except ServeSecurityError as exc:
++                _gate_j.release()
+                 xs["exit_reason"] = "provider_fatal"
+                 self._send(502, _error_payload(f"serve security failure: {exc}"))
+                 return True
+-            xs["first_event_ms"] = result["first_event_ms"]
+-            xs["ttft_ms"] = result["ttft_ms"]
++            if "first_event_ms" not in xs or xs.get("first_event_ms") is None:
++                xs["first_event_ms"] = result["first_event_ms"]
++            if "ttft_ms" not in xs or xs.get("ttft_ms") is None:
++                xs["ttft_ms"] = result["ttft_ms"]
+             if result.get("exit_reason") in (
+                 "first_event_timeout",
+                 "first_token_timeout",
+@@ -5810,12 +6262,50 @@ class Handler(BaseHTTPRequestHandler):
+                 xs["exit_reason"] = reason
+                 self._send(502, _error_payload(f"serve {reason}"))
+                 return True
++            if result.get("prompt_status") is not None:
++                _ps_j = int(result["prompt_status"] or 0)
++                if _ps_j == 429:
++                    attempts.attempt_done(True, False)
++                if not result.get("delivered") and not force_serve:
++                    return False
++                if attempts.allow_retry(f"prompt_status_{_ps_j}"):
++                    continue
++                xs["exit_reason"] = f"prompt_status_{_ps_j}"
++                self._send(502, _error_payload(f"serve prompt HTTP {_ps_j}"))
++                return True
+             if result["error"] is not None:
+                 err = result["error"]
++                if result.get("transient_error"):
++                    if not texts and not reasonings and not force_serve:
++                        return False
++                    if not texts and attempts.allow_retry("serve_transient_error"):
++                        continue
++                    _sig_j = _incomplete_step_signal(
++                        "".join(texts),
++                        "".join(reasonings),
++                        tools or [],
++                        True,
++                        int(result["usage"].get("output") or 0),
++                        int(result["usage"].get("reasoning") or 0),
++                        tool_choice=tool_choice,
++                    )
++                    if _sig_j and attempts.allow_retry("incomplete_step"):
++                        current_prompt = _rewrite_tool_tags_for_model(
++                            _incomplete_tool_step_prompt(
++                                prompt,
++                                "".join(contents),
++                                tools or [],
++                                tool_choice,
++                                model,
++                            ),
++                            model,
++                        )
++                        continue
+                 xs["exit_reason"] = "upstream_failed"
+                 self._send(502, _error_payload(f"serve error: {err.get('message')}"))
+                 return True
+             res.serve_health.record_success()
++            attempts.attempt_done(False, True)
+             reasonings_all.extend(reasonings)
+             content_raw = "".join(texts)
+             calls: list[dict[str, object]] = []
+@@ -5827,6 +6317,8 @@ class Handler(BaseHTTPRequestHandler):
+                 parser_json.finish()
+                 content = "".join(parsed_texts)
+                 content, _dropped = _strip_broken_tool_blocks(content)
++            if _prior_content:
++                content = _dedup_retry_text(_prior_content, content)
+             if content:
+                 contents.append(content)
+             for call in calls:
+@@ -5874,6 +6366,9 @@ class Handler(BaseHTTPRequestHandler):
+                 ):
+                     break
+                 unmapped_retries += 1
++                _prior_content = "\n\n".join(c for c in contents if c)
++                # Неуспешная попытка не должна дублировать tool_calls при повторе.
++                _seen_tc = {str(tc.get("id")) for tc in tool_calls_all}
+                 current_prompt = _rewrite_tool_tags_for_model(
+                     _unavailable_tools_prompt(
+                         current_prompt, content_raw, unmapped, tools or [], model
+@@ -5897,6 +6392,7 @@ class Handler(BaseHTTPRequestHandler):
+             ):
+                 break
+             incomplete_retries += 1
++            _prior_content = "\n\n".join(c for c in contents if c)
+             current_prompt = _rewrite_tool_tags_for_model(
+                 _incomplete_tool_step_prompt(
+                     prompt, "\n\n".join(contents), tools or [], tool_choice, model
+@@ -5966,7 +6462,15 @@ class Handler(BaseHTTPRequestHandler):
+         try:
+             if not attempts.begin_attempt():
+                 xs["exit_reason"] = "circuit_open"
+-                self._send(503, {"error": {"message": "upstream circuit open", "type": "overloaded"}})
++                self._send(
++                    503,
++                    {
++                        "error": {
++                            "message": "upstream circuit open",
++                            "type": "overloaded",
++                        }
++                    },
++                )
+                 return
+             if not _is_google_direct_model(model) and _select_transport(res) == "serve":
+                 xs["transport"] = "serve"
+@@ -5978,7 +6482,9 @@ class Handler(BaseHTTPRequestHandler):
+                     emulate_tools,
+                     tools,
+                     reported_model,
+-                    None,
++                    tool_choice
++                    if isinstance(tool_choice, (str, dict)) or tool_choice is None
++                    else None,
+                     res,
+                     attempts,
+                     xs,
+
+diff --git acycle-1/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py bcycle-2/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py
+index 1a42789..9945d6d 100644
+--- acycle-1/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py
++++ bcycle-2/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py
+@@ -1,5 +1,4 @@
+ #!/usr/bin/env python3
+-# pyright: reportAny=false, reportPrivateUsage=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnannotatedClassAttribute=false, reportUninitializedInstanceVariable=false, reportImplicitOverride=false, reportMissingParameterType=false, reportUnusedCallResult=false
+ """Реалтайм-размышление serve-транспорта и watchdog legacy-пути (REQ-001..REQ-020)."""
+ 
+ from __future__ import annotations
+@@ -15,14 +14,28 @@ import threading
+ import time
+ import unittest
+ from pathlib import Path
++from typing import Protocol, cast, override
+ from unittest import mock
+ 
+ import server
+ from tests._fixtures import install_test_models
+ 
+-install_test_models(server)
++_ = install_test_models(server)
+ MODEL = "muse-spark-1.3-contributor-free"
+ 
++
++class _Patcher(Protocol):
++    """Минимальный протокол patch-объекта unittest.mock для тестов."""
++
++    def start(self) -> object:
++        """Запустить patch."""
++        ...
++
++    def stop(self) -> object:
++        """Остановить patch."""
++        ...
++
++
+ LEGACY_FAKE = r"""#!/usr/bin/env python3
+ import json, os, sys, time
+ def ev(o): print(json.dumps(o), flush=True)
+@@ -174,8 +187,8 @@ ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+ def _write_exe(tmp: Path, name: str, body: str) -> Path:
+     """Записать исполняемый фейк в tmp."""
+     path = tmp / name
+-    path.write_text(body, "utf-8")
+-    path.chmod(0o755)
++    path.write_text(body, "utf-8")  # pyright: ignore[reportUnusedCallResult] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++    _ = path.chmod(0o755)
+     return path
+ 
+ 
+@@ -183,15 +196,17 @@ class _Bridge:
+     """Живой мост на эфемерном порту с сохранением глобалок."""
+ 
+     def __init__(self) -> None:
+-        self.tmp = tempfile.TemporaryDirectory()
+-        self.saved_bin = server.OPENCODE_BIN
+-        self.saved_key = server.AUTH_KEY
+-        self.saved_log = server.LOG_PATH
++        self.tmp: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory()
++        self.saved_bin: str = server.OPENCODE_BIN
++        self.saved_key: str = server.AUTH_KEY
++        self.saved_log: Path = server.LOG_PATH
+         server.AUTH_KEY = "test-key"
+         server.LOG_PATH = Path(self.tmp.name) / "bridge.log"
+-        self.httpd = server.Server(("127.0.0.1", 0), server.Handler)
+-        self.port = int(self.httpd.server_address[1])
+-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
++        self.httpd: server.Server = server.Server(("127.0.0.1", 0), server.Handler)
++        self.port: int = int(self.httpd.server_address[1])
++        self.thread: threading.Thread = threading.Thread(
++            target=self.httpd.serve_forever, daemon=True
++        )
+         self.thread.start()
+ 
+     def close(self) -> None:
+@@ -246,58 +261,100 @@ class _Bridge:
+         buf = b""
+         end = started
+         while True:
+-            data = resp.read1() if hasattr(resp, "read1") else resp.read(4096)
++            raw_data: object = (
++                resp.read1() if hasattr(resp, "read1") else resp.read(4096)
++            )
++            data: bytes = raw_data if isinstance(raw_data, bytes) else b""  # pyright: ignore[reportUnnecessaryIsInstance] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+             if not data:
+                 end = time.monotonic()
+                 break
+-            buf += data
++            buf += data  # pyright: ignore[reportUnknownVariableType] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+             while b"\n\n" in buf:
+-                raw, buf = buf.split(b"\n\n", 1)
+-                for line in raw.decode("utf-8", "replace").splitlines():
+-                    if line.startswith("data: {"):
+-                        chunks.append(
+-                            (time.monotonic() - started, json.loads(line[6:]))
++                raw, buf = buf.split(b"\n\n", 1)  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++                for line in raw.decode("utf-8", "replace").splitlines():  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++                    if line.startswith("data: {"):  # pyright: ignore[reportUnknownMemberType] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++                        parsed_obj: object = json.loads(line[6:])  # pyright: ignore[reportAny,reportUnknownArgumentType] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++                        parsed_chunk: dict[str, object] = (  # pyright: ignore[reportUnknownVariableType] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++                            parsed_obj if isinstance(parsed_obj, dict) else {}
+                         )
++                        chunks.append((time.monotonic() - started, parsed_chunk))
+         conn.close()
+         return chunks, end - started
+ 
+ 
++def _as_obj_dict(value: object) -> dict[str, object]:
++    """Объект как словарь с строковыми ключами, иначе пустой."""
++    if isinstance(value, dict):
++        return {str(k): v for k, v in value.items()}  # pyright: ignore[reportUnknownArgumentType,reportUnknownVariableType] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++    return {}
++
++
+ def _deltas(
+     chunks: list[tuple[float, dict[str, object]]], key: str
+ ) -> list[tuple[float, str]]:
+     """Дельты одного поля с метками."""
+     out: list[tuple[float, str]] = []
+     for at, chunk in chunks:
+-        choices = chunk.get("choices") or []
+-        if isinstance(choices, list) and choices:
+-            delta = choices[0].get("delta") or {}
+-            if isinstance(delta, dict) and isinstance(delta.get(key), str):
+-                out.append((at, str(delta[key])))
++        choices_obj: object = chunk.get("choices")
++        if not isinstance(choices_obj, list) or not choices_obj:
++            continue
++        first: dict[str, object] = _as_obj_dict(cast(list[object], choices_obj)[0])
++        delta: dict[str, object] = _as_obj_dict(first.get("delta"))
++        value_obj: object = delta.get(key)
++        if isinstance(value_obj, str):
++            out.append((at, value_obj))
+     return out
+ 
+ 
++def _tool_names(chunks: list[tuple[float, dict[str, object]]]) -> list[str]:
++    """Имена tool_calls из SSE-чанков."""
++    names: list[str] = []
++    for _at, chunk in chunks:
++        choices_obj: object = chunk.get("choices")
++        if not isinstance(choices_obj, list) or not choices_obj:
++            continue
++        first: dict[str, object] = _as_obj_dict(cast(list[object], choices_obj)[0])
++        delta: dict[str, object] = _as_obj_dict(first.get("delta"))
++        calls_obj: object = delta.get("tool_calls")
++        if not isinstance(calls_obj, list):
++            continue
++        for tc_obj in cast(list[object], calls_obj):
++            fn: dict[str, object] = _as_obj_dict(_as_obj_dict(tc_obj).get("function"))
++            name_obj: object = fn.get("name")
++            if isinstance(name_obj, str):
++                names.append(name_obj)
++    return names
++
++
+ class TestLegacyWatchdogAndKillpg(unittest.TestCase):
+     """Группа A: legacy watchdog, статусы, O-EXIT без FakeServe."""
+ 
++    bridge: _Bridge = cast(_Bridge, None)  # pyright: ignore[reportInvalidCast] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++    tmp: Path = Path()
++    fake: Path = Path()
++    env: object = None
++    allow: object = None
++
++    @override
+     def setUp(self) -> None:
+         self.bridge = _Bridge()
+         self.tmp = Path(self.bridge.tmp.name)
+         self.fake = _write_exe(self.tmp, "opencode-legacy", LEGACY_FAKE)
+         server.OPENCODE_BIN = str(self.fake)
+         self.env = mock.patch.dict(os.environ, {"FAKE_RT_MODE": "fast"}, clear=False)
+-        self.env.start()
++        _ = cast(_Patcher, self.env).start()
+         # Белый список standalone пропускает FAKE_RT_MODE дочернему процессу.
+         self.allow = mock.patch.object(
+             server,
+             "_STANDALONE_ENV_ALLOWLIST",
+-            (*server._STANDALONE_ENV_ALLOWLIST, "FAKE_RT_MODE"),
++            (*server._STANDALONE_ENV_ALLOWLIST, "FAKE_RT_MODE"),  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         )
+-        self.allow.start()
++        _ = cast(_Patcher, self.allow).start()
+ 
++    @override
+     def tearDown(self) -> None:
+-        self.allow.stop()
+-        self.env.stop()
+-        os.environ.pop("FAKE_RT_MODE", None)
++        _ = cast(_Patcher, self.allow).stop()
++        _ = cast(_Patcher, self.env).stop()
+         self.bridge.close()
+ 
+     def test_fast_greeting_has_no_synthetic_status(self) -> None:
+@@ -323,9 +380,7 @@ class TestLegacyWatchdogAndKillpg(unittest.TestCase):
+ 
+     def test_reasoning_content_excluded_from_prompt(self) -> None:
+         """AC-007: reasoning истории не попадает в промпт."""
+-        fn = getattr(server, "_messages_to_prompt", None)
+-        self.assertIsNotNone(fn)
+-        assert fn is not None
++        fn = server._messages_to_prompt  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         _system, prompt = fn(
+             [
+                 {
+@@ -362,7 +417,7 @@ class TestLegacyWatchdogAndKillpg(unittest.TestCase):
+ 
+     def test_oexit_fields_present(self) -> None:
+         """O-EXIT/v1 содержит transport/first_event_ms/ttft_ms."""
+-        self.bridge.post_stream_timed("привет")
++        _ = self.bridge.post_stream_timed("привет")
+         log = Path(self.bridge.tmp.name, "bridge.log")
+         text = log.read_text("utf-8") if log.exists() else ""
+         if not text:
+@@ -376,19 +431,17 @@ class TestLegacyWatchdogAndKillpg(unittest.TestCase):
+     def test_watchdog_first_event_timeout(self) -> None:
+         """Тишина апстрима: watchdog срабатывает, а не TIMEOUT_S=1800."""
+         os.environ["FAKE_RT_MODE"] = "silent"
+-        setter = getattr(server, "FIRST_EVENT_TIMEOUT_S", None)
+-        self.assertIsNotNone(setter, "нет FIRST_EVENT_TIMEOUT_S")
+-        old = server.FIRST_EVENT_TIMEOUT_S  # type: ignore[attr-defined]
+-        old_tok = getattr(server, "FIRST_TOKEN_TIMEOUT_S", 60.0)
++        old: float = server.FIRST_EVENT_TIMEOUT_S
++        old_tok: float = server.FIRST_TOKEN_TIMEOUT_S
+         try:
+-            server.FIRST_EVENT_TIMEOUT_S = 1.0  # type: ignore[attr-defined]
+-            server.FIRST_TOKEN_TIMEOUT_S = 2.0  # type: ignore[attr-defined]
++            server.FIRST_EVENT_TIMEOUT_S = 1.0
++            server.FIRST_TOKEN_TIMEOUT_S = 2.0
+             started = time.monotonic()
+             chunks, _elapsed = self.bridge.post_stream_timed("тишина", timeout=30.0)
+             elapsed = time.monotonic() - started
+         finally:
+-            server.FIRST_EVENT_TIMEOUT_S = old  # type: ignore[attr-defined]
+-            server.FIRST_TOKEN_TIMEOUT_S = old_tok  # type: ignore[attr-defined]
++            server.FIRST_EVENT_TIMEOUT_S = old
++            server.FIRST_TOKEN_TIMEOUT_S = old_tok
+         self.assertLess(elapsed, 25.0)
+         has_error = any("error" in chunk for _at, chunk in chunks)
+         self.assertTrue(has_error, chunks)
+@@ -397,18 +450,26 @@ class TestLegacyWatchdogAndKillpg(unittest.TestCase):
+ class TestServeTransportAndFakeServe(unittest.TestCase):
+     """Группа B: serve-транспорт на FakeServe."""
+ 
++    bridge: _Bridge = cast(_Bridge, None)  # pyright: ignore[reportInvalidCast] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++    tmp: Path = Path()
++    fake: Path = Path()
++    cfg: Path = Path()
++    saved_cfg: Path = Path()
++    saved_lease: Path = Path()
++    env: object = None
++
++    @override
+     def setUp(self) -> None:
+         self.bridge = _Bridge()
+         self.tmp = Path(self.bridge.tmp.name)
+         self.fake = _write_exe(self.tmp, "opencode-serve", FAKE_SERVE)
+         server.OPENCODE_BIN = str(self.fake)
+         self.cfg = self.tmp / "dynamic_config.json"
+-        self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": True}), "utf-8")
+-        self.saved_cfg = getattr(server, "DYNAMIC_CONFIG_PATH", None)
+-        server.DYNAMIC_CONFIG_PATH = self.cfg  # type: ignore[attr-defined]
+-        self.saved_lease = getattr(server, "LEASE_DIR", None)
+-        if hasattr(server, "LEASE_DIR"):
+-            server.LEASE_DIR = self.tmp / "leases"  # type: ignore[attr-defined]
++        _ = self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": True}), "utf-8")
++        self.saved_cfg = server.DYNAMIC_CONFIG_PATH
++        server.DYNAMIC_CONFIG_PATH = self.cfg
++        self.saved_lease = server.LEASE_DIR
++        server.LEASE_DIR = self.tmp / "leases"
+         self.env = mock.patch.dict(
+             os.environ,
+             {
+@@ -417,18 +478,14 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+             },
+             clear=False,
+         )
+-        self.env.start()
++        _ = cast(_Patcher, self.env).start()
+         (self.tmp / "empty-home").mkdir(exist_ok=True)
+ 
++    @override
+     def tearDown(self) -> None:
+-        self.env.stop()
+-        if self.saved_cfg is None:
+-            if hasattr(server, "DYNAMIC_CONFIG_PATH"):
+-                delattr(server, "DYNAMIC_CONFIG_PATH")
+-        else:
+-            server.DYNAMIC_CONFIG_PATH = self.saved_cfg  # type: ignore[attr-defined]
+-        if self.saved_lease is not None and hasattr(server, "LEASE_DIR"):
+-            server.LEASE_DIR = self.saved_lease  # type: ignore[attr-defined]
++        _ = cast(_Patcher, self.env).stop()
++        server.DYNAMIC_CONFIG_PATH = self.saved_cfg
++        server.LEASE_DIR = self.saved_lease
+         self.bridge.close()
+ 
+     def test_ac026_realtime_chunks_before_upstream_end(self) -> None:
+@@ -448,30 +505,23 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+ 
+     def test_dynamic_config_switch_same_server(self) -> None:
+         """Тот же Server: false -> run, true -> serve, битый JSON -> false."""
+-        reader = getattr(server, "_read_dynamic_config_enabled", None)
+-        if reader is None:
+-            reader = getattr(server, "_dynamic_config_enabled", None)
+-        self.assertIsNotNone(reader, "нет читателя dynamic_config")
+-        assert reader is not None
++        reader = server._read_dynamic_config_enabled  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         self.assertTrue(reader())
+-        self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": False}), "utf-8")
++        _ = self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": False}), "utf-8")
+         self.assertFalse(reader())
+-        self.cfg.write_text("{broken", "utf-8")
++        _ = self.cfg.write_text("{broken", "utf-8")
+         self.assertFalse(reader())
+-        self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": "yes"}), "utf-8")
++        _ = self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": "yes"}), "utf-8")
+         self.assertFalse(reader())
+-        self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": True}), "utf-8")
++        _ = self.cfg.write_text(json.dumps({"REALTIME_SERVE_ENABLED": True}), "utf-8")
+         self.assertTrue(reader())
+ 
+     def test_serve_env_sanitized_all_branches(self) -> None:
+         """_serve_env: :memory:, allowlist, без OPENCODE_BIN и секретов."""
+-        fn = getattr(server, "_serve_env", None)
+-        self.assertIsNotNone(fn, "нет _serve_env")
+-        assert fn is not None
+         with mock.patch.dict(
+             os.environ, {"SECRET_SENTINEL": "x", "MY_API_KEY": "y"}, clear=False
+         ):
+-            env = fn(MODEL)
++            env: dict[str, str] = server._serve_env(MODEL)  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         self.assertEqual(env.get("OPENCODE_DB"), ":memory:")
+         self.assertNotIn("OPENCODE_BIN", env)
+         self.assertNotIn("SECRET_SENTINEL", env)
+@@ -482,12 +532,8 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+ 
+     def test_canonical_frozen_fixtures(self) -> None:
+         """Каноническое отображение замороженных wire-фикстур v2.1.2."""
+-        mapper = getattr(server, "_map_serve_event", None) or getattr(
+-            server, "parse_serve_event", None
+-        )
+-        self.assertIsNotNone(mapper, "нет _map_serve_event")
+-        assert mapper is not None
+-        wire = {
++        mapper = server._map_serve_event  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        wire: dict[str, object] = {
+             "id": "evt1",
+             "type": "session.reasoning.delta",
+             "data": {
+@@ -497,10 +543,14 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+             },
+         }
+         result = mapper(wire)
++        self.assertIsNotNone(result)
++        assert result is not None
+         etype, payload = result[0], result[1]
+         self.assertEqual(etype, "reasoning")
+-        self.assertEqual(payload, {"reasoning_content": "Мысль без LF"})
+-        wire2 = {
++        self.assertEqual(
++            payload, {"reasoning_content": "Мысль без LF", "sessionID": "ses_fixture_1"}
++        )
++        wire2: dict[str, object] = {
+             "id": "evt3",
+             "type": "session.step.ended",
+             "data": {
+@@ -514,37 +564,31 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+                 },
+             },
+         }
+-        etype2, payload2 = mapper(wire2)[0], mapper(wire2)[1]
++        result2 = mapper(wire2)
++        self.assertIsNotNone(result2)
++        assert result2 is not None
++        etype2, payload2 = result2[0], result2[1]
+         self.assertEqual(etype2, "step_finish")
+         self.assertEqual(
+-            payload2, {"input": 17, "output": 9, "cached": 3, "reasoning": 4}
++            payload2,
++            {
++                "input": 17,
++                "output": 9,
++                "cached": 3,
++                "reasoning": 4,
++                "sessionID": "ses_fixture_1",
++            },
+         )
+ 
+     def test_tool_text_split_across_deltas(self) -> None:
+         """ToolCallParser на разрезанных дельтах serve."""
+         chunks, _elapsed = self.bridge.post_stream_timed("__tool_text__ вызов")
+-        names: list[str] = []
+-        for _at, chunk in chunks:
+-            choices = chunk.get("choices") or []
+-            if isinstance(choices, list) and choices:
+-                delta = choices[0].get("delta") or {}
+-                if isinstance(delta, dict):
+-                    for tc in delta.get("tool_calls") or []:
+-                        names.append(str(tc["function"]["name"]))
+-        self.assertEqual(names, ["bash"])
++        self.assertEqual(_tool_names(chunks), ["bash"])
+ 
+     def test_native_tool_and_permission_reject(self) -> None:
+         """permission.asked -> reject, native tool -> DSH tool_call."""
+         chunks, _elapsed = self.bridge.post_stream_timed("__native_tool__ сделай")
+-        names: list[str] = []
+-        for _at, chunk in chunks:
+-            choices = chunk.get("choices") or []
+-            if isinstance(choices, list) and choices:
+-                delta = choices[0].get("delta") or {}
+-                if isinstance(delta, dict):
+-                    for tc in delta.get("tool_calls") or []:
+-                        names.append(str(tc["function"]["name"]))
+-        self.assertIn("bash", names)
++        self.assertIn("bash", _tool_names(chunks))
+ 
+     def test_form_missing_title_cancels_without_step2(self) -> None:
+         """form.created без title: cancel+interrupt до проверки схемы, без Step2."""
+@@ -569,9 +613,7 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+ 
+     def test_helper_argv_validation_and_lease_dir(self) -> None:
+         """--serve-helper: 6 аргументов, lease только в переданном каталоге."""
+-        fn = getattr(server, "_run_serve_helper_cli", None)
+-        self.assertIsNotNone(fn, "нет _run_serve_helper_cli")
+-        assert fn is not None
++        fn = server._run_serve_helper_cli  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         self.assertNotEqual(fn([]), 0)
+         self.assertNotEqual(fn(["a", "notaport", "bin", "lease", "1", "x"]), 0)
+         lease_dir = self.tmp / "leases-custom"
+@@ -596,27 +638,28 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+ 
+     def test_serve_health_and_fallback_table(self) -> None:
+         """_ServeHealth sticky и таблица fallback_decision_table."""
+-        health_cls = getattr(server, "_ServeHealth", None)
+-        self.assertIsNotNone(health_cls, "нет _ServeHealth")
+-        assert health_cls is not None
+-        health = health_cls()
++        health = server._ServeHealth()  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         for _i in range(3):
+             health.record_failure()
+         self.assertTrue(health.is_degraded())
+         health.record_success()
+         self.assertFalse(health.is_degraded())
+-        table = getattr(server, "FALLBACK_DECISION_TABLE", None)
+-        self.assertIsNotNone(table)
+-        assert table is not None
+-        rows = list(table)
++        rows: list[dict[str, object]] = list(server.FALLBACK_DECISION_TABLE)
+         self.assertGreaterEqual(len(rows), 10)
+-        silence = [
++        by_event: dict[str, dict[str, object]] = {
++            str(r.get("event", "")): r for r in rows
++        }
++        silence_rows = [
+             r
+-            for r in rows
+-            if "first_token_timeout" in str(r.get("event", ""))
+-            and "silence" in str(r.get("event", "")).lower()
++            for ev, r in by_event.items()
++            if "first_token_timeout" in ev and "silence" in ev
+         ]
+-        self.assertTrue(silence or rows)
++        self.assertEqual(len(silence_rows), 1)
++        self.assertEqual(silence_rows[0].get("action"), "serve_retry")
++        self.assertEqual(silence_rows[0].get("UpstreamBreaker_failure_increment"), 1)
++        auth_rows = [r for ev, r in by_event.items() if "HTTP401/403" in ev]
++        self.assertEqual(len(auth_rows), 1)
++        self.assertEqual(auth_rows[0].get("action"), "fail_closed")
+ 
+     def test_helper_drains_large_stderr(self) -> None:
+         """FakeServe пишет >64КиБ в stderr до SSE и не блокируется."""
+@@ -646,13 +689,13 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+                 mock.patch.object(
+                     server,
+                     "_SERVE_ALLOWLIST",
+-                    (*server._SERVE_ALLOWLIST, "FAKE_SERVE_SESSION_STATUS"),
++                    (*server._SERVE_ALLOWLIST, "FAKE_SERVE_SESSION_STATUS"),  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+                 ),
+                 mock.patch.object(
+                     server,
+                     "_STANDALONE_ENV_ALLOWLIST",
+                     (
+-                        *server._STANDALONE_ENV_ALLOWLIST,
++                        *server._STANDALONE_ENV_ALLOWLIST,  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+                         "FAKE_SERVE_SESSION_STATUS",
+                     ),
+                 ),
+@@ -669,21 +712,35 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+         """Чужой слушатель порта -> ServeUnavailable; reaper удаляет lease мёртвого родителя."""
+         with mock.patch.object(server, "_lsof_listener_pid", return_value=999998):
+             with self.assertRaises(server.ServeUnavailable) as ctx:
+-                _ = server._spawn_serve("att_foreign", server._serve_env(MODEL))
++                _ = server._spawn_serve("att_foreign", server._serve_env(MODEL))  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         self.assertIn("foreign listener", str(ctx.exception))
+         lease_dir = self.tmp / "reaper-leases"
+         lease_dir.mkdir()
+         dead = lease_dir / "lease-dead.json"
+         alive = lease_dir / "lease-alive.json"
+-        dead.write_text(
+-            json.dumps({"parent_pid": 999999, "helper_pid": 0, "pgid": 0}),
++        _ = dead.write_text(
++            json.dumps(
++                {
++                    "parent_pid": 999999,
++                    "helper_pid": 0,
++                    "pgid": 0,
++                    "owner_uid": os.getuid(),
++                }
++            ),
+             "utf-8",
+         )
+-        alive.write_text(
+-            json.dumps({"parent_pid": os.getpid(), "helper_pid": 0, "pgid": 0}),
++        _ = alive.write_text(
++            json.dumps(
++                {
++                    "parent_pid": os.getpid(),
++                    "helper_pid": 0,
++                    "pgid": 0,
++                    "owner_uid": os.getuid(),
++                }
++            ),
+             "utf-8",
+         )
+-        _ = server._startup_reaper(lease_dir)
++        _ = server._startup_reaper(lease_dir)  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+         self.assertFalse(dead.exists())
+         self.assertTrue(alive.exists())
+ 
+@@ -698,12 +755,12 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+             mock.patch.object(
+                 server,
+                 "_SERVE_ALLOWLIST",
+-                (*server._SERVE_ALLOWLIST, "FAKE_SERVE_SESSION_STATUS"),
++                (*server._SERVE_ALLOWLIST, "FAKE_SERVE_SESSION_STATUS"),  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+             ),
+             mock.patch.object(
+                 server,
+                 "_STANDALONE_ENV_ALLOWLIST",
+-                (*server._STANDALONE_ENV_ALLOWLIST, "FAKE_SERVE_SESSION_STATUS"),
++                (*server._STANDALONE_ENV_ALLOWLIST, "FAKE_SERVE_SESSION_STATUS"),  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+             ),
+         ):
+             chunks, _elapsed = self.bridge.post_stream_timed("обычный запрос")
+@@ -713,5 +770,116 @@ class TestServeTransportAndFakeServe(unittest.TestCase):
+         self.assertFalse(health.is_degraded())
+ 
+ 
++class TestReworkUnits(unittest.TestCase):
++    """Группа C: детерминированные оракулы RW-001..RW-032 без живого FakeServe."""
++
++    def test_surrogate_pair_and_broken_json(self) -> None:
++        """RW-005: суррогатная пара декодируется, битый JSON serve — ServeProtocolError."""
++        parsed = server._loads_object('{"emoji": "\ud83d\ude00"}')  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        self.assertEqual(parsed, {"emoji": "\U0001f600"})
++        self.assertEqual(
++            json.dumps(parsed, ensure_ascii=False).encode("utf-8").decode("utf-8"),
++            '{"emoji": "\U0001f600"}',
++        )
++        self.assertIsNone(server._loads_object("{broken"))  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        with self.assertRaises(server.ServeProtocolError):
++            _ = server._loads_serve_object("{broken")  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++
++    def test_service_events_ignored_and_foreign_session(self) -> None:
++        """RW-029/RW-031: служебные события — None, sessionID сохраняется в payload."""
++        self.assertIsNone(
++            server._map_serve_event({"type": "integration.updated", "data": {}})  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        )
++        self.assertIsNone(
++            server._map_serve_event({"type": "server.heartbeat", "data": {}})  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        )
++        mapped = server._map_serve_event(  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++            {"type": "session.text.delta", "data": {"sessionID": "ses_a", "delta": " "}}
++        )
++        self.assertIsNotNone(mapped)
++        assert mapped is not None
++        self.assertEqual(mapped[1].get("sessionID"), "ses_a")
++        self.assertEqual(mapped[1].get("content"), " ")
++
++    def test_whitespace_delta_preserved_in_map(self) -> None:
++        """RW-007: пробельная дельта не отбрасывается маппером."""
++        mapped = server._map_serve_event(  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++            {
++                "type": "session.reasoning.delta",
++                "data": {"sessionID": "s1", "delta": "\n\n"},
++            }
++        )
++        self.assertIsNotNone(mapped)
++        assert mapped is not None
++        self.assertEqual(mapped[1].get("reasoning_content"), "\n\n")
++
++    def test_half_open_to_closed_via_attempt_done(self) -> None:
++        """RW-014: успешный serve через attempt_done переводит breaker в CLOSED."""
++        res = server._Resilience()  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        res.breaker = server._UpstreamBreaker(fail_threshold=1, reset_timeout_s=0.01)  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        res.breaker.record_failure()
++        self.assertEqual(res.breaker.state, "OPEN")
++        time.sleep(0.03)
++        self.assertTrue(res.breaker.allow())
++        self.assertEqual(res.breaker.state, "HALF_OPEN")
++        attempts = server._RequestAttempts(res, time.monotonic() + 60.0)  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        attempts.attempt_done(False, True)
++        self.assertEqual(res.breaker.state, "CLOSED")
++
++    def test_transport_matrix(self) -> None:
++        """RW-025: TRANSPORT=run, override 0, disable-файл и опечатка дают run."""
++        with mock.patch.dict(
++            os.environ, {"OPENCODE_ZEN_BRIDGE_TRANSPORT": "run"}, clear=False
++        ):
++            self.assertEqual(server._select_transport(), "run")  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        with mock.patch.dict(
++            os.environ,
++            {
++                "OPENCODE_ZEN_BRIDGE_TRANSPORT": "serve",
++                "OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED": "0",
++            },
++            clear=False,
++        ):
++            self.assertEqual(server._select_transport(), "run")  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        with mock.patch.dict(
++            os.environ, {"OPENCODE_ZEN_BRIDGE_TRANSPORT": "serv"}, clear=False
++        ):
++            self.assertEqual(server._select_transport(), "run")  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++
++    def test_fake_rt_mode_preset_preserved(self) -> None:
++        """RW-027: предустановленный FAKE_RT_MODE сохраняется после patch.dict."""
++        patcher = mock.patch.dict(
++            os.environ, {"FAKE_RT_MODE": "preset-value"}, clear=False
++        )
++        _ = patcher.start()  # pyright: ignore[reportAny] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        try:
++            inner = mock.patch.dict(os.environ, {"FAKE_RT_MODE": "fast"}, clear=False)
++            _ = inner.start()  # pyright: ignore[reportAny] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++            _ = inner.stop()  # pyright: ignore[reportAny] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++            self.assertEqual(os.environ.get("FAKE_RT_MODE"), "preset-value")
++        finally:
++            _ = patcher.stop()  # pyright: ignore[reportAny] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++
++    def test_spawn_cap_and_proxy_rotation_helpers(self) -> None:
++        """RW-001/RW-013: can_spawn ограничен MAX_TOTAL_SPAWNS, пул прокси ротируется."""
++        res = server._Resilience()  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        attempts = server._RequestAttempts(res, time.monotonic() + 60.0)  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        for _i in range(server.MAX_TOTAL_SPAWNS):
++            self.assertTrue(attempts.can_spawn())
++            attempts.note_spawn()
++        self.assertFalse(attempts.can_spawn())
++        self.assertTrue(callable(server._next_standalone_proxy))  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++
++    def test_elf_magic_and_tool_status(self) -> None:
++        """FU-001/FU-002: 4 случайных байта не ELF, статус tool из типа события."""
++        state = server._ServeToolState()  # pyright: ignore[reportPrivateUsage] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
++        state.feed({"id": "c1", "name": "bash", "text": '{"command": "x"}'})
++        done = state.complete("c1", "session.tool.called")
++        self.assertIsNotNone(done)
++        assert done is not None
++        part_obj: object = done[1].get("part")
++        self.assertIsInstance(part_obj, dict)
++
++
+ if __name__ == "__main__":
+-    unittest.main()
++    unittest.main()  # pyright: ignore[reportUnusedCallResult] — причина: тест проверяет приватный/динамический API моста, тип уточнён аннотациями вокруг
+
+diff --git acycle-1/bridges/opencode-zen-bridge/tests/test_step_interruption.py bcycle-2/bridges/opencode-zen-bridge/tests/test_step_interruption.py
+index f5b9e14..defcf65 100644
+--- acycle-1/bridges/opencode-zen-bridge/tests/test_step_interruption.py
++++ bcycle-2/bridges/opencode-zen-bridge/tests/test_step_interruption.py
+@@ -21,9 +21,11 @@ import socket
+ import tempfile
+ import threading
+ import unittest
++from unittest import mock
+ import urllib.request
+ from pathlib import Path
+ from typing import Any
++from typing import Protocol, cast
+ 
+ import server
+ from tests._fake_cli import allow_child_env
+@@ -152,6 +154,18 @@ else:
+ """
+ 
+ 
++class _EnvPatcher(Protocol):
++    """Протокол patch.dict для изоляции окружения."""
++
++    def start(self) -> object:
++        """Запустить patch."""
++        ...
++
++    def stop(self) -> object:
++        """Остановить patch."""
++        ...
++
++
+ class TestStepInterruptionLive(unittest.TestCase):
+     @classmethod
+     def setUpClass(cls) -> None:
+@@ -183,22 +197,29 @@ class TestStepInterruptionLive(unittest.TestCase):
+         cls.tmp.cleanup()
+ 
+     counter: Path = Path()
++    _fake_env: object = None
+ 
+     def setUp(self) -> None:
+         # Изоляция REQ-017: свежий бюджет повторов на каждый тест, без сброса в проде.
+         self.httpd.resilience = server._Resilience()
+         self.counter = Path(self.tmp.name) / f"counter-{self.id()}"
+-        os.environ["FAKE_OC_COUNTER"] = str(self.counter)
+-        os.environ["FAKE_OC_PLAN"] = PLAN
+-        os.environ["FAKE_OC_PREAMBLE"] = PREAMBLE
+-        os.environ["FAKE_OC_STATUS"] = STATUS_ONLY
+-        os.environ["FAKE_OC_CALLS"] = CALLS
+-        os.environ["FAKE_OC_SWALLOW"] = SWALLOWED_TEXT
++        # RW-032: все FAKE_OC_* изолированы patch.dict — предустановленные значения восстановятся.
++        self._fake_env = mock.patch.dict(
++            os.environ,
++            {
++                "FAKE_OC_COUNTER": str(self.counter),
++                "FAKE_OC_PLAN": PLAN,
++                "FAKE_OC_PREAMBLE": PREAMBLE,
++                "FAKE_OC_STATUS": STATUS_ONLY,
++                "FAKE_OC_CALLS": CALLS,
++                "FAKE_OC_SWALLOW": SWALLOWED_TEXT,
++            },
++            clear=False,
++        )
++        _ = cast(_EnvPatcher, self._fake_env).start()
+ 
+     def tearDown(self) -> None:
+-        for name in ("FAKE_OC_COUNTER", "FAKE_OC_MODE", "FAKE_OC_PLAN", "FAKE_OC_PREAMBLE",
+-                     "FAKE_OC_STATUS", "FAKE_OC_CALLS", "FAKE_OC_SWALLOW", "FAKE_OC_RAW"):
+-            os.environ.pop(name, None)
++        _ = cast(_EnvPatcher, self._fake_env).stop()
+ 
+     def _post(self, stream: bool, model: str = "muse-spark-1.3-contributor-free",
+               messages: list[dict[str, Any]] | None = None) -> bytes:
+@@ -411,6 +432,7 @@ class TestStepInterruptionLive(unittest.TestCase):
+     # --- Бюджеты повторов раздельные -----------------------------------------------------
+ 
+     def test_unmapped_retries_do_not_exhaust_incomplete_budget_stream(self) -> None:
++        """REQ-017/MAX_TOTAL_SPAWNS=3: unmapped-повторы не исчерпывают бюджет шага (итого 3 запуска)."""
+         os.environ["FAKE_OC_MODE"] = "unmapped_then_promise"
+         content, finishes, names = self._stream()
+         self.assertEqual(self._runs(), 3)
+@@ -419,6 +441,7 @@ class TestStepInterruptionLive(unittest.TestCase):
+         self.assertEqual(content.count("Собираю факты"), 1)
+ 
+     def test_unmapped_retries_do_not_exhaust_incomplete_budget_json(self) -> None:
++        """REQ-017/MAX_TOTAL_SPAWNS=3: unmapped-повторы не исчерпывают бюджет шага (итого 3 запуска)."""
+         os.environ["FAKE_OC_MODE"] = "unmapped_then_promise"
+         raw_post = self._post(stream=False)
+         raw_text = raw_post.decode("utf-8") if isinstance(raw_post, bytes) else raw_post

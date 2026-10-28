@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "role": "architect",
+  "iteration": 6,
+  "plan_kind": "delta",
+  "parent_plan": "plans/architect-05.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "FU-001",
+    "FU-002"
+  ],
+  "objective": "v6: закрыть два блокера и два follow-up a5 изолированными RSS/clean-room/VER-004 пробами, без изменений продукта; передать кандидата a6.",
+  "inputs_read": [
+    "handoff/panel-rework-brief-arch-a5.json",
+    "architecture/architecture-packet.json",
+    "handoff/panel-rework-brief-arch-a1.json",
+    "handoff/panel-rework-brief-arch-a2.json",
+    "handoff/panel-rework-brief-arch-a3.json",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/protocol.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/scope-and-contracts.md",
+    "handoff/panel-rework-brief-arch-a4.json"
+  ],
+  "stop_conditions": [
+    "Писать только architect-06.before.json/architect-06.json/architecture-packet.json; backups v1..v5 и product/analysis неизменны.",
+    "Пробы только /tmp/zen-arch6-probe-* с удалением до завершения.",
+    "Не ослаблять typing/frozen/24 gates; не присваивать Council PASS/ARCH_GATE_PASS/H3 PASS."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить a5 и закрытые a1..a4, снять fingerprints и validate before.",
+      "expected_evidence": "RW-001/RW-002/FU-001/FU-002; исходный v5 SHA и product fingerprint.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "verify",
+      "action": "RW-001/RW-002: ранний typed helper, полный argv, clean-room fake, фактический RSS.",
+      "expected_evidence": "EVD-079: воспроизводимые исходники/argv/env/RSS, отсутствие тяжёлых модулей и state/log/config I/O.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "FU-001/RW-001/RW-002: выполнить точный VER-004 с --config и hostile XDG_CONFIG_HOME.",
+      "expected_evidence": "errors0/reportAny125/catalog8/8/frozen3SHA, formatter identity, ruff0.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "decide",
+      "action": "Синхронизировать память 32/216/1296/1552 MiB и замкнутый helper контракт; FU-002 metadata v6/a6.",
+      "expected_evidence": "Все действующие секции согласованы; четыре resolutions a5; a1..a4 сохранены.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Проверить 46 HL fields/24 gates, JSON pointers, outside-allowlist fingerprint; закрыть plan и seal SHA.",
+      "expected_evidence": "after/packet validators0, probe dirs0, product gitstatus empty; a6 pending, H0..H9 NOT_RUN.",
+      "status": "PENDING"
+    }
+  ],
+  "deviations": []
+}

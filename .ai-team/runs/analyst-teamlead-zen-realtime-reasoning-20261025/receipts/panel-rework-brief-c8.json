@@ -1,0 +1,1 @@
+VALID n_instructions=2 n_followups=2 slot=gpt-6.1-sol ledger_findings=4 require_debate=1 final_verdict=ok

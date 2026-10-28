@@ -1,0 +1,48 @@
+# Единый согласованный документ судейства Совета Тимлидов по коду (`final-panel-verdict.md`) — Cycle 7
+
+- **Run ID:** `analyst-teamlead-zen-realtime-reasoning-20261025`
+- **Проверяемый артефакт:** `.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/package.md` (`sha256=5efd0909ef787d0125d23fe80ae837ad4d39d28975f2e455501c8f98b937f830`)
+- **Раунд R1 (`panel/council/r82`):** `PANEL PROOF: /Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/panel/council/r82/panel-proof.json sha256=2cf7c3441dc30d3485717ac5a3428d33fb3eb45443a05bb03423751fa9ea6322 verify_panel_proof exit=0`
+- **Раунд D1 (`panel/council/r89`):** `PANEL PROOF: /Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/panel/council/r89/panel-proof.json sha256=bb0e0279389377cca425491e41ec332da68107204496654de75ac57de2eafd52 verify_panel_proof exit=0`
+- **Итоговый вердикт Совета Тимлидов:** **NEEDS WORK (Класс A — `3` согласованных первичных блокера `RW-001..RW-003` и `3` согласованных non-blocking `FU-001..FU-003`, `0` открытых `CONFLICT`)**
+
+---
+
+## Раздел А. Согласованные блокеры («что не так»)
+
+Все `3` первичных блокера подтверждены большинством/единогласно после механического `RECHECK` (`recheck-r1.md`) и раунда дебатов `D1` (`panel/council/r89`):
+
+- **`F-001` → `RW-001`** (`status=AGREED`, `outcome=blocking`, критерий `КОРРЕКТНОСТЬ`, локация `bridges/opencode-zen-bridge/server.py` `server.py:6034,6039,7328`, правило `REQ-009, FALLBACK_DECISION_TABLE`): В `Handler._stream_sse_serve` (`server.py:6034`) разделить предикаты запрета fallback в `opencode run` (`_delivered_err = _delivered_now or bool(collected_texts)`) и допустимости `serve`-повтора ранней транзиентной ошибки без модельного вывода (`if not collected_texts and attempts.allow_retry("serve_transient_error"): continue`, аналогично JSON-ветке `server.py:7328`), чтобы после `session.execution.started` при раннем `session.execution.failed` (429/503) без выданных токенов выполнялся `serve`-повтор в пределах `MAX_TOTAL_SPAWNS`, но fallback в `opencode run` оставался запрещённым.
+- **`F-002` → `RW-002`** (`status=AGREED`, `outcome=blocking`, критерий `КОРРЕКТНОСТЬ`, локация `bridges/opencode-zen-bridge/server.py` `server.py:1785,5800,7460`, правило `python-standards.md §3, §14, FALLBACK_DECISION_TABLE`): В `_combine_surrogates` (`server.py:1785`) и на границе парсинга `serve`-событий отклонять непарные UTF-16 surrogates (`\ud800..\udfff`, вызывающие `UnicodeError` при `surrogatepass` -> `utf-16-be` или содержащие одиночные суррогаты после склейки) через `ServeProtocolError("invalid unpaired surrogate in serve event")`, сохраняя корректные суррогатные пары без изменения текста.
+- **`F-005` → `RW-003`** (`status=AGREED`, `outcome=blocking`, критерий `РИСКИ`, локация `bridges/opencode-zen-bridge/server.py` `server.py:3382,5995,6091,7284,7380`, правило `FALLBACK_DECISION_TABLE, R-BULK-I3`): Выделить локальное исчерпание общего дедлайна запроса (`exit_reason == "timeout"`, включая `ServeStartupDeadlineExceeded`) как нейтральный терминальный исход в `Handler._stream_sse_serve` (`server.py:5995, 6091`) и `Handler._serve_json_via_serve` (`server.py:7284, 7380`): не вызывать `attempts.attempt_done(True, False)` и не делать `allow_retry` для `"timeout"`, оставляя инкремент отказов Circuit Breaker только для фазовых watchdog (`first_event_timeout`, `first_token_timeout`, `stall_timeout`) и подтверждённых транзиентных отказов upstream.
+
+---
+
+## Раздел Б. План исправлений («что конкретно править до ACCEPT / PASS»)
+
+Взаимно-однозначное соответствие `1 первичный блокер из Раздела А → 1 инструкция RW-NNN + 1 критерий приёмки` (противоречащих пунктов нет):
+
+- **`RW-001` (`source_findings: ["F-001"]`, файл `bridges/opencode-zen-bridge/server.py`, строки `server.py:6034,6039,7328`):** **Действие:** В `Handler._stream_sse_serve` (`server.py:6034`) разделить предикаты запрета fallback в `opencode run` (`_delivered_err = _delivered_now or bool(collected_texts)`) и допустимости `serve`-повтора ранней транзиентной ошибки без модельного вывода (`if not collected_texts and attempts.allow_retry("serve_transient_error"): continue`, аналогично JSON-ветке `server.py:7328`), чтобы после `session.execution.started` при раннем `session.execution.failed` (429/503) без выданных токенов выполнялся `serve`-повтор в пределах `MAX_TOTAL_SPAWNS`, но fallback в `opencode run` оставался запрещённым. **Критерий приёмки:** Если `FakeServe` возвращает `session.execution.started`, затем `session.execution.failed` (429/503) без `texts`/`reasonings`/`native_calls`, а следующая `serve`-попытка успешна, и SSE (`stream=true`), и JSON (`stream=false`) выполняют вторую `serve`-попытку и завершаются успехом без запуска `opencode run`.
+- **`RW-002` (`source_findings: ["F-002"]`, файл `bridges/opencode-zen-bridge/server.py`, строки `server.py:1785,5800,7460`):** **Действие:** В `_combine_surrogates` (`server.py:1785`) и на границе парсинга `serve`-событий отклонять непарные UTF-16 surrogates (`\ud800..\udfff`, вызывающие `UnicodeError` при `surrogatepass` -> `utf-16-be` или содержащие одиночные суррогаты после склейки) через `ServeProtocolError("invalid unpaired surrogate in serve event")`, сохраняя корректные суррогатные пары без изменения текста. **Критерий приёмки:** При подаче в SSE и JSON `reasoning`/`text`-дельты с непарным старшим или младшим суррогатом (`\ud800` или `\udc00`) попытка `serve` завершается управляемой классификацией `invalid_serve_event` (`ServeProtocolError`) с гарантированным `lease.cleanup()` и корректным `O-EXIT/v1`, тогда как валидная суррогатная пара декодируется в символ без потерь.
+- **`RW-003` (`source_findings: ["F-005"]`, файл `bridges/opencode-zen-bridge/server.py`, строки `server.py:3382,5995,6091,7284,7380`):** **Действие:** Выделить локальное исчерпание общего дедлайна запроса (`exit_reason == "timeout"`, включая `ServeStartupDeadlineExceeded`) как нейтральный терминальный исход в `Handler._stream_sse_serve` (`server.py:5995, 6091`) и `Handler._serve_json_via_serve` (`server.py:7284, 7380`): не вызывать `attempts.attempt_done(True, False)` и не делать `allow_retry` для `"timeout"`, оставляя инкремент отказов Circuit Breaker только для фазовых watchdog (`first_event_timeout`, `first_token_timeout`, `stall_timeout`) и подтверждённых транзиентных отказов upstream. **Критерий приёмки:** Повторные отказы по локальному `timeout` / `ServeStartupDeadlineExceeded` в SSE и JSON не увеличивают `transient_failures` и не открывают Circuit Breaker, тогда как `first_event_timeout`, `first_token_timeout` и `stall_timeout` продолжают учитываться в Circuit Breaker.
+
+---
+
+## Раздел В. Снятые и отклонённые находки (`excluded_findings`)
+
+Отклонённых или снятых находок нет (`0`).
+
+---
+
+## Раздел Г. Неблокирующее и `Do-Not-Change`
+
+### Неблокирующие улучшения (`non_blocking_followups`, `3` пункта `FU-001..FU-003`):
+- **`F-003` → `FU-001`** (`status=AGREED`, `outcome=non-blocking`): В `_drain_serve_step_usage` (`server.py:3292-3321`, `:3818-3829`) в ограниченном окне закрытия шага (`0.15 с`) дочитывать не только `session.step.ended`, но и дополнительные завершённые `session.tool.called`/`failed`/`success` того же `sessionID` и того же `assistantMessageID` (исключая события следующего сообщения), чтобы пакет из двух параллельных native tool calls одного шага передавался полностью в SSE и JSON. (Согласовано большинством 2/3 в D1 (`realist`, `visionary`) как `non-blocking`; реализуем заодно в этом же проходе с unit-тестом.)
+- **`F-004` → `FU-002`** (`status=AGREED`, `outcome=non-blocking`): Ограничить `_StartupGate.acquire()` остатком дедлайна запроса и прерываемым ожиданием по `is_client_gone`, а перед `spawn_limiter.acquire` и `_spawn_with_stdin` на `serve`/`run` путях повторно проверять дедлайн и отключение клиента с освобождением резервов. (Согласовано большинством 2/3 в D1 (`realist`, `visionary`) как `non-blocking`; реализуем заодно в этом же проходе с unit-тестом.)
+- **`F-006` → `FU-003`** (`status=AGREED`, `outcome=non-blocking`): В `TestServeTransportAndFakeServe.setUp`/`tearDown` (`tests/test_realtime_reasoning.py:900, 922`) использовать `getattr(server, "DYNAMIC_CONFIG_PATH", Path("/tmp/nonexistent-dyn-cfg.json"))` и `hasattr(server, "DYNAMIC_CONFIG_PATH")`, чтобы при запуске `test_ac026_realtime_chunks_before_upstream_end` против немодифицированного `origin/dev` тест не падал в `setUp` по `AttributeError`, а доходил непосредственно до сокетного оракула и падал на `AssertionError` по числу/времени реалтайм-чанкам. (Единогласно согласовано 3/3 в D1 (`skeptic`, `realist`, `visionary`) как `non-blocking`; реализуем заодно в этом же проходе.)
+
+### Ограничения `Do-Not-Change` при доработке (`Coder` `rework` Цикла 8):
+- Разрешено изменять исключительно 3 файла кодера из `allowed_envelope_changes`: `bridges/opencode-zen-bridge/server.py`, `bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py`, `bridges/opencode-zen-bridge/tests/test_step_interruption.py`.
+- Запрещено изменять замороженные функции в `bridges/opencode-zen-bridge/server.py`: `def _run_env` (`sha256=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31`), `def _stream_google_sse` (`sha256=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3`), `def _execute_google_once` (`sha256=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6`).
+- Запрещено добавлять внешние runtime-зависимости вне стандартной библиотеки Python 3.14 (`dependencies = []` в `pyproject.toml`).
+- Запрещено модифицировать `zen_catalog.py`, `start.sh`, `muse-bridge`, существующие тестовые модули вне конверта и `dynamic_config.json` в git.

@@ -1,0 +1,1238 @@
+$ python3 -m unittest discover -s tests -p test_*.py
+[cwd=/tmp/cel-runs/zen-realtime-reasoning-20261025/l2-cleanroom/bridges/opencode-zen-bridge] [rc=0] [wall=388.04s]
+--- STDOUT ---
+
+--- STDERR ---
+..........2026-10-28 01:15:30 http "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-10-28 01:15:30 O-EXIT/v1 mode=json model=jev-1.13 status=400 exit_reason=bad_request rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=none first_event_ms=None ttft_ms=None transport_history=[] duration_s=0.00
+2026-10-28 01:15:30 http "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-10-28 01:15:30 O-EXIT/v1 mode=json model=jev-1.13-free status=400 exit_reason=bad_request rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=none first_event_ms=None ttft_ms=None transport_history=[] duration_s=0.00
+2026-10-28 01:15:30 http "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-10-28 01:15:30 O-EXIT/v1 mode=json model=nemotron-3-ultra-free status=400 exit_reason=bad_request rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=none first_event_ms=None ttft_ms=None transport_history=[] duration_s=0.00
+2026-10-28 01:15:30 http "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-10-28 01:15:30 O-EXIT/v1 mode=json model=test status=400 exit_reason=bad_request rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=none first_event_ms=None ttft_ms=None transport_history=[] duration_s=0.00
+2026-10-28 01:15:30 http "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-10-28 01:15:30 O-EXIT/v1 mode=json model=claude-opus-5-5-backup status=400 exit_reason=bad_request rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=none first_event_ms=None ttft_ms=None transport_history=[] duration_s=0.00
+2026-10-28 01:15:30 http "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-10-28 01:15:30 O-EXIT/v1 mode=json model=deepseek-v4.1-flash status=400 exit_reason=bad_request rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=none first_event_ms=None ttft_ms=None transport_history=[] duration_s=0.00
+2026-10-28 01:15:30 http "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-10-28 01:15:30 O-EXIT/v1 mode=json model=claude-haiku-5-5 status=400 exit_reason=bad_request rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=none first_event_ms=None ttft_ms=None transport_history=[] duration_s=0.00
+.2026-10-28 01:15:30 http "GET /health HTTP/1.1" 200 -
+.2026-10-28 01:15:30 http "GET /v1/models HTTP/1.1" 200 -
+.2026-10-28 01:15:30 http "GET /v1/models HTTP/1.1" 401 -
+........................2026-10-28 01:15:33 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:33 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:33 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=False retries=0 total_spawns=1
+2026-10-28 01:15:33 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=200 ttft_ms=200 transport_history=['run'] duration_s=0.45
+.2026-10-28 01:15:33 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:34 exec cli failed rc=1 state=nonzero_exit stderr_tail='Error: Unexpected error\ndatabase is locked'
+2026-10-28 01:15:34 exec failed rc=1 without output, retry 1/2 total_spawns=1/3: 'Error: Unexpected error\ndatabase is locked'
+2026-10-28 01:15:34 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:35 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=7 retries=0 total_spawns=2
+2026-10-28 01:15:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:35 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=7 transport=run first_event_ms=1577 ttft_ms=1577 transport_history=['run'] duration_s=1.83
+.2026-10-28 01:15:35 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:36 exec: early provider error (waiting for CLI recovery)
+2026-10-28 01:15:36 exec cli failed rc=1 state=provider_error stderr_tail='HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:36 exec failed rc=1 without output, retry 1/2 total_spawns=1/3: 'HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:36 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:37 exec: early provider error (waiting for CLI recovery)
+2026-10-28 01:15:37 exec cli failed rc=1 state=provider_error stderr_tail='HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:37 exec failed rc=1 without output, retry 2/2 total_spawns=2/3: 'HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:37 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:38 exec: early provider error (waiting for CLI recovery)
+2026-10-28 01:15:38 exec cli failed rc=1 state=provider_error stderr_tail='HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:38 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:15:38 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=3 retries=2 signal=0 tools=0 out_chars=0 transport=run first_event_ms=2750 ttft_ms=None transport_history=['run'] duration_s=3.01
+.2026-10-28 01:15:38 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:39 exec cli failed rc=1 state=nonzero_exit stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:39 exec failed rc=1 without output, retry 1/2 total_spawns=1/3: 'Error: fatal boom xyz'
+2026-10-28 01:15:39 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:40 exec cli failed rc=1 state=nonzero_exit stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:40 exec failed rc=1 without output, retry 2/2 total_spawns=2/3: 'Error: fatal boom xyz'
+2026-10-28 01:15:40 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:41 exec cli failed rc=1 state=nonzero_exit stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:41 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:15:41 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=3 retries=2 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=2.97
+.2026-10-28 01:15:41 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:41 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:42 stream provider error: HTTP 403: free tier denied
+2026-10-28 01:15:42 stream: early provider error (waiting for CLI recovery)
+2026-10-28 01:15:42 stream cli failed rc=1 stderr_tail='HTTP 403: free tier denied'
+2026-10-28 01:15:42 stream failed model=muse-spark-1.3-contributor-free rc=1 fail_retries=0 total_spawns=1
+2026-10-28 01:15:42 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=766 ttft_ms=None transport_history=['run'] duration_s=1.02
+..2026-10-28 01:15:42 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free --standalone prompt_chars=8 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:43 exec timeout after 1s, killing proc group
+/private/tmp/cel-runs/zen-realtime-reasoning-20261025/l2-cleanroom/bridges/opencode-zen-bridge/tests/test_cli_failure.py:267: ResourceWarning: unclosed file <_io.TextIOWrapper name=9 encoding='utf-8'>
+  out = server.Run("muse-spark-1.3-contributor-free", "Проверка", "", Path(self.tmp.name) / "ws")._execute_once()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/private/tmp/cel-runs/zen-realtime-reasoning-20261025/l2-cleanroom/bridges/opencode-zen-bridge/tests/test_cli_failure.py:267: ResourceWarning: unclosed file <_io.TextIOWrapper name=7 encoding='utf-8'>
+  out = server.Run("muse-spark-1.3-contributor-free", "Проверка", "", Path(self.tmp.name) / "ws")._execute_once()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.2026-10-28 01:15:43 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:43 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:43 stream cli failed rc=1 stderr_tail='Error: Unexpected error\ndatabase is locked'
+2026-10-28 01:15:43 stream retry 1/2 after cli failure without output
+2026-10-28 01:15:43 stream exec retry=0 fail_retries=1 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=1/3
+2026-10-28 01:15:44 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=False retries=0 total_spawns=2
+2026-10-28 01:15:44 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=7 transport=run first_event_ms=1031 ttft_ms=1031 transport_history=['run'] duration_s=1.29
+.2026-10-28 01:15:44 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:44 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:45 stream cli failed rc=1 stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:45 stream retry 1/2 after cli failure without output
+2026-10-28 01:15:45 stream exec retry=0 fail_retries=1 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=1/3
+2026-10-28 01:15:46 stream cli failed rc=1 stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:46 stream retry 2/2 after cli failure without output
+2026-10-28 01:15:46 stream exec retry=0 fail_retries=2 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=2/3
+2026-10-28 01:15:47 stream cli failed rc=1 stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:47 stream failed model=muse-spark-1.3-contributor-free rc=1 fail_retries=2 total_spawns=3
+2026-10-28 01:15:47 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=3 retries=2 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=2.98
+.2026-10-28 01:15:47 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:48 stream cli failed rc=1 stderr_tail='Error: Unexpected error\ndatabase is locked'
+2026-10-28 01:15:48 stream retry 1/2 after cli failure without output
+2026-10-28 01:15:48 stream exec retry=0 fail_retries=1 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=1/3
+2026-10-28 01:15:49 stream cli failed rc=1 stderr_tail='Error: Unexpected error\ndatabase is locked'
+2026-10-28 01:15:49 stream retry 2/2 after cli failure without output
+2026-10-28 01:15:49 stream exec retry=0 fail_retries=2 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=2/3
+2026-10-28 01:15:50 stream cli failed rc=1 stderr_tail='Error: Unexpected error\ndatabase is locked'
+2026-10-28 01:15:50 stream failed model=muse-spark-1.3-contributor-free rc=1 fail_retries=2 total_spawns=3
+2026-10-28 01:15:50 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=3 retries=2 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=3.00
+.2026-10-28 01:15:50 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:50 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:51 stream provider error: HTTP 429: FreeUsageLimitError
+2026-10-28 01:15:51 stream: early provider error (waiting for CLI recovery)
+2026-10-28 01:15:51 stream cli failed rc=1 stderr_tail='HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:51 stream retry 1/2 after cli failure without output
+2026-10-28 01:15:51 stream exec retry=0 fail_retries=1 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=1/3
+2026-10-28 01:15:52 stream provider error: HTTP 429: FreeUsageLimitError
+2026-10-28 01:15:52 stream: early provider error (waiting for CLI recovery)
+2026-10-28 01:15:52 stream cli failed rc=1 stderr_tail='HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:52 stream retry 2/2 after cli failure without output
+2026-10-28 01:15:52 stream exec retry=0 fail_retries=2 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=2/3
+2026-10-28 01:15:53 stream provider error: HTTP 429: FreeUsageLimitError
+2026-10-28 01:15:53 stream: early provider error (waiting for CLI recovery)
+2026-10-28 01:15:53 stream cli failed rc=1 stderr_tail='HTTP 429: FreeUsageLimitError'
+2026-10-28 01:15:53 stream failed model=muse-spark-1.3-contributor-free rc=1 fail_retries=2 total_spawns=3
+2026-10-28 01:15:53 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=3 retries=2 signal=0 tools=0 out_chars=0 transport=run first_event_ms=766 ttft_ms=None transport_history=['run'] duration_s=3.02
+.2026-10-28 01:15:53 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:53 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:54 stream cli failed rc=1 stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:54 stream retry 1/2 after cli failure without output
+2026-10-28 01:15:54 stream exec retry=0 fail_retries=1 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=1/3
+2026-10-28 01:15:55 stream cli failed rc=1 stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:55 stream retry 2/2 after cli failure without output
+2026-10-28 01:15:55 stream exec retry=0 fail_retries=2 model=opencode/muse-spark-1.3-contributor-free prompt_chars=32 total_spawns=2/3
+2026-10-28 01:15:56 stream cli failed rc=1 stderr_tail='Error: fatal boom xyz'
+2026-10-28 01:15:56 stream failed model=muse-spark-1.3-contributor-free rc=1 fail_retries=2 total_spawns=3
+2026-10-28 01:15:56 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=3 retries=2 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=2.97
+.2026-10-28 01:15:56 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:56 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:58 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=False retries=0 total_spawns=1
+2026-10-28 01:15:58 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=1177 ttft_ms=1177 transport_history=['run'] duration_s=1.43
+.2026-10-28 01:15:58 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=32 cwd=/var/folders/2f/***/T/tmpj9w22rt5/ws
+2026-10-28 01:15:58 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:15:59 stream timeout after 1s, killing proc group
+2026-10-28 01:15:59 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:15:59 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=1.01
+...............................................................................2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+.2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+.2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+..2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+2026-10-28 01:16:07 tool_call_recovered extra_braces=1
+2026-10-28 01:16:07 tool_call_recovered extra_braces=2
+2026-10-28 01:16:07 tool_call_recovered extra_braces=2
+2026-10-28 01:16:07 tool_call_recovered extra_braces=3
+2026-10-28 01:16:07 tool_call_recovered extra_braces=3
+2026-10-28 01:16:07 tool_call_recovered extra_braces=3
+2026-10-28 01:16:07 tool_call_recovered extra_braces=3
+2026-10-28 01:16:07 tool_call_recovered extra_braces=16
+2026-10-28 01:16:07 tool_call_recovered extra_braces=16
+............2026-10-28 01:16:07 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=13385 cwd=/var/folders/2f/***/T/tmpemhd2aiu/ws
+2026-10-28 01:16:07 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:16:08 unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:16:08 exec retry=1 (unmapped built-in tool) total_spawns=1/3
+2026-10-28 01:16:08 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=14047 cwd=/var/folders/2f/***/T/tmpemhd2aiu/ws
+2026-10-28 01:16:08 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:16:08 opencode built-in tool event: tool=bash status=error mapped=True as=['bash']
+2026-10-28 01:16:08 done model=muse-spark-1.3-contributor-free rc=-15 state=nonzero_exit tools=1 out_chars=15 retries=1 total_spawns=2
+2026-10-28 01:16:08 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:08 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=0 tools=1 out_chars=15 transport=run first_event_ms=336 ttft_ms=336 transport_history=['run'] duration_s=1.04
+.2026-10-28 01:16:08 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=13385 cwd=/var/folders/2f/***/T/tmpemhd2aiu/ws
+2026-10-28 01:16:09 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:16:09 opencode built-in tool event: tool=read status=error mapped=True as=['read']
+2026-10-28 01:16:09 opencode built-in tool event: tool=todowrite status=error mapped=True as=['todo_write']
+2026-10-28 01:16:09 opencode built-in tool event: tool=todowrite status=error mapped=True as=['todo_write']
+2026-10-28 01:16:09 dropped duplicate tool call todo_write
+2026-10-28 01:16:09 done model=muse-spark-1.3-contributor-free rc=-15 state=nonzero_exit tools=2 out_chars=0 retries=0 total_spawns=1
+2026-10-28 01:16:09 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:09 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=run first_event_ms=1000 ttft_ms=1000 transport_history=['run'] duration_s=1.00
+.2026-10-28 01:16:09 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=13385 cwd=/var/folders/2f/***/T/tmpemhd2aiu/ws
+2026-10-28 01:16:09 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:10 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:16:10 stream unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:16:10 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=14047 total_spawns=1/3
+2026-10-28 01:16:11 opencode built-in tool event: tool=bash status=error mapped=True as=['bash']
+2026-10-28 01:16:11 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:16:11 stream done model=muse-spark-1.3-contributor-free rc=-15 tools=1 out_chars=15 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:16:11 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=0 tools=1 out_chars=15 transport=run first_event_ms=990 ttft_ms=990 transport_history=['run'] duration_s=1.99
+.2026-10-28 01:16:11 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=13385 cwd=/var/folders/2f/***/T/tmpemhd2aiu/ws
+2026-10-28 01:16:11 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:12 opencode built-in tool event: tool=read status=error mapped=True as=['read']
+2026-10-28 01:16:12 opencode built-in tool event: tool=todowrite status=error mapped=True as=['todo_write']
+2026-10-28 01:16:12 opencode built-in tool event: tool=todowrite status=error mapped=True as=['todo_write']
+2026-10-28 01:16:12 stream dropped duplicate tool call todo_write
+2026-10-28 01:16:12 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:16:12 stream done model=muse-spark-1.3-contributor-free rc=-15 tools=2 out_chars=0 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:16:12 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=run first_event_ms=1004 ttft_ms=None transport_history=['run'] duration_s=1.01
+.......2026-10-28 01:16:17 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1023 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:17 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:20 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=6 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:16:20 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=run first_event_ms=2332 ttft_ms=2332 transport_history=['run'] duration_s=2.59
+.2026-10-28 01:16:20 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:20 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:21 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1033 total_spawns=1/3
+2026-10-28 01:16:22 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=5 emulate_tools=True retries=0 total_spawns=2
+2026-10-28 01:16:22 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=5 transport=run first_event_ms=202 ttft_ms=202 transport_history=['run'] duration_s=1.29
+2026-10-28 01:16:22 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free --standalone prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:22 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:23 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1033 total_spawns=1/3
+2026-10-28 01:16:24 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=5 emulate_tools=True retries=0 total_spawns=2
+2026-10-28 01:16:24 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=5 transport=run first_event_ms=742 ttft_ms=742 transport_history=['run'] duration_s=2.01
+2026-10-28 01:16:24 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:24 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:24 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:16:25 stream unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:16:25 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1520 total_spawns=1/3
+2026-10-28 01:16:26 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=5 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:16:26 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=5 transport=run first_event_ms=741 ttft_ms=741 transport_history=['run'] duration_s=1.99
+2026-10-28 01:16:26 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free --standalone prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:26 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:26 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:16:27 stream unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:16:27 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1520 total_spawns=1/3
+2026-10-28 01:16:28 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=5 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:16:28 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=5 transport=run first_event_ms=743 ttft_ms=743 transport_history=['run'] duration_s=2.01
+2026-10-28 01:16:28 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:28 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:29 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:16:29 stream incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-28 01:16:29 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1596 total_spawns=1/3
+2026-10-28 01:16:30 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=22 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:16:30 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=2 tools=0 out_chars=22 transport=run first_event_ms=728 ttft_ms=728 transport_history=['run'] duration_s=1.99
+2026-10-28 01:16:30 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free --standalone prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:30 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:31 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:16:31 stream incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-28 01:16:31 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1596 total_spawns=1/3
+2026-10-28 01:16:32 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=22 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:16:32 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=2 tools=0 out_chars=22 transport=run first_event_ms=744 ttft_ms=744 transport_history=['run'] duration_s=2.00
+.2026-10-28 01:16:32 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:32 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:32 retry denied (first_token_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:16:32 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:16:32 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=299 ttft_ms=None transport_history=['run'] duration_s=0.82
+.2026-10-28 01:16:33 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:34 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=5 retries=0 total_spawns=1
+2026-10-28 01:16:34 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:34 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=5 transport=run first_event_ms=198 ttft_ms=198 transport_history=['run'] duration_s=1.06
+.2026-10-28 01:16:34 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:35 opencode run watchdog: first_event_timeout
+2026-10-28 01:16:35 exec cli failed rc=-15 state=first_event_timeout stderr_tail='opencode run watchdog: first_event_timeout'
+2026-10-28 01:16:35 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:35 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=5 retries=0 total_spawns=2
+2026-10-28 01:16:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:35 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=5 transport=run first_event_ms=1039 ttft_ms=1039 transport_history=['run'] duration_s=1.30
+2026-10-28 01:16:35 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:36 opencode run watchdog: first_event_timeout
+2026-10-28 01:16:36 exec cli failed rc=-15 state=first_event_timeout stderr_tail='opencode run watchdog: first_event_timeout'
+2026-10-28 01:16:36 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:16:36 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=first_event_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.78
+2026-10-28 01:16:36 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:37 opencode run watchdog: first_token_timeout
+2026-10-28 01:16:37 exec cli failed rc=-15 state=first_token_timeout stderr_tail='opencode run watchdog: first_token_timeout'
+2026-10-28 01:16:37 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:38 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=5 retries=0 total_spawns=2
+2026-10-28 01:16:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:38 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=5 transport=run first_event_ms=1253 ttft_ms=1253 transport_history=['run'] duration_s=1.50
+2026-10-28 01:16:38 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:38 opencode run watchdog: first_token_timeout
+2026-10-28 01:16:39 exec cli failed rc=-15 state=first_token_timeout stderr_tail='opencode run watchdog: first_token_timeout'
+2026-10-28 01:16:39 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:16:39 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=30 ttft_ms=None transport_history=['run'] duration_s=0.81
+2026-10-28 01:16:39 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:39 opencode run watchdog: stall_timeout
+2026-10-28 01:16:39 exec cli failed rc=-15 state=stall_timeout stderr_tail='opencode run watchdog: stall_timeout'
+2026-10-28 01:16:39 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:40 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=5 retries=0 total_spawns=2
+2026-10-28 01:16:40 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:40 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=5 transport=run first_event_ms=1222 ttft_ms=1222 transport_history=['run'] duration_s=1.48
+2026-10-28 01:16:40 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:40 opencode run watchdog: stall_timeout
+2026-10-28 01:16:41 exec cli failed rc=-15 state=stall_timeout stderr_tail='opencode run watchdog: stall_timeout'
+2026-10-28 01:16:41 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:16:41 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=29 ttft_ms=29 transport_history=['run'] duration_s=0.54
+.2026-10-28 01:16:41 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:42 opencode run watchdog: first_event_timeout
+2026-10-28 01:16:42 exec cli failed rc=-15 state=first_event_timeout stderr_tail='opencode run watchdog: first_event_timeout'
+2026-10-28 01:16:42 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:16:42 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=first_event_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.78
+2026-10-28 01:16:42 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:43 opencode run watchdog: first_token_timeout
+2026-10-28 01:16:43 exec cli failed rc=-15 state=first_token_timeout stderr_tail='opencode run watchdog: first_token_timeout'
+2026-10-28 01:16:43 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:16:43 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=257 ttft_ms=None transport_history=['run'] duration_s=1.03
+2026-10-28 01:16:43 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:43 opencode run watchdog: stall_timeout
+2026-10-28 01:16:44 exec cli failed rc=-15 state=stall_timeout stderr_tail='opencode run watchdog: stall_timeout'
+2026-10-28 01:16:44 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:16:44 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=225 ttft_ms=225 transport_history=['run'] duration_s=0.74
+.2026-10-28 01:16:44 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:44 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:45 retry denied (first_event_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:16:45 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:16:45 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_event_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.78
+2026-10-28 01:16:45 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:45 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:46 retry denied (first_event_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:16:46 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:16:46 circuit_breaker state=OPEN failures=2 cooldown_s=10.1
+2026-10-28 01:16:46 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_event_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=1.00
+2026-10-28 01:16:46 circuit_breaker state=CLOSED
+2026-10-28 01:16:46 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:46 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:47 retry denied (first_token_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:16:47 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:16:47 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=252 ttft_ms=None transport_history=['run'] duration_s=1.02
+2026-10-28 01:16:47 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:48 retry denied (first_token_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:16:48 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:16:48 circuit_breaker state=OPEN failures=2 cooldown_s=8.5
+2026-10-28 01:16:48 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=225 ttft_ms=None transport_history=['run'] duration_s=1.00
+2026-10-28 01:16:48 circuit_breaker state=CLOSED
+2026-10-28 01:16:48 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:48 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:48 retry denied (stall_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:16:48 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:16:48 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=230 ttft_ms=230 transport_history=['run'] duration_s=0.74
+2026-10-28 01:16:48 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:48 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:49 retry denied (stall_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:16:49 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=1
+2026-10-28 01:16:49 circuit_breaker state=OPEN failures=2 cooldown_s=10.1
+2026-10-28 01:16:49 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=484 ttft_ms=484 transport_history=['run'] duration_s=1.00
+.2026-10-28 01:16:49 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1026 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:49 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:50 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:16:50 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=93 ttft_ms=93 transport_history=['run'] duration_s=0.35
+..2026-10-28 01:16:50 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1026 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:50 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:53 startup_gate_timeout wait_s=2.5, starting without the gate
+2026-10-28 01:16:53 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:16:53 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=2603 ttft_ms=2603 transport_history=['run'] duration_s=2.86
+.2026-10-28 01:16:53 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1026 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:53 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:54 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:16:54 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=100 ttft_ms=100 transport_history=['run'] duration_s=0.36
+..2026-10-28 01:16:54 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1026 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:54 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:56 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:16:56 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=1299 ttft_ms=1299 transport_history=['run'] duration_s=1.56
+.2026-10-28 01:16:56 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1028 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:56 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:16:58 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=6 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:16:58 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=run first_event_ms=1702 ttft_ms=1702 transport_history=['run'] duration_s=1.96
+.2026-10-28 01:16:58 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1026 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:16:58 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:01 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1026 total_spawns=1/3
+2026-10-28 01:17:03 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1026 total_spawns=2/3
+2026-10-28 01:17:05 retry denied (first_event_timeout): MAX_TOTAL_SPAWNS=3 reached
+2026-10-28 01:17:05 stream failed model=muse-spark-1.3-contributor-free rc=-15 fail_retries=0 total_spawns=3
+2026-10-28 01:17:05 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_event_timeout rc=None total_spawns=3 retries=2 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=6.14
+....2026-10-28 01:17:05 client_gone callback error: boom [MASKED]
+..2026-10-28 01:17:05 exec failed rc=1 without output, retry 1/2 total_spawns=0/3: 'database is locked'
+2026-10-28 01:17:05 exec failed rc=1 without output, retry 1/2 total_spawns=0/3: 'database is locked'
+.......2026-10-28 01:17:06 circuit_breaker state=OPEN failures=1 cooldown_s=0.0
+2026-10-28 01:17:06 circuit_breaker state=HALF_OPEN
+2026-10-28 01:17:06 circuit_breaker state=CLOSED
+..........2026-10-28 01:17:07 retry denied (aux_exhausted): aux io budget exhausted
+......./opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:2259: ResourceWarning: unclosed <socket.socket [closed] fd=3, family=2, type=1, proto=6>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:2259: ResourceWarning: unclosed <socket.socket [closed] fd=4, family=2, type=1, proto=6>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+...............2026-10-28 01:17:42 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1125 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:42 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:43 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=379 ttft_ms=379 transport_history=['serve'] duration_s=1.18
+.2026-10-28 01:17:43 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:43 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:44 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1034 total_spawns=1/3
+2026-10-28 01:17:46 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=13 emulate_tools=True retries=0 total_spawns=2
+2026-10-28 01:17:46 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=0 signal=0 tools=0 out_chars=13 transport=run first_event_ms=2261 ttft_ms=2261 transport_history=['serve', 'run'] duration_s=2.52
+2026-10-28 01:17:46 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:46 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:46 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1034 total_spawns=1/3
+2026-10-28 01:17:48 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=13 emulate_tools=True retries=0 total_spawns=2
+2026-10-28 01:17:48 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=0 signal=0 tools=0 out_chars=13 transport=run first_event_ms=2261 ttft_ms=2261 transport_history=['serve', 'run'] duration_s=2.52
+2026-10-28 01:17:48 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:48 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:49 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1034 total_spawns=1/3
+2026-10-28 01:17:51 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=13 emulate_tools=True retries=0 total_spawns=2
+2026-10-28 01:17:51 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=0 signal=0 tools=0 out_chars=13 transport=run first_event_ms=2266 ttft_ms=2266 transport_history=['serve', 'run'] duration_s=2.52
+.2026-10-28 01:17:51 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:51 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:52 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=380 ttft_ms=380 transport_history=['serve'] duration_s=0.61
+2026-10-28 01:17:52 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:17:52 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=228 ttft_ms=228 transport_history=['serve'] duration_s=0.40
+2026-10-28 01:17:52 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:52 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:54 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=223 ttft_ms=223 transport_history=['serve'] duration_s=2.05
+2026-10-28 01:17:56 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:56 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=226 ttft_ms=227 transport_history=['serve'] duration_s=2.05
+.2026-10-28 01:17:57 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1117 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:57 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:17:58 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.94
+2026-10-28 01:17:58 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:17:58 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.66
+.2026-10-28 01:17:59 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:17:59 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:00 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=533 ttft_ms=533 transport_history=['serve'] duration_s=1.21
+2026-10-28 01:18:01 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:01 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=223 ttft_ms=223 transport_history=['serve'] duration_s=0.92
+.2026-10-28 01:18:01 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:01 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:02 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=365 ttft_ms=366 transport_history=['serve'] duration_s=1.40
+2026-10-28 01:18:04 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:04 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=226 ttft_ms=226 transport_history=['serve'] duration_s=1.40
+.2026-10-28 01:18:04 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:04 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:04 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=12 transport=serve first_event_ms=368 ttft_ms=368 transport_history=['serve'] duration_s=0.54
+2026-10-28 01:18:05 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:05 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=12 transport=serve first_event_ms=224 ttft_ms=224 transport_history=['serve'] duration_s=0.43
+.2026-10-28 01:18:05 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1091 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:05 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:06 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=client_gone rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=408 ttft_ms=409 transport_history=['serve'] duration_s=1.14
+.2026-10-28 01:18:06 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:06 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:07 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=5 transport=serve first_event_ms=526 ttft_ms=526 transport_history=['serve'] duration_s=0.75
+2026-10-28 01:18:08 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:08 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=5 transport=serve first_event_ms=487 ttft_ms=487 transport_history=['serve'] duration_s=0.70
+.2026-10-28 01:18:08 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1030 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:08 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:08 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=0 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00
+2026-10-28 01:18:08 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1030 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:08 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:08 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00
+2026-10-28 01:18:08 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1030 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:08 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:09 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=client_gone rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=380 ttft_ms=None transport_history=['serve'] duration_s=1.08
+.2026-10-28 01:18:10 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=16 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:10 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:16 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=client_gone rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=369 ttft_ms=None transport_history=['serve'] duration_s=6.12
+.2026-10-28 01:18:16 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:16 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:17 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=serve first_event_ms=371 ttft_ms=371 transport_history=['serve'] duration_s=0.71
+2026-10-28 01:18:18 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:18 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=serve first_event_ms=514 ttft_ms=514 transport_history=['serve'] duration_s=0.81
+2026-10-28 01:18:18 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:18 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:19 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:18:19 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=511 ttft_ms=511 transport_history=['run'] duration_s=0.76
+2026-10-28 01:18:19 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=986 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:20 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=7 retries=0 total_spawns=1
+2026-10-28 01:18:20 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:20 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=737 ttft_ms=737 transport_history=['run'] duration_s=0.99
+.2026-10-28 01:18:20 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:20 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.74
+2026-10-28 01:18:21 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:21 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:22 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:22 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.64
+2026-10-28 01:18:22 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:22 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:23 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:23 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.64
+2026-10-28 01:18:24 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:24 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:24 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:24 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:25 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:25 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.59
+2026-10-28 01:18:25 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:25 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:26 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:26 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:26 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:26 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:27 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:27 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:27 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:27 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:28 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:28 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:28 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:28 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:29 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:29 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.38
+2026-10-28 01:18:29 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:29 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:29 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:29 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:30 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:30 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.38
+2026-10-28 01:18:30 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:30 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.43
+2026-10-28 01:18:30 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:30 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:31 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:31 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:31 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:32 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:32 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:32 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:32 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:32 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:32 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:33 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.64
+2026-10-28 01:18:33 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:33 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:33 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.60
+2026-10-28 01:18:33 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:33 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:34 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.59
+2026-10-28 01:18:34 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:34 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:35 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.65
+2026-10-28 01:18:35 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:35 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.64
+2026-10-28 01:18:35 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:36 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.64
+2026-10-28 01:18:36 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:36 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:37 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.64
+2026-10-28 01:18:37 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:37 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:37 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:37 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:37 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:37 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:37 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:37 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:38 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:38 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:38 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:38 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:39 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:39 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:39 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:39 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:39 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:39 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:39 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:39 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:39 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:40 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:40 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:40 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:40 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:40 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:40 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:41 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.44
+.2026-10-28 01:18:42 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:42 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=18 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.01
+2026-10-28 01:18:43 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:43 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=18 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.01
+2026-10-28 01:18:44 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:44 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=18 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.01
+2026-10-28 01:18:45 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:45 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=18 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:18:46 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:46 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=18 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.01
+2026-10-28 01:18:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:47 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=18 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.01
+.2026-10-28 01:18:48 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:48 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=101 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+.2026-10-28 01:18:49 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:49 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=101 transport=serve first_event_ms=374 ttft_ms=374 transport_history=['serve'] duration_s=0.59
+2026-10-28 01:18:49 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:49 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:50 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=103 transport=serve first_event_ms=224 ttft_ms=224 transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:50 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=998 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:50 opencode built-in tool event: tool=missing status=completed mapped=False as=[]
+2026-10-28 01:18:50 unmapped built-in tools=['missing']: retries exhausted (0)
+2026-10-28 01:18:50 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=101 retries=0 total_spawns=1
+2026-10-28 01:18:50 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:50 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=101 transport=run first_event_ms=29 ttft_ms=29 transport_history=['run'] duration_s=0.29
+2026-10-28 01:18:50 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:50 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:50 opencode built-in tool event: tool=missing status=completed mapped=False as=[]
+2026-10-28 01:18:50 stream unmapped built-in tools=['missing']: retries exhausted (0)
+2026-10-28 01:18:50 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=103 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:18:50 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=103 transport=run first_event_ms=28 ttft_ms=None transport_history=['run'] duration_s=0.28
+2026-10-28 01:18:51 retry denied (unmapped): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:18:51 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:51 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=101 transport=serve first_event_ms=222 ttft_ms=222 transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:51 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:51 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:51 retry denied (unmapped): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:18:51 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=103 transport=serve first_event_ms=223 ttft_ms=223 transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:51 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=998 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:51 opencode built-in tool event: tool=missing status=completed mapped=False as=[]
+2026-10-28 01:18:51 retry denied (unmapped): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:18:51 unmapped built-in tools=['missing']: retries exhausted (0)
+2026-10-28 01:18:51 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=101 retries=0 total_spawns=1
+2026-10-28 01:18:51 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:51 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=101 transport=run first_event_ms=27 ttft_ms=27 transport_history=['run'] duration_s=0.28
+2026-10-28 01:18:51 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:51 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:52 opencode built-in tool event: tool=missing status=completed mapped=False as=[]
+2026-10-28 01:18:52 retry denied (unmapped): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:18:52 stream unmapped built-in tools=['missing']: retries exhausted (0)
+2026-10-28 01:18:52 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=103 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:18:52 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=103 transport=run first_event_ms=28 ttft_ms=None transport_history=['run'] duration_s=0.28
+2026-10-28 01:18:52 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:52 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=101 transport=serve first_event_ms=222 ttft_ms=222 transport_history=['serve'] duration_s=0.44
+2026-10-28 01:18:52 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:52 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:53 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=103 transport=serve first_event_ms=219 ttft_ms=219 transport_history=['serve'] duration_s=0.39
+2026-10-28 01:18:53 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=998 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:53 opencode built-in tool event: tool=missing status=completed mapped=False as=[]
+2026-10-28 01:18:53 unmapped built-in tools=['missing']: retries exhausted (0)
+2026-10-28 01:18:53 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=101 retries=0 total_spawns=1
+2026-10-28 01:18:53 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:53 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=101 transport=run first_event_ms=30 ttft_ms=30 transport_history=['run'] duration_s=0.29
+2026-10-28 01:18:53 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:53 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:53 opencode built-in tool event: tool=missing status=completed mapped=False as=[]
+2026-10-28 01:18:53 stream unmapped built-in tools=['missing']: retries exhausted (0)
+2026-10-28 01:18:53 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=103 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:18:53 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=103 transport=run first_event_ms=27 ttft_ms=None transport_history=['run'] duration_s=0.28
+.2026-10-28 01:18:54 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:54 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.01
+.2026-10-28 01:18:55 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1036 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:55 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:18:57 retry denied (prompt_error): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:18:57 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=prompt_error rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.74
+2026-10-28 01:18:58 retry denied (prompt_error): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:18:58 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:18:58 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=prompt_error rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.73
+2026-10-28 01:18:58 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1041 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:18:58 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:00 retry denied (prompt_status_429): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:00 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=prompt_status_429 rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.64
+2026-10-28 01:19:02 retry denied (prompt_status_429): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:02 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:02 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=prompt_status_429 rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.64
+2026-10-28 01:19:02 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1041 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:02 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:03 retry denied (prompt_status_503): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:03 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=prompt_status_503 rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.65
+2026-10-28 01:19:05 retry denied (prompt_status_503): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:05 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:05 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=prompt_status_503 rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.59
+.2026-10-28 01:19:05 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1031 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:05 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:06 retry denied (serve_transient_error): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:19:06 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.77
+2026-10-28 01:19:07 retry denied (serve_transient_error): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:19:07 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:07 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.53
+2026-10-28 01:19:07 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1035 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:07 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:08 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.34
+2026-10-28 01:19:09 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:09 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.34
+.2026-10-28 01:19:09 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:09 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:11 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=5 tools=0 out_chars=23 transport=serve first_event_ms=373 ttft_ms=373 transport_history=['serve'] duration_s=1.40
+2026-10-28 01:19:12 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:12 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=23 transport=serve first_event_ms=221 ttft_ms=221 transport_history=['serve'] duration_s=1.44
+2026-10-28 01:19:12 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:12 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:14 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=4 tools=0 out_chars=21 transport=serve first_event_ms=373 ttft_ms=373 transport_history=['serve'] duration_s=1.39
+2026-10-28 01:19:15 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:15 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=serve first_event_ms=224 ttft_ms=224 transport_history=['serve'] duration_s=1.44
+2026-10-28 01:19:15 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:15 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:16 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:19:17 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=2 tools=0 out_chars=21 transport=serve first_event_ms=220 ttft_ms=220 transport_history=['serve'] duration_s=1.45
+2026-10-28 01:19:18 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:18 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=serve first_event_ms=227 ttft_ms=227 transport_history=['serve'] duration_s=1.45
+2026-10-28 01:19:18 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:18 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:19 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=224 ttft_ms=224 transport_history=['serve'] duration_s=0.59
+2026-10-28 01:19:19 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:19 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=221 ttft_ms=221 transport_history=['serve'] duration_s=0.63
+2026-10-28 01:19:19 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:19 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:20 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:19:21 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:19:21 retry denied (incomplete_step): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:21 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=2 tools=0 out_chars=15 transport=serve first_event_ms=223 ttft_ms=223 transport_history=['serve'] duration_s=1.44
+2026-10-28 01:19:22 retry denied (incomplete_step): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:22 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:22 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=15 transport=serve first_event_ms=370 ttft_ms=370 transport_history=['serve'] duration_s=1.45
+.2026-10-28 01:19:22 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:22 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:24 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=serve first_event_ms=380 ttft_ms=380 transport_history=['serve'] duration_s=1.39
+2026-10-28 01:19:25 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:25 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=serve first_event_ms=216 ttft_ms=216 transport_history=['serve'] duration_s=1.44
+2026-10-28 01:19:25 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:25 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:25 opencode built-in tool event: tool=todoread status=completed mapped=False as=[]
+2026-10-28 01:19:25 stream unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:19:25 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1548 total_spawns=1/2
+2026-10-28 01:19:26 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=21 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:19:26 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=run first_event_ms=32 ttft_ms=32 transport_history=['run'] duration_s=1.29
+2026-10-28 01:19:26 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=998 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:27 opencode built-in tool event: tool=todoread status=completed mapped=False as=[]
+2026-10-28 01:19:27 unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:19:27 exec retry=1 (unmapped built-in tool) total_spawns=1/2
+2026-10-28 01:19:27 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1513 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:28 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=21 retries=1 total_spawns=2
+2026-10-28 01:19:28 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:28 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=run first_event_ms=33 ttft_ms=33 transport_history=['run'] duration_s=1.29
+2026-10-28 01:19:28 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:28 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:29 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=1 tools=0 out_chars=21 transport=serve first_event_ms=224 ttft_ms=224 transport_history=['serve'] duration_s=1.40
+2026-10-28 01:19:31 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:31 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=21 transport=serve first_event_ms=223 ttft_ms=223 transport_history=['serve'] duration_s=1.44
+2026-10-28 01:19:31 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1033 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:31 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:31 stream provider error: HTTP 503: overloaded
+2026-10-28 01:19:31 stream: provider error mid-response (transient=True), stopping opencode run
+2026-10-28 01:19:31 stream incomplete tool step: re-prompt 1/2 signal=1 total_spawns=1/2
+2026-10-28 01:19:31 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1596 total_spawns=1/2
+2026-10-28 01:19:32 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=21 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:19:32 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=1 tools=0 out_chars=21 transport=run first_event_ms=33 ttft_ms=33 transport_history=['run'] duration_s=1.29
+2026-10-28 01:19:32 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=998 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:32 exec: provider error mid-response (transient=True), stopping opencode run
+2026-10-28 01:19:32 exec cli failed rc=1 state=provider_error stderr_tail='HTTP 503: overloaded'
+2026-10-28 01:19:32 incomplete tool step: re-prompt 1/2 signal=1 total_spawns=1/2
+2026-10-28 01:19:32 exec retry=1 (incomplete tool step) total_spawns=1/2
+2026-10-28 01:19:32 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1561 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:33 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=21 retries=1 total_spawns=2
+2026-10-28 01:19:33 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:33 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=1 tools=0 out_chars=21 transport=run first_event_ms=33 ttft_ms=33 transport_history=['run'] duration_s=1.29
+.2026-10-28 01:19:33 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:33 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:33 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=client_gone rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:19:33 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=0 exit_reason=client_gone rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:19:35 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:35 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:19:35 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:35 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+.2026-10-28 01:19:36 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:36 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:37 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=516 ttft_ms=516 transport_history=['serve'] duration_s=0.68
+.2026-10-28 01:19:37 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:37 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:38 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:38 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=invalid_serve_event rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=376 ttft_ms=None transport_history=['serve'] duration_s=1.60
+2026-10-28 01:19:38 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:40 retry denied (serve_transient_error): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:40 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=621 ttft_ms=None transport_history=['serve'] duration_s=2.05
+2026-10-28 01:19:42 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:42 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:42 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=invalid_serve_event rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=572 ttft_ms=None transport_history=['serve'] duration_s=2.00
+2026-10-28 01:19:44 retry denied (serve_transient_error): MAX_TOTAL_SPAWNS=2 reached
+2026-10-28 01:19:44 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:44 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=572 ttft_ms=None transport_history=['serve'] duration_s=2.00
+.2026-10-28 01:19:44 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:44 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:46 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=serve first_event_ms=523 ttft_ms=523 transport_history=['serve'] duration_s=1.14
+2026-10-28 01:19:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:47 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=serve first_event_ms=221 ttft_ms=221 transport_history=['serve'] duration_s=0.89
+.2026-10-28 01:19:47 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:47 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00
+2026-10-28 01:19:47 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:47 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.09
+2026-10-28 01:19:47 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:47 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:47 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00
+2026-10-28 01:19:47 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:47 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:19:47 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.09
+.2026-10-28 01:19:47 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:49 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=522 ttft_ms=1226 transport_history=['serve'] duration_s=2.06
+2026-10-28 01:19:49 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:49 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:51 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=223 ttft_ms=1224 transport_history=['serve'] duration_s=2.06
+2026-10-28 01:19:53 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:53 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=228 ttft_ms=1230 transport_history=['serve'] duration_s=2.07
+2026-10-28 01:19:55 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:55 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=224 ttft_ms=1225 transport_history=['serve'] duration_s=2.02
+.2026-10-28 01:19:56 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:19:56 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:19:57 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1021 total_spawns=1/2
+2026-10-28 01:19:58 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=13 emulate_tools=True retries=0 total_spawns=2
+2026-10-28 01:19:58 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=0 signal=0 tools=0 out_chars=13 transport=run first_event_ms=2260 ttft_ms=2260 transport_history=['serve', 'run'] duration_s=2.52
+2026-10-28 01:19:59 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:01 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=13 retries=0 total_spawns=2
+2026-10-28 01:20:01 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:01 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=0 signal=0 tools=0 out_chars=13 transport=run first_event_ms=2264 ttft_ms=2264 transport_history=['serve', 'run'] duration_s=2.52
+.2026-10-28 01:20:01 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:01 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:02 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:02 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=376 ttft_ms=None transport_history=['serve'] duration_s=0.59
+2026-10-28 01:20:02 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:02 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:02 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=220 ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:20:02 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:02 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:03 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:03 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=222 ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:20:03 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:03 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:03 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=222 ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:20:03 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:03 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:04 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:04 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=223 ttft_ms=None transport_history=['serve'] duration_s=0.39
+2026-10-28 01:20:04 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:04 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:04 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=220 ttft_ms=None transport_history=['serve'] duration_s=0.44
+2026-10-28 01:20:04 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:04 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:05 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:05 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=228 ttft_ms=None transport_history=['serve'] duration_s=0.45
+2026-10-28 01:20:05 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:05 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:05 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=238 ttft_ms=None transport_history=['serve'] duration_s=0.46
+2026-10-28 01:20:05 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:05 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:06 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=1 transport=serve first_event_ms=762 ttft_ms=762 transport_history=['serve'] duration_s=0.93
+2026-10-28 01:20:07 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:07 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=1 transport=serve first_event_ms=831 ttft_ms=831 transport_history=['serve'] duration_s=1.05
+2026-10-28 01:20:07 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:07 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:07 stream exec retry=0 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1021 total_spawns=1/2
+2026-10-28 01:20:10 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=13 emulate_tools=True retries=0 total_spawns=2
+2026-10-28 01:20:10 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=0 signal=0 tools=0 out_chars=13 transport=run first_event_ms=2262 ttft_ms=2262 transport_history=['serve', 'run'] duration_s=2.52
+2026-10-28 01:20:10 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=6 retries=0 total_spawns=1
+2026-10-28 01:20:10 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:10 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=run first_event_ms=None ttft_ms=None transport_history=['serve', 'run'] duration_s=0.00
+.2026-10-28 01:20:10 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:10 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:10 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:10 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:10 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:11 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:11 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:11 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:11 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:11 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:11 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:12 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:12 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:12 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:12 retry denied (first_token_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:12 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:12 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:12 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:13 retry denied (first_token_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:13 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:13 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:13 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:13 retry denied (stall_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:13 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:13 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:13 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:14 retry denied (stall_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:14 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:14 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:14 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:15 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:15 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:15 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:15 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:16 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:16 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:16 retry denied (first_token_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:16 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:16 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:17 retry denied (first_token_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:17 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:17 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=first_token_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:17 retry denied (stall_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:17 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:17 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:18 retry denied (stall_timeout): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:18 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:18 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=stall_timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+.2026-10-28 01:20:19 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:19 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:20 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=serve first_event_ms=528 ttft_ms=528 transport_history=['serve'] duration_s=0.92
+2026-10-28 01:20:20 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:20 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=serve first_event_ms=228 ttft_ms=228 transport_history=['serve'] duration_s=0.62
+2026-10-28 01:20:20 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:20 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:21 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=serve first_event_ms=222 ttft_ms=222 transport_history=['serve'] duration_s=0.67
+2026-10-28 01:20:21 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:21 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=serve first_event_ms=220 ttft_ms=220 transport_history=['serve'] duration_s=0.61
+2026-10-28 01:20:21 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:21 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:22 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:22 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=223 ttft_ms=223 transport_history=['serve'] duration_s=0.67
+2026-10-28 01:20:23 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:23 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:23 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=222 ttft_ms=222 transport_history=['serve'] duration_s=0.67
+2026-10-28 01:20:23 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:23 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:25 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:25 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=373 ttft_ms=373 transport_history=['serve'] duration_s=1.80
+2026-10-28 01:20:26 retry denied (invalid_serve_event): MAX_TOTAL_SPAWNS=1 reached
+2026-10-28 01:20:26 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:26 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=invalid_serve_event rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=220 ttft_ms=220 transport_history=['serve'] duration_s=1.60
+..2026-10-28 01:20:27 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:27 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:28 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=375 ttft_ms=375 transport_history=['serve'] duration_s=1.22
+...2026-10-28 01:20:30 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1131 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:30 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:30 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=cancelled rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=373 ttft_ms=None transport_history=['serve'] duration_s=0.80
+.2026-10-28 01:20:31 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:31 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:33 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=3 retries=2 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=2.01
+.2026-10-28 01:20:33 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free --standalone prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:33 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:34 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=0 tools=0 out_chars=14 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+.2026-10-28 01:20:35 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:35 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=cancelled rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:36 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:36 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=cancelled rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+..2026-10-28 01:20:36 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:36 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:37 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=374 ttft_ms=374 transport_history=['serve'] duration_s=1.17
+.2026-10-28 01:20:38 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:38 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=3 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['serve', 'run'] duration_s=0.00
+.2026-10-28 01:20:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:38 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+.2026-10-28 01:20:39 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1042 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:39 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:39 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=374 ttft_ms=376 transport_history=['serve'] duration_s=0.54
+.2026-10-28 01:20:40 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1048 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:40 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:40 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.75
+2026-10-28 01:20:40 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1048 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:40 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:41 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.91
+2026-10-28 01:20:41 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1048 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:41 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:42 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.94
+.2026-10-28 01:20:42 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:42 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:42 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+.2026-10-28 01:20:43 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:43 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:45 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=3 retries=2 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=2.00
+.2026-10-28 01:20:45 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:45 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:45 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:45 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:45 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:45 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=1 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:45 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:45 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=2 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:45 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:45 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=1 retries=1 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+..2026-10-28 01:20:46 dynamic config unreadable: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte
+.2026-10-28 01:20:47 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:47 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=113 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:47 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:47 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:48 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=113 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:48 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:48 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:49 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=113 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+.2026-10-28 01:20:49 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:49 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:49 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:50 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:50 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=upstream_failed rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+.2026-10-28 01:20:50 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1034 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:50 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:51 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=provider_fatal rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.72
+...2026-10-28 01:20:52 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1032 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:52 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:55 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=378 ttft_ms=1784 transport_history=['serve'] duration_s=2.62
+.2026-10-28 01:20:55 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1032 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:55 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:58 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=6 transport=serve first_event_ms=376 ttft_ms=1782 transport_history=['serve'] duration_s=2.57
+.2026-10-28 01:20:58 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:58 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:20:58 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=0.00
+2026-10-28 01:20:59 http "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-10-28 01:20:59 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=502 exit_reason=timeout rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:20:59 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1021 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:20:59 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:00 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=client_gone rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+2026-10-28 01:21:01 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=0 exit_reason=client_gone rc=None total_spawns=1 retries=0 signal=0 tools=0 out_chars=0 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.00
+.2026-10-28 01:21:03 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1058 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:21:03 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:04 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=1 tools=1 out_chars=17 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=1.01
+2026-10-28 01:21:04 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1056 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:21:04 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:06 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=2 retries=1 signal=1 tools=1 out_chars=17 transport=serve first_event_ms=None ttft_ms=None transport_history=['serve'] duration_s=2.00
+.2026-10-28 01:21:06 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1039 cwd=/private/tmp/cel-runs/***/l2-cleanroom/bridges/opencode-zen-bridge/workspace
+2026-10-28 01:21:06 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:07 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=serve first_event_ms=373 ttft_ms=373 transport_history=['serve'] duration_s=0.70
+........................................................2026-10-28 01:21:23 tool_call_unparsed bytes=7 head='{broken'
+.........................................2026-10-28 01:21:23 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:23 exec: early provider error (waiting for CLI recovery)
+2026-10-28 01:21:24 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:24 exec cli failed rc=-15 state=provider_error stderr_tail='HTTP None: provider.transport: Connection lost: ECONNRESET'
+2026-10-28 01:21:24 done model=muse-spark-1.3-contributor-free rc=-15 state=provider_error tools=2 out_chars=0 retries=0 total_spawns=1
+2026-10-28 01:21:24 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:24 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=run first_event_ms=208 ttft_ms=1213 transport_history=['run'] duration_s=1.22
+.2026-10-28 01:21:24 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:24 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:24 stream provider error: HTTP None: provider.transport: Connection lost: ECONNRESET
+2026-10-28 01:21:24 stream: early provider error (waiting for CLI recovery)
+2026-10-28 01:21:25 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:25 stream done model=muse-spark-1.3-contributor-free rc=-15 tools=2 out_chars=0 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:25 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=run first_event_ms=28 ttft_ms=1030 transport_history=['run'] duration_s=1.03
+.2026-10-28 01:21:25 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:25 exec: early provider error (waiting for CLI recovery)
+2026-10-28 01:21:26 done model=muse-spark-1.3-contributor-free rc=0 state=provider_error tools=0 out_chars=17 retries=0 total_spawns=1
+2026-10-28 01:21:26 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:26 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=17 transport=run first_event_ms=27 ttft_ms=1029 transport_history=['run'] duration_s=1.29
+.2026-10-28 01:21:26 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:26 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:26 stream provider error: HTTP None: provider.transport: Connection lost: ECONNRESET
+2026-10-28 01:21:26 stream: early provider error (waiting for CLI recovery)
+2026-10-28 01:21:28 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=17 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:28 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=17 transport=run first_event_ms=28 ttft_ms=1033 transport_history=['run'] duration_s=1.29
+.2026-10-28 01:21:28 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:28 exec: provider error mid-response (transient=True), stopping opencode run
+2026-10-28 01:21:28 exec cli failed rc=1 state=provider_error stderr_tail='HTTP None: provider.transport: Connection lost while reading the response: ECONNRESET'
+2026-10-28 01:21:28 incomplete tool step: re-prompt 1/2 signal=1 total_spawns=1/3
+2026-10-28 01:21:28 exec retry=1 (incomplete tool step) total_spawns=1/3
+2026-10-28 01:21:28 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1854 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:29 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:29 done model=muse-spark-1.3-contributor-free rc=-15 state=nonzero_exit tools=2 out_chars=78 retries=1 total_spawns=2
+2026-10-28 01:21:29 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:29 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=1 tools=2 out_chars=78 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.03
+.2026-10-28 01:21:29 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:29 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:29 stream provider error: HTTP None: provider.transport: Connection lost while reading the response: ECONNRESET
+2026-10-28 01:21:29 stream: provider error mid-response (transient=True), stopping opencode run
+2026-10-28 01:21:29 stream incomplete tool step: re-prompt 1/2 signal=1 total_spawns=1/3
+2026-10-28 01:21:29 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1854 total_spawns=1/3
+2026-10-28 01:21:30 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:30 stream done model=muse-spark-1.3-contributor-free rc=-15 tools=2 out_chars=78 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:21:30 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=1 tools=2 out_chars=78 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.04
+.2026-10-28 01:21:30 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1375 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:30 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:30 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:30 stream done model=glm-5.3-flash-free rc=-15 tools=2 out_chars=0 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:30 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=0.03
+.2026-10-28 01:21:30 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:30 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:30 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:30 stream done model=glm-5.3-flash-free rc=-15 tools=2 out_chars=0 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:30 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=0.03
+.2026-10-28 01:21:30 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:30 incomplete tool step: re-prompt 1/2 signal=3 total_spawns=1/3
+2026-10-28 01:21:30 exec retry=1 (incomplete tool step) total_spawns=1/3
+2026-10-28 01:21:30 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1867 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:31 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:31 done model=glm-5.3-flash-free rc=-15 state=nonzero_exit tools=2 out_chars=77 retries=1 total_spawns=2
+2026-10-28 01:21:31 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:31 O-EXIT/v1 mode=json model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=3 tools=2 out_chars=77 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.03
+.2026-10-28 01:21:31 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:31 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:32 stream incomplete tool step: re-prompt 1/2 signal=3 total_spawns=1/3
+2026-10-28 01:21:32 stream exec retry=1 fail_retries=0 model=opencode/glm-5.3-flash-free prompt_chars=1867 total_spawns=1/3
+2026-10-28 01:21:32 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:32 stream done model=glm-5.3-flash-free rc=-15 tools=2 out_chars=77 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:21:32 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=3 tools=2 out_chars=77 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.03
+.2026-10-28 01:21:32 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:32 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=7 retries=0 total_spawns=1
+2026-10-28 01:21:32 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:32 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=29 ttft_ms=29 transport_history=['run'] duration_s=0.29
+.2026-10-28 01:21:32 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:32 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:33 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:33 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=0.28
+.2026-10-28 01:21:33 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:33 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:33 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:33 dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:33 incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-28 01:21:33 exec retry=1 (incomplete tool step) total_spawns=1/3
+2026-10-28 01:21:33 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1868 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:34 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:34 done model=glm-5.3-flash-free rc=-15 state=nonzero_exit tools=2 out_chars=78 retries=1 total_spawns=2
+2026-10-28 01:21:34 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:34 O-EXIT/v1 mode=json model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=2 tools=2 out_chars=78 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.03
+.2026-10-28 01:21:34 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:34 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:34 tool_call_recovered extra_braces=1
+2026-10-28 01:21:34 done model=glm-5.3-flash-free rc=-15 state=nonzero_exit tools=1 out_chars=0 retries=0 total_spawns=1
+2026-10-28 01:21:34 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:34 O-EXIT/v1 mode=json model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=run first_event_ms=27 ttft_ms=27 transport_history=['run'] duration_s=0.03
+.2026-10-28 01:21:34 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:34 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=7 retries=0 total_spawns=1
+2026-10-28 01:21:34 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:34 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=27 ttft_ms=27 transport_history=['run'] duration_s=0.28
+.2026-10-28 01:21:34 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:34 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:34 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:34 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=29 ttft_ms=29 transport_history=['run'] duration_s=0.29
+.2026-10-28 01:21:34 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:35 incomplete tool step: re-prompt 1/2 signal=4 total_spawns=1/3
+2026-10-28 01:21:35 exec retry=1 (incomplete tool step) total_spawns=1/3
+2026-10-28 01:21:35 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1900 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:35 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:35 done model=muse-spark-1.3-contributor-free rc=-15 state=nonzero_exit tools=2 out_chars=125 retries=1 total_spawns=2
+2026-10-28 01:21:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:35 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=4 tools=2 out_chars=125 transport=run first_event_ms=27 ttft_ms=27 transport_history=['run'] duration_s=1.22
+.2026-10-28 01:21:35 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:35 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:36 stream incomplete tool step: re-prompt 1/2 signal=4 total_spawns=1/3
+2026-10-28 01:21:36 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1900 total_spawns=1/3
+2026-10-28 01:21:36 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:36 stream done model=muse-spark-1.3-contributor-free rc=-15 tools=2 out_chars=125 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:21:36 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=4 tools=2 out_chars=125 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.04
+.2026-10-28 01:21:36 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:36 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:36 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:36 dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:37 incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-28 01:21:37 exec retry=1 (incomplete tool step) total_spawns=1/3
+2026-10-28 01:21:37 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1777 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:37 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:37 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:37 dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:38 incomplete tool step: re-prompt 2/2 signal=2 total_spawns=2/3
+2026-10-28 01:21:38 exec retry=2 (incomplete tool step) total_spawns=2/3
+2026-10-28 01:21:38 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1777 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:38 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:38 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:38 dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:38 incomplete tool step: retries exhausted (2) signal=2
+2026-10-28 01:21:38 done model=glm-5.3-flash-free rc=-15 state=nonzero_exit tools=0 out_chars=66 retries=2 total_spawns=3
+2026-10-28 01:21:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:38 O-EXIT/v1 mode=json model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=3 retries=2 signal=2 tools=0 out_chars=66 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=2.04
+.2026-10-28 01:21:38 exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:38 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:38 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:38 dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:38 done model=glm-5.3-flash-free rc=-15 state=nonzero_exit tools=2 out_chars=0 retries=0 total_spawns=1
+2026-10-28 01:21:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:38 O-EXIT/v1 mode=json model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=2 out_chars=0 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=0.03
+.2026-10-28 01:21:38 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:38 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:39 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:39 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:39 stream incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-28 01:21:39 stream exec retry=1 fail_retries=0 model=opencode/glm-5.3-flash-free prompt_chars=1868 total_spawns=1/3
+2026-10-28 01:21:40 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:40 stream done model=glm-5.3-flash-free rc=-15 tools=2 out_chars=78 emulate_tools=True retries=1 total_spawns=2
+2026-10-28 01:21:40 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=2 tools=2 out_chars=78 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.03
+.2026-10-28 01:21:40 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:40 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:40 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:40 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:41 stream incomplete tool step: re-prompt 1/2 signal=2 total_spawns=1/3
+2026-10-28 01:21:41 stream exec retry=1 fail_retries=0 model=opencode/glm-5.3-flash-free prompt_chars=1777 total_spawns=1/3
+2026-10-28 01:21:41 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:41 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:42 stream incomplete tool step: re-prompt 2/2 signal=2 total_spawns=2/3
+2026-10-28 01:21:42 stream exec retry=2 fail_retries=0 model=opencode/glm-5.3-flash-free prompt_chars=1777 total_spawns=2/3
+2026-10-28 01:21:42 tool_call_unparsed bytes=7 head='{broken'
+2026-10-28 01:21:42 stream dropped 1 unparsed tool block(s) from content
+2026-10-28 01:21:42 stream incomplete tool step: retries exhausted (2) signal=2
+2026-10-28 01:21:42 stream done model=glm-5.3-flash-free rc=0 tools=0 out_chars=66 emulate_tools=True retries=2 total_spawns=3
+2026-10-28 01:21:42 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=0 total_spawns=3 retries=2 signal=2 tools=0 out_chars=66 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=2.46
+.2026-10-28 01:21:42 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:42 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:42 tool_call_recovered extra_braces=1
+2026-10-28 01:21:42 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:42 stream done model=glm-5.3-flash-free rc=-15 tools=1 out_chars=0 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:42 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=-15 total_spawns=1 retries=0 signal=0 tools=1 out_chars=0 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=0.03
+.2026-10-28 01:21:42 stream exec model=opencode/glm-5.3-flash-free -m opencode/glm-5.3-flash-free#high --standalone --thinking prompt_chars=1224 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:42 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:42 stream done model=glm-5.3-flash-free rc=0 tools=0 out_chars=7 emulate_tools=True retries=0 total_spawns=1
+2026-10-28 01:21:42 O-EXIT/v1 mode=stream model=glm-5.3-flash-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=0.28
+.2026-10-28 01:21:42 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=7872 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:43 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=7 retries=0 total_spawns=1
+2026-10-28 01:21:43 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:43 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=7 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=0.28
+.2026-10-28 01:21:43 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:43 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:21:43 unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:21:43 exec retry=1 (unmapped built-in tool) total_spawns=1/3
+2026-10-28 01:21:43 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1715 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:44 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:21:44 unmapped built-in tools=['todoread']: re-prompt 2/2
+2026-10-28 01:21:44 exec retry=2 (unmapped built-in tool) total_spawns=2/3
+2026-10-28 01:21:44 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=2214 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:45 retry denied (incomplete_step): MAX_TOTAL_SPAWNS=3 reached
+2026-10-28 01:21:45 incomplete tool step: retries exhausted (0) signal=4
+2026-10-28 01:21:45 done model=muse-spark-1.3-contributor-free rc=0 state=ok tools=0 out_chars=125 retries=2 total_spawns=3
+2026-10-28 01:21:45 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:45 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=3 retries=2 signal=0 tools=0 out_chars=125 transport=run first_event_ms=30 ttft_ms=30 transport_history=['run'] duration_s=2.29
+.2026-10-28 01:21:45 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:45 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:45 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:21:45 stream unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:21:45 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1715 total_spawns=1/3
+2026-10-28 01:21:46 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:21:46 stream unmapped built-in tools=['todoread']: re-prompt 2/2
+2026-10-28 01:21:46 stream exec retry=2 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=2214 total_spawns=2/3
+2026-10-28 01:21:47 retry denied (incomplete_step): MAX_TOTAL_SPAWNS=3 reached
+2026-10-28 01:21:47 stream incomplete tool step: retries exhausted (0) signal=4
+2026-10-28 01:21:47 stream done model=muse-spark-1.3-contributor-free rc=0 tools=0 out_chars=125 emulate_tools=True retries=2 total_spawns=3
+2026-10-28 01:21:47 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=0 total_spawns=3 retries=2 signal=0 tools=0 out_chars=125 transport=run first_event_ms=28 ttft_ms=2029 transport_history=['run'] duration_s=2.29
+.2026-10-28 01:21:47 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:47 exec: provider error mid-response (transient=True), stopping opencode run
+2026-10-28 01:21:47 exec cli failed rc=1 state=provider_error stderr_tail='HTTP None: provider.transport: Connection lost: ECONNRESET'
+2026-10-28 01:21:47 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:21:47 unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:21:47 exec retry=1 (unmapped built-in tool) total_spawns=1/3
+2026-10-28 01:21:47 exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1715 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:48 exec: step with tool call finished, stopping opencode run
+2026-10-28 01:21:48 done model=muse-spark-1.3-contributor-free rc=-15 state=nonzero_exit tools=2 out_chars=0 retries=1 total_spawns=2
+2026-10-28 01:21:48 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:48 O-EXIT/v1 mode=json model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=2 retries=1 signal=0 tools=2 out_chars=0 transport=run first_event_ms=28 ttft_ms=28 transport_history=['run'] duration_s=1.03
+.2026-10-28 01:21:48 stream exec model=opencode/muse-spark-1.3-contributor-free -m opencode/muse-spark-1.3-contributor-free#high --standalone --thinking prompt_chars=1216 cwd=/var/folders/2f/***/T/tmp7y_4_nm3/ws
+2026-10-28 01:21:48 http "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-10-28 01:21:48 opencode built-in tool event: tool=todoread status=error mapped=False as=[]
+2026-10-28 01:21:49 stream unmapped built-in tools=['todoread']: re-prompt 1/2
+2026-10-28 01:21:49 stream exec retry=1 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1715 total_spawns=1/3
+2026-10-28 01:21:51 stream incomplete tool step: re-prompt 1/2 signal=4 total_spawns=2/3
+2026-10-28 01:21:51 stream exec retry=2 fail_retries=0 model=opencode/muse-spark-1.3-contributor-free prompt_chars=1900 total_spawns=2/3
+2026-10-28 01:21:51 stream: step with tool call finished, stopping opencode run
+2026-10-28 01:21:51 stream done model=muse-spark-1.3-contributor-free rc=-15 tools=2 out_chars=125 emulate_tools=True retries=2 total_spawns=3
+2026-10-28 01:21:51 O-EXIT/v1 mode=stream model=muse-spark-1.3-contributor-free status=200 exit_reason=ok rc=-15 total_spawns=3 retries=2 signal=4 tools=2 out_chars=125 transport=run first_event_ms=28 ttft_ms=1030 transport_history=['run'] duration_s=2.68
+.....2026-10-28 01:21:51 tool_strip_cap_hit max=16 dropping tail
+2026-10-28 01:21:51 tool_strip_cap_hit max=16 dropping tail
+2026-10-28 01:21:51 tool_strip_cap_hit max=16 dropping tail
+..........................................................2026-10-28 01:21:53 tool_call_unparsed bytes=114 head='{"name": "read", "arguments": {"file_path": "/a"}} `<tool_call>`{"name": "read", "arguments": {"file_path": "/b"}}'
+...2026-10-28 01:21:53 tool_call_unparsed bytes=23 head='<tool_call>{"name":"a"}'
+2026-10-28 01:21:53 tool_call_unparsed bytes=47 head='{"name":"a"}<tool_call> <tool_call>{"name":"b"}'
+2026-10-28 01:21:53 tool_call_unparsed bytes=23 head='{"name":"a"}<tool_call>'
+.2026-10-28 01:21:53 tool_call_unparsed bytes=32 head='{"name": "a"} <tool_call>{broken'
+..............................................
+----------------------------------------------------------------------
+Ran 511 tests in 387.846s
+
+OK
+

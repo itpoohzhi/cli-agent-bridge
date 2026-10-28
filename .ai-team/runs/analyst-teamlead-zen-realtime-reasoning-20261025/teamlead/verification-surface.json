@@ -1,0 +1,166 @@
+{
+  "schema": "verification-surface/v1",
+  "created_at_utc": "2026-10-26T08:16:03.437356+00:00",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "risk_level": "medium",
+  "criticality": "S2",
+  "base_sha": "7eda27f9d82732bab726a420e31ea2adc15c2c39",
+  "worktree_fingerprint_before_coder": null,
+  "worktree_file_count_before_coder": 152,
+  "runtime_toolchain": {
+    "python3": "Python 3.14.7",
+    "uv": "uv 0.12.19 (bea138450 2026-09-24 aarch64-apple-darwin)",
+    "ruff": "ruff 0.17.2 (via uvx --from ruff==0.17.2)",
+    "basedpyright": "basedpyright 1.40.2 (via uvx --from basedpyright==1.40.2)",
+    "opencode": "opencode v2.1.2"
+  },
+  "container_image_digest": null,
+  "lock_files": {},
+  "config_and_ci_files": {
+    "bridges/opencode-zen-bridge/pyproject.toml": "7d6387d88008df032bfdc5c9f4ca7e7c8eb58ec3d72d1c90ff5b8a227df6b6ff"
+  },
+  "mandatory_ci_jobs": [],
+  "oracle_test_hashes_before_coder": {
+    "bridges/opencode-zen-bridge/tests/__init__.py": "41e4377649ceac5f8c9079f7b1dcd7593b7add43ac737b3d7e9dbf4340d465c1",
+    "bridges/opencode-zen-bridge/tests/_fake_cli.py": "0dd57ba7b80f54f5d73fa595a1500ff3367f334c5efeaeebe819840b2eb32b75",
+    "bridges/opencode-zen-bridge/tests/_fixtures.py": "777898f6d72283a6c034889b43d87e2fa0a16e4068a69eca79a6cee13cf5ae37",
+    "bridges/opencode-zen-bridge/tests/_http.py": "834df1103fc7f0f9ba9ac75bd1c2d1f2fb0c5644e1d75d05685e1abdbe865f57",
+    "bridges/opencode-zen-bridge/tests/live_matrix.py": "a3f839733a7c723473cb936c8b16f6743c25f3d12053d76461198c7d9a19581e",
+    "bridges/opencode-zen-bridge/tests/test_aliases.py": "1a8ca46743d7f59418bf4993933fac4612712e1c786cce8c24efa415ae273568",
+    "bridges/opencode-zen-bridge/tests/test_catalog.py": "3dcae238c1e2d743c768e2cef4a3286614ae7051a771c24f2d8ad49a8725cf0d",
+    "bridges/opencode-zen-bridge/tests/test_catalog_mode.py": "822dfa9dea1674c141964e3e25fbd272e67c6387d573615a2e0e9111bdc975b8",
+    "bridges/opencode-zen-bridge/tests/test_catalog_reload.py": "fac9fad229bdc6d0cd9c696e6283448b629851d64a219735badeb59dcfec7ef6",
+    "bridges/opencode-zen-bridge/tests/test_cli_failure.py": "12b95cefcc03ae40ec46494328767c6f9a0f520a014a3d844dbf0eeb5eaeea2d",
+    "bridges/opencode-zen-bridge/tests/test_effort_mapping.py": "d26c94b139e3c0a793499baf31c9e4cb1dc92e281fb3d5927da7c019d5f12868",
+    "bridges/opencode-zen-bridge/tests/test_go_model_routing.py": "c75d74be787e85900e42e9aa08205ef17045f69b12664602e70159444c8a8f1b",
+    "bridges/opencode-zen-bridge/tests/test_google_direct.py": "692d074f1da44189ce0fc19b46c146af103e5be870e072c2f1e6599f39c7d603",
+    "bridges/opencode-zen-bridge/tests/test_lenient_tool_call.py": "0dda90013f3f991a95601a17e75269274c52d3ad9206eabe6a3c1247fc9b3768",
+    "bridges/opencode-zen-bridge/tests/test_native_fallback.py": "f79f8b7030f9e5ee5a734c38f3846a10446315c574bcba5db69ffab833bcef57",
+    "bridges/opencode-zen-bridge/tests/test_run_env.py": "d3d0baf57f7ccae7dd7846ab98d3da43c588a35e7f076fabe074c1212f232e05",
+    "bridges/opencode-zen-bridge/tests/test_stdin_prompt.py": "533c0905314a31dfe63ea519fb3d1d2a43f9e629a61d9d00cb508ba7c674e8c6",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py": "afd542fed0722e48989c997c31595772a5c2df194a6c47ae6c1e86935bb2aa6e",
+    "bridges/opencode-zen-bridge/tests/test_stream_thinking.py": "ddaa0b97d274ec6f1a13fa7cb17856c109d4f219caa04a03e425127703b8f8ca",
+    "bridges/opencode-zen-bridge/tests/test_sync_yaml.py": "1e8593332bacd8f116fc587b6838b139e181211adb749cfe0fc7c9322a0d29ef",
+    "bridges/opencode-zen-bridge/tests/test_tool_emulation.py": "bd756c717909687bc974e68c184a6d1d7937043edf2f3768bfdae40d5c2b51af",
+    "bridges/opencode-zen-bridge/tests/test_zen_catalog.py": "8f4c60f33e041da64ae4f297286d5900e7aa6ac0776142fcda15c05ca5b7423e"
+  },
+  "testdata_golden_snapshot_hashes": {},
+  "coverage_and_quality_thresholds": {
+    "ruff_format_check": "exit 0 on tests/test_realtime_reasoning.py + closed --range={start}:1-{end}:999 on modified hunks of server.py and tests/test_step_interruption.py + frozen slice sha256 checks",
+    "ruff_check": "exit 0 on coder_target_files (allowing existing import zen_catalog as zc E402 on server.py)",
+    "basedpyright": "0 errors and per-rule warning counts <= baseline ceilings (reportAny <= 125, 0 new Any in changed ranges) via basedpyright==1.40.2",
+    "external_runtime_dependencies": "0 outside Python 3.14 stdlib"
+  },
+  "baseline": {
+    "command": "cd bridges/opencode-zen-bridge && uvx pytest -q -p no:cacheprovider tests/",
+    "exit_code": 1,
+    "counts": {
+      "collected": 378,
+      "passed": 375,
+      "failed": 3,
+      "skipped": 0,
+      "xfailed": 0,
+      "xpassed": 0
+    },
+    "preexisting_red_failures": [
+      {
+        "test_id": "tests/test_step_interruption.py::StepInterruptionTests::test_four_consecutive_interruptions_exhaust_budget",
+        "phase": "call",
+        "exception_type": "AssertionError",
+        "message_key": "MAX_TOTAL_SPAWNS=3 caps total spawns at 3 while legacy test asserts 4 spawns (F-47)"
+      },
+      {
+        "test_id": "tests/test_step_interruption.py::StepInterruptionTests::test_non_stream_retries_on_step_interruption",
+        "phase": "call",
+        "exception_type": "AssertionError",
+        "message_key": "shared _RetryBudget / MAX_TOTAL_SPAWNS=3 mismatch in legacy test fixture (F-48)"
+      },
+      {
+        "test_id": "tests/test_step_interruption.py::StepInterruptionTests::test_stream_retries_on_step_interruption_and_succeeds",
+        "phase": "call",
+        "exception_type": "AssertionError",
+        "message_key": "shared _RetryBudget / MAX_TOTAL_SPAWNS=3 mismatch in legacy test fixture (F-49)"
+      }
+    ],
+    "note": "REQ-017 / AD-004 explicitly scopes fixing these 3 legacy test/budget drift items without weakening MAX_TOTAL_SPAWNS=3 invariant; Verifier audits any oracle_change in tests/test_step_interruption.py."
+  },
+  "allowed_envelope_changes": {
+    "code": [
+      "bridges/opencode-zen-bridge/server.py"
+    ],
+    "new_tests": [
+      "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+    ],
+    "existing_tests_additive_or_req017": [
+      "bridges/opencode-zen-bridge/tests/test_step_interruption.py"
+    ],
+    "forbidden_oracle_changes": [
+      "bridges/opencode-zen-bridge/tests/test_run_env.py",
+      "bridges/opencode-zen-bridge/tests/test_google_direct.py",
+      "bridges/opencode-zen-bridge/tests/test_catalog_mode.py",
+      "bridges/opencode-zen-bridge/tests/test_zen_bridge.py",
+      "deleting tests, adding skip/xfail, weakening assertions, narrowing test selectors"
+    ],
+    "dependencies": [],
+    "configs": []
+  },
+  "levels": {
+    "L1": [
+      {
+        "id": "VER-004-static-and-frozen-slices",
+        "cmd": "python3 - <<'VER004'\nimport ast, collections, hashlib, json, re, subprocess, tempfile\nfrom pathlib import Path\nroot = Path.cwd().resolve()\nbridge = root / 'bridges/opencode-zen-bridge'\nfiles = [bridge/'server.py', bridge/'tests/test_step_interruption.py', bridge/'tests/test_realtime_reasoning.py']\nassert all(f.is_file() for f in files), 'all three target files must exist after Stage3'\nruff = ['uvx','--from','ruff==0.17.2','ruff']\ndef run(args, **kw):\n    return subprocess.run(args, check=True, **kw)\ndef changed_ranges(file):\n    rel = str(file.relative_to(root))\n    diff = subprocess.check_output(['git','diff','--no-ext-diff','--no-color','-U0','origin/dev','--',rel], cwd=root, text=True)\n    # NEW tracked files must be added before final verification; --no-index alternative below covers untracked newfile.\n    result = []\n    for line in diff.splitlines():\n        m = re.match(r'^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,(\\d+))? @@', line)\n        if m:\n            start = int(m.group(1)); count = int(m.group(2) or '1')\n            if count: result.append((start, start + count - 1))\n    return result\n\n# Raw-byte contract: frozen expected digests originate in EVD-075, never candidate.\nFROZEN = {\n    '_run_env': '1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31',\n    '_stream_google_sse': '5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3',\n    '_execute_google_once': '88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6',\n}\nbaseline_raw = subprocess.check_output(['git','show','origin/dev:bridges/opencode-zen-bridge/server.py'], cwd=root)\ndef frozen_slices(raw):\n    lines = raw.splitlines(keepends=True)\n    nodes = {n.name:n for n in ast.walk(ast.parse(raw)) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in FROZEN}\n    assert set(nodes)==set(FROZEN)\n    return {name:(node.lineno,node.end_lineno,b''.join(lines[node.lineno-1:node.end_lineno])) for name,node in nodes.items()}\nbaseline_slices = frozen_slices(baseline_raw)\ndef assert_frozen(candidate=files[0]):\n    candidate_slices = frozen_slices(candidate.read_bytes())\n    for name, expected in FROZEN.items():\n        assert hashlib.sha256(baseline_slices[name][2]).hexdigest()==expected, ('frozen origin/dev changed',name)\n        assert hashlib.sha256(candidate_slices[name][2]).hexdigest()==expected, ('immutable slice changed',name)\n        assert candidate_slices[name][2]==baseline_slices[name][2], ('nonzero raw Google/_run_env diff',name)\n    return candidate_slices\ncandidate_slices = assert_frozen()\nserver_diff = subprocess.check_output(['git','diff','--no-ext-diff','--no-color','-U0','origin/dev','--',str(files[0].relative_to(root))],cwd=root,text=True)\nfor line in server_diff.splitlines():\n    match = re.match(r'^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@',line)\n    if not match: continue\n    old_start,old_count,new_start,new_count = int(match[1]),int(match[2] or '1'),int(match[3]),int(match[4] or '1')\n    for start,count,table in [(old_start,old_count,baseline_slices),(new_start,new_count,candidate_slices)]:\n        for name,(lo,hi,_) in table.items():\n            # Zero-count insert/delete anchors represent the boundary after start.\n            overlaps = (start<=hi and start+count-1>=lo) if count else (lo<=start<hi)\n            assert not overlaps, ('VER-004 frozen-range hunk intersection',name,line)\n# Public module constant/read API remains intact; compatibility test file is frozen.\ntree = ast.parse(files[0].read_bytes())\nassignments = [n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='CATALOG_SOURCE' for t in n.targets)]\nassert len(assignments)==1 and isinstance(assignments[0].value,ast.Constant) and assignments[0].value.value=='static'\nassert any(isinstance(n,ast.FunctionDef) and n.name=='_set_catalog_source' for n in tree.body)\nassert any(isinstance(n,ast.Import) and any(a.name=='zen_catalog' and a.asname=='zc' for a in n.names) for n in ast.walk(tree))\nassert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='import_module' and n.args and isinstance(n.args[0],ast.Constant) and n.args[0].value=='zen_catalog' for n in ast.walk(tree))\nassert any(isinstance(n,ast.FunctionDef) and n.name=='_run_serve_helper_cli' for n in tree.body), 'helper code must be lint/type checked in server.py'\nhelper_branch = next((n for n in tree.body if isinstance(n, ast.If) and ast.unparse(n.test) == \"sys.argv[1:2] == ['--serve-helper']\"), None)\nassert helper_branch is not None and any(isinstance(n, ast.Raise) for n in helper_branch.body), 'early terminating helper dispatch required'\nheavy = {'http.client', 'sqlite3', 'http.server', 'zen_catalog'}\ndef imported_names(node):\n    if isinstance(node, ast.Import): return {a.name for a in node.names}\n    if isinstance(node, ast.ImportFrom): return {node.module}\n    return set()\nassert not any(imported_names(n) & heavy for n in tree.body[:tree.body.index(helper_branch)])\nassert any(isinstance(n, ast.Import) and any(a.name == 'zen_catalog' and a.asname == 'zc' for a in n.names) for n in helper_branch.orelse)\nassert all(not isinstance(n, (ast.Assign, ast.AnnAssign, ast.Expr)) for n in tree.body[1:tree.body.index(helper_branch)]), 'no server initialization before helper exit'\nassert not any(isinstance(n,ast.Global) and 'CATALOG_SOURCE' in n.names for n in ast.walk(tree))\nrun(['git','diff','--exit-code','origin/dev','--','bridges/opencode-zen-bridge/tests/test_catalog_mode.py'],cwd=root)\n\nranges = {f: changed_ranges(f) for f in files[:2]}\n# New file checked as a whole even before git add. Range gate never formats frozen legacy slices.\nrun([*ruff,'format','--config',str(root / 'ruff.toml'),'--check','--no-cache',str(files[2])], cwd=root)\nfor f in files[:2]:\n    for start, end in ranges[f]:\n        run([*ruff,'format','--config',str(root / 'ruff.toml'),'--check','--no-cache',f'--range={start}:1-{end}:999',str(f)], cwd=root)\nassert_frozen()\n# Exercise actual write-mode range formatting only on a disposable copy.\nwith tempfile.TemporaryDirectory(prefix='zen-arch6-probe-format-', dir='/tmp') as format_dir:\n    formatted_copy = Path(format_dir) / 'server.py'\n    formatted_copy.write_bytes(files[0].read_bytes())\n    for start, end in ranges[files[0]]:\n        run([*ruff,'format','--config',str(root / 'ruff.toml'),'--no-cache',f'--range={start}:1-{end}:999',str(formatted_copy)], cwd=root)\n    assert formatted_copy.read_bytes() == files[0].read_bytes()\n    assert_frozen(formatted_copy)\n    assert_frozen()\n    print('PASS write-mode frozen hashes', {name:hashlib.sha256(data[2]).hexdigest() for name,data in frozen_slices(formatted_copy.read_bytes()).items()})\n# Full-file lint on all three. Only inherited E402 import site is excepted on server.\nlint = subprocess.run([*ruff,'check','--config',str(root / 'ruff.toml'),'--no-cache','--output-format','json',str(files[0])], cwd=root, capture_output=True, text=True)\nassert lint.returncode in (0,1), lint.stderr\nfindings = json.loads(lint.stdout)\nlines = files[0].read_text().splitlines()\nassert all(x['code']=='E402' and lines[x['location']['row']-1].strip()=='import zen_catalog as zc' for x in findings), findings\nassert sum(x['code']=='E402' for x in findings) <= 1\nrun([*ruff,'check','--config',str(root / 'ruff.toml'),'--no-cache','--extend-ignore','E402',str(files[0])], cwd=root)\nrun([*ruff,'check','--config',str(root / 'ruff.toml'),'--no-cache',str(files[1]),str(files[2])], cwd=root)\n# Exact isolated import-root. No repo pyrightconfig mutation; JSON deleted on every exit.\nproject = None\ntry:\n    with tempfile.NamedTemporaryFile(mode='w',suffix='.json',prefix='zen-arch6-probe-project-',dir='/tmp',delete=False) as tmp:\n        project = Path(tmp.name)\n        json.dump({'include':[str(f) for f in files], 'extraPaths':[str(bridge.resolve())]},tmp)\n    b = subprocess.run(['uvx','--from','basedpyright==1.40.2','basedpyright','--project',str(project),'--outputjson'], cwd=bridge, capture_output=True, text=True)\n    assert b.returncode in (0,1), b.stderr\n    report = json.loads(b.stdout)\n    ds = report['generalDiagnostics']\n    assert report['summary']['errorCount']==0 and not [x for x in ds if x['severity']=='error'], ds\n    byfile = {f: [x for x in ds if Path(x['file']).resolve()==f] for f in files}\n    limits = {'reportExplicitAny':125,'reportAny':125,'reportUnusedCallResult':39,'reportUnknownMemberType':94,'reportUnknownVariableType':72,'reportUnknownArgumentType':55,'reportUnusedFunction':6,'reportImplicitStringConcatenation':35,'reportUnannotatedClassAttribute':105,'reportUnusedParameter':7,'reportUnnecessaryIsInstance':11,'reportUnknownParameterType':6,'reportMissingParameterType':4,'reportUnreachable':5,'reportImplicitOverride':3}\n    warnings = lambda f: [x for x in byfile[f] if x['severity']=='warning']\n    counts = collections.Counter(x.get('rule','') for x in warnings(files[0]))\n    print('BASEDPYRIGHT summary',report['summary'])\n    print('SERVER dict(counts)',dict(counts))\n    print('SERVER warningCount',len(warnings(files[0])))\n    assert all(n<=limits.get(rule,0) for rule,n in counts.items()), dict(counts)\n    assert len(warnings(files[0]))<=720, len(warnings(files[0]))\n    assert len(warnings(files[1]))<=194, len(warnings(files[1]))\n    # New test file: zero warnings as well as zero errors, thus zero Any.\n    assert not byfile[files[2]], byfile[files[2]]\n    for f in files[:2]:\n        for x in byfile[f]:\n            line = x['range']['start']['line']+1\n            if any(lo<=line<=hi for lo,hi in ranges[f]):\n                assert x.get('rule') not in {'reportAny','reportExplicitAny','reportUnusedCallResult'}, x\n    # Do not introduce Any annotations/type ignores in added code in either legacy file.\n    for f in files[:2]:\n        src = f.read_text().splitlines()\n        for lo,hi in ranges[f]:\n            for line in src[lo-1:hi]:\n                assert not re.search(r'\\bAny\\b|type:\\s*ignore|pyright:\\s*ignore|#\\s*noqa|#\\s*fmt:\\s*off',line), (f,line)\n    run(['python3','-B','-m','unittest','tests.test_catalog_mode','-v'],cwd=bridge)\n    print('PASS VER-004: all3 lint/type; legacy changed-range format; newfile whole format; server counts',dict(counts))\nfinally:\n    if project is not None: project.unlink(missing_ok=True)\nVER004",
+        "cwd": "."
+      },
+      {
+        "id": "VER-001-pytest-component",
+        "cmd": "uvx pytest -q -p no:cacheprovider tests/",
+        "cwd": "bridges/opencode-zen-bridge"
+      }
+    ],
+    "L2": [
+      {
+        "id": "L2-VER-004-static-and-frozen-slices",
+        "cmd": "python3 - <<'VER004'\nimport ast, collections, hashlib, json, re, subprocess, tempfile\nfrom pathlib import Path\nroot = Path.cwd().resolve()\nbridge = root / 'bridges/opencode-zen-bridge'\nfiles = [bridge/'server.py', bridge/'tests/test_step_interruption.py', bridge/'tests/test_realtime_reasoning.py']\nassert all(f.is_file() for f in files), 'all three target files must exist after Stage3'\nruff = ['uvx','--from','ruff==0.17.2','ruff']\ndef run(args, **kw):\n    return subprocess.run(args, check=True, **kw)\ndef changed_ranges(file):\n    rel = str(file.relative_to(root))\n    diff = subprocess.check_output(['git','diff','--no-ext-diff','--no-color','-U0','origin/dev','--',rel], cwd=root, text=True)\n    # NEW tracked files must be added before final verification; --no-index alternative below covers untracked newfile.\n    result = []\n    for line in diff.splitlines():\n        m = re.match(r'^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,(\\d+))? @@', line)\n        if m:\n            start = int(m.group(1)); count = int(m.group(2) or '1')\n            if count: result.append((start, start + count - 1))\n    return result\n\n# Raw-byte contract: frozen expected digests originate in EVD-075, never candidate.\nFROZEN = {\n    '_run_env': '1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31',\n    '_stream_google_sse': '5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3',\n    '_execute_google_once': '88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6',\n}\nbaseline_raw = subprocess.check_output(['git','show','origin/dev:bridges/opencode-zen-bridge/server.py'], cwd=root)\ndef frozen_slices(raw):\n    lines = raw.splitlines(keepends=True)\n    nodes = {n.name:n for n in ast.walk(ast.parse(raw)) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in FROZEN}\n    assert set(nodes)==set(FROZEN)\n    return {name:(node.lineno,node.end_lineno,b''.join(lines[node.lineno-1:node.end_lineno])) for name,node in nodes.items()}\nbaseline_slices = frozen_slices(baseline_raw)\ndef assert_frozen(candidate=files[0]):\n    candidate_slices = frozen_slices(candidate.read_bytes())\n    for name, expected in FROZEN.items():\n        assert hashlib.sha256(baseline_slices[name][2]).hexdigest()==expected, ('frozen origin/dev changed',name)\n        assert hashlib.sha256(candidate_slices[name][2]).hexdigest()==expected, ('immutable slice changed',name)\n        assert candidate_slices[name][2]==baseline_slices[name][2], ('nonzero raw Google/_run_env diff',name)\n    return candidate_slices\ncandidate_slices = assert_frozen()\nserver_diff = subprocess.check_output(['git','diff','--no-ext-diff','--no-color','-U0','origin/dev','--',str(files[0].relative_to(root))],cwd=root,text=True)\nfor line in server_diff.splitlines():\n    match = re.match(r'^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@',line)\n    if not match: continue\n    old_start,old_count,new_start,new_count = int(match[1]),int(match[2] or '1'),int(match[3]),int(match[4] or '1')\n    for start,count,table in [(old_start,old_count,baseline_slices),(new_start,new_count,candidate_slices)]:\n        for name,(lo,hi,_) in table.items():\n            # Zero-count insert/delete anchors represent the boundary after start.\n            overlaps = (start<=hi and start+count-1>=lo) if count else (lo<=start<hi)\n            assert not overlaps, ('VER-004 frozen-range hunk intersection',name,line)\n# Public module constant/read API remains intact; compatibility test file is frozen.\ntree = ast.parse(files[0].read_bytes())\nassignments = [n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='CATALOG_SOURCE' for t in n.targets)]\nassert len(assignments)==1 and isinstance(assignments[0].value,ast.Constant) and assignments[0].value.value=='static'\nassert any(isinstance(n,ast.FunctionDef) and n.name=='_set_catalog_source' for n in tree.body)\nassert any(isinstance(n,ast.Import) and any(a.name=='zen_catalog' and a.asname=='zc' for a in n.names) for n in ast.walk(tree))\nassert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='import_module' and n.args and isinstance(n.args[0],ast.Constant) and n.args[0].value=='zen_catalog' for n in ast.walk(tree))\nassert any(isinstance(n,ast.FunctionDef) and n.name=='_run_serve_helper_cli' for n in tree.body), 'helper code must be lint/type checked in server.py'\nhelper_branch = next((n for n in tree.body if isinstance(n, ast.If) and ast.unparse(n.test) == \"sys.argv[1:2] == ['--serve-helper']\"), None)\nassert helper_branch is not None and any(isinstance(n, ast.Raise) for n in helper_branch.body), 'early terminating helper dispatch required'\nheavy = {'http.client', 'sqlite3', 'http.server', 'zen_catalog'}\ndef imported_names(node):\n    if isinstance(node, ast.Import): return {a.name for a in node.names}\n    if isinstance(node, ast.ImportFrom): return {node.module}\n    return set()\nassert not any(imported_names(n) & heavy for n in tree.body[:tree.body.index(helper_branch)])\nassert any(isinstance(n, ast.Import) and any(a.name == 'zen_catalog' and a.asname == 'zc' for a in n.names) for n in helper_branch.orelse)\nassert all(not isinstance(n, (ast.Assign, ast.AnnAssign, ast.Expr)) for n in tree.body[1:tree.body.index(helper_branch)]), 'no server initialization before helper exit'\nassert not any(isinstance(n,ast.Global) and 'CATALOG_SOURCE' in n.names for n in ast.walk(tree))\nrun(['git','diff','--exit-code','origin/dev','--','bridges/opencode-zen-bridge/tests/test_catalog_mode.py'],cwd=root)\n\nranges = {f: changed_ranges(f) for f in files[:2]}\n# New file checked as a whole even before git add. Range gate never formats frozen legacy slices.\nrun([*ruff,'format','--config',str(root / 'ruff.toml'),'--check','--no-cache',str(files[2])], cwd=root)\nfor f in files[:2]:\n    for start, end in ranges[f]:\n        run([*ruff,'format','--config',str(root / 'ruff.toml'),'--check','--no-cache',f'--range={start}:1-{end}:999',str(f)], cwd=root)\nassert_frozen()\n# Exercise actual write-mode range formatting only on a disposable copy.\nwith tempfile.TemporaryDirectory(prefix='zen-arch6-probe-format-', dir='/tmp') as format_dir:\n    formatted_copy = Path(format_dir) / 'server.py'\n    formatted_copy.write_bytes(files[0].read_bytes())\n    for start, end in ranges[files[0]]:\n        run([*ruff,'format','--config',str(root / 'ruff.toml'),'--no-cache',f'--range={start}:1-{end}:999',str(formatted_copy)], cwd=root)\n    assert formatted_copy.read_bytes() == files[0].read_bytes()\n    assert_frozen(formatted_copy)\n    assert_frozen()\n    print('PASS write-mode frozen hashes', {name:hashlib.sha256(data[2]).hexdigest() for name,data in frozen_slices(formatted_copy.read_bytes()).items()})\n# Full-file lint on all three. Only inherited E402 import site is excepted on server.\nlint = subprocess.run([*ruff,'check','--config',str(root / 'ruff.toml'),'--no-cache','--output-format','json',str(files[0])], cwd=root, capture_output=True, text=True)\nassert lint.returncode in (0,1), lint.stderr\nfindings = json.loads(lint.stdout)\nlines = files[0].read_text().splitlines()\nassert all(x['code']=='E402' and lines[x['location']['row']-1].strip()=='import zen_catalog as zc' for x in findings), findings\nassert sum(x['code']=='E402' for x in findings) <= 1\nrun([*ruff,'check','--config',str(root / 'ruff.toml'),'--no-cache','--extend-ignore','E402',str(files[0])], cwd=root)\nrun([*ruff,'check','--config',str(root / 'ruff.toml'),'--no-cache',str(files[1]),str(files[2])], cwd=root)\n# Exact isolated import-root. No repo pyrightconfig mutation; JSON deleted on every exit.\nproject = None\ntry:\n    with tempfile.NamedTemporaryFile(mode='w',suffix='.json',prefix='zen-arch6-probe-project-',dir='/tmp',delete=False) as tmp:\n        project = Path(tmp.name)\n        json.dump({'include':[str(f) for f in files], 'extraPaths':[str(bridge.resolve())]},tmp)\n    b = subprocess.run(['uvx','--from','basedpyright==1.40.2','basedpyright','--project',str(project),'--outputjson'], cwd=bridge, capture_output=True, text=True)\n    assert b.returncode in (0,1), b.stderr\n    report = json.loads(b.stdout)\n    ds = report['generalDiagnostics']\n    assert report['summary']['errorCount']==0 and not [x for x in ds if x['severity']=='error'], ds\n    byfile = {f: [x for x in ds if Path(x['file']).resolve()==f] for f in files}\n    limits = {'reportExplicitAny':125,'reportAny':125,'reportUnusedCallResult':39,'reportUnknownMemberType':94,'reportUnknownVariableType':72,'reportUnknownArgumentType':55,'reportUnusedFunction':6,'reportImplicitStringConcatenation':35,'reportUnannotatedClassAttribute':105,'reportUnusedParameter':7,'reportUnnecessaryIsInstance':11,'reportUnknownParameterType':6,'reportMissingParameterType':4,'reportUnreachable':5,'reportImplicitOverride':3}\n    warnings = lambda f: [x for x in byfile[f] if x['severity']=='warning']\n    counts = collections.Counter(x.get('rule','') for x in warnings(files[0]))\n    print('BASEDPYRIGHT summary',report['summary'])\n    print('SERVER dict(counts)',dict(counts))\n    print('SERVER warningCount',len(warnings(files[0])))\n    assert all(n<=limits.get(rule,0) for rule,n in counts.items()), dict(counts)\n    assert len(warnings(files[0]))<=720, len(warnings(files[0]))\n    assert len(warnings(files[1]))<=194, len(warnings(files[1]))\n    # New test file: zero warnings as well as zero errors, thus zero Any.\n    assert not byfile[files[2]], byfile[files[2]]\n    for f in files[:2]:\n        for x in byfile[f]:\n            line = x['range']['start']['line']+1\n            if any(lo<=line<=hi for lo,hi in ranges[f]):\n                assert x.get('rule') not in {'reportAny','reportExplicitAny','reportUnusedCallResult'}, x\n    # Do not introduce Any annotations/type ignores in added code in either legacy file.\n    for f in files[:2]:\n        src = f.read_text().splitlines()\n        for lo,hi in ranges[f]:\n            for line in src[lo-1:hi]:\n                assert not re.search(r'\\bAny\\b|type:\\s*ignore|pyright:\\s*ignore|#\\s*noqa|#\\s*fmt:\\s*off',line), (f,line)\n    run(['python3','-B','-m','unittest','tests.test_catalog_mode','-v'],cwd=bridge)\n    print('PASS VER-004: all3 lint/type; legacy changed-range format; newfile whole format; server counts',dict(counts))\nfinally:\n    if project is not None: project.unlink(missing_ok=True)\nVER004",
+        "cwd": "."
+      },
+      {
+        "id": "L2-VER-001-pytest-component",
+        "cmd": "uvx pytest -q -p no:cacheprovider tests/",
+        "cwd": "bridges/opencode-zen-bridge"
+      },
+      {
+        "id": "L2-VER-002-unittest-discover",
+        "cmd": "python3 -m unittest discover -s tests -p 'test_*.py'",
+        "cwd": "bridges/opencode-zen-bridge"
+      },
+      {
+        "id": "L2-VER-003-pytest-root-import",
+        "cmd": "PYTHONPATH=. uvx pytest -q -p no:cacheprovider bridges/opencode-zen-bridge/tests/",
+        "cwd": "."
+      },
+      {
+        "id": "L2-VER-005-realtime-and-fault-oracles",
+        "cmd": "uvx pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py tests/test_step_interruption.py tests/test_run_env.py tests/test_google_direct.py tests/test_catalog_mode.py",
+        "cwd": "bridges/opencode-zen-bridge"
+      }
+    ],
+    "L3": {
+      "status_pre_accept": "N/A_REPO_MARKERS_PLUS_POST_ACCEPT_LIVE_HEAVY_PATH",
+      "note": "Repo has no pytest heavy/measured markers (entire component suite runs in L2). Live runtime checks H0..H9 / VER-006/VER-007 on deployed LaunchAgent 127.0.0.1:9883 are DEFERRED_L3 until Council ACCEPT + cp sync of server.py to ~/.dsh/bridges/opencode-zen-bridge/server.py so live production bridge is not mutated before Council ACCEPT.",
+      "deferred_checks": [
+        {
+          "id": "VER-006-live-sse-heavy-path",
+          "cmd": "Rollout ladder H0..H9 + curl -N -sS http://127.0.0.1:9883/v1/chat/completions (deepseek-v4.1-flash-free High, stream=true, multi-turn + tools + disconnect cleanup)",
+          "defer_reason": "Requires syncing ~/.dsh/bridges/opencode-zen-bridge/server.py after Council ACCEPT"
+        },
+        {
+          "id": "VER-007-deployed-mirror-diff",
+          "cmd": "diff -u bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py",
+          "defer_reason": "Synced post-ACCEPT after backup to ~/work/backups/"
+        }
+      ]
+    }
+  },
+  "acceptance_manifest_ref": "analysis/zen-realtime-reasoning/handoff-qa.md",
+  "architecture_packet_sha256": "88c02c37a7ca0be3d317217f23289dba07ddc681d922db207c7680a779128b6b"
+}

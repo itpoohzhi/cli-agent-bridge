@@ -1,0 +1,7 @@
+$ uvx --from ruff==0.17.2 ruff format --check --no-cache tests/test_realtime_reasoning.py
+[cwd=/tmp/cel-runs/zen-realtime-reasoning-20261025/l2-cleanroom/bridges/opencode-zen-bridge] [rc=0] [wall=0.06s]
+--- STDOUT ---
+1 file already formatted
+
+--- STDERR ---
+

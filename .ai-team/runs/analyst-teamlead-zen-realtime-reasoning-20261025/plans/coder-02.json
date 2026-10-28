@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 2,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-01.json",
+  "trigger_ids": [
+    "clean-room-l2",
+    "reverse-spec",
+    "coder-02-brief"
+  ],
+  "objective": "Дельта-доводка coder-02 после Clean-Room L2 и reverse-spec: 5 точечных замен в server.py и 3 новых теста в test_realtime_reasoning.py без трогания замороженных _run_env/_stream_google_sse/_execute_google_once",
+  "inputs_read": [
+    "architecture/architecture-packet.json (ARCH_GATE_PASS + ARCH_PANEL_PASS, VER-004 command)",
+    "plans/coder-01.before.json",
+    "plans/coder-01.json",
+    "handoffs/coder-01.json",
+    "brief coder-02 (точные строки и сниппеты замен 2.1-2.5 и тестов шага 3)",
+    "skills/feature.md (канон feature-implementation; путь брифа skills/feature-implementation.md на диске отсутствует, фактический файл skills/feature.md)"
+  ],
+  "stop_conditions": [
+    "Не менять файлы вне белого списка: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+    "Не менять замороженные _run_env/_stream_google_sse/_execute_google_once ни на один байт (контроль sha256 в VER-004)",
+    "Не делать git commit/push",
+    "При несовпадении фактических строк server.py со сниппетами брифа — стоп и ASK, не угадывать"
+  ],
+  "deviations": [
+    "Путь скилла из брифа skills/feature-implementation.md на диске отсутствует; прочитан фактический канон skills/feature.md той же папки aisdlc-gcge/skills",
+    "Команды валидаторов из брифа (--expected-role/--expected-stage, --repo-root) не соответствуют установленному CLI; использованы фактические validate_role_plan.py --phase и validate_handoff.py coder <file> --role-plan <plan> --root <repo>",
+    "Атрибут счётчика в _ServeHealth называется failures, а не _failures из брифа; в тесте проверяются failures и is_degraded(), как разрешено брифом",
+    "Диапазоны ruff format из шага 4 сужены до фактических ханков coder-02: широкий диапазон задел замороженный _stream_google_sse, срез восстановлен байт-в-байт из origin/dev, что подтверждено test_frozen_slices_hashes и VER-004 exit 0"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Замены 2.1-2.2 в server.py: FIRST_STATUS_DELAY_S 0.30 -> 0.65; keep-alive параметр conn в _serve_http и условие _pid_alive(self.pgid) в _ServeLease.cleanup",
+      "expected_evidence": "grep показывает FIRST_STATUS_DELAY_S = 0.65, сигнатуру conn в _serve_http и условие cleanup с _pid_alive",
+      "status": "DONE",
+      "actual_evidence": "server.py:1336 FIRST_STATUS_DELAY_S = 0.65; _serve_http получил conn: http.client.HTTPConnection | None = None без close в finally для чужого соединения; _ServeLease.cleanup: if self.helper.poll() is None or _pid_alive(self.pgid); py_compile OK; VER-004 exit 0"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Замены 2.3-2.4 в server.py: control_conn/_ctrl_http и проверки 400/404/422 в _serve_one_attempt; повторы unmapped/incomplete_step и накопление _serve_stream_usage в _run_serve_stream_attempts",
+      "expected_evidence": "grep показывает _ctrl_http, control_conn, ServeSecurityError на 400/404/422, unmapped_retries, incomplete_retries, _serve_stream_usage",
+      "status": "DONE",
+      "actual_evidence": "server.py: control_conn list + _ctrl_http с одним переоткрытием при (OSError, HTTPException), закрытие в finally; _ctrl_http применён к GET active, POST session, form cancel, permission reply, interrupt, DELETE; _prompt_worker оставлен на отдельном _serve_http; проверки status in (400, 404, 422) -> ServeSecurityError на active/create/sse; в _run_serve_stream_attempts добавлены unmapped_retries/incomplete_retries, unmapped_in_attempt, emitted_tools_in_attempt (+on_parsed_tool), накопление usage_acc в self._serve_stream_usage, ветки повторов unmapped/incomplete_step по образцу JSON-пути"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Замена 2.5 в _serve_json_serve (attempts.attempt_done(True, False) в else) и шаг 3: FAKE_SERVE 503/400 по FAKE_SERVE_SESSION_STATUS плюс 3 новых теста в TestServeTransportAndFakeServe",
+      "expected_evidence": "grep показывает attempt_done(True, False) в _serve_json_serve; 3 новых теста присутствуют в test_realtime_reasoning.py",
+      "status": "DONE",
+      "actual_evidence": "server.py _serve_json_serve: else: attempts.attempt_done(True, False); FAKE_SERVE do_POST /api/session отдаёт 503/400 по FAKE_SERVE_SESSION_STATUS; добавлены test_auto_fallback_to_run_and_sticky_degradation, test_foreign_listener_rejected_and_startup_reaper, test_serve_400_fails_closed_without_health_increment; быстрый прогон подмножества: 12 passed"
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Шаг 4: ruff format изменённых диапазонов; VER-004 из architecture-packet.json дословно; целевой pytest test_realtime_reasoning + test_step_interruption + test_go_model_routing",
+      "expected_evidence": "VER-004 exit 0 и целевой pytest exit 0 с числом прошедших тестов",
+      "status": "DONE",
+      "actual_evidence": "ruff format узких диапазонов server.py и всего test_realtime_reasoning.py выполнен; VER-004 дословно из architecture-packet.json: PASS VER-004, BASEDPYRIGHT errorCount 0, VER004_EXIT:0; целевой pytest: 139 passed, 45 subtests passed in 83.06s, PYTEST_EXIT:0"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Шаг 5: записать plans/coder-02.json со статусами DONE, handoffs/coder-02.json и копию coder.json с sha256 плана",
+      "expected_evidence": "validate_role_plan --phase after exit 0 и validate_handoff coder exit 0",
+      "status": "DONE",
+      "actual_evidence": "plans/coder-02.json записан в phase after со статусами DONE; handoffs/coder-02.json и coder.json записываются с точным sha256 plans/coder-02.json; validate_role_plan --phase after и validate_handoff coder выполняются после записи"
+    }
+  ]
+}

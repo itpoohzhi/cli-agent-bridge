@@ -1,0 +1,149 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 1,
+  "panel_slug": "analyst-teamlead-zen-realtime-reasoning-20261025-arch-council-1-a5-r14",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "VER-005; AD-001.details.resource_accounting; QA-009; RISK-003; evolution.H3_rollout_gate; high_load_envelope; rework_summary (v5: 1589, 1613-1618, 2509-2514, 2822, 2983-2986, 3152-3160, 3371, 3429, 3468-3473, 3488, 3592, 4234-4235, 4256)",
+      "rule_ref": "F-001 a5 rev2 / D1 r14; внутренняя арифметическая согласованность high_load_envelope.memory_ssot; выполнимость evolution.H3_rollout_gate; VER-005; VER-004 E402 и immutable slices",
+      "action": "Architect: в ревизии v6 (cycle: 6) устранить заниженный бюджет helper. Убрать устаревшие helper_estimate = 12.0 MiB и цель 12–14 MiB из всех действующих секций пакета: VER-005, AD-001.details.resource_accounting, QA-009, RISK-003, evolution.H3_rollout_gate, high_load_envelope (включая capacity_formula, memory_ssot, runtime_gate, operational_profile.fd_and_threads.substitution) и rework_summary; синхронизировать производные суммы и ссылки EVD-077/EVD-079. Совместно с RW-002 специфицировать изолированный --serve-helper: ранний CLI-перехват и минимальный stdlib-путь до тяжёлых sqlite3/http.server/zen_catalog, до reload_catalog() (server.py:163), _DEFAULT_RESILIENCE и серверной инициализации. Не порождать новые ruff E402: import zen_catalog as zc остаётся единственным разрешённым E402 в VER-004.command, а срезы _run_env, _stream_google_sse, _execute_google_once остаются побайтово неизменными вместе с их литеральными SHA-256. На целевой рабочей станции выполнить воспроизводимый замер действительного helper на изолированной копии server.py с полным закрытым argv RW-002: sys.executable -I <copy_of_server.py> --serve-helper и все шесть позиционных аргументов без сокращений. В EVD-079 записать полный конкретный argv/cwd/очищенное окружение без секретов, версию Python, метод ru_maxrss / ps rss, единицы и перевод в MiB, наблюдаемые значения и exit code; измерить живой helper, не только импорт модуля и не голый интерпретатор. Выставить helper_estimate строго выше фактического RSS с явно обоснованным запасом на Stage 3 (например, 30.0–32.0 MiB при полном модуле около 26–27 MiB либо измеренный ранний выход + запас Stage 3). Перебалансировать per_slot_ceiling и Mem_shared_max = 6 * per_slot_ceiling внутри 6 * per_slot_ceiling + 256 <= 1638.4 MiB так, чтобы per_slot_ceiling - (156.8 + helper_estimate + 8.0) >= 15 MiB под промпты 103 KB. Согласованный пример: helper_estimate=32.0, combined=196.8, per_slot_ceiling=216, запас=19.2, Mem_shared_max=1296, total=1552.0 <=1638.4 MiB; пример не заменяет замер. Не менять 6 слотов, 12 waiters, cap=3, Mem_limit_per_pod=2048 MiB и станционный потолок 1638.4 MiB. Превышение нового согласованного per_slot_ceiling в H3 блокирует H7 без waiver; H3 остаётся NOT_RUN до живого нагрузочного прогона. Продуктовый worktree не менять: доказательства этой архитектурной стадии выполнять на изолированных копиях.",
+      "acceptance": "EVD-079 содержит наблюдаемый воспроизводимый замер реального --serve-helper на целевой рабочей станции с полным argv RW-002, actual_helper_rss_mib < helper_estimate и явным запасом Stage 3. Во всех перечисленных действующих секциях отсутствуют старые 12.0 MiB / 12–14 MiB и производные устаревшие суммы; helper_estimate, combined=156.8+helper_estimate+8.0, per_slot_ceiling, Mem_shared_max и total взаимно согласованы. Запас per_slot_ceiling-combined >=15 MiB для 103 KB; Mem_shared_max=6*per_slot_ceiling и total=6*per_slot_ceiling+256 <=1638.4 MiB при прежних 6 слотах, 12 waiters, cap3 и Mem_limit_per_pod=2048 MiB. Ранний helper не вызывает reload_catalog(), не создаёт _DEFAULT_RESILIENCE и не исполняет серверную инициализацию; VER-004 подтверждает отсутствие дополнительных E402 (единственное разрешение: import zen_catalog as zc) и побайтовую неизменность трёх замороженных срезов/литеральных SHA-256. H3 не получает PASS по замеру helper: статус NOT_RUN до живой нагрузки; превышение потолка блокирует H7 без waiver. Architect выпускает v6, не реализацию Stage 3.",
+      "source": "arch-panel/cycle-1/a5/findings-ledger.md#F-001; R1 panel/arch/r10 -> D1 panel/arch/r14, rev2, outcome blocking большинством 2/3 D1",
+      "evidence": "### F-001\n- origin: skeptic · R1 (`r10`, Google) · skeptic-F-001\n- rev: 2\n- priority: blocking\n- status: CONCURRED_OPEN\n- outcome: blocking\n- resolved_in: d1-r14\n- votes: R1 skeptic(Google)=AUTHOR(blocking) | D1 skeptic(xAI)=AMEND(blocking, 25.66/17.86 MiB) | D1 visionary(Anthropic)=AGREE(blocking, 26.89 MiB) | D1 realist(Muse)=AMEND(non-blocking, 27.08/16.66 MiB)\n- dissent: realist D1 оценил приоритет F-001 как non-blocking (156.8+27.1+8.0≈191.9 ≤ 192 MiB при общем потолке H3 1638.4 MiB, но запас слота ~0.1 MiB) → panel/arch/r14/seats/3/verdict.md; большинство 2/3 семейств в D1 (xAI + Anthropic) + автор R1 (Google) удерживают blocking\n- owner_decision: —\n- amendments: D1 skeptic (xAI): вынести перехват `--serve-helper` до `sqlite3`/`http.server`/`zen_catalog` и до `reload_catalog()` (`server.py:163`), приложить замер EVD RSS для реального `--serve-helper` (пол stdlib уже ~16.7–17.9 MiB, полный импорт ~25.7–27.1 MiB), убрать `12.0 MiB`, выставить `helper_estimate` с запасом на Stage 3 и при запасе <12 MiB под 192 MiB поднять `per_slot_ceiling` и `Mem_shared_max = 6 * per_slot_ceiling` внутри `6 * per_slot_ceiling + 256 <= 1638.4 MiB` (не меняя 6 слотов, 12 waiters, cap=3 и `Mem_limit_per_pod = 2048 MiB`), синхронизировав `VER-005`, `AD-001.resource_accounting`, `QA-009`, `RISK-003`, `H3_rollout_gate` и `high_load_envelope`\n- text (дословно, R1 skeptic):\n> F-001 [blocking] Необновлённый расчёт памяти хелпера (helper_estimate = 12.0 MiB) противоречит переходу FU-004 на запуск полного server.py --serve-helper (~26.86 MiB RSS в простое) и срывает фиксированный потолок 192 MiB/слот гейта H3\n> - priority: blocking\n> - Якорь: architecture-packet.json:1313 (#EVD-077), architecture-packet.json:1589 (#VER-005), architecture-packet.json:1613-1618 (#VER-005), architecture-packet.json:1756 (#AD-001), architecture-packet.json:2509-2514 (#AD-001), architecture-packet.json:2822 (#QA-009), architecture-packet.json:2983-2986 (#RISK-003), architecture-packet.json:3152-3160 (#H3_rollout_gate / evolution.H3_rollout_gate), architecture-packet.json:3371 (high_load_envelope.capacity_formula.Mem_shared_max), architecture-packet.json:3429 (high_load_envelope.memory_ssot.estimate_status), architecture-packet.json:3468-3473 (high_load_envelope.memory_ssot.slot_breakdown), architecture-packet.json:3488 (high_load_envelope.memory_ssot.runtime_gate), architecture-packet.json:3592 (high_load_envelope.operational_profile.fd_and_threads.substitution), architecture-packet.json:4234-4235, architecture-packet.json:4256; [F-29] (architecture-packet.json:506-510).\n> - Правило: Внутренняя арифметическая согласованность бюджета ресурсов (high_load_envelope.memory_ssot) и выполнимость эксплуатационного гейта evolution.H3_rollout_gate («fixed192MiB combined/slot», «Exceedance fails H3, not waiver»).\n> - Доказательство (цитата и факт): В дельте v4->v5 (FU-004) запуск вспомогательного процесса изменён с `python3 -I -c _SERVE_HELPER_CODE` на `helper_proc=Popen([sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...])` с точкой входа внизу `server.py` внутри `if __name__ == \"__main__\":` после выполнения всех импортов и кода верхнего уровня (`architecture-packet.json:1313, 1589, 1756`). При этом во всех расчётах памяти оставлена прежняя цифра голого интерпретатора: `\"helper_estimate\": 12.0`, `\"combined_with_probe_estimate\": 176.8`, `\"per_slot_ceiling\": 192` и `\"Serve idle156.8+helper~12+probe~8=176.8 ... fixed192MiB combined/slot\"` (`architecture-packet.json:1613-1618, 2509-2514, 3156, 3468-3473`). Прямой read-only замер на целевой рабочей станции (`python3 -I -B` с импортом текущего 4021-строчного `bridges/opencode-zen-bridge/server.py`, включающего `sqlite3`, `http.server`, `urllib`, `zen_catalog` и вызов `reload_catalog()`, под очищенным окружением) показывает фактический RSS процесса **27 504 KiB = 26.86 MiB** (`ru_maxrss = 28 147 712 B = 26.84 MiB`; ср. также `[F-29]` = 22 MiB RSS простаивающего моста). Подстановка реального холостого RSS хелпера ещё до добавления ~1000 строк кода Stage 3 даёт `156.8 + 26.86 + 8.0 = 191.66 MiB` на слот (остаток `0.34 MiB` до жёсткого потолка `192 MiB`), что на реальной проверке `H3` (`6` параллельных запросов с промптами по `103 KB`, запрет waiver при превышении `192 MiB/slot`) гарантированно приведёт к провалу гейта и блокировке включения фичефлага `H7`.\n> - Ожидаемое исправление: Выполнить одно из двух согласованных архитектурных действий (или их комбинацию): (а) разместить быстрый перехват `--serve-helper` и stdlib-функцию `_run_serve_helper_cli` в верхней части `server.py` до импорта `sqlite3`, `http.server`, `zen_catalog` (сохранив `import zen_catalog as zc` на исходной позиции для основного режима или удержав единственный E402 без смещения замороженных функций) и до `reload_catalog()` / `_DEFAULT_RESILIENCE`, подтвердив новым замером `EVD`, что реальный RSS `python3 -I server.py --serve-helper` укладывается в заявленную оценку; либо (б) обновить `helper_estimate` до честной величины с запасом на Stage 3 (не менее `30–32 MiB`) и пересчитать `per_slot_ceiling` (например, `210 MiB/slot`: `6 * 210 + 256 = 1516 MiB <= 1638.4 MiB`) синхронно во всех 14 перечисленных местах пакета.\n> - Критерий проверки: Воспроизводимый замер `EVD` для команды `sys.executable -I bridges/opencode-zen-bridge/server.py --serve-helper ...` показывает `actual_helper_rss_mib <= helper_estimate`, а сумма `156.8 + helper_estimate + 8.0` имеет не менее `12–15 MiB` запаса под `per_slot_ceiling` для нагрузки `103 KB` во всех секциях (`VER-005`, `AD-001`, `QA-009`, `RISK-003`, `H3_rollout_gate`, `high_load_envelope`, `rework_summary`).",
+      "source_findings": [
+        "F-001"
+      ],
+      "related_locations": [
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "VER-005 / process_resource_oracle"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "AD-001.details.resource_accounting"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "QA-009"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "RISK-003"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/evolution/H3_rollout_gate"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/high_load_envelope"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/rework_summary"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "EVD-077; EVD-079"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "VER-004.command / E402 / immutable slices"
+        }
+      ]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "AD-001.details.spawn / crash_recovery.creation / startup_reaper; THREAT-001; THREAT-003; VER-004; VER-005; EVD-077/EVD-079 (v5: 1313, 1498-1499, 1553, 1589, 1629, 1643, 1756, 2257, 2286-2317, 2358, 2360, 3107, 3123)",
+      "rule_ref": "F-002 a5 / D1 r14; замкнутость parent -> helper_proc -> serve_proc; QA-008; AC-023; VER-005; THREAT-003; AD-001.details.serve_env_sanitization; VER-004",
+      "action": "Architect: в v6 заменить во всех спецификациях argv --serve-helper неоднозначные многоточия на единый замкнутый типизированный позиционный контракт: [sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart]. Синхронизировать AD-001.details.spawn, AD-001.details.crash_recovery.creation, startup_reaper, THREAT-001, THREAT-003, VER-004, VER-005, EVD-077/EVD-079 и все действующие повторения/rework_summary. --serve-helper <attempt_id> <port> остаются первыми аргументами для ps/startup_reaper. str(OPENCODE_BIN) вычисляется в родительском процессе моста после его конфигурации и in-process monkeypatch, сохраняя monkeypatch.setattr(server, \"OPENCODE_BIN\", str(fake_serve_bin)); не добавлять OPENCODE_BIN в очищенный serve_env и не расширять whitelist wildcard-ключами. Зафиксировать _run_serve_helper_cli(args: list[str]) -> int, где args = sys.argv[2:] и ровно шесть аргументов: attempt_id: str, port_text: str -> port: int, opencode_bin: str (непустой путь), lease_dir_text: str -> lease_dir: Path (изолированный каталог), parent_pid_text: str -> parent_pid: int, parent_lstart: str. Явно разобрать и валидировать все шесть, включая допустимый порт, положительный parent_pid, непустые attempt_id/opencode_bin/lease_dir/parent_lstart; неверная длина/значение отвергаются до spawn и обращений к боевому стейту. Helper запускает Popen([opencode_bin, \"serve\", \"--hostname\", \"127.0.0.1\", \"--port\", str(port)], ...): в спецификации дать остальные именованные Popen-параметры полностью из действующего контракта, не оставлять многоточий в argv. Не обращаться к модульной константе OPENCODE_BIN helper. Сохранить lifeline и топологию parent -> helper_proc -> serve_proc: helper start_new_session=True, serve start_new_session=False, свой child_pgid, close_fds и очищенный serve_env. При sys.argv[1:2] == [\"--serve-helper\"] защитить верхний уровень server.py от reload_catalog() (server.py:163), _DEFAULT_RESILIENCE и серверной инициализации до передачи управления CLI; исключить любые чтения/записи state/zen-catalog.json, logs/bridge.log, dynamic_config.json дерева кода. Решение согласовать с RW-001: без новых ruff E402 и без изменения замороженных срезов. В VER-005 потребовать clean-room тест реальной цепочки parent -> helper_proc -> fake_serve_bin при пустом временном HOME без ~/.opencode/bin/opencode и с monkeypatch.setattr(server, \"OPENCODE_BIN\", str(fake_serve_bin)); подтвердить фактический запуск именно переданного fake_serve_bin и отсутствие любых обращений к боевым путям репозитория. Тесты и EVD этой стадии выполнять на изолированных копиях, продуктовый worktree не менять.",
+      "acceptance": "Во всех перечисленных секциях ровно один полный argv без неоднозначных многоточий: [sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart]. Сигнатура _run_serve_helper_cli(args: list[str]) -> int и разбор всех 6 аргументов единообразны; opencode_bin непустой и приходит из родителя, Popen запускает [opencode_bin, \"serve\", \"--hostname\", \"127.0.0.1\", \"--port\", str(port)] без чтения helper.OPENCODE_BIN и без OPENCODE_BIN в serve_env. Негативные варианты количества/значений аргументов отвергаются до spawn. VER-005 задаёт и изолированное evidence подтверждает clean-room цепочку с пустым HOME и monkeypatch server.OPENCODE_BIN на fake_serve_bin: fake запускается, ~/.opencode/bin/opencode не нужен; нет чтений/записей боевых state/zen-catalog.json, logs/bridge.log, dynamic_config.json и иных боевых путей репозитория. Helper не выполняет reload_catalog(), _DEFAULT_RESILIENCE или серверную инициализацию; VER-004 не расширяет разрешение E402, immutable slices сохранены. EVD-077/EVD-079 согласованы с полным argv; реальный RSS учитывается в RW-001. Полный Stage3 и живые H0..H9 остаются NOT_RUN до своих фактических прогонов.",
+      "source": "arch-panel/cycle-1/a5/findings-ledger.md#F-002; R1 panel/arch/r10 -> D1 panel/arch/r14, единогласно 3/3 D1 blocking",
+      "evidence": "### F-002\n- origin: skeptic · R1 (`r10`, Google) · skeptic-F-002\n- rev: 1\n- priority: blocking\n- status: CONCURRED_OPEN\n- outcome: blocking\n- resolved_in: d1-r14\n- votes: R1 skeptic(Google)=AUTHOR(blocking) | D1 skeptic(xAI)=AGREE(blocking) | D1 visionary(Anthropic)=AGREE(blocking) | D1 realist(Muse)=AGREE(blocking)\n- dissent: — (единогласно 3/3 в D1)\n- owner_decision: —\n- amendments: —\n- text (дословно, R1 skeptic):\n> F-002 [blocking] Потеря переопределения OPENCODE_BIN, неспецифицированный хвост argv («...») и неизолированные побочные эффекты верхнего уровня server.py при запуске дочернего helper_proc с очищенным serve_env\n> - priority: blocking\n> - Якорь: architecture-packet.json:1113 (#EVD-076), architecture-packet.json:1313 (#EVD-077), architecture-packet.json:1498-1499 (#VER-004), architecture-packet.json:1553 (#VER-005), architecture-packet.json:1589 (#VER-005), architecture-packet.json:1629 (#VER-005), architecture-packet.json:1643 (#VER-005), architecture-packet.json:1756 (#AD-001), architecture-packet.json:2257 (#AD-001), architecture-packet.json:2286-2317 (#AD-001.details.serve_env_sanitization), architecture-packet.json:2358 (#AD-001.details.crash_recovery.creation), architecture-packet.json:2360 (#AD-001.details.crash_recovery.startup_reaper), architecture-packet.json:2525 (#AD-001), architecture-packet.json:3041 (#RISK-008), architecture-packet.json:3107 (#THREAT-001), architecture-packet.json:3123 (#THREAT-003), architecture-packet.json:3255, architecture-packet.json:3839, architecture-packet.json:4962, architecture-packet.json:5086, architecture-packet.json:5357, architecture-packet.json:5481; [F-43] (architecture-packet.json:619-620); bridges/opencode-zen-bridge/server.py:52-55, 163, 293.\n> - Правило: Замкнутость межпроцессного контракта `parent -> helper_proc -> serve_proc`, воспроизводимость clean-room верификации без домашнего каталога владельца (`QA-008`, `AC-023`, `VER-005`) и запрет побочных обращений к путям репозитория/боевого стейта из изолированных тестов (`THREAT-003`).\n> - Доказательство (цитата и факт): В `AD-001.details.spawn` (`architecture-packet.json:1756`) и `VER-005.details.process_resource_oracle.topology` (`architecture-packet.json:1589`) указано: `helper_proc=Popen([sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...], stdin=lifeline_r, stdout=PIPE, stderr=PIPE, start_new_session=True, close_fds=True, env=serve_env)` и далее внутри хелпера: `It launches serve_proc=Popen([OPENCODE_BIN,\"serve\",\"--hostname\",\"127.0.0.1\",\"--port\",str(port)], stdin=DEVNULL, start_new_session=False, close_fds=True, env=serve_env, ...)`. Одновременно `AD-001.details.serve_env_sanitization` (`architecture-packet.json:2286-2317`) фильтрует `serve_env` по строгому белому списку из 27 ключей с запретом `\"No broad OPENCODE_* or FAKE_* wildcard\"`, вырезая как `OPENCODE_BIN`, так и все `OPENCODE_ZEN_BRIDGE_*` (`OPENCODE_ZEN_BRIDGE_LOG`, `OPENCODE_ZEN_BRIDGE_CATALOG_STATE`). В результате в новом процессе `helper_proc`: (1) строка `server.py:52` (`OPENCODE_BIN = os.environ.get(\"OPENCODE_BIN\", str(Path.home() / \".opencode\" / \"bin\" / \"opencode\"))`) всегда вычисляется в `~/.opencode/bin/opencode`, теряя и in-process подмену `server.OPENCODE_BIN = str(fake)` (используемую существующими тестами по `[F-43]` и `FakeServe` в `VER-005`), и env-переменную `OPENCODE_BIN` родителя, тогда как скелет `_run_serve_helper_cli(args: list[str])` в `EVD-077` (`architecture-packet.json:1313`) принимает лишь `attempt_id, port_text = args[:2]`, оставляя остальные аргументы неспецифицированным многоточием `...`; (2) так как диспетчер `--serve-helper` расположен внизу `server.py` внутри `if __name__ == \"__main__\":`, каждый запуск `helper_proc` под очищенным `serve_env` выполняет `server.py:54-55` и `server.py:163` (`reload_catalog()`), обращаясь к путям внутри дерева кода `HERE / \"state\" / \"zen-catalog.json\"` и выставляя `LOG_PATH = HERE / \"logs\" / \"bridge.log\"` вопреки тестовой изоляции.\n> - Ожидаемое исправление: Полностью убрать неоднозначное `...` из спецификации `argv` хелпера и зафиксировать точный типизированный список позиционных параметров `--serve-helper`, включающий вычисленный в родителе путь исполняемого файла `str(OPENCODE_BIN)` и путь изолированного каталога lease/state (например: `[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart]`, где `--serve-helper <attempt_id> <port>` остаются первыми аргументами для `startup_reaper`). В `_run_serve_helper_cli` явно валидировать непустой путь `opencode_bin` и передавать его в `Popen([opencode_bin, \"serve\", ...])`, не опираясь на модульную константу `OPENCODE_BIN` и не добавляя `OPENCODE_BIN` в `serve_env` (чтобы не загрязнять окружение `opencode serve`). Одновременно защитить верхний уровень `server.py` от выполнения `reload_catalog()` и серверной инициализации при запуске с `sys.argv[1:2] == [\"--serve-helper\"]`.\n> - Критерий проверки: В `VER-005` clean-room тест с `monkeypatch.setattr(server, \"OPENCODE_BIN\", str(fake_serve_bin))` и `HOME` во временном пустом каталоге (без `~/.opencode/bin/opencode`) успешно поднимает реальную цепочку `parent -> helper_proc -> fake_serve_bin`, не читает `bridges/opencode-zen-bridge/state/zen-catalog.json` и не пишет в `bridges/opencode-zen-bridge/logs/bridge.log`; сигнатура `_run_serve_helper_cli` без многоточий зафиксирована единообразно во всех секциях пакета.",
+      "source_findings": [
+        "F-002"
+      ],
+      "related_locations": [
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "AD-001.details.crash_recovery.creation"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "AD-001.details.crash_recovery.startup_reaper"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "AD-001.details.serve_env_sanitization"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "THREAT-001"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "THREAT-003"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "VER-004"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "VER-005 / clean-room FakeServe"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "EVD-077; EVD-079"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/rework_summary"
+        }
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Architect: во все вызовы ruff format и ruff check внутри VER-004.command передавать явные аргументы '--config', str(root / 'ruff.toml'). После write-mode форматирования временной копии потребовать assert formatted_copy.read_bytes() == files[0].read_bytes(), сохранив проверки неизменности замороженных срезов и диапазонов. Выполнить VER-004.command с искусственным пользовательским Ruff-конфигом в XDG_CONFIG_HOME (например, line-length = 60): результат идентичен обычному запуску, exit 0. Продуктовый worktree этим пробным прогоном не форматировать.",
+      "reason": "F-003: детерминированность VER-004 / QA-008 / AC-023; R1 non-blocking, D1 r14 AGREE non-blocking всеми 3/3. cwd=root не фиксирует конфиг для файла в /tmp; пользовательский конфиг может менять форматирование и сдвигать диапазоны.",
+      "source_findings": [
+        "F-003"
+      ]
+    },
+    {
+      "id": "FU-002",
+      "text": "Architect: при выпуске v6 синхронно поставить \"cycle\": 6 и \"role_plan\": {\"path\": \"plans/architect-06.json\"} с сохранением остальных обязательных полей role_plan. В scope.architect_write_allowlist заменить старые пути плана на \".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-06.before.json\" и \".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-06.json\". Проверить совпадение номера цикла в cycle, role_plan.path и обоих путях allowlist; актуализировать адресат следующего внешнего Архитектурного Совета на a6, в том числе approval.rationale и актуальные handoff/rework ссылки пакета. Не объявлять Council PASS/ARCH_GATE_PASS и не увеличивать бюджет.",
+      "reason": "F-004 [pre-existing][sweep]: рассогласование cycle/role_plan с scope.architect_write_allowlist; R1 non-blocking, D1 r14 AGREE non-blocking всеми 3/3. Исправление метаданных при следующей ревизии v6, не новый blocking.",
+      "source_findings": [
+        "F-004"
+      ]
+    }
+  ],
+  "excluded": [],
+  "findings_total": 4,
+  "do_not_change": [
+    "Этот handoff адресован строго Architect: выпуск delta-пакета v6 / cycle: 6; summarizer пишет только handoff/panel-rework-brief-arch-a5.json, продуктовый worktree и остальные файлы .ai-team остаются неизменными в этой задаче.",
+    "scope.coder_target_files остаётся ровно из трёх путей: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py; продуктовую реализацию Stage 3 этим brief не запускать.",
+    "Побайтово замороженные _run_env, _stream_google_sse, _execute_google_once и их литеральные SHA-256: 1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31; 5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3; 88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6 соответственно. test_run_env.py, test_google_direct.py, test_catalog_mode.py и start.sh не изменять.",
+    "Сохранить import zen_catalog as zc единственным разрешённым E402 в VER-004.command, существующие typing ceilings и запрет Any/cast/# type: ignore; не возвращать обязательную importlib.import_module(\"zen_catalog\") трансформацию.",
+    "Согласованный внешний HTTP/SSE контракт :9883 (/health, /v1/models, /v1/chat/completions), публичные server.CATALOG_SOURCE и HTTP catalog_source; lifeline/PGID topology, listener ownership proof до Authorization/prompt и запрет сигналов чужому PGID.",
+    "Не менять 6 слотов, 12 waiters, cap=3, Mem_limit_per_pod=2048 MiB и станционный потолок H3=1638.4 MiB. Допустим только согласованный в RW-001 пересчёт helper_estimate/per_slot_ceiling/Mem_shared_max внутри конверта; H3 exceedance блокирует H7 без waiver.",
+    "Кодовый/runtime default=false; dynamic_config.json не создавать и не коммитить; H7 только после H3/H6. OPENCODE_BIN не добавлять в serve_env; не расширять whitelist OPENCODE_*/FAKE_*; не допускать секретов в argv/логах/lease и обращений helper к боевым state/log/config путям.",
+    "analysis/zen-realtime-reasoning/**, bridges/muse-bridge/**, общие конфиги opencode/georouter, opencode.db, зависимости/lockfiles и ~/.dsh/** вне архитектурной стадии.",
+    "Не объявлять Council PASS/ARCH_GATE_PASS от лица Architect или summarizer. H3, полный Stage3 и живые H0..H9 остаются NOT_RUN до фактических прогонов; изолированные EVD не подменяют живую приёмку. Сохранить dissent F-001: realist D1 non-blocking против большинства 2/3 blocking."
+  ],
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Текущий a5 (R1 r10 -> D1 r14): NEEDS_WORK; arch_panel_to_architect: 5/5 — финальный доступный цикл доработки архитектуры. Адресат строго Architect (§3 arch-council): выпустить v6 / cycle: 6 / plans/architect-06.json и передать на следующий внешний Архитектурный Совет a6. Blocking только RW-001 и RW-002; FU-001 и FU-002 non-blocking; F-001..F-004 покрыты ровно по одному разу, excluded: []. Этот brief не запускает Coder, не присваивает Council PASS/ARCH_GATE_PASS, не сбрасывает и не увеличивает бюджет; дальнейшая доработка сверх 5/5 требует решения владельца."
+}

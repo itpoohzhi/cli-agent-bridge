@@ -1,0 +1,1266 @@
+{
+  "brief_review": {
+    "arch_R2_cycle1": {
+      "realist": {
+        "verdict": "REJECT",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": null,
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a2-realist/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 130,
+        "transport": "claude-p"
+      },
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "9a9da58eda939619a51c10bc822f814e1d8678012990516be7ea2eac7d0bcf98",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a2-skeptic/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 119,
+        "transport": "claude-p"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "4b1559fd3d186b9d2d1f07392b23283587e0f3c3721f37780c42926861354961",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a2-visionary/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 146,
+        "transport": "claude-p"
+      }
+    },
+    "arch_R1-a2_cycle1": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 2,
+        "approved_sha256": "9a9da58eda939619a51c10bc822f814e1d8678012990516be7ea2eac7d0bcf98",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a2-skeptic/verdict-v1-g2.json",
+        "brief_review_calls": 2,
+        "wall_seconds": 138,
+        "transport": "claude-p"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 2,
+        "checklist_gen": 2,
+        "approved_sha256": "4b1559fd3d186b9d2d1f07392b23283587e0f3c3721f37780c42926861354961",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a2-visionary/verdict-v2-g2.json",
+        "brief_review_calls": 3,
+        "wall_seconds": 312,
+        "transport": "claude-p"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 2,
+        "checklist_gen": 2,
+        "approved_sha256": "96ff647aab266e88deded59b2ac5380cce19da4bf08163b3fb36a4454523eb51",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a2-realist/verdict-v2-g2.json",
+        "brief_review_calls": 2,
+        "wall_seconds": 239,
+        "transport": "claude-p"
+      }
+    },
+    "arch_R2_a5d1_r14_cycle1": {
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "982e339684496daf3e0eaf10fd5f88aa828ef259c7ad58ada33015955d7948fc",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r2-a5d1-r14-realist/verdict-v1-g1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 145,
+        "transport": "claude-p"
+      },
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "8ccaffa12a73d36e3b8fb06e75e955637fcef7b50d79fb2e8bcc9a774d699b0d",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r2-a5d1-r14-skeptic/verdict-v1-g1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 180,
+        "transport": "claude-p"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "151a2780ad39e1ae88935327532a44c8ee4e64df5e402284633df22afaadbeb9",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r2-a5d1-r14-visionary/verdict-v1-g1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 201,
+        "transport": "claude-p"
+      }
+    },
+    "arch_R1-a6r15_cycle1": {
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "b2ee71b51b4619c7332dcfd039740f97601c51387ff6a5f4ba986f36820b80ab",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a6r15-realist/verdict-v1-g1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 143,
+        "transport": "claude-p"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 2,
+        "checklist_gen": 1,
+        "approved_sha256": "d65e8177477645715d8fa7dbbdfa23be4a4a1f6c906caaaec25f13c0401334ae",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a6r15-visionary/verdict-v2-g1.json",
+        "brief_review_calls": 3,
+        "wall_seconds": 376,
+        "transport": "claude-p"
+      },
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "752167d25051560a8fc032ffe649d24f722e017041eeb6e17d0c0bc4fd947a5f",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a6r15-skeptic/verdict-v1-g1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 171,
+        "transport": "claude-p"
+      }
+    },
+    "arch_D1_cycle1_a6_r19": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "504ca773e8922fecd88c85c1bb04993af934bf28920dd3c433f299384102ac74",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r19-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "797e2019bf6601ee9684a4efe2f79189476810cf693019f85a3d0bf6c58360d8",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r19-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "e089eb08e7d30b920076a684156577cb4f292618d52753d163fb450e344cf006",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r19-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "arch_D1_cycle1_a6_r20": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "9c628811b44dbc722f1b005ad7cf199ced6f1dd3a5b89612e503464934158790",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r20-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "757d6e1c4c065a0c14c3823f831d4b0def1e605e08de69c52cddf4b12e0d4ebf",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r20-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "451fc33011ee974ba966fdf91543bbed75be601f696cba832c2249d9d708f462",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r20-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "arch_D1_cycle1_a6_r21": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "a58a87a70ecf531dac3a781b9ecba1b8f2346d7af6ef67348a20071817fdf98c",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r21-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "79a64f6f212507ba3302ecb6c35fd535f4c914a2749e185d1118d80731de4858",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r21-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 3,
+        "approved_sha256": "91e3a2ef8db4f6cbc514f14e52238df99802e78fc506982405562d9e64215daa",
+        "verdict_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/arch-panel/cycle-1/brief-review/arch-r2-a6d1-r21-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle1_r2": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "d46f2fe9512deb699981fae44b01d87aa259f8172ec97b82f6860f3fd1d56559",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r2-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "0d3a5038beea2a2991a9fa34b23c5d83debf987382a4cc95372d9dd7bd334db7",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r2-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "cf19aab2674acc377fe5ed62b513843dc06ab95f2ec1b6665763ab286e74352e",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r2-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle1_r3": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "b97e83eff4ae5b8a661f364893529f972cc4e6b8dc7327d67ccf608849dbec40",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r3-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "1bfc3a511a7f34197c851e3ab768cd1a6ad3e56b6152c1c62dcb65ad72c4904d",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r3-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "2eb325c1a2ea3d414290a3522bde2244814a42b6968f35c1b3d7f389b472ff2a",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r3-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle1_r5": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "cc2c3a8eafea5aa3700b711c03b9184c3b29afb5cceefde6407c686b5bb129b6",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r5-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "8e1929123e9be0b4cb7d141521a568c1d765a1214c4494c9cf005116288a89fe",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r5-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "8d371a1c1e0c2594843fdf98ee9482fe87335690e27f65352f9de79161456a38",
+        "verdict_path": "teamlead/cycle-1/brief-review/code-r5-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R6_cycle2": {
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "34fc1d7eebf7cd6cfe6840372485401efb38e21321e65feb992a12565fbcc8c9",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r6-realist/verdict-v1.json",
+        "brief_review_calls": 2,
+        "wall_seconds": 146,
+        "transport": "claude-p"
+      },
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "63bb108dd04904ac0cb630f4c9adf96ae32c5319ea8f4522cfc768c8a7ecfc0c",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r6-skeptic/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 137,
+        "transport": "claude-p"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "5989a9c7f9e24e38b58dfd44bd1010ce1d9f0b0e3488eb4689acee8c7b50c23e",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r6-visionary/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 868,
+        "transport": "claude-p"
+      }
+    },
+    "code_R9_cycle2": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "41f2c2e0d8c73cf377fa4c6aedaa6de82f0aecc39ec589513666c34b7eab3454",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r9-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "ff268cf0fdf3b8f64687a004a271ec1f4da8713454026ba4b6aa0e93e7677b1f",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r9-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "a804019d7df4b082e79349a247c1aee556056d17383159571d104f826b969a1d",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r9-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle2_r13": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "92cddee9fe2535170a4aca83f9d78e0282a3e302130ac2962147f108cc6851f7",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r13-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "ffe3174eafa9099834bd2718c56af19d0c9593dd63dd4be856e7414a70e598c5",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r13-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "ccc020215b1154b923d34a65ec314928620e988b4abb4ec99f7506e9533173be",
+        "verdict_path": "teamlead/cycle-2/brief-review/code-r13-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R25_cycle3": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "3799f476023270244658e6af71a9bb6a6500ec4edbbbab97f0a968a611d3a329",
+        "verdict_path": "teamlead/cycle-3/brief-review/code-r25-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "5d61bebe9ebd973b3afcecdd9c0756e2fb1eb67540f85530afe574ff453a655b",
+        "verdict_path": "teamlead/cycle-3/brief-review/code-r25-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "f3c5f6f38622c608edbfcda87a9e069d63b0e899ada03cd2e854a9cc7e079fff",
+        "verdict_path": "teamlead/cycle-3/brief-review/code-r25-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle3_r29": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "72f7774b778fe06fa9d67103c2305f81a9ee6a32cc04cb81b1b3dc1ead823513",
+        "verdict_path": "teamlead/cycle-3/brief-review/code-r29-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "303e69866e11f4a532bee4b0259c2beade0b490a4167cc991c2bc1cea0f92226",
+        "verdict_path": "teamlead/cycle-3/brief-review/code-r29-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "305d134ca522de3d6f1982715055d22cdf63039d0c16c37429ce61ed99d8589a",
+        "verdict_path": "teamlead/cycle-3/brief-review/code-r29-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R30_cycle4": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "91aa96a9fd959f5bea772707217334dfc997ab5adc126ea20f444b3d01e0ec4e",
+        "verdict_path": "teamlead/cycle-4/brief-review/code-r30-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle4_r36": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "436868090f01f63d2587a523f3758c2d311b0759f422ec19db4844bb9637070f",
+        "verdict_path": "teamlead/cycle-4/brief-review/code-r36-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "cd4a804ec74a9d54d4c094496f3f09a5d3c79c80285f4ccc515a0643bc655d1e",
+        "verdict_path": "teamlead/cycle-4/brief-review/code-r36-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "d29744866e8b88d5810066a14fe9142241cfe0bf289235485e5e625b7e08d06e",
+        "verdict_path": "teamlead/cycle-4/brief-review/code-r36-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R56_cycle5": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "dd2cc5123baae6d2e805d3d6954816b58df051cc478a46596cab98e16718f8de",
+        "verdict_path": "teamlead/cycle-5/brief-review/code-r56-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "5e5a8a86ef9d95415cf9c103bd60e4781f3b779b7accd2d2bc1f537873ff404f",
+        "verdict_path": "teamlead/cycle-5/brief-review/code-r56-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "e6381a45a9766b480defa9a60680f037b609b897f6c16891c3310456c7d3dc03",
+        "verdict_path": "teamlead/cycle-5/brief-review/code-r56-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle5_r65": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "89ebc840eca9adf63fd88cb664987f89de0718a68dea26fddac2cc10127ad027",
+        "verdict_path": "teamlead/cycle-5/brief-review/code-r65-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "e305549a941a869f671a15c1d57fa038a7d64a0f2c6d3d2f164f39aad964e9cc",
+        "verdict_path": "teamlead/cycle-5/brief-review/code-r65-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "684c35655b57ec771db75fc17763211e097435f4d72646434db1e21792658562",
+        "verdict_path": "teamlead/cycle-5/brief-review/code-r65-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R72_cycle6": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "5639e5157b141fb5a1b17dadbfb1576139d09cbecda8c253c2f260dbbb5fac22",
+        "verdict_path": "teamlead/cycle-6/brief-review/code-r72-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "fb095c3cc3db05eb27b208b1450db10c9ce3898e0b8186763d9149d6e9043d9f",
+        "verdict_path": "teamlead/cycle-6/brief-review/code-r72-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "cbd34d7ba2345185e44299cdacbc3bcca7a0ae75873ba72717259ade5c13e39b",
+        "verdict_path": "teamlead/cycle-6/brief-review/code-r72-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle6_r77": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "2e1c0b9ed6fa679d4a33b3dc70c0157862ebe43c375a81742ee0d22957e20672",
+        "verdict_path": "teamlead/cycle-6/brief-review/code-r77-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "a8e538df20347670313a9e9f1e29a70a584810d90c4c9eb915d83375b787ae7b",
+        "verdict_path": "teamlead/cycle-6/brief-review/code-r77-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "185c9c3329b6ebfa390b16451dee77e29484018142013eb74098577e1269e19a",
+        "verdict_path": "teamlead/cycle-6/brief-review/code-r77-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R82_cycle7": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "e7582569981b6078fde4efcabfdf3db7f57970ae010b955ba3c4e0c30e5c0698",
+        "verdict_path": "teamlead/cycle-7/brief-review/code-r82-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "2d2f9f1e1bd14cc8742cfa6f47c0e1685f666d39dec8087312db01f92a6115d1",
+        "verdict_path": "teamlead/cycle-7/brief-review/code-r82-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "b17d8ca6e6e74167252b23be03b26028350e0f14dfb617e581eca295f274c61e",
+        "verdict_path": "teamlead/cycle-7/brief-review/code-r82-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle7_r89": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "91955edf2bc507b44cb0658c1081602d32b20c2022efa63305996d9e8f039741",
+        "verdict_path": "teamlead/cycle-7/brief-review/code-r89-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "f5f21db83633cfa687c0b5c2068d94080a3f92ba835e2e9ddda30c25c8af51c6",
+        "verdict_path": "teamlead/cycle-7/brief-review/code-r89-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "8431219cb3454791ac10c929d22c3bc68f37200249546a74b649d10cea2aa219",
+        "verdict_path": "teamlead/cycle-7/brief-review/code-r89-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R99_cycle8": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "9ba9c82118c1154db2fa688f679dae3aebd6f969d8d3a35dc6360ea1e51582f0",
+        "verdict_path": "teamlead/cycle-8/brief-review/code-r99-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "2bf6c48a4f9a051365ebf8d39e62e7b306d5ecd2ff19121efe63d2ca56ef37df",
+        "verdict_path": "teamlead/cycle-8/brief-review/code-r99-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "2c9d1b3ee3c3689c2d1225822dbb51378bba6fba84d36d3176ca8a1e6b7f37ea",
+        "verdict_path": "teamlead/cycle-8/brief-review/code-r99-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle8_r106": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "223443103731d3da5ef1039af3ae5947585db7179c8dc694a7c6b0bd9141540a",
+        "verdict_path": "teamlead/cycle-8/brief-review/code-r106-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "75f170039f3b1697b61bc2a67b3fc943b0744f01361ea705da948c7425c27593",
+        "verdict_path": "teamlead/cycle-8/brief-review/code-r106-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "b770484657c1253e5b44981b09d558468308af77388b1e834b36ba1f022de48d",
+        "verdict_path": "teamlead/cycle-8/brief-review/code-r106-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R140_cycle9": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "ff6f9934131a862fe064cdb4c37d6606b20d81163049ed165f96ca92583d02b1",
+        "verdict_path": "teamlead/cycle-9/brief-review/code-r140-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "007e1ed986c121aaedfa7891356dc66324419cc7bb3b75b5e80a1c82bfc008ec",
+        "verdict_path": "teamlead/cycle-9/brief-review/code-r140-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "6ae70b46a7d16f4356732c7761b32b226a9a801f76b465ddf8594548239726c9",
+        "verdict_path": "teamlead/cycle-9/brief-review/code-r140-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle9_r144": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "241593568054925300b55949adddf81f5fc2bb6da83e69c88474f4e5f997f3c8",
+        "verdict_path": "teamlead/cycle-9/brief-review/code-r144-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "cd12f630b8aa55db21bfc1f5aee58da4930d2143cfa90cdd28192fb2e6a82b85",
+        "verdict_path": "teamlead/cycle-9/brief-review/code-r144-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "0a517ec2bdbfb548ec3aa75520efd345b9857fd3df27a6507107ed411575b8d8",
+        "verdict_path": "teamlead/cycle-9/brief-review/code-r144-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R149_cycle10": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "a3b37ab1a334619f848803cee67431c89c32cb3d2359fdb3dcc5f4a2aa350071",
+        "verdict_path": "teamlead/cycle-10/brief-review/code-r149-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "130b59cc22dee72bf14f4f1c3610ed609e393080460bb6de9fd9d275d5699ccf",
+        "verdict_path": "teamlead/cycle-10/brief-review/code-r149-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "f395e40322c908e40dafcddba7acfa73f9ec587d445f1602458c84b75a8d47b3",
+        "verdict_path": "teamlead/cycle-10/brief-review/code-r149-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle10_r154": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "4016fe1bde6b68bf417e8aafab544fd86b74b02e0091c4903b1f365ab74e8746",
+        "verdict_path": "teamlead/cycle-10/brief-review/code-r154-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "3502fc953afeab2842385118e7782d478670aa0e6698f076c6e3d7b15d7d4172",
+        "verdict_path": "teamlead/cycle-10/brief-review/code-r154-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "a997e6ba158911cdea431561a5c4b5ae9dfb54cba969a6a8775d367cb0b03762",
+        "verdict_path": "teamlead/cycle-10/brief-review/code-r154-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R158_cycle11": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "f82f6f4cb70f7dac63d41adb34533b91d26fd51bb4543a55ad0ced6f4ff37070",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r158-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "ba278492c047f54d1252a7a514650f3525a5be10eebc5758e4f881b052600b60",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r158-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "9a0c6ea3cabaefb649522f8eca004368540940e6a1677c1cd7e2e7c5d957be29",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r158-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle11_r193": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "a40f8af94fba13f5ca6b3a753564e87b128e6e322179beacc7115030f12a7a34",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r193-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "0995c6444597a5a97f5c167dacb6a5ba1b027d596c55af1ea37262beacf50fb1",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r193-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "0f766d0c025951ad7181048bd5fbf822e5f1abc6417e0da8fae2d057414fdf06",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r193-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D2_cycle11_r217": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "5c1dbd62374b648f41760fb5a2a0527ac68258cbb9077709deba7d0d58c77c0e",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r217-d2-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "57b5f8eb3e0851b20fe7aae0074483a4e76d34f211f0944f7d514814965e9621",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r217-d2-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "5f77ca8591b2f2855e7872baf705286cc759a5a817f35d39321ec772c9f1691c",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r217-d2-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_C1_cycle11_r225": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "7503e52080a231d0b2f84f06d3a84b2cec7b1f5421c6bd7e6e8fa3b2f87e4166",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r225-c1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "8c612fc541af702399e1a371fef15b4c2f291d0d3819e8f3a8c989ec745ffd59",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r225-c1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "d60c6ee2f98101502b6fc55078e995a15aaab3b98678ec23fc080e8b02f90ebd",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r225-c1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D2_cycle11_r238": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "f26f18a6c6ea00fbd1574323832007492468cfa65cf3875d8a202d228c834bed",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r238-d2-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "437696582a5e5da4ba70e1245144ab939956dabdadfa4c534fdaf98883dedb91",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r238-d2-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "9f322e43766bdedc0ead04fbd7bb3cd00d1800a7465fd9f8d894ef2978fb2831",
+        "verdict_path": "teamlead/cycle-11/brief-review/code-r238-d2-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_R245_cycle12": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "fb5b1d64ac0780b5908cc39678a78a9015735f6bd98a15dbad9182696ddf56af",
+        "verdict_path": "teamlead/cycle-12/brief-review/code-r245-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "c0f4b63fa51d7f7c544242bfc7ea72031db33c91ca429cf539c392fa66a3166a",
+        "verdict_path": "teamlead/cycle-12/brief-review/code-r245-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "4ed7fb44c814d8d88f5250ace887e39ff4b80721a81d73aaa81c654c000cf80a",
+        "verdict_path": "teamlead/cycle-12/brief-review/code-r245-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    },
+    "code_D1_cycle12_r266": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "1794aac259d2ba04a3d4acea3b63956937a05b17a167abc3e8532d69296fb806",
+        "verdict_path": "teamlead/cycle-12/brief-review/code-r266-d1-skeptic/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "8fdfdc81522d761dd9abae3401183ee626f86be5ba9865b4271f0b2088b6f1d5",
+        "verdict_path": "teamlead/cycle-12/brief-review/code-r266-d1-realist/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "75280932e69ad5813cfe2970fffcb8bb7f5de0a9b42352e20ca07fa9b22d382c",
+        "verdict_path": "teamlead/cycle-12/brief-review/code-r266-d1-visionary/verdict-v1.json",
+        "brief_review_calls": 0,
+        "wall_seconds": 1,
+        "transport": "local-prelint"
+      }
+    }
+  },
+  "transport_failures": [
+    {
+      "role": "coder",
+      "slot": "claude-sonnet-5-5",
+      "transport": "claude -p",
+      "reason": "quota_window: You've hit your session limit · resets 7:10pm (Europe/Moscow)",
+      "replacement_slot": "muse-wonder-1.0",
+      "replacement_transport": "muse-cli.sh exec",
+      "ts_utc": "2026-10-26T13:56:44Z"
+    }
+  ],
+  "coder": {
+    "slot": "muse-wonder-1.0",
+    "effort": "high",
+    "family": "Meta",
+    "transport": "muse-cli.sh exec",
+    "selection_mode": "1/N fallback 3b after claude-sonnet-5-5 quota_window"
+  },
+  "arch_panel_verdict": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/arch-panel.json",
+  "arch_panel_cycle": 1,
+  "coder_slot": "muse-wonder-1.0",
+  "coder_family": "Meta",
+  "coder_backend": "muse-cli",
+  "coder_effort": "high"
+}

@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-06.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004"
+  ],
+  "objective": "Устранить RW-001..RW-004 и FU-001..FU-006 Cycle 5 в разрешённых файлах без изменения frozen-функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-4/final-panel-verdict.md",
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+  ],
+  "stop_conditions": [
+    "Менять только 3 продуктовых/тестовых файла из брифа и файлы отчётности coder-06",
+    "Не трогать замороженные _run_env/_stream_google_sse/_execute_google_once (sha256 VER-004)",
+    "Не запускать full-file ruff format server.py; только --range по изменённым ханкам",
+    "Не делать git commit/push/gh pr create",
+    "Сохранить ранний перехват --serve-helper и совместимость ast feature_version=(3,9)"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Добавить регрессионные оракулы Cycle 5 и подтвердить RED до исправления",
+      "expected_evidence": "Новые тесты воспроизводят RW-001..RW-004 и FU-003",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Исправить headers/barrier, первый статус, разделители и native stall в server.py",
+      "expected_evidence": "Целевые тесты GREEN, FU-001..FU-006 покрыты",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Прогнать VER-004: диапазоны ruff, frozen sha256, lint/type и catalog",
+      "expected_evidence": "VER-004 exit=0; три frozen sha256 сохранены",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Прогнать целевой pytest и полный unittest discover без коммита",
+      "expected_evidence": "Оба набора exit=0 с сырыми результатами",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Записать after-план coder-07 и идентичные handoff/receipts",
+      "expected_evidence": "validate_role_plan after и validate_handoff coder exit=0",
+      "status": "PENDING"
+    }
+  ]
+}

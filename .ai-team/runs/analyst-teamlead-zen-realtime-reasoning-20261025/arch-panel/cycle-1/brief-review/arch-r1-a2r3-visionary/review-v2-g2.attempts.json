@@ -1,0 +1,21 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "slot": "claude-sonnet-5-5",
+      "transport": "claude-p",
+      "file": "review-v2-g2-a1.md",
+      "http_code": null,
+      "rc": 0,
+      "result": "ok",
+      "seconds": 134,
+      "wall_seconds": 133.51,
+      "tool_calls": 0,
+      "kill_reason": null,
+      "error": null,
+      "pid": 29164,
+      "pgid": 29164,
+      "text_chars": 15323
+    }
+  ]
+}

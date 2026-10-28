@@ -1,0 +1,220 @@
+# Mechanical unified diff (diff -u): Architecture Packet v5 -> v6
+# old_revision: architecture-packet.v5.json sha256=15ea67e3215ceea9e84b9d79853677f4be86b959e87a21f24830d0c895f62657
+# new_revision: architecture-packet.json sha256=88c02c37a7ca0be3d317217f23289dba07ddc681d922db207c7680a779128b6b
+--- architecture-packet.v5.json (sha256=15ea67e3215ceea9e84b9d79853677f4be86b959e87a21f24830d0c895f62657)
++++ architecture-packet.json (v6 sha256=88c02c37a7ca0be3d317217f23289dba07ddc681d922db207c7680a779128b6b)
+@@ -2,3 +2,3 @@
+   "schema_version": "1.0",
+-  "packet_version": "5.0",
++  "packet_version": "6.0",
+   "task_id": "zen-realtime-reasoning",
+@@ -6,3 +6,3 @@
+   "preset": "analyst-teamlead",
+-  "cycle": 5,
++  "cycle": 6,
+   "criticality": "S2",
+@@ -11,6 +11,6 @@
+   "role_plan": {
+-    "path": "plans/architect-05.json",
+-    "sha256": "5255c8728e8f00b594c3f6f6951d5a50127e5fbf5c702739aced8ab7dd401abd"
++    "path": "plans/architect-06.json",
++    "sha256": "f9aafe72f3c58b269dc03a5c355ad259efbeeeff889f124e8fa87148d45cbb16"
+   },
+-  "summary": "Cycle5 a4→a5 fix-from-panel:4 blocking RW-001..004 +6 FU-001..006 закрыты точечной архитектурной delta v5; duplicate PANEL-A4-F-006 absorbed in RW-003. APPROVED означает внутреннюю готовность пакета-кандидата для внешнего Совета a5/r9, не Council PASS/ARCH_GATE_PASS. Stage3/H0..H9 NOT_RUN.",
++  "summary": "Cycle6 a5→a6 fix-from-panel: RW-001/RW-002 и FU-001/FU-002 закрыты в v6 на уровне архитектурного контракта и изолированных проб. APPROVED — внутренний кандидат для внешнего Архитектурного Совета a6 (panel/arch/r15), не Council PASS/ARCH_GATE_PASS. Финальный бюджет arch_panel_to_architect=5/5 сохранён; Stage3/H0..H9 NOT_RUN.",
+   "scope": {
+@@ -19,4 +19,4 @@
+     "architect_write_allowlist": [
+-      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-04.before.json",
+-      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-04.json",
++      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-06.before.json",
++      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-06.json",
+       ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json"
+@@ -1074,20 +1074,15 @@
+       "id": "EVD-076",
+-      "command": [
+-        "uvx",
+-        "--from",
+-        "basedpyright==1.40.2",
+-        "basedpyright",
+-        "--project",
+-        "/tmp/zen-arch5-probe-ver004-4qvzmyuy/server-only.json",
+-        "--outputjson"
+-      ],
+-      "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge",
+-      "exit_code": 1,
+-      "elapsed_s": 3.067,
++      "kind": "command",
++      "ref": "ARCHIVED EXECUTION; disposable directory deleted: VER-004.command v6 executed on /tmp/zen-arch6-probe-work-jfgscb15/repo; full transcripts EVD-079",
++      "claim": "v6 early typed helper with heavy imports in normal-only else; unchanged static zc import. All3 errors0, server564warnings/reportAny125/reportExplicitAny125, step162/newfile0; catalog8/8; zero suppressions and no expanded typing budgets. Isolated feasibility, actual Stage3 NOT_RUN.",
++      "status": "OBSERVED_PASS",
++      "stage3_status": "NOT_RUN",
++      "exit_code": 0,
++      "full_command_exit_code": 0,
+       "summary": {
+-        "filesAnalyzed": 1,
++        "filesAnalyzed": 3,
+         "errorCount": 0,
+-        "warningCount": 564,
++        "warningCount": 726,
+         "informationCount": 0,
+-        "timeInSec": 2.451
++        "timeInSec": 3.594
+       },
+@@ -1110,12 +1105,3 @@
+       },
+-      "stderr": "",
+-      "errors": [],
+-      "source_transform": "Keep import zen_catalog as zc at original line67; CATALOG_SOURCE = \"static\"; typed _set_catalog_source via globals(); two explicit proc is not None guards; typed _run_serve_helper_cli(args: list[str]) -> int and __main__ --serve-helper dispatch.",
+-      "server_sha256": "c237df56c1ea8cf34b183d9058b07e8a0e454cfe8407dd3ae11d536096b57a70",
+-      "bridge_root_init_py": false,
+-      "status": "OBSERVED_PASS",
+-      "temp_removed": true,
+-      "stage3_status": "NOT_RUN",
+-      "kind": "command",
+-      "ref": "Isolated real bridge layout /tmp/zen-arch5-probe-ver004-*/bridges/opencode-zen-bridge; no root __init__.py; full command EVD-077",
++      "source_transform": "Early isolated dispatcher in server.py: top-level only minimal stdlib imports (json, os, signal, subprocess, sys, time, Path, select/resource as needed; existing typing import retained unchanged for the frozen no-new-Any gate) and typed def _run_serve_helper_cli(args: list[str]) -> int. Immediately afterwards: if sys.argv[1:2] == [\"--serve-helper\"]: raise SystemExit(_run_serve_helper_cli(sys.argv[2:])); else: import all normal-server-only modules, including http.client, sqlite3, from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, and after sys.path.insert(0, str(Path(__file__).resolve().parent)), static import zen_catalog as zc. Imports inside else prevent Ruff module-level E402; terminating SystemExit branch makes those names definitely assigned for the normal path in basedpyright1.40.2. No helper execution reaches reload_catalog() (original server.py:163), _DEFAULT_RESILIENCE, main/HTTP startup, LOG_PATH/DYNAMIC_CONFIG_PATH initialization, or any access to state/zen-catalog.json, logs/bridge.log, dynamic_config.json. No importlib transform, inline -c source, new module, suppressions, or frozen-slice changes. Public CATALOG_SOURCE static+typed globals setter and explicit proc is not None guard at final stream exit, frozen3 functions untouched.",
+       "versions": {
+@@ -1124,5 +1110,10 @@
+       },
+-      "claim": "Static import zen_catalog as zc preserved at original server.py:67; CATALOG_SOURCE static+typed globals setter, two proc None guards and typed helper CLI skeleton: server errors0/warnings564/reportAny125<=125. Final exact VER004 block exit0 including catalog8/8 in EVD-077; actual Stage3/H0..H9 NOT_RUN.",
+-      "full_ver004_evidence": "EVD-077",
+-      "full_command_exit_code": 0
++      "server_sha256": "f8b7a0cc40abfeeb8ebdbdbd54ae2de728e4d2c5a32d79607e98bcf14efd3b8d",
++      "full_ver004_evidence": "EVD-079",
++      "temp_removed": true,
++      "probe_cleanup": {
++        "removed": true,
++        "remaining_probe_directories": 0,
++        "path_semantics": "All recorded /tmp and /private/tmp probe paths are historical execution locations. The disposable tree and its pointer file have been deleted; transcripts and reproduction sources are embedded in this packet, not live filesystem references."
++      }
+     },
+@@ -1130,130 +1121,7 @@
+       "id": "EVD-077",
+-      "commands": [
+-        {
+-          "argv": [
+-            "uvx",
+-            "--from",
+-            "ruff==0.17.2",
+-            "ruff",
+-            "format",
+-            "--no-cache",
+-            "--range=95:1-95:999",
+-            "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge/server.py"
+-          ],
+-          "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy",
+-          "exit_code": 0,
+-          "returncode": 0,
+-          "elapsed_s": 0.052,
+-          "stdout": "1 file left unchanged\n",
+-          "stderr": ""
+-        },
+-        {
+-          "argv": [
+-            "uvx",
+-            "--from",
+-            "ruff==0.17.2",
+-            "ruff",
+-            "format",
+-            "--no-cache",
+-            "--range=116:1-119:999",
+-            "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge/server.py"
+-          ],
+-          "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy",
+-          "exit_code": 0,
+-          "returncode": 0,
+-          "elapsed_s": 0.0539,
+-          "stdout": "1 file reformatted\n",
+-          "stderr": ""
+-        },
+-        {
+-          "argv": [
+-            "uvx",
+-            "--from",
+-            "ruff==0.17.2",
+-            "ruff",
+-            "format",
+-            "--no-cache",
+-            "--range=122:1-122:999",
+-            "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge/server.py"
+-          ],
+-          "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy",
+-          "exit_code": 0,
+-          "returncode": 0,
+-          "elapsed_s": 0.045,
+-          "stdout": "1 file left unchanged\n",
+-          "stderr": ""
+-        },
+-        {
+-          "argv": [
+-            "uvx",
+-            "--from",
+-            "ruff==0.17.2",
+-            "ruff",
+-            "format",
+-            "--no-cache",
+-            "--range=135:1-135:999",
+-            "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge/server.py"
+-          ],
+-          "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy",
+-          "exit_code": 0,
+-          "returncode": 0,
+-          "elapsed_s": 0.0429,
+-          "stdout": "1 file left unchanged\n",
+-          "stderr": ""
+-        },
+-        {
+-          "argv": [
+-            "uvx",
+-            "--from",
+-            "ruff==0.17.2",
+-            "ruff",
+-            "format",
+-            "--no-cache",
+-            "--range=3670:1-3671:999",
+-            "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge/server.py"
+-          ],
+-          "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy",
+-          "exit_code": 0,
+-          "returncode": 0,
+-          "elapsed_s": 0.0474,
+-          "stdout": "1 file reformatted\n",
+-          "stderr": ""
+-        },
+-        {
+-          "argv": [
+-            "uvx",
+-            "--from",
+-            "ruff==0.17.2",
+-            "ruff",
+-            "format",
+-            "--no-cache",
+-            "--range=4024:1-4033:999",
+-            "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge/server.py"
+-          ],
+-          "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy",
+-          "exit_code": 0,
+-          "returncode": 0,
+-          "elapsed_s": 0.0502,
+-          "stdout": "1 file left unchanged\n",
+-          "stderr": ""
+-        },
+-        {
+-          "argv": [
+-            "uvx",
+-            "--from",
+-            "ruff==0.17.2",
+-            "ruff",
+-            "format",
+-            "--no-cache",
+-            "--range=4035:1-4036:999",
+-            "/tmp/zen-arch5-probe-ver004-4qvzmyuy/bridges/opencode-zen-bridge/server.py"
+-          ],
+-          "cwd": "/tmp/zen-arch5-probe-ver004-4qvzmyuy",
+-          "exit_code": 0,
+-          "returncode": 0,
+-          "elapsed_s": 0.0473,
+-          "stdout": "1 file left unchanged\n",
+-          "stderr": ""
+-        }

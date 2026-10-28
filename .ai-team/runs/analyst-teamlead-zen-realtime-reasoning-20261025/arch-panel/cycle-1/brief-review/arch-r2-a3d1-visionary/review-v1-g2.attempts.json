@@ -1,0 +1,38 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "slot": "claude-sonnet-5-5",
+      "transport": "claude-p",
+      "file": "review-v1-g2-a1.md",
+      "http_code": null,
+      "rc": 1,
+      "result": "invalid",
+      "seconds": 2,
+      "wall_seconds": 2.4,
+      "tool_calls": 0,
+      "kill_reason": null,
+      "error": "You've hit your session limit · resets 3:50am (Europe/Moscow)",
+      "pid": 59662,
+      "pgid": 59662,
+      "text_chars": 61
+    },
+    {
+      "attempt": 2,
+      "slot": "gpt-6.1-sol",
+      "transport": "codex",
+      "file": "review-v1-g2-a2.md",
+      "http_code": null,
+      "rc": 0,
+      "result": "ok",
+      "seconds": 86,
+      "wall_seconds": 85.53,
+      "tool_calls": 0,
+      "kill_reason": null,
+      "error": null,
+      "pid": 60163,
+      "pgid": 60163,
+      "text_chars": 19281
+    }
+  ]
+}

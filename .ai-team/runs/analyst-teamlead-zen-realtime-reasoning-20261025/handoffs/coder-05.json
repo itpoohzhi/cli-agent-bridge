@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.1",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "round_id": "coder-05",
+  "iteration": 1,
+  "status": "DONE",
+  "summary": "Rework Cycle2 RW-001..RW-019 и FU-001..FU-009 только в server.py и tests/test_realtime_reasoning.py (test_step_interruption.py без замечаний, не менялся): errno до ветки helper, timeout/client_gone не успех, ранняя проверка prompt_status и fail_closed 400/404/422, атомарный _spawn_serve, SIGKILL группы в helper, client_gone по errno, неблокирующий читатель SSE, монотонный барьер доставки, потолок спавнов в JSON, text tool_calls на step_finish, один разделитель повтора, дедуп JSON tool_calls, ранний release StartupGate, cleanup 4.0+2.0 с, замок wfile и таймер статуса, один сдвиг пула прокси. Полный прогон tests: 431 passed; unittest 2 модулей 160 OK; basedpyright 0 errors; frozen sha256 неизменны. coder-05b: tests/test_realtime_reasoning.py — приватные атрибуты server (_serve_one_attempt/_ServeLease/_spawn_serve/_serve_env/_StartupGate/_STARTUP_LOCK/_ACTIVE_SERVE_PORTS/_RequestAttempts) берутся лениво внутри test_* (server.X + pyright ignore[reportPrivateUsage]; cast по строковому типу), модуль собирается на непропатченном origin/dev (collect rc=0, 52 tests), падения — AssertionError внутри тестов; basedpyright 0 diagnostics на файле.",
+  "role_plan": {
+    "path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-05.json",
+    "sha256": "c2d6e69b87a7645d3b08c41e9586b8293bcb2b38e6a7e3a852392a8af2258e87",
+    "phase": "after"
+  },
+  "changed_files": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+  ],
+  "files_changed": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+  ],
+  "tests_added": [
+    "TestServeAttemptOracles: never_event/silent/stall timeouts, пауза SSE 1.4 с, ранний release StartupGate, prompt 400/404/422 fail_closed, text tool_call на step_finish, один сдвиг пула прокси",
+    "TestSpawnAndLeaseOracles: атомарность _spawn_serve (Popen/pipe), cleanup SIGKILL 4.0+2.0 с, _client_gone_check (ECONNRESET/FIN/closed)",
+    "TestHelperProcess: errno до ветки --serve-helper, helper при закрытом stdin, SIGKILL внука группы и lease после смерти",
+    "TestServeTransportAndFakeServe: пауза SSE и единственный STATUS_INITIAL, prompt 4xx в auto, timeout/client_gone не успех (SSE и JSON), один разделитель и монотонный барьер, дедуп JSON tool_calls, потолок спавнов JSON, один сдвиг пула, tool_choice в recovery-промпте",
+    "TestLegacyWatchdogAndKillpg: первый статус <=1.0 с под конкуренцией на StartupGate (TRANSPORT=run)"
+  ],
+  "commands": [
+    {
+      "command": "validate_role_plan coder-05.before.json --phase before",
+      "exit_code": 0,
+      "output_summary": "PASS sha256=8462b3f109fc7b51c3bc47c4502ef4d05d863142445b37516fa0ae65c030242b"
+    },
+    {
+      "command": "uvx pytest -q -p no:cacheprovider tests (cwd bridges/opencode-zen-bridge)",
+      "exit_code": 0,
+      "output_summary": "431 passed, 3173 subtests passed in 198.52s"
+    },
+    {
+      "command": "python3 -W error::ResourceWarning -B -m unittest tests.test_realtime_reasoning tests.test_step_interruption",
+      "exit_code": 0,
+      "output_summary": "Ran 160 tests OK"
+    },
+    {
+      "command": "python3 VER-004 (дословный скрипт из брифа)",
+      "exit_code": 0,
+      "output_summary": "VER004_EXIT:0; BASEDPYRIGHT errorCount=0; frozen sha256 _run_env/_stream_google_sse/_execute_google_once совпали; test_catalog_mode 8 OK"
+    },
+    {
+      "command": "validate_role_plan coder-05.json --phase after",
+      "exit_code": 0,
+      "output_summary": "PASS sha256=c2d6e69b87a7645d3b08c41e9586b8293bcb2b38e6a7e3a852392a8af2258e87"
+    }
+  ],
+  "verification_commands": [
+    {
+      "command": "uvx pytest + unittest (выше)",
+      "exit_code": 0,
+      "output_summary": "431 passed / 160 OK, без ResourceWarning"
+    },
+    {
+      "command": "basedpyright==1.40.2 на 3 файлах (VER-004)",
+      "exit_code": 0,
+      "output_summary": "errorCount=0; test_realtime_reasoning 0 diagnostics; server warnings 594 (<=720), счётчики правил в лимитах"
+    }
+  ],
+  "red_green_evidence": {
+    "red_command": "pytest новых оракулов tests/test_realtime_reasoning.py на server.py после coder-04 (временно подставлен)",
+    "red_exit_code": 1,
+    "red_failure_summary": "28 failed из 35 выбранных: never_event/silent/stall, пауза SSE, prompt 4xx, timeout/client_gone, разделитель, дедуп JSON, потолок спавнов, прокси, SIGKILL helper/lease, errno, ECONNRESET, spawn leftovers",
+    "green_command": "uvx pytest -q -p no:cacheprovider tests",
+    "green_exit_code": 0,
+    "green_summary": "431 passed, 3173 subtests passed"
+  },
+  "acceptance_coverage": [
+    "RW-001..RW-019 закрыты правками server.py и поведенческими тестами test_realtime_reasoning.py",
+    "FU-001..FU-004, FU-006, FU-007 в server.py; FU-009 уточнены причины pyright: ignore; FU-005/FU-008 — тестовый раннер совместим с pytest и unittest, diff минимален",
+    "Замороженные _run_env/_stream_google_sse/_execute_google_once байт-в-байт"
+  ],
+  "assumptions": [],
+  "risks": [
+    "RW-008 реализован блокирующим чтением SSE + shutdown сокета, а не select+recv: сырой recv терял бы буфер resp.fp и chunked-фрейминг",
+    "RW-009: синтетические статусы не ставят барьер доставки (иначе fallback serve->run недостижим после INITIAL на 0.65 с)",
+    "RW-017: таймер статуса на legacy run-пути покрывает ожидание StartupGate и отменяется после его получения (ожидание spawn_limiter не покрыто; иначе падал test_go_model_routing в полном прогоне)",
+    "Живой прогон против реального opencode serve не выполнялся (только FakeServe и fake-launcher)"
+  ],
+  "unresolved_risks": [],
+  "open_questions": [],
+  "next_role": "reviewer"
+}

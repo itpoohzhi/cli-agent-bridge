@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-10.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003"
+  ],
+  "objective": "Устранить RW-001..RW-003 и FU-001..FU-003 без изменения замороженных функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-10.json",
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py"
+  ],
+  "stop_conditions": [
+    "Продуктовые изменения только в трёх разрешённых путях; новые зависимости и изменения внешних контрактов запрещены",
+    "Frozen-функции сохраняют заданные raw SHA256; server.py форматируется только закрытыми диапазонами без пересечения frozen",
+    "Не выполнять commit, push или MR; передать Reviewer без заявления бизнес-приёмки"
+  ],
+  "deviations": [
+    "Валидатор validate_role_plan.py допускает максимум 5 шагов для delta; шесть логических пунктов RP-01..RP-06 сгруппированы в пять шагов, RP-05 включает проверку и отчётность. Об этом сообщено до правок.",
+    "В before-план при копировании структуры coder-10 ошибочно унаследованы его inputs_read и узкие stop_conditions. Before-файл сохранён неизменным с исходным SHA256; after-план исправляет эту метаинформацию. Фактический scope всё время определялся текущим брифом coder-11 и целевыми шагами before-плана.",
+    "RW-002, RW-003, FU-001 и FU-002 требуют более 15 строк: рекурсивная граница Unicode и вложенные JSON-аргументы; отдельные терминальные выходы SSE/JSON; дочитывание native lifecycle того же шага; два ожидания и четыре места запуска с возвратом резервов. Архитектура не заменялась.",
+    "Один первоначальный диапазон форматирования охватил класс Run и заголовок _stream_sse; это изменило оформление нетронутых legacy-блоков и вызвало запрет Any в VER-004. Нетронутые блоки и заголовки восстановлены по origin/dev с проверкой AST; финальный VER-004 проходит. Full-file форматирование server.py и test_step_interruption.py не выполнялось; frozen-функции ни разу не форматировались.",
+    "JSON timeout оставлен со статусом 502 (б brief разрешает 504/502): промежуточные 504 дали три несовпадения с прежними тестами; после возврата к 502 финальные 207/478 тестов прошли.",
+    "Вместо нового временного скрипта переиспользован предоставленный ранее ~/work/cli-agent-bridge/coder-10-20261027/ver004-offline.py: все предикаты VER-004, оба uvx с --offline и дополнительный AST Python 3.9. Временные проверки и логи находятся вне исходников в ~/work/cli-agent-bridge/coder-11-20261027/."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001: отделить serve retry без модельного вывода от запрета run fallback",
+      "expected_evidence": "Регрессия SSE/JSON: две serve-попытки, run не вызван",
+      "status": "DONE",
+      "actual_evidence": "RW-001: test_c8_rw001_early_transient_error_after_execution_started_retries_serve_without_run_fallback: SSE/JSON, 429/503, ровно две serve-попытки, run не вызван; green-fourth.log и targeted-final.log."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002 и FU-003: отклонить суррогаты и обеспечить поведенческий RED origin/dev",
+      "expected_evidence": "ProtocolError, cleanup, O-EXIT; AC-026 доходит до сокетного оракула",
+      "status": "DONE",
+      "actual_evidence": "RW-002: управляемый ServeProtocolError, lease.cleanup, O-EXIT invalid_serve_event; force serve и auto после execution; реальный auto fallback до барьера; валидные пары в SSE/JSON. FU-003: collection исходного origin/dev rc=0 (99 tests), AC-026 RED именно AssertionError на 1/5 чанках, candidate GREEN."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "RW-003: выделить нейтральный терминальный timeout без загрязнения breaker",
+      "expected_evidence": "SSE/JSON timeout оставляет breaker CLOSED с failures=0",
+      "status": "DONE",
+      "actual_evidence": "RW-003: test_c8_rw003_request_deadline_timeout_is_neutral_for_circuit_breaker: повторные startup/general timeout в SSE/JSON оставляют failures=0 и CLOSED; first_token/stall дают failures=2; run не вызывается."
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "FU-001 и FU-002: сохранить native пакет шага и прервать ожидание перед spawn",
+      "expected_evidence": "Два вызова m1 без m2; deadline/disconnect не запускают процесс",
+      "status": "DONE",
+      "actual_evidence": "FU-001: оба вызова c1/c2 ровно по одному разу, точный usage m1, m2 исключён в SSE/JSON. FU-002: gate/limiter ограничены deadline/cancel; дополнительный тест доказывает отсутствие legacy spawn после резерва, refund и освобождение slot/gate."
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "RP-05/06: выполнить VER-004, тесты и валидировать after-план и handoff",
+      "expected_evidence": "Frozen 3/3, Python 3.9, lint/type, pytest и валидаторы exit=0",
+      "status": "DONE",
+      "actual_evidence": "VER-004 PASS, frozen 3/3, AST Python 3.9, lint/type и format, ноль диагностик test_realtime_reasoning.py; catalog 8/8; targeted-final.log: 207 passed in 253.99s; full-pytest-final.log: 478 passed in 304.24s. After-план и handoff проверяются валидаторами после записи."
+    }
+  ],
+  "teamlead_cycle": 8,
+  "entry": "fix-from-panel",
+  "actual_evidence": "VER-004 PASS; 207 targeted / 478 full suite PASS; origin/dev collection 99 tests rc=0; AC-026 RED AssertionError по сокетному оракулу."
+}

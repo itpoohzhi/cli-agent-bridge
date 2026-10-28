@@ -1,0 +1,669 @@
+{
+  "schema": "l3-heavy-verification/1",
+  "started_at": "2026-10-28T00:02:06.241890+00:00",
+  "repo_root": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning",
+  "branch": "feature/zen-realtime-reasoning",
+  "run_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025",
+  "cel_run": "/tmp/cel-runs/zen-rollout-20261028-0302",
+  "steps": {
+    "H0": {
+      "status": "PASS",
+      "backups": [
+        {
+          "source": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/server.py",
+          "backup": "/Users/aazhiry1/work/backups/opencode-zen-bridge-20261028/server.py.bak-20261028",
+          "existed": true,
+          "sha256": "538ba1948bbd87c6bba806dd37b42106c9654544966a9ce8927973c979b3b36f"
+        },
+        {
+          "source": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/dynamic_config.json",
+          "existed": false
+        },
+        {
+          "source": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+          "existed": false
+        },
+        {
+          "source": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+          "backup": "/Users/aazhiry1/work/backups/opencode-zen-bridge-20261028/test_step_interruption.py.bak-20261028",
+          "existed": true,
+          "sha256": "afd542fed0722e48989c997c31595772a5c2df194a6c47ae6c1e86935bb2aa6e"
+        }
+      ],
+      "at": "2026-10-28T00:02:06.318831+00:00"
+    },
+    "H1": {
+      "status": "PASS",
+      "synced": [
+        {
+          "source": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/bridges/opencode-zen-bridge/server.py",
+          "deployed": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/server.py",
+          "sha256": "7eef6ac552863d8e4c499296fdcbf5165e4bd89e70ef084398852051669226bb",
+          "diff_rc": 0
+        },
+        {
+          "source": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+          "deployed": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+          "sha256": "408bc144512f8acaf5d87a32d210175fda778cd61096e0eb7d073a2f06b05c97",
+          "diff_rc": 0
+        },
+        {
+          "source": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+          "deployed": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+          "sha256": "2b177a32290adfebeffad700b1c3c3251619e83cba90032217576c777beb80ef",
+          "diff_rc": 0
+        }
+      ],
+      "dynamic_config": {
+        "path": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/dynamic_config.json",
+        "sha256": "a59f4df8c878ef24c5f42b6b573667dc6fbffcabb3e550a58a1048f05b1c72d8",
+        "enabled_flags": {
+          "OPENCODE_ZEN_REALTIME_REASONING_ENABLED": true,
+          "REALTIME_SERVE_ENABLED": true
+        }
+      },
+      "repo_dynamic_config_absent": true,
+      "at": "2026-10-28T00:02:06.335871+00:00"
+    },
+    "H2": {
+      "status": "PASS",
+      "health": {
+        "http_status": 200,
+        "ok": true,
+        "transport": "opencode-zen-cli",
+        "models": [
+          "beam-free",
+          "big-pickle",
+          "deepseek-v4.1-flash-free",
+          "flint-40b-free",
+          "glm-5.3-flash-free",
+          "mimo-v2.6-flash-free",
+          "nemotron-3.5-lightning-free",
+          "nemotron-3.5-super-vl-free"
+        ],
+        "default_model": "deepseek-v4.1-flash-free",
+        "catalog_mode": "dynamic",
+        "catalog_source": "file",
+        "active": 0,
+        "max_concurrent": 6,
+        "stream": true,
+        "tool_emulation": true,
+        "uptime_s": 71
+      },
+      "lsof": "COMMAND   PID     USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\nPython  14166 aazhiry1    4u  IPv4 0x44865c081f2f10cf      0t0  TCP 127.0.0.1:9883 (LISTEN)\n",
+      "at": "2026-10-28T00:03:26.541235+00:00"
+    },
+    "H3": {
+      "status": "FAIL",
+      "headers_ms": null
+    },
+    "H4": {
+      "status": "FAIL",
+      "ttfr_ms": null,
+      "reasoning_chunks_count": null
+    },
+    "H5": {
+      "status": "FAIL",
+      "ttft_ms": null
+    },
+    "H6": {
+      "status": "FAIL",
+      "finish_reason": null,
+      "usage": null,
+      "done": null
+    },
+    "H7": {
+      "status": "PASS",
+      "http_status": 200,
+      "total_ms": 20220.86,
+      "usage": {
+        "prompt_tokens": 18485,
+        "completion_tokens": 1016,
+        "total_tokens": 19501,
+        "cached_tokens": 4096,
+        "prompt_tokens_details": {
+          "cached_tokens": 4096
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1951
+        }
+      }
+    },
+    "H8": {
+      "status": "FAIL",
+      "request_count": 5,
+      "requests_passed": 1,
+      "early_disconnect_ms": null,
+      "final_health": {
+        "http_status": 200,
+        "ok": true,
+        "transport": "opencode-zen-cli",
+        "models": [
+          "beam-free",
+          "big-pickle",
+          "deepseek-v4.1-flash-free",
+          "flint-40b-free",
+          "glm-5.3-flash-free",
+          "mimo-v2.6-flash-free",
+          "nemotron-3.5-lightning-free",
+          "nemotron-3.5-super-vl-free"
+        ],
+        "default_model": "deepseek-v4.1-flash-free",
+        "catalog_mode": "dynamic",
+        "catalog_source": "file",
+        "active": 0,
+        "max_concurrent": 6,
+        "stream": true,
+        "tool_emulation": true,
+        "uptime_s": 106
+      },
+      "new_opencode_processes": [],
+      "structured_o_exit": true,
+      "o_exit_count": 7,
+      "client_gone_logged": true,
+      "log_path": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/logs/bridge.log",
+      "log_offset_start": 3210031,
+      "at": "2026-10-28T00:04:01.845912+00:00",
+      "client_disconnect_verified": false,
+      "client_gone_note": "client_gone is logged for handler TypeError; these lines do not prove the requested timed disconnect. Server closed before the 1.5-second timer fired."
+    },
+    "H9": {
+      "status": "PASS",
+      "receipt_path": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/l3-heavy-verification.json",
+      "execution_evidence_path": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/execution-evidence.md",
+      "at": "2026-10-28T00:04:01.845939+00:00",
+      "readback_at": "2026-10-28T00:06:33.532985+00:00",
+      "execution_evidence_sha256": "00acc6ad90454d38c818e44c1b6a4c2552a1e6a9ba0ecdbc5666a4d11a953b95"
+    }
+  },
+  "status": "FAIL_ROLLED_BACK",
+  "notes": [
+    "Requested flag OPENCODE_ZEN_REALTIME_REASONING_ENABLED is not read by server.py; actual flag REALTIME_SERVE_ENABLED enabled alongside it.",
+    "Health uses ok:true, not status:ok."
+  ],
+  "panel_proof": {
+    "path": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/panel/council/r266/panel-proof.json",
+    "sha256": "0f8b685cac3b1e65ee06bced04b90690d61ee5efc840c809a8a8ce6b8cac56e7",
+    "verify_rc": 0
+  },
+  "background_jobs": [
+    {
+      "pid": 29022,
+      "pgid": 29022,
+      "command": "run-guarded -- python3 heavy_probe.py",
+      "log": "/tmp/cel-runs/zen-rollout-20261028-0302/heavy-probe.log",
+      "rc": 1
+    },
+    {
+      "pid": 50322,
+      "command": "run-guarded -- python3 rollback_probe.py",
+      "log": "/tmp/cel-runs/zen-rollout-20261028-0302/rollback-probe.log",
+      "guard_pid": 50321,
+      "guard_pgid": 50321,
+      "rc": 0
+    }
+  ],
+  "preflight_health": {
+    "ok": true,
+    "transport": "opencode-zen-cli",
+    "models": [
+      "beam-free",
+      "big-pickle",
+      "deepseek-v4.1-flash-free",
+      "flint-40b-free",
+      "glm-5.3-flash-free",
+      "mimo-v2.6-flash-free",
+      "nemotron-3.5-lightning-free",
+      "nemotron-3.5-super-vl-free"
+    ],
+    "default_model": "deepseek-v4.1-flash-free",
+    "catalog_mode": "dynamic",
+    "catalog_source": "file",
+    "active": 0,
+    "max_concurrent": 6,
+    "stream": true,
+    "tool_emulation": true,
+    "uptime_s": 32198
+  },
+  "preflight_opencode_processes": [],
+  "restart": {
+    "rc": 0,
+    "stderr": "",
+    "at": "2026-10-28T00:02:06.345573+00:00"
+  },
+  "auth_source": "/Users/aazhiry1/.dsh/.env",
+  "bridge_log_offset_before_requests": 3210031,
+  "single_sse": {
+    "name": "single-sse",
+    "model": "deepseek-v4.1-flash-free",
+    "reasoning_effort": "high",
+    "stream": true,
+    "cancel_requested": false,
+    "started_at": "2026-10-28T00:03:26.551812+00:00",
+    "chunks": [],
+    "status": "FAIL",
+    "error_type": "RemoteDisconnected",
+    "error": "Remote end closed connection without response",
+    "total_ms": 19.879
+  },
+  "single_json": {
+    "name": "single-json",
+    "model": "deepseek-v4.1-flash-free",
+    "reasoning_effort": "high",
+    "stream": false,
+    "cancel_requested": false,
+    "started_at": "2026-10-28T00:03:26.551951+00:00",
+    "chunks": [],
+    "http_status": 200,
+    "headers_ms": 20220.717,
+    "content_type": "application/json; charset=utf-8",
+    "response": {
+      "id": "chatcmpl-oczen-a20a061fc87c",
+      "object": "chat.completion",
+      "created": 1793145826,
+      "model": "deepseek-v4.1-flash-free",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "**Канон прочитан:** `~/Мой диск/Context/AGENTS.md` целиком до `<!-- КАНОН-КОНЕЦ -->`. Проектные файлы правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочей папке `~/.dsh/bridges/opencode-zen-bridge/workspace` не читались — это служебный workspace моста, не проект; при появлении проектных файлов прочитаю их до первого действия.\n\n**1) Загрузка (в эрлангах: работа = λ·S, ёмкость = C·S, S=0.08 с)**\n- До отказа: C=3×10=30 задач/с, λ=18 → ρ = 18·0.08 / (30·0.08) = 1.44/2.4 = **0.60 (60 %)**, запас до 80 % = 20 п.п. (предел λ = 24 задачи/с).\n- После отказа без повторов: C=20 → ρ = 1.44/1.6 = **0.90 (90 %)** — уже выше порога.\n- После отказа с повторами: λ′ = 18·1.15 = 20.7 задач/с → ρ = 20.7·0.08 / (20·0.08) = 1.656/1.6 = **1.035 (103.5 %) — перегрузка**, очередь растёт линейно: 20.7−20 = **0.7 задачи/с** (через 60 с ≈ 42 в очереди), задержка неограничена.\n\n**2) Закон Литтла (L = λ·W, при W = S = 0.08 с одновременность L = λ·S)**\n- Нужно одновременно: до отказа 18·0.08 = **1.44**; после 20.7·0.08 = **1.656**.\n- Доступно слотов: 3 сервера → 30·0.08 = 2.4; после отказа 2 сервера → 20·0.08 = **1.60** → дефицит 0.056 запроса одновременно (≈0.7 задачи/с).\n\n**3) Сравнение с порогом 80 %:** до отказа 60 % < 80 % — норма (запас 25 % ёмкости); после 103.5 % > 80 % на 23.5 п.п. и > 100 % — порог нарушен, режим насыщения.\n\n**4) Минимальная доп. ёмкость:** для ρ ≤ 0.8 нужно C ≥ 20.7/0.8 = **25.875 задач/с**; живыми остаются 20 → добавить **+5.875 ≈ +6 задач/с** (60 % одного сервера). Практично: +1 сервер (4 всего; после отказа 30 задач/с → ρ = 20.7/30 = **69 %**, запас 11 п.п.). +0.7 задачи/с даёт лишь ρ=100 % без запаса — не годится.\n\n```json\n{\"S_s\":0.08,\"servers\":3,\"per_server_rps\":10,\"lambda_base\":18,\"retry_factor\":1.15,\"capacity_before_rps\":30,\"capacity_after_rps\":20,\"erlangs_offered_before\":1.44,\"erlangs_capacity_before\":2.4,\"util_before\":0.60,\"util_after_noretry\":0.90,\"lambda_after_retry\":20.7,\"erlangs_offered_after\":1.656,\"erlangs_capacity_after\":1.6,\"util_after_retry\":1.035,\"overload_rps\":0.7,\"backlog_60s\":42,\"little_concurrency_needed_before\":1.44,\"little_concurrency_needed_after\":1.656,\"little_concurrency_available_after\":1.6,\"little_deficit\":0.056,\"threshold\":0.8,\"threshold_breached_after\":true,\"capacity_needed_at_80pct_rps\":25.875,\"extra_capacity_rps_min\":5.875,\"extra_servers_min\":1,\"servers_total_recommended\":4,\"util_after_fix\":0.69,\"verdict\":\"перегрузка после отказа; нужно ≥+6 задач/с (+1 сервер)\"}\n```",
+            "reasoning_content": "The user asks a planning/math problem in Russian. No tools needed — this is a single-step calculation question (Rule 0: status, greeting, single reference question — one text, no tools).\n\nBut there's the canon gate: geyt razrabotki — modifies project files? No. This is a question/computation, no file changes. So no orchestration gate, no JIRA block (not a work task — it's a math question).\n\nAlso confirmation line requirement: \"В первом ответе каждого диалога каждый агент обязан в начале ответа ... явно написать строку подтверждения, что он прочитал общий канон...и какие проектные файлы правил прочитаны в рабочей папке.\" Hmm. The canon says in the first response of each dialog, agent must write a confirmation line that it read the canon fully (up to <!-- КАНОН-КОНЕЦ -->) and which project rule files (AGENTS.md, .agents/AGENTS.md, CLAUDE.md) were read in the working folder.\n\nThe canon text loaded does end with <!-- КАНОН-КОНЕЦ -->. So I read it fully. Working dir is /Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/workspace — should I check for project AGENTS.md? That would require tools, but Rule 0 says no tools for single reference question. However the canon requires the confirmation line listing project rule files read. I didn't read any. I can state that the working directory contains no project rule files... but I don't know without checking. Hmm, checking is one quick tool call. Rule 0 conflicts. I'll just be honest: canon read fully, project rule files — none read in working folder (not a git repo, bridge workspace). Actually I could do a very quick check but Rule 0 says no tools. I'll state reasonably: не читал, т.к. рабочая папка — workspace моста.\n\nNow the \"Вариант проверки: single-json\" — user asks to give answer in single-json format? \"Вариант проверки: single-json\" likely means output must be a single JSON object (a verification variant). Hmm, but also \"итог в 8-12 строках\". Conflict? Maybe: итог 8-12 строк, plus a single JSON block for verification. Safer: provide concise computation, and include one JSON object with the numbers. Actually \"Вариант проверки: single-json\" probably means the answer should be verifiable as a single JSON. I'll give the 8-12 line summary plus a single JSON block at the end containing all numbers (keys). Let me keep prose tight (maybe ~10 lines) and then the JSON.\n\nNow compute.\n\n3 servers × 10 tasks/s = 30 tasks/s capacity. Service time S = 0.08 s. Each server 10 tasks/s → per-server utilization... Let's define capacity in concurrent slots: using Little's law, average concurrency N = λ × S.\n\nBefore failure: λ = 18 tasks/s. Load relative to capacity: offered work = λ·S = 18 × 0.08 = 1.44 erlangs. Capacity in erlangs = 30 × 0.08 = 2.4. Utilization ρ = 1.44/2.4 = 0.6 = 60%.\n\nAfter one server fails: capacity 20 tasks/s → 2×10 = 20 tasks/s, service same 0.08. With repeats: λ' = 18 × 1.15 = 20.7 tasks/s. Offered work = 20.7 × 0.08 = 1.656 erlangs; capacity 20 × 0.08 = 1.6 erlangs → ρ = 1.035 = 103.5% > 1 → overload (saturated, unbounded queue).\n\nAlso check: does the retry traffic also fail over the remaining two? Yes, λ stays 18 base, retries +15%.\n\n2) Little's law: L = λ·W. Concurrent requests = λ·S = 18 × 0.08 = 1.44 before; after: 20.7 × 0.08 = 1.656 needed concurrency vs available 2 servers → 1.6 slots capacity. Actually the number of simultaneously executing requests is bounded by number of servers (2 servers → at most 2 concurrent if one worker per server) — but with 10 tasks/s per server and 0.08s, per-server concurrency = 10 × 0.08 = 0.8, so 3 servers → 2.4 concurrent average capacity. After failure 2 servers → 1.6.\n\n3) Compare with 80% threshold: before 60% — ok, margin 20 pp (headroom factor 80/60 = 1.33, i.e., can grow λ to 24 tasks/s at 80%: 0.8×30 = 24). After: 103.5% — exceeds 80% by 23.5 pp; exceeds 100% → saturated.\n\n4) Minimal additional capacity: need ρ ≤ 0.8 with λ' = 20.7 → required capacity tasks/s = 20.7/0.8 = 25.875 → 25.875 tasks/s. Remaining two servers give 20 → need 5.875 tasks/s more → ~6 tasks/s, i.e. one more server of 10 tasks/s (total 3 surviving = 30 → but wait, after failure of one, if we have 4 total servers, 3 remain = 30 tasks/s, ρ = 20.7/30 = 69%). Or partial: 6 tasks/s ≈ 60% of a server. So minimum: +6 tasks/s (e.g. one additional server of 10 tasks/s, or 60% capacity top-up). If we keep 80% threshold strictly: +5.875 tasks/s.\n\nAlso must consider capacity needed to keep threshold at 80%: with N servers of 10: need 10N ≥ 25.875 → N ≥ 2.5875 → 3 surviving servers → 4 total. So add 1 server (4 × 10 = 40; after failure 30 → ρ = 69%).\n\nLet me also double-check the \"10 задач/с\" as capacity ceiling including service concurrency: server handles 10 tasks/s with 0.08s each → needs 0.8 concurrent workers. So servers presumably have limited parallelism; capacity 10/s is the constraint. Fine.\n\nAlso note: at ρ = 103.5% queue grows without bound: 20.7 − 20 = 0.7 tasks/s backlog accumulates; latency unbounded. Little's law with overload: L grows linearly, W = L/λ → unbounded.\n\nLet me write numbers precisely:\n- Before: 18/30 = 0.6; 1.44/2.4 = 0.6.\n- After: 20.7/20 = 1.035.\n- Concurrency: 1.44 before, 1.656 needed after vs 1.6 available; deficit 0.056 concurrent ≈ equivalent 0.7 tasks/s.\n- Backlog growth: 0.7 tasks/s → after 60 s, 42 tasks queued.\n\nMinimal extra: 5.875 tasks/s ≈ 6 tasks/s for 80% target; 0.7 tasks/s would only reach 100% (critical, no margin) — not acceptable; for 100% exactly need +0.7.\n\nJSON single object.\n\nFormat: 8-12 lines итог. Let me structure:\n\nConfirmation line first (canon). Then numbers. Then JSON.\n\nKeep it compact. The JSON should be single object. Include fields: before{...}, after{...}, little, threshold, extra_capacity, verdict.\n\nI'll write in Russian.\n\nLines: I'll aim for ≤12 lines of prose bullet points.\n\nNote: \"Вариант проверки: single-json\" — I'll put JSON as one line (single-line JSON) so it's a single JSON object on one line. Good.\n\nCompute 15% extra: 18 * 1.15 = 20.7 ✓.\n\nRequired capacity at 80%: 20.7 * 0.08 / 0.8 = 1.656/0.8 = 2.07 erlangs → /0.08 = 25.875 tasks/s ✓. Equivalent servers: 25.875/10 = 2.5875 → 3 servers surviving → 4 total.\n\nCheck headroom multiplier before: 0.8 threshold → max λ = 24 tasks/s; current 18 → 33% growth room.\n\nAfter failure without retries: 18/20 = 90% — already above 80%.\n\nWrite it.\n\nAlso should I include JIRA? block? Not a work task (question, computation). No.\n\nGate marker? No file changes. Not needed.\n\nLet me write the answer."
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 18485,
+        "completion_tokens": 1016,
+        "total_tokens": 19501,
+        "cached_tokens": 4096,
+        "prompt_tokens_details": {
+          "cached_tokens": 4096
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1951
+        }
+      }
+    },
+    "content_chars": 2451,
+    "reasoning_chars": 6473,
+    "usage": {
+      "prompt_tokens": 18485,
+      "completion_tokens": 1016,
+      "total_tokens": 19501,
+      "cached_tokens": 4096,
+      "prompt_tokens_details": {
+        "cached_tokens": 4096
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 1951
+      }
+    },
+    "valid_usage": true,
+    "status": "PASS",
+    "total_ms": 20220.86
+  },
+  "load_baseline_health": {
+    "http_status": 200,
+    "ok": true,
+    "transport": "opencode-zen-cli",
+    "models": [
+      "beam-free",
+      "big-pickle",
+      "deepseek-v4.1-flash-free",
+      "flint-40b-free",
+      "glm-5.3-flash-free",
+      "mimo-v2.6-flash-free",
+      "nemotron-3.5-lightning-free",
+      "nemotron-3.5-super-vl-free"
+    ],
+    "default_model": "deepseek-v4.1-flash-free",
+    "catalog_mode": "dynamic",
+    "catalog_source": "file",
+    "active": 0,
+    "max_concurrent": 6,
+    "stream": true,
+    "tool_emulation": true,
+    "uptime_s": 91
+  },
+  "load_baseline_processes": [],
+  "parallel_requests": [
+    {
+      "name": "load-0",
+      "model": "deepseek-v4.1-flash-free",
+      "reasoning_effort": "high",
+      "stream": true,
+      "cancel_requested": false,
+      "started_at": "2026-10-28T00:03:46.844722+00:00",
+      "chunks": [],
+      "status": "FAIL",
+      "error_type": "RemoteDisconnected",
+      "error": "Remote end closed connection without response",
+      "total_ms": 11.456
+    },
+    {
+      "name": "load-1",
+      "model": "deepseek-v4.1-flash-free",
+      "reasoning_effort": "high",
+      "stream": true,
+      "cancel_requested": false,
+      "started_at": "2026-10-28T00:03:46.844641+00:00",
+      "chunks": [],
+      "status": "FAIL",
+      "error_type": "RemoteDisconnected",
+      "error": "Remote end closed connection without response",
+      "total_ms": 11.408
+    },
+    {
+      "name": "load-2",
+      "model": "deepseek-v4.1-flash-free",
+      "reasoning_effort": "high",
+      "stream": true,
+      "cancel_requested": false,
+      "started_at": "2026-10-28T00:03:46.844698+00:00",
+      "chunks": [],
+      "status": "FAIL",
+      "error_type": "RemoteDisconnected",
+      "error": "Remote end closed connection without response",
+      "total_ms": 11.867
+    },
+    {
+      "name": "load-3",
+      "model": "deepseek-v4.1-flash-free",
+      "reasoning_effort": "high",
+      "stream": false,
+      "cancel_requested": false,
+      "started_at": "2026-10-28T00:03:46.844670+00:00",
+      "chunks": [],
+      "http_status": 200,
+      "headers_ms": 14926.597,
+      "content_type": "application/json; charset=utf-8",
+      "response": {
+        "id": "chatcmpl-oczen-9f179a734a58",
+        "object": "chat.completion",
+        "created": 1793145841,
+        "model": "deepseek-v4.1-flash-free",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Подтверждение: общий канон `~/Мой диск/Context/AGENTS.md` прочитан целиком — в загруженном тексте присутствует закрывающий маркер `<!-- КАНОН-КОНЕЦ -->`. Проектных файлов правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочей папке нет: это workspace моста без git-репозитория. Инструменты не использовал — только арифметика.\n\nВариант проверки: **load-3**.\n\n1. Ёмкость: 3 × 10 = **30 задач/с**. Трафик с повторами: 18 × 1.15 = **20.7 задач/с**.\n2. До отказа: 18 / 30 = **60 %**; с повторами 20.7 / 30 = **69 %**.\n3. После отказа (2 сервера = 20 задач/с): 18 / 20 = **90 %**; с повторами 20.7 / 20 = **103.5 %** → ёмкости не хватает, очередь растёт без ограничения.\n4. Литтл, L = λ·W при W = 0.08 с: до отказа 18 × 0.08 = **1.44** запроса; с повторами 20.7 × 0.08 = **1.656**.\n5. После отказа те же 1.44 / 1.656 — это только обслуживание; при ρ = 0.90 очередь добавляет сверху, при ρ = 1.035 L не ограничено.\n6. Порог 80 %: до отказа 60 % ✔ (запас 20 п.п.), с повторами 69 % ✔ (11 п.п.); после отказа 90 % ✘ (−10 п.п.), с повторами 103.5 % ✘ (−23.5 п.п.).\n7. Требуемая ёмкость под 80 % с повторами: 20.7 / 0.8 = **25.875 ≈ 26 задач/с**.\n8. Минимальная добавка: 25.875 − 20 = **5.875 ≈ 6 задач/с**; целыми серверами → **+1 сервер**, итого 30 задач/с.\n9. Проверка после добавки: 20.7 / 30 = **69 %** ≤ 80 % ✔; ровно на пороге 20.7 / 25.875 = 0.800.\n10. Итог: без повторов отказ уже выводит за порог (90 %), с повторами даёт перегрузку; устойчивость при потере одного сервера требует ≥ 26 задач/с, практически +1 сервер (+10 задач/с).\n\nИсточник цифр: только условия задачи; допущение — 15 % повторов идут поверх основного потока и не дедуплицируются на входе.",
+              "reasoning_content": "The user asks a pure math/planning question, no tools. AGENTS.md says \"Правило 0: единичный справочный вопрос — один текст, без инструментов\". Also need the confirmation line at start of first response in a dialog about reading canon. Hmm, the hard gate says in the first response of each dialogue each agent must explicitly write a line confirming it read the general canon ~/Мой диск/Context/AGENTS.md fully... but user says \"без инструментов и внешних обращений\". There's tension. The canon is already loaded in context (the instructions include full AGENTS.md text, ending with <!-- КАНОН-КОНЕЦ -->). So I can confirm without tools since I see the marker at the end.\n\nLet me do the math.\n\nCapacity: 3 servers × 10 tasks/s = 30 tasks/s.\nLoad before failure: 18/30 = 60%.\nAfter failure (1 server lost): 20 tasks/s capacity, traffic same 18 → 18/20 = 90%.\nWith retries +15% traffic: 18 × 1.15 = 20.7 tasks/s.\nBefore failure with retries: 20.7/30 = 69%.\nAfter failure with retries: 20.7/20 = 103.5% → overload.\n\nLittle's law: L = λ × W. W = 0.08 s mean processing.\nBefore: L = 18 × 0.08 = 1.44 concurrent. With retries: 20.7 × 0.08 = 1.656.\nAfter failure, same traffic: L = 1.44 (same arrival, but service capacity limits; in stability). With retries after failure: 20.7 × 0.08 = 1.656 (exceeds capacity → queue grows, L unbounded).\nAlso after failure without retries: 18 × 0.08 = 1.44 but utilization 90% → high latency.\n\nHmm, \"Среднее время обработки 0.08 с\" — is that service time. Little's law uses total time in system, so L = λW assumes W = time in system. If we approximate W ≈ service time at low load, L_min = λ×0.08.\n\nCompare with 80% threshold:\n- Before: 60% ≤ 80% → OK; margin 20 pp.\n- Before with retries: 69% ≤ 80% → OK, margin 11 pp.\n- After failure w/o retries: 90% > 80% → fail, margin −10 pp.\n- After failure with retries: 103.5% → overload, need capacity.\n\nMinimal additional capacity: to hold ≤80% with 20.7 tasks/s, required capacity = 20.7/0.8 = 25.875 tasks/s ≈ 26 tasks/s. Surviving 2 servers give 20 → need +5.875 ≈ +6 tasks/s, i.e. at least one more server of 10 → 3 remaining = 30 tasks/s → 20.7/30 = 69%.\n\nBut wait — \"минимальная дополнительная ёмкость\" could be interpreted in tasks/s or servers. Minimal additional capacity = 25.875 − 20 = 5.875 tasks/s ≈ 6 tasks/s; in whole servers: +1 server (10 tasks/s) → 30 capacity, load 69%.\n\nAlternatively, if we don't count retries for sizing... but spec says with retries. Provide both.\n\nAlso note: 15% retry traffic during failure — actually retries typically add on top. Let's also compute latency via queueing maybe not needed.\n\nLet me also give Little's law at 80% threshold: L_max = 0.8 × 20 servers... hmm, number of in-flight = λW. At capacity 25.875 and W = 0.08: L = 25.875×0.08 ≈ 2.07 total in system (including queue) — that's a lower bound.\n\nActually with utilization ρ and M/M/c, L includes queueing. Simple Little: after failure without retries L = 1.44 in service, but with ρ=0.9 queueing growth. Provide L_service = λ×0.08 and note queue term.\n\nLet me present 8-12 lines. Need to keep the answer concise. Also the confirmation line about canon reading — required by canon gate. But user said no tools/external calls; I already have canon inline. I'll include a short line.\n\nAlso JIRA? gate — is this a working task? No, it's a question/computation, not a work artifact. So no JIRA block.\n\nLet me write ~11 lines.\n\nFormat:\n\nПодтверждение: прочитал канон целиком (маркер КАНОН-КОНЕЦ виден), проектных AGENTS.md в рабочей папке нет (workspace без репозитория).\n\nHmm, must state which project rule files read. Working dir is bridge workspace, no repo. I'd say project files not present.\n\nThen computations. Let me write compactly with a table maybe — but instructions say prefer canvas for tables? The skill says use canvas for standalone analytical artifacts... but user asked for 8-12 lines answer without tools. Keep it in text/table small. I'll use a small table—actually canvas requires tools. User forbade tools. So text.\n\nLines:\n1) Ёмкость: 3×10 = 30 задач/с. Трафик с повторами: 18×1.15 = 20.7 задач/с.\n2) До отказа: 18/30 = 0.60 = 60%; с повторами 20.7/30 = 0.69 = 69%.\n3) После отказа (2 сервера, 20 задач/с): 18/20 = 90%; с повторами 20.7/20 = 1.035 = 103.5% → перегрузка, очередь неограниченно растёт.\n4) Литтл: L = λ·W, W = 0.08. До: 18×0.08 = 1.44; с повторами 20.7×0.08 = 1.656. После отказа те же 1.44/1.656 в обслуживании, но при ρ≥1 очередь добавляется сверху.\n5) Порог 80%: до 60% ✔ (запас 20 п.п.), с повторами 69% ✔ (11 п.п.); после 90% ✘ (−10 п.п.), с повторами 103.5% ✘ (−23.5 п.п.).\n6) Требуемая ёмкость при 80%: 20.7/0.8 = 25.875 ≈ 26 задач/с.\n7) Минимальная добавка: 25.875 − 20 = 5.875 ≈ 6 задач/с; целыми серверами +1 сервер (30 задач/с) → 20.7/30 = 69%.\n8) Проверка: 20.7/25.875 = 0.80 ровно.\n\nThat's about 8-12 lines. Add \"Вариант проверки: load-3\" acknowledgment.\n\nKeep it tight."
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 18486,
+          "completion_tokens": 665,
+          "total_tokens": 19151,
+          "cached_tokens": 4096,
+          "prompt_tokens_details": {
+            "cached_tokens": 4096
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 1581
+          }
+        }
+      },
+      "content_chars": 1665,
+      "reasoning_chars": 4896,
+      "usage": {
+        "prompt_tokens": 18486,
+        "completion_tokens": 665,
+        "total_tokens": 19151,
+        "cached_tokens": 4096,
+        "prompt_tokens_details": {
+          "cached_tokens": 4096
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1581
+        }
+      },
+      "valid_usage": true,
+      "status": "PASS",
+      "total_ms": 14926.723
+    },
+    {
+      "name": "load-4",
+      "model": "deepseek-v4.1-flash-free",
+      "reasoning_effort": "high",
+      "stream": true,
+      "cancel_requested": true,
+      "started_at": "2026-10-28T00:03:46.844452+00:00",
+      "chunks": [],
+      "status": "FAIL",
+      "error_type": "RemoteDisconnected",
+      "error": "Remote end closed connection without response",
+      "total_ms": 12.002
+    }
+  ],
+  "cleanup_checks": [
+    {
+      "at": "2026-10-28T00:04:01.845554+00:00",
+      "health": {
+        "http_status": 200,
+        "ok": true,
+        "transport": "opencode-zen-cli",
+        "models": [
+          "beam-free",
+          "big-pickle",
+          "deepseek-v4.1-flash-free",
+          "flint-40b-free",
+          "glm-5.3-flash-free",
+          "mimo-v2.6-flash-free",
+          "nemotron-3.5-lightning-free",
+          "nemotron-3.5-super-vl-free"
+        ],
+        "default_model": "deepseek-v4.1-flash-free",
+        "catalog_mode": "dynamic",
+        "catalog_source": "file",
+        "active": 0,
+        "max_concurrent": 6,
+        "stream": true,
+        "tool_emulation": true,
+        "uptime_s": 106
+      },
+      "opencode_processes": []
+    }
+  ],
+  "o_exit_lines": [
+    "2026-10-28 03:03:26 O-EXIT/v1 mode=stream model=deepseek-v4.1-flash-free status=0 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00",
+    "2026-10-28 03:03:46 O-EXIT/v1 mode=json model=deepseek-v4.1-flash-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=2451 transport=serve first_event_ms=895 ttft_ms=3583 transport_history=['serve'] duration_s=20.22",
+    "2026-10-28 03:03:46 O-EXIT/v1 mode=stream model=deepseek-v4.1-flash-free status=0 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00",
+    "2026-10-28 03:03:46 O-EXIT/v1 mode=stream model=deepseek-v4.1-flash-free status=0 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00",
+    "2026-10-28 03:03:46 O-EXIT/v1 mode=stream model=deepseek-v4.1-flash-free status=0 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00",
+    "2026-10-28 03:03:46 O-EXIT/v1 mode=stream model=deepseek-v4.1-flash-free status=0 exit_reason=client_gone rc=None total_spawns=0 retries=0 signal=0 tools=0 out_chars=0 transport=run first_event_ms=None ttft_ms=None transport_history=['run'] duration_s=0.00",
+    "2026-10-28 03:04:01 O-EXIT/v1 mode=json model=deepseek-v4.1-flash-free status=200 exit_reason=ok rc=0 total_spawns=1 retries=0 signal=0 tools=0 out_chars=1665 transport=serve first_event_ms=894 ttft_ms=2816 transport_history=['serve'] duration_s=14.93"
+  ],
+  "VER-006-live-sse-heavy-path": "FAIL",
+  "VER-007-deployed-mirror-diff": "FAIL_ROLLED_BACK",
+  "finished_at": "2026-10-28T00:05:36.159021+00:00",
+  "rollback": {
+    "status": "PASS",
+    "reason": "Live SSE failed with TypeError socket.socket | None on Python 3.9; start.sh hardcodes /usr/bin/python3 and is outside rollout file envelope.",
+    "restart_rc": 0,
+    "at": "2026-10-28T00:04:55.192699+00:00",
+    "objects": [
+      {
+        "path": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/server.py",
+        "action": "restored_backup",
+        "sha256": "538ba1948bbd87c6bba806dd37b42106c9654544966a9ce8927973c979b3b36f"
+      },
+      {
+        "path": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/dynamic_config.json",
+        "action": "removed_created_file",
+        "absent": true
+      },
+      {
+        "path": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+        "action": "removed_created_file",
+        "absent": true
+      },
+      {
+        "path": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+        "action": "restored_backup",
+        "sha256": "afd542fed0722e48989c997c31595772a5c2df194a6c47ae6c1e86935bb2aa6e"
+      }
+    ],
+    "server_error_evidence": {
+      "path": "/Users/aazhiry1/.dsh/bridges/opencode-zen-bridge/logs/bridge.err",
+      "exception": "TypeError: unsupported operand type(s) for |: type and NoneType",
+      "frame": "server.py:7171"
+    },
+    "probe": {
+      "name": "rollback-sse",
+      "model": "deepseek-v4.1-flash-free",
+      "reasoning_effort": "high",
+      "stream": true,
+      "cancel_requested": false,
+      "started_at": "2026-10-28T00:05:23.878324+00:00",
+      "chunks": [
+        {
+          "t_ms": 1.505,
+          "reasoning_chars": 0,
+          "content_chars": 0
+        },
+        {
+          "t_ms": 11877.067,
+          "reasoning_chars": 3213,
+          "content_chars": 0
+        },
+        {
+          "t_ms": 11877.208,
+          "reasoning_chars": 0,
+          "content_chars": 1841
+        },
+        {
+          "t_ms": 12201.551,
+          "reasoning_chars": 0,
+          "content_chars": 0,
+          "finish_reason": "stop",
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 408,
+            "total_tokens": 508
+          }
+        }
+      ],
+      "http_status": 200,
+      "headers_ms": 1.462,
+      "content_type": "text/event-stream; charset=utf-8",
+      "reasoning_chunks_count": 1,
+      "content_chunks_count": 1,
+      "done": true,
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 100,
+        "completion_tokens": 408,
+        "total_tokens": 508
+      },
+      "ttfr_ms": 11877.067,
+      "ttft_ms": 11877.208,
+      "finish_ms": 12201.551,
+      "usage_ms": 12201.551,
+      "done_ms": 12201.598,
+      "reasoning_content": "The user asks a planning problem, no tools. But the canon demands a confirmation line that I read the canon... The canon is loaded in full (ends with <!-- КАНОН-КОНЕЦ -->). I must include a confirmation line at the start of the first response. Also JIRA? block — is this a work task? It's a question/computation, not a work artifact. \"Не задача: вопрос, объяснение, статус, консультация\" → block JIRA? not output.\n\nAlso variant check \"rollback-sse\" — probably a distractor / irrelevant token. Ignore or note it.\n\nLet's compute.\n\n3 servers × 10 tasks/s = 30 tasks/s capacity. Arrival 18 tasks/s. Service time 0.08 s.\n\nUtilization before failure: 18/30 = 0.60 = 60%.\nAfter one failure: capacity 20 tasks/s. Traffic remains 18, plus retries +15% → 18 × 1.15 = 20.7 tasks/s. Utilization = 20.7/20 = 1.035 → 103.5% > 100%. Overload.\n\nWithout retries after failure: 18/20 = 0.90 = 90%.\n\nLittle's law: L = λW. Before: 18 × 0.08 = 1.44 concurrent requests. After failure without retries: 18 × 0.08 = 1.44 (same, but service per server capacity 20). With retries: 20.7 × 0.08 = 1.656 — but that's only valid if system stable; at ρ>1 queue grows unbounded, so 1.656 is not achievable steady state — requests in system diverge. Mention that.\n\nThreshold 80%: 0.8 × 20 = 16 tasks/s sustainable. Before: 60% ≤ 80% OK, headroom 20% (6 tasks/s). After, with retries at 20.7: need capacity ≥ 20.7/0.8 = 25.875 tasks/s → ~26 tasks/s. With 2 servers at 20 tasks/s, deficit 5.875 → need 3 servers at... Actually minimum additional capacity: total capacity needed 25.875 tasks/s → additional servers = ceil(25.875/10) - 2 = 3 - 2 = 1 additional server, but adding a server gives 30 total = initial. Hmm, minimal additional capacity in the sense \"how much capacity must be added beyond the 20 tasks/s of remaining servers\": 25.875 - 20 = 5.875 ≈ 5.9 tasks/s, i.e., one server of 10 tasks/s (restoring to 30). That gives 20.7/30 = 69% ≤ 80%, headroom.\n\nAlso mention that with 2 servers at 20 and 80% threshold, max admissible traffic = 16 tasks/s < 20.7 → deficit 4.7 tasks/s even without the 80% margin.\n\nLet's structure 8-12 lines. Include verification: numbers reproducible, e.g. 18×1.15=20.7.\n\nAlso note \"вариант проверки: rollback-sse\" — I should acknowledge it's not a computational parameter; it doesn't change the math. Keep concise.\n\nAlso need the canon confirmation line. Let me write it.\n\nFormat: confirmation line, then the answer 8-12 lines, plus maybe a small table. Table counts as lines... keep compact.\n\nI'll include \"ПРОВЕРЕНО\" block? That's for сдача правок. This is a computation — arguably not needed. I'll skip heavy-path since no changes made. But being safe, I could add a short \"ПРОВЕРЕНО ЛЁГКИМ\" line. Hmm, the second gate applies to \"любой сдаваемой правки\". No edits → not applicable. I'll skip but mention arithmetic check.\n\nLet me write ~11 lines of substance.\n\nCompute exactness: λ=18; C=30; ρ=0.6; after: C'=20; λ'=20.7; ρ'=1.035 (103.5%). Little: L=λW=1.44; L'=1.656 nominal but unstable. 80% target: 0.8·20=16 <20.7. Required C ≥ 20.7/0.8=25.875 ≈26. Add: 25.875−20=5.875≈6 tasks/s → one whole server (10) → ρ=20.7/30=69%, L=1.656, headroom 11%.\n\nVerification line: multiply back 30·0.69=20.7 ✓.\n\nGood.",
+      "content": "**Подтверждение канона:** прочитал общий канон `~/Мой диск/Context/AGENTS.md` целиком (до `<!-- КАНОН-КОНЕЦ -->`); проектных файлов правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочей папке `~/.dsh/bridges/opencode-zen-bridge/workspace` нет — файловых правил проекта не читал.\n\nСчитаю без инструментов; «rollback-sse» — метка варианта проверки, в формулы не входит и результат не меняет.\n\n1. **Ёмкость и базовая загрузка.** C = 3 × 10 = 30 задач/с; λ = 18 задач/с; ρ = 18/30 = **0,60 (60%)**.\n2. **После отказа одного сервера.** C′ = 2 × 10 = 20 задач/с; λ′ = 18 × 1,15 = **20,7 задач/с** (18 без повторов = 90%, но с повторами ρ′ = 20,7/20 = **1,035 → 103,5%**).\n3. **Закон Литтла.** L = λ·W. До: 18 × 0,08 = **1,44** одновременных запроса. После: 20,7 × 0,08 = **1,656** — но только как «мгновенная» оценка: при ρ′ > 1 это не стационар, очередь и L растут линейно во времени.\n4. **Порог 80%.** До: 60% ≤ 80% — запас 20 п.п. (6 задач/с до порога). После: допустимо 0,8 × 20 = **16 задач/с**, а приходит 20,7 → дефицит **4,7 задач/с** уже без учёта запаса.\n5. **Минимальная доп. ёмкость.** Нужно C ≥ 20,7/0,8 = **25,875 ≈ 26 задач/с** → добавить 25,875 − 20 = **5,875 ≈ 6 задач/с**, то есть **один сервер (10 задач/с)**.\n6. **Проверка.** С третьим сервером C = 30: ρ = 20,7/30 = **69%** ≤ 80%, запас 11 п.п. (3,3 задачи/с), L = 1,656. Обратно: 30 × 0,69 = 20,7 ✓.\n7. **Итог:** 60% → 103,5% после отказа с повторами; 1,44 → 1,656 (нестабильно); порог 80% нарушен, дефицит 4,7 задач/с; минимум +1 сервер (или +6 задач/с), при этом 69% и запас 11 п.п.\n\nОговорки: W = 0,08 с взято как среднее время обслуживания, модель — M/M/c-подобная без учёта хвостов; при ρ ≥ 1 расчёт L по Литтлу показывает лишь нижнюю границу, реальные задержки и ретраи будут расти (риск ретрай-шторма: 15% — оценка, при таймаутах доля повторов обычно выше).",
+      "reasoning_before_content": true,
+      "live_progress_first_seconds": false,
+      "valid_usage": true,
+      "status": "FAIL",
+      "total_ms": 12201.615,
+      "oracle_note": "Realtime oracle remains FAIL on the restored baseline (one buffered reasoning chunk). Rollback verification checks HTTP 200 + content + finish_reason + DONE, not realtime feature acceptance."
+    },
+    "health": {
+      "http_status": 200,
+      "ok": true,
+      "transport": "opencode-zen-cli",
+      "models": [
+        "beam-free",
+        "big-pickle",
+        "deepseek-v4.1-flash-free",
+        "flint-40b-free",
+        "glm-5.3-flash-free",
+        "mimo-v2.6-flash-free",
+        "nemotron-3.5-lightning-free",
+        "nemotron-3.5-super-vl-free"
+      ],
+      "default_model": "deepseek-v4.1-flash-free",
+      "catalog_mode": "dynamic",
+      "catalog_source": "file",
+      "active": 0,
+      "max_concurrent": 6,
+      "stream": true,
+      "tool_emulation": true,
+      "uptime_s": 31
+    },
+    "opencode_processes": [],
+    "sse_content_and_done": true
+  },
+  "VER-007-deployed-mirror-diff_at_rollout": "PASS",
+  "runtime_evidence": {
+    "launchagent_program_arguments": [
+      "/bin/bash",
+      "~/.dsh/bridges/opencode-zen-bridge/start.sh"
+    ],
+    "start_sh_exec": "exec /usr/bin/python3 server.py",
+    "live_python_version": "Python 3.9.6",
+    "project_requires_python": ">=3.11",
+    "traceback_file": "/tmp/cel-runs/zen-rollout-20261028-0302/sse-runtime-traceback.log",
+    "traceback_sha256": "688b95a46c26a0b16e4015d0359c518533e283f85e2f51358ad642253c5b54ca",
+    "source_frame": "server.py:7171",
+    "exception": "TypeError: unsupported operand type(s) for |: type and NoneType",
+    "start_sh_unchanged": true
+  },
+  "source_integrity_after_run": [
+    {
+      "path": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/bridges/opencode-zen-bridge/server.py",
+      "sha256": "7eef6ac552863d8e4c499296fdcbf5165e4bd89e70ef084398852051669226bb",
+      "unchanged": true
+    },
+    {
+      "path": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+      "sha256": "408bc144512f8acaf5d87a32d210175fda778cd61096e0eb7d073a2f06b05c97",
+      "unchanged": true
+    },
+    {
+      "path": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning/bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+      "sha256": "2b177a32290adfebeffad700b1c3c3251619e83cba90032217576c777beb80ef",
+      "unchanged": true
+    }
+  ],
+  "final_health": {
+    "http_status": 200,
+    "ok": true,
+    "transport": "opencode-zen-cli",
+    "models": [
+      "beam-free",
+      "big-pickle",
+      "deepseek-v4.1-flash-free",
+      "flint-40b-free",
+      "glm-5.3-flash-free",
+      "mimo-v2.6-flash-free",
+      "nemotron-3.5-lightning-free",
+      "nemotron-3.5-super-vl-free"
+    ],
+    "default_model": "deepseek-v4.1-flash-free",
+    "catalog_mode": "dynamic",
+    "catalog_source": "file",
+    "active": 0,
+    "max_concurrent": 6,
+    "stream": true,
+    "tool_emulation": true,
+    "uptime_s": 88
+  },
+  "final_lsof": "COMMAND   PID     USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\nPython  45056 aazhiry1    4u  IPv4 0x8a17627097e9705a      0t0  TCP 127.0.0.1:9883 (LISTEN)\n",
+  "probe_scripts": [
+    {
+      "path": "/tmp/cel-runs/zen-rollout-20261028-0302/heavy_probe.py",
+      "sha256": "d48cd1dc91f83c320312ecc6103304ec4a0cf2018f5fed1be54cbd0c5ab49f6f"
+    },
+    {
+      "path": "/tmp/cel-runs/zen-rollout-20261028-0302/rollback_probe.py",
+      "sha256": "a01b7701d634fc6d2bf3f37f0cfcdbe38fa050744fbe702ddf42db29fddc69e4"
+    }
+  ]
+}

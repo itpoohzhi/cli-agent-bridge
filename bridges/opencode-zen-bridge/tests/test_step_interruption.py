@@ -21,9 +21,11 @@ import socket
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import urllib.request
 from pathlib import Path
 from typing import Any
+from typing import Protocol, cast
 
 import server
 from tests._fake_cli import allow_child_env
@@ -64,7 +66,7 @@ INVOKE_CALLS = CALLS.replace("tool_call", "tool_invoke")
 # Реальный шаг glm-5.3-flash-free: апстрим вырезал `<tool_call>…` из text, а 97 токенов выставил.
 SWALLOWED_TEXT = "2026-10-24 (MSK) — статус: проверяю вывод джобы job_fetch_01 и читаю goal.md."
 
-FAKE_OPENCODE = r'''#!/usr/bin/env python3
+FAKE_OPENCODE = r"""#!/usr/bin/env python3
 import json, os, sys, time
 counter = os.environ["FAKE_OC_COUNTER"]
 n = int(open(counter).read()) if os.path.exists(counter) else 0
@@ -139,10 +141,29 @@ elif mode == "unmapped_then_promise" and n == 2:
     reasoning(os.environ["FAKE_OC_PLAN"])
     text(os.environ["FAKE_OC_STATUS"])
     finish()
+elif mode == "unmapped_incomplete_calls" and n == 0:
+    ev({"type": "tool_use", "part": {"tool": "todoread", "state": {"status": "error", "input": {}}}})
+    finish()
+elif mode == "unmapped_incomplete_calls" and n == 1:
+    reasoning(os.environ["FAKE_OC_PLAN"])
+    text(os.environ["FAKE_OC_STATUS"])
+    finish()
 else:
     text(calls)
     finish()
-'''
+"""
+
+
+class _EnvPatcher(Protocol):
+    """Протокол patch.dict для изоляции окружения."""
+
+    def start(self) -> object:
+        """Запустить patch."""
+        ...
+
+    def stop(self) -> object:
+        """Остановить patch."""
+        ...
 
 
 class TestStepInterruptionLive(unittest.TestCase):
@@ -176,20 +197,29 @@ class TestStepInterruptionLive(unittest.TestCase):
         cls.tmp.cleanup()
 
     counter: Path = Path()
+    _fake_env: object = None
 
     def setUp(self) -> None:
+        # Изоляция REQ-017: свежий бюджет повторов на каждый тест, без сброса в проде.
+        self.httpd.resilience = server._Resilience()
         self.counter = Path(self.tmp.name) / f"counter-{self.id()}"
-        os.environ["FAKE_OC_COUNTER"] = str(self.counter)
-        os.environ["FAKE_OC_PLAN"] = PLAN
-        os.environ["FAKE_OC_PREAMBLE"] = PREAMBLE
-        os.environ["FAKE_OC_STATUS"] = STATUS_ONLY
-        os.environ["FAKE_OC_CALLS"] = CALLS
-        os.environ["FAKE_OC_SWALLOW"] = SWALLOWED_TEXT
+        # RW-032: все FAKE_OC_* изолированы patch.dict — предустановленные значения восстановятся.
+        self._fake_env = mock.patch.dict(
+            os.environ,
+            {
+                "FAKE_OC_COUNTER": str(self.counter),
+                "FAKE_OC_PLAN": PLAN,
+                "FAKE_OC_PREAMBLE": PREAMBLE,
+                "FAKE_OC_STATUS": STATUS_ONLY,
+                "FAKE_OC_CALLS": CALLS,
+                "FAKE_OC_SWALLOW": SWALLOWED_TEXT,
+            },
+            clear=False,
+        )
+        _ = cast(_EnvPatcher, self._fake_env).start()
 
     def tearDown(self) -> None:
-        for name in ("FAKE_OC_COUNTER", "FAKE_OC_MODE", "FAKE_OC_PLAN", "FAKE_OC_PREAMBLE",
-                     "FAKE_OC_STATUS", "FAKE_OC_CALLS", "FAKE_OC_SWALLOW", "FAKE_OC_RAW"):
-            os.environ.pop(name, None)
+        _ = cast(_EnvPatcher, self._fake_env).stop()
 
     def _post(self, stream: bool, model: str = "muse-spark-1.3-contributor-free",
               messages: list[dict[str, Any]] | None = None) -> bytes:
@@ -379,22 +409,43 @@ class TestStepInterruptionLive(unittest.TestCase):
         self.assertEqual(self._runs(), 1)
         self.assertEqual((content, finishes, names), ("Готово, проверил.", ["stop"], []))
 
-    # --- «The previous response was interrupted» вычищается и из reasoning -----------------
+    # --- RW-003 (цикл 10): reasoning побайтово, маркер вычищается только из content -----
 
     def test_interrupted_artifact_removed_from_reasoning_stream(self) -> None:
         os.environ["FAKE_OC_MODE"] = "reasoning_interrupted"
         raw = self._post(stream=True).decode()
         chunks = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
         thoughts = "".join(c["choices"][0]["delta"].get("reasoning_content") or "" for c in chunks)
-        self.assertEqual(thoughts, "Simple greeting.")
-        self.assertNotIn("interrupted", raw)
+        content_parts: list[str] = []
+        for line in raw.splitlines():
+            if not line.startswith("data: {"):
+                continue
+            parsed = server._loads_object(line[6:]) or {}
+            choices = parsed.get("choices")
+            if isinstance(choices, list) and choices:
+                delta = server._as_dict(server._as_dict(choices[0]).get("delta"))
+                value = delta.get("content")
+                if isinstance(value, str):
+                    content_parts.append(value)
+        content = "".join(content_parts)
+        marker = (
+            "The previous response was interrupted. Continue from where you left off "
+            "without repeating completed content."
+        )
+        self.assertEqual(thoughts, marker + "Simple greeting.")
+        self.assertEqual(content, "Привет!")
+        self.assertNotIn("interrupted", content)
         self.assertEqual(self._runs(), 1)
 
     def test_interrupted_artifact_removed_from_reasoning_json(self) -> None:
         os.environ["FAKE_OC_MODE"] = "reasoning_interrupted"
         out = json.loads(self._post(stream=False))
         message = out["choices"][0]["message"]
-        self.assertEqual(message["reasoning_content"], "Simple greeting.")
+        marker = (
+            "The previous response was interrupted. Continue from where you left off "
+            "without repeating completed content."
+        )
+        self.assertEqual(message["reasoning_content"], marker + "Simple greeting.")
         self.assertEqual(message["content"], "Привет!")
         self.assertEqual(out["choices"][0]["finish_reason"], "stop")
         self.assertEqual(self._runs(), 1)
@@ -402,19 +453,51 @@ class TestStepInterruptionLive(unittest.TestCase):
     # --- Бюджеты повторов раздельные -----------------------------------------------------
 
     def test_unmapped_retries_do_not_exhaust_incomplete_budget_stream(self) -> None:
+        """REQ-017/MAX_TOTAL_SPAWNS=3: unmapped-повторы не исчерпывают бюджет шага (итого 3 запуска)."""
         os.environ["FAKE_OC_MODE"] = "unmapped_then_promise"
         content, finishes, names = self._stream()
-        self.assertEqual(self._runs(), 4)
-        self.assertEqual(names, ["job_output", "bash"])
-        self.assertEqual(finishes, ["tool_calls"])
+        self.assertEqual(self._runs(), 3)
+        self.assertEqual(names, [])
+        self.assertEqual(finishes, ["stop"])
         self.assertEqual(content.count("Собираю факты"), 1)
 
     def test_unmapped_retries_do_not_exhaust_incomplete_budget_json(self) -> None:
+        """REQ-017/MAX_TOTAL_SPAWNS=3: unmapped-повторы не исчерпывают бюджет шага (итого 3 запуска)."""
         os.environ["FAKE_OC_MODE"] = "unmapped_then_promise"
-        out = json.loads(self._post(stream=False))
-        self.assertEqual(self._runs(), 4)
-        self.assertEqual([c["function"]["name"] for c in out["choices"][0]["message"]["tool_calls"]],
-                         ["job_output", "bash"])
+        raw_post = self._post(stream=False)
+        raw_text = raw_post.decode("utf-8") if isinstance(raw_post, bytes) else raw_post
+        parsed_obj: object = server._loads_object(raw_text)
+        self.assertIsInstance(parsed_obj, dict)
+        choices_obj = (
+            parsed_obj.get("choices") if isinstance(parsed_obj, dict) else None
+        )
+        self.assertIsInstance(choices_obj, list)
+        choice_obj = (
+            choices_obj[0] if isinstance(choices_obj, list) and choices_obj else {}
+        )
+        self.assertIsInstance(choice_obj, dict)
+        message_obj = (
+            choice_obj.get("message") if isinstance(choice_obj, dict) else None
+        )
+        self.assertIsInstance(message_obj, dict)
+        self.assertEqual(self._runs(), 3)
+        self.assertEqual(
+            message_obj.get("tool_calls") or []
+            if isinstance(message_obj, dict)
+            else [],
+            [],
+        )
+        self.assertEqual(
+            choice_obj.get("finish_reason") if isinstance(choice_obj, dict) else None,
+            "stop",
+        )
+
+    def test_unmapped_then_incomplete_then_calls_within_cap_stream(self) -> None:
+        os.environ["FAKE_OC_MODE"] = "unmapped_incomplete_calls"
+        _content, finishes, names = self._stream()
+        self.assertEqual(self._runs(), 3)
+        self.assertEqual(names, ["job_output", "bash"])
+        self.assertEqual(finishes, ["tool_calls"])
 
     # --- Обычный текстовый ответ не ретраится ------------------------------------------
 

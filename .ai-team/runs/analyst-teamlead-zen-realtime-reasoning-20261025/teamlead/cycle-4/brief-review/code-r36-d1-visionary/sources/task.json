@@ -1,0 +1,13 @@
+{
+  "task_id": "zen-realtime-reasoning",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "preset": "analyst-teamlead",
+  "setup": "default",
+  "criticality": "S2",
+  "architecture_gate": {
+    "packet_sha256": "88c02c37a7ca0be3d317217f23289dba07ddc681d922db207c7680a779128b6b",
+    "verification_surface_sha256": "4886ffa8669391618891b8e180a3443879043711da25bfe909bb6887ea6b924f",
+    "protected_paths_sha256": "98f7f5f54622baf379b40bad458cf3ef2a1952644fb79fb662ebe11f70659d8b"
+  },
+  "teamlead_cycle": 2
+}

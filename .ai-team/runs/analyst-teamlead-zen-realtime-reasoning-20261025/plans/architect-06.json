@@ -1,0 +1,151 @@
+{
+  "schema_version": "1.0",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "role": "architect",
+  "iteration": 6,
+  "plan_kind": "delta",
+  "parent_plan": "plans/architect-05.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "FU-001",
+    "FU-002"
+  ],
+  "objective": "v6: закрыть два блокера и два follow-up a5 изолированными RSS/clean-room/VER-004 пробами, без изменений продукта; передать кандидата a6.",
+  "inputs_read": [
+    "handoff/panel-rework-brief-arch-a5.json",
+    "architecture/architecture-packet.json",
+    "handoff/panel-rework-brief-arch-a1.json",
+    "handoff/panel-rework-brief-arch-a2.json",
+    "handoff/panel-rework-brief-arch-a3.json",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/protocol.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/scope-and-contracts.md",
+    "handoff/panel-rework-brief-arch-a4.json"
+  ],
+  "stop_conditions": [
+    "Писать только architect-06.before.json/architect-06.json/architecture-packet.json; backups v1..v5 и product/analysis неизменны.",
+    "Пробы только /tmp/zen-arch6-probe-* с удалением до завершения.",
+    "Не ослаблять typing/frozen/24 gates; не присваивать Council PASS/ARCH_GATE_PASS/H3 PASS."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить a5 и закрытые a1..a4, снять fingerprints и validate before.",
+      "expected_evidence": "RW-001/RW-002/FU-001/FU-002; исходный v5 SHA и product fingerprint.",
+      "status": "DONE",
+      "actual_evidence": "Existing before-plan retained byte-for-byte, iteration6 delta covers RW-001/RW-002/FU-001/FU-002. Prior v5 SHA256 15ea67e3215ceea9e84b9d79853677f4be86b959e87a21f24830d0c895f62657. Resumed RP-05 using preserved outputs; semantic recheck confirms historical a1..a4 unchanged, four a5 resolutions and all current JSON pointers valid.6947 outside-allowlist files unchanged; fingerprint 6e8b7e52c0cb95e68d724e641907168bbc10e70247a533af7947b627e8beafdf.",
+      "evidence": "Existing before-plan retained byte-for-byte, iteration6 delta covers RW-001/RW-002/FU-001/FU-002. Prior v5 SHA256 15ea67e3215ceea9e84b9d79853677f4be86b959e87a21f24830d0c895f62657. Resumed RP-05 using preserved outputs; semantic recheck confirms historical a1..a4 unchanged, four a5 resolutions and all current JSON pointers valid.6947 outside-allowlist files unchanged; fingerprint 6e8b7e52c0cb95e68d724e641907168bbc10e70247a533af7947b627e8beafdf."
+    },
+    {
+      "id": "RP-02",
+      "kind": "verify",
+      "action": "RW-001/RW-002: ранний typed helper, полный argv, clean-room fake, фактический RSS.",
+      "expected_evidence": "EVD-079: воспроизводимые исходники/argv/env/RSS, отсутствие тяжёлых модулей и state/log/config I/O.",
+      "status": "DONE",
+      "actual_evidence": "EVD-079 clean-room typed early-helper probe: helper exit0,12 invalid argv cases exit2; forbidden module/global sets and state/log/config accesses empty. Darwin Python3.14.7 ps RSS31.703125MiB, ru_maxrss peak31.71875MiB. Helper budget36MiB includes4.28125MiB Stage3 reserve. Full source/argv/env/output embedded in packet; isolated probe is not full Stage3 acceptance.",
+      "evidence": "EVD-079 clean-room typed early-helper probe: helper exit0,12 invalid argv cases exit2; forbidden module/global sets and state/log/config accesses empty. Darwin Python3.14.7 ps RSS31.703125MiB, ru_maxrss peak31.71875MiB. Helper budget36MiB includes4.28125MiB Stage3 reserve. Full source/argv/env/output embedded in packet; isolated probe is not full Stage3 acceptance."
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "FU-001/RW-001/RW-002: выполнить точный VER-004 с --config и hostile XDG_CONFIG_HOME.",
+      "expected_evidence": "errors0/reportAny125/catalog8/8/frozen3SHA, formatter identity, ruff0.",
+      "status": "DONE",
+      "actual_evidence": "EVD-076/077/079: exact VER-004 ordinary/hostile XDG_CONFIG_HOME runs both exit0,6.2825s/9.688s. Errors0; server reportAny125/reportExplicitAny125, server warnings564, all3warnings726. Catalog8/8 twice; lint/type/formatter identity pass; three frozen raw SHA256 values unchanged. Command SHA256 9210b5ac49c687bdd3fe38df7d4290fc5abb65936820bef2c5524eb7a1d85abe.",
+      "evidence": "EVD-076/077/079: exact VER-004 ordinary/hostile XDG_CONFIG_HOME runs both exit0,6.2825s/9.688s. Errors0; server reportAny125/reportExplicitAny125, server warnings564, all3warnings726. Catalog8/8 twice; lint/type/formatter identity pass; three frozen raw SHA256 values unchanged. Command SHA256 9210b5ac49c687bdd3fe38df7d4290fc5abb65936820bef2c5524eb7a1d85abe."
+    },
+    {
+      "id": "RP-04",
+      "kind": "decide",
+      "action": "Синхронизировать память 32/216/1296/1552 MiB и замкнутый helper контракт; FU-002 metadata v6/a6.",
+      "expected_evidence": "Все действующие секции согласованы; четыре resolutions a5; a1..a4 сохранены.",
+      "status": "DONE",
+      "actual_evidence": "check_semantics.py exit0 PASS: cycle6/version6.0; four a5 resolutions; historical a1..a4 unchanged; all current JSON pointers resolve;46canonical HL fields/24unique stop codes. Memory SSoT agrees across decision/VER-005/HL envelope: helper peak31.71875MiB, reserved36, slot216, shared1296, total1552 <=1638.4MiB. External a6 Council/proof pending; Stage3/H0..H9 NOT_RUN.",
+      "evidence": "check_semantics.py exit0 PASS: cycle6/version6.0; four a5 resolutions; historical a1..a4 unchanged; all current JSON pointers resolve;46canonical HL fields/24unique stop codes. Memory SSoT agrees across decision/VER-005/HL envelope: helper peak31.71875MiB, reserved36, slot216, shared1296, total1552 <=1638.4MiB. External a6 Council/proof pending; Stage3/H0..H9 NOT_RUN."
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Проверить 46 HL fields/24 gates, JSON pointers, outside-allowlist fingerprint; закрыть plan и seal SHA.",
+      "expected_evidence": "after/packet validators0, probe dirs0, product gitstatus empty; a6 pending, H0..H9 NOT_RUN.",
+      "status": "DONE",
+      "actual_evidence": "check_semantics.py exit0 PASS before cleanup;6947 outside-allowlist files unchanged and backups v1..v5 unchanged. Probe tree and stale pointer file removed; /tmp/zen-arch6-probe-* count0. Pre-existing untracked analysis/zen-realtime-reasoning/ retained byte-for-byte; bridges clean. validate_role_plan.py --phase after exit0; validate_architecture_packet.py --phase approved --role-plan exit0; worktree_fingerprint.py --exclude .ai-team --compare architect-06-before.json exit0. Final outside-allowlist recheck6947files identical; before-plan bytes unchanged. a6 Council/proof pending; H0..H9 NOT_RUN.",
+      "evidence": "check_semantics.py exit0 PASS before cleanup;6947 outside-allowlist files unchanged and backups v1..v5 unchanged. Probe tree and stale pointer file removed; /tmp/zen-arch6-probe-* count0. Pre-existing untracked analysis/zen-realtime-reasoning/ retained byte-for-byte; bridges clean. validate_role_plan.py --phase after exit0; validate_architecture_packet.py --phase approved --role-plan exit0; worktree_fingerprint.py --exclude .ai-team --compare architect-06-before.json exit0. Final outside-allowlist recheck6947files identical; before-plan bytes unchanged. a6 Council/proof pending; H0..H9 NOT_RUN."
+    }
+  ],
+  "deviations": [
+    "Continuation after transient codex-lb capacity failure: reused existing before-plan/v6 packet and preserved RP-02..RP-04 results; no new implementation or repeated probes.",
+    "RP-05 expected empty product status; baseline already contains untracked analysis/zen-realtime-reasoning/. Preserved its bytes under read-only product gate; bridges status clean.",
+    "32MiB is approximate measured helper usage: actual peak31.71875MiB and36MiB reserved design allowance. H3 six live103KB slots and Stage3 acceptance remain NOT_RUN."
+  ],
+  "validation_scope": {
+    "local_observed": [
+      "EVD-079 chain/RSS/import/I/O and invalid argv probes",
+      "EVD-076/077 exact VER-004 ordinary/hostile runs",
+      "check_semantics.py exit0 PASS",
+      "46 HL fields / 24 gates / 4 resolutions",
+      "6947 outside-allowlist files unchanged"
+    ],
+    "not_run": [
+      "actual Stage3 VER-001..005 implementation",
+      "H0..H9",
+      "external a6 Council/proof"
+    ],
+    "final_ver004_command_sha256": "9210b5ac49c687bdd3fe38df7d4290fc5abb65936820bef2c5524eb7a1d85abe",
+    "temp_cleanup": {
+      "removed": true,
+      "remaining_probe_directories": 0,
+      "stale_pointer_removed": true
+    },
+    "final_validators": {
+      "role_plan_after_exit": 0,
+      "architecture_packet_approved_exit": 0,
+      "product_fingerprint_compare_exit": 0,
+      "outside_allowlist_unchanged": 6947
+    }
+  },
+  "worktree_fingerprint": {
+    "status": "PASS",
+    "canonical_fields": 46,
+    "resilience_stop_codes": 24,
+    "current_resolutions": 4,
+    "historical_a1_a4_unchanged": true,
+    "all_current_pointers_resolve": true,
+    "all_outside_allowlist_files_unchanged": 6947,
+    "fingerprint_sha256": "6e8b7e52c0cb95e68d724e641907168bbc10e70247a533af7947b627e8beafdf",
+    "backup_sha256": {
+      "1": "e620a689a0d665a2c7979eba5a7073af41d9ca9473ea906ff9cee316fa0c7e02",
+      "2": "c3936c99b53fc50508c113c88368f0b75b01d250d8345ee3be175c753a8b9a3d",
+      "3": "8edcb4c410579c365f825cdc74d5da7417e9dfaaebce5ac465cb2b103a44b608",
+      "4": "a53012565332cab8140d26d43029b931ff6d6c1fe4c63612310567ecba6812b3",
+      "5": "15ea67e3215ceea9e84b9d79853677f4be86b959e87a21f24830d0c895f62657"
+    },
+    "product_status": "?? analysis/zen-realtime-reasoning/\n",
+    "ver004_command_sha256": "9210b5ac49c687bdd3fe38df7d4290fc5abb65936820bef2c5524eb7a1d85abe",
+    "memory": {
+      "unit": "MiB",
+      "serve_idle_observed": 156.8,
+      "serve_evidence": "EVD-071 owner-supplied idle, not6parallel peak",
+      "helper_estimate": 36.0,
+      "helper_observed_peak_mib": 31.71875,
+      "helper_evidence": "EVD-079",
+      "helper_stage3_reserve_mib": 4.28125,
+      "pair_estimate": 192.8,
+      "probe_peak_estimate": 8.0,
+      "combined_with_probe_estimate": 200.8,
+      "per_slot_ceiling": 216,
+      "per_slot_headroom_estimate": 15.2,
+      "shared_ceiling": 1296,
+      "parent_ceiling": 256,
+      "full_design_ceiling": 1552.0,
+      "H3_full_sum_max": 1638.4,
+      "station_headroom_mib": 86.4,
+      "status": "PARTIAL_OBSERVATION: isolated early helper measured in EVD-079; 36.0 includes explicit Stage3 code/lease/drain reserve. Serve156.8 is idle; probe8 and loaded Stage3 not measured. H3 six live103KB slots plus bridge/helper/serve/probe peaks remains NOT_RUN; per-slot>216 or station>1638.4 fails H3 and blocks H7 without waiver."
+    }
+  }
+}

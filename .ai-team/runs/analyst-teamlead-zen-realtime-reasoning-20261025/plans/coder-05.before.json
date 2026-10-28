@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-04.json",
+  "trigger_ids": ["RW-001", "RW-002", "RW-003", "RW-004", "RW-005", "RW-006", "RW-007", "RW-008", "RW-009", "RW-010", "RW-011", "RW-012", "RW-013", "RW-014", "RW-015", "RW-016", "RW-017", "RW-018", "RW-019"],
+  "objective": "Хирургически устранить RW-001..RW-019 и FU-001..FU-009 Совета Тимлидов Cycle 2 только в server.py, tests/test_realtime_reasoning.py, tests/test_step_interruption.py без изменения замороженных _run_env/_stream_google_sse/_execute_google_once",
+  "inputs_read": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+    "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    "plans/coder-04.json",
+    "бриф Coder coder-05 (RW-001..RW-019, FU-001..FU-009)"
+  ],
+  "stop_conditions": [
+    "Менять только 3 продуктовых/тестовых файла из брифа и файлы отчётности coder-05",
+    "Не трогать замороженные _run_env/_stream_google_sse/_execute_google_once (sha256 VER-004)",
+    "Не запускать full-file ruff format server.py; только --range по изменённым ханкам",
+    "Не делать git commit/push/gh pr create",
+    "Сохранить ранний перехват --serve-helper и совместимость ast feature_version=(3,9)"
+  ],
+  "deviations": [],
+  "actual_evidence": "",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Правки server.py по RW-001..RW-006, RW-008..RW-019 и FU-001..FU-009: errno в ранних импортах, exit_reason timeout/client_gone, ранняя проверка prompt_status и fail_closed 400/404/422, атомарный _spawn_serve, SIGKILL группы в helper, client_gone по errno, неблокирующий _reader, монотонный delivered, лимит спавнов в JSON, text tool_calls на step_finish, единый разделитель retry, дедуп tool_calls_all, ранний release StartupGate, бюджеты cleanup 4+2 с, lock/Event для wfile и статус-таймер на run-пути, attempt_done на транзиентных ошибках, один шаг ротации прокси",
+      "expected_evidence": "AST/grep-подтверждения по каждому RW в server.py; замороженные sha256 неизменны",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-007: tests/test_realtime_reasoning.py — поведенческие оракулы вместо текстовых проверок исходника (never_event/silent/пауза SSE/ранний release gate/ECONNRESET/fail_closed/helper errno)",
+      "expected_evidence": "новые поведенческие тесты проходят; basedpyright 0 ошибок",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Форматирование --range по изменённым ханкам server.py/test_step_interruption.py и целиком test_realtime_reasoning.py; VER-004 дословно; pytest и unittest по двум тестовым модулям без ResourceWarning",
+      "expected_evidence": "VER004_EXIT:0, pytest exit 0, unittest exit 0",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Записать plans/coder-05.json (phase after, DONE), handoffs/coder-05.json, coder.json и receipts/coder.json с sha256 плана; validate_role_plan --phase after и validate_handoff exit 0",
+      "expected_evidence": "validate_role_plan --phase after exit 0; validate_handoff coder exit 0",
+      "status": "PENDING"
+    }
+  ]
+}

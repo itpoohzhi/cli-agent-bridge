@@ -1,0 +1,21 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "slot": "gemini-4-argon-medium",
+      "transport": "agy",
+      "file": "review-v1-g1-a1.md",
+      "http_code": null,
+      "rc": 0,
+      "result": "ok",
+      "seconds": 77,
+      "wall_seconds": 77.15,
+      "tool_calls": 0,
+      "kill_reason": null,
+      "error": null,
+      "pid": 52840,
+      "pgid": 52840,
+      "text_chars": 21360
+    }
+  ]
+}

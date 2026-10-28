@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "role": "verifier",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Независимая clean-room L2 верификация кандидата zen-realtime-reasoning (Cycle 3) и сборка доказательной базы пакета приёмки Совета Тимлидов",
+  "inputs_read": [
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/verification-surface.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/coder.json"
+  ],
+  "stop_conditions": [
+    "Модификация файлов вне белого списка coder_target_files или нарушение SHA-256 замороженных функций",
+    "Прохождение RED-теста на непропатченном origin/dev или ненулевой код любой L2 проверки на кандидате"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "verify",
+      "action": "Проверить RED-чувствительность нового тестового модуля tests/test_realtime_reasoning.py на чистом worktree origin/dev",
+      "command": "uvx pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py",
+      "expected_evidence": "Ненулевой код возврата AssertionError без ImportError/SyntaxError в receipts/l2-red.log",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-02",
+      "kind": "verify",
+      "action": "Выполнить полный замороженный набор проверок VER-004, VER-001, VER-002, VER-003, AC-023 и VER-005 в изолированном clean-room worktree",
+      "command": "python3 run_cleanroom_l2.py",
+      "expected_evidence": "receipts/code-gate.json со статусом PASS и нулевыми кодами возврата всех проверок кандидата",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-03",
+      "kind": "report",
+      "action": "Собрать свидетельства execution-evidence.md, verification-traceability.md, environment-manifest.json и evidence-manifest.sha256",
+      "expected_evidence": "Заполненные первичные артефакты в teamlead/ и квитанция receipts/verifier.json со статусом PASS",
+      "status": "PENDING",
+      "actual_evidence": ""
+    }
+  ],
+  "deviations": []
+}

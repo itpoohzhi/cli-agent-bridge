@@ -1,0 +1,149 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-07.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005",
+    "RW-006",
+    "RW-007"
+  ],
+  "objective": "Устранить RW-001..RW-007 и FU-001..FU-003 Cycle 6 без изменения frozen-функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-5/final-panel-verdict.md",
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+  ],
+  "stop_conditions": [
+    "Менять только 3 продуктовых/тестовых файла из брифа и файлы отчётности coder-08",
+    "Не трогать замороженные _run_env/_stream_google_sse/_execute_google_once (sha256 VER-004)",
+    "Не запускать full-file ruff format server.py; только --range по изменённым ханкам",
+    "Не делать git commit/push/gh pr create",
+    "Сохранить ранний перехват --serve-helper и совместимость ast feature_version=(3,9)"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Добавить регрессионные тесты Cycle 6 и подтвердить RED до server.py",
+      "execution_step_ids": [
+        "RP-01"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Исправить доставку, watchdog, отмену старта и stderr без frozen-дельты",
+      "execution_step_ids": [
+        "RP-02",
+        "RP-04",
+        "RP-05"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Ограничить HTTP, SSE и cleanup и закрыть матрицу AC-016/017",
+      "execution_step_ids": [
+        "RP-03",
+        "RP-06"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Прогнать VER-004, целевой pytest и полные тесты моста",
+      "execution_step_ids": [
+        "RP-07"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Записать after-план, handoff и две идентичные квитанции coder-08",
+      "execution_step_ids": [
+        "RP-08"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "PENDING"
+    }
+  ],
+  "execution_steps": [
+    {
+      "id": "RP-01",
+      "kind": "verify",
+      "action": "Подтвердить RED-оракулы барьера доставки и фазовых watchdog",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Исправить доставку headers_at и фазовые watchdog обоих путей",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Проверить AC-016 и AC-017 матрицей serve и run",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Ограничить старт serve дедлайном и отменой клиента",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "change",
+      "action": "Дренировать stderr до handshake с байтовым пределом",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-06",
+      "kind": "change",
+      "action": "Ограничить HTTP и cleanup дедлайном, SSE и usage валидаторами",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-07",
+      "kind": "verify",
+      "action": "Прогнать VER-004, целевой pytest и полные наборы моста",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-08",
+      "kind": "report",
+      "action": "Записать валидные after-план и handoff coder-08",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "PENDING"
+    }
+  ]
+}
