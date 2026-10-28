@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "role": "architect",
+  "iteration": 5,
+  "plan_kind": "delta",
+  "parent_plan": "plans/architect-04.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "FU-001",
+    "FU-002",
+    "FU-003",
+    "FU-004",
+    "FU-005",
+    "FU-006"
+  ],
+  "objective": "Редакция v5: закрыть все 4 RW и 6 FU прохода a4/r8 эмпирическими пробами и точечной синхронизацией контракта без изменения product tree.",
+  "inputs_read": [
+    "handoff/panel-rework-brief-arch-a4.json",
+    "architecture/architecture-packet.json",
+    "handoff/panel-rework-brief-arch-a1.json",
+    "handoff/panel-rework-brief-arch-a2.json",
+    "handoff/panel-rework-brief-arch-a3.json",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/protocol.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/scope-and-contracts.md"
+  ],
+  "stop_conditions": [
+    "Запись в репозиторий только в три разрешённых JSON; продукт/analysis и backups v1..v4 неизменны.",
+    "Эмпирические пробы только /tmp/zen-arch5-probe-*; удалить все каталоги перед сдачей.",
+    "Не ослаблять лимиты typing/frozen slices; не объявлять Council PASS/ARCH_GATE_PASS или Stage3/H0..H9 PASS."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить a4 с историей a1..a3 и fingerprints; покрыть RW-001..004 и FU-001..006 в delta-плане.",
+      "expected_evidence": "Входы, исходные hashes, 10 trigger IDs; before validator PASS.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "verify",
+      "action": "RW-003/RW-004/FU-002/FU-004: выполнить ruff на реальных 4021 строках и полный VER-004 на изолированной копии с typed helper CLI.",
+      "expected_evidence": "EVD-075..077: argv/rc/output, 3 literal hashes, reportAny=125/warnings564/errors0, catalog8/8.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "RW-001/RW-002/FU-003/FU-005/FU-006: согласовать угрозы, helper tree, stdio альтернативу, env и два fixture digest.",
+      "expected_evidence": "THREAT-001/002 и VER-005 согласованы; EVD-078 stdio help; stable wire/canonical digest.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Обновить v5 и 10 rework_resolutions_a4; FU-001 a5(r9), сохранить исторические a1..a3 и закрытые узлы.",
+      "expected_evidence": "cycle5/version5.0/APPROVED candidate only; 10 записей с валидными JSON Pointer.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Проверить 46 HL fields/24 gates/JSON, fingerprints и удаление temp; закрыть plan, связать точный SHA-256.",
+      "expected_evidence": "Before/after и packet validators; exact role_plan SHA; product/backup equality; temp0.",
+      "status": "PENDING"
+    }
+  ],
+  "deviations": []
+}

@@ -1,0 +1,218 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 1,
+  "panel_slug": "analyst-teamlead-zen-realtime-reasoning-20261025-arch-council-1-a4-r8",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "/threat_model/threats/0/mitigation (THREAT-001)",
+      "rule_ref": "THREAT-001; T-LIFE/v1; AD-001.details.spawn; AD-001.details.listener_ownership; VER-005; F-001 текущего a4",
+      "action": "Architect: синхронизировать THREAT-001.mitigation и относящиеся к нему ссылки rework_resolutions с единым деревом v4 parent -> helper_proc -> serve_proc. Родитель резервирует 127.0.0.1:0 и запускает helper_proc с start_new_session=True, child_pgid=helper_proc.pid; helper_proc запускает serve_proc с start_new_session=False в той же группе child_pgid. Маркер attempt_id должен находиться в первых байтах argv хелпера, видимых через ps. До отправки Authorization или prompt одновременно требовать listener_pid == serve_pid, os.getpgid(listener_pid) == child_pgid и helper_proc.poll() is None. Бюджет lsof <= 0.35 с входит в общий ready <= 3.0 с. Cleanup убивает только подтверждённый собственный child_pgid, включая helper, serve и потомков. Удалить из живого контракта release-before-Popen / newPGID / own child only / bounded<=.25s; исторические записи не переписывать как действующий контракт. В VER-005 добавить негативные сценарии listener — чужой PID в той же группе и listener — чужой PID в иной группе: 0 байт пароля/prompt и 0 сигналов чужому PGID.",
+      "acceptance": "THREAT-001, AD-001.details.spawn/listener_ownership/cleanup и актуальные rework_resolutions задают одно дерево и все три проверки до Authorization/prompt; attempt_id доступен в первых байтах ps argv; lsof <= 0.35 с внутри ready <= 3.0 с. В живом контракте отсутствуют release-before-Popen, newPGID, own child only и bounded<=.25s. packet_locations включает THREAT-001 и VER-005. VER-005 содержит оба негативных listener-сценария с оракулом 0 байт пароля/prompt и 0 сигналов чужому PGID, при cleanup собственного child_pgid (helper + serve + потомки). Будущие продуктовые/живые проверки остаются NOT_RUN до исполнения.",
+      "source": "arch-panel/cycle-1/a4/findings-ledger.md#F-001; panel/arch/r8 (текущий проход a4)",
+      "evidence": "### F-001\n- origin: skeptic · R1 · seat1-F-001\n- rev: 1\n- priority: blocking\n- status: CONSENTED\n- outcome: blocking\n- resolved_in: r8-majority\n- votes: R1 skeptic(xAI)=AUTHOR\n- dissent: visionary R1 PASS (6/6 PASS) → panel/arch/r8/seats/3/verdict.md; realist R1 по КОРРЕКТНОСТЬ/ПОЛНОТА/РИСКИ PASS → panel/arch/r8/seats/2/verdict.md\n- owner_decision: —\n- amendments: —\n- text (дословно, R1 skeptic):\n> F-001\n> priority: blocking\n> locations: architecture-packet.json#THREAT-001\n> rule: RW-003 / T-LIFE/v1 / AD-001.details.spawn / listener_ownership\n> evidence: mitigation дословно «Parent bind loopback0/getport/release-before-Popen explicit port/newPGID; до Auth/prompt lsof listener PID->os.getpgid==childPGID, bounded<=.25s … cleanup own child only». Живой spawn v4: helper — session leader, serve в той же группе, proof `listener_pid==serve_pid`, lsof ≤0.35 с. Фразы `newPGID` и `release-before-Popen` в текущем контракте встречаются только здесь (второе `release-before-Popen` — исторический `rework_resolutions_a1/2`).\n> expected: mitigation = дерево v4 и proof до Auth; убрать singular child, newPGID и бюджет 0.25 с.\n> check: поиск по пакету не находит `newPGID` вне истории a1; текст THREAT-001 содержит `listener_pid==serve_pid` и `0.35`.",
+      "source_findings": [
+        "F-001"
+      ],
+      "related_locations": [
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/decisions/0/details/spawn"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/decisions/0/details/listener_ownership"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/decisions/0/details/cleanup"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/rework_resolutions/2/packet_locations"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/verification_surface/4 (VER-005)"
+        }
+      ]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "/threat_model/threats/1/mitigation (THREAT-002)",
+      "rule_ref": "THREAT-002; EVD-073; AD-001.details.event_contract.safety_order; AD-001.details.single_turn_control; VER-005; F-002 текущего a4",
+      "action": "Architect: синхронизировать THREAT-002.mitigation и его ссылки rework_resolutions с event_contract.safety_order и single_turn_control. При своём data.form.sessionID и непустом data.form.id немедленно защёлкнуть single-turn/Step2 barrier и отправить cancel <= 0.25 с, затем interrupt <= 0.10 с ДО проверки title, fields и схемы. Отсутствующий title при успешных cancel+interrupt даёт штатную отмену, ServeHealth +0, без ожидания watchdog и без Step2; обязательность title в исходной wire-схеме не менять. Отсутствие/невалидность id или sessionID либо ошибка cancel/control-lane ведут в fail-closed с killpg собственного child_pgid <= 1.2 с; валидный чужой sessionID игнорируется без чужих control-вызовов. Удалить of validated event из threat_model, не меняя несвязанный S-HERD-I1. Согласовать этот порядок и негативные мутации между THREAT-002, single_turn_control и VER-005.",
+      "acceptance": "Строка of validated event отсутствует в threat_model; S-HERD-I1 сохранён. THREAT-002, safety_order, single_turn_control, актуальные rework_resolutions и VER-005 одинаково описывают cancel <= 0.25 с и interrupt <= 0.10 с до валидации. Мутация missing title приводит к штатной отмене с ServeHealth +0 без watchdog/Step2; missing id/sessionID и cancel failure требуют fail-closed и killpg <= 1.2 с только своей группы. packet_locations включает THREAT-002 и VER-005; будущие продуктовые/живые проверки остаются NOT_RUN до исполнения.",
+      "source": "arch-panel/cycle-1/a4/findings-ledger.md#F-002; panel/arch/r8 (текущий проход a4)",
+      "evidence": "### F-002\n- origin: skeptic · R1 · seat1-F-002\n- rev: 1\n- priority: blocking\n- status: CONSENTED\n- outcome: blocking\n- resolved_in: r8-majority\n- votes: R1 skeptic(xAI)=AUTHOR\n- dissent: visionary R1 PASS (6/6 PASS) → panel/arch/r8/seats/3/verdict.md; realist R1 по КОРРЕКТНОСТЬ/ПОЛНОТА/РИСКИ PASS → panel/arch/r8/seats/2/verdict.md\n- owner_decision: —\n- amendments: —\n- text (дословно, R1 skeptic):\n> F-002\n> priority: blocking\n> locations: architecture-packet.json#THREAT-002\n> rule: FU-001 / EVD-073 / AD-001.details.single_turn_control / event_contract.safety_order\n> evidence: внутри mitigation остался порядок «form cancel within0.25s of validated event». Рядом `single_turn_control.order[1]` требует cancel до title/fields/schema. Второе вхождение «validated event» — `S-HERD-I1` (релиз startup gate), это другой смысл, его не трогать.\n> expected: вложенный order в THREAT-002 заменить на safety_order; отсутствующий title не увеличивает ServeHealth и не ждёт watchdog.\n> check: строка `of validated event` отсутствует в threat_model; негативная мутация «missing title → cancel ≤0.25 с, ServeHealth 0» одна и та же в THREAT-002, single_turn_control и VER-005.",
+      "source_findings": [
+        "F-002"
+      ],
+      "related_locations": [
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/decisions/0/details/event_contract"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/decisions/0/details/single_turn_control"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/rework_resolutions/3/packet_locations"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/verification_surface/4/process_resource_oracle/form_cancel"
+        }
+      ]
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "/evidence/69 (EVD-075)",
+      "rule_ref": "EVD-075; VER-004; критерий доказательства closed-range на копии текущего server.py; F-003 текущего a4",
+      "action": "Architect: дополнить EVD-075 реальным прогоном закрытого диапазона uvx --from ruff==0.17.2 ruff format --check --no-cache --range={start}:1-{end}:999 на изолированной /tmp-копии продуктового 4021-строчного bridges/opencode-zen-bridge/server.py. В копии добавить синтетический пробел на ранней строке и на строке непосредственно перед def _run_env; продуктовый worktree не менять. Для тех же входных байтов и раннего диапазона выполнить контрольный отрицательный прогон старого --range={start}:{end}, показывающий захват хвоста. Записать реальные start/end, полный argv, exit code и stdout/stderr обоих прогонов, длину файла и побайтовую неизменность всех трёх замороженных срезов до/после. Литеральные SHA-256: _run_env=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31; _stream_google_sse=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3; _execute_google_once=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6. Синхронизировать ссылки EVD-075 в VER-004 и rework_resolutions; шестистрочный tmp_server.py не считать доказательством поведения продуктового хвоста.",
+      "acceptance": "EVD-075 содержит наблюдаемый прогон именно /tmp-копии реального bridges/opencode-zen-bridge/server.py (4021 строка), обе синтетические мутации и argv с конкретными start/end. Закрытый --range={start}:1-{end}:999 видит раннюю мутацию (rc=1 для неформатированного диапазона), но не захватывает хвост; контрольный старый --range={start}:{end} демонстрирует захват хвоста. У обоих прогонов записаны exit code и вывод; исходный продуктовый файл/worktree не изменены. Все три среза побайтово совпадают с baseline до/после и сохраняют литеральные SHA-256: _run_env=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31; _stream_google_sse=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3; _execute_google_once=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6. Проверка не выдаётся за полный Stage3 all-3 или живые H0..H9: их статус остаётся NOT_RUN.",
+      "source": "arch-panel/cycle-1/a4/findings-ledger.md#F-003; panel/arch/r8 (текущий проход a4)",
+      "evidence": "### F-003\n- origin: skeptic · R1 · seat1-F-003\n- rev: 1\n- priority: blocking\n- status: AGREED\n- outcome: blocking\n- resolved_in: r8-majority\n- votes: R1 skeptic(xAI)=AUTHOR | R1 visionary(Anthropic)=F-1(non-blocking, та же причина)\n- dissent: visionary R1 PASS (оформил ту же нехватку прогона EVD-075 на копии реального server.py как non-blocking F-1 / F-006) → panel/arch/r8/seats/3/verdict.md; realist R1 по RW-001 PASS → panel/arch/r8/seats/2/verdict.md\n- owner_decision: —\n- amendments: —\n- text (дословно, R1 skeptic):\n> F-003\n> priority: blocking\n> locations: architecture-packet.json#EVD-075, architecture-packet.json#VER-004\n> rule: RW-001 acceptance (прогон раннего hunk на копии текущего server.py)\n> evidence: оба argv ruff заканчиваются на `/tmp/zen-arch4-probe-ruff-swkgt3h8/tmp_server.py`; stdout unformatted показывает файл из строк 2–4 (`PROBE_ALPHA`). Hash-негативы идут на `/tmp/zen-arch4-probe-hashes-95n6ulqk/server.py` и не вызывают ruff. `frozen_slices_unchanged: true` относится к шестистрочному файлу.\n> expected: EVD-075 дополнить прогоном закрытого `--range` и контрольным старым `start:end` на копии продуктового server.py; три SHA неизменны, продукт не тронут.\n> check: в EVD есть argv с копией `bridges/opencode-zen-bridge/server.py`, exit code и те же три digest; в выводе ruff нет правки `_run_env` / `_stream_google_sse` / `_execute_google_once`.",
+      "source_findings": [
+        "F-003"
+      ],
+      "related_locations": [
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/verification_surface/3 (VER-004)"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/verification_surface/4/immutable_google_slices"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/rework_resolutions/0"
+        }
+      ]
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "/evidence/70 (EVD-076); /verification_surface/3/command (VER-004)",
+      "rule_ref": "REQ-001/002/003/017; EVD-076; AD-001.details.typing; VER-004.command per-rule limits; F-005 текущего a4",
+      "action": "Architect: устранить противоречие между обязательной заменой zc = importlib.import_module(\"zen_catalog\") и VER-004.command с limits[\"reportAny\"] == 125: ModuleType.__getattr__ -> Any поднимает counts[\"reportAny\"] со 125 до 142. Предпочтительным путём убрать требование importlib.import_module(\"zen_catalog\") во всех секциях пакета (EVD-076.source_transform/claim/summary, AD-001.details.typing, VER-004 expected/baseline_transition, RISK-008, verification_policy.strict_typing и соответствующие rework_resolutions), сохранив существующий import zen_catalog as zc на server.py:67, уже разрешённый E402-проверкой VER-004.command. Сохранить CATALOG_SOURCE = \"static\", типизированный _set_catalog_source(source: str) -> None с globals()[\"CATALOG_SOURCE\"] = source и проверки proc is not None перед обоими чтениями .returncode. Подтвердить на изолированной /tmp-копии реальную раскладку моста без лишнего __init__.py и с extraPaths=[str(bridge.resolve())]: errorCount == 0, warningCount == 564, reportAny == 125 <= 125. Выполнить ПОЛНЫЙ скрипт VER-004.command, включая all(n <= limits[rule]), распечатку dict(counts), проверки changed_ranges, ruff check всех трёх целевых файлов, а также неизменённый tests.test_catalog_mode; записать argv/cwd/exit code и фактический вывод в EVD-076. Продуктовый worktree не менять, потолки и запреты подавлений не ослаблять.",
+      "acceptance": "Ни одна секция пакета не требует importlib.import_module(\"zen_catalog\") как обязательную трансформацию; статический import zen_catalog as zc и публичный CATALOG_SOURCE сохранены в контракте. EVD-076 содержит новый наблюдаемый прогон на /tmp-копии, воспроизводящей bridges/opencode-zen-bridge без дополнительного __init__.py, с extraPaths=[str(bridge.resolve())]: errorCount=0, warningCount=564, counts[\"reportAny\"]=125 при limits[\"reportAny\"]=125. Полный VER-004.command завершён с exit code 0, в evidence распечатан dict(counts), выполнен per-rule assert all(n <= limits[rule]) и запрет reportAny/reportExplicitAny/reportUnusedCallResult в changed_ranges; пройдены ruff check и неизменённый test_catalog_mode (8 тестов). Нельзя подменить полный прогон одним summary basedpyright, поднять лимиты или добавить Any/cast/# type: ignore. Продуктовый worktree и coder_target_files неизменны; изолированное доказательство не переименовывает будущий Stage3/живые H0..H9 в PASS.",
+      "source": "arch-panel/cycle-1/a4/findings-ledger.md#F-005; panel/arch/r8 (текущий проход a4)",
+      "evidence": "### F-005\n- origin: realist · R1 · seat2-F-001\n- rev: 1\n- priority: blocking\n- status: CONSENTED\n- outcome: blocking\n- resolved_in: r8-majority\n- votes: R1 realist(Google)=AUTHOR\n- dissent: visionary R1 PASS (3. РЕАЛИЗУЕМОСТЬ PASS) → panel/arch/r8/seats/3/verdict.md; skeptic R1 по RW-002 PASS → panel/arch/r8/seats/1/verdict.md\n- owner_decision: —\n- amendments: —\n- text (дословно, R1 realist):\n> ### F-001: Предписанная в RW-002/EVD-076 замена `import zen_catalog as zc` на `importlib.import_module(\"zen_catalog\")` поднимает `reportAny` до 142 и детерминированно валит `VER-004.command` (`limits['reportAny'] == 125`)\n> - **Якоря**:\n>   - `architecture-packet.json:1166` (`architecture-packet.json#VER-004`, `verification_surface[3].command`)\n>   - `architecture-packet.json:1167,1172` (`architecture-packet.json#VER-004`, `verification_surface[3].expected` и `baseline_transition.new`)\n>   - `architecture-packet.json:957-1005` (`architecture-packet.json#EVD-076`, `summary` и `source_transform`)\n>   - `architecture-packet.json:1906,2688,2902,4632,4810` (`architecture-packet.json#AD-001` `details.typing`, `architecture-packet.json#RISK-008` `mitigation`, `verification_policy.strict_typing`, `rework_resolutions[1]` / `rework_resolutions_a3[1]`)\n>   - `bridges/opencode-zen-bridge/server.py:67-165` (`import zen_catalog as zc` на `:67` и обращения `zc.*` на `:69,109,112,113,121,159,165`)\n> - **Нарушенное правило**: внутренняя выполнимость и непротиворечивость верификационного контракта (`REQ-001`, `REQ-002`, `REQ-003`, `REQ-017`, `VER-004`, `AD-001.details.typing`, `handoff/panel-rework-brief-arch-a3.json` `RW-002`): предписанная пакетом трансформация кода для `Stage 3 Coder` обязана проходить собственный исполняемый гейт `VER-004.command` без `# type: ignore`, `Any` и расширения `scope.coder_target_files`.\n> - **Цитата и доказательство из артефакта**:\n>   - В `architecture-packet.json:998` (`EVD-076.source_transform`) и `architecture-packet.json:1906` (`AD-001.details.typing`, а также `:1167,1172,2688,2902`) пакет обязывает Coder выполнить: `\"zc = importlib.import_module(\\\"zen_catalog\\\") with import importlib replaces static relative import; guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore\"`, и одновременно фиксирует `\"server Any<=125each\"` / `\"Existing Any<=125 and nonAny/total720+194 ceilings retained, no suppressions\"`.\n>   - В `architecture-packet.json:1166` исполняемый скрипт `VER-004.command` жёстко проверяет по-правиловые потолки на `files[0]` (`server.py`) и запрещает подавления:\n>     `limits = {'reportExplicitAny':125,'reportAny':125,...}`\n>     `counts = collections.Counter(x.get('rule','') for x in warnings(files[0]))`\n>     `assert all(n<=limits.get(rule,0) for rule,n in counts.items()), dict(counts)`\n>   - На базовом `bridges/opencode-zen-bridge/server.py` (`HEAD == origin/dev`) запуск `uvx --from basedpyright==1.40.2 basedpyright --project <tmp_proj.json> --outputjson` из `cwd=bridges/opencode-zen-bridge` с `extraPaths=[str(bridge.resolve())]` даёт `errorCount=3` (`L131 reportConstantRedefinition`, `L3666` и `L3667 reportOptionalMemberAccess`), `warningCount=564`, `reportAny=125`, `reportExplicitAny=125` (строка `server.py:67` `import zen_catalog as zc` даёт `0` ошибок `basedpyright`, так как `bridges/opencode-zen-bridge/__init__.py` отсутствует, а единственное замечание `ruff` `E402` на этой строке уже явно разрешено в `VER-004.command`: `assert all(x['code']=='E402' and lines[x['location']['row']-1].strip()=='import zen_catalog as zc' for x in findings)`).\n>   - При точном применении `EVD-076.source_transform` (`zc = importlib.import_module(\"zen_catalog\")`) `basedpyright==1.40.2` выводит для `zc` тип `types.ModuleType` (`ModuleType.__getattr__(self, name: str) -> Any`), превращая все обращения `zc.*` в существующем коде `server.py` в `Any`. Именно эти `+17` предупреждений образуют рост `warningCount` с `564` до `581` в `EVD-076` (`architecture-packet.json:976`), при котором **`counts['reportAny']` вырастает со `125` до `142`** (`{'reportAny': 142, 'reportExplicitAny': 125, ...}`) и детерминированно обрушивает `VER-004.command` по `AssertionError` (`142 > 125`). В `EVD-076` проверялся только `summary` (`errorCount=0, warningCount=581`), без запуска по-правилового ассерта `limits` из `VER-004.command`.\n> - **Ожидаемое исправление**:\n>   1. **Предпочтительный вариант (без роста `reportAny` и без изменения `limits`)**: удалить требование замены на `zc = importlib.import_module(\"zen_catalog\")` из `architecture-packet.json:998,1167,1172,1906,2688,2902,4632,4810`, сохранив в `bridges/opencode-zen-bridge/server.py:67` существующий `import zen_catalog as zc` (уже разрешённый правилом `E402` в `VER-004.command`) вместе с `CATALOG_SOURCE = \"static\"`, типизированным `_set_catalog_source(source: str) -> None` (`globals()[\"CATALOG_SOURCE\"] = source`) и двумя проверками `proc is not None` перед чтением `proc.returncode` (`server.py:3666-3667`), что на реальной структуре `bridges/opencode-zen-bridge/` даёт `errorCount=0`, `warningCount=564`, `reportAny=125 <= 125`.\n>   2. **Альтернативный вариант**: если `importlib.import_module(\"zen_catalog\")` сохраняется намеренно, типизировать фасад доступа к `zen_catalog` через `typing.Protocol`/узкие обёртки без `Any`, `cast` и `# type: ignore` с подтверждением `counts['reportAny'] <= 125`, либо явно согласовать потолок `limits['reportAny']` (`142`) в `VER-004.command` и текстовых разделах `VER-004`/`AD-001.details.typing` при сохранении запрета `reportAny` в изменённых диапазонах `ranges`.\n> - **Критерий проверки**: в `EVD` пакета приведён прогон полного набора проверок `VER-004.command` (`basedpyright==1.40.2` `errorCount == 0` + `all(n <= limits[rule])` с распечаткой `dict(counts)` + проверка отсутствия `reportAny`/`reportExplicitAny`/`reportUnusedCallResult` в `changed_ranges` + `ruff==0.17.2 check` + `tests.test_catalog_mode`) на изолированной копии, воспроизводящей реальную раскладку `bridges/opencode-zen-bridge/` (без лишнего `__init__.py` в корне моста), с exit code `0`.\n> - **Приоритет**: `priority: blocking`",
+      "source_findings": [
+        "F-005"
+      ],
+      "related_locations": [
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/decisions/0/details/typing"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/verification_surface/3/expected"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/verification_surface/3/baseline_transition/new"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/risks/7/mitigation"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/verification_policy/strict_typing"
+        },
+        {
+          "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+          "line_hint": "/rework_resolutions/1"
+        }
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "В /approval/rationale заменить остаточное упоминание \"a3 (r4)\" на актуальный следующий проход внешнего Архитектурного Совета a5. Не объявлять ARCH_GATE_PASS или Council PASS; актуализировать только адресат/номер прохода.",
+      "reason": "visionary R1 PASS (6/6 PASS) → panel/arch/r8/seats/3/verdict.md; realist R1 по КОРРЕКТНОСТЬ/ПОЛНОТА/РИСКИ PASS → panel/arch/r8/seats/2/verdict.md",
+      "source_findings": [
+        "F-004"
+      ]
+    },
+    {
+      "id": "FU-002",
+      "text": "В /verification_surface/3/command (VER-004) добавить проверку записи форматтера uvx --from ruff==0.17.2 ruff format --no-cache --range={start}:1-{end}:999 на временной /tmp-копии кандидата server.py. После записи проверить неизменность трёх литеральных SHA-256 замороженных _run_env/_stream_google_sse/_execute_google_once и отсутствие пересечения old/new diff-ханков с этими срезами; мутация с расширением диапазона на замороженную функцию должна краснить гейт. Продуктовый worktree не форматировать этим пробным прогоном.",
+      "reason": "visionary R1 ОБЩИЙ ВЕРДИКТ: PASS (оформлено автором как non-blocking улучшение)",
+      "source_findings": [
+        "F-007"
+      ]
+    },
+    {
+      "id": "FU-003",
+      "text": "В /decisions/0/alternatives (AD-001.alternatives) добавить оценку opencode serve --stdio с привязкой к [F-30], проверяемой пригодностью протокола для внешнего клиента и доказательной причиной отказа в пользу Option C/A1 HTTP+SSE. Не менять выбранную архитектуру без нового доказательства; само наличие процесса --stdio не доказывает пригодность протокола.",
+      "reason": "visionary R1 ОБЩИЙ ВЕРДИКТ: PASS (оформлено автором как non-blocking улучшение)",
+      "source_findings": [
+        "F-008"
+      ]
+    },
+    {
+      "id": "FU-004",
+      "text": "В /decisions/0/details/spawn, VER-004 и T_LIFE_v1 описать запуск helper режимом того же модуля вместо строкового литерала _SERVE_HELPER_CODE: [sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, ...], с ранним CLI-входом server.py до старта моста. Код helper должен проходить ruff и basedpyright в VER-004, а attempt_id находиться в первых байтах ps argv. Допустимая альтернатива — явное исключение из покрытия в пакете с модульными тестами функций helper и усиленным VER-005; топология/PGID и безопасность не ослабляются.",
+      "reason": "visionary R1 ОБЩИЙ ВЕРДИКТ: PASS (оформлено автором как non-blocking улучшение)",
+      "source_findings": [
+        "F-009"
+      ]
+    },
+    {
+      "id": "FU-005",
+      "text": "Согласовать /decisions/0/details/configuration (AD-001.details.configuration) и вложенный feature_flag_context: формулировать «без новых env-переменных для самого фичефлага» REALTIME_SERVE_ENABLED в dynamic_config.json. Явно назвать новые диагностические/override поверхности OPENCODE_ZEN_BRIDGE_TRANSPORT, OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY, OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE и watchdog-пороги AD-003; для OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED дать проверяемую ссылку на существующий код либо назвать override новым. Сохранить default=false и прежние rollout-гейты.",
+      "reason": "visionary R1 ОБЩИЙ ВЕРДИКТ: PASS (оформлено автором как non-blocking улучшение)",
+      "source_findings": [
+        "F-010"
+      ]
+    },
+    {
+      "id": "FU-006",
+      "text": "В /decisions/0/details/event_contract вычислять frozen_fixture_sha256 строго по неизменным парам wire + canonical всех frozen_v2_1_2_fixtures, с явной воспроизводимой формулой: pairs = {name: {\"wire\": fixture[\"wire\"], \"canonical\": fixture[\"canonical\"]} for name, fixture in frozen_v2_1_2_fixtures.items()}; frozen_fixture_sha256 = hashlib.sha256(json.dumps(pairs, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")).hexdigest(). Хэш редакционных negative_mutations и safety_order считать отдельно. Зафиксировать входы сериализации и digest; изменение текста negative_mutations/safety_order не должно менять wire/canonical digest, изменение wire/canonical должно его менять.",
+      "reason": "visionary R1 ОБЩИЙ ВЕРДИКТ: PASS (оформлено автором как non-blocking улучшение)",
+      "source_findings": [
+        "F-011"
+      ]
+    }
+  ],
+  "excluded": [
+    {
+      "id": "F-006",
+      "reason": "duplicate_of:F-003"
+    }
+  ],
+  "findings_total": 11,
+  "do_not_change": [
+    "Этот handoff адресован Architect: изменяется архитектурный delta-пакет, продуктовый worktree на этой стадии остаётся read-only; summarizer создаёт только этот brief.",
+    "scope.coder_target_files остаётся ровно из трёх путей: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py.",
+    "Замороженные _run_env, _stream_google_sse, _execute_google_once и их литеральные SHA-256/побайтовые срезы; test_run_env.py, test_google_direct.py, test_catalog_mode.py и start.sh не изменять.",
+    "Согласованный внешний HTTP/SSE контракт :9883 (/health, /v1/models, /v1/chat/completions), публичные server.CATALOG_SOURCE и HTTP catalog_source.",
+    "analysis/zen-realtime-reasoning/**, bridges/muse-bridge/**, общие конфиги opencode/georouter, opencode.db, зависимости/lockfiles и ~/.dsh/** вне архитектурной стадии.",
+    "Кодовый/runtime default=false; dynamic_config.json не создавать и не коммитить; H7 включение только после H3/H6. Сохранять запреты утечки секретов в argv/лог/lease, cap3, лимиты 6 слотов/12 waiters и H3 <=1638.4 MiB без поднятия потолков.",
+    "Не объявлять Council PASS/ARCH_GATE_PASS от лица Architect или summarizer; Stage3 и живые H0..H9 остаются NOT_RUN до своих фактических прогонов. Исторические записи не использовать как действующий контракт."
+  ],
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Текущий a4/r8: NEEDS_WORK, arch_panel_to_architect 4/5. Получатель — Architect (§3 arch-council): delta v5 и следующий внешний проход a5; blocking только RW-001..RW-004. FU-001..FU-006 не блокируют; F-006 исключён как дубль F-003. Этот brief не запускает Coder, не присваивает ARCH_GATE_PASS/Council PASS и не изменяет счётчики оркестратора."
+}

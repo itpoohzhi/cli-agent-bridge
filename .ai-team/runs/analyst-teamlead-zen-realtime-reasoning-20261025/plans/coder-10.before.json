@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 2,
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-09.json",
+  "trigger_ids": [
+    "CG-HTTP-CLOSE-RACE"
+  ],
+  "objective": "Устранить конкурентное закрытие HTTPResponse сторожем и исключить успешный усечённый ответ при deadline/отмене",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-09.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/l2-green-ver001-pytest.log"
+  ],
+  "stop_conditions": [
+    "Только точечная правка _watch_serve_connection и _serve_http в server.py и артефакты coder-10",
+    "Frozen-функции не менять; форматирование только заданного диапазона",
+    "Не создавать commit/push/MR; живую приёмку оставляет оркестратору"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Устранить CG-HTTP-CLOSE-RACE: сокет сторожем, HTTPConnection основным потоком; проверить фазу после чтения",
+      "expected_evidence": "L2 RED из переданного лога; минимальная дельта server.py; регрессионный тест GREEN",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "verify",
+      "action": "Прогнать VER-004, 20 последовательных deadline-регрессий и наборы тестов моста",
+      "expected_evidence": "Сырые логи PASS VER-004, 20/20, test_realtime_reasoning.py и полный набор моста",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "report",
+      "action": "Записать after-план coder-10 и идентичные handoff/квитанции с привязкой SHA256",
+      "expected_evidence": "validate_role_plan --phase after и validate_handoff coder exit=0",
+      "status": "PENDING"
+    }
+  ]
+}

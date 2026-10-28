@@ -1,0 +1,480 @@
+{
+  "schema_version": "2.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 2,
+  "panel_slug": "panel/council/r13",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "claude-sonnet-5-5",
+  "findings_total": 50,
+  "decision_required_human": false,
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Cycle 2 Совета Тимлидов по коду завершён после R1 (panel/council/r9) и D1 (panel/council/r13) с вердиктом NEEDS_WORK (19 первичных блокеров RW-001..RW-019, 9 non-blocking FU-001..FU-009, 22 excluded: 20 duplicate_of + 1 out_of_scope + 1 invalid_after_recheck). Бюджет следующей волны: Coder rework (coder-05, Цикл 3) -> слепой reverse-spec -> Clean-Room L2 -> Cycle 3 Совета Тимлидов по коду.",
+  "do_not_change": [
+    "Разрешено модифицировать ТОЛЬКО 3 файла из allowed_envelope_changes: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py.",
+    "Запрещено менять замороженную функцию def _run_env в bridges/opencode-zen-bridge/server.py (sha256=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31).",
+    "Запрещено менять замороженную функцию def _stream_google_sse в bridges/opencode-zen-bridge/server.py (sha256=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3).",
+    "Запрещено менять замороженную функцию def _execute_google_once в bridges/opencode-zen-bridge/server.py (sha256=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6).",
+    "Запрещено добавлять любые внешние зависимости вне стандартной библиотеки Python 3.14 (dependencies = [] в pyproject.toml).",
+    "Запрещено модифицировать zen_catalog.py, start.sh, muse-bridge, существующие тестовые модули вне конверта и коммитить dynamic_config.json в git."
+  ],
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:98-99,239-244",
+      "rule_ref": "python-standards.md §3, REQ-008",
+      "action": "Перенести `import errno` в ранний блок импортов до ветки `if sys.argv[1:2] == [\"--serve-helper\"]:` (рядом с `import select`), чтобы обработка `OSError` в `_fd_ready()` и `_run_serve_helper_cli()` никогда не вызывала `NameError`.",
+      "acceptance": "В процессе `--serve-helper` модуль `errno` связан до вызова `_run_serve_helper_cli`; ошибки `OSError` (включая `EBADF`/`EINTR`) на `select` обрабатываются без `NameError` и с гарантированным снятием lease.",
+      "source": "F-001 (skeptic · R1 · skeptic-01; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AMEND; duplicates merged: F-030, F-048)",
+      "source_findings": [
+        "F-001"
+      ],
+      "evidence": "Ledger F-001: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AMEND]; dissent=[realist d1 «DISPUTE F-001 класс: duplicate_of:F-030 — контр-evidence: `bridges/opencode-zen-bridge/server.py:98`, `:99`, `:239`, `:244` — подтверждаю дефект: ранний helper обращается к `errno`, импортируемо» → teamlead/cycle-2/debate/d1/realist.md ; visionary d1 «AMEND F-001 priority=non-blocking; locations=server.py:98-99,239-244; fix=перенести `import errno` в начало модуля — причина: дефект возник в дельте цикла 2, а не остался от RW. Путь достижим » → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:98-99,239-244; fix=перенести `import errno` в начало модуля — причина: дефект возник в дельте цикла 2, а не остался от RW. Путь достижим только при EBADF: EINTR Python повторяет (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3254,5150,5237,6247,6307",
+      "rule_ref": "RW-008, REQ-006, REQ-009, R-BULK-I1",
+      "action": "В `_run_serve_stream_attempts` и `_serve_json_serve` обрабатывать `result[\"exit_reason\"] in (\"timeout\", \"client_gone\")` как неуспешное завершение попытки ДО ветки `serve_health.record_success()` и `attempts.attempt_done(False, True)`: при `client_gone` немедленно выходить без записи успеха и без ответа, а при `timeout` переходить в retry/fallback (до доставки) или ошибку/recovery (после доставки).",
+      "acceptance": "Попытка `serve`, завершившаяся по `exit_reason == \"timeout\"` или `\"client_gone\"`, никогда не вызывает `record_success()`, `attempt_done(False, True)` или успешный `[DONE]` / HTTP 200.",
+      "source": "F-002 (skeptic · R1 · skeptic-02; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AMEND; duplicates merged: F-014, F-038)",
+      "source_findings": [
+        "F-002"
+      ],
+      "evidence": "Ledger F-002: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AMEND]; dissent=[realist d1 «DISPUTE F-002 класс: duplicate_of:F-014 — контр-evidence: `bridges/opencode-zen-bridge/server.py:3254`, `:5150`, `:5237`, `:6247`, `:6307` — возвращённый `timeout` действительно проходит мимо об» → teamlead/cycle-2/debate/d1/realist.md ; visionary d1 «AMEND F-002 priority=blocking; locations=server.py:3254,5150,5237-5238,6247,6307-6308; fix=обработать `exit_reason==\"timeout\"` и `\"client_gone\"` в обоих потребителях до ветки успеха: без `reco» → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=blocking; locations=server.py:3254,5150,5237-5238,6247,6307-6308; fix=обработать `exit_reason==\"timeout\"` и `\"client_gone\"` в обоих потребителях до ветки успеха: без `record_success`, без `attempt_done(False,Tru (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3022,3053-3061",
+      "rule_ref": "RW-015, REQ-009, AC-012",
+      "action": "В цикле `_serve_one_attempt` проверять `prompt_status.get(\"status\")` и `prompt_status.get(\"error\")` на каждой итерации ДО `events.get(timeout=0.05)` (или без `continue` до проверки `prompt_status`), а статусы `HTTP 400/404/422` классифицировать по `FALLBACK_DECISION_TABLE` как `fail_closed` (`ServeProtocolError` / терминальный отказ без fallback на `run`).",
+      "acceptance": "HTTP-ошибка `prompt_async` обрабатывается за `<= 0.1 с` даже при пустой очереди SSE после `server.connected`, а коды `400/404/422` завершаются `fail_closed` по таблице.",
+      "source": "F-003 (skeptic · R1 · skeptic-03; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE; duplicates merged: F-016)",
+      "source_findings": [
+        "F-003"
+      ],
+      "evidence": "Ledger F-003: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE]; dissent=[realist d1 «DISPUTE F-003 класс: duplicate_of:F-016 — контр-evidence: `bridges/opencode-zen-bridge/server.py:3022`, `:3053`, `:3055`, `:3061` — HTTP-результат prompt проверяется после `events.get()`, а `que» → teamlead/cycle-2/debate/d1/realist.md]; amendments=[—]."
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:1718,2493-2535,2599",
+      "rule_ref": "RW-019, REQ-008, AC-011",
+      "action": "Создавать временный `state_dir` и открывать `lifeline` pipe внутри единого `try/except BaseException` в `_spawn_serve`, гарантированно освобождая `_ACTIVE_SERVE_PORTS.discard(port)`, закрывая оба дескриптора `lifeline_r`/`lifeline_w`, удаляя `state_dir` и вызывая `lease.cleanup()` при любом сбое старта, а `OSError` при спавне транслировать в `ServeUnavailable`.",
+      "acceptance": "Любое исключение на старте `_spawn_serve` (включая `OSError` в `pipe`/`Popen`/`mkdtemp`) не оставляет сиротских FD, записей в `_ACTIVE_SERVE_PORTS` или каталогов `zen-serve-state-*` и переводит запрос в штатный fallback через `ServeUnavailable`.",
+      "source": "F-006 (skeptic · R1 · skeptic-06; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE; duplicates merged: F-022, F-039)",
+      "source_findings": [
+        "F-006"
+      ],
+      "evidence": "Ledger F-006: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE]; dissent=[realist d1 «DISPUTE F-006 класс: duplicate_of:F-022 — контр-evidence: `bridges/opencode-zen-bridge/server.py:1718`, `:2493`, `:2502`, `:2505`, `:2531`, `:2599` — state-dir, резерв порта и pipe создаются до » → teamlead/cycle-2/debate/d1/realist.md]; amendments=[—]."
+    },
+    {
+      "id": "RW-005",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:197-232",
+      "rule_ref": "RW-023, REQ-008, AC-011, T-LIFE/v1",
+      "action": "В `finally` процесса `--serve-helper` проверять живость всей процессной группы `_pgid_alive(child_pgid)` (через `os.killpg(child_pgid, 0)`), эскалировать `SIGKILL` на `-child_pgid`, если в группе остались живые процессы после `SIGTERM` (даже если прямой `serve_proc` уже вышел), и удалять `lease_path` только после подтверждения `not _pgid_alive(child_pgid)`.",
+      "acceptance": "Если `opencode serve` породил дочерний процесс в группе `child_pgid` и сам завершился, `--serve-helper` добивает всю группу `SIGKILL` и удаляет lease только после гибели всех процессов группы.",
+      "source": "F-007 (skeptic · R1 · skeptic-07; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE; duplicates merged: F-024)",
+      "source_findings": [
+        "F-007"
+      ],
+      "evidence": "Ledger F-007: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE]; dissent=[realist d1 «AMEND F-007 priority=blocking; locations=bridges/opencode-zen-bridge/server.py:197,bridges/opencode-zen-bridge/server.py:231,bridges/opencode-zen-bridge/server.py:232; fix=проверять и завершат» → teamlead/cycle-2/debate/d1/realist.md]; amendments=[realist d1: priority=blocking; locations=bridges/opencode-zen-bridge/server.py:197,bridges/opencode-zen-bridge/server.py:231,bridges/opencode-zen-bridge/server.py:232; fix=проверять и завершать остальных членов собственной группы не (teamlead/cycle-2/debate/d1/realist.md)]."
+    },
+    {
+      "id": "RW-006",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:4938-4955,6224,6314",
+      "rule_ref": "RW-024, REQ-008, AC-011",
+      "action": "В `Handler._client_gone_check` при `OSError` с `errno not in (errno.EAGAIN, errno.EWOULDBLOCK)` и при `ValueError` возвращать `True` (клиент отключился по `RST`/`EPIPE`/`EBADF`), а в `_serve_json_serve` проверять `is_client_gone()` перед отправкой итогового JSON-ответа.",
+      "acceptance": "Сброс клиентского сокета (`ECONNRESET`/`EPIPE`/`EBADF`) возвращает `True` в `_client_gone_check` как в SSE, так и в JSON-режиме.",
+      "source": "F-008 (skeptic · R1 · skeptic-08; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE; duplicates merged: F-026)",
+      "source_findings": [
+        "F-008"
+      ],
+      "evidence": "Ledger F-008: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE]; dissent=[realist d1 «DISPUTE F-008 класс: duplicate_of:F-026 — контр-evidence: `bridges/opencode-zen-bridge/server.py:4938`, `:4954`, `:4955`, `:6224` — передача checker в JSON добавлена, но RST по-прежнему попадает» → teamlead/cycle-2/debate/d1/realist.md]; amendments=[—]."
+    },
+    {
+      "id": "RW-007",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+      "line_hint": "tests/test_realtime_reasoning.py:112,489-873",
+      "rule_ref": "RW-025, REQ-001..020, AC-001..026, testing.md",
+      "action": "Заменить текстовые проверки исходника в `tests/test_realtime_reasoning.py` полноценными поведенческими оракулами: реальные сценарии `__never_event__` (`first_event_timeout`), `__silent__` (`first_token_timeout` и `stall_timeout`), паузы SSE `>0.5 с` без разрыва потока, раннего освобождения `_StartupGate` до завершения стрима, `ECONNRESET` в `_client_gone_check`, `fail_closed` на `HTTP 400/404/422` и сохранения `tool_choice` при step-interruption recovery.",
+      "acceptance": "Все тесты в `tests/test_realtime_reasoning.py` проверяют реальное поведение рантайма и падают при внесении соответствующей регрессии в `server.py`.",
+      "source": "F-009 (skeptic · R1 · skeptic-09; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE; duplicates merged: F-032, F-043)",
+      "source_findings": [
+        "F-009"
+      ],
+      "evidence": "Ledger F-009: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=DISPUTE, visionary=AGREE]; dissent=[realist d1 «DISPUTE F-009 класс: duplicate_of:F-032 — контр-evidence: `bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py:112`, `:115`, `:502`, `:591`, `:640`, `:830`, `:871`, `:881` — подтверждаю» → teamlead/cycle-2/debate/d1/realist.md]; amendments=[—]."
+    },
+    {
+      "id": "RW-008",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:2941-2965",
+      "rule_ref": "RW-009, REQ-006, REQ-007, AC-009, AC-010",
+      "action": "В `_serve_one_attempt` в потоке `_reader` не вызывать `resp.readline()` после `sock.settimeout(0.5)` (так как `SocketIO.readinto` помечает буфер закрытым после первого таймаута и превращает любую паузу >0.5 с в ложный EOF): читать байты напрямую через `select.select([raw_sock], [], [], 0.25)` и `raw_sock.recv(4096)` (или `resp.fp.read1` только при готовности `select`) с собственной построчной буферизацией до `\\n`.",
+      "acceptance": "Пауза между SSE-событиями >0.5 с (например, 1.5 с между `server.connected` и первой дельтой) не закрывает поток `_reader` и доставляет все последующие события без ложного `invalid_serve_event`.",
+      "source": "F-015 (realist · R1 · realist-02; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE; duplicates merged: F-037)",
+      "source_findings": [
+        "F-015"
+      ],
+      "evidence": "Ledger F-015: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-009",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:2385,2997,3063,5202-5208,6280",
+      "rule_ref": "REQ-009, AC-012",
+      "action": "Сделать барьер доставки (`delivered` / `headers_at`) монотонным на весь запрос: фиксировать `headers_at` сразу при отправке HTTP-заголовков/первого видимого чанка, а в `_run_serve_stream_attempts` вычислять `_delivered_err = bool(contents or reasonings or tool_calls_all or native_calls_seen or attempt_res.get(\"delivered\"))`, чтобы после отдачи клиенту любого `reasoning`/`text`/`tool` чанка не происходил тихий pre-delivery fallback на `run` без разделителя.",
+      "acceptance": "После отдачи клиенту любого видимого чанка (`reasoning`, `text`, `tool_call` или статуса) барьер доставки остаётся необратимо установленным (`delivered=True`) на всех последующих ветках обработки ошибок.",
+      "source": "F-017 (realist · R1 · realist-04; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND; duplicates merged: F-041, F-050)",
+      "source_findings": [
+        "F-017"
+      ],
+      "evidence": "Ledger F-017: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND]; dissent=[visionary d1 «AMEND F-017 priority=non-blocking; locations=server.py:2385,2997,3063,5208,6280; fix=выставлять `headers_at` по `getresponse()`, а не после `read()`, и считать `delivered` по latch «ответ на p» → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:2385,2997,3063,5208,6280; fix=выставлять `headers_at` по `getresponse()`, а не после `read()`, и считать `delivered` по latch «ответ на prompt получен» или «валидное execution-с (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-010",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:6195,6498",
+      "rule_ref": "RW-013, REQ-009, AC-013, R-BULK-I2",
+      "action": "В `_serve_json` после возврата `False` из `_serve_json_serve` проверять `attempts.can_spawn()` (`attempts.spawns < MAX_TOTAL_SPAWNS`) на каждой итерации legacy-цикла `run`, чтобы суммарное число спавнов `serve + run` в JSON-режиме никогда не превышало `MAX_TOTAL_SPAWNS = 3`.",
+      "acceptance": "В JSON-режиме при отказе `serve` и переходе на `run` суммарное число спавнов строго `<= 3` (`AC-013`).",
+      "source": "F-018 (realist · R1 · realist-05; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-018"
+      ],
+      "evidence": "Ledger F-018: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-011",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3236-3242",
+      "rule_ref": "RW-017, REQ-011",
+      "action": "В `_serve_one_attempt` при обработке `step_finish` проверять не только `result[\"native_calls\"]`, но и текстовые вызовы инструментов `_extract_tool_calls(\"\".join(result[\"text\"]))` (когда включена эмуляция текстовых инструментов), выставляя `result[\"terminal\"] = \"tool_calls\"` и завершая шаг.",
+      "acceptance": "Текстовый вызов инструмента в потоке `serve` закрывает шаг на `step_finish` с `terminal == \"tool_calls\"` так же, как нативный `tool` part.",
+      "source": "F-019 (realist · R1 · realist-06; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND)",
+      "source_findings": [
+        "F-019"
+      ],
+      "evidence": "Ledger F-019: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND]; dissent=[visionary d1 «AMEND F-019 priority=non-blocking; locations=server.py:3236,5000,5030; fix=по `step.ended` завершать попытку и при `tool_calls`, распарсенных `ToolCallParser`, либо после `terminal` ждать не д» → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:3236,5000,5030; fix=по `step.ended` завершать попытку и при `tool_calls`, распарсенных `ToolCallParser`, либо после `terminal` ждать не дольше короткого окна — причина: `finish_ (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-012",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5207-5285",
+      "rule_ref": "RW-018, REQ-011, AC-014",
+      "action": "Вынести эмиссию разделителя `[мост] Повтор попытки` в единую точку перед стартом следующей попытки (когда `attempt_idx > 0` и в предыдущих попытках уже был доставлен `reasoning` или статус), чтобы разделитель гарантированно отправлялся ровно один раз на каждый retry независимо от причины повтора (`transient_error`, `prompt_status`, `timeout`, `incomplete_step`).",
+      "acceptance": "На любом retry после уже отданного `reasoning` эмитится ровно один разделитель `[мост] Повтор попытки` (`AC-014`).",
+      "source": "F-020 (realist · R1 · realist-07; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND)",
+      "source_findings": [
+        "F-020"
+      ],
+      "evidence": "Ledger F-020: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND]; dissent=[visionary d1 «AMEND F-020 priority=non-blocking; locations=server.py:5211,5228,5255,5281; fix=единая эмиссия одного разделителя «Повтор попытки» на все причины повтора; объединить с фиксом F-027 — причина: » → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:5211,5228,5255,5281; fix=единая эмиссия одного разделителя «Повтор попытки» на все причины повтора; объединить с фиксом F-027 — причина: разделитель в веток unmapped/incomplete  (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-013",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:6323-6372",
+      "rule_ref": "RW-018, REQ-011, AC-014",
+      "action": "В `_serve_json_serve` дедуплицировать итоговый список `tool_calls_all` по семантическому ключу `_call_key(name, arguments)` (как для нативных вызовов, так и для вызовов, извлечённых из текста), исключая дублирование одинакового вызова инструмента в JSON-ответе.",
+      "acceptance": "В JSON-ответе `_serve_json_serve` одинаковый вызов инструмента `(name, arguments)` никогда не дублируется.",
+      "source": "F-021 (realist · R1 · realist-08; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND)",
+      "source_findings": [
+        "F-021"
+      ],
+      "evidence": "Ledger F-021: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND]; dissent=[visionary d1 «AMEND F-021 priority=non-blocking; locations=server.py:6323,6344,6372; fix=дедуплицировать `tool_calls_all` по `_call_key(name, arguments)`, как `emit_tool_call` в SSE-пути — причина: паритет » → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:6323,6344,6372; fix=дедуплицировать `tool_calls_all` по `_call_key(name, arguments)`, как `emit_tool_call` в SSE-пути — причина: паритет с SSE-путём полезен. Но одинаковый вызов (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-014",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5092-5136,6203-6243",
+      "rule_ref": "RW-001, REQ-013, S-HERD-I1",
+      "action": "Освобождать `_StartupGate` сразу по завершении фазы старта `serve` (после `_spawn_serve`, `/global/health` и подписки `/event` через callback `on_startup_ready`) и дублировать идемпотентный `gate.release()` в `finally` вокруг попытки как в `_run_serve_stream_attempts`, так и в `_serve_json_serve`.",
+      "acceptance": "`_StartupGate` удерживается только на время старта `serve` (а не всей генерации ответа) и гарантированно освобождается в `finally` в SSE и JSON путях.",
+      "source": "F-023 (realist · R1 · realist-10; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE; duplicates merged: F-005, F-040)",
+      "source_findings": [
+        "F-023"
+      ],
+      "evidence": "Ledger F-023: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-015",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:2432-2470",
+      "rule_ref": "RW-006, REQ-008, AC-011, T-LIFE/v1",
+      "action": "В `_ServeLease.cleanup()` разделить бюджет ожидания в рамках `AC-011` (`<= 7.0 с`): до `4.0 с` на завершение группы после `SIGTERM` и отдельное окно до `2.0 с` после эскалации `SIGKILL`, чтобы цикл подтверждения смерти группы `-pgid` после `SIGKILL` всегда выполнялся перед `lease_path.unlink()`.",
+      "acceptance": "При игнорировании `SIGTERM` процессная группа получает `SIGKILL`, цикл ожидания подтверждает её смерть в отдельном окне до `2.0 с`, и только после этого удаляется lease-файл.",
+      "source": "F-025 (realist · R1 · realist-12; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND)",
+      "source_findings": [
+        "F-025"
+      ],
+      "evidence": "Ledger F-025: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND]; dissent=[visionary d1 «AMEND F-025 priority=non-blocking; locations=server.py:2432,2444,2450,2470; fix=разделить бюджет: TERM-окно (например 3 с) и отдельное окно подтверждения после SIGKILL — причина: после полных » → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:2432,2444,2450,2470; fix=разделить бюджет: TERM-окно (например 3 с) и отдельное окно подтверждения после SIGKILL — причина: после полных 5 с TERM-ожидания цикл после SIGKILL не  (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-016",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3042,5079-5087",
+      "rule_ref": "RW-011, REQ-004, AC-005",
+      "action": "Сериализовать все записи в `self.wfile` в потоковом запросе общим `threading.Lock`, использовать единый потокобезопасный флаг `first_visible_sent` (`threading.Event`) для подавления фонового таймера после первой реальной дельты или статуса и обязательно отменять таймер (`timer.cancel()`) в `finally` запроса.",
+      "acceptance": "Фоновый таймер первого статуса не конкурирует с основным потоком за `wfile`, не срабатывает после завершения запроса и не дублирует `STATUS_INITIAL`.",
+      "source": "F-027 (realist · R1 · realist-14; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND; duplicates merged: F-042)",
+      "source_findings": [
+        "F-027"
+      ],
+      "evidence": "Ledger F-027: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND]; dissent=[visionary d1 «AMEND F-027 priority=non-blocking; locations=server.py:3042,5079-5087; fix=один владелец записей статусов, общий флаг «первый статус отправлен», `cancel` таймера в `finally` — причина: `wfile`» → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:3042,5079-5087; fix=один владелец записей статусов, общий флаг «первый статус отправлен», `cancel` таймера в `finally` — причина: `wfile` не буферизован (`BaseHTTPRequestHandler (teamlead/cycle-2/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-017",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5649,5743",
+      "rule_ref": "RW-011, REQ-004, AC-005",
+      "action": "Запускать защитный таймер первого видимого статуса (`<= 1.0 с`) до входа в `_StartupGate.acquire()` также на legacy-пути `run` (разделив с ним тот же потокобезопасный `wfile_lock` и `first_visible_sent`), чтобы `REQ-004` (`<= 1.0 с`) выполнялся и при `TRANSPORT=run` под конкуренцией на `_StartupGate`.",
+      "acceptance": "При `TRANSPORT=run` и задержке в `_StartupGate` первый видимый статус `[мост] ...` доставляется клиенту не позднее `1.0 с` (`AC-005`).",
+      "source": "F-028 (realist · R1 · realist-15; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-028"
+      ],
+      "evidence": "Ledger F-028: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-018",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5180,5207,6265",
+      "rule_ref": "RW-014, RW-016, REQ-009, R-BULK-I3",
+      "action": "В `_run_serve_stream_attempts` и `_serve_json_serve` при транзиентных апстрим-ошибках `serve` (`transient_error`, `HTTP 429/5xx`, `timeout`) вызывать `attempts.attempt_done(is_429, False)`, чтобы общий upstream Circuit Breaker учитывал сбои апстрима в режиме `serve`.",
+      "acceptance": "Повторные транзиентные ошибки апстрима (`429`/`5xx`/`timeout`) в режиме `serve` учитываются в общем upstream Circuit Breaker.",
+      "source": "F-031 (realist · R1 · realist-18; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-031"
+      ],
+      "evidence": "Ledger F-031: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-019",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:1370,2831,5119,6228",
+      "rule_ref": "RW-001, REQ-013",
+      "action": "Убрать повторный вызов `_next_standalone_proxy()` внутри `_serve_one_attempt` (передавать уже выбранный на попытку `proxy_url` в `_serve_env(proxy_url)` без повторной ротации внутри `_run_env`), чтобы пул прокси сдвигался ровно на 1 шаг за одну попытку `serve`.",
+      "acceptance": "Каждая попытка `serve` продвигает циклический индекс прокси ровно на 1 позицию.",
+      "source": "F-035 (realist · R1 · realist-22; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND)",
+      "source_findings": [
+        "F-035"
+      ],
+      "evidence": "Ledger F-035: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AMEND]; dissent=[visionary d1 «AMEND F-035 priority=non-blocking; locations=server.py:1696,2831,5119,6228; fix=убрать явный `proxy_url=_next_standalone_proxy()` из `_serve_one_attempt` и брать `HTTP_PROXY` из `_run_env` (ег» → teamlead/cycle-2/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=server.py:1696,2831,5119,6228; fix=убрать явный `proxy_url=_next_standalone_proxy()` из `_serve_one_attempt` и брать `HTTP_PROXY` из `_run_env` (его результат уже проходит `_serve_env`),  (teamlead/cycle-2/debate/d1/visionary.md)]."
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Удалить неиспользуемую локальную переменную `_seen_tc` в `_serve_json_serve` (`server.py:6370`) при внедрении дедупликации `tool_calls_all` по `RW-013`.",
+      "reason": "Согласовано в D1 как non-blocking гигиена кода.",
+      "source_findings": [
+        "F-004"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-002",
+      "text": "В `_serve_json_serve` накапливать `result[\"usage\"]` в `usage_total` также на неуспешных попытках перед `continue` (`server.py:6259,6285`), аналогично потоковому пути.",
+      "reason": "Non-blocking учёт токенов при ретраях в JSON-режиме (включая дубли `F-033` и `F-049`).",
+      "source_findings": [
+        "F-011"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-003",
+      "text": "В `_startup_reaper` (`server.py:2639-2660`) сверять `helper_lstart` из lease-файла с фактическим временем старта `helper_pid` через `ps -p <pid> -o lstart=`.",
+      "reason": "Non-blocking защита от переиспользования `helper_pid` (включая дубль `F-029`).",
+      "source_findings": [
+        "F-012"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-004",
+      "text": "В `_serve_one_attempt` при первом нативном `tool_event` вычислять `result[\"ttft_ms\"]` наряду с `result[\"first_token_at\"]`, чтобы для tool-only ответов поле `ttft_ms` в `O-EXIT/v1` было заполнено целым числом.",
+      "reason": "Non-blocking уточнение телеметрии `O-EXIT/v1` для tool-only ответов.",
+      "source_findings": [
+        "F-013"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-005",
+      "text": "Сохранить единообразие тестового раннера в `tests/test_realtime_reasoning.py` (совместимого с `pytest` и `unittest`), без переписывания всех 17 существующих модулей `tests/`.",
+      "reason": "Понижено большинством 2/3 (`skeptic` + `visionary`) в D1 до non-blocking: все существующие тесты репозитория используют `unittest.TestCase` и проходят под `pytest`.",
+      "source_findings": [
+        "F-034"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-006",
+      "text": "Ограничить диагностический буфер `_LSOF_CALLS` в `server.py:1433,2345` кольцевой очередью `collections.deque(maxlen=64)`.",
+      "reason": "Non-blocking защита от роста диагностического списка при длительном аптайме демона.",
+      "source_findings": [
+        "F-036"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-007",
+      "text": "В `_ensure_lease_dir` и `_startup_reaper` проверять `os.lstat(lease_dir).st_uid == os.getuid()` и отсутствие симлинков на `LEASE_DIR` и lease-файлах.",
+      "reason": "Non-blocking усиление проверки владения `LEASE_DIR`.",
+      "source_findings": [
+        "F-044"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-008",
+      "text": "Сохранить минимальный diff форматирования в пределах 3 целевых файлов конверта.",
+      "reason": "Согласовано в D1 (`skeptic` + `realist` + `visionary`) как non-blocking.",
+      "source_findings": [
+        "F-046"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-009",
+      "text": "Уточнить пояснения в комментариях `# pyright: ignore[...] — причина:` в `tests/test_realtime_reasoning.py`.",
+      "reason": "Согласовано в D1 как non-blocking (`VER-004` `basedpyright` проходит с `0` ошибок).",
+      "source_findings": [
+        "F-047"
+      ],
+      "decision_required_human": false
+    }
+  ],
+  "excluded": [
+    {
+      "id": "F-005",
+      "reason": "duplicate_of:F-023"
+    },
+    {
+      "id": "F-010",
+      "reason": "out_of_scope"
+    },
+    {
+      "id": "F-014",
+      "reason": "duplicate_of:F-002"
+    },
+    {
+      "id": "F-016",
+      "reason": "duplicate_of:F-003"
+    },
+    {
+      "id": "F-022",
+      "reason": "duplicate_of:F-006"
+    },
+    {
+      "id": "F-024",
+      "reason": "duplicate_of:F-007"
+    },
+    {
+      "id": "F-026",
+      "reason": "duplicate_of:F-008"
+    },
+    {
+      "id": "F-029",
+      "reason": "duplicate_of:F-012"
+    },
+    {
+      "id": "F-030",
+      "reason": "duplicate_of:F-001"
+    },
+    {
+      "id": "F-032",
+      "reason": "duplicate_of:F-009"
+    },
+    {
+      "id": "F-033",
+      "reason": "duplicate_of:F-011"
+    },
+    {
+      "id": "F-037",
+      "reason": "duplicate_of:F-015"
+    },
+    {
+      "id": "F-038",
+      "reason": "duplicate_of:F-002"
+    },
+    {
+      "id": "F-039",
+      "reason": "duplicate_of:F-006"
+    },
+    {
+      "id": "F-040",
+      "reason": "duplicate_of:F-023"
+    },
+    {
+      "id": "F-041",
+      "reason": "duplicate_of:F-017"
+    },
+    {
+      "id": "F-042",
+      "reason": "duplicate_of:F-027"
+    },
+    {
+      "id": "F-043",
+      "reason": "duplicate_of:F-009"
+    },
+    {
+      "id": "F-045",
+      "reason": "invalid_after_recheck"
+    },
+    {
+      "id": "F-048",
+      "reason": "duplicate_of:F-001"
+    },
+    {
+      "id": "F-049",
+      "reason": "duplicate_of:F-011"
+    },
+    {
+      "id": "F-050",
+      "reason": "duplicate_of:F-017"
+    }
+  ]
+}

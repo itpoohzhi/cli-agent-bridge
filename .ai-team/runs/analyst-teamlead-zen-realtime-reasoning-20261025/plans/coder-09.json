@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-08.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004"
+  ],
+  "objective": "Устранить RW-001..RW-004 и FU-001 Cycle 7 с регрессионными оракулами и неизменными frozen-функциями",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-6/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-08.json"
+  ],
+  "stop_conditions": [
+    "Менять только три разрешённых файла и отчёты coder-09",
+    "Frozen-функции побайтово неизменны",
+    "Форматирование legacy-файлов только --range",
+    "Без commit/push/MR; сохранять Python 3.9 AST и ранний helper dispatch"
+  ],
+  "deviations": [
+    "RW-001 и RW-004 превышают сигнальные 15 строк: обязательные изменения распределены между Run/Handler и тремя HTTP-фазами; дополнительные ms вычисляются из timestamp относительно xs.t0, поскольку O-EXIT читает first_event_ms/ttft_ms.",
+    "FU-001 превышает 15 строк: ограниченное дочитывание очереди с фильтрацией session/assistantMessageID вынесено в приватный _drain_serve_step_usage, поскольку вложенный цикл в _serve_one_attempt вызвал reportGeneralTypeIssues (complexity). Скелет основного алгоритма сохранён.",
+    "При промежуточном диапазонном форматировании заранее вычисленные диапазоны сдвинулись и затронули frozen _stream_google_sse. Срез немедленно восстановлен побайтово из origin/dev; последующее форматирование шло снизу вверх. VER-004 окончательно подтвердил все три исходных digest и write-mode на копии.",
+    "Невынужденное промежуточное форматирование прежних сигнатур и GoogleInput/выражений с Any отменено; финальный changed-range gate не содержит новых Any/ignore/noqa/fmt-off.",
+    "RW-003 сохраняет существующий отложенный commit Circuit Breaker по итогу запроса: тест выполняет два запроса MAX_TOTAL_SPAWNS=1 для каждой фазы, проверяя [1,2] отказов и OPEN при пороге 2; record_success не вызывается.",
+    "Полный набор ограничен самостоятельным проектом bridges/opencode-zen-bridge (471 тест); соседние проекты репозитория вне задания не запускались. Commit/push/MR не выполнялись.",
+    "validate_handoff.py требует --role-plan; использован этот аргумент. before-план не изменялся."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Добавить регрессионные оракулы RW-001..004 и FU-001 до фикса server.py",
+      "expected_evidence": "RED pytest для пяти находок",
+      "status": "DONE",
+      "actual_evidence": "~/work/cli-agent-bridge/coder-09-20261027/red.log: до server.py — 5 failed, 87 deselected in 8.26s. Исправлена синхронизация чтения O-EXIT с его записью; финальные тесты test_c7_* и усиленный test_c6_rw003_* проходят в target-pytest.log (200 passed)."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Исправить времена JSON, барьер доставки и учёт watchdog в breaker",
+      "expected_evidence": "GREEN для RW-001..003",
+      "status": "DONE",
+      "actual_evidence": "RW-001: классификация watchdog, timestamps и ms в JSON; RW-002: execution-событие в _is_delivered; RW-003: watchdog включён в transient_failure до attempt_done. ~/work/cli-agent-bridge/coder-09-20261027/target-pytest.log — 200 passed in 225.80s."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Ограничить startup-фазы и дочитать usage закрываемого tool-шага",
+      "expected_evidence": "GREEN для RW-004 и FU-001",
+      "status": "DONE",
+      "actual_evidence": "RW-004: абсолютные бюджеты ready/create/subscribe и cleanup под капающими заголовками. FU-001: ограниченное дочитывание usage текущего шага, input=123/output=45/cached=10/reasoning=67; новые text/tool события отфильтрованы. ~/work/cli-agent-bridge/coder-09-20261027/target-pytest.log — 200 passed."
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Прогнать VER-004, целевые тесты и полный набор тестов моста",
+      "expected_evidence": "Сырые результаты format/lint/type/pytest и frozen sha256",
+      "status": "DONE",
+      "actual_evidence": "~/work/cli-agent-bridge/coder-09-20261027/ver004-final.log: PASS, frozen 3/3, lint/type errors=0, warnings=759 (server=590, новый test=0), catalog=8/8, AST 3.9. target-pytest.log: 200 passed; full-pytest.log: 471 passed in 278.49s; baseline-collect.log: 92 tests collected, rc=0."
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Записать after-план, handoff и идентичные квитанции coder-09",
+      "expected_evidence": "Валидаторы after-плана и handoff exit=0",
+      "status": "DONE",
+      "actual_evidence": "after-план, handoff и две идентичные квитанции записаны; validate_role_plan --phase after и validate_handoff coder --role-plan проходят (сырой вывод: ~/work/cli-agent-bridge/coder-09-20261027/validation.log). before sha256=71c7e1de71b96e37701fa0cd0010ca34fcc5b9c66520fd845d9e16564b408863"
+    }
+  ],
+  "actual_evidence": "~/work/cli-agent-bridge/coder-09-20261027/ver004-final.log: PASS, frozen 3/3, lint/type errors=0, warnings=759 (server=590, новый test=0), catalog=8/8, AST 3.9. target-pytest.log: 200 passed; full-pytest.log: 471 passed in 278.49s; baseline-collect.log: 92 tests collected, rc=0."
+}

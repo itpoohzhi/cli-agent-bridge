@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 12,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-14.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004"
+  ],
+  "objective": "Устранить RW-001..RW-004 Цикла 12 в трёх разрешённых файлах; сохранить frozen bytes и unittest, передать Reviewer без commit/push/MR.",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-11/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoffs/coder-14.json"
+  ],
+  "stop_conditions": [
+    "Только coder_target_files и разрешённые coder-15 артефакты",
+    "Без commit/push/MR и живого моста; frozen bytes неизменны"
+  ],
+  "deviations": [
+    "RW-001..RW-003 exceed the rework 1–15 line signal: coordinated control pairing, two retry engines and deadline propagation require several blocks. Helpers are private/local; no new classes, DTOs, dependencies or unrelated refactoring.",
+    "The supplied _stream_google_sse hash has 63 hex. Raw bytes remain equal to origin/dev and coder-14: 5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3.",
+    "VER-004 reused coder-10/ver004-offline.py in a local copy with explicit --diff-algorithm=patience for both range calculations. Default git diff placed unchanged legacy _new_exit_state Any signature inside an added hunk after insertion-size changes. The signature is unchanged from origin/dev and the whole function is byte-identical to coder-15 input; patience reports zero added forbidden lines. Original failed gate logs retained. No rules/thresholds were relaxed.",
+    "Initial concurrent targeted/full pytest/unittest runs failed with ownership errors (foreign listener) during FakeServe startup. Isolated failing subsets and the whole realtime file passed. All mandatory final suites repeated serially without ownership bypass or source changes; runner-only kqueue context-manager error fixed outside repository.",
+    "Exact Russian interruption marker from brief was not handled by existing _strip_interrupted. Added exact literal removal there and covered it in both retry engines; no heuristic error parsing."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001: fail-closed control HTTP main/drain",
+      "expected_evidence": "SecurityError без retry/fallback, нейтральный disconnect/deadline",
+      "status": "DONE",
+      "actual_evidence": "test_c12_rw001_control_errors_are_terminal_main_sse_json; test_c12_rw001_main_control_disconnect_and_deadline_are_neutral; test_c12_rw001_drain_reject_preserves_neutral_exceptions; 40 main SSE/JSON control-error/status subcases: cancel/reply/interrupt failures -> ServeSecurityError, interrupt attempted, one spawn, no Run.execute fallback; 8 neutral main subcases + drain exception/status matrix.; ~/work/cli-agent-bridge/coder-15-20261028/c12-final2.log (9 passed)."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002: сохранить частичный текст, reasoning и usage retry serve JSON/Run.execute",
+      "expected_evidence": "Обе попытки сохранены, текст очищен и дедуплицирован, usage суммирован",
+      "status": "DONE",
+      "actual_evidence": "test_c12_rw002_json_retry_preserves_partial_output_and_usage; test_c12_rw002_run_retry_preserves_partial_output_and_usage; JSON stall/prompt_status/transient retries preserve both reasonings, clean/dedup content and 22/13/7 tokens; Run watchdog/CLI retries preserve reasoning/text/chunks and component usage, discard failed native calls/tool blocks. English and exact Russian interruption markers covered.; ~/work/cli-agent-bridge/coder-15-20261028/c12-final2.log (9 passed)."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "RW-003: скользящий drain в рамках attempt_deadline",
+      "expected_evidence": "Живой шаг >2 окон завершается, тишина/hard deadline прерывают",
+      "status": "DONE",
+      "actual_evidence": "test_c12_rw003_drain_activity_extends_window_but_not_hard_deadline; test_c12_rw003_main_passes_attempt_deadline_to_active_drain; 0.15 s window with 0.08 s events lasts 0.4 s and publishes two calls only after step.ended. Silence/foreign session do not extend; hard deadline caps active stream. Real _serve_one_attempt forwards deadline and preserves tail.; ~/work/cli-agent-bridge/coder-15-20261028/c12-final2.log (9 passed)."
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "RW-004: согласовать unmapped исчерпание",
+      "expected_evidence": "JSON 200 stop с диагностикой",
+      "status": "DONE",
+      "actual_evidence": "test_c12_rw004_unmapped_exhaustion_returns_diagnostic_json; test_c12_rw004_unmapped_exhaustion_transport_matrix; Exact JSON 200/stop diagnostic; serve/run x SSE/JSON under local cap, total spawn cap and denied retry. SSE leading newlines normalized only for cross-transport comparison.; ~/work/cli-agent-bridge/coder-15-20261028/c12-final2.log (9 passed)."
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Проверить VER-004, targeted/full pytest и unittest; валидировать handoff",
+      "expected_evidence": "rc=0, frozen raw bytes PASS",
+      "status": "DONE",
+      "actual_evidence": "VER-004 PASS; final serial targeted pytest, full pytest and full unittest rc=0; frozen 3/3. Raw outputs: ~/work/cli-agent-bridge/coder-15-20261028/targeted-serial.log, full-pytest-serial.log, unittest-serial.log, ver004-patience.log. Bound after-plan and handoff validated after writing."
+    }
+  ]
+}

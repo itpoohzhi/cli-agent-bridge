@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-05.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005",
+    "RW-006",
+    "RW-007",
+    "RW-008"
+  ],
+  "objective": "Хирургически устранить RW-001..RW-008 и FU-001..FU-015 Совета Тимлидов Cycle 3 только в server.py, tests/test_realtime_reasoning.py, tests/test_step_interruption.py без изменения замороженных _run_env/_stream_google_sse/_execute_google_once",
+  "inputs_read": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    "plans/coder-05.json",
+    "бриф Coder coder-06 (RW-001..RW-008, FU-001..FU-015)",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoffs/coder-05.json",
+    "bridges/opencode-zen-bridge/tests/test_go_model_routing.py (только чтение для диагностики упавшего оракула)"
+  ],
+  "stop_conditions": [
+    "Менять только 3 продуктовых/тестовых файла из брифа и файлы отчётности coder-06",
+    "Не трогать замороженные _run_env/_stream_google_sse/_execute_google_once (sha256 VER-004)",
+    "Не запускать full-file ruff format server.py; только --range по изменённым ханкам",
+    "Не делать git commit/push/gh pr create",
+    "Сохранить ранний перехват --serve-helper и совместимость ast feature_version=(3,9)"
+  ],
+  "deviations": [
+    "Продолжение coder-06 после лимита предыдущего процесса; before-план сохранён без изменений, sha256=d19c0733f8c7f0bb6212c225fdff32acdfe605bf9993696a1e2165e4d950d459.",
+    "Блокер RP-03 снят внутри allowlist: резерв spawn_limiter возвращается при OSError из _spawn_with_stdin в Run._execute_once и Handler._stream_sse. tests/test_go_model_routing.py не менялся; оба полных прогона: 445/445, exit=0.",
+    "Ранее предложенная изоляция _DEFAULT_RESILIENCE в Go-тесте не применялась: существующий регрессионный тест воспроизвёл дефект до фикса (1 failed, 9 passed) и прошёл в полном suite после фикса.",
+    "Повреждение форматированием устранено дословным возвратом AST-эквивалентных функций, сигнатур и выражений к origin/dev. Full-file ruff format server.py не запускался; диапазоны форматировались на временной копии в обратном порядке, с защитой frozen байтов.",
+    "Ошибку дополнительного контроля HTTP/1.0 (EBADF после последней порции тела) поймал полный pytest; исправлена проверкой resp.isclosed(), профильные и финальные проверки повторены.",
+    "В брифе лимитер назван _TokenBucket, но фактический класс — _SpawnRateLimiter с полем _burst. Метод refund добавлен в существующий класс без переименования и без нового слоя; delta coder-06c — 7 добавленных строк server.py.",
+    "Пути teamlead-gate/scripts/validate_role_plan.py и validate_handoff.py из брифа отсутствуют (ENOENT). Найдены и использованы существующие валидаторы ~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/ с теми же CLI-параметрами."
+  ],
+  "actual_evidence": "VER004_EXIT:0; basedpyright errors=0, server warnings=591 <=720, step warnings=169 <=194, newfile diagnostics=0; frozen SHA-256 3/3 PASS; pytest: 445 passed in 175.70s (0:02:55); unittest: Ran 445 tests in 174.375s; OK; оба full-suite exit=0, run-guarded. Сырые логи: ~/work/cli-agent-bridge/coder-06c-20261027-o33ihuod/ver004.log, ~/work/cli-agent-bridge/coder-06c-20261027-o33ihuod/full-pytest.log, ~/work/cli-agent-bridge/coder-06c-20261027-o33ihuod/full-unittest.log.",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Правки server.py: RW-001 (headers_at после getresponse + монотонный барьер delivered_any во всех 4 ветках return False), RW-002 (status_timer.cancel() после spawn_limiter.acquire()), RW-003 (_serve_env в try/except OSError -> ServeUnavailable), RW-004 (_native_call_as_dsh через _native_to_tool_calls), RW-005 (_stop_proc: SIGTERM/SIGKILL группы даже если лидер вышел), RW-006 (catch OSError|ValueError в _read_dynamic_config_enabled), RW-007 (потоковый фильтр split маркеров прерывания), RW-008 (_clean_err/_mask_secrets в _error_payload), FU-001..FU-015",
+      "expected_evidence": "AST/grep-подтверждения по каждому RW в server.py; замороженные sha256 неизменны",
+      "status": "DONE",
+      "actual_evidence": "RW-001..RW-008 и FU-001..FU-015 сверены/доведены; подробная карта в handoffs/coder-06.json acceptance_coverage и finding_evidence. Все три frozen SHA-256 совпали с литералами брифа и origin/dev. Согласованный API не менялся. coder-06c: _SpawnRateLimiter.refund под _lock возвращает неиспользованный резерв с ограничением _burst; оба except OSError после _spawn_with_stdin вызывают refund."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Добавить в tests/test_realtime_reasoning.py регрессионные тесты на RW-001..RW-008 и поправить FU-005/008/013/015",
+      "expected_evidence": "Новые тесты присутствуют; basedpyright 0 ошибок на файле; collect rc=0 на непропатченном origin/dev",
+      "status": "DONE",
+      "actual_evidence": "Добавлено 14 тестов (всего 66 в test_realtime_reasoning.py); целевые два модуля: 174 passed in 129.88s. Новый тестовый файл собирается на чистом origin/dev: 66 tests collected in 0.05s, BASELINE_COLLECT_EXIT:0. VER-004: новый файл 0 diagnostics."
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "VER-004 (ruff format --range только изменённых диапазонов, frozen sha256, basedpyright, test_catalog_mode); полный uvx --from pytest==8.3.4 pytest -q -p no:cacheprovider tests; полный python3 -m unittest discover -s tests -p test_*.py",
+      "expected_evidence": "VER004_EXIT:0, pytest exit 0, unittest exit 0",
+      "status": "DONE",
+      "actual_evidence": "VER004_EXIT:0; basedpyright errors=0, server warnings=591 <=720, step warnings=169 <=194, newfile diagnostics=0; frozen SHA-256 3/3 PASS; pytest: 445 passed in 175.70s (0:02:55); unittest: Ran 445 tests in 174.375s; OK; оба full-suite exit=0, run-guarded. Сырые логи: ~/work/cli-agent-bridge/coder-06c-20261027-o33ihuod/ver004.log, ~/work/cli-agent-bridge/coder-06c-20261027-o33ihuod/full-pytest.log, ~/work/cli-agent-bridge/coder-06c-20261027-o33ihuod/full-unittest.log. Существующие Go-тесты и test_rw002_initial_status_while_waiting_spawn_limiter включены в оба зелёных full-suite."
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Записать plans/coder-06.json (phase after, DONE), handoffs/coder-06.json, coder.json и receipts/coder.json с sha256 плана; validate_role_plan --phase after и validate_handoff exit 0",
+      "expected_evidence": "validate_role_plan --phase after exit 0; validate_handoff coder exit 0",
+      "status": "DONE",
+      "actual_evidence": "Обновлены четыре разрешённых отчёта; handoff DONE, next_role=reviewer, unresolved_risks/open_questions пусты. role_plan.sha256 привязан к точным байтам after-плана, три копии handoff байтово идентичны. validate_role_plan --phase after и validate_handoff coder выполнены по существующим путям orchestrate-coder-reviewer-summarizer/scripts; оба exit=0."
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a17a2e-7c14-7b20-a027-e03016e12211"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Under-development features enabled: respect_system_proxy. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /Users/aazhiry1/.codex/config.toml."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":29668,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":17,"reasoning_output_tokens":10}}

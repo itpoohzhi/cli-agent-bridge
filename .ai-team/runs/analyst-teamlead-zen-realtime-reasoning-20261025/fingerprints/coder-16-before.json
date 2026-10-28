@@ -1,0 +1,12 @@
+{
+  "schema": "worktree-fingerprint/v1",
+  "phase": "before",
+  "round_id": "coder-16",
+  "captured_at_utc": "2026-10-27T23:46:59.035514+00:00",
+  "digest": "51bd8af785a8e72e3938c734675d211f9b0521acd16c2ffc2ff0b4ec5f673842",
+  "files": {
+    "bridges/opencode-zen-bridge/server.py": "236cb82e0dcc91e5efc78266218af5cbae331791833967bf19d273ad45a45a20",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py": "9a7d2e29f5518ca1f75f289ccb2034e735d42f634ce8120c51fcedc6829becd4",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py": "2b177a32290adfebeffad700b1c3c3251619e83cba90032217576c777beb80ef"
+  }
+}

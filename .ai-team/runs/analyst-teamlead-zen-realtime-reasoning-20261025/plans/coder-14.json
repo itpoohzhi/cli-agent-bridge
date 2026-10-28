@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 11,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-13.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005",
+    "RW-006"
+  ],
+  "objective": "Устранить RW-001..RW-006 Цикла 11 в разрешённых файлах с regression-оракулами, неизменными frozen-функциями и совместимостью unittest; передать Reviewer без commit/push/MR и без живого моста.",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-10/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-14.before.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoffs/coder-13.json"
+  ],
+  "stop_conditions": [
+    "Продуктовые правки только server.py и tests/test_realtime_reasoning.py; tests/test_step_interruption.py разрешён, но не изменён относительно входного состояния",
+    "Замороженные функции побайтово равны origin/dev; Python 3.9 AST и ранний helper dispatch сохранены",
+    "Без commit/push/MR, без живого ~/.dsh/bridges/opencode-zen-bridge/ и без бизнес-приёмки"
+  ],
+  "deviations": [
+    "RW-002 превышает 15 строк: остаточный дедлайн prompt, единовременное списание до headers/execution, подписка до первого SSE и control I/O требуют согласованных изменений нескольких фаз одной попытки; архитектура и публичные DTO сохранены.",
+    "RW-003 превышает 15 строк из-за переноса существующей обёртки до заголовков/role, RLock для таймера и раннего возврата при ошибке; новых классов/слоёв/зависимостей нет.",
+    "Указанный в брифе hash _stream_google_sse имеет 63 hex. Сохранён подтверждённый origin/dev и handoff coder-13 полный hash 5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3.",
+    "Сокетный оракул использует настоящий PGID lease в cleanup; штатный downstream timeout 5.0 с не подменяется. Изолированная проверка не зависит от записи FakeServe вспомогательного record-файла."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001/RW-005/RW-006: доставить хвост drain при tools, очищать только вход классификатора при непустом финальном тексте и учитывать UTF-8 ID/имя native вызова",
+      "expected_evidence": "SSE/JSON хвост ровно один раз + один tool_call; serve/run одна попытка и raw reasoning; main/drain byte-cap до called",
+      "status": "DONE",
+      "actual_evidence": "C11 pytest/unittest 11 PASS; AC-016 и весь полный набор 502 PASS. Тесты c11_rw001, c11_rw005, c11_rw006; pending не публикуются при ServeProtocolError."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002/RW-003/RW-004: замкнуть aux дедлайны и учёт prompt/подписки/control; ограничить headers/role/status и логировать callback с гарантированным abort_socket",
+      "expected_evidence": "Реальные prompt и SSE точки расходуют максимум 54 с, новый I/O при exhausted запрещён; bounded initial writes и cleanup менее 7 с",
+      "status": "DONE",
+      "actual_evidence": "C11 реальные HTTP/FakeServe оракулы prompt <=2 с при остатке 1 с, 20+20+14 через _serve_one_attempt, control main/drain, generation исключена; штатный downstream timeout 5 с, release/PGID death <7 с; bridge.log read-back маскирован."
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Проверить frozen raw bytes, VER-004 и все pytest/unittest сценарии; записать after-план и связанный handoff coder-14",
+      "expected_evidence": "VER-004 PASS; full pytest и unittest PASS; after ROLE PLAN и coder handoff валидны",
+      "status": "DONE",
+      "actual_evidence": "VER-004 PASS; full pytest 502 PASS; full unittest 502 OK; финальная точная команда для двух файлов 231 PASS (targeted-final.log); C11 pytest/unittest 11 PASS. Схемы after-плана и bound handoff проверяются validate_role_plan.py/validate_handoff.py; журнал ~/work/cli-agent-bridge/coder-14-20261027/validation-final.log."
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"response": "", "status": "ERROR", "duration_seconds": 146.637525, "usage": {"input_tokens": 245278, "output_tokens": 4058, "thinking_tokens": 2705, "cache_read_tokens": 13114, "total_tokens": 249336}, "stats": {"input_tokens": 245278, "output_tokens": 4058, "thinking_tokens": 2705, "cache_read_tokens": 13114, "total_tokens": 249336}, "thinking_tokens": 2705}

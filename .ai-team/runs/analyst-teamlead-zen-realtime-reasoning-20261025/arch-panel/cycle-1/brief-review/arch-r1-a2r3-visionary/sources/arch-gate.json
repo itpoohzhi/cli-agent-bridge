@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "gate": "ARCH_GATE",
+  "status": "PASS",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "criticality": "S2",
+  "packet_sha256": "c3936c99b53fc50508c113c88368f0b75b01d250d8345ee3be175c753a8b9a3d",
+  "verification_surface_sha256": "66e68ca767d07b24b7afacb40f8c84abde9f26837a50d38ccba03a3824a5ce84",
+  "protected_paths_sha256": "98f7f5f54622baf379b40bad458cf3ef2a1952644fb79fb662ebe11f70659d8b",
+  "architect_worktree_sha256": "2bcabd4d9c9bdf3d108afbae3344a2b4e7350c7d697355529fc2360d73eb7334",
+  "materialized_targets": 0
+}

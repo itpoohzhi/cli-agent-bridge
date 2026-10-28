@@ -1,0 +1,45 @@
+{
+  "panel": "arch",
+  "round": "R1-a2",
+  "cycle": 1,
+  "seat": "skeptic",
+  "iteration": 1,
+  "run_kind": "targeted",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "9a9da58eda939619a51c10bc822f814e1d8678012990516be7ea2eac7d0bcf98",
+  "checklist_gen": 2,
+  "checklist_sha256": "e8e1329561fab775cc9ac1867daf0a5eb92341c3ff83ab1a862325138d718f33",
+  "reviewer_slot": "claude-sonnet-5-5",
+  "transport": "claude-p",
+  "transport_attempts": [
+    {
+      "transport": "claude-p",
+      "file": "review-v1-g2-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 19,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 19,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "BR-48",
+      "status": "covered",
+      "evidence_quote": "Если работа этой роли меняет Git-репозиторий, перед сдачей обязательно прочитать и",
+      "fix": "",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [],
+  "dropped": [],
+  "model_verdict": "APPROVE",
+  "model_verdict_mismatch": false,
+  "verdict": "APPROVE",
+  "blocked_reason": null,
+  "open_ids": []
+}

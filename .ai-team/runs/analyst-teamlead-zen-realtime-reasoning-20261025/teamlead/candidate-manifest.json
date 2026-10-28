@@ -1,0 +1,42 @@
+{
+  "schema": "candidate-manifest/v1",
+  "created_at_utc": "2026-10-27T23:00:45.394185+00:00",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "cycle": 12,
+  "branch": "feature/zen-realtime-reasoning",
+  "base_ref": "origin/dev",
+  "base_sha": "7eda27f9d82732bab726a420e31ea2adc15c2c39",
+  "head_sha": "7eda27f9d82732bab726a420e31ea2adc15c2c39",
+  "staged_diff_bytes": 0,
+  "binary_files": [],
+  "worktree_fingerprint_before_coder": "a44424343a049cdb62bc830eac9fe7bb2b3dd305a4df8dc76b978d252b4f6e39",
+  "worktree_fingerprint_after_coder": "51bd8af785a8e72e3938c734675d211f9b0521acd16c2ffc2ff0b4ec5f673842",
+  "candidate_diff_path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/candidate.diff",
+  "candidate_diff_sha256": "06e18516ba8308cc580efcb8913287da91d4c20ef0ae5fe55e060ffb60514300",
+  "files": [
+    {
+      "path": "bridges/opencode-zen-bridge/server.py",
+      "status": "modified_unstaged",
+      "is_binary": false,
+      "bytes": 389278,
+      "lines": 8919,
+      "sha256": "236cb82e0dcc91e5efc78266218af5cbae331791833967bf19d273ad45a45a20"
+    },
+    {
+      "path": "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+      "status": "added_untracked",
+      "is_binary": false,
+      "bytes": 280059,
+      "lines": 5306,
+      "sha256": "9a7d2e29f5518ca1f75f289ccb2034e735d42f634ce8120c51fcedc6829becd4"
+    },
+    {
+      "path": "bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+      "status": "modified_unstaged",
+      "is_binary": false,
+      "bytes": 59094,
+      "lines": 1109,
+      "sha256": "2b177a32290adfebeffad700b1c3c3251619e83cba90032217576c777beb80ef"
+    }
+  ]
+}

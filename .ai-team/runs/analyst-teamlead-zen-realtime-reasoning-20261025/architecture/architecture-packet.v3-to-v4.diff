@@ -1,0 +1,1272 @@
+# Mechanical unified diff (diff -u): Architecture Packet v3 -> v4
+# old_revision: architecture-packet.v3.json sha256=8edcb4c410579c365f825cdc74d5da7417e9dfaaebce5ac465cb2b103a44b608
+# new_revision: architecture-packet.json sha256=a53012565332cab8140d26d43029b931ff6d6c1fe4c63612310567ecba6812b3
+--- architecture-packet.v3.json (sha256=8edcb4c410579c365f825cdc74d5da7417e9dfaaebce5ac465cb2b103a44b608)
++++ architecture-packet.json (v4 sha256=a53012565332cab8140d26d43029b931ff6d6c1fe4c63612310567ecba6812b3)
+@@ -2,3 +2,3 @@
+   "schema_version": "1.0",
+-  "packet_version": "3.0",
++  "packet_version": "4.0",
+   "task_id": "zen-realtime-reasoning",
+@@ -6,3 +6,3 @@
+   "preset": "analyst-teamlead",
+-  "cycle": 3,
++  "cycle": 4,
+   "criticality": "S2",
+@@ -11,6 +11,6 @@
+   "role_plan": {
+-    "path": "plans/architect-03.json",
+-    "sha256": "8e383a4a7ad0982736360cc1ba4be3fcf5d4a29d87fcafc8c5c03169f2044d3c"
++    "path": "plans/architect-04.json",
++    "sha256": "2da27b07a4d80209e2f9537b3362ea00b6d37334f21a826dce25813014d88a2a"
+   },
+-  "summary": "Cycle3 a2→a3 fix-from-panel: 6 RW + 8 FU закрыты на уровне архитектурной delta; OPENCODE_DB=:memory:, полный single-turn control, Keep-Alive owner proof, sanitized env и crash leases. APPROVED — кандидат для отдельного Совета a3, не ACCEPT/ARCH_GATE_PASS; Stage3/H0..H9 NOT_RUN.",
++  "summary": "Cycle4 a3→a4 fix-from-panel:3blocking RW+6non-blockingFU закрыты архитектурной delta v4,2excluded учтены без нового scope. Сохранены OPENCODE_DB=:memory:,Keep-Alive,default=false и прежние альтернативы. APPROVED — кандидат для внешнего Совета a4,не Council PASS/ARCH_GATE_PASS; Stage3/H0..H9 NOT_RUN.",
+   "scope": {
+@@ -19,4 +19,4 @@
+     "architect_write_allowlist": [
+-      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-03.before.json",
+-      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-03.json",
++      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-04.before.json",
++      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-04.json",
+       ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json"
+@@ -836,2 +836,170 @@
+       "status": "PANEL_EVIDENCE_DESIGN_PENDING"
++    },
++    {
++      "id": "EVD-075",
++      "versions": {
++        "ruff": "0.17.2"
++      },
++      "commands": [
++        {
++          "case": "formatted",
++          "argv": [
++            "uvx",
++            "--from",
++            "ruff==0.17.2",
++            "ruff",
++            "format",
++            "--check",
++            "--no-cache",
++            "--range=1:1-6:999",
++            "/tmp/zen-arch4-probe-ruff-swkgt3h8/tmp_server.py"
++          ],
++          "returncode": 0,
++          "elapsed_s": 3.7895,
++          "stdout": "1 file already formatted\n",
++          "stderr": "Downloading ruff (9.7MiB)\n Downloaded ruff\nInstalled 1 package in 4ms\n",
++          "file_unchanged": true,
++          "frozen_slices_unchanged": true
++        },
++        {
++          "case": "unformatted",
++          "argv": [
++            "uvx",
++            "--from",
++            "ruff==0.17.2",
++            "ruff",
++            "format",
++            "--check",
++            "--no-cache",
++            "--range=1:1-6:999",
++            "/tmp/zen-arch4-probe-ruff-swkgt3h8/tmp_server.py"
++          ],
++          "returncode": 1,
++          "elapsed_s": 0.0837,
++          "stdout": "unformatted: File would be reformatted\n --> /tmp/zen-arch4-probe-ruff-swkgt3h8/tmp_server.py:3:12\n  |\n2 | # synthetic closed-range probe\n  - PROBE_ALPHA=    1\n3 + PROBE_ALPHA = 1\n4 | PROBE_BETA = 2\n  |\n\n1 file would be reformatted\n",
++          "stderr": "",
++          "file_unchanged": true,
++          "frozen_slices_unchanged": true
++        }
++      ],
++      "hashes": {
++        "_run_env": {
++          "baseline_sha256": "1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31",
++          "candidate_sha256": "1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31",
++          "equal_origin_dev": true
++        },
++        "_stream_google_sse": {
++          "baseline_sha256": "5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3",
++          "candidate_sha256": "5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3",
++          "equal_origin_dev": true
++        },
++        "_execute_google_once": {
++          "baseline_sha256": "88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6",
++          "candidate_sha256": "88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6",
++          "equal_origin_dev": true
++        }
++      },
++      "negative_hash_cases": [
++        {
++          "symbol": "_run_env",
++          "argv": [
++            "python3",
++            "-B",
++            "-c",
++            "import ast,hashlib,sys; from pathlib import Path; raw=Path(sys.argv[1]).read_bytes(); lines=raw.splitlines(keepends=True); n=next(n for n in ast.walk(ast.parse(raw)) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name==sys.argv[2]); assert hashlib.sha256(b\"\".join(lines[n.lineno-1:n.end_lineno])).hexdigest()==sys.argv[3]",
++            "/tmp/zen-arch4-probe-hashes-95n6ulqk/server.py",
++            "_run_env",
++            "1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31"
++          ],
++          "returncode": 1,
++          "stderr": "AssertionError (not SyntaxError)",
++          "mutation": "one ASCII space inserted before first LF of raw function slice; ast.parse succeeds"
++        },
++        {
++          "symbol": "_stream_google_sse",
++          "argv": [
++            "python3",
++            "-B",
++            "-c",
++            "import ast,hashlib,sys; from pathlib import Path; raw=Path(sys.argv[1]).read_bytes(); lines=raw.splitlines(keepends=True); n=next(n for n in ast.walk(ast.parse(raw)) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name==sys.argv[2]); assert hashlib.sha256(b\"\".join(lines[n.lineno-1:n.end_lineno])).hexdigest()==sys.argv[3]",
++            "/tmp/zen-arch4-probe-hashes-95n6ulqk/server.py",
++            "_stream_google_sse",
++            "5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3"
++          ],
++          "returncode": 1,
++          "stderr": "AssertionError (not SyntaxError)",
++          "mutation": "one ASCII space inserted before first LF of raw function slice; ast.parse succeeds"
++        },
++        {
++          "symbol": "_execute_google_once",
++          "argv": [
++            "python3",
++            "-B",
++            "-c",
++            "import ast,hashlib,sys; from pathlib import Path; raw=Path(sys.argv[1]).read_bytes(); lines=raw.splitlines(keepends=True); n=next(n for n in ast.walk(ast.parse(raw)) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name==sys.argv[2]); assert hashlib.sha256(b\"\".join(lines[n.lineno-1:n.end_lineno])).hexdigest()==sys.argv[3]",
++            "/tmp/zen-arch4-probe-hashes-95n6ulqk/server.py",
++            "_execute_google_once",
++            "88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6"
++          ],
++          "returncode": 1,
++          "stderr": "AssertionError (not SyntaxError)",
++          "mutation": "one ASCII space inserted before first LF of raw function slice; ast.parse succeeds"
++        }
++      ],
++      "status": "OBSERVED_PASS",
++      "stage3_status": "NOT_RUN_NEW_TEST_NOT_PRESENT",
++      "temp_removed": true,
++      "kind": "command",
++      "ref": "Isolated /tmp/zen-arch4-probe-* copy; current product server.py read-only; commands/measurements below",
++      "claim": "ruff==0.17.2 closed --range=1:1-6:999: formatted rc0, unformatted rc1; all frozen slices unchanged; three independent valid-syntax byte mutations rejected by literal hash gate."
++    },
++    {
++      "id": "EVD-076",
++      "versions": {
++        "basedpyright": "1.40.2"
++      },
++      "command": [
++        "uvx",
++        "--from",
++        "basedpyright==1.40.2",
++        "basedpyright",
++        "--project",
++        "/tmp/zen-arch4-probe-types-y4mnent0/tmp_proj.json",
++        "--outputjson"
++      ],
++      "cwd": "/tmp/zen-arch4-probe-types-y4mnent0",
++      "returncode": 1,
++      "elapsed_s": 13.576,
++      "summary": {
++        "filesAnalyzed": 1,
++        "errorCount": 0,
++        "warningCount": 581,
++        "informationCount": 0,
++        "timeInSec": 2.001
++      },
++      "errors": [],
++      "type_ignores": 0,
++      "probe_server_sha256": "21a8d834428dd6e2300846f74b070dd8295f2153d041d6642957fd09276f1988",
++      "catalog_tests": {
++        "command": [
++          "python3",
++          "-B",
++          "-m",
++          "unittest",
++          "tests.test_catalog_mode",
++          "-v"
++        ],
++        "returncode": 0,
++        "elapsed_s": 0.3457,
++        "stdout": "",
++        "stderr": "test_env_default_is_dynamic (tests.test_catalog_mode.ModeFromEnvironmentTest.test_env_default_is_dynamic) ... ok\ntest_env_static_and_legacy (tests.test_catalog_mode.ModeFromEnvironmentTest.test_env_static_and_legacy) ... ok\ntest_default_in_tests_is_dynamic (tests.test_catalog_mode.ModeNormalizationTest.test_default_in_tests_is_dynamic) ... ok\ntest_modes (tests.test_catalog_mode.ModeNormalizationTest.test_modes) ... ok\ntest_aliases_still_work_in_static (tests.test_catalog_mode.StaticModeTest.test_aliases_still_work_in_static) ... ok\ntest_static_never_reloads_by_mtime (tests.test_catalog_mode.StaticModeTest.test_static_never_reloads_by_mtime) ... ok\ntest_static_routes_through_background_service (tests.test_catalog_mode.StaticModeTest.test_static_routes_through_background_service) ... ok\ntest_static_uses_embedded_snapshot_and_ignores_state_file (tests.test_catalog_mode.StaticModeTest.test_static_uses_embedded_snapshot_and_ignores_state_file) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 0.215s\n\nOK\n",
++        "test_file_byte_identical": true
++      },
++      "source_transform": "import importlib; zc = importlib.import_module(\"zen_catalog\"); CATALOG_SOURCE = \"static\"; def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; remove CATALOG_SOURCE from reload_catalog global declaration; replace assignment with _set_catalog_source(source); guard proc is not None before both final stream returncode accesses.",
++      "status": "OBSERVED_PASS",
++      "stage3_status": "NOT_RUN_NEW_TEST_NOT_PRESENT",
++      "temp_removed": true,
++      "kind": "command",
++      "ref": "Isolated /tmp/zen-arch4-probe-* copy; current product server.py read-only; commands/measurements below",
++      "claim": "Public CATALOG_SOURCE retained; module initial value static and typed globals helper; importlib and two proc None guards: basedpyright==1.40.2 errorCount0 (581 warnings, CLI rc1 due warnings); unchanged test_catalog_mode.py 8 tests PASS. No suppressions/config/product changes. Full Stage3 NOT_RUN."
+     }
+@@ -997,4 +1165,4 @@
+       "kind": "command",
+-      "command": "python3 - <<'VER004'\nimport ast, collections, json, re, subprocess, tempfile\nfrom pathlib import Path\nroot = Path.cwd().resolve()\nbridge = root / 'bridges/opencode-zen-bridge'\nfiles = [bridge/'server.py', bridge/'tests/test_step_interruption.py', bridge/'tests/test_realtime_reasoning.py']\nassert all(f.is_file() for f in files), 'all three target files must exist after Stage3'\nruff = ['uvx','--from','ruff==0.17.2','ruff']\ndef run(args, **kw):\n    return subprocess.run(args, check=True, **kw)\ndef changed_ranges(file):\n    rel = str(file.relative_to(root))\n    diff = subprocess.check_output(['git','diff','--no-ext-diff','--no-color','-U0','origin/dev','--',rel], cwd=root, text=True)\n    # NEW tracked files must be added before final verification; --no-index alternative below covers untracked newfile.\n    result = []\n    for line in diff.splitlines():\n        m = re.match(r'^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,(\\d+))? @@', line)\n        if m:\n            start = int(m.group(1)); count = int(m.group(2) or '1')\n            if count: result.append((start, start + count - 1))\n    return result\nranges = {f: changed_ranges(f) for f in files[:2]}\n# New file checked as a whole even before git add. Range gate never formats frozen legacy slices.\nrun([*ruff,'format','--check','--no-cache',str(files[2])], cwd=root)\nfor f in files[:2]:\n    for start, end in ranges[f]:\n        run([*ruff,'format','--check','--no-cache','--range',f'{start}:{end}',str(f)], cwd=root)\n# Full-file lint on all three. Only inherited E402 import site is excepted on server.\nlint = subprocess.run([*ruff,'check','--no-cache','--output-format','json',str(files[0])], cwd=root, capture_output=True, text=True)\nassert lint.returncode in (0,1), lint.stderr\nfindings = json.loads(lint.stdout)\nlines = files[0].read_text().splitlines()\nassert all(x['code']=='E402' and lines[x['location']['row']-1].strip()=='import zen_catalog as zc' for x in findings), findings\nassert sum(x['code']=='E402' for x in findings) <= 1\nrun([*ruff,'check','--no-cache','--extend-ignore','E402',str(files[0])], cwd=root)\nrun([*ruff,'check','--no-cache',str(files[1]),str(files[2])], cwd=root)\n# Exact isolated import-root. No repo pyrightconfig mutation; JSON deleted on every exit.\nproject = None\ntry:\n    with tempfile.NamedTemporaryFile(mode='w',suffix='.json',prefix='zen-ver004-',dir='/tmp',delete=False) as tmp:\n        project = Path(tmp.name)\n        json.dump({'include':[str(f) for f in files], 'extraPaths':[str(bridge.resolve())]},tmp)\n    b = subprocess.run(['uvx','--from','basedpyright==1.40.2','basedpyright','--project',str(project),'--outputjson'], cwd=bridge, capture_output=True, text=True)\n    assert b.returncode in (0,1), b.stderr\n    report = json.loads(b.stdout)\n    ds = report['generalDiagnostics']\n    assert report['summary']['errorCount']==0 and not [x for x in ds if x['severity']=='error'], ds\n    byfile = {f: [x for x in ds if Path(x['file']).resolve()==f] for f in files}\n    limits = {'reportExplicitAny':125,'reportAny':125,'reportUnusedCallResult':39,'reportUnknownMemberType':94,'reportUnknownVariableType':72,'reportUnknownArgumentType':55,'reportUnusedFunction':6,'reportImplicitStringConcatenation':35,'reportUnannotatedClassAttribute':105,'reportUnusedParameter':7,'reportUnnecessaryIsInstance':11,'reportUnknownParameterType':6,'reportMissingParameterType':4,'reportUnreachable':5,'reportImplicitOverride':3}\n    warnings = lambda f: [x for x in byfile[f] if x['severity']=='warning']\n    counts = collections.Counter(x.get('rule','') for x in warnings(files[0]))\n    assert all(n<=limits.get(rule,0) for rule,n in counts.items()), dict(counts)\n    assert len(warnings(files[0]))<=720, len(warnings(files[0]))\n    assert len(warnings(files[1]))<=194, len(warnings(files[1]))\n    # New test file: zero warnings as well as zero errors, thus zero Any.\n    assert not byfile[files[2]], byfile[files[2]]\n    for f in files[:2]:\n        for x in byfile[f]:\n            line = x['range']['start']['line']+1\n            if any(lo<=line<=hi for lo,hi in ranges[f]):\n                assert x.get('rule') not in {'reportAny','reportExplicitAny','reportUnusedCallResult'}, x\n    # Do not introduce Any annotations/type ignores in added code in either legacy file.\n    for f in files[:2]:\n        src = f.read_text().splitlines()\n        for lo,hi in ranges[f]:\n            for line in src[lo-1:hi]:\n                assert not re.search(r'\\bAny\\b|type:\\s*ignore|pyright:\\s*ignore|#\\s*noqa|#\\s*fmt:\\s*off',line), (f,line)\n    print('PASS VER-004: all3 lint/type; legacy changed-range format; newfile whole format; server counts',dict(counts))\nfinally:\n    if project is not None: project.unlink(missing_ok=True)\nVER004",
+-      "expected": "exit0 after Stage3. New file full ruff format; legacy added/modified hunks git diff-U0 origin/dev checked via ruff format --check --range start:end. Full lint all3, exactly inherited zen_catalog E402 site only excepted via server-only --extend-ignore E402 (new lint0); no noqa/config edit. Isolated bridge-cwd basedpyright temporary /tmp project, all3 errorCount0; new test0diagnostics/Any; server Any<=125 each, nonAny per-rule+total<=720, step<=194; new changed code0Any/0unused-call-result. Immutable _run_env and both Google function slices enforced separately VER-005. NOT_RUN until new file exists.",
++      "command": "python3 - <<'VER004'\nimport ast, collections, hashlib, json, re, subprocess, tempfile\nfrom pathlib import Path\nroot = Path.cwd().resolve()\nbridge = root / 'bridges/opencode-zen-bridge'\nfiles = [bridge/'server.py', bridge/'tests/test_step_interruption.py', bridge/'tests/test_realtime_reasoning.py']\nassert all(f.is_file() for f in files), 'all three target files must exist after Stage3'\nruff = ['uvx','--from','ruff==0.17.2','ruff']\ndef run(args, **kw):\n    return subprocess.run(args, check=True, **kw)\ndef changed_ranges(file):\n    rel = str(file.relative_to(root))\n    diff = subprocess.check_output(['git','diff','--no-ext-diff','--no-color','-U0','origin/dev','--',rel], cwd=root, text=True)\n    # NEW tracked files must be added before final verification; --no-index alternative below covers untracked newfile.\n    result = []\n    for line in diff.splitlines():\n        m = re.match(r'^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,(\\d+))? @@', line)\n        if m:\n            start = int(m.group(1)); count = int(m.group(2) or '1')\n            if count: result.append((start, start + count - 1))\n    return result\n\n# Raw-byte contract: frozen expected digests originate in EVD-075, never candidate.\nFROZEN = {\n    '_run_env': '1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31',\n    '_stream_google_sse': '5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3',\n    '_execute_google_once': '88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6',\n}\nbaseline_raw = subprocess.check_output(['git','show','origin/dev:bridges/opencode-zen-bridge/server.py'], cwd=root)\ndef frozen_slices(raw):\n    lines = raw.splitlines(keepends=True)\n    nodes = {n.name:n for n in ast.walk(ast.parse(raw)) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in FROZEN}\n    assert set(nodes)==set(FROZEN)\n    return {name:(node.lineno,node.end_lineno,b''.join(lines[node.lineno-1:node.end_lineno])) for name,node in nodes.items()}\nbaseline_slices = frozen_slices(baseline_raw)\ndef assert_frozen():\n    candidate_slices = frozen_slices(files[0].read_bytes())\n    for name, expected in FROZEN.items():\n        assert hashlib.sha256(baseline_slices[name][2]).hexdigest()==expected, ('frozen origin/dev changed',name)\n        assert hashlib.sha256(candidate_slices[name][2]).hexdigest()==expected, ('immutable slice changed',name)\n        assert candidate_slices[name][2]==baseline_slices[name][2], ('nonzero raw Google/_run_env diff',name)\n    return candidate_slices\ncandidate_slices = assert_frozen()\nserver_diff = subprocess.check_output(['git','diff','--no-ext-diff','--no-color','-U0','origin/dev','--',str(files[0].relative_to(root))],cwd=root,text=True)\nfor line in server_diff.splitlines():\n    match = re.match(r'^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@',line)\n    if not match: continue\n    old_start,old_count,new_start,new_count = int(match[1]),int(match[2] or '1'),int(match[3]),int(match[4] or '1')\n    for start,count,table in [(old_start,old_count,baseline_slices),(new_start,new_count,candidate_slices)]:\n        for name,(lo,hi,_) in table.items():\n            # Zero-count insert/delete anchors represent the boundary after start.\n            overlaps = (start<=hi and start+count-1>=lo) if count else (lo<=start<hi)\n            assert not overlaps, ('VER-004 frozen-range hunk intersection',name,line)\n# Public module constant/read API remains intact; compatibility test file is frozen.\ntree = ast.parse(files[0].read_bytes())\nassignments = [n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='CATALOG_SOURCE' for t in n.targets)]\nassert len(assignments)==1 and isinstance(assignments[0].value,ast.Constant) and assignments[0].value.value=='static'\nassert any(isinstance(n,ast.FunctionDef) and n.name=='_set_catalog_source' for n in tree.body)\nassert not any(isinstance(n,ast.Global) and 'CATALOG_SOURCE' in n.names for n in ast.walk(tree))\nrun(['git','diff','--exit-code','origin/dev','--','bridges/opencode-zen-bridge/tests/test_catalog_mode.py'],cwd=root)\n\nranges = {f: changed_ranges(f) for f in files[:2]}\n# New file checked as a whole even before git add. Range gate never formats frozen legacy slices.\nrun([*ruff,'format','--check','--no-cache',str(files[2])], cwd=root)\nfor f in files[:2]:\n    for start, end in ranges[f]:\n        run([*ruff,'format','--check','--no-cache',f'--range={start}:1-{end}:999',str(f)], cwd=root)\nassert_frozen()\n# Full-file lint on all three. Only inherited E402 import site is excepted on server.\nlint = subprocess.run([*ruff,'check','--no-cache','--output-format','json',str(files[0])], cwd=root, capture_output=True, text=True)\nassert lint.returncode in (0,1), lint.stderr\nfindings = json.loads(lint.stdout)\nlines = files[0].read_text().splitlines()\nassert all(x['code']=='E402' and lines[x['location']['row']-1].strip()=='import zen_catalog as zc' for x in findings), findings\nassert sum(x['code']=='E402' for x in findings) <= 1\nrun([*ruff,'check','--no-cache','--extend-ignore','E402',str(files[0])], cwd=root)\nrun([*ruff,'check','--no-cache',str(files[1]),str(files[2])], cwd=root)\n# Exact isolated import-root. No repo pyrightconfig mutation; JSON deleted on every exit.\nproject = None\ntry:\n    with tempfile.NamedTemporaryFile(mode='w',suffix='.json',prefix='zen-ver004-',dir='/tmp',delete=False) as tmp:\n        project = Path(tmp.name)\n        json.dump({'include':[str(f) for f in files], 'extraPaths':[str(bridge.resolve())]},tmp)\n    b = subprocess.run(['uvx','--from','basedpyright==1.40.2','basedpyright','--project',str(project),'--outputjson'], cwd=bridge, capture_output=True, text=True)\n    assert b.returncode in (0,1), b.stderr\n    report = json.loads(b.stdout)\n    ds = report['generalDiagnostics']\n    assert report['summary']['errorCount']==0 and not [x for x in ds if x['severity']=='error'], ds\n    byfile = {f: [x for x in ds if Path(x['file']).resolve()==f] for f in files}\n    limits = {'reportExplicitAny':125,'reportAny':125,'reportUnusedCallResult':39,'reportUnknownMemberType':94,'reportUnknownVariableType':72,'reportUnknownArgumentType':55,'reportUnusedFunction':6,'reportImplicitStringConcatenation':35,'reportUnannotatedClassAttribute':105,'reportUnusedParameter':7,'reportUnnecessaryIsInstance':11,'reportUnknownParameterType':6,'reportMissingParameterType':4,'reportUnreachable':5,'reportImplicitOverride':3}\n    warnings = lambda f: [x for x in byfile[f] if x['severity']=='warning']\n    counts = collections.Counter(x.get('rule','') for x in warnings(files[0]))\n    assert all(n<=limits.get(rule,0) for rule,n in counts.items()), dict(counts)\n    assert len(warnings(files[0]))<=720, len(warnings(files[0]))\n    assert len(warnings(files[1]))<=194, len(warnings(files[1]))\n    # New test file: zero warnings as well as zero errors, thus zero Any.\n    assert not byfile[files[2]], byfile[files[2]]\n    for f in files[:2]:\n        for x in byfile[f]:\n            line = x['range']['start']['line']+1\n            if any(lo<=line<=hi for lo,hi in ranges[f]):\n                assert x.get('rule') not in {'reportAny','reportExplicitAny','reportUnusedCallResult'}, x\n    # Do not introduce Any annotations/type ignores in added code in either legacy file.\n    for f in files[:2]:\n        src = f.read_text().splitlines()\n        for lo,hi in ranges[f]:\n            for line in src[lo-1:hi]:\n                assert not re.search(r'\\bAny\\b|type:\\s*ignore|pyright:\\s*ignore|#\\s*noqa|#\\s*fmt:\\s*off',line), (f,line)\n    print('PASS VER-004: all3 lint/type; legacy changed-range format; newfile whole format; server counts',dict(counts))\nfinally:\n    if project is not None: project.unlink(missing_ok=True)\nVER004",
++      "expected": "exit0 only after Stage3. Ruff==0.17.2 full newfile format, legacy changed hunks exclusively --range={start}:1-{end}:999 (closed inclusive syntax). Before and after formatter: reject ANY old/new hunk intersection with raw AST lineno..end_lineno of def _run_env/_stream_google_sse/_execute_google_once, including zero-count deletions/insertions within slices. Literal _run_env sha256=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31; both Google functions zero byte diff versus origin/dev and fixed EVD-075 hashes; expected hashes never derived from edited source. All3 full lint/type per existing warning_policy, only inherited exact server E402 if static import remains, no new E402/suppressions. Preserve CATALOG_SOURCE = \"static\" + typed _set_catalog_source globals helper and importlib.import_module(\"zen_catalog\")/proc None guards; catalog_source HTTP key unchanged. No test_catalog_mode.py changes; VER-001/002 full suites include its :64,93 accesses. EVD-075 isolated formatter/hash and EVD-076 one-file type/8catalog tests observed; all3/newfile VER-004 remains NOT_RUN until Stage3.",
+       "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для frozen strict VER-004. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox. Run command from repo_root; invokes basedpyright with cwd=absolute bridge and exact temporary include+extraPaths, never root pyrightconfig. origin/dev must exist locally (no implicit fetch); missing ref is FAIL, not empty-range bypass. Delete temporary project in finally.",
+@@ -1003,3 +1171,3 @@
+         "old": "v2 full-file ruff format changes3216diff lines/frozen hash; root pyright80 errors wrong imports; server564+step162 warnings, server3type errors in isolated config,1E402.",
+-        "new": "0 type errors on all3; reachability by lower-case mutable catalog source symbol and explicit proc is not None guards before both returncode uses. Existing import zen_catalog kept; only exact inherited E402 CLI exception, no blanket new E402. Legacy range gate preserves frozen byte slices. NonAny allowance explicit design delta with review a3, Any<=125 retained.",
++        "new": "All3 errorCount0 target; EVD-076 isolated server proof errorCount0/warnings581,8catalog tests PASS. Public CATALOG_SOURCE = \"static\" remains module-level; typed _set_catalog_source(source: str) -> None writes globals()[\"CATALOG_SOURCE\"]; no global rebind/rename/testfile expansion. Use importlib.import_module(\"zen_catalog\") plus proc is not None guards. Ruff==0.17.2 --range={start}:1-{end}:999 only; reject hunks intersecting frozen functions and verify raw literal hashes/zero Google diff before/after. Existing Any<=125 and nonAny/total720+194 ceilings retained, no suppressions. Full Stage3 all3 NOT_RUN.",
+         "owner": "Stage3 Coder in three-file allowlist; no test_run_env/start.sh/config edits; independent Verifier runs actual command; stage2 syntax/contract checks only."
+@@ -1021,3 +1189,7 @@
+         "rationale": "Server nonAny allowance+156 upper total and targeted per-rule ceilings for strict unknown/narrowing/unannotated members; step allowance+32 for isolated fresh resilience assertions. Explicit no-new-Any and no-unused-call-result in changed code; new tests zero diagnostics. Unlisted server rules0. Total cap remains even if per-rule sum greater. This is proposed architecture budget delta for a3, not silently frozen v2 ceiling; no type/lint suppression."
+-      }
++      },
++      "empirical_evidence_ids": [
++        "EVD-075",
++        "EVD-076"
++      ]
+     },
+@@ -1048,3 +1220,3 @@
+       "command": "cd bridges/opencode-zen-bridge && uvx pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py",
+-      "expected": "exit0, both independent GroupA and GroupB. All prior v2 oracles retained except explicitly superseded isolation/format/warning choices. GroupA no FakeServe; GroupB six frozen fixture families with nested form paths, complete JSON args fallback, reject/cancel+interrupt and zeroStep2; secret sentinels all3env branches; in-memory DB/auth;1lsof then persistent lanes; crash helper+startup reaper; fallback table counter oracle;15s stall heartbeat; 46keys/24gates; immutable raw function hashes; thread/FD/aux math. NOT_RUN Stage2. AC-026 / VER-005 / Clean-Room L2: tests/test_realtime_reasoning.py создаёт tmp_path / \"dynamic_config.json\" с {\"REALTIME_SERVE_ENABLED\":true}; monkeypatch.setattr(server, \"DYNAMIC_CONFIG_PATH\", cfg_path, raising=False). При переносе только этого testfile на непропатченный origin/dev нет AttributeError: реально POST /v1/chat/completions, RED именно на поведенческих realtime chunk intervals (чтение socket до upstream release), GREEN на новом коде. Та же Server instance: атомарно false в cfg_path ->следующий запрос run без restart; true ->serve при test eligibility override/native, deletion/invalid JSON/nonbool/unreadable ->false; unchanged (st_mtime_ns,st_size) ->нет reopen. Новый cfg stat key для переключения обеспечивается и проверяется тестом, без sleep-предположений. Existing378 tests не создают JSON и остаются run. Runtime результаты NOT_RUN.",
++      "expected": "exit0, both independent GroupA and GroupB. All prior v2/v3 oracles retained except explicitly superseded isolation/format/warning choices. GroupA no FakeServe; GroupB six frozen fixture families with nested form paths, complete JSON args fallback, reject/cancel+interrupt and zeroStep2; secret sentinels all3env branches; in-memory DB/auth;1lsof then persistent lanes; crash helper+startup reaper; fallback table counter oracle;15s stall heartbeat; 46keys/24gates; immutable raw function hashes; thread/FD/aux math. NOT_RUN Stage2. AC-026 / VER-005 / Clean-Room L2: tests/test_realtime_reasoning.py создаёт tmp_path / \"dynamic_config.json\" с {\"REALTIME_SERVE_ENABLED\":true}; monkeypatch.setattr(server, \"DYNAMIC_CONFIG_PATH\", cfg_path, raising=False). При переносе только этого testfile на непропатченный origin/dev нет AttributeError: реально POST /v1/chat/completions, RED именно на поведенческих realtime chunk intervals (чтение socket до upstream release), GREEN на новом коде. Та же Server instance: атомарно false в cfg_path ->следующий запрос run без restart; true ->serve при test eligibility override/native, deletion/invalid JSON/nonbool/unreadable ->false; unchanged (st_mtime_ns,st_size) ->нет reopen. Новый cfg stat key для переключения обеспечивается и проверяется тестом, без sleep-предположений. Existing378 tests не создают JSON и остаются run. Runtime результаты NOT_RUN. Entire normal Keep-Alive path(permission/form/reply/interrupt/DELETE),including50controls:exactly1 lsof/successful spawn and1retained control TCP. Separate explicit control-socket reconnect scenario permits only2nd lsof<=0.35s outside reply0.25s/cleanupAPI0.20s; spies distinguish the scenarios; urgent control disconnect is fail-closed,never lsof wait.3forced lsof timeouts ->3ServeHealth failures->DEGRADED,nextauto has0serve/helper/lsof Popen. Check listener_pid==serve_pid and pgid==helper_proc.pid; count lifeline2ends during setup/one parent end thereafter,all0afterfinally; parentFD<=128,allprocess344design,55admittedthreads,19systemprocesspeak; probes1/slot. H3 measures actual RSS/FD/thread/ports and rejects excess without raising limits. For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event. Normal p99<=180 goal measured separately; three60s firsttoken faultprofile+aux51.6<=231.6,>=100sample batch nearest-rank criterion. Universal TIMEOUT1800 unchanged. Exact waiting template \"[мост] Ожидание первого токена…\\n\", no (10 с). New topology/form/formatter/type oracles are designed,NOT_RUN until Stage3.",
+       "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для frozen strict VER-004. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
+@@ -1075,5 +1247,57 @@
+         ],
+-        "method": "ast FunctionDef/AsyncFunctionDef lineno..end_lineno inclusive over raw bytes splitlines(keepends=True), including terminal LF; compare byte-identical with baseline for each function, not AST-equivalence; current frozen _run_env literal digest also mandatory."
+-      },
+-      "orphan_oracles": "VER-005 GroupB: hard kill parent after spawn before READY, after lease publish, during prompt; helper EOF cleanup, plus disabled-helper/reaper recovery on next bridge start;0 old owned serve/descendants/helper/temp dirs, foreign PID/PGID/start-time-reuse and foreign directories untouched. Normal50cancel counters remain0. H0/H9 actual kickstart -k tests still NOT_RUN."
++        "method": "ast FunctionDef/AsyncFunctionDef lineno..end_lineno inclusive over raw bytes splitlines(keepends=True), including terminal LF; compare byte-identical with baseline for each function, not AST-equivalence; current frozen _run_env literal digest also mandatory.",
++        "sha256": {
++          "_stream_google_sse": "5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3",
++          "_execute_google_once": "88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6"
++        },
++        "verification": "VER-004 executable raw-byte/hash+old/new hunk guard also mandatory; EVD-075 proves0byte source diff and three independent negative mutations on temporary copy. Stage3 full gate NOT_RUN."
++      },
++      "orphan_oracles": "VER-005 GroupB inject parent SIGKILL (1) immediately after helper Popen before helper entry/lease, (2) immediately after serve Popen before serve_pid publication, (3) after atomic lease before handshake, (4) after handshake before lsof/READY, (5) during prompt. Same helper→serve group; EOF never lost, helper watcher active before READY. Include TERM-ignoring descendant and terminal_quiescence order (all writers stopped ->owned root removal ->lease unlink ->final same-group KILL; no imagined helper finally after self-KILL). Assert listener_pid==serve_pid and pgid==child_pgid,0 owned helper/serve/descendants/lease/temp roots,0 foreign signals/deletions including PID/PGID reuse. Separately kill/disable helper, restart bridge with retained lease ->safe startup reaper; this is recovery scenario, not immediate EOF success.50 normal cancellation cycles return all counters/FD/thread/pipe counts to0; lifeline_w closed every exit. Stage3/H0/H9 remain NOT_RUN.",
++      "process_resource_oracle": {
++        "topology": "One tree only: server.py parent -> helper_proc -> serve_proc; no direct parent Popen(opencode serve). Each attempt spends one common _RequestAttempts token and spawn-rate admission (cap3), paired helper is bounded auxiliary, not a free model attempt. Unified limiter+startup gate deadline<=5.0s; fresh _serve_env(model_id) calls immutable _run_env once and rotates proxy once. Parent reserves127.0.0.1:0 until just before helper spawn; creates lifeline_r,lifeline_w=os.pipe(), close_fds=True. helper_proc=Popen([sys.executable,\"-I\",\"-c\",_SERVE_HELPER_CODE,...],stdin=lifeline_r,stdout=PIPE,stderr=PIPE,start_new_session=True,close_fds=True,env=serve_env); child_pgid=helper_proc.pid and os.getpgid(helper_proc.pid)==child_pgid. Parent closes lifeline_r after Popen even on exceptions; lifeline_w never inherited by helper/serve and is closed in parent finally. Helper installs TERM handler and arms EOF monitoring on stdin fd0 BEFORE serve Popen; already-latched EOF causes cleanup without spawn. Helper immediately atomically creates /tmp/opencode-zen-bridge-leases/lease-<attempt_id>.json with helper_pid,helper_lstart,pgid=child_pgid,port,start_ts,parent identity,temp ownership. It launches serve_proc=Popen([OPENCODE_BIN,\"serve\",\"--hostname\",\"127.0.0.1\",\"--port\",str(port)],stdin=DEVNULL,start_new_session=False,close_fds=True,env=serve_env,stdout=sys.stderr,stderr=sys.stderr). Thus os.getpgid(serve_proc.pid)==child_pgid: helper and serve+descendants share ONE group. Helper atomically/fsync publishes serve_pid and serve_lstart in lease BEFORE stdout handshake JSON {\"serve_pid\":...,\"pgid\":...}, before lsof/READY/Auth/prompt. Parent gets exact serve_pid/child_pgid from handshake; port-only identity never sufficient. EOF immediately after either Popen is latched throughout publish/handshake; bounded EOF loop<=0.25s runs before readiness and during prompt. Standard XDG_DATA_HOME/auth preserved, OPENCODE_DB=\":memory:\" on all3 env branches; sanitized serve_env, no prompt/password in argv/stdin/lease. Port race consumes common token and retries only after full cleanup within original ready<=3s; all lsof/identity probes included.",
++        "resources": {
++          "process_tree": "Exactly1bridge parent ->at most6 helper_proc ->at most6 serve_proc, each pair same child_pgid=helper_proc.pid; <=6 transient bounded lsof/ps identity probes, at most1/slot (no overlap),peak19 processes including bridge. One model attempt token creates one helper/serve pair; MAX_TOTAL_SPAWNS=3 counts pairs/actual serve launches, never free retries; probes auxiliary bounded and accounted. Serve start_new_session=False, helper=True; no alternate process topology.",
++          "parent_threads": 55,
++          "thread_formula": "Parent admitted bound55=1accept+18handlers(6active+12waiters)+6supervisor/setup+6SSE readers+6prompt delivery workers+12helper stdout/stderr drains+6parent bookkeeping. Helper EOF/TERM/serve poll uses one single-thread main loop per slot, no helper watcher threads;<=6 helper processes. serve logs route to helper stderr, stdout reserved for one handshake; parent still accounts2drains/slot. At most6 auxiliary identity/lsof/ps probes total,1per slot,serial nonoverlap with reconnect/cleanup, executed on existing supervisor/helper loops. Peak system processes1bridge+6helper+6serve+6probe=19. Reaper startup-only, no request overlap. Rejected unadmitted ThreadingHTTPServer handlers may be transient:55 is admitted bound; H3 must measure rejection peaks, not claim arbitrary flood defense.",
++          "fd": {
++            "parent_baseline": 36,
++            "admitted_client_sockets": 18,
++            "serve_http_lanes": 18,
++            "stdout_stderr_drains": 12,
++            "reserved_port_sockets": 6,
++            "lsof_capture_pipes": 6,
++            "parent_watchdog_pipes": 6,
++            "open_lease_files": 6,
++            "parent_upper_bound": 114,
++            "configured_envelope": 128,
++            "aggregate_estimate": "Steady parent108 plus transient6lifeline read ends=114<=envelope128. Systemwide conservative128+6serve*20+6helper*8+6probe*8=344descriptors; probe=lsof OR ps identity,at most1/slot,no overlap. Helper per-process8 upper design includes std0/1/2,one transient lease file/atomic temp,DEVNULL/child-launch descriptors and select bookkeeping; measure H3 each process and transient peaks,do not claim aggregate<256.",
++            "lifeline_definition": "6 parent lifeline_w write ends; transient parent lifeline_r read end closed immediately after Popen. During setup read+write momentarily add<=6FD; terminal no leaks. helper stdin fd0 is lifeline_r, never inherits write end.",
++            "transient_lifeline_read_ends": 6
++          },
++          "rss": {
++            "unit": "MiB",
++            "serve_idle_observed": 156.8,
++            "serve_evidence": "EVD-071 owner-supplied idle, not6parallel peak",
++            "helper_estimate": 12.0,
++            "pair_estimate": 168.8,
++            "probe_peak_estimate": 8.0,
++            "combined_with_probe_estimate": 176.8,
++            "per_slot_ceiling": 192,
++            "per_slot_headroom_estimate": 15.2,
++            "shared_ceiling": 1152,
++            "parent_ceiling": 256,
++            "full_design_ceiling": 1408,
++            "H3_full_sum_max": 1638.4,
++            "status": "DESIGN_ESTIMATES; helper/probe and loaded serve NOT_MEASURED; H3 six live slots sums bridge/helper/serve/probe RSS,blocked enable on breach"
++          },
++          "cleanup": "lifeline_w closed in parent finally; child_pgid covers helper/serve/descendants; helper EOF single-thread and terminal_quiescence as crash_recovery; all resources in H3",
++          "verification_ids": [
++            "VER-005"
++          ]
++        },
++        "C_MULT_I5": "Entire normal Keep-Alive path(permission/form/reply/interrupt/DELETE),including50controls:exactly1 lsof/successful spawn and1retained control TCP. Separate explicit control-socket reconnect scenario permits only2nd lsof<=0.35s outside reply0.25s/cleanupAPI0.20s; spies distinguish the scenarios; urgent control disconnect is fail-closed,never lsof wait.3forced lsof timeouts ->3ServeHealth failures->DEGRADED,nextauto has0serve/helper/lsof Popen. Check listener_pid==serve_pid and pgid==helper_proc.pid; count lifeline2ends during setup/one parent end thereafter,all0afterfinally; parentFD<=128,allprocess344design,55admittedthreads,19systemprocesspeak; probes1/slot. H3 measures actual RSS/FD/thread/ports and rejects excess without raising limits.",
++        "counter_branches": "Normal p99<=180 goal measured separately; three60s firsttoken faultprofile+aux51.6<=231.6,>=100sample batch nearest-rank criterion. Universal TIMEOUT1800 unchanged.",
++        "form_cancel": "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event.",
++        "status_waiting": "[мост] Ожидание первого токена…\n"
++      }
+     }
+@@ -1183,3 +1407,3 @@
+         "auto_fake_compatibility": "В git-клоне bridges/opencode-zen-bridge/dynamic_config.json отсутствует и не коммитится; default=false гарантирует прежний run для всех378 fake-CLI baseline tests REQ-003/AC-004, без опоры на shebang/имя теста/FAKE_OC_MODE. При explicit enabled auto дополнительно cached executable path+mtime_ns+size/first bytes: shebang/text ->run без --help/--version/serve subprocess; native opencode ->serve. Явный test-only eligibility override допустим только fixtures; force serve для FakeServe сохраняет первый kill-switch приоритет и stdin=DEVNULL. Explicit env false/run ->zero serve UUID/password/queue/threads/probes/Popen до file stat; default=false selector допускает только O(1) config stat, без serve allocations. При смене executable cache key старые capability/health инвалидируются.",
+-        "spawn": "На каждую реальную попытку общий _RequestAttempts/slot, единый admission deadline<=5.0s для _SpawnRateLimiter+_StartupGate (не два ожидания по5s), свежий _serve_env(model_id) поверх одного неизменного _run_env(model_id), новая per-spawn _next_standalone_proxy запись. Parent socket.bind((127.0.0.1,0)), getsockname()[1]; держать резерв до непосредственно Popen, затем close reserve и Popen([OPENCODE_BIN,serve,--hostname,127.0.0.1,--port,str(port)],stdin=DEVNULL,start_new_session=True,close_fds=True), сохранить child_pgid. Prompt/Basic password не передавать argv/stdin. До первого Authorization или prompt доказать owner listener по listener_ownership; при port race cleanup + новый порт только в оставшемся ready deadline, каждый новый Popen расходует общий cap3 и spawn token. Ни одного бесплатного spawn при EADDRINUSE. Apply serve_env_sanitization to ALL3 branches and data_isolation; keep standard XDG_DATA_HOME, set OPENCODE_DB=:memory:. Register crash-safe lease before readiness/auth and arm parent-death watchdog before admitting prompt, see crash_recovery. lsof owned helper once per successful spawn, not model attempt; no extra model Popen.",
++        "spawn": "One tree only: server.py parent -> helper_proc -> serve_proc; no direct parent Popen(opencode serve). Each attempt spends one common _RequestAttempts token and spawn-rate admission (cap3), paired helper is bounded auxiliary, not a free model attempt. Unified limiter+startup gate deadline<=5.0s; fresh _serve_env(model_id) calls immutable _run_env once and rotates proxy once. Parent reserves127.0.0.1:0 until just before helper spawn; creates lifeline_r,lifeline_w=os.pipe(), close_fds=True. helper_proc=Popen([sys.executable,\"-I\",\"-c\",_SERVE_HELPER_CODE,...],stdin=lifeline_r,stdout=PIPE,stderr=PIPE,start_new_session=True,close_fds=True,env=serve_env); child_pgid=helper_proc.pid and os.getpgid(helper_proc.pid)==child_pgid. Parent closes lifeline_r after Popen even on exceptions; lifeline_w never inherited by helper/serve and is closed in parent finally. Helper installs TERM handler and arms EOF monitoring on stdin fd0 BEFORE serve Popen; already-latched EOF causes cleanup without spawn. Helper immediately atomically creates /tmp/opencode-zen-bridge-leases/lease-<attempt_id>.json with helper_pid,helper_lstart,pgid=child_pgid,port,start_ts,parent identity,temp ownership. It launches serve_proc=Popen([OPENCODE_BIN,\"serve\",\"--hostname\",\"127.0.0.1\",\"--port\",str(port)],stdin=DEVNULL,start_new_session=False,close_fds=True,env=serve_env,stdout=sys.stderr,stderr=sys.stderr). Thus os.getpgid(serve_proc.pid)==child_pgid: helper and serve+descendants share ONE group. Helper atomically/fsync publishes serve_pid and serve_lstart in lease BEFORE stdout handshake JSON {\"serve_pid\":...,\"pgid\":...}, before lsof/READY/Auth/prompt. Parent gets exact serve_pid/child_pgid from handshake; port-only identity never sufficient. EOF immediately after either Popen is latched throughout publish/handshake; bounded EOF loop<=0.25s runs before readiness and during prompt. Standard XDG_DATA_HOME/auth preserved, OPENCODE_DB=\":memory:\" on all3 env branches; sanitized serve_env, no prompt/password in argv/stdin/lease. Port race consumes common token and retries only after full cleanup within original ready<=3s; all lsof/identity probes included.",
+         "startup": "SERVE_READY_TIMEOUT_S=3.0s (ready_budget_s=3.0): после owner proof лёгкий authenticated GET /api/session/active, HTTP200 + $.data object map of active sessions (empty={}); не качать 281KB /openapi.json на каждом spawn. Control I/O slices<=.25s, всего<=3 readiness TCP probes, remaining request deadline/cancel всегда проверяются. Child EOF/no listener/incompatible protocol -> ServeUnavailable. Пароль secrets per spawn в OPENCODE_SERVER_PASSWORD ПОСЛЕ whitelist, Basic opencode:<password>, никогда в argv/URL/log. stdout/stderr bounded drain+redact. HTTP на loopback напрямую без proxy/redirects. Readiness не устанавливает first_event_ms и не сбрасывает first_event/token часы.",
+@@ -1197,3 +1421,3 @@
+           "other": "first_event latch только валидный execution/step/reasoning started текущей session после prompt; валидные current-session model delta также доказывают начало исполнения. server.connected, HTTPready, session.created, чужие session/control/comments/status не latch и не model token. form.created session lookup is nested data.form.sessionID; shared flat filter must special-case this valid envelope before discard.",
+-          "payload_validation": "Проверять exact field paths/types и mandatory sessionID до emit. Текущая schema shape mismatch -> invalid_serve_event (не пустая полезная delta), отдельный ServeHealth; permission capability mismatch ->security fail-closed. Incremental UTF8/CRLF/multiline SSE/comments/fragment boundaries, byte budgets как прежде. Никакого Coder-discovered protocol или aliases, которых нет в frozen source. Coder и FakeServe используют frozen expected независимо; мутации delta path/token/permission должны краснить тест даже если adapter и mock согласованно ошибочны.",
++          "payload_validation": "Проверять exact field paths/types и mandatory sessionID до emit. Текущая schema shape mismatch -> invalid_serve_event (не пустая полезная delta), отдельный ServeHealth; permission capability mismatch ->security fail-closed. Incremental UTF8/CRLF/multiline SSE/comments/fragment boundaries, byte budgets как прежде. Никакого Coder-discovered protocol или aliases, которых нет в frozen source. Coder и FakeServe используют frozen expected независимо; мутации delta path/token/permission должны краснить тест даже если adapter и mock согласованно ошибочны. For form.created safety action with nested own sessionID+nonempty id MUST precede other schema validation; see form.created / form.cancelled policy; never delay cancel for missing root title.",
+           "frozen_v2_1_2_fixtures": {
+@@ -1505,9 +1729,11 @@
+               "negative_mutations": [
+-                "flatten form.sessionID to data.sessionID -> reject invalid event, no foreign cancel",
+-                "missing form.id/fields/title ->invalid_serve_event",
+-                "foreign nested sessionID ->ignore",
++                "flatten form.sessionID to data.sessionID or missing/invalid nested sessionID/id ->immediate fail-closed attempt,0foreigncancel,own-group kill<=1.2s,no watchdog wait",
++                "own nested sessionID+nonempty id but missing title ->cancel<=0.25s BEFORE other validation,interrupt<=0.10s,normal cancellation,ServeHealth0,UpstreamBreaker0,Step2output0",
++                "own nested sessionID+nonempty id but malformed/missing fields ->cancel first<=0.25s,then schema diagnostic/fail-closed as applicable; never wait watchdog or send answer",
++                "foreign valid nested sessionID ->ignore,0foreigncancel",
+                 "form.cancelled wrong id/session ->not own success",
+-                "cancel endpoint failure ->fail-closed, no permission allow or Step2 output"
++                "cancel endpoint failure or broken control ->immediate fail-closed+finally killpg(child_pgid)<=1.2s,never allow/answer/Step2"
+               ],
+-              "provenance": "EVD-073 source schema; synthetic ids/titles/empty fields, not observed runtime cancellation"
++              "provenance": "EVD-073 source schema; synthetic ids/titles/empty fields, not observed runtime cancellation",
++              "safety_order": "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event."
+             }
+@@ -1520,5 +1746,6 @@
+           },
+-          "frozen_fixture_sha256": "12456f8b4568c3f3b4c52677118748faf80512f376b2b1b2f467226ff94a1f38",
+-          "form.created / form.cancelled": "form.created uses data.form.sessionID/id (Form.Info nested); validate own session before action. Cancel immediately via POST /api/session/{id}/form/{formID}/cancel, no answer/allow; form.cancelled data.id/sessionID settles same form. Not a model token/first-event. Error->security fail-closed+kill. See single_turn_control.",
+-          "fixture_digest_serialization": "UTF-8 json.dumps(frozen_v2_1_2_fixtures,ensure_ascii=False,sort_keys=True,separators=(\",\",\":\")); no trailing LF"
++          "frozen_fixture_sha256": "e7871cd2910fa8458ec3efd90e254cc51fcef97300e6541a7edd1cce6d14a7a3",
++          "form.created / form.cancelled": "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event.",
++          "fixture_digest_serialization": "UTF-8 json.dumps(frozen_v2_1_2_fixtures,ensure_ascii=False,sort_keys=True,separators=(\",\",\":\")); no trailing LF",
++          "fixture_digest_revision_a3": "Wire and canonical fixture data unchanged from v3; only negative-mutation/safety-order metadata amended for PANEL-A3-F-004. Source Form.Info required title preserved. Recompute documented full-fixture serialization digest accordingly."
+         },
+@@ -1527,8 +1754,9 @@
+           "protocol": [
+-            "Parent reserves127.0.0.1:0; release immediately before Popen explicit --port; saved child PGID. No Auth/prompt until proof.",
+-            "SPAWN→READY after port LISTEN: exactly once lsof -nP -a -iTCP:<port> -sTCP:LISTEN -Fp, timeout0.35s; one listener_pid, os.getpgid(listener_pid)==child_pgid and proc.poll() is None. Mismatch/ambiguous/timeout counts _ServeHealth failure, zero secret bytes.",
+-            "After proof establish/retain3 HTTP/1.1 Keep-Alive connections: control, SSE, prompt. Loopback direct, redirects/proxy disabled. Before each authenticated request proc.poll() is None; never lsof in permission/form/interrupt/DELETE hot path.",
+-            "Cached proof bound to exact live child lease + sockets, never globally port-only. On dead proc close lanes and fail-closed, no Auth to replacement listener. On control disconnect one explicit reconnect with fresh proof<=0.35s before Auth; not transparent retry of sent request, no prompt replay. SSE/prompt disconnect closes attempt (no transparent reconnect).",
+-            "Reconnect is separate recovery budget outside fast control SLA; pending urgent permission/form cannot wait0.35s while claiming<=0.25s: terminate attempt fail-closed and kill own PGID. Cleanup never reconnects; broken control skips API and uses group kill.",
+-            "Foreign listener/PGID: no API or signals to foreign PID. Only own child cleanup; retry new port allowed within original ready3s/admission/cap3. lsof helper has own bounded PID lifecycle."
++            "Parent reserves127.0.0.1:0 and launches only stdlib helper in new session. helper_proc.pid=child_pgid; helper launches serve_proc with start_new_session=False in that same group. Lease records helper and serve separately, raw pid aliases forbidden.",
++            "Helper publishes serve_pid/serve_lstart/pgid atomically before JSON handshake {\"serve_pid\":...,\"pgid\":...}; parent validates helper_proc.pid==child_pgid==os.getpgid(helper_proc.pid), handshake/lease match before any lsof/READY/Auth.",
++            "SPAWN→READY: exactly1 lsof -nP -a -iTCP:<port> -sTCP:LISTEN -Fp,timeout<=0.35s. Require single listener_pid==serve_pid AND os.getpgid(listener_pid)==child_pgid AND helper_proc.poll() is None. Mismatch/ambiguous/timeout:0secret bytes,ServeHealth+1 once, cleanup own group only.",
++            "Retain3 HTTP/1.1 Keep-Alive lanes(control,SSE,prompt), loopback direct,no redirects/proxy. Before EACH authenticated Keep-Alive request require helper_proc.poll() is None; helper exits immediately with serve termination code/signal after owned cleanup when serve_proc exits. Never use helper_pid as listener or ambiguous proc.poll().",
++            "For entire normal permission/form/reply/interrupt/DELETE path:1lsof total per successful spawn, including50 control operations; never extra lsof or reconnect in <=0.25s reply/<=0.20s final API cleanup.",
++            "Only separate explicit control-socket reconnect may perform second lsof/proof<=0.35s, against same serve_pid/child_pgid/live helper/lease BEFORE Authorization; outside0.25s/0.20s budgets, no sent-request retry or prompt replay. Urgent pending control on broken socket fails closed immediately; SSE/prompt disconnect closes attempt.",
++            "On helper death close all lanes/fail-closed; no Auth to replacement listener. Foreign PID/PGID never signalled. Parent cleanup closes lifeline_w then TERM→KILL child_pgid, including live descendants even if serve exited. lsof/identity probe own bounded lifecycle; cleanup never reconnects."
+           ],
+@@ -1648,5 +1876,5 @@
+               "version": "2.1.2",
+-              "pid": "<actual child PID integer>"
++              "pid": "<actual serve_pid integer,never helper_pid>"
+             },
+-            "note": "Пример pid placeholder только в документации, wire integer; owner PGID проверяется до Auth независимо от self-reported pid. appversion2.1.2 отличается от OpenAPI.info.version0.0.1. Once per executable stat key, withinready3s."
++            "note": "Пример pid placeholder только в документации, wire integer; owner PGID проверяется до Auth независимо от self-reported pid. appversion2.1.2 отличается от OpenAPI.info.version0.0.1. Once per executable stat key, withinready3s. If /api/info pid is checked it must equal handshake serve_pid (not helper_proc.pid),group remains child_pgid=helper_proc.pid."
+           },
+@@ -1671,3 +1899,3 @@
+           },
+-          "ownership": "Lease + finally remove owned zen-serve-state-* only after kill/reap/readers closed; no silent ignore_errors success, verify absence, record cleanup failure. Startup reaper handles crash remnants. Cleanup aggregate<=1.2s; H3 actual disk cleanup required.",
++          "ownership": "Lease + normal parent finally removes own zen-serve-state-* only after same-group kill/reap/readers closed; parent-dead helper terminal_quiescence is explicit exception: stop/recheck every residual writer before owned root removal,unlink lease last,final self-including group KILL. No deletion by unquiesced children/no ignore_errors; failed deletion retains lease for safe startup reaper. cleanup<=1.2s design target; Stage3/H3/H9 actual proof required.",
+           "preflight": "EVD-071 covers GET /api/session/active; /api/info version+pid readback NOT supplied. Before freeze-to-Coder execution gate, Stage3 first provider-free preflight rechecks both /api/info and /api/session/active on chosen env, startup<=3s/RSS/files/auth visibility; no Zen quota. H3 actual provider auth/parallel RSS remain NOT_RUN.",
+@@ -1677,3 +1905,3 @@
+         },
+-        "typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. New test0diagnostics; new legacy ranges0reportAny/reportExplicitAny/reportUnusedCallResult. VER-004 uses isolated bridge cwd + ephemeral /tmp include/extraPaths, errorCount0all3, server Any<=125each and documented nonAny per-rule/total720, step194 (baseline564/162). Rename mutable internal CATALOG_SOURCE to lower-case across server references (no external HTTP key change); guard proc is not None at both returncode sites. No new module/config/dependency. Legacy format ranges only; all3 full lint with exact existing server-only E402 exception and no new E402.",
++        "typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. zc = importlib.import_module(\"zen_catalog\") with import importlib replaces static relative import; guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter.",
+         "transport_health": {
+@@ -1746,3 +1974,3 @@
+             "Do not wait for pending prompt HTTP response or step.ended. Snapshot already received complete tool args/call ids; continue only bounded same-step argument finalization, never wait for Step2.",
+-            "Use idle Keep-Alive control lane: permission reply decision=reject OR form cancel within0.25s of validated event, including scheduling+I/O; no lsof/reconnect on this path.",
++            "For own form nested sessionID+nonempty id: cancel on idle Keep-Alive control lane<=0.25s BEFORE title/fields/schema checks; permission reply decision=reject same0.25s. Missing form title still normal cancellation,0ServeHealth increment, no watchdog wait. Missing id/sessionID or any control failure ->fail-closed+own group kill<=1.2s. Never lsof/reconnect on this hot path.",
+             "Immediately POST /api/session/{id}/interrupt (<=0.10s) after rejection/cancellation; single-turn guard suppresses Step2 even if server races interrupt. On any control error fail-closed and group kill.",
+@@ -1760,2 +1988,3 @@
+             "schema_version",
++            "attempt_id",
+             "owner_uid",
+@@ -1764,3 +1993,6 @@
+             "parent_start_ts",
+-            "pid",
++            "helper_pid",
++            "helper_lstart",
++            "serve_pid",
++            "serve_lstart",
+             "pgid",
+@@ -1774,11 +2006,19 @@
+           ],
+-          "creation": "Write owned pre-spawn lease with temp root, phase=reserved before Popen; immediately after Popen atomically persist exact pid/pgid+ps start-time identity before READY/Auth/prompt. Parent bookkeeping thread per active lease watches the owned helper; parent-death enforcement itself is the paired helper holding the parent pipe. All included in thread/process budgets. Startup reaper required even if killed in persist gap. To cover spawn→lease update gap without unknown-child kill, spawn under lease-named stdlib helper which publishes child identity atomically and waits on parent pipe; EOF kills verified child PGID. Helper stdout/stderr not model data; new helper count boundedM and accounted below, not free model attempt. Implementation stays inside allowed server.py, stdlib -c helper only, no new script file.",
+-          "parent_death": "Helper owns parent pipe, checks EOF / os.getppid() and parent start identity; polling<=0.25s, no timeout killing live owner. On EOF closes lanes and TERM verified child PGID, grace0.50s then KILL and reap, remove only own recorded temp root. Helper process owns separate PGID and parent bridge retains helper identity. No secret in lease/helper argv. Helper exits on completed attempt, capped one per slot.",
+-          "startup_reaper": "Run before accepting bridge traffic (including disabled serve path): read only owner-UID valid leases. Live parent PID+matching parent_start_ts ->skip. If parent dead/mismatch, validate child ps pid,pgid,lstart,uid and command contains literal opencode serve --hostname 127.0.0.1 with exact recorded --port and binary path; os.getpgid(pid)==recorded pgid, start_ts matches. Recheck immediately before each signal and TERM→KILL. PID reuse, foreign uid, symlink, malformed/absent manifest or ambiguous identity ->no signal; redacted quarantine diagnostic, do not kill by name. Stored start_ts uses ps lstart identity plus monotonic instance nonce, not timestamp proximity alone.",
+-          "directory_cleanup": "Only recorded local temp_root with zen-serve-state- prefix, owner uid and recorded inode, no symlink, path resolved within tempfile.gettempdir; verify child/helper no longer active before rmtree and absence check. Do not delete another live attempt root. Missing ownership manifest ->do not discover/kill/remove by name. Dead-child orphan temp lease may be removed after ownership checks; retain error lease for diagnostics on failure.",
+-          "finally": "Normal finally closes pipe/helper, kills/reaps owned groups, removes temp root then lease. Never unlink manifest first or claim cleanup with ignore_errors. Startup reaper and helper idempotent under atomic lease ownership lock; races cannot signal reused PGID. All50 cancellation tests retained.",
+-          "tests": "VER-005 GroupB: hard kill parent after spawn before READY, after lease publish, during prompt; helper EOF cleanup, plus disabled-helper/reaper recovery on next bridge start;0 old owned serve/descendants/helper/temp dirs, foreign PID/PGID/start-time-reuse and foreign directories untouched. Normal50cancel counters remain0. H0/H9 actual kickstart -k tests still NOT_RUN.",
++          "creation": "Parent reserved ownership manifest contains attempt/temp inode before helper Popen; helper immediately creates/updates lease-<attempt_id>.json with helper_pid,helper_lstart,pgid=helper_pid,port,start_ts. Install SIGTERM handler/EOF watcher first; if parent already died EOF is latched, do not launch serve. serve_proc=Popen(...,stdin=DEVNULL,start_new_session=False,env=serve_env) in same child_pgid; atomic fsync+replace adds serve_pid and serve_lstart BEFORE stdout handshake {\"serve_pid\":...,\"pgid\":...}, then parent lsof/READY/Auth. Check EOF before serve Popen, immediately after it, before/after lease publication/handshake and in <=0.25s monitor loop. No gap depends on parent surviving to publish child identity; helper owns serve Popen->lease publication. helper_proc denotes parent Popen object only; serve_proc denotes helper Popen object only.",
++          "parent_death": "EOF on helper stdin lifeline_r (parent closes lifeline_w or SIGKILL at ANY point including helper Popen->helper entry, serve Popen->lease write, handshake->READY, active prompt) triggers immediate own-group shutdown; never wait first-event/token/watchdog. helper SIGTERM handler latches shutdown without recursively exiting, so os.killpg(child_pgid,SIGTERM) reaches serve/descendants while helper remains to reap/clean. Grace<=0.50s; normal parent alive escalates os.killpg(child_pgid,SIGKILL) and performs post-kill cleanup outside group. For parent-dead helper escalation, use explicit terminal_quiescence below: never claim a finally after SIGKILL-to-self. Parent identity checks are additional diagnostics, EOF is primary death signal; live parent is never time-killed. Serve exit immediately triggers same cleanup and helper terminates with same serve exit code/signal (not a healthy lingering helper); poll guard checks helper_proc only.",
++          "startup_reaper": "Before bridge accepts any traffic, even disabled serve: inspect only valid owner-UID leases. Matching live parent PID+parent_start_ts ->skip. Dead parent: validate helper_pid/helper_lstart/pgid and/or serve_pid/serve_lstart using exact uid,pgid,binary path/command/port; helper command is sys.executable -I -c _SERVE_HELPER_CODE with attempt marker, never opencode listener. When serve still exists require os.getpgid(serve_pid)==stored child_pgid; pid reuse/mismatched lstart/foreign UID/PGID/no manifest/symlink ->no signal, redacted quarantine. While a verified group anchor exists recheck before TERM/KILL; do not infer ownership merely from port/name. Reap/remove only recorded own inode-safe temp root after group absent; reserved manifests with no helper/serve may clean only their proven owned root. No name-wide kill or scanning outside registry.",
++          "directory_cleanup": "Parent-alive cleanup verifies helper+serve/group gone before rmtree; parent-dead helper uses terminal_quiescence (all residual writers stopped, helper owns PGID, root/inode/UID verified) before final self-including KILL. This narrowly defined terminal path is the only cleanup-before-group-absence path; no deletion while unquiesced child can recreate files. Only recorded zen-serve-state-* local root resolved under tempfile.gettempdir, correct uid+inode/no symlink. Foreign roots never removed; no ignore_errors; failed cleanup retains manifest for startup reaper.",
++          "finally": "Parent finally always closes lifeline_w, closes lanes, TERM→KILL same child_pgid, reaps helper_proc; helper owns reaping serve_proc. Join both stdout/stderr drain threads, SSE/prompt/supervisor/bookkeeping within aggregate cleanup<=1.2s. Outside-group parent removes root then lease only after group absent. Parent-dead helper follows terminal_quiescence before final self-KILL. Atomic per-lease lock/idempotence coordinates helper/parent/reaper; never signal reused foreign PGID. Normal50cancel counters remain zero.",
++          "tests": "VER-005 GroupB inject parent SIGKILL (1) immediately after helper Popen before helper entry/lease, (2) immediately after serve Popen before serve_pid publication, (3) after atomic lease before handshake, (4) after handshake before lsof/READY, (5) during prompt. Same helper→serve group; EOF never lost, helper watcher active before READY. Include TERM-ignoring descendant and terminal_quiescence order (all writers stopped ->owned root removal ->lease unlink ->final same-group KILL; no imagined helper finally after self-KILL). Assert listener_pid==serve_pid and pgid==child_pgid,0 owned helper/serve/descendants/lease/temp roots,0 foreign signals/deletions including PID/PGID reuse. Separately kill/disable helper, restart bridge with retained lease ->safe startup reaper; this is recovery scenario, not immediate EOF success.50 normal cancellation cycles return all counters/FD/thread/pipe counts to0; lifeline_w closed every exit. Stage3/H0/H9 remain NOT_RUN.",
+           "verification_ids": [
+             "VER-005"
+-          ]
++          ],
++          "terminal_quiescence": {
++            "reason": "SIGKILL to -child_pgid includes helper itself: no post-SIGKILL helper code or implicit finally can clean files.",
++            "normal_parent_alive": "Parent closes lifeline_w, TERM child_pgid, waits<=0.50s, then KILL child_pgid if needed; after verified group absence parent reaps helper and removes owned temp root then lease. Parent is outside child_pgid.",
++            "parent_dead_single_fault": "Helper handles own TERM, reaps cooperative serve; if residual group members ignore TERM, snapshot only child_pgid members by PID/UID/lstart, SIGSTOP each residual member except helper, recheck all group members stopped and repeat to close fork race. No other process/group is touched. Helper remains live group/session leader, preventing PGID reuse. Once all potential writers are quiescent, remove only recorded owned inode-safe temp root and unlink lease as LAST filesystem operation, then final syscall os.killpg(child_pgid,SIGKILL) kills helper and all stopped descendants; no code after it. If no residual members, remove owned files then exit preserving serve termination code. This is cleanup-before-self-KILL, not impossible cleanup-after-self-KILL.",
++            "failure_policy": "Quiescence/identity/deletion failure never reported cleanup success: retain lease, redacted error, group kill for safety and startup reaper completes retained-manifest cleanup. Fault-injection must prove zero roots on successful cleanup and fail the gate on any retained lease/root; budgets cannot be raised or failure ignored.",
++            "budget": "EOF detection<=0.25s; TERM grace<=0.50s; residual identity/stop/reap/root+lease cleanup<=0.45s; total<=1.20s target. No API0.20s cost after parent death. Extra ps identity snapshots run serially on existing helper main loop, at most1 per-slot auxiliary probe, never overlap that slot lsof; resource accounting includes them.",
++            "scope": "Single parent-death fault; helper failure is independent startup-reaper scenario and never proof of immediate EOF-path success; H0/H9/Stage3 actual timing NOT_RUN."
++          }
+         },
+@@ -1835,2 +2075,10 @@
+             {
++              "phase": "DELIVERED",
++              "event": "first_token_timeout with proven protocol/capability defect (non-security); valid protocol model silence is the separate preceding row",
++              "DELIVERED": "true",
++              "action": "serve_retry",
++              "ServeHealth_failure_increment": 1,
++              "UpstreamBreaker_failure_increment": 0
++            },
++            {
+               "phase": "ANY",
+@@ -1883,3 +2131,44 @@
+           ],
+-          "rules": "In auto fallback_to_run only before both barriers and before model/tool output, at most1 fallback after complete cleanup; force serve turns fallback_to_run into explicit failure. serve_retry means explicit admitted same-transport retry after cleanup/status, common cap3/retrytoken/FullJitter and remaining deadlines. If no budget ->fail_closed. Any response headers (including4xx/5xx) latch delivery before status classification. Upstream provider failure committed by existing per-request pending semantics once per cause, not per duplicate step/execution event. Security errors neutral to both health counters but fail-closed. lsof failure counter once per failed attempt;3 ->DEGRADED120s, next auto run without probes. Invalid protocol endpoint signature/security never bypassed by fallback."
++          "rules": "In auto fallback_to_run only before both barriers and before model/tool output, at most1 fallback after complete cleanup; force serve turns fallback_to_run into explicit failure. serve_retry means explicit admitted same-transport retry after cleanup/status, common cap3/retrytoken/FullJitter and remaining deadlines. If no budget ->fail_closed. Any response headers (including4xx/5xx) latch delivery before status classification. Upstream provider failure committed by existing per-request pending semantics once per cause, not per duplicate step/execution event. Security errors neutral to both health counters but fail-closed. lsof failure counter once per failed attempt;3 ->DEGRADED120s, next auto run without probes. Invalid protocol endpoint signature/security never bypassed by fallback. first_token_timeout branches are mutually exclusive: proven non-security protocol/capability defect ServeHealth+1/UpstreamBreaker0; valid protocol/model silence ServeHealth0/UpstreamBreaker+1. Count exactly once per cause; security capability failures keep fail_closed neutral counters. Delivery barrier/cap3/retry budget unchanged."
++        },
++        "cleanup": "Parent normal/emergency finally: latch no-more-output/spawn, bounded own-session APIs<=0.20s on already proven Keep-Alive only, close all lanes and lifeline_w (always finally), os.killpg(child_pgid,SIGTERM),grace<=0.50s,then os.killpg(child_pgid,SIGKILL) for whole shared helper+serve+descendant group even if serve exited. Parent reaps helper_proc, helper reaps serve_proc; total remainder<=0.50s includes joins+owned root then lease removal; aggregate<=1.20s. Parent death bypasses finally ->helper EOF plus terminal_quiescence, startup reaper for retained manifests; no new group/ambiguous proc. EVD-055 justifies killing descendants after leader exit.",
++        "resource_accounting": {
++          "process_tree": "Exactly1bridge parent ->at most6 helper_proc ->at most6 serve_proc, each pair same child_pgid=helper_proc.pid; <=6 transient bounded lsof/ps identity probes, at most1/slot (no overlap),peak19 processes including bridge. One model attempt token creates one helper/serve pair; MAX_TOTAL_SPAWNS=3 counts pairs/actual serve launches, never free retries; probes auxiliary bounded and accounted. Serve start_new_session=False, helper=True; no alternate process topology.",
++          "parent_threads": 55,
++          "thread_formula": "Parent admitted bound55=1accept+18handlers(6active+12waiters)+6supervisor/setup+6SSE readers+6prompt delivery workers+12helper stdout/stderr drains+6parent bookkeeping. Helper EOF/TERM/serve poll uses one single-thread main loop per slot, no helper watcher threads;<=6 helper processes. serve logs route to helper stderr, stdout reserved for one handshake; parent still accounts2drains/slot. At most6 auxiliary identity/lsof/ps probes total,1per slot,serial nonoverlap with reconnect/cleanup, executed on existing supervisor/helper loops. Peak system processes1bridge+6helper+6serve+6probe=19. Reaper startup-only, no request overlap. Rejected unadmitted ThreadingHTTPServer handlers may be transient:55 is admitted bound; H3 must measure rejection peaks, not claim arbitrary flood defense.",
++          "fd": {
++            "parent_baseline": 36,
++            "admitted_client_sockets": 18,
++            "serve_http_lanes": 18,
++            "stdout_stderr_drains": 12,
++            "reserved_port_sockets": 6,
++            "lsof_capture_pipes": 6,
++            "parent_watchdog_pipes": 6,
++            "open_lease_files": 6,
++            "parent_upper_bound": 114,
++            "configured_envelope": 128,
++            "aggregate_estimate": "Steady parent108 plus transient6lifeline read ends=114<=envelope128. Systemwide conservative128+6serve*20+6helper*8+6probe*8=344descriptors; probe=lsof OR ps identity,at most1/slot,no overlap. Helper per-process8 upper design includes std0/1/2,one transient lease file/atomic temp,DEVNULL/child-launch descriptors and select bookkeeping; measure H3 each process and transient peaks,do not claim aggregate<256.",
++            "lifeline_definition": "6 parent lifeline_w write ends; transient parent lifeline_r read end closed immediately after Popen. During setup read+write momentarily add<=6FD; terminal no leaks. helper stdin fd0 is lifeline_r, never inherits write end.",
++            "transient_lifeline_read_ends": 6
++          },
++          "rss": {
++            "unit": "MiB",
++            "serve_idle_observed": 156.8,
++            "serve_evidence": "EVD-071 owner-supplied idle, not6parallel peak",
++            "helper_estimate": 12.0,
++            "pair_estimate": 168.8,
++            "probe_peak_estimate": 8.0,
++            "combined_with_probe_estimate": 176.8,
++            "per_slot_ceiling": 192,
++            "per_slot_headroom_estimate": 15.2,
++            "shared_ceiling": 1152,
++            "parent_ceiling": 256,
++            "full_design_ceiling": 1408,
++            "H3_full_sum_max": 1638.4,
++            "status": "DESIGN_ESTIMATES; helper/probe and loaded serve NOT_MEASURED; H3 six live slots sums bridge/helper/serve/probe RSS,blocked enable on breach"
++          },
++          "cleanup": "lifeline_w closed in parent finally; child_pgid covers helper/serve/descendants; helper EOF single-thread and terminal_quiescence as crash_recovery; all resources in H3",
++          "verification_ids": [
++            "VER-005"
++          ]
+         }
+@@ -1995,3 +2284,3 @@
+         "disconnect": "На каждой итерации/ожидании <=0.25 s проверять cancel flag и client socket select + recv(MSG_PEEK|MSG_DONTWAIT): EOF/ECONNRESET -> client_gone без чтения данных и без переключения wfile в nonblocking. Реальная bounded empty OpenAI keepalive каждые <=2.0 s тишины страхует разрыв, который TCP ещё не сигнализировал; write deadline <=0.5 s, без write на отдельном потоке. Poll, status, write и cleanup не блокируют supervisor на 15/5 s. Суммарное обнаружение контролируемого FIN/RST <=5.0 s. Полное исчезновение сети без FIN нельзя доказать одним MSG_PEEK — bounded write/OS transport timeout и fault injection отдельно, не обещать физически невозможный мгновенный детект blackhole.",
+-        "cleanup": "T-LIFE: после cancel/terminal/watchdog/error/overflow/tool step/success в одном finally: запретить новый prompt/spawn; serve interrupt и DELETE с общим cleanup API ceiling 0.20 s (каждый <=0.10 s, ошибки не блокируют kill); close SSE/control sockets для разблокировки reader; SIGTERM сохранённому own PGID даже если proc.poll уже завершён; grace<=0.50 s, затем SIGKILL тому же PGID при наличии; reap leader и join owned readers/writer <=0.50 s суммарно. Запрет blanket pkill, чужих PID и повторного сигнала переиспользованному PGID после подтверждённого cleanup. cleanup идемпотентен и защищён lock; kill также descendant при leader exit (EVD-056). Target watchdog+2 s и disconnect detect<=5 s + cleanup<=2 s, итог orphan-free<=7 s; не сохранять старые wait(15)+join(5)+kill-parent. После child kill/reap обязателен finally verified removal of owned zen-serve-state-* root (XDG_STATE_HOME/TMPDIR), preserve standard XDG_DATA_HOME; закрыть также daemon prompt delivery socket и join его в том же aggregate cleanup<=1.2s. Interrupt/delete только после ownership proof, никогда чужому listener. Fast API interrupt/delete each0.09s plus0.02 scheduling margin aggregate0.20; no lsof/reconnect. Normal helper pipe close/join and lease/temp deletion share remaining0.50s; crash_recovery covers death outside finally.",
++        "cleanup": "T-LIFE: после cancel/terminal/watchdog/error/overflow/tool step/success в одном finally: запретить новый prompt/spawn; serve interrupt и DELETE с общим cleanup API ceiling 0.20 s (каждый <=0.10 s, ошибки не блокируют kill); close SSE/control sockets для разблокировки reader; SIGTERM сохранённому own PGID даже если proc.poll уже завершён; grace<=0.50 s, затем SIGKILL тому же PGID при наличии; reap leader и join owned readers/writer <=0.50 s суммарно. Запрет blanket pkill, чужих PID и повторного сигнала переиспользованному PGID после подтверждённого cleanup. cleanup идемпотентен и защищён lock; kill также descendant при leader exit (EVD-055). Target watchdog+2 s и disconnect detect<=5 s + cleanup<=2 s, итог orphan-free<=7 s; не сохранять старые wait(15)+join(5)+kill-parent. После child kill/reap обязателен finally verified removal of owned zen-serve-state-* root (XDG_STATE_HOME/TMPDIR), preserve standard XDG_DATA_HOME; закрыть также daemon prompt delivery socket и join его в том же aggregate cleanup<=1.2s. Interrupt/delete только после ownership proof, никогда чужому listener. Fast API interrupt/delete each0.09s plus0.02 scheduling margin aggregate0.20; no lsof/reconnect. Parent closes lifeline_w in finally; killpg(child_pgid) covers helper_proc+serve_proc+descendants in same group. Parent reaps helper_proc, helper reaps serve_proc. Normal join and root/lease deletion share remaining0.50s; parent-dead helper terminal_quiescence before final self-KILL and startup reaper are specified in AD-001.crash_recovery.",
+         "retry": "Watchdog first_event/first_token/stall -> bounded common retry after full cleanup, _RequestAttempts/MAX_TOTAL_SPAWNS3/FAIL_RETRY_LIMIT/_RetryBudget/Full Jitter как ранее. Но serve-specific no-session-event/invalid_serve_event/EOF классифицируются _ServeHealth и НЕ _UpstreamBreaker; общие provider failures по-прежнему model breaker. При DELIVERED silent run fallback запрещён: retry текущего запроса остаётся явным на закреплённом транспорте, health TTL влияет только на последующие auto requests. Legacy watchdog сохраняет provider semantics. client_gone/fatal4xx/auth/permission ->no retry/fallback. HALF_OPEN owner token жив до завершения/cleanup, cooldown не допускает второй probe; neutral transport failure/cancel освобождает probe без fake provider success/failure. Slot один на запрос, release once; cancel-aware waits<=.25s; Full Jitter capped remaining. Decision table AD-001.fallback_decision_table is authoritative for phases/counter effects, including first_event before/after headers.",
+@@ -2398,3 +2687,3 @@
+       "impact": "medium",
+-      "mitigation": "EVD-072: full legacy format violates frozen bytes. VER-004 new file full format, legacy changed ranges via git diff-U0; local bridge-cwd temporary import-root, no repo config mutation. CATALOG_SOURCE mutable-name correction and proc None guards resolve3 type errors. Existing E402 only import zen_catalog baseline handled per-file CLI ignore with exact-site check, no noqa. Both Any<=125,0 Any/new warnings policy and explicit nonAny budgets; commands pendingStage3.",
++      "mitigation": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. zc = importlib.import_module(\"zen_catalog\") with import importlib replaces static relative import; guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter.",
+       "verification_ids": [
+@@ -2506,3 +2795,3 @@
+     "migration": "No product DB migration. serve child SQLite memory only; never read/write/migrate shared opencode.db/opencode-next.db. Owned zen-serve-state-* dirs and UID registry leases are transient control state removed normally/following crash-safe reaper. Standard XDG_DATA_HOME/auth.json kept read-only.",
+-    "rollout": "Все H0..H9 NOT_RUN, external a3 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS.",
++    "rollout": "Все H0..H9 NOT_RUN, external a4 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS. H4 uses ONLY cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py, then SHA-256 read-back. Never rsync --delete or directory sync. Preserve live dynamic_config.json and disable-serve byte-for-byte (or their recorded absence) from H0 snapshot AFTER any intentional H0 false-write; H0/H4 read back existence/bytes/mode after cp. H5 restarts only after that preservation check; no copy/delete/overwrite of either runtime file. Default=false and true only H7 after H3/H6, no new owner waiver required.",
+     "rollback": "Runtime kill-switch без рестарта: атомарно tempfile+os.replace mode0600 записать {\"REALTIME_SERVE_ENABLED\":false} в ~/.dsh/bridges/opencode-zen-bridge/dynamic_config.json; либо удалить файл (default=false), либо создать disable-serve. Следующий auto запрос run без serve probes/allocations. Цель selector overhead <1мс проверяется VER-005/H9; это не измеренная гарантия задержки файловой записи/планировщика. Существующий explicit env=true имеет заданный override приоритет: в таком диагностическом процессе использовать disable-file для безусловного runtime rollback; production H0/H7 требуют auto без override. Env false/no/off/0 или TRANSPORT=run также force run, но изменение env живого процесса требует restart. In-flight leases drain/cancel, DELIVERED prompt не повторяется на run. H9 проверяет same PID, transport_history и повторные/параллельные вызовы; kickstart-k отдельно с config false/absent и identity-verified owned reaper. Stage2 ничего не деплоит. Все H0..H9 NOT_RUN.",
+@@ -2513,5 +2802,5 @@
+       "memory_unit": "MiB",
+-      "memory_inequality": "actual_parent_RSS + sum(RSS_serve + RSS_paired_helper + RSS_lsof_peak over M=6) <=0.80*2048=1638.4MiB; combined design per-slot192MiB includes helpers, not192+helpers.",
++      "memory_inequality": "actual_parent_RSS + sum(RSS_serve + RSS_python3_I_helper + RSS_bounded_lsof_or_ps_probe_peak over M=6) <=0.80*2048=1638.4MiB; fixed192MiB combined/slot. Serve idle156.8+helper~12+probe~8=176.8MiB estimate only; no omitted helper/probe/load overhead.",
+       "database_gate": "OPENCODE_DB=:memory:,0 shared SQLite opens/writes (lsof + disk identity snapshot);0database is locked/SQLITE_BUSY across6parallel×3; valid opencode-go auth without false401 tested separately from provider-free readiness.",
+-      "other_evidence": "Реальные RSS/FD/CPU/TTFT каждого запроса, parent/child peaks, все owned temp dirs удалены, zero orphan PGID; design child192MiB не подставлять вместо замера Include lsof one per spawn, helper/watchdog PIDs,18 admitted handler threads (6active+12waiters), consistent12 drains, observed FD/thread peaks and transport diagnostics. /api/info+active provider-free first; measured ready120.7ms is baseline not guarantee.",
++      "other_evidence": "Реальные RSS/FD/CPU/TTFT каждого запроса, parent/child peaks, все owned temp dirs удалены, zero orphan PGID; design child192MiB не подставлять вместо замера Include lsof one per spawn, helper/watchdog PIDs,18 admitted handler threads (6active+12waiters), consistent12 drains, observed FD/thread peaks and transport diagnostics. /api/info+active provider-free first; measured ready120.7ms is baseline not guarantee. Same tree helper_proc(new session leader)->serve_proc(same child_pgid). Record<=19total processes,55admitted parent threads,transient parentFD<=128 and344aggregate design; helper EOF single-thread and both lifeline ends accounted. Exceedance fails H3,not waiver.",
+       "on_fail": "Rollout enable запрещён: runtime config остаётся absent/false (и дополнительный disable-file остаётся, если поставлен). Не повышать slots6/12/retrycap3 и не менять shared env/config/DB."
+@@ -2525,2 +2814,3 @@
+         "optional additional disable-serve; preserve recorded safety state",
++        "H0 snapshot exact bytes/hash/existence/mode of dynamic_config.json and disable-serve after intentional safety false-write; H4/H0 read-back same state after copying ONLY server.py.",
+         "capture old PID/start/leases",
+@@ -2536,2 +2826,14 @@
+       "scenario": "Same live bridge PID: atomic runtime config false ->run, true ->serve при native+healthy, file deletion ->run; disable-serve дополнительно always run. Подтвердить selector overhead<1мс фактом, не обещанием. Отдельно parent hard kill/kickstart-k с active serve и последующий startup reaper:0 собственных orphan serve/helper/temp roots, чужие PID/PGID untouched."
++    },
++    "H4_H5_sync_contract": {
++      "status": "NOT_RUN",
++      "copy_command": "cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py",
++      "forbidden": [
++        "rsync --delete",
++        "directory-wide sync",
++        "copy/delete/overwrite live dynamic_config.json",
++        "copy/delete/overwrite disable-serve"
++      ],
++      "preservation_gate": "H4 uses ONLY cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py, then SHA-256 read-back. Never rsync --delete or directory sync. Preserve live dynamic_config.json and disable-serve byte-for-byte (or their recorded absence) from H0 snapshot AFTER any intentional H0 false-write; H0/H4 read back existence/bytes/mode after cp. H5 restarts only after that preservation check; no copy/delete/overwrite of either runtime file. Default=false and true only H7 after H3/H6, no new owner waiver required.",
++      "H5": "launchctl kickstart only after H0/H4 copied server hash and both runtime file preservation checks; false/dark until H7"
+     }
+@@ -2550,3 +2852,3 @@
+     "evidence_ref": null,
+-    "rationale": "S2 schema review NOT_REQUIRED, but downstream external Council a3/proof is mandatory orchestration gate; Architect writes no vote or ACCEPT. Previous a2 NEEDS_WORK history retained."
++    "rationale": "S2 schema NOT_REQUIRED is unchanged; downstream external a4 Council/proof mandatory. Author issues no Council PASS. a3 NEEDS_WORK is input history."
+   },
+@@ -2599,3 +2901,3 @@
+     "wire_fixture": "Six frozen source-schema families, canonical digest serialization explicit; five original family literals retained and nested form family added, adversarial mutations independent adapter/FakeServe.",
+-    "strict_typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. New test0diagnostics; new legacy ranges0reportAny/reportExplicitAny/reportUnusedCallResult. VER-004 uses isolated bridge cwd + ephemeral /tmp include/extraPaths, errorCount0all3, server Any<=125each and documented nonAny per-rule/total720, step194 (baseline564/162). Rename mutable internal CATALOG_SOURCE to lower-case across server references (no external HTTP key change); guard proc is not None at both returncode sites. No new module/config/dependency. Legacy format ranges only; all3 full lint with exact existing server-only E402 exception and no new E402."
++    "strict_typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. zc = importlib.import_module(\"zen_catalog\") with import importlib replaces static relative import; guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter."
+   },
+@@ -2715,3 +3017,3 @@
+       "Mem_rss_worker_max": "F-29 parent baseline22MiB; design bound256MiB; H3 actual_parent_RSS_max measured in MiB.",
+-      "Mem_shared_max": "1152MiB=6*192MiB COMBINED per-slot budget for serve+parent-pipe helper+transient lsof, no192MiB extra helper allowance. EVD-071156.8MiB serve idle leaves35.2MiB nominal per-slot headroom, NOT proof of loaded peak. H3 sums actual parent+serve+helper+lsof RSS and must satisfy<=1638.4MiB; design fields remain2048/256/1152MiB a1.",
++      "Mem_shared_max": "1152MiB=6*192MiB COMBINED serve+helper+transient lsof/ps slot ceiling; EVD-071 idle serve156.8MiB +estimated python3 -I helper12MiB+probe8MiB=176.8MiB,nominal15.2MiB headroom. Helper/probe/load not measured. H3 full parent+6serve+6helper+probe peaks<=1638.4MiB mandatory; no increased limits.",
+       "RPS_peak": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+@@ -2733,3 +3035,3 @@
+       "min_reserve_retry_rps": "F-11/server.py:287-314; max spawns=3, retry tokens=6, refill=.05/s, backoff=.5/2s.",
+-      "FD_worker": "Design parent ceiling128 vs recalculated108=36baseline+18admittedclients+18lanes+12drains+6reserve+6lsof pipes+6watchdogpipe+6lease handles; helper/serve/lsof processFD separate. H3 verify per-process limits and344aggregate estimate.",
++      "FD_worker": "Design parent ceiling128;steady108=36baseline+18clients+18HTTP+12helperdrains+6reserve+6probe pipes+6lifeline_w+6leasehandles;transient6lifeline_r=>114<=128.6serve/6helper/6bounded lsof-or-ps probes separate FD,system344estimate. H3 per-process/transient peaks mandatory.",
+       "ulimit_n": "F-29 launchctl soft maxfiles=65536; не переносить значение вчерашнего reference packet=4096 как текущий факт.",
+@@ -2751,3 +3053,3 @@
+       "threads_per_worker_upper_bound": 55,
+-      "thread_accounting": "Parent bound55=1server/accept loop +18 admitted handlers(6active+12waiting) +6supervisors/setup tasks +6SSE readers +6prompt delivery workers +12separate stdout/stderr drains +6parent-watchdog bookkeeping threads. No additional per-request gate timers; cancellation polls shared supervisors. lsof runs synchronously bounded0.35s on setup/supervisor,6 concurrent helpers max, no extra parent thread. Reaper startup-only (no overlap request workers). Parent-pipe helper at most6 single-thread processes, separately counted, not parent threads; at most6 actual serve +6 helper +6 transient lsof processes (18aux at peak). Rejected ingress handlers beyond admission exist transiently in ThreadingHTTPServer:55 is admitted-workload bound, not arbitrary SYN-flood guarantee; H3 measure transient rejection peaks, do not claim unlimited HTTP thread defense.",
++      "thread_accounting": "Parent admitted bound55=1accept+18handlers(6active+12waiters)+6supervisor/setup+6SSE readers+6prompt delivery workers+12helper stdout/stderr drains+6parent bookkeeping. Helper EOF/TERM/serve poll uses one single-thread main loop per slot, no helper watcher threads;<=6 helper processes. serve logs route to helper stderr, stdout reserved for one handshake; parent still accounts2drains/slot. At most6 auxiliary identity/lsof/ps probes total,1per slot,serial nonoverlap with reconnect/cleanup, executed on existing supervisor/helper loops. Peak system processes1bridge+6helper+6serve+6probe=19. Reaper startup-only, no request overlap. Rejected unadmitted ThreadingHTTPServer handlers may be transient:55 is admitted bound; H3 must measure rejection peaks, not claim arbitrary flood defense.",
+       "stdout_queue_max_events": 4096,
+@@ -2773,3 +3075,3 @@
+       "total_deadline_s": 1800,
+-      "estimate_status": "Design targets only, including combined per-slot192MiB child+helper+lsof. EVD-071 idle156.8MiB is not6parallel peak. Normal p99<=180s goal; degraded3x60+51.6=231.6s distinct profile, live H3 NOT_RUN.",
++      "estimate_status": "Design only: EVD-071 serve idle156.8MiB + python3 -I helper~12MiB=168.8MiB; auxiliary probe estimated8MiB ->176.8MiB under fixed192MiB/slot.6*192+parent256=1408<=1638.4MiB; H3 actual full process RSS sum<=1638.4MiB mandatory, no unmeasured live PASS. Parent FD114<=128,admitted threads55,peak19processes. Normalp99<=180/degraded<=231.6 with >=100samples unchanged.",
+       "pre_spawn_admission_budget_s": 5.0,
+@@ -2794,7 +3096,9 @@
+         "open_lease_files": 6,
+-        "parent_upper_bound": 108,
++        "parent_upper_bound": 114,
+         "configured_envelope": 128,
+-        "aggregate_estimate": "parent128 +6serve*20 +6helper*8 +6lsof*8=344 descriptors system-wide design, per-process parent<=128, not claim aggregate<256. H3 actual per-process FD and system peaks."
+-      },
+-      "process_accounting": "6serve slots plus <=6parent-pipe stdlib helpers plus<=6lsof (one per active setup, no extra token-free model spawn). Each serve attempt consumes one _RequestAttempts token/spawn-limiter admission and may create exactly one paired helper; all<=3 model attempts/request. Helper/lsof separate owned bounded aux PIDs, never count them as model generations or ignore resource overhead. No lsof on control hot path.",
++        "aggregate_estimate": "Steady parent108 plus transient6lifeline read ends=114<=envelope128. Systemwide conservative128+6serve*20+6helper*8+6probe*8=344descriptors; probe=lsof OR ps identity,at most1/slot,no overlap. Helper per-process8 upper design includes std0/1/2,one transient lease file/atomic temp,DEVNULL/child-launch descriptors and select bookkeeping; measure H3 each process and transient peaks,do not claim aggregate<256.",
++        "lifeline_definition": "6 parent lifeline_w write ends; transient parent lifeline_r read end closed immediately after Popen. During setup read+write momentarily add<=6FD; terminal no leaks. helper stdin fd0 is lifeline_r, never inherits write end.",
++        "transient_lifeline_read_ends": 6
++      },
++      "process_accounting": "Exactly1bridge parent ->at most6 helper_proc ->at most6 serve_proc, each pair same child_pgid=helper_proc.pid; <=6 transient bounded lsof/ps identity probes, at most1/slot (no overlap),peak19 processes including bridge. One model attempt token creates one helper/serve pair; MAX_TOTAL_SPAWNS=3 counts pairs/actual serve launches, never free retries; probes auxiliary bounded and accounted. Serve start_new_session=False, helper=True; no alternate process topology.",
+       "p99_criteria": {
+@@ -2805,3 +3109,19 @@
+       },
+-      "stall_heartbeat_interval_s": 15.0
++      "stall_heartbeat_interval_s": 15.0,
++      "rss_accounting": {
++        "unit": "MiB",
++        "serve_idle_observed": 156.8,
++        "serve_evidence": "EVD-071 owner-supplied idle, not6parallel peak",
++        "helper_estimate": 12.0,
++        "pair_estimate": 168.8,
++        "probe_peak_estimate": 8.0,
++        "combined_with_probe_estimate": 176.8,
++        "per_slot_ceiling": 192,
++        "per_slot_headroom_estimate": 15.2,
++        "shared_ceiling": 1152,
++        "parent_ceiling": 256,
++        "full_design_ceiling": 1408,
++        "H3_full_sum_max": 1638.4,
++        "status": "DESIGN_ESTIMATES; helper/probe and loaded serve NOT_MEASURED; H3 six live slots sums bridge/helper/serve/probe RSS,blocked enable on breach"
++      }
+     },
+@@ -2814,3 +3134,3 @@
+       "evidence_level": "design estimate only; NOT measured runtime PASS",
+-      "runtime_gate": "H3 sum actual_parent_RSS + RSS(all6serve + allpaired helper + lsof peaks) <=1638.4MiB; combined slot budget192MiB, no hidden helper memory.103KB×6×3, zero sharedDB opens/locks, actual FD/CPU and temp cleanup. Idle156.8MiB not loaded PASS."
++      "runtime_gate": "H3 sum actual_parent_RSS + RSS(all6serve + allpaired helper + bounded lsof/ps probe peaks) <=1638.4MiB; combined slot budget192MiB, no hidden helper memory.103KB×6×3, zero sharedDB opens/locks, actual FD/CPU and temp cleanup. Idle156.8MiB not loaded PASS."
+     },
+@@ -2871,3 +3191,3 @@
+         "substitution": "46 exact keys/sources/field_units SSoT§3.0; memory inMiB:1*256+1152=1408<=0.80*2048=1638.4. N/A сохраняет actual diff и transitive graph; runtime H3 NOT_RUN.",
+-        "oracle": "set equality канонических 46 keys/field_sources; recompute memory; assert each N/A carries git diff and transitive proof; future Coder diff allowlist. Assert memory units exact MiB and actual H3 inequalities separately; bytes вместо MiB FAIL. Recompute parent55admitted threads/108FD<=128, combined helper memory, normal p99 goal180 vs degraded3x60+51.6=231.6 distinct profile. Full-thread peak under arbitrary flood is not bounded by slot count alone.",
++        "oracle": "set equality канонических 46 keys/field_sources; recompute memory; assert each N/A carries git diff and transitive proof; future Coder diff allowlist. Assert memory units exact MiB and actual H3 inequalities separately; bytes вместо MiB FAIL. Recompute parent55admitted threads/114FD<=128, 19systemprocess/344aggregateFD and combined helper/probe memory, normal p99 goal180 vs degraded3x60+51.6=231.6 distinct profile. Full-thread peak under arbitrary flood is not bounded by slot count alone.",
+         "verification_ids": [
+@@ -2918,4 +3238,4 @@
+         "status": "PASS",
+-        "substitution": "ParentFD estimate108<=envelope128<=.70*65536=45875.2. Systemwide parent128+6*serve20+6*helper8+6*lsof8=344design (not<256); each process independent ulimit check.3HTTP lanes/serve retained, lsof capture1pipe/helper<=6. Nodeports3.6*60+30=246<=8192; SNAT1.8*60+12=120<=8192.0extra network from lsof/helpers. H3 actualFD/thread/ports required.",
+-        "oracle": "Recompute both scope inequalities, count control connection creation/reuse (50 operations on one owned serve lease ->1 keepalive control TCP), readiness≤3 probes; leak counters FD/start/end stable; H3 измеряет реальные FD/egress. Assert one lsof per successful spawn including permission/form/interrupt/DELETE;3forced lsof timeouts count3ServeHealth->DEGRADED, next auto request no serve/helper/lsof Popen. No additional model tokens charged for lsof, but helper process ceilings enforced.",
++        "substitution": "ParentFD steady108 +6 transient lifeline_r=114<=envelope128<=0.70*65536=45875.2. System128+6serve20+6helper8+6probe8=344descriptors; probe=lsof/ps at most1/slot nonoverlap. Parent55admitted threads,peak19processes. lifeline_w always finally closes; helper and serve share child_pgid=helper_proc.pid.3HTTP lanes/serve; nodeports3.6*60+30=246<=8192,SNAT1.8*60+12=120<=8192,0probe network. RSS serve156.8+helper~12+probe~8=176.8MiB under192/slot,full1408<=1638.4; all estimates until H3.",
++        "oracle": "Entire normal Keep-Alive path(permission/form/reply/interrupt/DELETE),including50controls:exactly1 lsof/successful spawn and1retained control TCP. Separate explicit control-socket reconnect scenario permits only2nd lsof<=0.35s outside reply0.25s/cleanupAPI0.20s; spies distinguish the scenarios; urgent control disconnect is fail-closed,never lsof wait.3forced lsof timeouts ->3ServeHealth failures->DEGRADED,nextauto has0serve/helper/lsof Popen. Check listener_pid==serve_pid and pgid==helper_proc.pid; count lifeline2ends during setup/one parent end thereafter,all0afterfinally; parentFD<=128,allprocess344design,55admittedthreads,19systemprocesspeak; probes1/slot. H3 measures actual RSS/FD/thread/ports and rejects excess without raising limits.",
+         "verification_ids": [
+@@ -3160,4 +3480,4 @@
+       "status": "PASS",
+-      "substitution": "Normal attempt owns childPGID,control/SSE/prompt lanes,12drains bound,helper pipe/process,session and memoryDB/state root; cleanup<=1.2s includes API.2/TERM.5/reap-join-temp-lease.5. SIGKILL bypasses finally: parent-pipe helper then startup lease reaper validates ownerUID,parent/childPID start_ts,PGID,cmd/binary/port and temp inode; no name-wide kill, no removal without manifest. Standard XDG_DATA_HOME never deleted.",
+-      "oracle": "VER-005 both original50cancellations and hard-parent-death→next-start reaper, killed parent before/after READY, failed helper, PID reuse/foreign UID/PGID/symlink/foreign dir negatives.0old owned serve/descendant/helper/temp roots;0active/waiter/socket/reader counts. H0/H9 actual kickstart-k NOT_RUN.",
++      "substitution": "Parent normal/emergency finally: latch no-more-output/spawn, bounded own-session APIs<=0.20s on already proven Keep-Alive only, close all lanes and lifeline_w (always finally), os.killpg(child_pgid,SIGTERM),grace<=0.50s,then os.killpg(child_pgid,SIGKILL) for whole shared helper+serve+descendant group even if serve exited. Parent reaps helper_proc, helper reaps serve_proc; total remainder<=0.50s includes joins+owned root then lease removal; aggregate<=1.20s. Parent death bypasses finally ->helper EOF plus terminal_quiescence, startup reaper for retained manifests; no new group/ambiguous proc. EVD-055 justifies killing descendants after leader exit.",
++      "oracle": "VER-005 GroupB inject parent SIGKILL (1) immediately after helper Popen before helper entry/lease, (2) immediately after serve Popen before serve_pid publication, (3) after atomic lease before handshake, (4) after handshake before lsof/READY, (5) during prompt. Same helper→serve group; EOF never lost, helper watcher active before READY. Include TERM-ignoring descendant and terminal_quiescence order (all writers stopped ->owned root removal ->lease unlink ->final same-group KILL; no imagined helper finally after self-KILL). Assert listener_pid==serve_pid and pgid==child_pgid,0 owned helper/serve/descendants/lease/temp roots,0 foreign signals/deletions including PID/PGID reuse. Separately kill/disable helper, restart bridge with retained lease ->safe startup reaper; this is recovery scenario, not immediate EOF success.50 normal cancellation cycles return all counters/FD/thread/pipe counts to0; lifeline_w closed every exit. Stage3/H0/H9 remain NOT_RUN.",
+       "verification_ids": [
+@@ -3473,6 +3793,6 @@
+     "retry": "[мост] Повтор попытки 2/3…\n",
+-    "waiting": "[мост] Ожидание первого токена (10 с)…\n"
++    "waiting": "[мост] Ожидание первого токена…\n"
+   },
+   "handoff_state": {
+-    "architecture_contract": "Cycle3 APPROVED architecture candidate for external a3,6RW+8FU design resolutions; no Council verdict/ARCH_GATE_PASS from author.",
++    "architecture_contract": "Cycle4 v4 APPROVED architecture candidate for external a4,3RW+6FU a3 delta; author does not issue Council verdict or ARCH_GATE_PASS.",
+     "implementation_tests": "NOT_RUN; Stage3a GroupA then3b GroupB and independent VER001..005 required.",
+@@ -3480,6 +3800,5 @@
+     "pending_orchestrator_actions": [
+-      "External a3 council on v2→v3 diff with independent launch_seat/verify_panel_proof; no author vote.",
+-      "Validate finalized cycle3b packet and independent a3 council; FU007 policy compliant, no human waiver; no author Council vote.",
+-      "Update envelope/fingerprints/hashes after council; outside three-file Architect allowlist.",
+-      "Only then Stage3a/3b+C clean-room verification and H0..H9: dark absent/false through H4/H5, H7 runtime true after H3/H6."
++      "External a4 council on frozen v3->v4 delta with launch_seat/verify_panel_proof; author is not judge; a3 NEEDS_WORK remains history.",
++      "Validate finalized cycle4 packet/role plan SHA and product fingerprint,then record council proof outside three-file Architect allowlist.",
++      "Only after external ARCH_PANEL_PASS: Stage3a/3b clean-room VER001..005 and H0..H9;H4 cp only server.py with H0/H4 runtime preservation,enable H7 only after H3/H6."
+     ]
+@@ -3507,3 +3826,4 @@
+       "Model reasoning chunk без trailingLF ->synthetic delta \"\\n[мост] ...\\n\"; whole delta incl leading LF provenance=synthetic, model-only concatenation exact bytes, literal model [мост] survives; LF already present->no redundant prefix; fast Simple greeting.->zero statuses.",
+-      "After first model token pause>=15s mandatory waiting-continuation heartbeat every15s; silence threshold explicit, not optional5s. Firsttoken wait remains5s; status does not reset stall60."
++      "After first model token pause>=15s mandatory waiting-continuation heartbeat every15s; silence threshold explicit, not optional5s. Firsttoken wait remains5s; status does not reset stall60.",
++      "Exact waiting template bytes \"[мост] Ожидание первого токена…\\n\" from status_protocol_examples.waiting == AD-002.lifecycle == VER-005; variant containing parenthesized10s rejected."
+     ],
+@@ -3526,4 +3846,4 @@
+       "Unique per-spawn zen-serve-state-* state/TMPDIR; OPENCODE_DB=:memory: on ALL3 branches, standard XDG_DATA_HOME/auth/model config retained; finally remove owned root+lease;50cancels + hard-parent-kill→helper/reaper restore0old processes/temp, foreign objects untouched.",
+-      "VER-005 GroupB: hard kill parent after spawn before READY, after lease publish, during prompt; helper EOF cleanup, plus disabled-helper/reaper recovery on next bridge start;0 old owned serve/descendants/helper/temp dirs, foreign PID/PGID/start-time-reuse and foreign directories untouched. Normal50cancel counters remain0. H0/H9 actual kickstart -k tests still NOT_RUN.",
+-      "1lsof per spawn then Keep-Alive; takeover beforeREADY0Authorization/prompt bytes, no foreign signals; control reconnect proof separate.35s, never lsof/repair in urgent control/cleanup."
++      "VER-005 GroupB inject parent SIGKILL (1) immediately after helper Popen before helper entry/lease, (2) immediately after serve Popen before serve_pid publication, (3) after atomic lease before handshake, (4) after handshake before lsof/READY, (5) during prompt. Same helper→serve group; EOF never lost, helper watcher active before READY. Include TERM-ignoring descendant and terminal_quiescence order (all writers stopped ->owned root removal ->lease unlink ->final same-group KILL; no imagined helper finally after self-KILL). Assert listener_pid==serve_pid and pgid==child_pgid,0 owned helper/serve/descendants/lease/temp roots,0 foreign signals/deletions including PID/PGID reuse. Separately kill/disable helper, restart bridge with retained lease ->safe startup reaper; this is recovery scenario, not immediate EOF success.50 normal cancellation cycles return all counters/FD/thread/pipe counts to0; lifeline_w closed every exit. Stage3/H0/H9 remain NOT_RUN.",
++      "Entire normal Keep-Alive path(permission/form/reply/interrupt/DELETE),including50controls:exactly1 lsof/successful spawn and1retained control TCP. Separate explicit control-socket reconnect scenario permits only2nd lsof<=0.35s outside reply0.25s/cleanupAPI0.20s; spies distinguish the scenarios; urgent control disconnect is fail-closed,never lsof wait.3forced lsof timeouts ->3ServeHealth failures->DEGRADED,nextauto has0serve/helper/lsof Popen. Check listener_pid==serve_pid and pgid==helper_proc.pid; count lifeline2ends during setup/one parent end thereafter,all0afterfinally; parentFD<=128,allprocess344design,55admittedthreads,19systemprocesspeak; probes1/slot. H3 measures actual RSS/FD/thread/ports and rejects excess without raising limits."
+     ],
+@@ -3540,3 +3860,3 @@
+       "Actual input.started(name), input.delta, input.ended(text), called(input,executed), progress(metadata), success/failed. Correlate data.sessionID+assistantMessageID+id; accumulate tool name/input, normalize tool_use part{tool,state{input,status}}+call_id. permission.asked отправляет decision=reject немедленно по отдельному control lane. Никакого встроенного allow или выполнения bridge-side. On input.ended save $.data.text and parse JSON as object with runtime validation. Prefer called.data.input if present and valid; if called absent before failed/step.ended use completed input.ended.text, including streaming→failed. Never emit partial JSON; dedup by sessionID/assistantMessageID/call id. Both paths give identical mapped DSH tool_calls. Invalid JSON follows existing incomplete/unmapped recovery, not invented empty args.",
+-      "form.created uses data.form.sessionID/id (Form.Info nested); validate own session before action. Cancel immediately via POST /api/session/{id}/form/{formID}/cancel, no answer/allow; form.cancelled data.id/sessionID settles same form. Not a model token/first-event. Error->security fail-closed+kill. See single_turn_control.",
++      "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event.",
+       "permission reject and form cancel MUST immediately interrupt; Step2 output0 even if emitted concurrently, completed input.ended JSON tool mapping same as called.input. Cancel/reject failure fail-closed.",
+@@ -3560,7 +3880,8 @@
+       "Memory SSoT fields2048/256/1152 MiB exactly; design1408<=1638.4 not H3PASS.3HTTP sockets per serve supports immediate reject while promptHTTP pending; recalc nodeports246<=8192.",
+-      "Parent admitted threads55=1+18+6+6+6+12+6;parentFD108<=128, auxiliary processes6helper+6lsof included. Arbitrary rejected handler peak measured H3, not claimed bounded by slots.",
++      "Admitted parent55=1+18+6+6+6+12+6; steadyFD108+transient6lifeline_r=114<=128;19process peak includes6helper+6serve+6lsof/ps probes (one/slot),RSS per-slot~176.8<=192/full1408<=1638.4MiB design. lifeline_w finally closed,live H3 must measure rejection/transient and loaded RSS.",
+       "All phase×event actions and two health counter effects match fallback_decision_table; changedmtime+same used-schema projection->serve, mismatch->run+diagnostic;permission capability gap fail-closed.",
+-      "Normal p99<=180 goal measured separately; three60s firsttoken faultprofile+aux51.6<=231.6,>=100sample batch nearest-rank criterion. Universal TIMEOUT1800 unchanged."
++      "Normal p99<=180 goal measured separately; three60s firsttoken faultprofile+aux51.6<=231.6,>=100sample batch nearest-rank criterion. Universal TIMEOUT1800 unchanged.",
++      "first_token_timeout proven non-security protocol/capability defect ->ServeHealth+1,UpstreamBreaker0; valid protocol/model silence ->ServeHealth0,UpstreamBreaker+1; exactly one increment once/cause; unchanged delivery barrier/cap3."
+     ],
+-    "rollout_boundary": "Все H0..H9 NOT_RUN, external a3 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS."
++    "rollout_boundary": "Все H0..H9 NOT_RUN, external a4 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS. H4 uses ONLY cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py, then SHA-256 read-back. Never rsync --delete or directory sync. Preserve live dynamic_config.json and disable-serve byte-for-byte (or their recorded absence) from H0 snapshot AFTER any intentional H0 false-write; H0/H4 read back existence/bytes/mode after cp. H5 restarts only after that preservation check; no copy/delete/overwrite of either runtime file. Default=false and true only H7 after H3/H6, no new owner waiver required."
+   },
+@@ -3572,10 +3893,11 @@
+     "decisions": "4/4 two-way with >=2 genuine alternatives",
+-    "evidence_refs": "69 EVD records,49analyst facts; provided070..072, source073, panel074 clearly separated. EVD ids intentionally retain gap065..069; no fabricated missing observations.",
++    "evidence_refs": "71 EVD records,49analystfacts;EVD-075/076 empirically observed isolated current-source copies,not Stage3/live proof;gap065..069 preserved.",
+     "status_protocol": "3 templates begin[мост]/endLF; при model unterminated line весь дополнительный leading LF synthetic, template bytes модели не менять.",
+     "schema_vs_semantics": "Installed packet validator does not inspect high_load_envelope/resilience_gates/legacy checks; above explicit semantic assertions supplement it. Neither schema nor design assertions prove runtime passes.",
+-    "VER_004_syntax": "ast.parse PASS and changed-hunk regex tested for count+singleton; embedded commands NOT_RUN because new file NOT_PRESENT. Full3files independent Stage3/L2 required.",
+-    "rework_coverage": "Exactly6RW+8FU a2,16sourcefindings eachonce in rework_resolutions_a2; rework_resolutions is compatibility alias, not additional closures.21a1 historicalrecords retained.",
++    "VER_004_syntax": "ast.parse required; closed --range={start}:1-{end}:999 plus old/new frozen hunk rejection and literal raw hashes,Google zero diff. EVD-075 observed positive/negative probe;EVD-076 onefiletype/catalog observed;full Stage3 all3/newfile NOT_RUN.",
++    "rework_coverage": "a3 exactly3RW+6FU=9entries;source PANEL-A3-F-001..008/F-010 once,duplicate009 absorbedRW003,011 excludedinvalid. a1/a2 sections retained byte-equivalent JSON values. Alias only current a3.",
+     "memory_units": "All46 canonical keys+field_sources+field_units; memory2048/256/1152 MiB;1408<=1638.4MiB",
+     "aux_budget": "15+3*(5+3+2+1.2)+3=51.6<=54,headroom2.4; old independent5+5/.5/.2 absent",
+-    "wire_evidence": "Sixfamilies, source Form.Info wrapper verified; delta/token/permission old literals unchanged; new digest calculated deterministically; candidate runtime NOT_RUN."
++    "wire_evidence": "Sixfamilies, source Form.Info wrapper verified; delta/token/permission old literals unchanged; new digest calculated deterministically; candidate runtime NOT_RUN.",
++    "resource_topology": "One helper session/serve samegroup:55parentadmittedthreads,114FD<=128,19processpeak,344aggregateFD;RSS156.8+12+8~176.8<=192MiBslot,full1408<=1638.4design;actualH3 mandatory."
+   },
+@@ -3639,11 +3961,21 @@
+   "rework_source": {
+-    "path": "handoff/panel-rework-brief-arch-a2.json",
+-    "sha256": "baa297e7819579dc1cf779af370b16f385a7ede77d9538553713212b1475dc7f",
+-    "base_packet_path": "architecture/architecture-packet.v2.json",
+-    "base_packet_sha256": "c3936c99b53fc50508c113c88368f0b75b01d250d8345ee3be175c753a8b9a3d",
+-    "resolutions_count": 14,
+-    "blocking_count": 6,
+-    "nonblocking_count": 8,
+-    "findings_count": 16,
+-    "namespace": "a2 current rework_resolutions alias mirrors rework_resolutions_a2; a1 history in rework_resolutions_a1; IDs are unique within pass, not counted twice through alias."
++    "path": "handoff/panel-rework-brief-arch-a3.json",
++    "sha256": "65d79bf43820da90b77b49e6f90960f0b8b9af985046cafa00ce2da9d10ba14d",
++    "base_packet_path": "architecture/architecture-packet.v3.json",
++    "base_packet_sha256": "8edcb4c410579c365f825cdc74d5da7417e9dfaaebce5ac465cb2b103a44b608",
++    "resolutions_count": 9,
++    "blocking_count": 3,
++    "nonblocking_count": 6,
++    "findings_count": 11,
++    "excluded": [
++      {
++        "id": "PANEL-A3-F-009",
++        "reason": "duplicate_of:PANEL-A3-F-003; absorbed only in RW-003,not independent new work"
++      },
++      {
++        "id": "PANEL-A3-F-011",
++        "reason": "invalid_after_recheck; no implementation or scope expansion"
++      }
++    ],
++    "namespace": "Current alias mirrors rework_resolutions_a3; a1 and a2 retained verbatim as history. Exact3blocking+6followups;2excluded are not new resolutions."
+   },
+@@ -4273,18 +4605,18 @@
+       "id": "RW-001",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-001",
+-        "PANEL-A2-F-009"
+-      ],
+-      "changes_made": "Исполнимый VER004: full new-file/range legacy formatter, server-only exact E402 allowance, temporary /tmp bridge import-root,3legacy type error sites and explicit nonAny budgets; bytehash/Google oracle unchanged.",
+-      "packet_locations": [
+-        "#/verification_surface/3",
+-        "#/decisions/0/details/typing",
+-        "#/decisions/0/details/immutable_run_env",
+-        "#/risks/7",
+-        "#/evidence/66"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-001"
++      ],
++      "changes_made": "Ruff==0.17.2 --range={start}:1-{end}:999 in command/expected/baseline_transition/typing and this resolution; fail-hard old/new hunk intersections plus literal raw SHA guards for all3 frozen functions. EVD-075 rc0/1,baseline/candidate fixed digests,valid-syntax one-byte mutations each reject.",
++      "packet_locations": [
++        "/verification_surface/3/command",
++        "/verification_surface/3/expected",
++        "/verification_surface/3/baseline_transition/new",
++        "/verification_surface/4/immutable_google_slices",
++        "/decisions/0/details/typing",
++        "/evidence/69"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4293,19 +4625,18 @@
+       "id": "RW-002",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-002",
+-        "PANEL-A2-F-007"
+-      ],
+-      "changes_made": "OPENCODE_DB=:memory:,120.7ms/156.8MiB/0db EVD071; preserve standard auth/models/config, owned state+TMPDIR; /api/info preflight and real provider auth explicitly pending.",
+-      "packet_locations": [
+-        "#/decisions/0/details/data_isolation",
+-        "#/decisions/0/details/serve_env_sanitization",
+-        "#/assumptions/0",
+-        "#/risks/2",
+-        "#/evolution/H3_rollout_gate",
+-        "#/evidence/65"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-002"
++      ],
++      "changes_made": "Public CATALOG_SOURCE retained with static module initializer and typed globals setter, importlib and proc None guards, exactly3 coder targets. EVD-076 errorCount0/581warnings and unchanged8catalog tests PASS, no suppressions.",
++      "packet_locations": [
++        "/decisions/0/details/typing",
++        "/verification_policy/strict_typing",
++        "/verification_surface/3",
++        "/risks/7/mitigation",
++        "/scope/coder_target_files",
++        "/evidence/70"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4314,17 +4645,41 @@
+       "id": "RW-003",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-003"
+-      ],
+-      "changes_made": "Nested form.created→cancel<=.25s, sixth frozen family, input.ended.text fallback, reject/cancel→immediate interrupt with Step2 output barrier and mapped calls/recovery.",
+-      "packet_locations": [
+-        "#/decisions/0/details/single_turn_control",
+-        "#/decisions/0/details/session_wire/form_cancel",
+-        "#/decisions/0/details/event_contract",
+-        "#/decisions/3/details/step",
+-        "#/threat_model/threats/1"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-003"
++      ],
++      "changes_made": "One parent->helper->serve tree, helper session leader/serve same group, lifeline armed before spawn, lease before handshake before lsof/READY. helper_proc poll,listener_pid==serve_pid,killpg child_pgid everywhere. Explicit self-KILL terminal quiescence avoids post-KILL finally fiction.55threads,114parentFD<=128,19processes,per-slot RSS~176.8<=192MiB/full1408<=1638.4 design,live H3 NOT_RUN.",
++      "packet_locations": [
++        "/decisions/0/details/spawn",
++        "/decisions/0/details/listener_ownership",
++        "/decisions/0/details/crash_recovery",
++        "/decisions/0/details/cleanup",
++        "/decisions/0/details/resource_accounting",
++        "/high_load_envelope/operational_profile",
++        "/resilience_gates/C_MULT/C-MULT-I5",
++        "/resilience_gates/T_LIFE_v1",
++        "/verification_surface/4/orphan_oracles",
++        "/evolution/H3_rollout_gate"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false,
++      "absorbed_duplicate": "PANEL-A3-F-009"
++    },
++    {
++      "id": "FU-001",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-004"
++      ],
++      "changes_made": "Cancel own identified form<=0.25s before schema checks,interrupt<=0.10s; missing title cancels normally with no ServeHealth, source mandatory title unchanged; missingid/session or cancel failure failclosed+kill<=1.2s.",
++      "packet_locations": [
++        "/decisions/0/details/event_contract/form.created ~1 form.cancelled",
++        "/decisions/0/details/event_contract/frozen_v2_1_2_fixtures/form.created ~1 form.cancelled/negative_mutations",
++        "/decisions/0/details/single_turn_control",
++        "/verification_surface/4/process_resource_oracle/form_cancel"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4332,17 +4687,16 @@
+     {
+-      "id": "RW-004",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-004"
+-      ],
+-      "changes_made": "One lsof SPAWN→READY0.35s,3 persistent HTTP/1.1 lanes with proc.poll guard; explicit reconnect outside urgent/cleanup budgets, foreign listener0leak/0kill.",
+-      "packet_locations": [
+-        "#/decisions/0/details/listener_ownership",
+-        "#/decisions/0/details/session_wire/cleanup",
+-        "#/decisions/2/details/cleanup",
+-        "#/resilience_gates/C_MULT/C-MULT-I5"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "id": "FU-002",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-005"
++      ],
++      "changes_made": "Waiting byte template unified to [мост] Ожидание первого токена… plus terminalLF,without10s suffix.",
++      "packet_locations": [
++        "/status_protocol_examples/waiting",
++        "/decisions/1/details/lifecycle",
++        "/verification_surface/4/process_resource_oracle/status_waiting"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4350,16 +4704,16 @@
+     {
+-      "id": "RW-005",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-005"
+-      ],
+-      "changes_made": "Exact allowlist on all3_run_env branches before child-only secrets/overrides; OPENCODE_ZEN_BRIDGE_* and arbitrary parent secret sentinels absent, required routing/auth preserved.",
+-      "packet_locations": [
+-        "#/decisions/0/details/serve_env_sanitization",
+-        "#/threat_model/threats/2",
+-        "#/verification_acceptance_matrix/tools_matrix"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "id": "FU-003",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-006"
++      ],
++      "changes_made": "Separate first_token_timeout protocol/capability and model-silence rows,mutually exclusive ServeHealth1/Upstream0 vs0/1; no delivery/retry weakening.",
++      "packet_locations": [
++        "/decisions/0/details/fallback_decision_table/rows/4",
++        "/decisions/0/details/fallback_decision_table/rows/5",
++        "/verification_surface/4/process_resource_oracle/counter_branches"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4367,18 +4721,14 @@
+     {
+-      "id": "RW-006",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-006"
+-      ],
+-      "changes_made": "Atomic UID-scoped lease + parent-pipe helper and safe startup reaper, ps/PGID/start-time/binary/port/inode checks; hard-kill→next-start cleanup oracle and foreign-object negatives, H0/H9 NOT_RUN.",
+-      "packet_locations": [
+-        "#/decisions/0/details/crash_recovery",
+-        "#/resilience_gates/T_LIFE_v1",
+-        "#/verification_surface/4/orphan_oracles",
+-        "#/evolution/H0_precondition",
+-        "#/evolution/H9_crash_recovery_gate"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "id": "FU-004",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-007"
++      ],
++      "changes_made": "AD-003.cleanup cites EVD-055 for _stop_proc descendants; EVD-056 remains worktree evidence only.",
++      "packet_locations": [
++        "/decisions/2/details/cleanup"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4386,17 +4736,16 @@
+     {
+-      "id": "FU-001",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-008"
+-      ],
+-      "changes_made": "Owner proof errors counted once,3timeouts→DEGRADED; --port0 stdout considered unverified alternative; one bounded lsof/helper resource accounting included.",
+-      "packet_locations": [
+-        "#/decisions/0/details/transport_health/counted_failures",
+-        "#/decisions/0/alternatives",
+-        "#/high_load_envelope/operational_profile/thread_accounting",
+-        "#/resilience_gates/C_MULT/C-MULT-I5"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "id": "FU-005",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-008"
++      ],
++      "changes_made": "Normal whole Keep-Alive path exactly1lsof/spawn; second proof only separate explicit control reconnect<=0.35s outside fast budgets;spies distinguish;urgent brokencontrol failclosed.",
++      "packet_locations": [
++        "/decisions/0/details/listener_ownership/protocol",
++        "/resilience_gates/C_MULT/C-MULT-I5/oracle",
++        "/verification_surface/4/process_resource_oracle/C_MULT_I5"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4404,125 +4753,17 @@
+     {
+-      "id": "FU-002",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-010"
+-      ],
+-      "changes_made": "EVD070 actual supplied378tests/122.956s/0imports/3knownfailures frombridge cwd; no17module edits needed, future full-green gate preserved.",
+-      "packet_locations": [
+-        "#/verification_surface/1/baseline",
+-        "#/evidence/64"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-003",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-011"
+-      ],
+-      "changes_made": "Changed binary stat key revalidates used schema projection; same hash remains serve, mismatch run+reason; expected schema fixture independent. REQ016/AC021 authorized fields preserved, detail diagnostic adjacent if strict parser.",
+-      "packet_locations": [
+-        "#/decisions/0/details/protocol_compatibility",
+-        "#/decisions/2/details/telemetry",
+-        "#/resilience_gates/O_EXIT_v1"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-004",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-012"
+-      ],
+-      "changes_made": "Explicit phase/event→fallback/retry/fail and ServeHealth/model counter table, including20s pre-/post-header no-event; any headers latchDELIVERED before classification.",
+-      "packet_locations": [
+-        "#/decisions/0/details/fallback_decision_table",
+-        "#/decisions/0/details/fallback_barrier",
+-        "#/decisions/2/details/retry",
+-        "#/resilience_gates/R_BULK/R-BULK-I3"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-005",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-013"
+-      ],
+-      "changes_made": "REQ004/005 match thinking eligibility/grace.30,fast/off/JSON exclusions and immutable model bytes; mandatory post-token stall heartbeat threshold/interval15s, no watchdog resets.",
+-      "packet_locations": [
+-        "#/requirements/3",
+-        "#/requirements/4",
+-        "#/decisions/1/details/lifecycle",
+-        "#/decisions/1/details/STALL_HEARTBEAT_INTERVAL_S",
+-        "#/contract_deltas/0"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
+-      "decision_required_human": false
+-    },
+-    {
+       "id": "FU-006",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-014"
+-      ],
+-      "changes_made": "18admittedhandlers+readers/delivery/12drains/supervisors/watchdogs→55parentthreads;108FD<=128,helper/lsof process/memory included; normalp99goal180 vs degraded3*60+51.6=231.6 separately measured, flood caveat explicit.",
+-      "packet_locations": [
+-        "#/high_load_envelope/operational_profile/thread_accounting",
+-        "#/high_load_envelope/operational_profile/fd_accounting",
+-        "#/high_load_envelope/operational_profile/p99_criteria",
+-        "#/high_load_envelope/memory_closure_check",
+-        "#/resilience_gates/HL_ENV_v1/HL-ENV-01"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-007",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-015"
+-      ],
+-      "changes_made": "Кодовый дефолт REALTIME_SERVE_ENABLED=false. Локальный runtime dynamic_config.json — stdlib-аналог dynamic_config.py/GigaRC автономного моста без внешних зависимостей: H0 отсутствие файла или boolean false удерживает run; H7 атомарно включает true только после успешных H3 (6 параллельных слотов RSS/FD с OPENCODE_DB=\":memory:\") и H6 (живая permission/tool изоляция на кандидате). Без исключений из канона, human waiver, новых env-переменных и правок start.sh; никакой записи dynamic_config.json в git. AC-004:378legacy run при отсутствии файла. AC-026/VER-005 Clean-Room L2: tmp_path JSON true и monkeypatch.setattr(server,\"DYNAMIC_CONFIG_PATH\",cfg_path,raising=False), RED на chunk timing против origin/dev, GREEN на новом; false runtime без restart.",
+-      "packet_locations": [
+-        "#/approval",
+-        "#/assumptions/2",
+-        "#/assumptions/3",
+-        "#/evolution/H0_precondition",
+-        "#/evolution/rollout",
+-        "#/decisions/0/details/configuration",
+-        "#/evolution/rollback"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-008",
+-      "pass": "a2",
+-      "status": "RESOLVED",
+-      "resolution_level": "architecture_contract",
+-      "source_findings": [
+-        "PANEL-A2-F-016"
+-      ],
+-      "changes_made": "Considered split3a/3b delivery, one branch/MR for owner realtime outcome with staged execution. GroupA RC2/RC3 requires noFakeServe; GroupB independent tests localize serve failures.",
+-      "packet_locations": [
+-        "#/decisions/0/alternatives",
+-        "#/verification_surface/4/groups"
+-      ],
+-      "verification": "Pointers/coverage/digests validated in architect03; implementation VER004/005 and all H gates NOT_RUN. External a3 review required, no author vote.",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-010"
++      ],
++      "changes_made": "H4 cp ONLY server.py,never rsync--delete/directory sync;preserve dynamic_config.json and disable-serve bytes/absence/mode;H0/H4 readback,H5 after;H7 true only after H3/H6.",
++      "packet_locations": [
++        "/evolution/rollout",
++        "/evolution/H0_precondition",
++        "/evolution/H4_H5_sync_contract",
++        "/verification_acceptance_matrix/rollout_boundary"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+       "decision_required_human": false
+@@ -4535,4 +4776,186 @@
+     "EVD-073",
+-    "EVD-074"
+-  ]
++    "EVD-074",
++    "EVD-075",
++    "EVD-076"
++  ],
++  "rework_resolutions_a3": [
++    {
++      "id": "RW-001",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-001"
++      ],
++      "changes_made": "Ruff==0.17.2 --range={start}:1-{end}:999 in command/expected/baseline_transition/typing and this resolution; fail-hard old/new hunk intersections plus literal raw SHA guards for all3 frozen functions. EVD-075 rc0/1,baseline/candidate fixed digests,valid-syntax one-byte mutations each reject.",
++      "packet_locations": [
++        "/verification_surface/3/command",
++        "/verification_surface/3/expected",
++        "/verification_surface/3/baseline_transition/new",
++        "/verification_surface/4/immutable_google_slices",
++        "/decisions/0/details/typing",
++        "/evidence/69"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "RW-002",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-002"
++      ],
++      "changes_made": "Public CATALOG_SOURCE retained with static module initializer and typed globals setter, importlib and proc None guards, exactly3 coder targets. EVD-076 errorCount0/581warnings and unchanged8catalog tests PASS, no suppressions.",
++      "packet_locations": [
++        "/decisions/0/details/typing",
++        "/verification_policy/strict_typing",
++        "/verification_surface/3",
++        "/risks/7/mitigation",
++        "/scope/coder_target_files",
++        "/evidence/70"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "RW-003",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-003"
++      ],
++      "changes_made": "One parent->helper->serve tree, helper session leader/serve same group, lifeline armed before spawn, lease before handshake before lsof/READY. helper_proc poll,listener_pid==serve_pid,killpg child_pgid everywhere. Explicit self-KILL terminal quiescence avoids post-KILL finally fiction.55threads,114parentFD<=128,19processes,per-slot RSS~176.8<=192MiB/full1408<=1638.4 design,live H3 NOT_RUN.",
++      "packet_locations": [
++        "/decisions/0/details/spawn",
++        "/decisions/0/details/listener_ownership",
++        "/decisions/0/details/crash_recovery",
++        "/decisions/0/details/cleanup",
++        "/decisions/0/details/resource_accounting",
++        "/high_load_envelope/operational_profile",
++        "/resilience_gates/C_MULT/C-MULT-I5",
++        "/resilience_gates/T_LIFE_v1",
++        "/verification_surface/4/orphan_oracles",
++        "/evolution/H3_rollout_gate"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false,
++      "absorbed_duplicate": "PANEL-A3-F-009"
++    },
++    {
++      "id": "FU-001",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-004"
++      ],
++      "changes_made": "Cancel own identified form<=0.25s before schema checks,interrupt<=0.10s; missing title cancels normally with no ServeHealth, source mandatory title unchanged; missingid/session or cancel failure failclosed+kill<=1.2s.",
++      "packet_locations": [
++        "/decisions/0/details/event_contract/form.created ~1 form.cancelled",
++        "/decisions/0/details/event_contract/frozen_v2_1_2_fixtures/form.created ~1 form.cancelled/negative_mutations",
++        "/decisions/0/details/single_turn_control",
++        "/verification_surface/4/process_resource_oracle/form_cancel"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-002",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-005"
++      ],
++      "changes_made": "Waiting byte template unified to [мост] Ожидание первого токена… plus terminalLF,without10s suffix.",
++      "packet_locations": [
++        "/status_protocol_examples/waiting",
++        "/decisions/1/details/lifecycle",
++        "/verification_surface/4/process_resource_oracle/status_waiting"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-003",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-006"
++      ],
++      "changes_made": "Separate first_token_timeout protocol/capability and model-silence rows,mutually exclusive ServeHealth1/Upstream0 vs0/1; no delivery/retry weakening.",
++      "packet_locations": [
++        "/decisions/0/details/fallback_decision_table/rows/4",
++        "/decisions/0/details/fallback_decision_table/rows/5",
++        "/verification_surface/4/process_resource_oracle/counter_branches"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-004",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-007"
++      ],
++      "changes_made": "AD-003.cleanup cites EVD-055 for _stop_proc descendants; EVD-056 remains worktree evidence only.",
++      "packet_locations": [
++        "/decisions/2/details/cleanup"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-005",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-008"
++      ],
++      "changes_made": "Normal whole Keep-Alive path exactly1lsof/spawn; second proof only separate explicit control reconnect<=0.35s outside fast budgets;spies distinguish;urgent brokencontrol failclosed.",
++      "packet_locations": [
++        "/decisions/0/details/listener_ownership/protocol",
++        "/resilience_gates/C_MULT/C-MULT-I5/oracle",
++        "/verification_surface/4/process_resource_oracle/C_MULT_I5"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-006",
++      "pass": "a3",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
++      "source_findings": [
++        "PANEL-A3-F-010"
++      ],
++      "changes_made": "H4 cp ONLY server.py,never rsync--delete/directory sync;preserve dynamic_config.json and disable-serve bytes/absence/mode;H0/H4 readback,H5 after;H7 true only after H3/H6.",
++      "packet_locations": [
++        "/evolution/rollout",
++        "/evolution/H0_precondition",
++        "/evolution/H4_H5_sync_contract",
++        "/verification_acceptance_matrix/rollout_boundary"
++      ],
++      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "decision_required_human": false
++    }
++  ],
++  "rework_source_a2": {
++    "path": "handoff/panel-rework-brief-arch-a2.json",
++    "sha256": "baa297e7819579dc1cf779af370b16f385a7ede77d9538553713212b1475dc7f",
++    "base_packet_path": "architecture/architecture-packet.v2.json",
++    "base_packet_sha256": "c3936c99b53fc50508c113c88368f0b75b01d250d8345ee3be175c753a8b9a3d",
++    "resolutions_count": 14,
++    "blocking_count": 6,
++    "nonblocking_count": 8,
++    "findings_count": 16,
++    "namespace": "a2 current rework_resolutions alias mirrors rework_resolutions_a2; a1 history in rework_resolutions_a1; IDs are unique within pass, not counted twice through alias."
++  }
+ }

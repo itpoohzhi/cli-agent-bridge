@@ -1,0 +1,73 @@
+{
+  "schema_version": "2.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 8,
+  "panel_slug": "panel/council/r106",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "findings_total": 4,
+  "decision_required_human": false,
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Cycle 8 Совета Тимлидов по коду завершён после R1 (panel/council/r99, где 2/3 судей — Скептик и Визионер — выдали ACCEPT/PASS с 0 находок) и D1 (panel/council/r106) с вердиктом NEEDS_WORK (2 узких блокера RW-001..RW-002 и 2 non-blocking FU-001..FU-002). Бюджет следующей волны: точечный Coder rework (coder-12, Цикл 9) -> слепой reverse-spec -> Clean-Room L2 -> Cycle 9 Совета Тимлидов по коду.",
+  "do_not_change": [
+    "Разрешено модифицировать ТОЛЬКО 3 файла из allowed_envelope_changes: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py.",
+    "Запрещено менять замороженную функцию def _run_env в bridges/opencode-zen-bridge/server.py (sha256=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31).",
+    "Запрещено менять замороженную функцию def _stream_google_sse в bridges/opencode-zen-bridge/server.py (sha256=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3).",
+    "Запрещено менять замороженную функцию def _execute_google_once в bridges/opencode-zen-bridge/server.py (sha256=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6).",
+    "Запрещено добавлять любые внешние зависимости вне стандартной библиотеки Python 3.14 (dependencies = [] в pyproject.toml).",
+    "Запрещено модифицировать zen_catalog.py, start.sh, muse-bridge, существующие тестовые модули вне конверта и коммитить dynamic_config.json в git."
+  ],
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3355,3371,3885,3893",
+      "rule_ref": "REQ-011, REQ-014, feature.md §2, §5",
+      "action": "В `_drain_serve_step_usage` (`server.py:3355-3398`, `:3885-3905`) расширить окно дочитывания завершения инструментального шага до `min(1.0, max(0.0, deadline - time.monotonic()))`, принимать дополнительные `session.tool.called`/`failed`/`success` того же `session_id`, когда `ev_msg_id == assistant_msg_id` либо когда `assistant_msg_id` или `ev_msg_id` пусты (отсекая только события с непустым отличающимся `ev_msg_id`), и различать подтверждённый `session.step.ended` и истечение окна дочитывания без подтверждения конца шага (при неподтверждённом конце шага после истечения окна возбуждать `ServeProtocolError(\"incomplete tool step without step.ended\")`, чтобы не возвращать неполный пакет native-вызовов как успешный ответ).",
+      "acceptance": "В SSE и JSON: (1) два native-вызова одного шага со вторым вызовом через `> 150 мс` (`200 мс`) и последующим `session.step.ended` доставляются полностью с точным `usage`, а события следующего `assistantMessageID` отсекаются; (2) дополнительные native-вызовы того же шага без `assistantMessageID` с последующим `session.step.ended` сохраняются; (3) при отсутствии `session.step.ended` до конца окна попытка не объявляется успешной с неполным набором.",
+      "source": "F-001 (realist · R1 · realist-F-001; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AMEND, visionary=AGREE)",
+      "source_findings": [
+        "F-001"
+      ],
+      "evidence": "Ledger F-001: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AMEND, visionary=AGREE]; dissent=[realist d1 «AMEND F-001 priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:3355, bridges/opencode-zen-bridge/server.py:3371, bridges/opencode-zen-bridge/server.py:3885, bridges/opencod» → teamlead/cycle-8/debate/d1/realist.md]; amendments=[realist d1: priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:3355, bridges/opencode-zen-bridge/server.py:3371, bridges/opencode-zen-bridge/server.py:3885, bridges/opencode-zen-bridge/server.py:3893; fix=окно 0. (teamlead/cycle-8/debate/d1/realist.md)]."
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5438,7749,7821,7942",
+      "rule_ref": "REQ-016 / AC-021, O-EXIT/v1",
+      "action": "В `Handler._serve_json` (`server.py:7749-7840`) обрабатывать `result.get(\"state\") == \"timeout\"` терминально до ветки пустого текста (`upstream_failed` на `server.py:7942`): записывать `exit_reason = \"timeout\"`, возвращать прежний HTTP `502` с нейтральным учётом Circuit Breaker (`attempts.attempt_done(False, False)`, `0` инкрементов отказов).",
+      "acceptance": "При исчерпании локального дедлайна до legacy spawn (`state=\"timeout\"`, сценарий FU-002 в JSON и SSE) в `O-EXIT/v1` записывается ровно одно событие с `exit_reason=\"timeout\"`, `total_spawns=0`, `0` инкрементов отказов Circuit Breaker и возвращённым резервом `_RetryBudget`.",
+      "source": "F-003 (realist · R1 · realist-F-003; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-003"
+      ],
+      "evidence": "Ledger F-003: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Ввести в `_ServeSseStream` (`server.py:1580, 3580-3595`) и цикле накопления ответа (`server.py:3850-3865`) явный байтовый бюджет очереди SSE-событий (`MAX_SERVE_QUEUE_BYTES = 16 * 1024 * 1024`) и накопленного текста/reasoning на попытку (`MAX_SERVE_ACCUMULATED_BYTES = 16 * 1024 * 1024`), чтобы при 6 слотах суммарная память гарантированно укладывалась в конверт `HL-ENV-01` (`<= 2 GiB`), а при превышении попытка останавливалась через `ServeProtocolError` с `cleanup()`.",
+      "reason": "Согласовано квалифицированным большинством 2/3 в D1 (`skeptic`, `realist`) через `AMEND F-002 -> priority=non-blocking`; реализуем заодно в этом же проходе с детерминированным unit-тестом.",
+      "source_findings": [
+        "F-002"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-002",
+      "text": "Сохранить совместимость `bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py` с замороженным оракулом `VER-002` (`python3 -m unittest discover -s tests -p 'test_*.py'`) и существующим `unittest`-контуром моста (`tests/test_step_interruption.py`).",
+      "reason": "Согласовано квалифицированным большинством 2/3 в D1 (`skeptic` `DISPUTE -> invalid`, `realist` `AMEND -> non-blocking: сохранить unittest.TestCase, чтобы VER-002 исполнял модуль`).",
+      "source_findings": [
+        "F-004"
+      ],
+      "decision_required_human": false
+    }
+  ],
+  "excluded": []
+}

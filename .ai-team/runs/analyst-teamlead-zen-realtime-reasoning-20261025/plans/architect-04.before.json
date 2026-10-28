@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "role": "architect",
+  "iteration": 4,
+  "plan_kind": "delta",
+  "parent_plan": "plans/architect-03.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "FU-001",
+    "FU-002",
+    "FU-003",
+    "FU-004",
+    "FU-005",
+    "FU-006"
+  ],
+  "objective": "Редакция v4: закрыть RW-001..RW-003 и FU-001..FU-006 a3 без регрессий a1/a2 и без записи в product tree.",
+  "inputs_read": [
+    "handoff/panel-rework-brief-arch-a3.json",
+    "architecture/architecture-packet.json",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md"
+  ],
+  "stop_conditions": [
+    "Любая запись вне трёх разрешённых JSON или временных /tmp/zen-arch4-probe-* запрещена.",
+    "Неуспешная эмпирическая проба запрещает заявлять подтверждение EVD-075/EVD-076.",
+    "Coder/rollout/новый голос панели не запускаются; H0..H9 и Stage3 остаются NOT_RUN."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить a3 с сохранёнными решениями a1/a2 и замороженными входами; зафиксировать исходные hashes/scope.",
+      "expected_evidence": "RW-001..003, FU-001..006 трассированы; исходные product/backup fingerprints.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "verify",
+      "action": "RW-001/RW-002: выполнить /tmp пробы ruff закрытого диапазона и basedpyright/public CATALOG_SOURCE; удалить копии.",
+      "expected_evidence": "EVD-075: rc0/1 и immutable hash negatives; EVD-076: errorCount0 и catalog tests PASS.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "RW-003/FU-001/FU-003/FU-005: согласовать helper→serve PGID, lifeline, lease, cleanup и ресурсы во всех AD/HL/VER.",
+      "expected_evidence": "Один process tree, согласованные FD/threads/RSS, form cancel, оба first_token_timeout, lsof reconnect oracle.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "FU-002/FU-004/FU-006 и RW-001/RW-002: обновить v4, статусы, evidence и JSON-pointer rework_resolutions_a3.",
+      "expected_evidence": "Точная waiting строка; EVD-055 cleanup; cp only server.py; 3 coder files; 9 resolution entries.",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Проверить JSON/46 HL fields/24 gates, delta v3→v4, неизменность product и backups; закрыть plan и вписать SHA-256.",
+      "expected_evidence": "before/after plan validators PASS; packet validator результат; точный role_plan SHA; temp удалён.",
+      "status": "PENDING"
+    }
+  ],
+  "deviations": []
+}

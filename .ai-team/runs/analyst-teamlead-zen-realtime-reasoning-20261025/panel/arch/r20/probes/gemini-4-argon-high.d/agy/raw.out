@@ -1,0 +1,1 @@
+{"response": "OK\n", "status": "SUCCESS", "duration_seconds": 16.62302, "usage": {"input_tokens": 26208, "output_tokens": 707, "thinking_tokens": 702, "cache_read_tokens": 0, "total_tokens": 26915}, "stats": {"input_tokens": 26208, "output_tokens": 707, "thinking_tokens": 702, "cache_read_tokens": 0, "total_tokens": 26915}, "thinking_tokens": 702}

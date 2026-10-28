@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 2,
+  "plan_kind": "delta",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-01.json",
+  "trigger_ids": [
+    "clean-room-l2",
+    "reverse-spec",
+    "coder-02-brief"
+  ],
+  "objective": "Дельта-доводка coder-02 после Clean-Room L2 и reverse-spec: 5 точечных замен в server.py и 3 новых теста в test_realtime_reasoning.py без трогания замороженных _run_env/_stream_google_sse/_execute_google_once",
+  "inputs_read": [
+    "architecture/architecture-packet.json (ARCH_GATE_PASS + ARCH_PANEL_PASS, VER-004 command)",
+    "plans/coder-01.before.json",
+    "plans/coder-01.json",
+    "handoffs/coder-01.json",
+    "brief coder-02 (точные строки и сниппеты замен 2.1-2.5 и тестов шага 3)",
+    "skills/feature.md (канон feature-implementation; путь брифа skills/feature-implementation.md на диске отсутствует, фактический файл skills/feature.md)"
+  ],
+  "stop_conditions": [
+    "Не менять файлы вне белого списка: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+    "Не менять замороженные _run_env/_stream_google_sse/_execute_google_once ни на один байт (контроль sha256 в VER-004)",
+    "Не делать git commit/push",
+    "При несовпадении фактических строк server.py со сниппетами брифа — стоп и ASK, не угадывать"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Замены 2.1-2.2 в server.py: FIRST_STATUS_DELAY_S 0.30 -> 0.65; keep-alive параметр conn в _serve_http и условие _pid_alive(self.pgid) в _ServeLease.cleanup",
+      "expected_evidence": "grep показывает FIRST_STATUS_DELAY_S = 0.65, сигнатуру conn в _serve_http и условие cleanup с _pid_alive",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Замены 2.3-2.4 в server.py: control_conn/_ctrl_http и проверки 400/404/422 в _serve_one_attempt; повторы unmapped/incomplete_step и накопление _serve_stream_usage в _run_serve_stream_attempts",
+      "expected_evidence": "grep показывает _ctrl_http, control_conn, ServeSecurityError на 400/404/422, unmapped_retries, incomplete_retries, _serve_stream_usage",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Замена 2.5 в _serve_json_serve (attempts.attempt_done(True, False) в else) и шаг 3: FAKE_SERVE 503/400 по FAKE_SERVE_SESSION_STATUS плюс 3 новых теста в TestServeTransportAndFakeServe",
+      "expected_evidence": "grep показывает attempt_done(True, False) в _serve_json_serve; 3 новых теста присутствуют в test_realtime_reasoning.py",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Шаг 4: ruff format изменённых диапазонов; VER-004 из architecture-packet.json дословно; целевой pytest test_realtime_reasoning + test_step_interruption + test_go_model_routing",
+      "expected_evidence": "VER-004 exit 0 и целевой pytest exit 0 с числом прошедших тестов",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Шаг 5: записать plans/coder-02.json со статусами DONE, handoffs/coder-02.json и копию coder.json с sha256 плана",
+      "expected_evidence": "validate_role_plan --phase after exit 0 и validate_handoff coder exit 0",
+      "status": "PENDING"
+    }
+  ]
+}

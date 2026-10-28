@@ -1,0 +1,204 @@
+{
+  "schema_version": "1.1",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "round_id": "coder-13",
+  "iteration": 1,
+  "teamlead_cycle": 10,
+  "entry": "fix-from-panel",
+  "status": "DONE",
+  "next_role": "reviewer",
+  "summary": "RW-001..RW-005 и FU-002 реализованы; VER-004 PASS, targeted 15 / full pytest 491 / unittest 491 PASS. Передача Reviewer; живой чат владельца не проверялся (запрещён брифом).",
+  "role_plan": {
+    "path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-13.json",
+    "sha256": "f45f06b41ba8410502da77147498b30d859db85f6e549f76c1b70232914b6bd5",
+    "phase": "after"
+  },
+  "before_plan_sha256": "c676a2c51fe06e0eede6a8f781f455b0dc30c2ae70eda42ab9a3ee9f87f7db4c",
+  "changed_files": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py"
+  ],
+  "inherited_modified_files": [],
+  "report_files": [
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-13.before.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-13.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoffs/coder-13.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/coder.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/coder.json"
+  ],
+  "source_file_sha256": {
+    "bridges/opencode-zen-bridge/server.py": "b7acdf54b30ab6b4f748a534a18fe05bf6d7d1495f2b63e08d2696ca26f3b288",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py": "18d7dcd1201188160705736465760f696730d1d9c1e074676ecbd325bf44a4d2",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py": "2b177a32290adfebeffad700b1c3c3251619e83cba90032217576c777beb80ef"
+  },
+  "frozen_sha256": {
+    "_run_env": "1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31",
+    "_execute_google_once": "88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6",
+    "_stream_google_sse": "5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3"
+  },
+  "commands": [
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py tests/test_step_interruption.py -k \"c10 or interrupted_artifact\"",
+      "exit_code": 1,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/red.log",
+      "result": "13 failed, 2 passed (RED до правок server.py)",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py tests/test_step_interruption.py -k \"c10 or interrupted_artifact\"",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/green2.log",
+      "result": "15 passed",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 ~/work/cli-agent-bridge/coder-10-20261027/ver004-offline.py",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/ver004-final3.log",
+      "result": "PASS VER-004 (финальный прогон после исправления регрессий RW-005)",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider bridges/opencode-zen-bridge/tests",
+      "exit_code": 1,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/full-pytest.log",
+      "result": "480 passed, 11 failed: авто-abort _LockedWfile на дедлайне (cli_failure/c6_rw001/c8_fu002), Handler без connection (go/google x6), prompt_4xx handshake timeout и c7_rw004 7.72<7.0 под нагрузкой",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider <11 упавших + c10/interrupted selection>",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/failed11-rerun.log",
+      "result": "37 passed",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider bridges/opencode-zen-bridge/tests",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/full-pytest-final.log",
+      "result": "491 passed in 442.61s, без crash-guard предупреждений",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 -B -m unittest discover -s tests -p \"test_*.py\"",
+      "exit_code": 1,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/unittest-final.log",
+      "result": "Ran 491, FAILED failures=2: RW-002 foreign listener on serve port при повторе (SSE и JSON subTest)",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 -B -m unittest tests.test_realtime_reasoning.TestServeTransportAndFakeServe.test_c10_rw002_unconfirmed_tool_not_published_retry_b_only -v; discover -k c10 (3 раза)",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/unittest-rw002-1.log, unittest-c10-1..3.log",
+      "result": "RW-002 изолированно OK; все 11 c10-тестов unittest OK трижды подряд",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 -B -m unittest discover -s tests -p \"test_*.py\"",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-13-20261027/unittest-final2.log",
+      "result": "Ran 491 tests in 343.823s OK",
+      "background": true
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "id": "RW-001",
+      "status": "PASS",
+      "test": "test_c10_rw001_drain_permission_reject_continues_and_reasoning_delivered; test_c10_rw001_drain_form_created_fails_closed_without_tool; test_c10_rw001_drain_error_classification_preserved",
+      "evidence": "~/work/cli-agent-bridge/coder-13-20261027/green2.log; full-pytest-final.log; unittest-final2.log"
+    },
+    {
+      "id": "RW-002",
+      "status": "PASS",
+      "test": "test_c10_rw002_unconfirmed_tool_not_published_retry_b_only (SSE и JSON, MAX_TOTAL_SPAWNS=2)",
+      "evidence": "~/work/cli-agent-bridge/coder-13-20261027/green2.log; full-pytest-final.log; unittest-final2.log"
+    },
+    {
+      "id": "RW-003",
+      "status": "PASS",
+      "test": "test_c10_rw003_reasoning_markers_preserved_text_clean; test_interrupted_artifact_removed_from_reasoning_stream/json (обновлены под raw reasoning)",
+      "evidence": "~/work/cli-agent-bridge/coder-13-20261027/green2.log; full-pytest-final.log"
+    },
+    {
+      "id": "RW-004",
+      "status": "PASS",
+      "test": "test_c10_rw004_tool_count_and_state_bytes_caps; test_c10_rw004_tool_state_byte_cap_main_and_drain_cleanup",
+      "evidence": "~/work/cli-agent-bridge/coder-13-20261027/green2.log; full-pytest-final.log"
+    },
+    {
+      "id": "RW-005",
+      "status": "PASS",
+      "test": "test_c10_rw005_locked_wfile_timeout_and_abort_without_lock; test_c10_rw005_slow_client_bounded_cleanup_and_slot_released (реальный сокет)",
+      "evidence": "~/work/cli-agent-bridge/coder-13-20261027/green2.log; failed11-rerun.log; full-pytest-final.log"
+    },
+    {
+      "id": "FU-002",
+      "status": "PASS",
+      "test": "test_c10_fu002_aux_budget_three_subscriptions_deterministic; test_c10_fu002_exhausted_aux_budget_starts_no_attempt",
+      "evidence": "~/work/cli-agent-bridge/coder-13-20261027/green2.log; unittest-c10-1..3.log"
+    }
+  ],
+  "changes": [
+    "RW-001: _drain_serve_step_usage обрабатывает все события до step.ended — form.created до верхнего sessionID-фильтра по form.sessionID/data.sessionID с cancel+interrupt и ServeSecurityError(\"serve requested interactive form during tool drain\"); tool_event обновляет state и складывает полные вызовы в pending; step_finish даёт usage+True только без terminal error; error пишет result[\"error\"]=mapped payload с transient-классификацией _is_transient_stream_error (401/403 terminal, 429/503 retry) и немедленно прекращает drain; reasoning/text сохраняются с byte-cap и callbacks (text callback только при not emulate_tools). Permission в drain всегда POST reject: <300 — drain продолжается без interrupt, >=300/ServeUnavailable/OSError — interrupt и ServeSecurityError(\"permission reject failed\").",
+    "RW-002: pending_step_calls в _serve_one_attempt — первый и drain-вызовы не попадают в result/native_calls/on_tool до _finish_serve_tool_step; публикация один раз после подтверждённого step.ended (drain или step_finish главного цикла); EOF/окно/protocol/security/error не публикуют ни одного pending. На session.execution.succeeded без step.ended pending публикуется (сохранён прежний контракт test_c5_rw004 native_pause при emulate_tools=False).",
+    "RW-003: _strip_interrupted убран с reasoning-путей legacy JSON (Run.execute), serve SSE on_reasoning и legacy SSE; text-фильтрация, _inter_buf_text split-буфер и детектор незавершённого шага сохранены (legacy signal по-прежнему получает stripped-копию reasoning, поэтому reasoning_interrupted остаётся 1 запуском); в serve JSON финальный content дополнительно проходит _strip_interrupted по склеенному тексту (split-маркеры).",
+    "RW-004: _MAX_SERVE_NATIVE_TOOLS=128 уникальных call_id на попытку (ServeProtocolError \"serve native tool calls count exceeded cap\" в _ServeToolState.feed); _serve_tool_state_bytes считает UTF-8 text+сериализованный input с заменой по тому же ID без двойного счёта; _serve_accumulated_bytes проверяет reasoning+texts+held против 16MiB (\"serve accumulated output exceeded byte cap\") в main и drain, cleanup в finally попытки.",
+    "RW-005: _DOWNSTREAM_WRITE_TIMEOUT_S=5.0; _LockedWfile получил sock/deadline/deadline_fn/on_client_gone, write/flush ставят settimeout(min(5,max(0.05,remaining))), abort_socket делает shutdown/close без замка, TimeoutError/socket.timeout/OSError превращаются в BrokenPipeError с mark client_gone (Handler._downstream_client_gone, учитывается _client_gone_check) для немедленного cleanup serve и возврата bulkhead-слота.",
+    "FU-002: _AUX_IO_BUDGET_S=54.0 и приватный _AuxIoBudget на весь запрос в _RequestAttempts; фактическое aux-время списывается в finally для StartupGate/SpawnRateLimiter waits (serve SSE/JSON циклы), _spawn_serve, ready/create control HTTP, _open_serve_events до первого SSE, prompt HTTP до заголовков и retry backoff (allow_retry режет delay остатком и отказывает при исчерпании); каждая фаза deadline=min(request_deadline, now+remaining_aux); remaining<=0 не стартует новый I/O/attempt (controlled timeout), cleanup идёт отдельным резервом и в aux не списывается; модельный стриминг aux не считается."
+  ],
+  "assumptions": [
+    "Продолжена назначенная внешняя роль Coder coder-13 без вложенных Coder/панелей; commit/push/MR не выполнялись, живой мост ~/.dsh/bridges/opencode-zen-bridge/ не трогался.",
+    "Панель r144 уже reverified родителем (verify_panel_proof exit=0, receipts/council-r144-proof.json sha256 f62457aae2f9e53ebeb8e42fa1900db1bb11c60dd0533d9ab03437b889bcd5b7); новых panel proof записей не создавалось.",
+    "before-план coder-13.before.json не изменялся (sha256 c676a2c51fe06e0eede6a8f781f455b0dc30c2ae70eda42ab9a3ee9f87f7db4c)."
+  ],
+  "risks": [
+    "Живой существующий рабочий слот/чат владельца не проверен (бриф запрещает живую приёмку и трогать живой мост).",
+    "Первый полный unittest дал 2 падения RW-002 'foreign listener on serve port' при немедленном повторе после EOF; изолированно RW-002 и все c10 (3 прогона) зелёны, повторный полный unittest — 491 OK. Причина гонки освобождения порта при нагрузке окончательно не локализована.",
+    "prompt_http_4xx (handshake timeout) и c7_rw004 (7.72с при пороге 7.0) падали только в первом полном pytest под нагрузкой и зелёны в failed11-rerun и финальном полном pytest; рассматриваются как нагрузочные флейки без изменения тестов."
+  ],
+  "open_questions": [],
+  "deviations": [
+    "Каждое из RW-001/RW-002/RW-004/RW-005/FU-002 превышает 15 строк: drain обязан обрабатывать пять классов событий до step.ended, pending-публикация затрагивает main/drain/step_finish, байтовые потолки — обоих consumers, downstream — сокет и Handler, aux-бюджет — handler-циклы, попытку и backoff. Расширения архитектуры, новых зависимостей и изменений публичных DTO нет.",
+    "Basedpyright выявил превышение сложности _serve_one_attempt после aux-дельты. Ready/create/subscribe механически выделены во вложенный приватный helper _open_session того же модуля (nonlocal session_id, возврат (conn, resp)); алгоритм, фазовые дедлайны и владение ресурсами сохранены.",
+    "В исходном брифе для _stream_google_sse опечатка в 63 hex: 5914c9654c7345692dd55e84cfd3765e27406f63a3df85830bc798bc1778de3. Фактический исходный и финальный hash — 5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3; байты всех трёх frozen-функций сохранены (VER-004 frozen 3/3).",
+    "Permission в drain: по явному уточнению пользователя успешный reject (<300) НЕ прерывает сессию и drain продолжается — это приоритет над panel-rework-brief/ledger (reject+interrupt fail-closed) и над прежним main-поведением; main-цикл permission вне drain не менялся.",
+    "_LockedWfile не аборит сокет автоматически ровно на дедлайне запроса (иначе финальная timeout-ошибка клиенту не доставляется — доказано первым полным pytest). Ограничение зависшей записи дают settimeout в write/flush и внешний abort_socket без замка.",
+    "Для VER-004 переиспользован известный ~/work/cli-agent-bridge/coder-10-20261027/ver004-offline.py без записи в него; финальный VER-004 PASS (ver004-final3.log)."
+  ],
+  "verification": {
+    "light": "VER-004 PASS; targeted c10 15 passed; failed11-rerun 37 passed; full pytest 491 passed; unittest discover 491 OK; frozen 3/3; git diff --check PASS",
+    "heavy": null,
+    "not_verified": [
+      "Живой рабочий слот/чат владельца (запрещено брифом)",
+      "Корень гонки foreign listener on serve port в первом полном unittest (не воспроизвелась в 4 последующих прогонах)"
+    ]
+  },
+  "raw_outputs": {
+    "red.log": "13 failed, 2 passed, 205 deselected in 34.73s",
+    "green2.log": "15 passed, 205 deselected in 41.13s",
+    "full-pytest.log": "11 failed, 480 passed in 436.46s (первый полный прогон, регрессии RW-005 исправлены после него)",
+    "failed11-rerun.log": "37 passed, 200 deselected in 98.01s",
+    "full-pytest-final.log": "491 passed in 442.61s (0:07:22)",
+    "unittest-final.log": "Ran 491 tests in 392.658s FAILED (failures=2) — RW-002 foreign listener",
+    "unittest-final2.log": "Ran 491 tests in 343.823s OK",
+    "ver004-final3.log": "PASS VER-004: all3 lint/type; legacy changed-range format; newfile whole format; server warningCount 590"
+  },
+  "invariants": {
+    "frozen_raw_bytes": "PASS 3/3",
+    "python39_ast": "PASS",
+    "early_helper_dispatch": "PASS VER-004",
+    "catalog_test_unchanged": "PASS VER-004",
+    "before_plan_unchanged": true,
+    "no_commit_push_mr": true,
+    "live_bridge_untouched": true
+  },
+  "validation_log": "~/work/cli-agent-bridge/coder-13-20261027/validation-final.log"
+}

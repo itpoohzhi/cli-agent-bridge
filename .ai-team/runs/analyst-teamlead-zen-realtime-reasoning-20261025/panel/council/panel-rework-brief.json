@@ -1,0 +1,89 @@
+{
+  "schema_version": "2.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 12,
+  "panel_slug": "panel/council/r266",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "findings_total": 5,
+  "decision_required_human": false,
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Cycle 12 Совета Тимлидов по коду завершён после R1 (panel/council/r245) и D1 (panel/council/r266) с вердиктом NEEDS_WORK: согласованы 4 точечных блокера RW-001..RW-004 (F-001..F-004), находка F-005 отклонена большинством 2/3 семейств как out_of_scope (excluded). Следующая волна: Coder rework (coder-16, Цикл 13) -> слепой reverse-spec -> Clean-Room L2 -> Cycle 13 Совета Тимлидов по коду.",
+  "do_not_change": [
+    "Разрешено модифицировать ТОЛЬКО 3 файла из coder_target_files: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py.",
+    "Запрещено менять замороженную функцию def _run_env в bridges/opencode-zen-bridge/server.py (sha256=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31).",
+    "Запрещено менять замороженную функцию def _stream_google_sse в bridges/opencode-zen-bridge/server.py (sha256=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3).",
+    "Запрещено менять замороженную функцию def _execute_google_once в bridges/opencode-zen-bridge/server.py (sha256=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6).",
+    "Запрещено добавлять любые внешние зависимости вне стандартной библиотеки Python 3.14 (dependencies = [] в pyproject.toml).",
+    "Запрещено модифицировать zen_catalog.py, start.sh, muse-bridge, существующие тестовые модули вне конверта и коммитить dynamic_config.json в git."
+  ],
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3508,3579,3988,4494",
+      "rule_ref": "REQ-012, FALLBACK_DECISION_TABLE (permission/form/security -> fail_closed), SK-P security/error-handling",
+      "action": "В `_reject_and_interrupt` (`bridges/opencode-zen-bridge/server.py:3973-3992`), `_ctrl_quiet` (`server.py:3502-3515`) и обработчике `permission` в `_drain_serve_step_usage` (`server.py:3568-3588`) включить `ServeProtocolError` в перехватываемый кортеж исключений управляющего HTTP (`(OSError, http.client.HTTPException, ServeUnavailable, ServeProtocolError)`), чтобы протокольный сбой управляющего ответа (`> _MAX_SERVE_HTTP_BODY_BYTES`, невалидный JSON или непарные суррогаты из `_serve_http`) не пропускал отправку `POST /api/session/{session_id}/interrupt` и всегда переводился в терминальный `ServeSecurityError`, а не в повторяемый `invalid_serve_event` на `server.py:4494`.",
+      "acceptance": "Инъекция `ServeProtocolError` (а также ответа `> _MAX_SERVE_HTTP_BODY_BYTES` или битого JSON) на управляющих вызовах `form` (`cancel` и `interrupt`) и `permission` (`reply` и `interrupt`) как в основном цикле `_serve_one_attempt`, так и в `_drain_serve_step_usage`, в SSE и JSON (`auto`) приводит к попытке `interrupt`, терминальному `ServeSecurityError`, ровно 1 спавну `serve` и 0 ретраев/фолбэков.",
+      "source": "F-001 (realist · R1 · realist-F-001; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE(rev=1,blocking), realist=AGREE(rev=1,blocking), visionary=AMEND(rev=2,non-blocking))",
+      "source_findings": [
+        "F-001"
+      ],
+      "evidence": "Ledger F-001: votes=[D1 2/3 AGREE rev=1 blocking]; locations=bridges/opencode-zen-bridge/server.py:3508,3579,3988,4494."
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "СООТВЕТСТВИЕ КОНТЕКСТУ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5908",
+      "rule_ref": "REQ-005, AC-006, SK-T побайтовая идентичность склейки reasoning_content",
+      "action": "В `Run.execute._with_previous` (`bridges/opencode-zen-bridge/server.py:5908`) заменить `\"\\n\\n\".join(...)` на `\"\".join(...)` при объединении накопленных `acc_reasonings` с `out[\"reasoning\"]`, чтобы между внутренними ретраями `Run.execute` не вставлялись синтетические разделители `\\n\\n` (в точном соответствии с `_serve_json_serve` на `server.py:8360` и `_serve_json` на `server.py:8707`). Обновить проверку в `tests/test_realtime_reasoning.py:3453`.",
+      "acceptance": "При внутреннем ретрае в `Run.execute` поле `out[\"reasoning\"]` (и итоговый `message.reasoning_content` в `_serve_json`) равно точной побайтовой конкатенации `\"\".join(parts)` без вставленных `\\n\\n`.",
+      "source": "F-002 (realist · R1 · realist-F-002; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE(rev=1,blocking), realist=AGREE(rev=1,blocking), visionary=AMEND(rev=2,non-blocking))",
+      "source_findings": [
+        "F-002"
+      ],
+      "evidence": "Ledger F-002: votes=[D1 2/3 AGREE rev=1 blocking]; locations=bridges/opencode-zen-bridge/server.py:5908."
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3474,3517-3567,3775,3792,4409",
+      "rule_ref": "REQ-011, AC-011, AC-012, SK-T управляемость и отмена активного ожидания",
+      "action": "Добавить `is_client_gone: Callable[[], bool] | None = None` в `_finish_serve_tool_step` (`server.py:3775`) и `_drain_serve_step_usage` (`server.py:3474`) и передавать `is_client_gone=is_client_gone` из `_serve_one_attempt` (`server.py:4409`). В `_drain_serve_step_usage` проверять `is_client_gone()` в начале каждой итерации цикла, нарезать ожидание `events.get(timeout=...)` интервалом опроса `min(0.05, max(0.0, wait_deadline - time.monotonic()))` (продолжая цикл при `queue.Empty`, пока `time.monotonic() < wait_deadline`) и при `is_client_gone() == True` немедленно выбрасывать `ServeClientDisconnect(\"client disconnected\")` без публикации `pending_calls` (включая проверку перед циклом публикации `pending_calls` в `_finish_serve_tool_step`).",
+      "acceptance": "При отключении клиента во время активного дренажа инструментального шага (с непрерывным потоком `session.tool.input.delta`) в SSE и JSON дренаж прерывается за `<< 5` с через `ServeClientDisconnect`, `exit_reason=\"client_gone\"`, ни один `pending_call` не публикуется, группа процессов останавливается и слот bulkhead освобождается без ретраев.",
+      "source": "F-003 (realist · R1 · realist-F-003; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE(rev=1,blocking), realist=AGREE(rev=1,blocking), visionary=AGREE(rev=1,blocking))",
+      "source_findings": [
+        "F-003"
+      ],
+      "evidence": "Ledger F-003: votes=[D1 3/3 AGREE rev=1 blocking]; locations=bridges/opencode-zen-bridge/server.py:3474,3519,3775,3792,4409."
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5880,5905,6259,8480-8495",
+      "rule_ref": "REQ-013, AC-019, O-EXIT/v1 observability",
+      "action": "В `Run.execute` (`bridges/opencode-zen-bridge/server.py:5870-5926`) сохранять самые ранние непустые числовые отметки `first_event_at` и `first_token_at` из предыдущих внутренних попыток в `_save_partial` и восстанавливать их в `out[\"first_event_at\"]` и `out[\"first_token_at\"]` в `_with_previous`, чтобы `_serve_json` (`server.py:8480-8495`) логировал в `O-EXIT/v1` истинные `first_event_ms` и `ttft_ms` первой попытки запроса после внутреннего ретрая `Run.execute`.",
+      "acceptance": "Детерминированный тест в `tests/test_realtime_reasoning.py`: при внутреннем ретрае в `Run.execute` возвращаемый словарь и запись `O-EXIT/v1` в `_serve_json` содержат `first_event_at`/`first_token_at` (`first_event_ms`/`ttft_ms`) от первой попытки, выдавшей событие/токен.",
+      "source": "F-004 (realist · R1 · realist-F-004; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE(rev=1,blocking), realist=AGREE(rev=1,blocking), visionary=AMEND(rev=2,non-blocking))",
+      "source_findings": [
+        "F-004"
+      ],
+      "evidence": "Ledger F-004: votes=[D1 2/3 AGREE rev=1 blocking]; locations=bridges/opencode-zen-bridge/server.py:5880,5905,8480."
+    }
+  ],
+  "non_blocking_followups": [],
+  "excluded": [
+    {
+      "id": "F-005",
+      "reason": "out_of_scope"
+    }
+  ]
+}

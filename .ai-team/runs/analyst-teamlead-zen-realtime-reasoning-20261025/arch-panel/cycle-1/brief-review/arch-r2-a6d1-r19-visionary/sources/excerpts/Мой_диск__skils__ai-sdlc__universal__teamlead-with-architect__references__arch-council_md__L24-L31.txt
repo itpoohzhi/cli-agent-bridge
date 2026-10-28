@@ -1,0 +1,8 @@
+| В consensus | В арх-проходе |
+|---|---|
+| diff / candidate SHA (§3–§4, «Валидная ссылка») | Architecture Packet целиком; sha256 — из receipt `ARCH_GATE` (SK-A-01, SK-A-02) |
+| `file:line` в F-блоке, позициях, `locations` | якорь пакета — §2 |
+| шапка тимлида (код), пакет приёмки | шапка тимлида в SK-A не требуется; состав брифа — SK-A-01…SK-A-15 (`brief-review/references/checklist-sources.md`): пакет, receipt, handoff и ledger при наличии, строка режима с модификатором. Блок «ПОЛНОТА ВЫДАЧИ» (`teamlead-gate/references/council.md:101`) обязателен: brief-review проверяет его в обеих панелях (там же :147); «diff» в нём читается как «пакет» |
+| режим code (§7 п.2) | `mode.txt` = `architecture`, пишется явно; усилены Альтернативы и Риски ×1.5, два усиленных FAIL = `RED FLAG` (`universal-panel`, «Режимы оценки») |
+| корень артефактов `<RUN>/teamlead/cycle-<N>/` | `ARCH_ROOT` = `<RUN>/arch-panel/cycle-<N>/a<A>/`; `A` — счётчик `arch_panel_to_architect` (первый проход `a1`) — тот же, что в каталогах brief-review |
+| вердикт → саммаризатор → Coder | вердикт → саммаризатор → Architect (§3) |

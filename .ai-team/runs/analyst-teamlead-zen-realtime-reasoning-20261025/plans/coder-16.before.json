@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 13,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-15.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004"
+  ],
+  "objective": "Реализовать исправления RW-001..RW-004 по итогам Совета Тимлидов Цикла 12 (panel/council/r245 + r266) строго в пределах 3 разрешённых файлов coder_target_files без изменения замороженных функций.",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-12/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-15.json"
+  ],
+  "stop_conditions": [
+    "Только три разрешённых продуктовых пути и отчётность coder-16",
+    "Сохранить frozen raw SHA256, ранний helper и Python 3.9; форматировать legacy только диапазонами",
+    "Без commit/push/MR; без бизнес-приёмки живого чата"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001 + RW-003: включить ServeProtocolError в перехват ошибок управляющего HTTP безопасности (_reject_and_interrupt, _ctrl_quiet, _drain_serve_step_usage) с обязательной попыткой interrupt и пробросить is_client_gone в _finish_serve_tool_step и _drain_serve_step_usage с нарезкой ожидания по 0.05 с",
+      "expected_evidence": "Терминальный ServeSecurityError при ServeProtocolError на form/permission и немедленный ServeClientDisconnect в дренаже шага при отключении клиента без публикации pending_calls",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002 + RW-004: заменить '\\n\\n'.join на ''.join для acc_reasonings и сохранять ранние first_event_at/first_token_at через внутренние ретраи в Run.execute",
+      "expected_evidence": "Побайтовая идентичность склейки reasoning_content и сохранение истинных first_event_ms/ttft_ms первой попытки в O-EXIT/v1 после ретрая Run.execute",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Добавить регрессионные тесты test_c13_rw001..rw004 в tests/test_realtime_reasoning.py, прогнать VER-004, pytest и unittest discover",
+      "expected_evidence": "Все проверки VER-004, pytest и unittest discover зелёные (rc=0) и записан валидный handoffs/coder-16.json",
+      "status": "PENDING"
+    }
+  ]
+}

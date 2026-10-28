@@ -1,0 +1,21 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "slot": "claude-sonnet-5-5",
+      "transport": "claude-p",
+      "file": "review-v1-dSK-T-12-a1.md",
+      "http_code": null,
+      "rc": 0,
+      "result": "ok",
+      "seconds": 24,
+      "wall_seconds": 23.53,
+      "tool_calls": 0,
+      "kill_reason": null,
+      "error": null,
+      "pid": 3701,
+      "pgid": 3701,
+      "text_chars": 541
+    }
+  ]
+}

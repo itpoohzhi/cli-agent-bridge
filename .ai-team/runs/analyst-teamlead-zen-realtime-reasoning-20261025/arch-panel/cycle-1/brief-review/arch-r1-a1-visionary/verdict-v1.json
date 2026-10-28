@@ -1,0 +1,591 @@
+{
+  "panel": "arch",
+  "round": "R1",
+  "cycle": 1,
+  "seat": "visionary",
+  "iteration": 1,
+  "run_kind": "full",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "29595eb3fd95a0a30483ba09e46026d020c2fbaafee3734873e3508a882973fa",
+  "checklist_gen": 1,
+  "checklist_sha256": "4209e18990c21d33072ce098efada46a567636741de92aa40f76225bf3def44d",
+  "reviewer_slot": "claude-sonnet-5-5",
+  "transport": "claude-p",
+  "transport_attempts": [
+    {
+      "transport": "claude-p",
+      "file": "review-v1-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 177,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 177,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "BR-01",
+      "status": "covered",
+      "evidence_quote": "При запуске DeepSeek (`deepseek-v4.1-flash-free` High) через `opencode-zen-bridge` в DSH Desktop размышления (`reasoning_content` / блок `Think`) и прогресс шагов стримятся в реалтайме по мере генерации",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-02",
+      "status": "covered",
+      "evidence_quote": "Полный цикл `analyst-teamlead` пройден с двумя `PANEL PROOF` (`verify_panel_proof.py` exit=0, `panel-proof.json` PASS на `arch` и `code`), всеми L1/L2 проверками (`ruff`, `basedpyright`, `pytest`) и открытым PR в `origin/dev` (без merge).",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-03",
+      "status": "covered",
+      "evidence_quote": "Проведена живая проверка тяжёлым путём на реальном мосту и DSH.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-04",
+      "status": "covered",
+      "evidence_quote": "\"preset\": \"analyst-teamlead\",\n  \"setup\": \"default\",\n  \"criticality\": \"S2\",",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-05",
+      "status": "covered",
+      "evidence_quote": "Подтверждены три независимые причины; устранять надо все три, иначе пользователь по-прежнему не увидит «процесс идёт».",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-06",
+      "status": "covered",
+      "evidence_quote": "Вне периметра: правка кода, деплой, изменение DSH, смена модели, чужие мосты (кроме эталона muse-bridge).",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-07",
+      "status": "covered",
+      "evidence_quote": "Дельты размышления и текста уходят клиенту по мере прихода из апстрима, а не в конце шага | F-17, F-18, F-19 | AC-001: на клиентском сокете интервал между соседними `reasoning_content`-чанками меньше 500 мс, пока апстрим-стрим ещё идёт",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-08",
+      "status": "covered",
+      "evidence_quote": "AC-002: накладные расходы моста между приходом дельты и записью в сокет не больше 250 мс",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-09",
+      "status": "covered",
+      "evidence_quote": "Публичный контракт не меняется: `/health`, `/v1/models`, `/v1/chat/completions`, формат OpenAI SSE, `finish_reason`, `usage`, порт :9883 | F-35, F-34 | AC-003: побайтовое совпадение формы чанков с текущей на наборе существующих тестов формата",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-10",
+      "status": "covered",
+      "evidence_quote": "остаётся рабочим как переключаемый запасной вариант и kill-switch (имя переменной и дефолт задаёт Архитектор); существующие тесты на fake-CLI остаются зелёными | F-43, F-40, F-42 | AC-004: при выключенном новом транспорте проходят все 378 существующих тестов",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-11",
+      "status": "covered",
+      "evidence_quote": "Первая видимая реакция моста в течение 1.0 с после открытия SSE: непустой `reasoning_content`, оканчивающийся `\\n` (статус подключения/ожидания модели), независимо от состояния апстрима",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-12",
+      "status": "covered",
+      "evidence_quote": "Статусные строки моста отделены от текста модели, имеют префикс «[мост]» и завершаются `\\n`; текст размышления модели не модифицируется; статусные строки не попадают в промпт при реплее",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-13",
+      "status": "covered",
+      "evidence_quote": "AC-007: `_messages_to_prompt` не содержит статусных строк при реплее",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-14",
+      "status": "covered",
+      "evidence_quote": "Watchdog первого события: нет ни одного события транспорта в течение порога (допущение 20 с, OPEN-11) — группа процессов убивается, попытка повторяется по общему бюджету либо клиент получает явную ошибку",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-15",
+      "status": "covered",
+      "evidence_quote": "Watchdog первого токена (reasoning или text, допущение 60 с) и watchdog паузы между чанками (допущение 60 с); пороги настраиваются переменными окружения",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-16",
+      "status": "covered",
+      "evidence_quote": "AC-010: порог первого токена даёт `first_token_timeout`",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-17",
+      "status": "covered",
+      "evidence_quote": "Отсутствие осиротевших процессов: при отключении клиента, таймауте и watchdog убивается вся группа (включая дочерний `opencode serve`); отключение клиента обнаруживается не позже 5 с",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-18",
+      "status": "covered",
+      "evidence_quote": "AC-012: ход 1 образца (24.4 с на обнаружение) не воспроизводится",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-19",
+      "status": "covered",
+      "evidence_quote": "Потолок `MAX_TOTAL_SPAWNS=3`, `FAIL_RETRY_LIMIT`, `_RetryBudget`, Full Jitter и Circuit Breaker сохраняются; повторы по watchdog считаются в общий потолок; при повторе после отданного размышления вставляется отдельная статусная строка",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-20",
+      "status": "covered",
+      "evidence_quote": "AC-014: размышление не дедуплицируется, между попытками ровно одна статусная строка",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-21",
+      "status": "covered",
+      "evidence_quote": "`ToolCallParser` на потоковых дельтах: текст вне тегов выдаётся инкрементально (удерживается не более `len(\"<tool_invoke>\")-1` символов хвоста и открытый блок), блоки `<tool_call>`/`<tool_invoke>` не попадают в `content` при любом разбиении на дельты",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-22",
+      "status": "covered",
+      "evidence_quote": "Завершение шага с вызовом инструмента останавливает процесс или сессию и даёт `finish_reason=\"tool_calls\"`; детектор оборванного шага (`STEP_RECOVERY`), классификация `etype=error` и маркеры `_INTERRUPTED_RE` работают на накопленных данных потокового пути",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-23",
+      "status": "covered",
+      "evidence_quote": "Встроенные инструменты `opencode` на новом транспорте запрещены (политика `deny` для всех) либо эквивалентно изолированы; события встроенных инструментов приводятся к текущему внутреннему виду (`tool_use`, unmapped, native)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-24",
+      "status": "covered",
+      "evidence_quote": "Ротация чистых IP на каждый новый запуск, `_StartupGate`, `SPAWN_RATE_PER_S`, bulkhead слотов и Circuit Breaker действуют и для нового транспорта",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-25",
+      "status": "covered",
+      "evidence_quote": "`usage` собирается из токенов завершения шага нового транспорта и совпадает по полям (`input`, `output`, `cached`, `reasoning`) с текущим",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-26",
+      "status": "covered",
+      "evidence_quote": "Секреты не пишутся в логи и артефакты: пароль `opencode serve` (случайный на процесс), ключи, креды прокси; применяется существующее маскирование",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-27",
+      "status": "covered",
+      "evidence_quote": "Наблюдаемость `O-EXIT/v1`: новые значения `exit_reason` (`first_event_timeout`, `first_token_timeout`, `stall_timeout`, `client_gone`) и поля `transport`, `first_event_ms`, `ttft_ms` в строке выхода",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-28",
+      "status": "covered",
+      "evidence_quote": "Базовая линия тестов приводится в зелёное: два теста ждут 4 запуска при потолке 3, третий страдает от общего `_RetryBudget` на класс",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-29",
+      "status": "covered",
+      "evidence_quote": "AC-023: результат не зависит от порядка тестов",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-30",
+      "status": "covered",
+      "evidence_quote": "Прямой Google-маршрут (`_stream_google_sse`, `_execute_google_once`) не затрагивается | F-16 | AC-024: `test_google_direct.py` проходит без правок",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-31",
+      "status": "covered",
+      "evidence_quote": "Развёрнутая копия `~/.dsh/bridges/opencode-zen-bridge/server.py` синхронизируется с репозиторием и проверяется сверкой",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-32",
+      "status": "covered",
+      "evidence_quote": "В набор тестов добавляется измерение реального времени прихода чанков на клиентском сокете при ещё идущем апстриме (сейчас таких тестов нет)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-33",
+      "status": "covered",
+      "evidence_quote": "## 7. Конверт `HL-ENV/v1` (46 канонических полей `REQUIRED_HL_ENV_FIELDS`)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-34",
+      "status": "covered",
+      "evidence_quote": "Не менять публичный HTTP-контракт моста, порт и формат OpenAI SSE (REQ-002).",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-35",
+      "status": "covered",
+      "evidence_quote": "Не менять DSH (бандл `app.asar`), профиль `cordis.patch.yml` и поведение `ReasoningRow`.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-36",
+      "status": "covered",
+      "evidence_quote": "Не модифицировать текст размышления модели ради превью (OPEN-13).",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-37",
+      "status": "covered",
+      "evidence_quote": "Не менять модель, список моделей, логику выбора эффорта и каталог Zen.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-38",
+      "status": "covered",
+      "evidence_quote": "Не трогать `muse-bridge`, другие мосты и общий `~/.config/opencode/opencode.json` / конфиг `model_georouter`.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-39",
+      "status": "covered",
+      "evidence_quote": "Не вводить новые внешние зависимости Python вне стандартной библиотеки, если Architect не обоснует иное.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-40",
+      "status": "covered",
+      "evidence_quote": "Изменение чужих файлов репозитория вне `bridges/opencode-zen-bridge/` и тестов этого моста.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-41",
+      "status": "covered",
+      "evidence_quote": "Запись секретов (ключи, пароль serve, креды прокси, значения `apiKey`) в логи, артефакты, код и тесты.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-42",
+      "status": "covered",
+      "evidence_quote": "Мутирующие действия на боевом контуре без отката: правка `~/.dsh` и перезапуск LaunchAgent допустимы только в живой приёмке по протоколу из `handoff-qa.md`.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-43",
+      "status": "covered",
+      "evidence_quote": "Использование `security find-generic-password`.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-44",
+      "status": "covered",
+      "evidence_quote": "Правка `opencode.db` и общего каталога состояния `opencode` напрямую.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-45",
+      "status": "covered",
+      "evidence_quote": "Коммит в `main`, `master`, `dev`; merge выполняет человек.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-46",
+      "status": "covered",
+      "evidence_quote": "<<<ARTIFACT analysis/zen-realtime-reasoning/evidence-ledger.md sha256=2a5c9f7f8a8fc20573d69a4617da87bdfbf1f57e70681e7036ece27541fe0367",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-01",
+      "status": "covered",
+      "evidence_quote": "<<<ARTIFACT .ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json sha256=e620a689a0d665a2c7979eba5a7073af41d9ca9473ea906ff9cee316fa0c7e02",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-03",
+      "status": "covered",
+      "evidence_quote": "а также проверь, что все архитектурные решения опираются на факты `[F-NN]` и каждый использованный факт `[F-NN]` действительно присутствует в приложенном `evidence-ledger.md`",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-04",
+      "status": "covered",
+      "evidence_quote": "Модификатор режима `architecture`: Сравни с ≥2 альтернативными архитектурами; назови, что ломается при росте нагрузки.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-05",
+      "status": "covered",
+      "evidence_quote": "Проверь альтернативы: в Architecture Packet должно быть рассмотрено ≥2 альтернативы с явной причиной выбора; если в пакете меньше двух альтернатив или нет причины выбора — ставь FAIL по пункту об альтернативах (критерий 5. АЛЬТЕРНАТИВЫ).",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-06",
+      "status": "covered",
+      "evidence_quote": "сценарии качества (NFR, тайминги отзывчивости, конверт `HL-ENV/v1` из 46 полей и расчёты `C-MULT/v1`, `S-HERD/v1`, `H-CPU/v1`, `R-BULK/v1`, `T-LIFE/v1`, `O-EXIT/v1`, `M-SEM/v1`), модель угроз и защиту секретов (`threats` / `security`)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-07",
+      "status": "covered",
+      "evidence_quote": "FAIL без привязки к разделу пакета / `[F-NN]` / правилу не засчитывается.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-08",
+      "status": "covered",
+      "evidence_quote": "FAIL без оговорок: (1) пакет меняет согласованный внешний контракт (HTTP/event/data/CLI/SDK) без явного указания в постановке задачи / task envelope (`scope-and-contracts.md`); (2) работа или пакет выходит за рамки текущей задачи",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-09",
+      "status": "covered",
+      "evidence_quote": "Оцени все 6 критериев `universal-panel` (1. КОРРЕКТНОСТЬ, 2. ПОЛНОТА, 3. РЕАЛИЗУЕМОСТЬ, 4. РИСКИ, 5. АЛЬТЕРНАТИВЫ, 6. СООТВЕТСТВИЕ КОНТЕКСТУ)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-10",
+      "status": "covered",
+      "evidence_quote": "<<<ARTIFACT ~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md sha256=906aab1ea3b7cda57b9d788a3dd105f2f6d2e7be159a699eccaf3f93f6bba400",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-13",
+      "status": "covered",
+      "evidence_quote": "ПОЛНОТА ВЫДАЧИ — ВСЕ ЗАМЕЧАНИЯ ЗА ОДИН ПРОХОД (обязательно, оба режима):",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-14",
+      "status": "covered",
+      "evidence_quote": "ЯКОРЯ ПАКЕТА (арх-проход; предмет — Architecture Packet, не diff)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-01",
+      "status": "covered",
+      "evidence_quote": "Universal Architecture Packet валиден в `approved` phase.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-02",
+      "status": "covered",
+      "evidence_quote": "Все Python-утверждения подтверждены кодом/конфигом/официальной документацией.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-03",
+      "status": "covered",
+      "evidence_quote": "Слои, async semantics и ownership отражают реальный проект.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-04",
+      "status": "covered",
+      "evidence_quote": "Contract deltas содержат compatibility и verification IDs.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-05",
+      "status": "covered",
+      "evidence_quote": "Stateful change имеет migration/rollout/rollback и integrity checks.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-06",
+      "status": "covered",
+      "evidence_quote": "Verification surface содержит реальные project commands и targeted checks.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-07",
+      "status": "covered",
+      "evidence_quote": "ADR path/format не конфликтует с `.agents/agents/docs.md`.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-08",
+      "status": "covered",
+      "evidence_quote": "## Обязательные Highload & Resilience гейты (`HL-ENV/v1`, `C-MULT/v1`, `S-HERD/v1`, `H-CPU/v1`, `R-BULK/v1`)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-01",
+      "status": "covered",
+      "evidence_quote": "FAIL без оговорок: (1) пакет меняет согласованный внешний контракт (HTTP/event/data/CLI/SDK) без явного указания в постановке задачи / task envelope (`scope-and-contracts.md`)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-02",
+      "status": "covered",
+      "evidence_quote": "(2) работа или пакет выходит за рамки текущей задачи (чужие Jira-KEY, чужой статус, правки чужих мостов или файлов «заодно»)",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-03",
+      "status": "covered",
+      "evidence_quote": "<<<ARTIFACT ~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/AGENTS.md sha256=7e606a52d977e281e8eedc9f0482a0d8d83008a2106fc3d27bee00f3c62d384a",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-02",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-03",
+      "status": "covered",
+      "evidence_quote": "суди ЗАНОВО, не подтверждай прошлый вердикт автоматически",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-04",
+      "status": "covered",
+      "evidence_quote": "ФОРМАТ ОТВЕТА (строго):",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-05",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-06",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-07",
+      "status": "covered",
+      "evidence_quote": "РЕЖИМ: architecture",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-08",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-02",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-04",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-05",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-06",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [],
+  "dropped": [],
+  "model_verdict": "APPROVE",
+  "model_verdict_mismatch": false,
+  "verdict": "APPROVE",
+  "blocked_reason": null,
+  "open_ids": []
+}

@@ -1,0 +1,228 @@
+{
+  "schema_version": "1.1",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "round_id": "coder-14",
+  "iteration": 1,
+  "teamlead_cycle": 11,
+  "entry": "fix-from-panel",
+  "status": "DONE",
+  "next_role": "reviewer",
+  "summary": "RW-001..RW-006 реализованы: VER-004 PASS, финальный targeted pytest 231 PASS, full pytest 502 PASS, full unittest 502 OK, C11 pytest/unittest 11 PASS. Передача Reviewer; живой чат не проверялся.",
+  "role_plan": {
+    "path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-14.json",
+    "sha256": "37c7397919400825f4340b8523d72cf2ca011deeb54103045f1c186087b580e5",
+    "phase": "after"
+  },
+  "before_plan_sha256": "98880207192fefcbd8769c830d74ce3d4e8c4927152987fdc04746202439b25a",
+  "changed_files": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+  ],
+  "inherited_modified_files": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py"
+  ],
+  "report_files": [
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-14.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoffs/coder-14.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/coder.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/coder.json"
+  ],
+  "source_file_sha256": {
+    "bridges/opencode-zen-bridge/server.py": "54c607d7d346bf79c29104de4cfcaa4712b9ec8fb638dbdae1a4adf530e19b88",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py": "77db0a950d263354af0a41afc4a8844c91dbfb2cd59fbaa5268957af482c881a",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py": "2b177a32290adfebeffad700b1c3c3251619e83cba90032217576c777beb80ef"
+  },
+  "frozen_sha256": {
+    "_run_env": "1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31",
+    "_stream_google_sse": "5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3",
+    "_execute_google_once": "88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6"
+  },
+  "commands": [
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py -k c11",
+      "exit_code": 1,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/red.log",
+      "result": "RED: 4 failed, 1 passed; уточнена полнота schema tokens в новых test events перед red2",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py -k 'c11_rw001 or c11_rw003 or c11_rw006'",
+      "exit_code": 1,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/red2.log",
+      "result": "RED: 4 failed до целевых fixes; RW-003 ошибка/сокет, RW-001 доставка, RW-006 cap",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py tests/test_step_interruption.py",
+      "exit_code": 1,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/targeted-full1.log",
+      "result": "230 passed, 1 failed: ошибка сравнения first_event_deadline с более поздним prompt_send_start; исправлено first_event_limit",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 -B -m unittest discover -s tests -p 'test_*.py'",
+      "exit_code": 1,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/unittest-full1.log",
+      "result": "502 tests; 4 failures в загруженной до исправлений версии: first_event_timeout и 3 subTest прежнего fileno-оракула закрытия socket; исправлены",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py::TestServeAttemptOracles::test_never_event_gives_first_event_timeout",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/first-event-regression-final.log",
+      "result": "1 passed",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/full-pytest-final.log",
+      "result": "502 passed in 364.21s",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 -B -m unittest discover -s tests -p 'test_*.py'",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/unittest-final.log",
+      "result": "Ran 502 tests in 340.600s OK",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py -k c11",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/c11-default-final.log",
+      "result": "11 passed in 24.13s; штатный downstream timeout 5 с; PGID из cleanup реального lease",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 -B -m unittest discover -s tests -p test_realtime_reasoning.py -k c11",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/unittest-c11-final.log",
+      "result": "Ran 11 tests in 22.013s OK (после финального усиления тестов)",
+      "background": true
+    },
+    {
+      "command": "run-guarded -- python3 ~/work/cli-agent-bridge/coder-10-20261027/ver004-offline.py",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/ver004-handoff-final.log",
+      "result": "PASS VER-004, frozen 3/3, Python 3.9 AST/helper/catalog, lint/range format/type; server warnings 590, realtime diagnostics 0",
+      "background": true
+    },
+    {
+      "command": "python3 -I ~/Мой диск/skils/ai-sdlc/universal/teamlead-gate/scripts/verify_panel_proof.py --round-dir .ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/panel/council/r154 --artifact-sha256 bf242262f19cce9383401e2c9988677fa6cdcb64fb5045bf8ab3cb1e44249cfc --expect-seats 3 --min-seconds 8",
+      "exit_code": 0,
+      "result": "PASS: stage=council round=154 seats=3; исходный receipt не изменялся"
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    },
+    {
+      "command": "run-guarded -- uvx --offline --from pytest==8.3.4 pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py tests/test_step_interruption.py",
+      "exit_code": 0,
+      "output": "~/work/cli-agent-bridge/coder-14-20261027/targeted-final.log",
+      "result": "231 passed in 321.78s; окончательная версия всех трёх target files",
+      "background": true
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "id": "RW-001",
+      "status": "PASS",
+      "test": "test_c11_rw001_drain_text_delivered_once_with_native_tool",
+      "evidence": "~/work/cli-agent-bridge/coder-14-20261027/c11-default-final.log; SSE/JSON content=хвост ровно один раз, один native call, finish_reason=tool_calls"
+    },
+    {
+      "id": "RW-002",
+      "status": "PASS",
+      "test": "test_c11_rw002_prompt_headers_use_remaining_aux; test_c11_rw002_first_sse_budget_across_real_attempts; test_c11_rw002_execution_wait_excluded_from_prompt_budget; test_c11_rw002_exhausted_before_prompt_starts_no_http; test_c11_rw002_security_control_time_debited_main_and_drain",
+      "evidence": "~/work/cli-agent-bridge/coder-14-20261027/c11-default-final.log; реальный HTTP prompt <2 с при остатке 1 с; _serve_one_attempt 20+20+14; запрет I/O при exhausted; модельное ожидание исключено; control debits main/drain"
+    },
+    {
+      "id": "RW-003",
+      "status": "PASS",
+      "test": "test_c11_rw003_initial_writes_fail_closed; test_c11_rw003_status_socket_timeout_before_model_token",
+      "evidence": "~/work/cli-agent-bridge/coder-14-20261027/c11-default-final.log; header/role/status ошибки, mark+socket close, in_use=0; реальный сокет SO_RCVBUF=1024, штатный write timeout 5.0 с, slot release/PGID death <7.0 с"
+    },
+    {
+      "id": "RW-004",
+      "status": "PASS",
+      "test": "test_c11_rw004_callback_error_logged_and_socket_aborted",
+      "evidence": "~/work/cli-agent-bridge/coder-14-20261027/c11-default-final.log; RuntimeError callback -> _mask_secrets + _log, read-back bridge.log, socket abort в finally"
+    },
+    {
+      "id": "RW-005",
+      "status": "PASS",
+      "test": "test_c11_rw005_completed_text_preserves_reasoning_without_retry; test_c6_rw004_ac016_serve_step_interruption_matrix; tests/test_step_interruption.py",
+      "evidence": "~/work/cli-agent-bridge/coder-14-20261027/full-pytest-final.log; serve/run SSE/JSON с tools, tool_choice=auto, recovery=true: одна попытка, raw reasoning byte-for-byte; empty-text AC-016 сохранён"
+    },
+    {
+      "id": "RW-006",
+      "status": "PASS",
+      "test": "test_c11_rw006_name_and_id_caps_main_and_drain",
+      "evidence": "~/work/cli-agent-bridge/coder-14-20261027/c11-default-final.log; UTF-8 name/ID превышают cap до called, наблюдаемый ServeProtocolError, cleanup, 0 pending publications"
+    }
+  ],
+  "changes": [
+    "RW-001: text_cb вызывается в _drain_serve_step_usage и при emulate_tools=True. SSE ToolCallParser.finish() и JSON parser сохраняют хвост без XML/дублей наряду с одним native tool call.",
+    "RW-002: prompt aux.check до HTTP, остаточный deadline/timeout; _finish_prompt_aux списывает один раз при headers/execution/finally до min timestamps; первый SSE отдельно списывается после подписки, first_event_limit сохраняет исходную timeout-классификацию. Control HTTP main/drain получает aux.check/deadline/finally debit, cleanup остаётся отдельным резервом. Счётчик потребления ограничен размером доступного aux-бюджета.",
+    "RW-003: _LockedWfile установлен и применяет таймаут до end_headers/role. Ранние ошибки abort_socket+return без serve/run. Таймер пишет через тот же wrapper под RLock; OSError/ValueError закрывают клиентский сокет и уведомляют Handler.",
+    "RW-004: callback exception логируется с _mask_secrets; abort_socket гарантирован finally; рекурсия mark/abort ограничена флагом client_gone, повторный abort идемпотентен.",
+    "RW-005: только вход serve-классификатора очищается при непустом итоговом тексте. Исходный reasoning не меняется; при пустом тексте детектор interruption и AC-016 сохранены. Legacy run использует существующую очищенную классификационную копию.",
+    "RW-006: _serve_tool_state_bytes учитывает UTF-8 call_id и name; существующие checks после feed каждого tool_event main/drain сохранены и покрыты событиями до called."
+  ],
+  "assumptions": [
+    "Выполнена назначенная внешняя роль coder-14, entry=fix-from-panel; вложенные Coder/Reviewer/панели не запускались. Передача Reviewer — следующий этап оркестратора.",
+    "Исходные незакоммиченные изменения и untracked файлы сохранены; test_step_interruption.py не менялся относительно входного hash handoff coder-13.",
+    "Команды uvx использовали уже доступные offline pytest==8.3.4, ruff==0.17.2 и basedpyright==1.40.2; новых runtime-зависимостей нет.",
+    "Полные pytest/unittest прогоны относятся к неизменному финальному продуктовому коду; после усиления тестового socket-оракула отдельно пройдены финальные C11 pytest и unittest и полный VER-004."
+  ],
+  "risks": [
+    "Живой существующий рабочий слот/чат владельца и реальные провайдеры opencode не проверены: живой ~/.dsh/bridges/opencode-zen-bridge/ запрещён брифом. Бизнес-приёмка не проведена; code handoff передаётся Reviewer."
+  ],
+  "open_questions": [],
+  "verification": {
+    "light": "VER-004 PASS; финальный targeted pytest 231 PASS; full pytest 502 PASS; full unittest 502 OK; C11 pytest/unittest 11 PASS; frozen 3/3; git diff --check PASS.",
+    "heavy": null,
+    "not_verified": [
+      "Живой рабочий слот/чат владельца, реальные провайдеры и бизнес-приёмка (за пределами разрешённого брифа)"
+    ]
+  },
+  "invariants": {
+    "frozen_raw_bytes": "PASS 3/3, равны origin/dev",
+    "python39_ast": "PASS VER-004",
+    "early_helper_dispatch": "PASS VER-004",
+    "catalog_test_unchanged": "PASS VER-004",
+    "before_plan_unchanged": true,
+    "step_interruption_input_unchanged": true,
+    "no_commit_push_mr": true,
+    "live_bridge_untouched": true,
+    "branch": "feature/zen-realtime-reasoning",
+    "head_commit": "7eda27f9d82732bab726a420e31ea2adc15c2c39"
+  },
+  "panel_proof": {
+    "path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/council-r154-proof.json",
+    "sha256": "275e60054117978dbd95944e654320e49a133633223309b925a865a0bc608c36",
+    "verification_exit_code": 0
+  },
+  "validation_log": "~/work/cli-agent-bridge/coder-14-20261027/validation-final.log",
+  "deviations": [
+    "RW-002 превышает 15 строк: остаточный дедлайн prompt, единовременное списание до headers/execution, подписка до первого SSE и control I/O требуют согласованных изменений нескольких фаз одной попытки; архитектура и публичные DTO сохранены.",
+    "RW-003 превышает 15 строк из-за переноса существующей обёртки до заголовков/role, RLock для таймера и раннего возврата при ошибке; новых классов/слоёв/зависимостей нет.",
+    "Указанный в брифе hash _stream_google_sse имеет 63 hex. Сохранён подтверждённый origin/dev и handoff coder-13 полный hash 5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3.",
+    "Сокетный оракул использует настоящий PGID lease в cleanup; штатный downstream timeout 5.0 с не подменяется. Изолированная проверка не зависит от записи FakeServe вспомогательного record-файла."
+  ],
+  "raw_outputs": {
+    "targeted-final.log": "231 passed in 321.78s (0:05:21)",
+    "full-pytest-final.log": "502 passed in 364.21s (0:06:04)",
+    "unittest-final.log": "Ran 502 tests in 340.600s OK",
+    "c11-default-final.log": "11 passed in 24.13s",
+    "unittest-c11-final.log": "Ran 11 tests in 22.013s OK",
+    "ver004-handoff-final.log": "PASS VER-004; server warningCount 590; realtime diagnostics 0",
+    "targeted-full1.log": "230 passed, 1 failed до исправления first_event_limit",
+    "unittest-full1.log": "502 tests, 4 failures в старой загруженной версии; исправлены и повторный full suite зелёный"
+  }
+}

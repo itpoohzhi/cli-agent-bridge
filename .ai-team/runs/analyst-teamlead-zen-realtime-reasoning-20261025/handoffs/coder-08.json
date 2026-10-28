@@ -1,0 +1,212 @@
+{
+  "schema_version": "1.1",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "frozen_sha256": {
+    "_run_env": "1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31",
+    "_stream_google_sse": "5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3",
+    "_execute_google_once": "88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6"
+  },
+  "round_id": "coder-08",
+  "iteration": 1,
+  "teamlead_cycle": 6,
+  "entry": "fix-from-panel",
+  "status": "DONE",
+  "next_role": "reviewer",
+  "summary": "Отчётность реворка Cycle 6 RW-001..RW-007/FU-001..FU-003 восстановлена после 503. VER-004 PASS, целевой pytest 195 passed, collect 87. Итог 466 passed передан в брифе (271 без сырого лога). Передача Reviewer; бизнес-приёмка не заявляется.",
+  "role_plan": {
+    "path": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-08.json",
+    "sha256": "98845b39909bacecc540d41b90d0c759c132ab36fe816374cd443c0a063240ff",
+    "phase": "after"
+  },
+  "changed_files": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py"
+  ],
+  "files_changed": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py"
+  ],
+  "inherited_modified_files": [],
+  "report_files": [
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-08.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoffs/coder-08.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/coder.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/coder.json"
+  ],
+  "before_plan_sha256": "6a4012d244338d7d5209d30f4b5e96c31d5598f0c35912624f63eef5f7cdd290",
+  "source_file_sha256": {
+    "bridges/opencode-zen-bridge/server.py": "5863e2301ba1781ce06a3aad9260adbe98704a26cbeadec2a23ee6fc1aea1044",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py": "b36516df8c212ada1b738ad32a36724bd5687ffdb490cf52ec649699d94482cf",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py": "e41d10bd96cb208ce3120ab25d1c8028c82fe81895eacd322312b7fbbbef8a11"
+  },
+  "assumptions": [],
+  "risks": [
+    "Живой рабочий слот/чат владельца не проверен; rollout и бизнес-приёмка не заявляются.",
+    "Остальные модули: 271 passed in 50.08s, итог 466 passed — передано владельцем в брифе восстановления; отдельного сырого лога в evidence_dir нет, независимо не подтверждено. full-pytest.log содержит ранний неуспешный прогон: 1 failed, 465 passed in 2065.27s (listener ownership в test_serve_400_fails_closed_without_health_increment).",
+    "AC-016/017 test IDs указаны в handoff; verification-traceability.md требует обновления оркестратором вне scope этого вызова."
+  ],
+  "open_questions": [],
+  "unresolved_risks": [
+    "Остальные модули: 271 passed in 50.08s, итог 466 passed — передано владельцем в брифе восстановления; отдельного сырого лога в evidence_dir нет, независимо не подтверждено. full-pytest.log содержит ранний неуспешный прогон: 1 failed, 465 passed in 2065.27s (listener ownership в test_serve_400_fails_closed_without_health_increment)."
+  ],
+  "deviations": [
+    "Остальные модули: 271 passed in 50.08s, итог 466 passed — передано владельцем в брифе восстановления; отдельного сырого лога в evidence_dir нет, независимо не подтверждено. full-pytest.log содержит ранний неуспешный прогон: 1 failed, 465 passed in 2065.27s (listener ownership в test_serve_400_fails_closed_without_health_increment).",
+    "Восстановление после 503 ограничено четырьмя отчётными JSON; тесты повторно не запускались, bridges/** не изменялись.",
+    "Локальный validate_role_plan.py не поддерживает --before-file: выполнена отдельная проверка неизменности steps/execution_steps; validate_handoff.py требует --role-plan, поэтому аргумент добавлен.",
+    "unittest-root.log: 18 import errors; успешный полный unittest не заявляется.",
+    "verification-traceability.md не изменялся: вне разрешённого scope; test IDs матрицы AC-016/017 приведены в acceptance_coverage handoff."
+  ],
+  "verification": {
+    "light": "ver004-final-evidence.log: PASS VER-004, frozen sha256 3/3, lint/type, errors=0, warnings=759 (server=590), catalog 8/8; target-pytest-accepted.log: 195 passed in 198.43s; baseline-collect-accepted.log: 87 tests collected in 0.05s. Все пути: ~/work/cli-agent-bridge/coder-08-20261027/",
+    "heavy": null,
+    "not_verified": "Живой слот владельца; сырой успешный лог остальных 271 тестов"
+  },
+  "restoration_scope": "Только отчётные JSON coder-08 и две квитанции; bridges/** и before-план не менялись.",
+  "commands": [
+    {
+      "command": "VER-004 (предыдущий coder-08)",
+      "exit_code": 0,
+      "result": "PASS VER-004; errors=0; frozen 3/3",
+      "output_file": "~/work/cli-agent-bridge/coder-08-20261027/ver004-final-evidence.log"
+    },
+    {
+      "command": "Целевой pytest (предыдущий coder-08)",
+      "exit_code": 0,
+      "result": "195 passed in 198.43s",
+      "output_file": "~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log"
+    },
+    {
+      "command": "baseline collect (предыдущий coder-08)",
+      "exit_code": 0,
+      "result": "87 tests collected in 0.05s",
+      "output_file": "~/work/cli-agent-bridge/coder-08-20261027/baseline-collect-accepted.log"
+    },
+    {
+      "command": "Cycle 6 pytest (предыдущий coder-08)",
+      "exit_code": 0,
+      "result": "16 passed, 71 deselected in 48.83s",
+      "output_file": "~/work/cli-agent-bridge/coder-08-20261027/c6-final.log"
+    },
+    {
+      "command": "Полный pytest — ранний неуспешный прогон",
+      "exit_code": 1,
+      "result": "1 failed, 465 passed in 2065.27s; не считается PASS",
+      "output_file": "~/work/cli-agent-bridge/coder-08-20261027/full-pytest.log"
+    },
+    {
+      "command": "python3 validate_role_plan.py plans/coder-08.json --phase after",
+      "exit_code": 0,
+      "result": "PASS; before/after steps также сравнены отдельно"
+    },
+    {
+      "command": "python3 validate_handoff.py coder handoffs/coder-08.json --role-plan plans/coder-08.json",
+      "exit_code": 0,
+      "result": "VALID; SHA-256 привязка after-плана"
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "id": "RW-001",
+      "status": "PASS",
+      "oracle": "test_c6_rw001_headers_at_blocks_run_fallback_on_sse_error_and_timeout",
+      "evidence": "Доставка headers_at запрещает run fallback при SSE error/deadline. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "RW-002",
+      "status": "PASS",
+      "oracle": "test_c6_rw002_legacy_first_token_timeout_respects_configured_value_under_120s",
+      "evidence": "Legacy FIRST_TOKEN_TIMEOUT_S без пола 120 с. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "RW-003",
+      "status": "PASS",
+      "oracle": "test_c6_rw003_nonstream_json_run_execute_enforces_phase_watchdogs; test_c6_rw003_active_subagent_does_not_trigger_token_stall",
+      "evidence": "JSON run: first-event/first-token/stall и активный subagent. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "RW-004",
+      "status": "PASS",
+      "oracle": "test_c6_rw004_ac016_serve_step_interruption_matrix; test_c6_rw004_ac017_unmapped_recovery_serve_vs_run_equivalence",
+      "evidence": "AC-016 serve matrix; AC-017 serve/run recovery, включая partial. Traceability-документ вне scope. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "RW-005",
+      "status": "PASS",
+      "oracle": "test_c6_rw005_spawn_serve_respects_deadline_and_client_disconnect_without_run_fallback; test_c6_rw005_startup_abort_never_falls_back_or_changes_serve_health; test_c6_rw005_subscribe_deadline_and_disconnect_cleanup",
+      "evidence": "Старт/subscribe учитывают deadline и disconnect без run fallback. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "RW-006",
+      "status": "PASS",
+      "oracle": "test_c6_rw006_spawn_serve_drains_multi_mib_stderr_before_bind_without_deadlock",
+      "evidence": "Дренаж stderr до bind, байтовый cap. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "RW-007",
+      "status": "PASS",
+      "oracle": "test_c6_rw007_absolute_deadline_interrupts_dripping_headers_and_body; test_c6_rw007_skip_body_returns_immediately_after_headers; test_c6_rw007_fu003_dripping_interrupt_delete_still_cleans_up_under_7s",
+      "evidence": "Абсолютный HTTP deadline, skip_body, cleanup <=7 с. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "FU-001",
+      "status": "PASS",
+      "oracle": "test_c6_fu001_oversized_sse_line_is_terminal_invalid_event; test_c6_fu001_fu002_sse_line_body_byte_caps_and_strict_usage_ints",
+      "evidence": "SSE line и HTTP body byte caps. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "FU-002",
+      "status": "PASS",
+      "oracle": "test_c6_fu001_fu002_sse_line_body_byte_caps_and_strict_usage_ints",
+      "evidence": "Usage: integer >=0, bool/negative отклоняются. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    },
+    {
+      "id": "FU-003",
+      "status": "PASS",
+      "oracle": "test_c6_rw007_fu003_dripping_interrupt_delete_still_cleans_up_under_7s",
+      "evidence": "Сквозной cleanup с капающим ответом <=7 с. ~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log (195 passed); ~/work/cli-agent-bridge/coder-08-20261027/c6-final.log (16 passed)."
+    }
+  ],
+  "raw_outputs": {
+    "target-pytest-accepted.log": "........................................................................ [ 36%]\n........................................................................ [ 73%]\n...................................................                      [100%]\n195 passed in 198.43s (0:03:18)\n",
+    "c6-final.log": "................                                                         [100%]\n16 passed, 71 deselected in 48.83s\n",
+    "ac017-partial-green-2.log": ".                                                                        [100%]\n1 passed, 86 deselected in 11.48s\n"
+  },
+  "evidence_files": {
+    "ver004-final-evidence.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/ver004-final-evidence.log",
+      "sha256": "487e910ec0ed17ee3985f427c1ca0d912c8ac75d69383cf0fa9cda4c6e8c9a4d"
+    },
+    "target-pytest-accepted.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/target-pytest-accepted.log",
+      "sha256": "6034d6a73fe18a204f6ead68c6d914653d3e148aaefd336584487f67e9dcc520"
+    },
+    "baseline-collect-accepted.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/baseline-collect-accepted.log",
+      "sha256": "7111c798a99c8a100b29082289fd1ab466305ec78908d21afc86cb8c9c32b669"
+    },
+    "red.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/red.log",
+      "sha256": "f967f092a1a9b3b928ceaf3f8579fa107e82922cf6707cd3ad7046a9545a306a"
+    },
+    "c6-final.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/c6-final.log",
+      "sha256": "4a4325f9f7badf97cef018f7a545ef6a139c012b742409849527e67981e888f1"
+    },
+    "ac017-partial-red.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/ac017-partial-red.log",
+      "sha256": "9cbbf124b36c32a22a41ffdaf2116e9044d1a964aba69dbb715e41551c0181b9"
+    },
+    "ac017-partial-green-2.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/ac017-partial-green-2.log",
+      "sha256": "1b413e1dc1353d89f1f0c7927d915679366edb9558b7dcf3c004be8935f84629"
+    },
+    "full-pytest.log": {
+      "path": "~/work/cli-agent-bridge/coder-08-20261027/full-pytest.log",
+      "sha256": "1bf685791cbac8000fc8829af32f9d036fecb0c30398d666c5a21582e2e3dd51"
+    }
+  }
+}

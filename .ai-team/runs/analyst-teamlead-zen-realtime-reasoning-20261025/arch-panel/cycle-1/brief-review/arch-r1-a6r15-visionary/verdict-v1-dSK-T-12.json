@@ -1,0 +1,47 @@
+{
+  "panel": "arch",
+  "round": "R1-a6r15",
+  "cycle": 1,
+  "seat": "visionary",
+  "iteration": 1,
+  "run_kind": "dispute",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "6a59892ba3ec31e5a7d2611b9d259a6a27889121084791de74ff976a6c568180",
+  "checklist_gen": 1,
+  "checklist_sha256": "3c5f01bc2cc413322ae95c830ac9edde872753491d39f0622c089066f480186d",
+  "reviewer_slot": "claude-sonnet-5-5",
+  "transport": "claude-p",
+  "transport_attempts": [
+    {
+      "transport": "claude-p",
+      "file": "review-v1-dSK-T-12-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 24,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 24,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "SK-T-12",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Добавить в evidence[] пакета запись, где открыт корневой/мостовой pyproject.toml и lockfile с реальными версиями, либо проверяемое обоснование их отсутствия. Одно упоминание «bridge pyproject.toml» в EVD-079 и пины ruff/basedpyright в EVD-072 это не заменяют. Формулировка пункта в инструкциях судье тоже не заменяет.",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [],
+  "dropped": [],
+  "model_verdict": "REJECT",
+  "model_verdict_mismatch": false,
+  "verdict": "REJECT",
+  "blocked_reason": null,
+  "open_ids": [
+    "SK-T-12"
+  ]
+}

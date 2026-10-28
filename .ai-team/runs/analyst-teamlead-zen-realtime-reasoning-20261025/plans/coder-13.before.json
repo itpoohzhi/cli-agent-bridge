@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 10,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-12.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005"
+  ],
+  "objective": "Реализовать исправления RW-001..RW-005 и FU-002 по итогам Совета Тимлидов Цикла 9 (panel/council/r140 + r144) строго в пределах 3 разрешённых файлов coder_target_files без изменения замороженных функций.",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-9/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-12.json"
+  ],
+  "stop_conditions": [
+    "Только три разрешённых продуктовых пути и отчётность coder-13",
+    "Сохранить frozen raw SHA256, ранний helper и Python 3.9; форматировать legacy только диапазонами",
+    "Без commit/push/MR; без бизнес-приёмки живого чата"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001 + RW-002: обрабатывать form.created, permission, error, reasoning/text в _drain_serve_step_usage и публиковать native tool_calls только после подтверждённого session.step.ended",
+      "expected_evidence": "Подтверждённая граница публикации tool_calls и fail-closed обработка управляющих событий в окне дренажа",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-003 + RW-004 + RW-005 + FU-002: убрать _strip_interrupted с пути reasoning (AC-006), ограничить _ServeToolState.tools (HL-ENV-01), ограничить _LockedWfile.write таймаутом/дедлайном с закрытием сокета при зависшем клиенте, ввести общий вспомогательный бюджет _AUX_IO_BUDGET_S=54.0 (R-BULK-I1)",
+      "expected_evidence": "Выполнение инвариантов AC-006, HL-ENV-01, R-BULK-I1 и таймаута downstream-записи без нарушения замороженных функций",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Обновить тесты в tests/test_step_interruption.py и добавить регрессионные тесты RW-001..RW-005 и FU-002 в tests/test_realtime_reasoning.py, прогнать VER-004, pytest и unittest discover",
+      "expected_evidence": "Все проверки VER-004, pytest и unittest discover зелёные (rc=0) и записан валидный handoffs/coder-13.json",
+      "status": "PENDING"
+    }
+  ]
+}

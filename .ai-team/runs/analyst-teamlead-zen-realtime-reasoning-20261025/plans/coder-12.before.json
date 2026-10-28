@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 9,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-11.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002"
+  ],
+  "objective": "Устранить RW-001, RW-002 и FU-001 в разрешённой дельте без изменения frozen-функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-8/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-11.json"
+  ],
+  "stop_conditions": [
+    "Только три разрешённых продуктовых пути и отчётность coder-12",
+    "Сохранить frozen raw SHA256, ранний helper и Python 3.9; форматировать legacy только диапазонами",
+    "Без commit/push/MR; без бизнес-приёмки живого чата"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001: добавить RED, подтвердить step.ended и дочитать delayed/idless вызовы",
+      "expected_evidence": "SSE/JSON сохраняют c1/c2 и usage m1; неподтверждённый шаг даёт invalid_serve_event",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002: добавить RED и терминальный timeout с нейтральным breaker",
+      "expected_evidence": "Ровно один O-EXIT с timeout/client_gone, total_spawns=0, refund и failures=0",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "FU-001: ограничить байтовую очередь и накопленный ответ с RED/GREEN",
+      "expected_evidence": "Оба лимита детерминированно приводят к invalid_serve_event и lease.cleanup",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Проверить VER-004, целевые и полный suite, оформить передачу Reviewer",
+      "expected_evidence": "Frozen 3/3, lint/type/format, тесты и валидаторы exit=0",
+      "status": "PENDING"
+    }
+  ]
+}

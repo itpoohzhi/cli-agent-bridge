@@ -1,0 +1,972 @@
+{
+  "panel": "arch",
+  "round": "R2_a5d1_r12",
+  "cycle": 1,
+  "seat": "visionary",
+  "iteration": 1,
+  "run_kind": "full",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "80a7069eb0892c5fa54186c005d4152bfa45bd54e3ea36b87fe73053c6d0abb2",
+  "checklist_gen": 1,
+  "checklist_sha256": "99f0fd0ef076f811d2b232e4219dd4c980c9362321d2aac4caf4813d0d1c0459",
+  "reviewer_slot": "gemini-4-argon-medium",
+  "transport": "agy",
+  "transport_attempts": [
+    {
+      "transport": "agy",
+      "file": "review-v1-g1-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 77,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 77,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "BR-01",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Входной промпт обрезан платформой (<truncated 1266560 bytes>) до секции БРИФ; передать бриф без превышения лимита входа или сократить дублирующиеся дампы",
+      "downgraded": false
+    },
+    {
+      "id": "BR-02",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-03",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-04",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-05",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-06",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-07",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-08",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-09",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-10",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-11",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-12",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-13",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-14",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-15",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-16",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-17",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-18",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-19",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-20",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-21",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-22",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-23",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-24",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-25",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-26",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-27",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-28",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-29",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-30",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-31",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-32",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-33",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-34",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-35",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-36",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-37",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-38",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-39",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-40",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-41",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-42",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-43",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-44",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-45",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-46",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-47",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-48",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-49",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-50",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-51",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-52",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-53",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-54",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-55",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-56",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-57",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-58",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-59",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-60",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-61",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-62",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-63",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-64",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-65",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-66",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-67",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-68",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "BR-69",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-01",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-03",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-04",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-05",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-06",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-07",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-08",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-09",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-10",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-11",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-13",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-14",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-15",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-01",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-02",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-03",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-04",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-05",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-06",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-07",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-08",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-09",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-10",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-11",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-12",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-13",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-14",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-01",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-02",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-03",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-04",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-05",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-06",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "JD-02",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-03",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "JD-04",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "JD-05",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-06",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "JD-07",
+      "status": "missing",
+      "evidence_quote": "",
+      "fix": "Секция БРИФ обрезана во входном промпте (<truncated 1266560 bytes>); включить текст брифа в видимую часть входа",
+      "downgraded": false
+    },
+    {
+      "id": "JD-08",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-02",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-04",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-05",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-06",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [],
+  "dropped": [
+    {
+      "kind": "item",
+      "ref": "JD-02",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "JD-05",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "JD-08",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-02",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-04",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-05",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-06",
+      "reason": "цитата не найдена в брифе"
+    }
+  ],
+  "model_verdict": "REJECT",
+  "model_verdict_mismatch": false,
+  "verdict": "REJECT",
+  "blocked_reason": null,
+  "open_ids": [
+    "BR-01",
+    "BR-02",
+    "BR-03",
+    "BR-04",
+    "BR-05",
+    "BR-06",
+    "BR-07",
+    "BR-08",
+    "BR-09",
+    "BR-10",
+    "BR-11",
+    "BR-12",
+    "BR-13",
+    "BR-14",
+    "BR-15",
+    "BR-16",
+    "BR-17",
+    "BR-18",
+    "BR-19",
+    "BR-20",
+    "BR-21",
+    "BR-22",
+    "BR-23",
+    "BR-24",
+    "BR-25",
+    "BR-26",
+    "BR-27",
+    "BR-28",
+    "BR-29",
+    "BR-30",
+    "BR-31",
+    "BR-32",
+    "BR-33",
+    "BR-34",
+    "BR-35",
+    "BR-36",
+    "BR-37",
+    "BR-38",
+    "BR-39",
+    "BR-40",
+    "BR-41",
+    "BR-42",
+    "BR-43",
+    "BR-44",
+    "BR-45",
+    "BR-46",
+    "BR-47",
+    "BR-48",
+    "BR-49",
+    "BR-50",
+    "BR-51",
+    "BR-52",
+    "BR-53",
+    "BR-54",
+    "BR-55",
+    "BR-56",
+    "BR-57",
+    "BR-58",
+    "BR-59",
+    "BR-60",
+    "BR-61",
+    "BR-62",
+    "BR-63",
+    "BR-64",
+    "BR-65",
+    "BR-66",
+    "BR-67",
+    "BR-68",
+    "BR-69",
+    "SK-A-01",
+    "SK-A-03",
+    "SK-A-04",
+    "SK-A-05",
+    "SK-A-06",
+    "SK-A-07",
+    "SK-A-08",
+    "SK-A-09",
+    "SK-A-10",
+    "SK-A-11",
+    "SK-A-13",
+    "SK-A-14",
+    "SK-A-15",
+    "SK-T-01",
+    "SK-T-02",
+    "SK-T-03",
+    "SK-T-04",
+    "SK-T-05",
+    "SK-T-06",
+    "SK-T-07",
+    "SK-T-08",
+    "SK-T-09",
+    "SK-T-10",
+    "SK-T-11",
+    "SK-T-12",
+    "SK-T-13",
+    "SK-T-14",
+    "SK-P-01",
+    "SK-P-02",
+    "SK-P-03",
+    "SK-P-04",
+    "SK-P-05",
+    "SK-P-06",
+    "JD-03",
+    "JD-04",
+    "JD-06",
+    "JD-07"
+  ]
+}
