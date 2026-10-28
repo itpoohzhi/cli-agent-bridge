@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 12,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-14.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004"
+  ],
+  "objective": "Устранить RW-001..RW-004 Цикла 12 в трёх разрешённых файлах; сохранить frozen bytes и unittest, передать Reviewer без commit/push/MR.",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-11/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoffs/coder-14.json"
+  ],
+  "stop_conditions": [
+    "Только coder_target_files и разрешённые coder-15 артефакты",
+    "Без commit/push/MR и живого моста; frozen bytes неизменны"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001: fail-closed control HTTP main/drain",
+      "expected_evidence": "SecurityError без retry/fallback, нейтральный disconnect/deadline",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002: сохранить частичный текст, reasoning и usage retry serve JSON/Run.execute",
+      "expected_evidence": "Обе попытки сохранены, текст очищен и дедуплицирован, usage суммирован",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "RW-003: скользящий drain в рамках attempt_deadline",
+      "expected_evidence": "Живой шаг >2 окон завершается, тишина/hard deadline прерывают",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "RW-004: согласовать unmapped исчерпание",
+      "expected_evidence": "JSON 200 stop с диагностикой",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Проверить VER-004, targeted/full pytest и unittest; валидировать handoff",
+      "expected_evidence": "rc=0, frozen raw bytes PASS",
+      "status": "PENDING"
+    }
+  ]
+}

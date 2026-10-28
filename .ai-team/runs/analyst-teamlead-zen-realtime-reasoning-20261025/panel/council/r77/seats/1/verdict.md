@@ -1,0 +1,35 @@
+PANEL-NONCE: 12c042ce4e46a5fe
+ARTIFACT-SHA256: 2ae457623c8fae473e1e768a9e2a798a9827630b0b7e7bdf15aba727d2f856cb
+
+AGREE F-001 rev=1 — проверил: bridges/opencode-zen-bridge/server.py:5488 — при любом `watchdog_reason` `_execute_once` ставит `fatal_error=True` и возвращает этот словарь (`server.py:5507`); `Run.execute` при исчерпанном бюджете делает `return out` (`server.py:5237`); `Handler._serve_json` на `fatal_error` без tool_calls пишет `exit_reason="provider_fatal"` и тело «opencode provider error after partial output» (`server.py:7516`). Clean-room VER-002: после `state=first_event_timeout` / `first_token_timeout` / `stall_timeout` строка `O-EXIT/v1 mode=json status=502 exit_reason=provider_fatal`. JSON-путь при этом уже считает watchdog транзиентным (`server.py:5491`); ломается метка выхода, не повтор. `fatal_error=True` на детерминированном HTTP (`server.py:5442`) — другой исход и в фикс не входит.
+
+AGREE F-002 rev=1 — проверил: bridges/opencode-zen-bridge/server.py:3345 — `_is_delivered()` учитывает только `headers_at`, тексты, reasoning и native calls. `session.execution.started` своей сессии ставит `first_event_at` (`server.py:3675`) и не поднимает барьер. На EOF без terminal `exit_reason="invalid_serve_event"` и `delivered=_is_delivered()` (`server.py:3609`). Внешний цикл при `not _delivered_now and not force_serve` возвращает `False` и уходит в `run` (`server.py:5878`). Строка таблицы `PROMPT_SENDING` разрешает fallback только при «no response headers and no valid execution SSE» (`server.py:1658`); код эту оговорку не исполняет.
+
+AGREE F-003 rev=1 — проверил: bridges/opencode-zen-bridge/server.py:6772 — `transient_failure` на legacy SSE считается без `watchdog_state["reason"]`, затем сразу `attempt_done` (`server.py:6776`). Убитый watchdog имеет `rc<0`, `_is_retryable_failure` на `rc<=0` возвращает False (`server.py:2063`). Без вывода исход нейтральный: breaker не получает failure. После частичного вывода `attempt_done(False, True)` пишет success, и только потом ветка watchdog вызывает `allow_retry` (`server.py:6779`). На JSON-пути `watchdog_reason` уже входит в `transient_failure` (`server.py:5491`) — это другой root cause, не F-001.
+
+DISPUTE F-004 — класс: duplicate_of:F-001 — контр-evidence: bridges/opencode-zen-bridge/server.py:5488 и bridges/opencode-zen-bridge/server.py:7516 — тот же `fatal_error=True` → `exit_reason="provider_fatal"`. Поля `first_event_ms`/`ttft_ms` в строке `O-EXIT/v1` присутствуют; для `first_event_timeout` значение `None` корректно. Отдельного MUST на ненулевые времена нет: AC-021 требует имя фазы в `exit_reason`, и это закрывается фиксом F-001.
+
+AGREE F-005 rev=1 — проверил: bridges/opencode-zen-bridge/server.py:3171 — watcher подписки получает общий `deadline` запроса; `_ctrl_http` передаёт `deadline=attempt_deadline` (`server.py:3375`). `ready_deadline=now+3` (`server.py:3391`) проверяется только после возврата или исключения `_ctrl_http`. Если заголовки капают быстрее socket timeout, readiness/create/subscribe живут до общего `TIMEOUT_S`, а не до собственного окна фазы. RW-005 требует `min(своё окно, остаток deadline)` на handshake/listener/subscribe; тесты с общим deadline ~0.9 с это окно не отделяют.
+
+AGREE F-006 rev=1 — проверил: bridges/opencode-zen-bridge/server.py:3752 — при `emulate_tools` готовый native call ставит `terminal="tool_calls"` и `break` до `session.step.ended`, где usage читается из токенов (`server.py:3766`). Итог опирается на оценку. REQ-014 — SHOULD, priority остаётся non-blocking.
+
+1. КОРРЕКТНОСТЬ: VERDICT=FAIL
+   WHY=Исчерпанный JSON `run` отдаёт клиенту и в `O-EXIT/v1` `provider_fatal` вместо `first_event_timeout` / `first_token_timeout` / `stall_timeout` (F-001, REQ-016 / AC-021 / AC-010). Валидное `session.execution.started` не входит в барьер доставки, и EOF до заголовков prompt уводит `auto` в `opencode run` (F-002, `FALLBACK_DECISION_TABLE` `server.py:1658`, REQ-009).
+   СОВЕТЫ (при FAIL): В `_serve_json` до ветки `fatal_error` обработать `out["state"]` из трёх фаз watchdog: `xs["exit_reason"]=state` и тело `opencode {state}`. В `_execute_once` не ставить `fatal_error=True` из-за watchdog. Включить валидное execution-событие своей сессии в монотонный `delivered` и в `_delivered_now` SSE/JSON, чтобы после него был только serve-retry или терминальная ошибка.
+2. ПОЛНОТА: VERDICT=FAIL
+   WHY=AC-021 требует на каждом `do_POST` машиночитаемую причину watchdog. Оракул `test_c6_rw003_nonstream_json_run_execute_enforces_phase_watchdogs` зелёный, потому что ищет имя фазы где-либо в логе и HTTP 502, а строка `O-EXIT/v1` при этом `exit_reason=provider_fatal` (F-001). Матрицы AC-016/AC-017 и прочие AC этим не закрываются; F-006 (SHOULD) полноту не роняет.
+   СОВЕТЫ (при FAIL): В том же тесте при `MAX_TOTAL_SPAWNS=1` утверждать `exit_reason=<фаза>` именно в строке `O-EXIT/v1` и отсутствие «provider error after partial output» в теле 502. Успешный повтор при `MAX_TOTAL_SPAWNS=2` по-прежнему `exit_reason=ok`.
+3. РЕАЛИЗУЕМОСТЬ: VERDICT=FAIL
+   WHY=Стартовые HTTP-фазы readiness/create/subscribe ограничены общим дедлайном запроса, а окно ~3 с проверяется только после возврата вызова (F-005, RW-005, feature.md §2, R-BULK-I1). Капающие заголовки при длинном `TIMEOUT_S` не обрываются собственным бюджетом фазы.
+   СОВЕТЫ (при FAIL): Передавать в watcher и `_serve_http` `min(request_deadline, phase_started + phase_budget)`; повторы readiness делят один фазовый deadline. Оракул: общий deadline 30–60 с, фаза 0.3 с, peer капает заголовки каждые 0.02 с — фаза завершается по своему бюджету с cleanup.
+4. РИСКИ: VERDICT=FAIL
+   WHY=Прод-строка JSON `run` не отличает watchdog от фатального отказа провайдера (F-001). Legacy SSE после частичного вывода записывает watchdog как success breaker и всё равно ретраит (F-003, REQ-009, R-BULK-I3). Fallback после `execution.started` допускает повторное исполнение того же хода (F-002). Полный L2 зелёный (466 passed, RED на `origin/dev` rc=1) эти ветки не ловит. F-006 non-blocking: ранний native terminal может потерять фактический usage (REQ-014 SHOULD).
+   СОВЕТЫ (при FAIL): Те же правки F-001 и F-002. На SSE включить watchdog в `transient_failure` до единственного `attempt_done` и не писать success для такой попытки. Оракул трёх фаз с выводом и без: инкремент failure, отсутствие success, открытие breaker после порога.
+5. АЛЬТЕРНАТИВЫ: VERDICT=PASS
+   WHY=Короткоживущий `opencode serve` с откатом на `run` до барьера доставки по-прежнему закрывает RC-1: `opencode run` не отдаёт `*.delta`, прямой Zen без заголовков дал 429, общий демон ломает ротацию IP. Фиксы F-001..F-003 и F-005 локальные; переписывания транспорта не требуется.
+6. СООТВЕТСТВИЕ КОНТЕКСТУ: VERDICT=PASS
+   WHY=Diff ровно в трёх файлах конверта. Замороженные `_run_env` / `_stream_google_sse` / `_execute_google_once` совпали, `google_direct_unchanged=True`, зависимостей вне stdlib нет. Публичные маршруты, порт `:9883` и форма SSE сохранены; строки `[мост]` требуются REQ-004/005. VER-006/VER-007 остаются `DEFERRED_L3` до ACCEPT.
+
+POSITIONS: 6/6
+ANSWERS: 0/0
+ОБЩИЙ ВЕРДИКТ: NEEDS WORK

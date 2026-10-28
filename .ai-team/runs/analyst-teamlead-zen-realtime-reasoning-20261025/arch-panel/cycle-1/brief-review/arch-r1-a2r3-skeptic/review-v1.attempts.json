@@ -1,0 +1,21 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "slot": "gpt-6.1-sol",
+      "transport": "codex",
+      "file": "review-v1-a1.md",
+      "http_code": null,
+      "rc": 0,
+      "result": "ok",
+      "seconds": 120,
+      "wall_seconds": 120.37,
+      "tool_calls": 0,
+      "kill_reason": null,
+      "error": null,
+      "pid": 39897,
+      "pgid": 39897,
+      "text_chars": 23760
+    }
+  ]
+}

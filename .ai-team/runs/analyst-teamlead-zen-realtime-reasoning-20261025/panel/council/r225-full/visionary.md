@@ -1,0 +1,8 @@
+PANEL-NONCE: ed8910344430fc29
+ARTIFACT-SHA256: 1b2f1af3c71f0f56d62d0b42049fe3c03d1f41ab2bd9615a979d3a7ba2d4652f
+OBJECT F-001 — дефект: bridges/opencode-zen-bridge/server.py:4231,4288,4440 — сетевой отказ reject/cancel/interrupt после prompt headers классифицируется как повторяемый `prompt_error` вместо терминального fail-closed по REQ-012 и FALLBACK_DECISION_TABLE; итог `non-blocking` нарушает правило шапки тимлида п.7 (`council.md` §3 Diff-scope): дефект в файле, изменённом задачей, — blocking
+OBJECT F-002 — дефект: bridges/opencode-zen-bridge/server.py:5868,8099,8184 — `Run.execute` возвращает только последнюю попытку, `_serve_json_serve` делает `continue` до сохранения reasoning/text, частичный JSON-результат теряется вопреки REQ-005/REQ-009; итог `non-blocking` нарушает п.7 (`council.md` §3 Diff-scope): дефект в файле, изменённом задачей, — blocking
+OBJECT F-003 — дефект: bridges/opencode-zen-bridge/server.py:1581,4362 — абсолютное окно `_STEP_DRAIN_WINDOW_S = 1.0` не продлевается по активности событий, активный многовызовный шаг со `step.ended` в 1.3 с отвергается как `ServeProtocolError` вопреки REQ-007/REQ-011; итог `non-blocking` нарушает п.7 (`council.md` §3 Diff-scope): дефект в файле, изменённом задачей, — blocking
+OBJECT F-004 — дефект: bridges/opencode-zen-bridge/server.py:8223,8261 — при исчерпании unmapped-recovery serve JSON возвращает 502 без уведомления вместо legacy `finish_reason="stop"` с уведомлением (server.py:8519), нарушая REQ-002/REQ-012/AC-017; итог `non-blocking` нарушает п.7 (`council.md` §3 Diff-scope): дефект в файле, изменённом задачей, — blocking
+CONSENTS: 4/4
+VERDICT: NEEDS WORK

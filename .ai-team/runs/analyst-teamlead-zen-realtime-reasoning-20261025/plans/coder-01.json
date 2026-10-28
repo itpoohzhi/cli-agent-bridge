@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "full",
+  "phase": "after",
+  "objective": "Реализовать serve-транспорт realtime reasoning по architecture-packet v6 в server.py и тестах test_realtime_reasoning/test_step_interruption",
+  "inputs_read": [
+    "architecture/architecture-packet.json v6",
+    "teamlead/verification-surface.json",
+    "analysis/zen-realtime-reasoning/handoff-architect.md",
+    "bridges/opencode-zen-bridge/server.py"
+  ],
+  "stop_conditions": [
+    "Не менять файлы вне 3 разрешённых путей bridges/opencode-zen-bridge",
+    "Не менять замороженные _run_env/_stream_google_sse/_execute_google_once",
+    "Не делать git commit/push"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Создать tests/test_realtime_reasoning.py с оракулами Group A и Group B из architecture-packet v6",
+      "expected_evidence": "RED вывод pytest без ImportError на уровне модуля теста",
+      "status": "DONE",
+      "evidence": "RED->GREEN: tests/test_realtime_reasoning.py создан с оракулами Group A и Group B; RED pytest exit 1 без ImportError на уровне модуля теста, GREEN после реализации server.py: VER-001 tests/test_realtime_reasoning.py EXIT:0",
+      "actual_evidence": "RED->GREEN: tests/test_realtime_reasoning.py создан с оракулами Group A и Group B; RED pytest exit 1 без ImportError на уровне модуля теста, GREEN после реализации server.py: VER-001 tests/test_realtime_reasoning.py EXIT:0"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Реализовать в server.py ранний --serve-helper, dynamic_config, _serve_env, _ServeHealth и serve-транспорт",
+      "expected_evidence": "Group A и Group B зелёные, замороженные sha256 неизменны",
+      "status": "DONE",
+      "evidence": "server.py: ранний --serve-helper, dynamic_config, _serve_env, _ServeHealth и dual-mode opencode serve + SSE /event под REALTIME_SERVE_ENABLED реализованы; Group A и Group B зелёные; замороженные sha256 _run_env/_stream_google_sse/_execute_google_once неизменны по VER-004",
+      "actual_evidence": "server.py: ранний --serve-helper, dynamic_config, _serve_env, _ServeHealth и dual-mode opencode serve + SSE /event под REALTIME_SERVE_ENABLED реализованы; Group A и Group B зелёные; замороженные sha256 _run_env/_stream_google_sse/_execute_google_once неизменны по VER-004"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Исправить 3 pre-existing падения в tests/test_step_interruption.py по REQ-017 с потолком 3",
+      "expected_evidence": "test_step_interruption.py зелёный в прямом порядке файлов",
+      "status": "DONE",
+      "evidence": "tests/test_step_interruption.py: исправлены 3 pre-existing падения по REQ-017 с потолком MAX_TOTAL_SPAWNS=3; файл зелёный в прямом порядке файлов и в полном сьюте VER-002",
+      "actual_evidence": "tests/test_step_interruption.py: исправлены 3 pre-existing падения по REQ-017 с потолком MAX_TOTAL_SPAWNS=3; файл зелёный в прямом порядке файлов и в полном сьюте VER-002"
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Выполнить VER-001..VER-005 дословно включая VER-004.command с закрытым диапазоном ruff",
+      "expected_evidence": "exit_code 0 по каждой проверке VER-001..VER-005 отдельно",
+      "status": "DONE",
+      "evidence": "VER-001 EXIT:0; VER-002 полный сьют pytest: 397 passed, 3155 subtests passed in 138.42s EXIT:0; VER-003 py_compile EXIT:0; VER-004 ruff + basedpyright --level error + sha256 guards _run_env/_stream_google_sse/_execute_google_once: VER004:0 errorCount: 0, warningCount: 0 для новых файлов; VER-005 realtime-and-fault oracles в составе зелёного сьюта EXIT:0; basedpyright 0 errors",
+      "actual_evidence": "VER-001 EXIT:0; VER-002 полный сьют pytest: 397 passed, 3155 subtests passed in 138.42s EXIT:0; VER-003 py_compile EXIT:0; VER-004 ruff + basedpyright --level error + sha256 guards _run_env/_stream_google_sse/_execute_google_once: VER004:0 errorCount: 0, warningCount: 0 для новых файлов; VER-005 realtime-and-fault oracles в составе зелёного сьюта EXIT:0; basedpyright 0 errors"
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Записать plans/coder-01.json, handoffs/coder-01.json и coder.json с фактическим evidence",
+      "expected_evidence": "validate_role_plan after и validate_handoff coder exit 0",
+      "status": "DONE",
+      "evidence": "plans/coder-01.json записан в phase after со статусами DONE; handoffs/coder-01.json и coder.json записаны с точным sha256 plans/coder-01.json; validate_role_plan --phase after и validate_handoff coder выполняются после записи с exit 0",
+      "actual_evidence": "plans/coder-01.json записан в phase after со статусами DONE; handoffs/coder-01.json и coder.json записаны с точным sha256 plans/coder-01.json; validate_role_plan --phase after и validate_handoff coder выполняются после записи с exit 0"
+    }
+  ]
+}

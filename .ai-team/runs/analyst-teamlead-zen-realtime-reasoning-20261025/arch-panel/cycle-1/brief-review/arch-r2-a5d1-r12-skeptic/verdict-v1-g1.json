@@ -1,0 +1,972 @@
+{
+  "panel": "arch",
+  "round": "R2_a5d1_r12",
+  "cycle": 1,
+  "seat": "skeptic",
+  "iteration": 1,
+  "run_kind": "full",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "c8f9e3bf02827cd5cc76c0bb6fdef9471e5b9e34625f3ab713d3c18f7e6a28a0",
+  "checklist_gen": 1,
+  "checklist_sha256": "7910bd75b75fd7079edc2ae07dbe09f19670dd4c740dd5338d8c70b7ca324489",
+  "reviewer_slot": "gemini-4-argon-medium",
+  "transport": "agy",
+  "transport_attempts": [
+    {
+      "transport": "agy",
+      "file": "review-v1-g1-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 73,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 73,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "BR-01",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ (при запрете вызова инструментов в брифе): убедиться, что требование BR-01 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-02",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-02 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-03",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-03 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-04",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-04 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-05",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-05 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-06",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-06 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-07",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-07 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-08",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-08 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-09",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-09 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-10",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-10 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-11",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-11 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-12",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-12 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-13",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-13 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-14",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-14 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-15",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-15 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-16",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-16 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-17",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-17 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-18",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-18 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-19",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-19 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-20",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-20 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-21",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-21 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-22",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-22 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-23",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-23 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-24",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-24 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-25",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-25 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-26",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-26 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-27",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-27 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-28",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-28 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-29",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-29 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-30",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-30 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-31",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-31 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-32",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-32 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-33",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-33 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-34",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-34 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-35",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-35 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-36",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-36 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-37",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-37 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-38",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-38 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-39",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-39 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-40",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-40 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-41",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-41 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-42",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-42 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-43",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-43 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-44",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-44 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-45",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-45 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-46",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-46 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-47",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-47 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-48",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-48 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-49",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-49 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-50",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-50 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-51",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-51 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-52",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-52 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-53",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-53 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-54",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-54 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-55",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-55 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-56",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-56 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-57",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-57 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-58",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-58 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-59",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-59 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-60",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-60 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-61",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-61 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-62",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-62 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-63",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-63 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-64",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-64 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-65",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-65 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-66",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-66 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-67",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-67 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-68",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-68 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "BR-69",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: убедиться, что требование BR-69 присутствует в полном тексте брифа.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-01",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить полноту вложения Architecture Packet.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-03",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие handoff-architect.md, evidence-ledger.md и указания по [F-NN].",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-04",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить строку РЕЖИМ: architecture и модификатор.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-05",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие указания об альтернативах.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-06",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие указания о границах, контрактах, NFR и модели угроз.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-07",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить правило привязки FAIL.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-08",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить правило FAIL без оговорок.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-09",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие 6 критериев и факт-карты.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-10",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить видимость architecture.md и AGENTS.md.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-11",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить артефакты повторного прохода SK-A-11.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-13",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие блока ПОЛНОТА ВЫДАЧИ.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-14",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие блока ЯКОРЯ ПАКЕТА.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-A-15",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие ПРАВИЛ ДЕБАТОВ, строк РАУНД/ПОЗИЦИИ и СВОДНОГО ЛЕДЖЕРА.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-01",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-01 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-02",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-02 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-03",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-03 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-04",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-04 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-05",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-05 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-06",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-06 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-07",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-07 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-08",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-08 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-09",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-09 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-10",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-10 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-11",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-11 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-12",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-12 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-13",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-13 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-T-14",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-T-14 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-01",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-P-01 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-02",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-P-02 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-03",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-P-03 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-04",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-P-04 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-05",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-P-05 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "SK-P-06",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие SK-P-06 в брифе.",
+      "downgraded": false
+    },
+    {
+      "id": "JD-02",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-03",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие фразы «суди ЗАНОВО, не подтверждай прошлый вердикт автоматически».",
+      "downgraded": false
+    },
+    {
+      "id": "JD-04",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить, что блок ФОРМАТ ОТВЕТА ровно один.",
+      "downgraded": false
+    },
+    {
+      "id": "JD-05",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-06",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить блоки ВЕРДИКТ ТВОЕЙ РОЛИ В РАУНДЕ 1 и АРГУМЕНТЫ ДРУГИХ ЭКСПЕРТОВ.",
+      "downgraded": false
+    },
+    {
+      "id": "JD-07",
+      "status": "uncertain",
+      "evidence_quote": "",
+      "fix": "Входной промпт усечён маркером <truncated 1266508 bytes> до начала секции БРИФ: проверить наличие факт-карты, строки режима и секции КОНТЕКСТ.",
+      "downgraded": false
+    },
+    {
+      "id": "JD-08",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-02",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-04",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-05",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-06",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [],
+  "dropped": [
+    {
+      "kind": "item",
+      "ref": "JD-02",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "JD-05",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "JD-08",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-02",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-04",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-05",
+      "reason": "цитата не найдена в брифе"
+    },
+    {
+      "kind": "item",
+      "ref": "HY-06",
+      "reason": "цитата не найдена в брифе"
+    }
+  ],
+  "model_verdict": "REJECT",
+  "model_verdict_mismatch": false,
+  "verdict": "REJECT",
+  "blocked_reason": null,
+  "open_ids": [
+    "BR-01",
+    "BR-02",
+    "BR-03",
+    "BR-04",
+    "BR-05",
+    "BR-06",
+    "BR-07",
+    "BR-08",
+    "BR-09",
+    "BR-10",
+    "BR-11",
+    "BR-12",
+    "BR-13",
+    "BR-14",
+    "BR-15",
+    "BR-16",
+    "BR-17",
+    "BR-18",
+    "BR-19",
+    "BR-20",
+    "BR-21",
+    "BR-22",
+    "BR-23",
+    "BR-24",
+    "BR-25",
+    "BR-26",
+    "BR-27",
+    "BR-28",
+    "BR-29",
+    "BR-30",
+    "BR-31",
+    "BR-32",
+    "BR-33",
+    "BR-34",
+    "BR-35",
+    "BR-36",
+    "BR-37",
+    "BR-38",
+    "BR-39",
+    "BR-40",
+    "BR-41",
+    "BR-42",
+    "BR-43",
+    "BR-44",
+    "BR-45",
+    "BR-46",
+    "BR-47",
+    "BR-48",
+    "BR-49",
+    "BR-50",
+    "BR-51",
+    "BR-52",
+    "BR-53",
+    "BR-54",
+    "BR-55",
+    "BR-56",
+    "BR-57",
+    "BR-58",
+    "BR-59",
+    "BR-60",
+    "BR-61",
+    "BR-62",
+    "BR-63",
+    "BR-64",
+    "BR-65",
+    "BR-66",
+    "BR-67",
+    "BR-68",
+    "BR-69",
+    "SK-A-01",
+    "SK-A-03",
+    "SK-A-04",
+    "SK-A-05",
+    "SK-A-06",
+    "SK-A-07",
+    "SK-A-08",
+    "SK-A-09",
+    "SK-A-10",
+    "SK-A-11",
+    "SK-A-13",
+    "SK-A-14",
+    "SK-A-15",
+    "SK-T-01",
+    "SK-T-02",
+    "SK-T-03",
+    "SK-T-04",
+    "SK-T-05",
+    "SK-T-06",
+    "SK-T-07",
+    "SK-T-08",
+    "SK-T-09",
+    "SK-T-10",
+    "SK-T-11",
+    "SK-T-12",
+    "SK-T-13",
+    "SK-T-14",
+    "SK-P-01",
+    "SK-P-02",
+    "SK-P-03",
+    "SK-P-04",
+    "SK-P-05",
+    "SK-P-06",
+    "JD-03",
+    "JD-04",
+    "JD-06",
+    "JD-07"
+  ]
+}

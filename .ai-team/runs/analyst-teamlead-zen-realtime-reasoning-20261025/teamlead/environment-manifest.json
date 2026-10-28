@@ -1,0 +1,26 @@
+{
+  "schema": "environment-manifest/v1",
+  "captured_at_utc": "2026-10-27T23:00:45.416711+00:00",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "platform": {
+    "system": "Darwin",
+    "release": "27.0.0",
+    "machine": "arm64",
+    "python_version": "3.14.7",
+    "python_executable": "/opt/homebrew/opt/python@3.14/bin/python3.14"
+  },
+  "tools": {
+    "uv": "uv 0.12.19 (bea138450 2026-09-24 aarch64-apple-darwin)",
+    "ruff": "ruff 0.17.2 (uvx --from ruff==0.17.2)",
+    "basedpyright": "basedpyright 1.40.2 (uvx --from basedpyright==1.40.2)",
+    "opencode": "opencode v2.1.2",
+    "git": "git version 2.54.0"
+  },
+  "isolation": {
+    "cleanroom_mode": "git worktree --detach at origin/dev (/tmp/cel-runs/zen-realtime-reasoning-20261025/l2-cleanroom)",
+    "coder_worktree": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning",
+    "worktree_fingerprint_before": "a44424343a049cdb62bc830eac9fe7bb2b3dd305a4df8dc76b978d252b4f6e39",
+    "worktree_fingerprint_after": "51bd8af785a8e72e3938c734675d211f9b0521acd16c2ffc2ff0b4ec5f673842",
+    "external_runtime_dependencies_added": 0
+  }
+}

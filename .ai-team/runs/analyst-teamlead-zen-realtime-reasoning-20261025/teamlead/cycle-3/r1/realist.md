@@ -1,0 +1,50 @@
+PANEL-NONCE: c212c4c89ca22820
+ARTIFACT-SHA256: 674edaca247fa44fb9639f81a52dbfe62235889400a00a99eec3f6c321db2b82
+Канон прочитан: AGENTS.md, 430 строк
+
+1. КОРРЕКТНОСТЬ: VERDICT=FAIL
+   WHY=Цикл 3 закрывает RW-001..RW-008 и RW-010..RW-019: `errno` до ветки `--serve-helper`; `timeout`/`client_gone` до `record_success()`; `prompt_status` 400/404/422 как `ServeSecurityError` до `events.get`; уборка старта; SIGKILL группы и окно 4+2 с; `_client_gone_check` на RST; пауза SSE 1.4 с без ложного EOF; `can_spawn` в JSON; текстовый `tool_calls` на `step_finish`; один разделитель на return-ретрае; дедуп JSON по `_call_key`; `_StartupGate` по готовности и в `finally`; замок `wfile` и `cancel` таймера; `attempt_done(True, False)` на транзиентных 429/5xx; один шаг пула прокси. Публичный маршрут не добавлен, замороженные `_run_env` / `_stream_google_sse` / `_execute_google_once` совпали с sha256 из гейта, потолок `MAX_TOTAL_SPAWNS=3` сохранён (REQ-017: оракулы ждут 3 запуска). RW-009 закрыт только на возврате результата: `_delivered_now` на `server.py:5257-5279` читает `delivered_any`. Ветки исключения и лимитера этот latch не читают и после уже отданного клиенту reasoning уходят в тихий `opencode run` без строки «[мост] Повтор попытки».
+   СОВЕТЫ: (1) В `except ServeUnavailable` и при отказе `spawn_limiter` на serve (SSE и JSON) перед `return False` смотреть монотонный latch: SSE — `delivered_any[0]`, JSON — уже накопленные `contents` / `reasonings_all` / `tool_calls_all`. (2) Если модельный чанк уже ушёл клиенту, оставаться на serve-retry или завершать `_sse_error` / HTTP 502, эмитить ровно один разделитель, не вызывать `record_success()`, не продолжать тот же ответ через `opencode run`. (3) Синтетический `[мост]` по-прежнему не ставит latch: иначе fallback после INITIAL на 0.65 с недостижим. (4) Регрессионный тест: попытка 1 отдаёт reasoning, попытка 2 бросает `ServeUnavailable`; соседний кейс — timeout лимитера на попытке 2. Ожидание: нет spawn `run`, ровно один разделитель или терминальная ошибка.
+
+2. ПОЛНОТА: VERDICT=FAIL
+   WHY=AC-001..AC-013, AC-015..AC-024 и AC-026 на возвратном пути и в L2 закрыты (VER-001: 431 passed). AC-014 («ровно одна статусная строка между попытками», без тихого fallback после отданного размышления) не выполняется на исключении и на лимитере: разделитель стоит только на `server.py:5206-5210`, то есть после проверки лимитера и вне `except ServeUnavailable`. Follow-up, не второй блокер: при `TRANSPORT=run` таймер статуса отменяется на `server.py:5809-5811` до `spawn_limiter.acquire` (`SPAWN_WAIT_MAX_S=5.0` на `:565`), поэтому при насыщенном лимитере первый `[мост]` может выйти позже 1.0 с; кейс StartupGate из RW-017 зелёный. Follow-up: JSON step-recovery при `transient_error` собирает промпт из `contents` (`server.py:6511-6520`), а `contents` дописывается только после успеха; SSE берёт уже отданный `collected_texts`. DSH ходит `stream:true` (F-35).
+   СОВЕТЫ: (1) Закрыть AC-014 на всех четырёх `return False` из F-001. (2) Follow-up: не гасить защитный таймер до выхода из `spawn_limiter.acquire`, не дублируя `STATUS_INITIAL` и не ломая быстрый путь `test_go_model_routing`. (3) Follow-up: в JSON-recovery передавать в `_incomplete_tool_step_prompt` текст текущей попытки (`texts`), как SSE передаёт `collected_texts`.
+
+3. РЕАЛИЗУЕМОСТЬ: VERDICT=PASS
+   WHY=Короткоживущий `opencode serve` на запрос поднимается stdlib-процессами (helper, lease, Basic-пароль на попытку, `OPENCODE_DB=:memory:`), без новых runtime-зависимостей. Kill-switch рабочий: `_select_transport` (`server.py:1761-1788`) по умолчанию `auto`, файл `~/.dsh/bridges/opencode-zen-bridge/disable-serve`, override env и `dynamic_config.json` (нет файла = serve выключен). Группа убивается в `finally`, reaper на старте сверяет uid и symlink. L2 зелёный (431 тест, ruff/basedpyright 0 errors). Живой прогон против настоящего `opencode serve` законно отложен (`VER-006`/`VER-007` = `DEFERRED_L3` до ACCEPT). Внедрение после F-001 операционно то же: один Python-процесс, потолок 3 spawn, откат на `run`.
+
+4. РИСКИ: VERDICT=FAIL
+   WHY=Full suite L2 зелёный и порядок-независимый: VER-001 `rc=0` (431 passed, 3173 subtests), VER-002 unittest 431 OK, AC-023 reversed `rc=0`, RED на `origin/dev` `rc=1` (новых символов нет). Секрет serve — `secrets.token_hex(16)`, в лог не пишется; allowlist срезает произвольный env; 401/403/400 fail-closed без инкремента health. Дыра F-001 тестом не ловится: `test_retry_separator_once_and_delivery_barrier_is_monotonic` подменяет `_serve_one_attempt` возвратами `stall_timeout` / `first_event_timeout` и не бросает `ServeUnavailable` и не упирается в лимитер. После частичной доставки это тихий второй транспорт в том же SSE и потеря JSON-накопления. Скрытый долг возвратного пути (watchdog, cap, dedup, gate) этим прогоном закрыт.
+   СОВЕТЫ: (1) Добавить в `tests/test_realtime_reasoning.py` два оракула к F-001: `ServeUnavailable` на второй попытке после reasoning и отказ `spawn_limiter` на второй попытке. (2) Проверять отсутствие вызова `Run`/`opencode run`, ровно один разделитель либо терминальную ошибку, и что `record_success` не вызван. (3) Оставить зелёными текущие 431 тест и замороженные sha256.
+
+5. АЛЬТЕРНАТИВЫ: VERDICT=PASS
+   WHY=Выбор — вариант A1 архитектора (serve на запрос) с откатом на `run`, как в `muse-bridge` (F-40). Общий демон A2 ломает ротацию IP, прямой Zen без заголовков дал 429 (F-24, F-25). Объём helper/lease оправдан REQ-008 (нет осиротевших `opencode serve`). Замена блокирующего `readline`+`shutdown` на `select`+`recv` (RW-008) поведенчески не нужна: пауза 1.4 с в L2 зелёная. Переписывания ради стиля нет.
+
+6. СООТВЕТСТВИЕ КОНТЕКСТУ: VERDICT=PASS
+   WHY=Дельта ровно в трёх файлах конверта: `bridges/opencode-zen-bridge/server.py`, `tests/test_realtime_reasoning.py`, `tests/test_step_interruption.py`. Новых зависимостей нет (`dependencies = []`). Google-срез и `_run_env` побайтово те же (`run_env_sha256=1c51b28f…`, `google_direct_unchanged=true`). Синтетические строки `[мост] …\n` заданы REQ-004/REQ-005, в промпт реплея не попадают. `json` стандартной библиотеки здесь обязателен: orjson/Litestar/Redis в этом мосте вне задачи. Пересчёт сида: `seed_input` дословен, `SHA-256` = `1ab7cac3f5917dc822365018f78bb6d7eecd50b5554c42571b5e59b929621e22`, `SEED=1ab7cac3`, совпало с `manifest.json` r25. `ranked_order` по пулу `table["setups"]["default"]` не могу проверить: таблица слотов в пакет раунда не вложена; опубликованный порядок в манифесте — `grok-4.7-high`, `gpt-6.1-sol-high`, `claude-sonnet-5-5-high`, `muse-wonder-full-1.0`, `gemini-4-argon-high`.
+
+F-001
+priority: blocking
+criteria: КОРРЕКТНОСТЬ, ПОЛНОТА, РИСКИ
+locations: bridges/opencode-zen-bridge/server.py:5198-5201, bridges/opencode-zen-bridge/server.py:5229-5234, bridges/opencode-zen-bridge/server.py:6407-6409, bridges/opencode-zen-bridge/server.py:6431-6434
+rule: RW-009, REQ-009, AC-014
+evidence: Latch ставится только модельным чанком (`delivered_any[0] = True` в `on_reasoning` / `_text_seen`, `server.py:5112-5124` и `:5185-5191`). Возврат результата это учитывает (`_delivered_now` включает `delivered_any[0]`, `:5257-5279`). Исключение и лимитер — нет. SSE-лимитер: `if not _limiter_ok: … if not force_serve: return False` (`:5198-5201`), разделитель на `:5206-5210` уже не исполняется. SSE: `except ServeUnavailable: … if not force_serve: return False` (`:5229-5234`) без чтения `delivered_any`. Те же `return False` в JSON на `:6407-6409` и `:6431-6434`. Сценарий: попытка 1 отдала reasoning и ушла в `stall_timeout` (serve-retry), попытка 2 падает на spawn/ready/create/prompt с `ServeUnavailable` до своих токенов. Клиент уже видел мысль; тот же SSE продолжается через `opencode run` без «[мост] Повтор попытки».
+expected: Если latch уже установлен, не возвращать fallback на `run`: serve-retry или терминальная ошибка, ровно один разделитель, без `record_success()`. Синтетический статус latch не ставит.
+check: Тест с reasoning на попытке 1 и `ServeUnavailable` либо timeout лимитера на попытке 2; нет четвёртого и нет legacy-spawn поверх уже отданного reasoning; один разделитель или `_sse_error`/502.
+
+SUB Корректность/логика: FAIL — evidence (bridges/opencode-zen-bridge/server.py:5229-5234, RW-009: `return False` мимо `delivered_any`)
+SUB Корректность/граничные условия: FAIL — evidence (server.py:5198-5201 и :6431-6434: fallback после уже отданной попытки и при отказе лимитера)
+SUB Корректность/обработка ошибок: FAIL — evidence (server.py:5229-5234: `ServeUnavailable` не терминал и не retry, а тихий run)
+SUB Полнота/покрытие AC: FAIL — evidence (AC-014 / REQ-009: разделитель только на server.py:5206-5210, ветки F-001 его пропускают)
+SUB Полнота/пропущенные ветки: FAIL — evidence (server.py:5257-5279 читает latch, :5229-5234 и :5198-5201 — нет)
+SUB Реализуемость/общее: PASS — evidence (server.py:1761-1788 kill-switch; L2 VER-001 rc=0; VER-006/007 DEFERRED_L3)
+SUB Риски/безопасность: PASS — evidence (fail-closed 401/403/400, пароль `token_hex(16)`, allowlist без произвольного env, AC-020)
+SUB Риски/данные: PASS — evidence (`OPENCODE_DB=:memory:`, lease uid/symlink, usage `input/output/cached/reasoning`)
+SUB Риски/прод: PASS — evidence (дефолт serve выключен, reaper+killpg, живой :9883 не мутируется до ACCEPT)
+SUB Риски/regression red→green: FAIL — evidence (tests/test_realtime_reasoning.py `test_retry_separator_once_and_delivery_barrier_is_monotonic` подменяет возврат, не `ServeUnavailable` и не лимитер)
+SUB Риски/Full Suite (L2): PASS — evidence (execution-evidence.md VER-001 rc=0, 431 passed; AC-023 reversed rc=0; RED rc=1 на origin/dev)
+SUB Риски/scope-diff: PASS — evidence (candidate-manifest.json: ровно 3 файла; code-gate `google_direct_unchanged=true`; dependencies=[])
+SUB Альтернативы/общее: PASS — evidence (A1 архитектора + fallback muse-bridge F-40; потолок spawn=3 сохранён)
+SUB Соответствие контексту/общее: PASS — evidence (REQ-004 требует `[мост]`; frozen sha256 MATCH; seed_hex `1ab7cac3f5917dc822365018f78bb6d7eecd50b5554c42571b5e59b929621e22` MATCH; ranked_order по пулу слотов не могу проверить)
+
+ОБЩИЙ ВЕРДИКТ: NEEDS WORK

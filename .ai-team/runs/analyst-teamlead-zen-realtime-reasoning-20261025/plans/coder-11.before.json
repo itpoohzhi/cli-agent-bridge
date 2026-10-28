@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-10.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003"
+  ],
+  "objective": "Устранить RW-001..RW-003 и FU-001..FU-003 без изменения замороженных функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-09.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/l2-green-ver001-pytest.log"
+  ],
+  "stop_conditions": [
+    "Только точечная правка _watch_serve_connection и _serve_http в server.py и артефакты coder-10",
+    "Frozen-функции не менять; форматирование только заданного диапазона",
+    "Не создавать commit/push/MR; живую приёмку оставляет оркестратору"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001: отделить serve retry без модельного вывода от запрета run fallback",
+      "expected_evidence": "Регрессия SSE/JSON: две serve-попытки, run не вызван",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002 и FU-003: отклонить суррогаты и обеспечить поведенческий RED origin/dev",
+      "expected_evidence": "ProtocolError, cleanup, O-EXIT; AC-026 доходит до сокетного оракула",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "RW-003: выделить нейтральный терминальный timeout без загрязнения breaker",
+      "expected_evidence": "SSE/JSON timeout оставляет breaker CLOSED с failures=0",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "FU-001 и FU-002: сохранить native пакет шага и прервать ожидание перед spawn",
+      "expected_evidence": "Два вызова m1 без m2; deadline/disconnect не запускают процесс",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "RP-05/06: выполнить VER-004, тесты и валидировать after-план и handoff",
+      "expected_evidence": "Frozen 3/3, Python 3.9, lint/type, pytest и валидаторы exit=0",
+      "status": "PENDING"
+    }
+  ],
+  "teamlead_cycle": 8,
+  "entry": "fix-from-panel"
+}

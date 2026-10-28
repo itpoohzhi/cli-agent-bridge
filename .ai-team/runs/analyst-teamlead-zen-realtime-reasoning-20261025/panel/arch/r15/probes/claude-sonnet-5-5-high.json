@@ -1,0 +1,26 @@
+{
+  "available": true,
+  "family": "Anthropic",
+  "ladder": [
+    {
+      "argv_sha256": "90015e5062185fe95ca96c1476072b605526c25a6809347f555500d07f8b4081",
+      "end_utc": "2026-10-26T08:17:24.900694+00:00",
+      "error": null,
+      "pgid": "16054",
+      "pid": 16054,
+      "raw_err_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_out_sha256": "deebaa182febb669d6fb7788549c1985864399a50e1f225602951bf75a911f58",
+      "rc": 0,
+      "start_utc": "2026-10-26T08:17:22.085323+00:00",
+      "status": "ok",
+      "transport": "claude-p"
+    }
+  ],
+  "launcher_sha256": "2123a3a8c508864327a1b9cf19460f5383194cab4f9c9581204157190c84c5d1",
+  "round": 15,
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "schema": "pol-probe/1",
+  "setup": "default",
+  "slot_id": "claude-sonnet-5-5-high",
+  "stage": "arch"
+}

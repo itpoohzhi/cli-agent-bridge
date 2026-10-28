@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-06.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004"
+  ],
+  "objective": "Устранить RW-001..RW-004 и FU-001..FU-006 Cycle 5 в разрешённых файлах без изменения frozen-функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-4/final-panel-verdict.md",
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+  ],
+  "stop_conditions": [
+    "Менять только 3 продуктовых/тестовых файла из брифа и файлы отчётности coder-07",
+    "Не трогать замороженные _run_env/_stream_google_sse/_execute_google_once (sha256 VER-004)",
+    "Не запускать full-file ruff format server.py; только --range по изменённым ханкам",
+    "Не делать git commit/push/gh pr create",
+    "Сохранить ранний перехват --serve-helper и совместимость ast feature_version=(3,9)"
+  ],
+  "deviations": [
+    "Регрессионный incomplete-сценарий уточнён: короткая фраза без tool-блока не запускает recovery; используется незавершённый <tool_call>. Продуктовые эвристики не изменялись.",
+    "Буквальный unittest discover из корня дал 18 ошибок импорта; повтор с PYTHONPATH из корня дал 16 ошибок из-за затенения модулем server.py корня. Из каталога bridges/opencode-zen-bridge полный discover прошёл 451/451. Конфиги и импорты проекта не менялись.",
+    "Первый VER-004 нашёл одно reportAny в новом тесте на json.loads; явный cast(object, ...) устранил предупреждение. Финальный VER-004: PASS.",
+    "Full-file форматирование server.py запрещено брифом: только закрытые изменённые диапазоны. Новый тестовый файл форматировался целиком. Коммит, push и MR не выполнялись.",
+    "В дополнение к запрошенным целевому pytest и полному unittest выполнен полный pytest моста для Full Suite Gate.",
+    "Before-план сохранил унаследованную опечатку в stop_conditions: отчётность coder-06 вместо coder-07. Фактический scope определялся явным allowlist брифа; before-план оставлен неизменным, after-план уточнён."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Добавить регрессионные оракулы Cycle 5 и подтвердить RED до исправления",
+      "expected_evidence": "Новые тесты воспроизводят RW-001..RW-004 и FU-003",
+      "status": "DONE",
+      "actual_evidence": "RED до изменения server.py: 6 failed, 66 deselected in 14.34s. RW-002: нет STATUS_INITIAL, первый статус около 1.29 с; RW-003: разделитель при effort=off; FU-003: дублирование преамбулы и сырой tool-блок; RW-001: фактический уход в run; FU-002: нет ServeSecurityError при 401; RW-004: ложный stall_timeout после native-call. После исправления все сценарии включены в 180/180 и 451/451."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Исправить headers/barrier, первый статус, разделители и native stall в server.py",
+      "expected_evidence": "Целевые тесты GREEN, FU-001..FU-006 покрыты",
+      "status": "DONE",
+      "actual_evidence": "RW-001: статус и headers_at публикуются до тела; prompt_error и HTTP429/503 идут через allow_retry без run и record_success; тест проверяет ровно одно списание RetryBudget на две попытки в SSE и JSON. RW-002: таймер сохраняется, срок от начала запроса. RW-003: три ветки retry, thinking on/off. RW-004: last_token_at на delta/complete/step_finish. FU-003: нормализация и dedup JSON; FU-004: попарная задержка каждой дельты <0.25 с; FU-006: абсолютный deadline cleanup +0.35 с."
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Прогнать VER-004: диапазоны ruff, frozen sha256, lint/type и catalog",
+      "expected_evidence": "VER-004 exit=0; три frozen sha256 сохранены",
+      "status": "DONE",
+      "actual_evidence": "VER-004 exit=0; basedpyright errors=0, server warnings=591 (как у coder-06), step warnings=169, новый файл diagnostics=0. Frozen SHA-256 3/3 PASS; AST feature_version=(3,9) PASS; test_catalog_mode PASS. Сырой лог: ~/work/cli-agent-bridge/coder-07-20261027-8uvwzvk5/ver004-final.log. Непатченный origin/dev: 72 tests collected, exit=0."
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Прогнать целевой pytest и полный unittest discover без коммита",
+      "expected_evidence": "Оба набора exit=0 с сырыми результатами",
+      "status": "DONE",
+      "actual_evidence": "Целевой pytest: 180 passed in 159.84s; полный pytest: 451 passed in 208.70s; полный unittest: Ran 451 tests in 205.232s, OK. Все финальные процессы под run-guarded, exit=0. Сырые логи в ~/work/cli-agent-bridge/coder-07-20261027-8uvwzvk5/."
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Записать after-план coder-07 и идентичные handoff/receipts",
+      "expected_evidence": "validate_role_plan after и validate_handoff coder exit=0",
+      "status": "DONE",
+      "actual_evidence": "After-план валидирован: validate_role_plan --phase after exit=0. Handoff привязан к SHA-256 after-плана и валидирован: validate_handoff coder exit=0. Три копии handoff байтово идентичны; before-план не менялся. Финальная валидация после уточнения stop_conditions повторена."
+    }
+  ],
+  "actual_evidence": "VER-004 exit=0; basedpyright errors=0, server warnings=591 (как у coder-06), step warnings=169, новый файл diagnostics=0. Frozen SHA-256 3/3 PASS; AST feature_version=(3,9) PASS; test_catalog_mode PASS. Сырой лог: ~/work/cli-agent-bridge/coder-07-20261027-8uvwzvk5/ver004-final.log. Непатченный origin/dev: 72 tests collected, exit=0. Целевой pytest: 180 passed in 159.84s; полный pytest: 451 passed in 208.70s; полный unittest: Ran 451 tests in 205.232s, OK. Все финальные процессы под run-guarded, exit=0. Сырые логи в ~/work/cli-agent-bridge/coder-07-20261027-8uvwzvk5/."
+}

@@ -1,0 +1,10 @@
+$ uvx pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py
+[cwd=/tmp/cel-runs/zen-realtime-reasoning-20261025/l2-cleanroom/bridges/opencode-zen-bridge] [rc=0] [wall=346.55s]
+--- STDOUT ---
+............................................................. [ 46%]
+................................................................... [ 96%]
+....                                                                     [100%]
+132 passed, 232 subtests passed in 345.98s (0:05:45)
+
+--- STDERR ---
+

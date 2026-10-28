@@ -1,0 +1,45 @@
+{
+  "panel": "arch",
+  "round": "R1",
+  "cycle": 1,
+  "seat": "visionary",
+  "iteration": 1,
+  "run_kind": "targeted",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "29595eb3fd95a0a30483ba09e46026d020c2fbaafee3734873e3508a882973fa",
+  "checklist_gen": 2,
+  "checklist_sha256": "141a3f00420071999f3d526ace432197292611d2d2dc3ec61044e76ef0d274c5",
+  "reviewer_slot": "claude-sonnet-5-5",
+  "transport": "claude-p",
+  "transport_attempts": [
+    {
+      "transport": "claude-p",
+      "file": "review-v1-g2-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 16,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 16,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "BR-47",
+      "status": "covered",
+      "evidence_quote": "TTFT first actual reasoning<=3s и pause goal15s — operational goals, не hard deterministic unit guarantee; watchdog default20/60/60 и status<=1s заданы текущим брифом.",
+      "fix": "",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [],
+  "dropped": [],
+  "model_verdict": "APPROVE",
+  "model_verdict_mismatch": false,
+  "verdict": "APPROVE",
+  "blocked_reason": null,
+  "open_ids": []
+}

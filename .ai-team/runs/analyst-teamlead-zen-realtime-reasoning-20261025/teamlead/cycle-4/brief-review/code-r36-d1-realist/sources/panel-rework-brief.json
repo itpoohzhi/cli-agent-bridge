@@ -1,0 +1,309 @@
+{
+  "schema_version": "2.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 3,
+  "panel_slug": "panel/council/r29",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "claude-sonnet-5-5",
+  "findings_total": 30,
+  "decision_required_human": false,
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Cycle 3 Совета Тимлидов по коду завершён после R1 (panel/council/r25) и D1 (panel/council/r29) с вердиктом NEEDS_WORK (8 первичных блокеров RW-001..RW-008, 15 non-blocking FU-001..FU-015, 7 excluded: 6 duplicate_of + 1 out_of_scope). Бюджет следующей волны: Coder rework (coder-06, Цикл 4) -> слепой reverse-spec -> Clean-Room L2 -> Cycle 4 Совета Тимлидов по коду.",
+  "do_not_change": [
+    "Разрешено модифицировать ТОЛЬКО 3 файла из allowed_envelope_changes: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py.",
+    "Запрещено менять замороженную функцию def _run_env в bridges/opencode-zen-bridge/server.py (sha256=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31).",
+    "Запрещено менять замороженную функцию def _stream_google_sse в bridges/opencode-zen-bridge/server.py (sha256=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3).",
+    "Запрещено менять замороженную функцию def _execute_google_once в bridges/opencode-zen-bridge/server.py (sha256=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6).",
+    "Запрещено добавлять любые внешние зависимости вне стандартной библиотеки Python 3.14 (dependencies = [] в pyproject.toml).",
+    "Запрещено модифицировать zen_catalog.py, start.sh, muse-bridge, существующие тестовые модули вне конверта и коммитить dynamic_config.json в git."
+  ],
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:2406-2407,3062,5198-5201,5206,5229-5234,5294,6407-6409,6431-6434,6486",
+      "rule_ref": "RW-009, RW-012, REQ-009, AC-014, FALLBACK_DECISION_TABLE",
+      "action": "Фиксировать `headers_at` в `_prompt_async` сразу после `getresponse()` (до `resp.read()`), и проверять монотонный барьер доставки (`delivered_any[0]` / модельный чанк или подтверждённый prompt) во всех четырёх ветках `return False` по `ServeUnavailable` и отказу `spawn_limiter` (как в `_run_serve_stream_attempts`, так и в `_serve_json_serve`): если барьер уже установлен, не делать fallback на `run`, а выполнять `serve-retry` (с эмиссией ровно одного разделителя `[мост] Повтор попытки`) или терминальную ошибку (`_sse_error` / HTTP 502) без вызова `record_success()`. При этом синтетический `STATUS_INITIAL` барьер доставки не ставит.",
+      "acceptance": "Попытка 1 отдаёт `reasoning`, попытка 2 бросает `ServeUnavailable` или упирается в `spawn_limiter`: `Run` не запускается ни в SSE, ни в JSON, клиенту отдаётся ровно один разделитель или терминальная ошибка, `record_success()` не вызывается.",
+      "source": "F-001 (skeptic · R1 · skeptic-F-001; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AMEND, realist=AGREE, visionary=AGREE; duplicates merged: F-018, F-020)",
+      "source_findings": [
+        "F-001"
+      ],
+      "evidence": "Ledger F-001: votes=[R1 skeptic=AUTHOR; D1 skeptic=AMEND, realist=AGREE, visionary=AGREE]; dissent=[skeptic d1 «AMEND F-001 priority=blocking; locations=`server.py:2406`, `:2407`, `:3062`, `:3112`, `:5198`, `:5206`, `:5229`, `:5294`, `:6407`, `:6431`, `:6486`; fix=фиксировать prompt headers непосредстве» → teamlead/cycle-3/debate/d1/skeptic.md]; amendments=[skeptic d1: priority=blocking; locations=`server.py:2406`, `:2407`, `:3062`, `:3112`, `:5198`, `:5206`, `:5229`, `:5294`, `:6407`, `:6431`, `:6486`; fix=фиксировать prompt headers непосредственно после `getresponse()`, сохранять общ (teamlead/cycle-3/debate/d1/skeptic.md)]."
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5808-5814",
+      "rule_ref": "RW-017, REQ-004, AC-005",
+      "action": "В `Handler._stream_sse` на legacy-пути `run` не отменять `status_timer` до `spawn_limiter.acquire()`: переносить `status_timer.cancel()` после прохождения `spawn_limiter.acquire()` (непосредственно перед стартом `send_keepalive` / `run`), чтобы при ожидании лимитера более 0.65 с первый видимый статус `[мост] ...` гарантированно доставлялся за `<= 1.0 с` без дублирования `STATUS_INITIAL`.",
+      "acceptance": "При свободном `_StartupGate` и занятом `spawn_limiter` на legacy-пути `run` первый статус `[мост]` приходит не позднее `1.0 с` (`AC-005`), ровно один `STATUS_INITIAL`.",
+      "source": "F-002 (skeptic · R1 · skeptic-F-002; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AMEND)",
+      "source_findings": [
+        "F-002"
+      ],
+      "evidence": "Ledger F-002: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AMEND]; dissent=[visionary d1 «AMEND F-002 priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:5808-5814; fix=держать защитный таймер до первого видимого чанка либо отдавать статус во время ожидания spawn» → teamlead/cycle-3/debate/d1/visionary.md]; amendments=[visionary d1: priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:5808-5814; fix=держать защитный таймер до первого видимого чанка либо отдавать статус во время ожидания spawn_limiter, не дублируя STATUS_INITIAL — п (teamlead/cycle-3/debate/d1/visionary.md)]."
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:1738,2891-2929",
+      "rule_ref": "RW-004, REQ-008, AC-011",
+      "action": "Включить вызов `_serve_env` (`tempfile.mkdtemp(prefix=\"zen-serve-state-\")`) внутрь защищённого блока `try/except BaseException` запуска `_spawn_serve`, транслируя локальные `OSError` (например `ENOSPC`/`EACCES` в `mkdtemp`) в `ServeUnavailable` с гарантированной очисткой всех уже выделенных ресурсов.",
+      "acceptance": "Fault injection `OSError` на `tempfile.mkdtemp` при старте `serve` переводится в `ServeUnavailable` (штатный fallback или ошибка без ложного `client_gone`) и не оставляет сиротских FD, портов или каталогов.",
+      "source": "F-004 (skeptic · R1 · skeptic-F-004; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE)",
+      "source_findings": [
+        "F-004"
+      ],
+      "evidence": "Ledger F-004: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:686-726,2832-2853",
+      "rule_ref": "REQ-011, REQ-012, AC-017, code.md",
+      "action": "В `_native_call_as_dsh` переиспользовать существующий канонический преобразователь `_native_to_tool_calls(tool_name, args, tools)` (включая `_fit_args`, нормализацию `list`/`ls` и разворачивание `multiedit` в список вызовов), чтобы нативные вызовы инструментов в `serve` и `run` давали побайтово идентичные `tool_calls` в SSE и JSON.",
+      "acceptance": "Одинаковые нативные фикстуры `bash`/`read`/`edit`/`list`/`multiedit` дают идентичные `tool_calls` в `serve` и `run` (SSE и JSON).",
+      "source": "F-007 (skeptic · R1 · skeptic-F-007; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE)",
+      "source_findings": [
+        "F-007"
+      ],
+      "evidence": "Ledger F-007: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-005",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:1115-1119",
+      "rule_ref": "REQ-008, AC-011, T-LIFE/v1",
+      "action": "В `_stop_proc` проверять живость процессной группы `pgid` (`_pgid_alive(pgid)` через `os.killpg(pgid, 0)`) независимо от `proc.poll() is not None`: даже если лидер `opencode run` уже завершился, при живых членах группы посылать `SIGTERM` всей группе `-pgid`, ждать завершения группы и эскалировать `SIGKILL` на `-pgid` при оставшихся процессах.",
+      "acceptance": "Если лидер `opencode run` завершился раньше дочернего процесса в своей процессной группе, `_stop_proc` завершает всю группу (`SIGTERM` -> `SIGKILL`), не оставляя сиротских процессов.",
+      "source": "F-008 (skeptic · R1 · skeptic-F-008; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE)",
+      "source_findings": [
+        "F-008"
+      ],
+      "evidence": "Ledger F-008: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE]; dissent=[realist d1 «AMEND F-008 priority=non-blocking; locations=server.py:1115-1119; fix=перед выходом по `poll() is not None` проверять живость группы через `killpg(pgid, 0)` — причина: `_stop_proc` не входит в» → teamlead/cycle-3/debate/d1/realist.md]; amendments=[realist d1: priority=non-blocking; locations=server.py:1115-1119; fix=перед выходом по `poll() is not None` проверять живость группы через `killpg(pgid, 0)` — причина: `_stop_proc` не входит в дельту, в candidate.diff нет ханка в эт (teamlead/cycle-3/debate/d1/realist.md)]."
+    },
+    {
+      "id": "RW-006",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:1700-1704",
+      "rule_ref": "REQ-003, python-standards.md §3",
+      "action": "В `_read_dynamic_config_enabled` ловить `(OSError, ValueError)` (включая `UnicodeDecodeError` при чтении повреждённого UTF-8 в `dynamic_config.json`), возвращая безопасное значение по умолчанию `False` (fail-open в `run`) и логируя предупреждение.",
+      "acceptance": "Невалидные UTF-8 байты в `dynamic_config.json` не прерывают обработку запроса в режиме `auto` (выбирается `run`), а последующее восстановление валидного JSON включает `serve`.",
+      "source": "F-010 (skeptic · R1 · skeptic-F-010; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE)",
+      "source_findings": [
+        "F-010"
+      ],
+      "evidence": "Ledger F-010: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-007",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:823,5127,5145",
+      "rule_ref": "REQ-011",
+      "action": "Обеспечить инкрементальную очистку маркеров прерванного шага (`_INTERRUPTED_RE`) на потоковом пути `serve` с буферизацией потенциального префикса маркера на границе соседних текстовых дельт (и сбросом буфера в конце шага), чтобы маркер `I was interrupted right before making tool calls.` удалялся даже при разбиении между двумя дельтами.",
+      "acceptance": "Маркер прерывания шага, разрезанный между двумя соседними текстовыми дельтами `serve`, полностью удаляется из клиентского вывода так же, как при подаче одним чанком.",
+      "source": "F-011 (skeptic · R1 · skeptic-F-011; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE)",
+      "source_findings": [
+        "F-011"
+      ],
+      "evidence": "Ledger F-011: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE]; dissent=[realist d1 «AMEND F-011 priority=non-blocking; locations=server.py:823, 5127, 5145; fix=инкрементальная очистка с удержанием хвоста либо вынос в адаптер — причина: в serve `result[\"texts\"]` пополняется сы» → teamlead/cycle-3/debate/d1/realist.md]; amendments=[realist d1: priority=non-blocking; locations=server.py:823, 5127, 5145; fix=инкрементальная очистка с удержанием хвоста либо вынос в адаптер — причина: в serve `result[\"texts\"]` пополняется сырой дельтой до `on_text`, поэтому `_inco (teamlead/cycle-3/debate/d1/realist.md)]."
+    },
+    {
+      "id": "RW-008",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:1928,5347,6523",
+      "rule_ref": "REQ-015, AC-020, security.md",
+      "action": "Пропускать сообщения ошибок провайдера/транспорта `err.get(\"message\")` и `_error_payload` через `_clean_err` / `_mask_secrets` перед отправкой в клиентский SSE/JSON и записью в лог.",
+      "acceptance": "Sentinel-секреты (`sk-...`, `Bearer ...`, `OPENCODE_SERVER_PASSWORD`, учётные данные прокси) в тексте ошибки провайдера `serve` маскируются в SSE, JSON и `bridge.log`.",
+      "source": "F-014 (skeptic · R1 · skeptic-F-014; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE)",
+      "source_findings": [
+        "F-014"
+      ],
+      "evidence": "Ledger F-014: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AMEND, visionary=AGREE]; dissent=[realist d1 «AMEND F-014 priority=non-blocking; locations=server.py:5347, 6523; fix=пропускать `err.get('message')` через `_clean_err` до `_error_payload` — причина: сообщение уходит только клиенту на 127.» → teamlead/cycle-3/debate/d1/realist.md]; amendments=[realist d1: priority=non-blocking; locations=server.py:5347, 6523; fix=пропускать `err.get('message')` через `_clean_err` до `_error_payload` — причина: сообщение уходит только клиенту на 127.0.0.1 и в `_log` не пишется. AC-020 пров (teamlead/cycle-3/debate/d1/realist.md)]."
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Ограничивать фазы старта и чтения тела ответа `_ctrl_http`/`_prompt_async` остатком общего `attempts.deadline` и проверкой `is_client_gone`.",
+      "reason": "Понижено большинством 2/3 (`realist` + `visionary` AMEND non-blocking) в D1: каждая фаза уже ограничена короткими окнами 3–5 с, а `lease.cleanup()` в `finally` размыкает сокеты.",
+      "source_findings": [
+        "F-003"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-002",
+      "text": "В `_serve_json_serve` на ветке `transient_error` переносить частичные `texts` и `reasonings` неуспешной попытки в накопители перед построением recovery-промпта.",
+      "reason": "Понижено большинством 2/3 (`realist` + `visionary` AMEND non-blocking) в D1: DSH ходит со `stream:true` (`F-35`), а в JSON клиенту до завершения ничего не эмитится.",
+      "source_findings": [
+        "F-005"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-003",
+      "text": "В `_run_serve_stream_attempts` начислять `result[\"usage\"]` в аккумулятор ровно один раз до ветвления по причинам ретрая (как в JSON).",
+      "reason": "Понижено большинством 2/3 (`realist` + `visionary` AMEND non-blocking) в D1 (`REQ-014` имеет приоритет `SHOULD`).",
+      "source_findings": [
+        "F-006"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-004",
+      "text": "Пробрасывать `on_idle` и `is_client_gone` в legacy JSON-путь `Run._execute_once` (не затрагивая замороженный `_run_env`).",
+      "reason": "Понижено большинством 2/3 (`realist` + `visionary` AMEND non-blocking) в D1: инцидент и AC-005..010 относятся к SSE.",
+      "source_findings": [
+        "F-009"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-005",
+      "text": "В `test_ac026_realtime_chunks_before_upstream_end` ужесточить порог соседних дельт с `< 1.0` до `< 0.5` с и фиксировать независимую отметку завершения отправки `FakeServe`.",
+      "reason": "Понижено большинством 2/3 (`realist` + `visionary` AMEND non-blocking) в D1.",
+      "source_findings": [
+        "F-012"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-006",
+      "text": "Поддерживать стабильные допуски таймингов в `tests/test_realtime_reasoning.py` без модификации `pyproject.toml` (вне конверта).",
+      "reason": "Понижено большинством 2/3 (`realist` + `visionary` AMEND non-blocking) в D1 (`pyproject.toml` вне конверта `allowed_envelope_changes`, включая дубль `F-027`).",
+      "source_findings": [
+        "F-013"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-007",
+      "text": "В `_serve_one_attempt` при сборке нативного вызова на границе `step_finish` (`server.py:3304-3309`) выставлять `first_token_at` и `ttft_ms`, если они ещё `None`.",
+      "reason": "Согласовано 3/3 в D1 как non-blocking уточнение телеметрии `O-EXIT/v1`.",
+      "source_findings": [
+        "F-016"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-008",
+      "text": "Уточнить пояснения в оставшихся комментариях `# pyright: ignore[...] — причина:` в `tests/test_realtime_reasoning.py:324-325,1150,1154` под конкретное выражение.",
+      "reason": "Согласовано 3/3 в D1 как non-blocking гигиена комментариев (включая дубль `F-029`).",
+      "source_findings": [
+        "F-017"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-009",
+      "text": "На legacy-пути `run` (`send_keepalive`) обновлять отметку активности первого токена/шага при получении `step_start` (либо использовать повышенный порог для буферизующего `opencode run`), чтобы длинный шаг размышления `> 60 с` на `opencode run` не прерывался ложным `first_token_timeout`.",
+      "reason": "Согласовано в D1 (`realist` AMEND non-blocking) как безопасная защита legacy-пути для длинных запросов (до `85.65 с` по `F-32`).",
+      "source_findings": [
+        "F-019"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-010",
+      "text": "Гейтить эмиссию синтетического разделителя `[мост] Повтор попытки` по флагу `thinking_enabled` так же, как периодические статусы ожидания.",
+      "reason": "Согласовано большинством 2/3 (`realist` + `visionary`) в D1 как non-blocking.",
+      "source_findings": [
+        "F-021"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-011",
+      "text": "При `terminal == \"cancelled\"` (отмена `form.created`) не вызывать `serve_health.record_success()` и единообразно завершать попытку в SSE и JSON.",
+      "reason": "Согласовано 3/3 в D1 как non-blocking.",
+      "source_findings": [
+        "F-022"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-012",
+      "text": "Синхронизировать декларативную таблицу `FALLBACK_DECISION_TABLE` с фактическим поведением веток `prompt_status`.",
+      "reason": "Согласовано большинством 2/3 (`realist` + `visionary`) в D1 как non-blocking.",
+      "source_findings": [
+        "F-023"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-013",
+      "text": "В `test_transport_matrix` явно проверять файл отключения `DISABLE_FILE_PATH`, а в `test_elf_magic_and_tool_status` — сигнатуру ELF/Mach-O и поле статуса.",
+      "reason": "Согласовано 3/3 в D1 как non-blocking усиление тестов.",
+      "source_findings": [
+        "F-024"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-014",
+      "text": "Минимизировать число подпроцессов `lsof` при ожидании готовности `serve` (проверять после готовности HTTP или с увеличенным шагом).",
+      "reason": "Согласовано большинством 2/3 (`realist` + `visionary`) в D1 как non-blocking оптимизация.",
+      "source_findings": [
+        "F-025"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-015",
+      "text": "Добавить в `test_serve_env_sanitized_all_branches` гарантированное удаление временного каталога `XDG_STATE_HOME` через `shutil.rmtree` в `finally` (с учётом `F-030`).",
+      "reason": "Согласовано в D1 как non-blocking.",
+      "source_findings": [
+        "F-026"
+      ],
+      "decision_required_human": false
+    }
+  ],
+  "excluded": [
+    {
+      "id": "F-015",
+      "reason": "out_of_scope"
+    },
+    {
+      "id": "F-018",
+      "reason": "duplicate_of:F-001"
+    },
+    {
+      "id": "F-020",
+      "reason": "duplicate_of:F-001"
+    },
+    {
+      "id": "F-027",
+      "reason": "duplicate_of:F-013"
+    },
+    {
+      "id": "F-028",
+      "reason": "duplicate_of:F-017"
+    },
+    {
+      "id": "F-029",
+      "reason": "duplicate_of:F-017"
+    },
+    {
+      "id": "F-030",
+      "reason": "duplicate_of:F-026"
+    }
+  ]
+}

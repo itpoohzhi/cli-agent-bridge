@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 11,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "before",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-13.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005",
+    "RW-006"
+  ],
+  "objective": "Реализовать исправления RW-001..RW-006 по итогам Совета Тимлидов Цикла 10 (panel/council/r149 + r154) строго в пределах 3 разрешённых файлов coder_target_files без изменения замороженных функций.",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-10/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-13.json"
+  ],
+  "stop_conditions": [
+    "Только три разрешённых продуктовых пути и отчётность coder-14",
+    "Сохранить frozen raw SHA256, ранний helper и Python 3.9; форматировать legacy только диапазонами",
+    "Без commit/push/MR; без бизнес-приёмки живого чата"
+  ],
+  "deviations": [],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001 + RW-005 + RW-006: передавать текстовые дельты в text_cb в _drain_serve_step_usage при emulate_tools=True, передавать очищенную через _strip_interrupted копию reasoning в _incomplete_step_signal на serve (сохраняя сырые байты для клиента), включить размеры call_id и name в _serve_tool_state_bytes",
+      "expected_evidence": "Корректная доставка текста в дренаже, идентичное число попыток serve/run при STEP_RECOVERY_ENABLED и полный учёт строк в бюджете памяти _ServeToolState",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002 + RW-003 + RW-004: ограничить ожидание заголовков prompt остатком _AuxIoBudget и списывать подписку до первого SSE и управляющие вызовы permission/form, обернуть начальные записи заголовков/role-чанка/_initial_status через _LockedWfile без повторного захвата замка, заменить except Exception: pass в _mark_client_gone на логирование с _mask_secrets и abort_socket в finally",
+      "expected_evidence": "Замкнутый бюджет _AuxIoBudget по реальным точкам вызова, ограничение всех начальных downstream-записей и наблюдаемая обработка сбоя callback в _mark_client_gone",
+      "status": "PENDING"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Добавить регрессионные тесты RW-001..RW-006 в tests/test_realtime_reasoning.py, прогнать VER-004, pytest и unittest discover",
+      "expected_evidence": "Все проверки VER-004, pytest и unittest discover зелёные (rc=0) и записан валидный handoffs/coder-14.json",
+      "status": "PENDING"
+    }
+  ]
+}

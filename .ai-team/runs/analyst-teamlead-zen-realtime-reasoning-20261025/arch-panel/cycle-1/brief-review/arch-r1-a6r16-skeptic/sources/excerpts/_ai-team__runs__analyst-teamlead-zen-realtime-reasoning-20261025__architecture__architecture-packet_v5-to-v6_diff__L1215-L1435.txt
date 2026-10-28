@@ -1,0 +1,221 @@
+-      "id": "FU-004",
+-      "pass": "a4",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A4-F-009"
+-      ],
+-      "changes_made": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv.",
+-      "packet_locations": [
+-        "/decisions/0/details/spawn",
+-        "/decisions/0/details/crash_recovery",
+-        "/decisions/0/details/resource_accounting/helper_cli_contract",
+-        "/resilience_gates/T_LIFE_v1/helper_cli_contract",
+-        "/verification_surface/3/command",
+-        "/verification_surface/4/process_resource_oracle/topology",
+-        "/evidence/71"
+-      ],
+-      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-005",
+-      "pass": "a4",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A4-F-010"
+-      ],
+-      "changes_made": "Новые диагностические/override env-переменные этого пакета: OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED, OPENCODE_ZEN_BRIDGE_TRANSPORT, OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY, OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE и watchdog overrides OPENCODE_ZEN_BRIDGE_FIRST_EVENT_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_FIRST_TOKEN_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S (AD-003). Сам рабочий фичефлаг REALTIME_SERVE_ENABLED переключается boolean в dynamic_config.json без новой env для переключения и без правки start.sh/LaunchAgent; кодовый default=false, включение H7 только после H3/H6.",
+-      "packet_locations": [
+-        "/decisions/0/details/configuration",
+-        "/decisions/0/details/configuration/feature_flag_context",
+-        "/decisions/2/details/thresholds/env_classification",
+-        "/evolution/feature_flag"
+-      ],
+-      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-006",
+-      "pass": "a4",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A4-F-011"
+-      ],
+-      "changes_made": "frozen_fixture_sha256 over wire/canonical pairs only; separate frozen_fixture_metadata_sha256 over negative_mutations/safety_order. Exact json.dumps UTF8 formulas and observed stability/sensitivity checks.",
+-      "packet_locations": [
+-        "/decisions/0/details/event_contract/frozen_fixture_sha256",
+-        "/decisions/0/details/event_contract/frozen_fixture_metadata_sha256",
+-        "/decisions/0/details/event_contract/fixture_digest_serialization",
+-        "/decisions/0/details/event_contract/fixture_metadata_digest_serialization"
+-      ],
+-      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
++      "pass": "a5",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated probes observed, actual Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A5-F-004"
++      ],
++      "changes_made": "Cycle6/version6.0/architect06 hash and allowlist; external a6/r15 pending, no panel verdict from author.",
++      "packet_locations": [
++        "/cycle",
++        "/packet_version",
++        "/role_plan",
++        "/scope/architect_write_allowlist",
++        "/approval/rationale",
++        "/summary",
++        "/independent_review/rationale",
++        "/handoff_state"
++      ],
++      "verification": "EVD-076/EVD-077/EVD-079 plus exact role-plan/packet/semantic/fingerprint checks; external a6/r15 Council pending; actual Stage3/H0..H9 NOT_RUN.",
+       "decision_required_human": false
+@@ -5144,3 +5341,4 @@
+     "EVD-077",
+-    "EVD-078"
++    "EVD-078",
++    "EVD-079"
+   ],
+@@ -5529,3 +5727,140 @@
+     }
+-  ]
++  ],
++  "rework_source_a4": {
++    "path": "handoff/panel-rework-brief-arch-a4.json",
++    "sha256": "eb819238cd17dec3ffef8667f75124bbdf2764d59239145c52039292dab4fc16",
++    "base_packet_path": "architecture/architecture-packet.v4.json",
++    "base_packet_sha256": "a53012565332cab8140d26d43029b931ff6d6c1fe4c63612310567ecba6812b3",
++    "resolutions_count": 10,
++    "blocking_count": 4,
++    "nonblocking_count": 6,
++    "findings_count": 11,
++    "excluded": [
++      {
++        "id": "PANEL-A4-F-006",
++        "reason": "duplicate_of:PANEL-A4-F-003; absorbed only in RW-003"
++      }
++    ],
++    "namespace": "Current alias mirrors rework_resolutions_a4; historical a1/a2/a3 JSON values retained exactly. Findings use PANEL-A4-F-NNN; analyst ledger stays F-01..F-49."
++  },
++  "rework_resolutions_a5": [
++    {
++      "id": "RW-001",
++      "pass": "a5",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated probes observed, actual Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A5-F-001"
++      ],
++      "changes_made": "Units MiB. EVD-079 final actual helper peak=31.718750; helper_estimate36.0 reserves 4.281250 for Stage3 helper code/lease/drain bookkeeping (design allowance, not live proof). Serve idle156.8 + helper36.0 =192.8; probe8.0 -> combined200.8; per_slot_ceiling216.0 gives15.2>=15 MiB for103KB prompts.6*216=1296 shared;1296+256=1552.0<=0.80*2048=1638.4; station headroom86.4.6slots/12waiters/cap3 unchanged. H3 NOT_RUN until live6parallel103KB×3; any actual slot>216 or total>1638.4 blocks H7 without waiver. Helpers/probes/load must be summed, not omitted.",
++      "packet_locations": [
++        "/decisions/0/details/resource_accounting/rss",
++        "/quality_scenarios/8",
++        "/risks/2",
++        "/evolution/H3_rollout_gate",
++        "/high_load_envelope/memory_ssot",
++        "/high_load_envelope/capacity_formula",
++        "/verification_surface/4/process_resource_oracle/resources/rss"
++      ],
++      "verification": "EVD-076/EVD-077/EVD-079 plus exact role-plan/packet/semantic/fingerprint checks; external a6/r15 Council pending; actual Stage3/H0..H9 NOT_RUN.",
++      "decision_required_human": false,
++      "dissent": {
++        "seat": "realist",
++        "family": "Muse",
++        "round": "D1 panel/arch/r14",
++        "priority": "non-blocking",
++        "majority": "xAI+Anthropic 2/3 blocking",
++        "preserved": true,
++        "outcome": "RW-001 blocking as agreed by majority; dissent retained without reclassifying consensus."
++      }
++    },
++    {
++      "id": "RW-002",
++      "pass": "a5",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated probes observed, actual Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A5-F-002"
++      ],
++      "changes_made": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart]; helper_proc=subprocess.Popen([sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart], stdin=lifeline_r, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, close_fds=True, env=serve_env); child_pgid=helper_proc.pid; serve_proc=subprocess.Popen([opencode_bin, \"serve\", \"--hostname\", \"127.0.0.1\", \"--port\", str(port)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=False, close_fds=True, env=serve_env). args=sys.argv[2:] must have len(args)==6; parse attempt_id, port_text, opencode_bin, lease_dir_text, parent_pid_text, parent_lstart. Before any spawn or state I/O: reject length mismatch; require nonempty attempt_id/opencode_bin/lease_dir_text/parent_lstart, decimal integers port_text/parent_pid_text, 1<=int(port_text)<=65535 and int(parent_pid_text)>0. Convert lease_dir=Path(lease_dir_text) and parent_pid=int(parent_pid_text); use only the passed isolated lease directory. opencode_bin is the parent-resolved str(OPENCODE_BIN) after configuration/in-process monkeypatch, never a module constant read by helper. serve_env is the already sanitized parent environment, copied without OPENCODE_BIN; do not add OPENCODE_BIN or widen any OPENCODE_*/FAKE_* whitelist. Child stdout/stderr PIPEs must be continuously drained/forwarded by the bounded single-thread helper loop to helper stderr; helper stdout remains reserved for handshake, parent keeps exactly two drain lanes per slot. Drain-ready pipes concurrently with fd0 EOF/TERM and child poll, bounded per-tick work, no child pipe wait delaying EOF. Preserve lease/handshake/listener ownership and terminal_quiescence invariants. Early isolated dispatcher in server.py: top-level only minimal stdlib imports (json, os, signal, subprocess, sys, time, Path, select/resource as needed; existing typing import retained unchanged for the frozen no-new-Any gate) and typed def _run_serve_helper_cli(args: list[str]) -> int. Immediately afterwards: if sys.argv[1:2] == [\"--serve-helper\"]: raise SystemExit(_run_serve_helper_cli(sys.argv[2:])); else: import all normal-server-only modules, including http.client, sqlite3, from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, and after sys.path.insert(0, str(Path(__file__).resolve().parent)), static import zen_catalog as zc. Imports inside else prevent Ruff module-level E402; terminating SystemExit branch makes those names definitely assigned for the normal path in basedpyright1.40.2. No helper execution reaches reload_catalog() (original server.py:163), _DEFAULT_RESILIENCE, main/HTTP startup, LOG_PATH/DYNAMIC_CONFIG_PATH initialization, or any access to state/zen-catalog.json, logs/bridge.log, dynamic_config.json. No importlib transform, inline -c source, new module, suppressions, or frozen-slice changes. --serve-helper/attempt_id/port occupy fixed argv[3]/argv[4]/argv[5] after executable,-I,resolved script path. Startup reaper checks full untruncated ps -ww argv, exact script realpath and all six manifest arguments, UID/PID/lstart/PGID; no secrets/password/prompt in argv or lease. Mandatory clean-room GroupB oracle: empty temporary HOME with no ~/.opencode/bin/opencode; monkeypatch.setattr(server, \"OPENCODE_BIN\", str(fake_serve_bin)); actual parent -> helper_proc -> fake_serve_bin, not in-process mock. Parent uses subprocess.Popen([sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart], stdin=lifeline_r, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, close_fds=True, env=serve_env); helper uses subprocess.Popen([opencode_bin, \"serve\", \"--hostname\", \"127.0.0.1\", \"--port\", str(port)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=False, close_fds=True, env=serve_env). Prove child executable and all serve arguments exactly equal passed fake, same owned child_pgid, zero OPENCODE_BIN in serve_env, no broader whitelist. Spy/audit helper I/O plus early-exit structural assertions prove zero state/zen-catalog.json, logs/bridge.log, dynamic_config.json accesses and no sqlite3/http.client/http.server/zen_catalog loaded; reload_catalog/_DEFAULT_RESILIENCE and server globals absent. Reject every invalid six-argument length/value before spawn. Retain EOF/TERM/lease/reaper/listener proof fault oracles: this test does not replace them. Actual Stage3 test NOT_RUN; EVD-079 local minimal chain observed.",
++      "packet_locations": [
++        "/decisions/0/details/helper_cli_contract",
++        "/decisions/0/details/spawn",
++        "/decisions/0/details/crash_recovery/creation",
++        "/decisions/0/details/crash_recovery/startup_reaper",
++        "/threat_model/threats/0",
++        "/threat_model/threats/2",
++        "/verification_surface/4/clean_room_helper_oracle"
++      ],
++      "verification": "EVD-076/EVD-077/EVD-079 plus exact role-plan/packet/semantic/fingerprint checks; external a6/r15 Council pending; actual Stage3/H0..H9 NOT_RUN.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-001",
++      "pass": "a5",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated probes observed, actual Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A5-F-003"
++      ],
++      "changes_made": "Explicit --config on every Ruff call; formatter output must equal original candidate bytes and frozen guards; exact command passed normal/hostile user config.",
++      "packet_locations": [
++        "/verification_surface/3/command",
++        "/verification_surface/3/expected"
++      ],
++      "verification": "EVD-076/EVD-077/EVD-079 plus exact role-plan/packet/semantic/fingerprint checks; external a6/r15 Council pending; actual Stage3/H0..H9 NOT_RUN.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-002",
++      "pass": "a5",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated probes observed, actual Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A5-F-004"
++      ],
++      "changes_made": "Cycle6/version6.0/architect06 hash and allowlist; external a6/r15 pending, no panel verdict from author.",
++      "packet_locations": [
++        "/cycle",
++        "/packet_version",
++        "/role_plan",
++        "/scope/architect_write_allowlist",
++        "/approval/rationale",
++        "/summary",
++        "/independent_review/rationale",
++        "/handoff_state"
++      ],
++      "verification": "EVD-076/EVD-077/EVD-079 plus exact role-plan/packet/semantic/fingerprint checks; external a6/r15 Council pending; actual Stage3/H0..H9 NOT_RUN.",
++      "decision_required_human": false
++    }
++  ],
++  "rework_summary": {
++    "pass": "a5→a6",
++    "iteration": 6,
++    "resolved": [
++      "RW-001",
++      "RW-002",
++      "FU-001",
++      "FU-002"
++    ],
++    "memory": "Units MiB. EVD-079 final actual helper peak=31.718750; helper_estimate36.0 reserves 4.281250 for Stage3 helper code/lease/drain bookkeeping (design allowance, not live proof). Serve idle156.8 + helper36.0 =192.8; probe8.0 -> combined200.8; per_slot_ceiling216.0 gives15.2>=15 MiB for103KB prompts.6*216=1296 shared;1296+256=1552.0<=0.80*2048=1638.4; station headroom86.4.6slots/12waiters/cap3 unchanged. H3 NOT_RUN until live6parallel103KB×3; any actual slot>216 or total>1638.4 blocks H7 without waiver. Helpers/probes/load must be summed, not omitted.",
++    "helper_contract": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart]; helper_proc=subprocess.Popen([sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), str(OPENCODE_BIN), str(lease_dir), str(os.getpid()), parent_lstart], stdin=lifeline_r, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, close_fds=True, env=serve_env); child_pgid=helper_proc.pid; serve_proc=subprocess.Popen([opencode_bin, \"serve\", \"--hostname\", \"127.0.0.1\", \"--port\", str(port)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=False, close_fds=True, env=serve_env). args=sys.argv[2:] must have len(args)==6; parse attempt_id, port_text, opencode_bin, lease_dir_text, parent_pid_text, parent_lstart. Before any spawn or state I/O: reject length mismatch; require nonempty attempt_id/opencode_bin/lease_dir_text/parent_lstart, decimal integers port_text/parent_pid_text, 1<=int(port_text)<=65535 and int(parent_pid_text)>0. Convert lease_dir=Path(lease_dir_text) and parent_pid=int(parent_pid_text); use only the passed isolated lease directory. opencode_bin is the parent-resolved str(OPENCODE_BIN) after configuration/in-process monkeypatch, never a module constant read by helper. serve_env is the already sanitized parent environment, copied without OPENCODE_BIN; do not add OPENCODE_BIN or widen any OPENCODE_*/FAKE_* whitelist. Child stdout/stderr PIPEs must be continuously drained/forwarded by the bounded single-thread helper loop to helper stderr; helper stdout remains reserved for handshake, parent keeps exactly two drain lanes per slot. Drain-ready pipes concurrently with fd0 EOF/TERM and child poll, bounded per-tick work, no child pipe wait delaying EOF. Preserve lease/handshake/listener ownership and terminal_quiescence invariants. Early isolated dispatcher in server.py: top-level only minimal stdlib imports (json, os, signal, subprocess, sys, time, Path, select/resource as needed; existing typing import retained unchanged for the frozen no-new-Any gate) and typed def _run_serve_helper_cli(args: list[str]) -> int. Immediately afterwards: if sys.argv[1:2] == [\"--serve-helper\"]: raise SystemExit(_run_serve_helper_cli(sys.argv[2:])); else: import all normal-server-only modules, including http.client, sqlite3, from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, and after sys.path.insert(0, str(Path(__file__).resolve().parent)), static import zen_catalog as zc. Imports inside else prevent Ruff module-level E402; terminating SystemExit branch makes those names definitely assigned for the normal path in basedpyright1.40.2. No helper execution reaches reload_catalog() (original server.py:163), _DEFAULT_RESILIENCE, main/HTTP startup, LOG_PATH/DYNAMIC_CONFIG_PATH initialization, or any access to state/zen-catalog.json, logs/bridge.log, dynamic_config.json. No importlib transform, inline -c source, new module, suppressions, or frozen-slice changes. --serve-helper/attempt_id/port occupy fixed argv[3]/argv[4]/argv[5] after executable,-I,resolved script path. Startup reaper checks full untruncated ps -ww argv, exact script realpath and all six manifest arguments, UID/PID/lstart/PGID; no secrets/password/prompt in argv or lease.",
++    "ruff": "Explicit root/ruff.toml on every format/check plus exact write-copy byte equality/frozen checks; hostile XDG test observed pass.",
++    "budget": "arch_panel_to_architect5/5 unchanged; no further cycle authorized",
++    "council": "External a6/r15 pending; no Council PASS/ARCH_GATE_PASS issued",
++    "dissent": {
++      "seat": "realist",
++      "family": "Muse",
++      "round": "D1 panel/arch/r14",
++      "priority": "non-blocking",
++      "majority": "xAI+Anthropic 2/3 blocking",
++      "preserved": true,
++      "outcome": "RW-001 blocking as agreed by majority; dissent retained without reclassifying consensus."
++    },
++    "not_run": [
++      "actual Stage3",
++      "H0..H9",
++      "external a6/r15"
++    ]
++  }
+ }

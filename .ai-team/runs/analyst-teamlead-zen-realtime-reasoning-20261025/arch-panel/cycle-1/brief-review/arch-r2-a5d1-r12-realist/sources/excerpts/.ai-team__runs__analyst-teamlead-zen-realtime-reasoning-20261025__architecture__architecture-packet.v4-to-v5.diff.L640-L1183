@@ -1,0 +1,544 @@
+@@ -1295,3 +1627,4 @@
+             "VER-005"
+-          ]
++          ],
++          "helper_cli_contract": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv."
+         },
+@@ -1300,3 +1633,13 @@
+         "form_cancel": "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event.",
+-        "status_waiting": "[мост] Ожидание первого токена…\n"
++        "status_waiting": "[мост] Ожидание первого токена…\n",
++        "listener_takeover_negative": {
++          "status": "NOT_RUN; frozen future Stage3 oracle",
++          "cases": [
++            "listener is foreign PID in same child_pgid",
++            "listener is foreign PID in different PGID"
++          ],
++          "proof_before_auth": "listener_pid == serve_pid AND os.getpgid(listener_pid) == child_pgid AND helper_proc.poll() is None; exactly one lsof <=0.35s inside ready<=3.0s",
++          "expected": "Both cases:0 bytes Authorization/password/prompt and0 signals to foreign PGID; listener_pid!=serve_pid fails closed even when os.getpgid(listener_pid)==child_pgid. Cleanup signals only the confirmed own child_pgid and covers helper+serve+descendants. A different foreign PGID is never signalled; mere same-group membership is never sufficient proof to send credentials.",
++          "helper_cli": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv."
++        }
+       }
+@@ -1317,3 +1660,4 @@
+         "--port 0 + stdout port announcement considered: child picks own port but stable versioned stdout announcement not evidenced; would require new bounded parser/ownership proof. Choose parent-reserved ephemeral port + one lsof + persistent lanes; port race remains fail-closed with cap3.",
+-        "Two independent deliveries3a then3b considered per analyst§4. Stage3a: RC-2/RC-3 watchdog/status/killpg, baseline tests/O-EXIT/VER004 debt; Stage3b: serve behind selector. Chosen one feature branch and eventual MR to meet owner request «реалтайм размышления... доводи дело до мра», but implementation/verification staged3a→3b and Group A must pass without FakeServe. Separate future MR for3a possible only by owner scope decision; no new delivery promised here."
++        "Two independent deliveries3a then3b considered per analyst§4. Stage3a: RC-2/RC-3 watchdog/status/killpg, baseline tests/O-EXIT/VER004 debt; Stage3b: serve behind selector. Chosen one feature branch and eventual MR to meet owner request «реалтайм размышления... доводи дело до мра», but implementation/verification staged3a→3b and Group A must pass without FakeServe. Separate future MR for3a possible only by owner scope decision; no new delivery promised here.",
++        "opencode serve --stdio ([F-30], EVD-078): help confirms flag; observed as internal child IPC of opencode run, but no public external framing/message contract or OpenAPI v2.1.2 mapping is evidenced for it. Treat as undocumented internal CLI IPC, not a verified external SSE API; accepting it would require new framing/flow-control/permission/ownership evidence and parser, not scope justified by this delta. Keep selected Option C/A1 HTTP+SSE: actual reasoning/text deltas and HTTP lifecycle verified [F-17]..[F-22], schemas frozen EVD-062/073. No assertion that merely --stdio is broken; flag availability alone is insufficient."
+       ],
+@@ -1333,3 +1677,3 @@
+         "Per-attempt in-memory SQLite via OPENCODE_DB=:memory:, standard XDG_DATA_HOME preserves auth; isolated owned zen-serve-state-* dirs/lease removed after kill/reap. No shared DB opens/writes.",
+-        "Кодовый дефолт REALTIME_SERVE_ENABLED=false. Локальный runtime dynamic_config.json — stdlib-аналог dynamic_config.py/GigaRC автономного моста без внешних зависимостей: H0 отсутствие файла или boolean false удерживает run; H7 атомарно включает true только после успешных H3 (6 параллельных слотов RSS/FD с OPENCODE_DB=\":memory:\") и H6 (живая permission/tool изоляция на кандидате). Без исключений из канона, human waiver, новых env-переменных и правок start.sh; никакой записи dynamic_config.json в git."
++        "Кодовый дефолт REALTIME_SERVE_ENABLED=false. Локальный runtime dynamic_config.json — stdlib-аналог dynamic_config.py/GigaRC автономного моста без внешних зависимостей: H0 отсутствие файла или boolean false удерживает run; H7 атомарно включает true только после успешных H3 (6 параллельных слотов RSS/FD с OPENCODE_DB=\":memory:\") и H6 (живая permission/tool изоляция на кандидате). Без исключений из канона или human waiver; без новых env-переменных для самого фичефлага REALTIME_SERVE_ENABLED через dynamic_config.json и без правок start.sh/LaunchAgent; никакой записи dynamic_config.json в git. Новые диагностические/override env-переменные этого пакета: OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED, OPENCODE_ZEN_BRIDGE_TRANSPORT, OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY, OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE и watchdog overrides OPENCODE_ZEN_BRIDGE_FIRST_EVENT_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_FIRST_TOKEN_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S (AD-003). Сам рабочий фичефлаг REALTIME_SERVE_ENABLED переключается boolean в dynamic_config.json без новой env для переключения и без правки start.sh/LaunchAgent; кодовый default=false, включение H7 только после H3/H6."
+       ],
+@@ -1356,3 +1700,7 @@
+         "EVD-073",
+-        "EVD-074"
++        "EVD-074",
++        "EVD-075",
++        "EVD-076",
++        "EVD-077",
++        "EVD-078"
+       ],
+@@ -1371,3 +1719,3 @@
+             "default": false,
+-            "purpose": "Существующий env override: явные 0/false/no/off принудительно run; явные 1/true включают auto serve при native OPENCODE_BIN. Отсутствующий override использует boolean REALTIME_SERVE_ENABLED из DYNAMIC_CONFIG_PATH с кодовым default=false. Новые env не добавляются; start.sh заморожен."
++            "purpose": "Новый диагностический env override пакета: явные 0/false/no/off принудительно run; 1/true включают auto serve при native OPENCODE_BIN, не обходя security/disable/health guards. Без override используется boolean REALTIME_SERVE_ENABLED из DYNAMIC_CONFIG_PATH с кодовым default=false. Для рабочего переключения фичефлага env не требуется; start.sh/LaunchAgent заморожены."
+           },
+@@ -1380,3 +1728,3 @@
+             "default": "auto",
+-            "precedence": "1) TRANSPORT=run OR существующий env OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED в {0,false,no,off} OR disable-serve по OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE OR открытый sticky TTL _ServeHealth ->строго run. Явный env/run guard раньше stat/serve allocations; файл и health до subprocess. 2) TRANSPORT=serve ->serve, даже при кодовом default=false, но не обходит пункт1/security; ошибки явные, без silent run fallback. 3) TRANSPORT=auto ->serve iff runtime boolean REALTIME_SERVE_ENABLED=true (либо env=1/true) AND OPENCODE_BIN подтверждён native opencode (не текстовый #! fake, кроме явного test-only override). Иначе прежний run --format json. Невалидный TRANSPORT ->config error."
++            "precedence": "1) TRANSPORT=run OR новый диагностический env override OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED в {0,false,no,off} OR disable-serve по OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE OR открытый sticky TTL _ServeHealth ->строго run. Явный env/run guard раньше stat/serve allocations; файл и health до subprocess. 2) TRANSPORT=serve ->serve, даже при кодовом default=false, но не обходит пункт1/security; ошибки явные, без silent run fallback. 3) TRANSPORT=auto ->serve iff runtime boolean REALTIME_SERVE_ENABLED=true (либо env=1/true) AND OPENCODE_BIN подтверждён native opencode (не текстовый #! fake, кроме явного test-only override). Иначе прежний run --format json. Невалидный TRANSPORT ->config error."
+           },
+@@ -1396,3 +1744,3 @@
+           "SERVE_SESSION_SETUP_TIMEOUT_S": 2.0,
+-          "feature_flag_context": "Кодовый дефолт REALTIME_SERVE_ENABLED=false. Локальный runtime dynamic_config.json — stdlib-аналог dynamic_config.py/GigaRC автономного моста без внешних зависимостей: H0 отсутствие файла или boolean false удерживает run; H7 атомарно включает true только после успешных H3 (6 параллельных слотов RSS/FD с OPENCODE_DB=\":memory:\") и H6 (живая permission/tool изоляция на кандидате). Без исключений из канона, human waiver, новых env-переменных и правок start.sh; никакой записи dynamic_config.json в git.",
++          "feature_flag_context": "Кодовый дефолт REALTIME_SERVE_ENABLED=false. Локальный runtime dynamic_config.json — stdlib-аналог dynamic_config.py/GigaRC автономного моста без внешних зависимостей: H0 отсутствие файла или boolean false удерживает run; H7 атомарно включает true только после успешных H3 (6 параллельных слотов RSS/FD с OPENCODE_DB=\":memory:\") и H6 (живая permission/tool изоляция на кандидате). Без исключений из канона или human waiver; без новых env-переменных для самого фичефлага REALTIME_SERVE_ENABLED через dynamic_config.json и без правок start.sh/LaunchAgent; никакой записи dynamic_config.json в git. Новые диагностические/override env-переменные этого пакета: OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED, OPENCODE_ZEN_BRIDGE_TRANSPORT, OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY, OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE и watchdog overrides OPENCODE_ZEN_BRIDGE_FIRST_EVENT_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_FIRST_TOKEN_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S (AD-003). Сам рабочий фичефлаг REALTIME_SERVE_ENABLED переключается boolean в dynamic_config.json без новой env для переключения и без правки start.sh/LaunchAgent; кодовый default=false, включение H7 только после H3/H6.",
+           "DYNAMIC_CONFIG_PATH": {
+@@ -1407,3 +1755,3 @@
+         "auto_fake_compatibility": "В git-клоне bridges/opencode-zen-bridge/dynamic_config.json отсутствует и не коммитится; default=false гарантирует прежний run для всех378 fake-CLI baseline tests REQ-003/AC-004, без опоры на shebang/имя теста/FAKE_OC_MODE. При explicit enabled auto дополнительно cached executable path+mtime_ns+size/first bytes: shebang/text ->run без --help/--version/serve subprocess; native opencode ->serve. Явный test-only eligibility override допустим только fixtures; force serve для FakeServe сохраняет первый kill-switch приоритет и stdin=DEVNULL. Explicit env false/run ->zero serve UUID/password/queue/threads/probes/Popen до file stat; default=false selector допускает только O(1) config stat, без serve allocations. При смене executable cache key старые capability/health инвалидируются.",
+-        "spawn": "One tree only: server.py parent -> helper_proc -> serve_proc; no direct parent Popen(opencode serve). Each attempt spends one common _RequestAttempts token and spawn-rate admission (cap3), paired helper is bounded auxiliary, not a free model attempt. Unified limiter+startup gate deadline<=5.0s; fresh _serve_env(model_id) calls immutable _run_env once and rotates proxy once. Parent reserves127.0.0.1:0 until just before helper spawn; creates lifeline_r,lifeline_w=os.pipe(), close_fds=True. helper_proc=Popen([sys.executable,\"-I\",\"-c\",_SERVE_HELPER_CODE,...],stdin=lifeline_r,stdout=PIPE,stderr=PIPE,start_new_session=True,close_fds=True,env=serve_env); child_pgid=helper_proc.pid and os.getpgid(helper_proc.pid)==child_pgid. Parent closes lifeline_r after Popen even on exceptions; lifeline_w never inherited by helper/serve and is closed in parent finally. Helper installs TERM handler and arms EOF monitoring on stdin fd0 BEFORE serve Popen; already-latched EOF causes cleanup without spawn. Helper immediately atomically creates /tmp/opencode-zen-bridge-leases/lease-<attempt_id>.json with helper_pid,helper_lstart,pgid=child_pgid,port,start_ts,parent identity,temp ownership. It launches serve_proc=Popen([OPENCODE_BIN,\"serve\",\"--hostname\",\"127.0.0.1\",\"--port\",str(port)],stdin=DEVNULL,start_new_session=False,close_fds=True,env=serve_env,stdout=sys.stderr,stderr=sys.stderr). Thus os.getpgid(serve_proc.pid)==child_pgid: helper and serve+descendants share ONE group. Helper atomically/fsync publishes serve_pid and serve_lstart in lease BEFORE stdout handshake JSON {\"serve_pid\":...,\"pgid\":...}, before lsof/READY/Auth/prompt. Parent gets exact serve_pid/child_pgid from handshake; port-only identity never sufficient. EOF immediately after either Popen is latched throughout publish/handshake; bounded EOF loop<=0.25s runs before readiness and during prompt. Standard XDG_DATA_HOME/auth preserved, OPENCODE_DB=\":memory:\" on all3 env branches; sanitized serve_env, no prompt/password in argv/stdin/lease. Port race consumes common token and retries only after full cleanup within original ready<=3s; all lsof/identity probes included.",
++        "spawn": "One tree only: server.py parent -> helper_proc -> serve_proc; no direct parent Popen(opencode serve). Each attempt spends one common _RequestAttempts token and spawn-rate admission (cap3), paired helper is bounded auxiliary, not a free model attempt. Unified limiter+startup gate deadline<=5.0s; fresh _serve_env(model_id) calls immutable _run_env once and rotates proxy once. Parent reserves127.0.0.1:0 until just before helper spawn; creates lifeline_r,lifeline_w=os.pipe(), close_fds=True. helper_proc=Popen([sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...],stdin=lifeline_r,stdout=PIPE,stderr=PIPE,start_new_session=True,close_fds=True,env=serve_env); child_pgid=helper_proc.pid and os.getpgid(helper_proc.pid)==child_pgid. Parent closes lifeline_r after Popen even on exceptions; lifeline_w never inherited by helper/serve and is closed in parent finally. Helper installs TERM handler and arms EOF monitoring on stdin fd0 BEFORE serve Popen; already-latched EOF causes cleanup without spawn. Helper immediately atomically creates /tmp/opencode-zen-bridge-leases/lease-<attempt_id>.json with helper_pid,helper_lstart,pgid=child_pgid,port,start_ts,parent identity,temp ownership. It launches serve_proc=Popen([OPENCODE_BIN,\"serve\",\"--hostname\",\"127.0.0.1\",\"--port\",str(port)],stdin=DEVNULL,start_new_session=False,close_fds=True,env=serve_env,stdout=sys.stderr,stderr=sys.stderr). Thus os.getpgid(serve_proc.pid)==child_pgid: helper and serve+descendants share ONE group. Helper atomically/fsync publishes serve_pid and serve_lstart in lease BEFORE stdout handshake JSON {\"serve_pid\":...,\"pgid\":...}, before lsof/READY/Auth/prompt. Parent gets exact serve_pid/child_pgid from handshake; port-only identity never sufficient. EOF immediately after either Popen is latched throughout publish/handshake; bounded EOF loop<=0.25s runs before readiness and during prompt. Standard XDG_DATA_HOME/auth preserved, OPENCODE_DB=\":memory:\" on all3 env branches; sanitized serve_env, no prompt/password in argv/stdin/lease. Port race consumes common token and retries only after full cleanup within original ready<=3s; all lsof/identity probes included. Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv.",
+         "startup": "SERVE_READY_TIMEOUT_S=3.0s (ready_budget_s=3.0): после owner proof лёгкий authenticated GET /api/session/active, HTTP200 + $.data object map of active sessions (empty={}); не качать 281KB /openapi.json на каждом spawn. Control I/O slices<=.25s, всего<=3 readiness TCP probes, remaining request deadline/cancel всегда проверяются. Child EOF/no listener/incompatible protocol -> ServeUnavailable. Пароль secrets per spawn в OPENCODE_SERVER_PASSWORD ПОСЛЕ whitelist, Basic opencode:<password>, никогда в argv/URL/log. stdout/stderr bounded drain+redact. HTTP на loopback напрямую без proxy/redirects. Readiness не устанавливает first_event_ms и не сбрасывает first_event/token часы.",
+@@ -1746,6 +2094,9 @@
+           },
+-          "frozen_fixture_sha256": "e7871cd2910fa8458ec3efd90e254cc51fcef97300e6541a7edd1cce6d14a7a3",
++          "frozen_fixture_sha256": "991445656b459e1a7c50b353d5bf4915a18319d964cabd2f92726e915b708e4c",
+           "form.created / form.cancelled": "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event.",
+-          "fixture_digest_serialization": "UTF-8 json.dumps(frozen_v2_1_2_fixtures,ensure_ascii=False,sort_keys=True,separators=(\",\",\":\")); no trailing LF",
+-          "fixture_digest_revision_a3": "Wire and canonical fixture data unchanged from v3; only negative-mutation/safety-order metadata amended for PANEL-A3-F-004. Source Form.Info required title preserved. Recompute documented full-fixture serialization digest accordingly."
++          "fixture_digest_serialization": "pairs = {name: {\"wire\": fixture[\"wire\"], \"canonical\": fixture[\"canonical\"]} for name, fixture in frozen_v2_1_2_fixtures.items()}; frozen_fixture_sha256 = hashlib.sha256(json.dumps(pairs, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")).hexdigest(). Default ensure_ascii=True; UTF-8; no trailing LF; no field_paths/notes/negative_mutations/safety_order in pairs.",
++          "fixture_digest_revision_a3": "Historical a3 amended editorial negative_mutations/safety_order only, leaving wire/canonical unchanged. v5 supersedes the old full-fixture digest serialization with separate protocol-pair and metadata digests; source title remains required.",
++          "safety_order": "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event.",
++          "frozen_fixture_metadata_sha256": "4b8972a47238ed700c615b2f236e95a9397897404a6cd78ecd5723c0668356e4",
++          "fixture_metadata_digest_serialization": "metadata = {\"fixtures\": {name: {key: fixture[key] for key in (\"negative_mutations\", \"safety_order\") if key in fixture} for name, fixture in frozen_v2_1_2_fixtures.items()}, \"safety_order\": safety_order}; frozen_fixture_metadata_sha256 = hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")).hexdigest(). Default ensure_ascii=True; UTF-8; no trailing LF."
+         },
+@@ -1905,3 +2256,3 @@
+         },
+-        "typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. zc = importlib.import_module(\"zen_catalog\") with import importlib replaces static relative import; guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter.",
++        "typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. Preserve existing static import zen_catalog as zc at original server.py:67 (the sole inherited E402 site); guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter. Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv. EVD-076 static-import server warningCount564/reportAny125, EVD-077 full local block exit0 with catalog8/8; source init→static transition is probe-only. Actual Stage3 NOT_RUN. Write-mode range formatting must run on disposable candidate copy and assert_frozen(copy), never write product during architecture probe.",
+         "transport_health": {
+@@ -2006,5 +2357,5 @@
+           ],
+-          "creation": "Parent reserved ownership manifest contains attempt/temp inode before helper Popen; helper immediately creates/updates lease-<attempt_id>.json with helper_pid,helper_lstart,pgid=helper_pid,port,start_ts. Install SIGTERM handler/EOF watcher first; if parent already died EOF is latched, do not launch serve. serve_proc=Popen(...,stdin=DEVNULL,start_new_session=False,env=serve_env) in same child_pgid; atomic fsync+replace adds serve_pid and serve_lstart BEFORE stdout handshake {\"serve_pid\":...,\"pgid\":...}, then parent lsof/READY/Auth. Check EOF before serve Popen, immediately after it, before/after lease publication/handshake and in <=0.25s monitor loop. No gap depends on parent surviving to publish child identity; helper owns serve Popen->lease publication. helper_proc denotes parent Popen object only; serve_proc denotes helper Popen object only.",
++          "creation": "Parent reserved ownership manifest contains attempt/temp inode before helper Popen; helper immediately creates/updates lease-<attempt_id>.json with helper_pid,helper_lstart,pgid=helper_pid,port,start_ts. Install SIGTERM handler/EOF watcher first; if parent already died EOF is latched, do not launch serve. serve_proc=Popen(...,stdin=DEVNULL,start_new_session=False,env=serve_env) in same child_pgid; atomic fsync+replace adds serve_pid and serve_lstart BEFORE stdout handshake {\"serve_pid\":...,\"pgid\":...}, then parent lsof/READY/Auth. Check EOF before serve Popen, immediately after it, before/after lease publication/handshake and in <=0.25s monitor loop. No gap depends on parent surviving to publish child identity; helper owns serve Popen->lease publication. helper_proc denotes parent Popen object only; serve_proc denotes helper Popen object only. Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv.",
+           "parent_death": "EOF on helper stdin lifeline_r (parent closes lifeline_w or SIGKILL at ANY point including helper Popen->helper entry, serve Popen->lease write, handshake->READY, active prompt) triggers immediate own-group shutdown; never wait first-event/token/watchdog. helper SIGTERM handler latches shutdown without recursively exiting, so os.killpg(child_pgid,SIGTERM) reaches serve/descendants while helper remains to reap/clean. Grace<=0.50s; normal parent alive escalates os.killpg(child_pgid,SIGKILL) and performs post-kill cleanup outside group. For parent-dead helper escalation, use explicit terminal_quiescence below: never claim a finally after SIGKILL-to-self. Parent identity checks are additional diagnostics, EOF is primary death signal; live parent is never time-killed. Serve exit immediately triggers same cleanup and helper terminates with same serve exit code/signal (not a healthy lingering helper); poll guard checks helper_proc only.",
+-          "startup_reaper": "Before bridge accepts any traffic, even disabled serve: inspect only valid owner-UID leases. Matching live parent PID+parent_start_ts ->skip. Dead parent: validate helper_pid/helper_lstart/pgid and/or serve_pid/serve_lstart using exact uid,pgid,binary path/command/port; helper command is sys.executable -I -c _SERVE_HELPER_CODE with attempt marker, never opencode listener. When serve still exists require os.getpgid(serve_pid)==stored child_pgid; pid reuse/mismatched lstart/foreign UID/PGID/no manifest/symlink ->no signal, redacted quarantine. While a verified group anchor exists recheck before TERM/KILL; do not infer ownership merely from port/name. Reap/remove only recorded own inode-safe temp root after group absent; reserved manifests with no helper/serve may clean only their proven owned root. No name-wide kill or scanning outside registry.",
++          "startup_reaper": "Before bridge accepts any traffic, even disabled serve: inspect only valid owner-UID leases. Matching live parent PID+parent_start_ts ->skip. Dead parent: validate helper_pid/helper_lstart/pgid and/or serve_pid/serve_lstart using exact uid,pgid,binary path/command/port; helper command is sys.executable -I <resolved server.py> --serve-helper <attempt_id> <port> ... with exact early argv-position attempt marker and untruncated ps -ww, never opencode listener. When serve still exists require os.getpgid(serve_pid)==stored child_pgid; pid reuse/mismatched lstart/foreign UID/PGID/no manifest/symlink ->no signal, redacted quarantine. While a verified group anchor exists recheck before TERM/KILL; do not infer ownership merely from port/name. Reap/remove only recorded own inode-safe temp root after group absent; reserved manifests with no helper/serve may clean only their proven owned root. No name-wide kill or scanning outside registry.",
+           "directory_cleanup": "Parent-alive cleanup verifies helper+serve/group gone before rmtree; parent-dead helper uses terminal_quiescence (all residual writers stopped, helper owns PGID, root/inode/UID verified) before final self-including KILL. This narrowly defined terminal path is the only cleanup-before-group-absence path; no deletion while unquiesced child can recreate files. Only recorded zen-serve-state-* local root resolved under tempfile.gettempdir, correct uid+inode/no symlink. Foreign roots never removed; no ignore_errors; failed cleanup retains manifest for startup reaper.",
+@@ -2172,3 +2523,4 @@
+             "VER-005"
+-          ]
++          ],
++          "helper_cli_contract": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv."
+         }
+@@ -2280,3 +2632,4 @@
+           "env_prefix": "OPENCODE_ZEN_BRIDGE_",
+-          "validation": "положительное finite число; недопустимое -> ошибка старта, не бесконечный timeout"
++          "validation": "положительное finite число; недопустимое -> ошибка старта, не бесконечный timeout",
++          "env_classification": "Новые диагностические/override env-переменные этого пакета: OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED, OPENCODE_ZEN_BRIDGE_TRANSPORT, OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY, OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE и watchdog overrides OPENCODE_ZEN_BRIDGE_FIRST_EVENT_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_FIRST_TOKEN_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S (AD-003). Сам рабочий фичефлаг REALTIME_SERVE_ENABLED переключается boolean в dynamic_config.json без новой env для переключения и без правки start.sh/LaunchAgent; кодовый default=false, включение H7 только после H3/H6."
+         },
+@@ -2687,3 +3040,3 @@
+       "impact": "medium",
+-      "mitigation": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. zc = importlib.import_module(\"zen_catalog\") with import importlib replaces static relative import; guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter.",
++      "mitigation": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. Preserve existing static import zen_catalog as zc at original server.py:67 (the sole inherited E402 site); guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter. Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv. EVD-076 static-import server warningCount564/reportAny125, EVD-077 full local block exit0 with catalog8/8; source init→static transition is probe-only. Actual Stage3 NOT_RUN. Write-mode range formatting must run on disposable candidate copy and assert_frozen(copy), never write product during architecture probe.",
+       "verification_ids": [
+@@ -2752,4 +3105,4 @@
+         "id": "THREAT-001",
+-        "scenario": "Подмена локального serve listener/вывод случайного пароля в stdout",
+-        "mitigation": "Parent bind loopback0/getport/release-before-Popen explicit port/newPGID; до Auth/prompt lsof listener PID->os.getpgid==childPGID, bounded<=.25s внутри ready3s. Foreign listener/owner unavailable ->zero secret/prompt bytes, cleanup own child only, bounded new port retry/cap3. Пароль secrets env до spawn, stdout redact, no redirects/proxy. VER-005 deliberate port takeover negative test.",
++        "scenario": "Подмена локального serve listener и утечка пароля/промпта или сигнал чужому процессу",
++        "mitigation": "Родитель резервирует 127.0.0.1:0 и запускает только helper_proc с argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...], start_new_session=True; child_pgid=helper_proc.pid. Helper устанавливает EOF/TERM надзор до spawn, атомарно публикует lease и запускает serve_proc с start_new_session=False в той же группе child_pgid; публикует serve_pid/serve_lstart до handshake/READY. --serve-helper <attempt_id> находится в первых аргументах ps -ww argv. До отправки любых Authorization/пароля или prompt обязательны одновременно listener_pid == serve_pid, os.getpgid(listener_pid) == child_pgid и helper_proc.poll() is None; ровно один lsof с бюджетом <=0.35s внутри общего ready<=3.0s. На mismatch/timeout/неоднозначность 0 байт Authorization/пароля/prompt, fail-closed, retry только внутри исходного ready/cap3 после cleanup. Cleanup os.killpg(child_pgid, SIGTERM→SIGKILL) охватывает подтверждённые собственные helper + serve + потомков, с lifeline/reap/root+lease cleanup по crash_recovery; чужой PID в той же или иной группе получает 0 байт пароля и 0 сигналов чужому PGID. Секреты только sanitized env, без argv/lease/log; no redirects/proxy. Normal Keep-Alive control path не вызывает повторный lsof; отдельный explicit reconnect имеет собственный proof, как listener_ownership.",
+         "verification_ids": [
+@@ -2760,4 +3113,4 @@
+         "id": "THREAT-002",
+-        "scenario": "Модель выдаёт builtin bash/write/edit, пока DSH думает, что это только предложение",
+-        "mitigation": "Default OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY=ask_reject: _serve_env(model_id) вызывает _run_env(model_id) ровно один раз, копирует/merge scoped OPENCODE_CONFIG_CONTENT permission={\"*\":\"ask\"} с сохранением provider/options/OPENCODE_MODELS_PATH, session permissions=[{action:\"*\",resource:\"*\",effect:\"ask\"}]. _run_env(model_id) оставить ПОБАЙТОВО неизменным, tests/test_run_env.py не менять. На wire permission.asked (логическая группа session.permission.requested) немедленно POST /api/session/{id}/permission/{data.id}/reply {decision:\"reject\"}; никогда allow/once/always. Reply через bounded control lane, не ожидает completion prompt POST, HTTP budget<=.25s и cancel/deadline; failure -> явный security error+cleanup, без деградации в разрешение. Env=deny выставляет config permission={\"*\":\"deny\"} и session effect=deny, без пересборки; если всё же пришёл ask, только reject. Неподдержанная policy/отсутствие safe permission capability -> fail-closed. Нет автоматического deny↔ask_reject switching даже до prompt: разница позиций R1 закрыта явным выбором безопасного селектора. После принятия prompt 401/403 никогда не дают run fallback. EVD-050 + F-08 объясняют Zen403 с deny; FakeServe проверяет оба режима и byte hash _run_env, реальную Zen совместимость/запрещённую запись доказывает только H6. _run_env does NOT sanitize every branch; _serve_env must apply serve_env_sanitization to all3 branches. Mandatory form.created→cancel and reject/cancel→immediate interrupt single_turn_control; JSON args fallback input.ended.data.text when called absent; no second-step output. {\"trigger\": \"permission.asked on own session or form.created.data.form.sessionID on own session. Immediately latch step_closed/output barrier BEFORE sending any control reply; retain accumulated raw/tool arguments and suppress every later-step text/reasoning.\", \"order\": [\"Do not wait for pending prompt HTTP response or step.ended. Snapshot already received complete tool args/call ids; continue only bounded same-step argument finalization, never wait for Step2.\", \"Use idle Keep-Alive control lane: permission reply decision=reject OR form cancel within0.25s of validated event, including scheduling+I/O; no lsof/reconnect on this path.\", \"Immediately POST /api/session/{id}/interrupt (<=0.10s) after rejection/cancellation; single-turn guard suppresses Step2 even if server races interrupt. On any control error fail-closed and group kill.\", \"If mapped complete native call available, return it exactly once to DSH with finish_reason=tool_calls; otherwise apply existing _incomplete_step_signal/unmapped-tool recovery under same cap3/retry budgets. Preserve raw model data/provenance.\", \"Final cleanup DELETE/close/kill/reap. Avoid duplicate interrupt if already succeeded; cancellation notifications never release Step2 barrier.\"], \"latency\": \"permission/form first reply<=0.25s; immediate subsequent interrupt<=0.10s is distinct control cost within model-execution phase. Final cleanup API aggregate<=0.20s; no new lsof. Only own session/PGID.\", \"verification_ids\": [\"VER-005\"]}",
++        "scenario": "Исполнение builtin tools или Step2 до отмены формы/отказа инструмента DSH",
++        "mitigation": "Default OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY=ask_reject; _serve_env вызывает неизменный _run_env ровно один раз и sanitizes все3 ветки, permission={\"*\":\"ask\"}, session effect=ask; никогда allow/once/always. permission.asked своей сессии ->single-turn barrier, decision=reject<=0.25s, затем interrupt<=0.10s, не ждать prompt completion. deny selectable до attempt, никогда auto-switch/разрешение или silent run fallback после delivered; unsupported capability/policy ->fail-closed. For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event. Полный single_turn_control.order авторитетен: raw tool args/input.ended fallback сохраняются, готовый mapped call возвращается ровно один раз finish_reason=tool_calls, иначе существующее recovery в cap3; никакого Step2. _run_env, tests/test_run_env.py побайтно неизменны. EVD-050 + [F-08] обосновывают выбор ask_reject; FakeServe не доказывает живую Zen-совместимость или запрет записи, это H6 NOT_RUN.",
+         "verification_ids": [
+@@ -2793,7 +3146,7 @@
+   "evolution": {
+-    "compatibility": "Existing public endpoints/schema/Google unchanged; run fallback retained. OPENCODE_DB=:memory: и standard auth/models/config сохранены. Кодовый default=false и отсутствие runtime JSON в git гарантируют378baseline по run; native auto включается атомарным runtime true только на H7 после H3/H6, без start.sh/restart/new env.",
++    "compatibility": "Existing public endpoints/schema/Google unchanged; run fallback retained. OPENCODE_DB=:memory: и standard auth/models/config сохранены. Кодовый default=false и отсутствие runtime JSON в git гарантируют378baseline по run; native auto включается атомарным runtime true только на H7 после H3/H6, без start.sh/restart и без новых env-переменных для самого фичефлага; диагностические/override env пакета перечислены отдельно в AD-001/AD-003.",
+     "migration": "No product DB migration. serve child SQLite memory only; never read/write/migrate shared opencode.db/opencode-next.db. Owned zen-serve-state-* dirs and UID registry leases are transient control state removed normally/following crash-safe reaper. Standard XDG_DATA_HOME/auth.json kept read-only.",
+-    "rollout": "Все H0..H9 NOT_RUN, external a4 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS. H4 uses ONLY cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py, then SHA-256 read-back. Never rsync --delete or directory sync. Preserve live dynamic_config.json and disable-serve byte-for-byte (or their recorded absence) from H0 snapshot AFTER any intentional H0 false-write; H0/H4 read back existence/bytes/mode after cp. H5 restarts only after that preservation check; no copy/delete/overwrite of either runtime file. Default=false and true only H7 after H3/H6, no new owner waiver required.",
++    "rollout": "Все H0..H9 NOT_RUN, external a5/r9 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS. H4 uses ONLY cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py, then SHA-256 read-back. Never rsync --delete or directory sync. Preserve live dynamic_config.json and disable-serve byte-for-byte (or their recorded absence) from H0 snapshot AFTER any intentional H0 false-write; H0/H4 read back existence/bytes/mode after cp. H5 restarts only after that preservation check; no copy/delete/overwrite of either runtime file. Default=false and true only H7 after H3/H6, no new owner waiver required.",
+     "rollback": "Runtime kill-switch без рестарта: атомарно tempfile+os.replace mode0600 записать {\"REALTIME_SERVE_ENABLED\":false} в ~/.dsh/bridges/opencode-zen-bridge/dynamic_config.json; либо удалить файл (default=false), либо создать disable-serve. Следующий auto запрос run без serve probes/allocations. Цель selector overhead <1мс проверяется VER-005/H9; это не измеренная гарантия задержки файловой записи/планировщика. Существующий explicit env=true имеет заданный override приоритет: в таком диагностическом процессе использовать disable-file для безусловного runtime rollback; production H0/H7 требуют auto без override. Env false/no/off/0 или TRANSPORT=run также force run, но изменение env живого процесса требует restart. In-flight leases drain/cancel, DELIVERED prompt не повторяется на run. H9 проверяет same PID, transport_history и повторные/параллельные вызовы; kickstart-k отдельно с config false/absent и identity-verified owned reaper. Stage2 ничего не деплоит. Все H0..H9 NOT_RUN.",
+-    "feature_flag": "Кодовый дефолт REALTIME_SERVE_ENABLED=false. Локальный runtime dynamic_config.json — stdlib-аналог dynamic_config.py/GigaRC автономного моста без внешних зависимостей: H0 отсутствие файла или boolean false удерживает run; H7 атомарно включает true только после успешных H3 (6 параллельных слотов RSS/FD с OPENCODE_DB=\":memory:\") и H6 (живая permission/tool изоляция на кандидате). Без исключений из канона, human waiver, новых env-переменных и правок start.sh; никакой записи dynamic_config.json в git.",
++    "feature_flag": "Кодовый дефолт REALTIME_SERVE_ENABLED=false. Локальный runtime dynamic_config.json — stdlib-аналог dynamic_config.py/GigaRC автономного моста без внешних зависимостей: H0 отсутствие файла или boolean false удерживает run; H7 атомарно включает true только после успешных H3 (6 параллельных слотов RSS/FD с OPENCODE_DB=\":memory:\") и H6 (живая permission/tool изоляция на кандидате). Без исключений из канона или human waiver; без новых env-переменных для самого фичефлага REALTIME_SERVE_ENABLED через dynamic_config.json и без правок start.sh/LaunchAgent; никакой записи dynamic_config.json в git. Новые диагностические/override env-переменные этого пакета: OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED, OPENCODE_ZEN_BRIDGE_TRANSPORT, OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY, OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE и watchdog overrides OPENCODE_ZEN_BRIDGE_FIRST_EVENT_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_FIRST_TOKEN_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S (AD-003). Сам рабочий фичефлаг REALTIME_SERVE_ENABLED переключается boolean в dynamic_config.json без новой env для переключения и без правки start.sh/LaunchAgent; кодовый default=false, включение H7 только после H3/H6.",
+     "H3_rollout_gate": {
+@@ -2845,3 +3198,3 @@
+     "evidence_ref": null,
+-    "rationale": "FU-007 закрыт без исключений из канона: кодовый дефолт REALTIME_SERVE_ENABLED переведён в false, а включение на :9883 выполняется через локальный runtime dynamic_config.json (stat mtime_ns кэш без рестарта и без правки start.sh) строго на шаге H7 после прохождения H3/H6. Все AD обратимы (two-way); status=APPROVED означает валидированный архитектурный пакет-кандидат для Архитектурного Совета a3 (r4), а не вердикт Совета."
++    "rationale": "FU-007 закрыт без исключений из канона: кодовый дефолт REALTIME_SERVE_ENABLED переведён в false, а включение на :9883 выполняется через локальный runtime dynamic_config.json (stat mtime_ns кэш без рестарта и без правки start.sh) строго на шаге H7 после прохождения H3/H6. Все AD обратимы (two-way); status=APPROVED означает валидированный архитектурный пакет-кандидат для Архитектурного Совета a5 (r9), а не вердикт Совета."
+   },
+@@ -2852,3 +3205,3 @@
+     "evidence_ref": null,
+-    "rationale": "S2 schema NOT_REQUIRED is unchanged; downstream external a4 Council/proof mandatory. Author issues no Council PASS. a3 NEEDS_WORK is input history."
++    "rationale": "S2 schema NOT_REQUIRED is unchanged; downstream external a5/r9 Council/proof mandatory. Author issues no Council PASS. a4 NEEDS_WORK is input history; revision v5 is internally ready for external re-review only."
+   },
+@@ -2901,3 +3254,3 @@
+     "wire_fixture": "Six frozen source-schema families, canonical digest serialization explicit; five original family literals retained and nested form family added, adversarial mutations independent adapter/FakeServe.",
+-    "strict_typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. zc = importlib.import_module(\"zen_catalog\") with import importlib replaces static relative import; guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter."
++    "strict_typing": "Decode wire JSON as object with isinstance narrowing/TypedDict; new code no Any/casts-to-Any/type-ignore. VER-004 uses isolated bridge cwd + temporary include/extraPaths: all3 errorCount==0, new test0diagnostics, server Any<=125each/nonAny per-rule and total<=720, step<=194; changed legacy code0reportAny/reportExplicitAny/reportUnusedCallResult. Preserve public module attribute server.CATALOG_SOURCE and HTTP catalog_source: module-level CATALOG_SOURCE = \"static\", never rename it or external test references. Replace reload_catalog global CATALOG_SOURCE/reassignment with typed def _set_catalog_source(source: str) -> None: globals()[\"CATALOG_SOURCE\"] = source; keep only _catalog_mtime/_catalog_ids in reload_catalog global declaration. Preserve existing static import zen_catalog as zc at original server.py:67 (the sole inherited E402 site); guard proc is not None before both final stream .returncode reads. EVD-076 observed errorCount0 without # type: ignore; tests/test_catalog_mode.py:64,93 unchanged,8tests PASS on copy. coder_target_files remains exactly3; no config/dependency/new module. Full all3 Stage3 gate NOT_RUN. Ruff==0.17.2 legacy ranges use only --range={start}:1-{end}:999; reject any old/new diff hunk intersecting _run_env/_stream_google_sse/_execute_google_once and check their literal raw hashes before and after formatter. Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv. EVD-076 static-import server warningCount564/reportAny125, EVD-077 full local block exit0 with catalog8/8; source init→static transition is probe-only. Actual Stage3 NOT_RUN. Write-mode range formatting must run on disposable candidate copy and assert_frozen(copy), never write product during architecture probe."
+   },
+@@ -3484,3 +3837,4 @@
+         "VER-005"
+-      ]
++      ],
++      "helper_cli_contract": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv."
+     },
+@@ -3796,3 +4150,3 @@
+   "handoff_state": {
+-    "architecture_contract": "Cycle4 v4 APPROVED architecture candidate for external a4,3RW+6FU a3 delta; author does not issue Council verdict or ARCH_GATE_PASS.",
++    "architecture_contract": "Cycle5 v5 APPROVED architecture candidate for external a5/r9,4RW+6FU a4 delta; author does not issue Council verdict or ARCH_GATE_PASS.",
+     "implementation_tests": "NOT_RUN; Stage3a GroupA then3b GroupB and independent VER001..005 required.",
+@@ -3800,5 +4154,5 @@
+     "pending_orchestrator_actions": [
+-      "External a4 council on frozen v3->v4 delta with launch_seat/verify_panel_proof; author is not judge; a3 NEEDS_WORK remains history.",
+-      "Validate finalized cycle4 packet/role plan SHA and product fingerprint,then record council proof outside three-file Architect allowlist.",
+-      "Only after external ARCH_PANEL_PASS: Stage3a/3b clean-room VER001..005 and H0..H9;H4 cp only server.py with H0/H4 runtime preservation,enable H7 only after H3/H6."
++      "External a5/r9 council on frozen v4→v5 delta with launch_seat/verify_panel_proof; author is not judge; a4 NEEDS_WORK stays historical.",
++      "Validate finalized cycle5 packet/role-plan SHA and product fingerprint, then record council proof outside three-file Architect allowlist.",
++      "Only after external ARCH_PANEL_PASS: Stage3a/3b actual VER001..005 and H0..H9; H4 cp only server.py preserving H0/H4 runtime; enable H7 only after H3/H6."
+     ]
+@@ -3885,3 +4239,3 @@
+     ],
+-    "rollout_boundary": "Все H0..H9 NOT_RUN, external a4 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS. H4 uses ONLY cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py, then SHA-256 read-back. Never rsync --delete or directory sync. Preserve live dynamic_config.json and disable-serve byte-for-byte (or their recorded absence) from H0 snapshot AFTER any intentional H0 false-write; H0/H4 read back existence/bytes/mode after cp. H5 restarts only after that preservation check; no copy/delete/overwrite of either runtime file. Default=false and true only H7 after H3/H6, no new owner waiver required."
++    "rollout_boundary": "Все H0..H9 NOT_RUN, external a5/r9 ACCEPT+panel proof и независимые VER gates обязательны; Architect не выполняет rollout. H0 BLOCKING до sync/restart: проверить текущий env не force serve/true, отсутствие production dynamic_config.json либо boolean false; при прежнем enabled состоянии атомарно записать false, проверить read-back; дополнительный disable-serve разрешён. Снять старые PID/start/lease identity. H4 sync/read-back server.py hash; H5 launchctl kickstart с config absent/false: сразу dark run без окна serve; startup reaper0 старых собственных serve/helper/temp roots, чужие процессы untouched. На отдельном кандидате test-local dynamic_config.json=true и отдельный disable-file path: provider-free info/active, H3 реальные6parallel RSS/FD+OPENCODE_DB=:memory:, H6 live permission/tool isolation, Stage3a/A затем3b/B. На production до H7 run. H7 ТОЛЬКО после PASS H3 и H6: при env auto без explicit false и закрытом TTL подготовить tempfile в ~/.dsh/bridges/opencode-zen-bridge/,0600, записать {\"REALTIME_SERVE_ENABLED\":true}, os.replace в dynamic_config.json; убедиться дополнительный disable-serve отсутствует. Следующий native auto запрос на :9883 использует serve без правки start.sh и без повторного рестарта LaunchAgent. H8 повторяет живые проверки рабочего чата, H9 проверяет runtime false/true и disable-file same PID, отдельно kickstart-k crash recovery. Никакой выдачи design/NOT_RUN за runtime PASS. H4 uses ONLY cp bridges/opencode-zen-bridge/server.py ~/.dsh/bridges/opencode-zen-bridge/server.py, then SHA-256 read-back. Never rsync --delete or directory sync. Preserve live dynamic_config.json and disable-serve byte-for-byte (or their recorded absence) from H0 snapshot AFTER any intentional H0 false-write; H0/H4 read back existence/bytes/mode after cp. H5 restarts only after that preservation check; no copy/delete/overwrite of either runtime file. Default=false and true only H7 after H3/H6, no new owner waiver required."
+   },
+@@ -3893,10 +4247,10 @@
+     "decisions": "4/4 two-way with >=2 genuine alternatives",
+-    "evidence_refs": "71 EVD records,49analystfacts;EVD-075/076 empirically observed isolated current-source copies,not Stage3/live proof;gap065..069 preserved.",
++    "evidence_refs": "73 EVD records,49 analyst facts; EVD-075 real4021line closed/write/hash negatives;076 server564warnings/reportAny125/errors0;077 full exact local blockrc0/catalog8/8;078 readonly help. Synthetic helper/newfile probe is not Stage3/live proof; gap065..069 preserved.",
+     "status_protocol": "3 templates begin[мост]/endLF; при model unterminated line весь дополнительный leading LF synthetic, template bytes модели не менять.",
+     "schema_vs_semantics": "Installed packet validator does not inspect high_load_envelope/resilience_gates/legacy checks; above explicit semantic assertions supplement it. Neither schema nor design assertions prove runtime passes.",
+-    "VER_004_syntax": "ast.parse required; closed --range={start}:1-{end}:999 plus old/new frozen hunk rejection and literal raw hashes,Google zero diff. EVD-075 observed positive/negative probe;EVD-076 onefiletype/catalog observed;full Stage3 all3/newfile NOT_RUN.",
+-    "rework_coverage": "a3 exactly3RW+6FU=9entries;source PANEL-A3-F-001..008/F-010 once,duplicate009 absorbedRW003,011 excludedinvalid. a1/a2 sections retained byte-equivalent JSON values. Alias only current a3.",
++    "VER_004_syntax": "ast.parse; exact block locally observedrc0 on typed helper skeleton+synthetic newfile, not Stage3. Closed range check+actual writes on temp candidate copy; literal hash and old/new frozen hunk gates. Future Stage3 all3 NOT_RUN.",
++    "rework_coverage": "a4 exactly4RW+6FU=10 entries; findings PANEL-A4-F-001..011,006 duplicate absorbedRW003. Valid JSON Pointers include both THREAT-001/002. a1/a2/a3 histories retained exact JSON values; alias current a4 only.",
+     "memory_units": "All46 canonical keys+field_sources+field_units; memory2048/256/1152 MiB;1408<=1638.4MiB",
+     "aux_budget": "15+3*(5+3+2+1.2)+3=51.6<=54,headroom2.4; old independent5+5/.5/.2 absent",
+-    "wire_evidence": "Sixfamilies, source Form.Info wrapper verified; delta/token/permission old literals unchanged; new digest calculated deterministically; candidate runtime NOT_RUN.",
++    "wire_evidence": "Six source-schema wire/canonical pairs identical to v4; protocol fingerprint isolates pairs from editorial metadata, separate metadata digest; sensitivity/stability self-checks; source Form.Info title still required; runtime NOT_RUN.",
+     "resource_topology": "One helper session/serve samegroup:55parentadmittedthreads,114FD<=128,19processpeak,344aggregateFD;RSS156.8+12+8~176.8<=192MiBslot,full1408<=1638.4design;actualH3 mandatory."
+@@ -3961,8 +4315,8 @@
+   "rework_source": {
+-    "path": "handoff/panel-rework-brief-arch-a3.json",
+-    "sha256": "65d79bf43820da90b77b49e6f90960f0b8b9af985046cafa00ce2da9d10ba14d",
+-    "base_packet_path": "architecture/architecture-packet.v3.json",
+-    "base_packet_sha256": "8edcb4c410579c365f825cdc74d5da7417e9dfaaebce5ac465cb2b103a44b608",
+-    "resolutions_count": 9,
+-    "blocking_count": 3,
++    "path": "handoff/panel-rework-brief-arch-a4.json",
++    "sha256": "eb819238cd17dec3ffef8667f75124bbdf2764d59239145c52039292dab4fc16",
++    "base_packet_path": "architecture/architecture-packet.v4.json",
++    "base_packet_sha256": "a53012565332cab8140d26d43029b931ff6d6c1fe4c63612310567ecba6812b3",
++    "resolutions_count": 10,
++    "blocking_count": 4,
+     "nonblocking_count": 6,
+@@ -3971,11 +4325,7 @@
+       {
+-        "id": "PANEL-A3-F-009",
+-        "reason": "duplicate_of:PANEL-A3-F-003; absorbed only in RW-003,not independent new work"
+-      },
+-      {
+-        "id": "PANEL-A3-F-011",
+-        "reason": "invalid_after_recheck; no implementation or scope expansion"
++        "id": "PANEL-A4-F-006",
++        "reason": "duplicate_of:PANEL-A4-F-003; absorbed only in RW-003"
+       }
+     ],
+-    "namespace": "Current alias mirrors rework_resolutions_a3; a1 and a2 retained verbatim as history. Exact3blocking+6followups;2excluded are not new resolutions."
++    "namespace": "Current alias mirrors rework_resolutions_a4; historical a1/a2/a3 JSON values retained exactly. Findings use PANEL-A4-F-NNN; analyst ledger stays F-01..F-49."
+   },
+@@ -4605,18 +4955,74 @@
+       "id": "RW-001",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-001"
+-      ],
+-      "changes_made": "Ruff==0.17.2 --range={start}:1-{end}:999 in command/expected/baseline_transition/typing and this resolution; fail-hard old/new hunk intersections plus literal raw SHA guards for all3 frozen functions. EVD-075 rc0/1,baseline/candidate fixed digests,valid-syntax one-byte mutations each reject.",
+-      "packet_locations": [
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-001"
++      ],
++      "changes_made": "Родитель резервирует 127.0.0.1:0 и запускает только helper_proc с argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...], start_new_session=True; child_pgid=helper_proc.pid. Helper устанавливает EOF/TERM надзор до spawn, атомарно публикует lease и запускает serve_proc с start_new_session=False в той же группе child_pgid; публикует serve_pid/serve_lstart до handshake/READY. --serve-helper <attempt_id> находится в первых аргументах ps -ww argv. До отправки любых Authorization/пароля или prompt обязательны одновременно listener_pid == serve_pid, os.getpgid(listener_pid) == child_pgid и helper_proc.poll() is None; ровно один lsof с бюджетом <=0.35s внутри общего ready<=3.0s. На mismatch/timeout/неоднозначность 0 байт Authorization/пароля/prompt, fail-closed, retry только внутри исходного ready/cap3 после cleanup. Cleanup os.killpg(child_pgid, SIGTERM→SIGKILL) охватывает подтверждённые собственные helper + serve + потомков, с lifeline/reap/root+lease cleanup по crash_recovery; чужой PID в той же или иной группе получает 0 байт пароля и 0 сигналов чужому PGID. Секреты только sanitized env, без argv/lease/log; no redirects/proxy. Normal Keep-Alive control path не вызывает повторный lsof; отдельный explicit reconnect имеет собственный proof, как listener_ownership.",
++      "packet_locations": [
++        "/threat_model/threats/0",
++        "/decisions/0/details/spawn",
++        "/decisions/0/details/listener_ownership",
++        "/decisions/0/details/cleanup",
++        "/verification_surface/4/process_resource_oracle/listener_takeover_negative"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "RW-002",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-002"
++      ],
++      "changes_made": "For form.created first inspect nested data.form object: if data.form.sessionID==active_session_id and data.form.id is a nonempty string, latch single-turn/Step2 barrier and IMMEDIATELY send POST /api/session/{id}/form/{formID}/cancel on retained control lane<=0.25s, then interrupt<=0.10s, BEFORE validating title/fields/metadata or emitting invalid_serve_event. EVD-073 source Form.Info requires id,sessionID,title,fields (only root metadata optional; field-level title/required optional). Missing root title is a schema discrepancy but safety cancel is authoritative: successful cancel+interrupt completes normal cancelled attempt with ServeHealth+0/UpstreamBreaker+0, no watchdog60s wait and no Step2. This does not relabel source title optional. Missing/invalid id or sessionID ->immediate fail-closed(no foreign cancel); cancel failure/control disconnect ->immediate fail-closed; parent finally killpg(child_pgid) completes<=1.2s, no watchdog wait. Valid foreign nested sessionID ignored with0foreigncontrol. form.cancelled.data.id/sessionID settles only same owned form; not model token or first-event.",
++      "packet_locations": [
++        "/threat_model/threats/1",
++        "/decisions/0/details/event_contract/safety_order",
++        "/decisions/0/details/single_turn_control",
++        "/verification_surface/4/process_resource_oracle/form_cancel"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "RW-003",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-003",
++        "PANEL-A4-F-006"
++      ],
++      "changes_made": "EVD-075 now real4021-line source copy; early+pre-_run_env whitespace mutations, closed check1/write0/recheck0, old1:6 controlrc1; 3 literal hashes unchanged and 3 actual expanded-write negative hashes REJECT. No product writes.",
++      "packet_locations": [
++        "/evidence/69",
+         "/verification_surface/3/command",
+         "/verification_surface/3/expected",
++        "/verification_surface/4/immutable_google_slices"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "RW-004",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-005"
++      ],
++      "changes_made": "Static import zen_catalog as zc retained, public CATALOG_SOURCE=\"static\"+typed globals setter+proc None guards. EVD-076 errors0/serverwarnings564/reportAny125; EVD-077 full exact VER004 local blockrc0/counters/changed ranges/lint/write hashes/catalog8tests. No suppression/budget expansion.",
++      "packet_locations": [
++        "/evidence/70",
++        "/evidence/71",
+         "/verification_surface/3/baseline_transition/new",
+-        "/verification_surface/4/immutable_google_slices",
+         "/decisions/0/details/typing",
+-        "/evidence/69"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++        "/risks/7/mitigation",
++        "/verification_policy/strict_typing"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
+       "decision_required_human": false
+@@ -4624,19 +5030,14 @@
+     {
+-      "id": "RW-002",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-002"
+-      ],
+-      "changes_made": "Public CATALOG_SOURCE retained with static module initializer and typed globals setter, importlib and proc None guards, exactly3 coder targets. EVD-076 errorCount0/581warnings and unchanged8catalog tests PASS, no suppressions.",
+-      "packet_locations": [
+-        "/decisions/0/details/typing",
+-        "/verification_policy/strict_typing",
+-        "/verification_surface/3",
+-        "/risks/7/mitigation",
+-        "/scope/coder_target_files",
+-        "/evidence/70"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "id": "FU-001",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-004"
++      ],
++      "changes_made": "approval.rationale refers to a5(r9); APPROVED is internal candidate readiness, not Council PASS/ARCH_GATE_PASS.",
++      "packet_locations": [
++        "/approval/rationale"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
+       "decision_required_human": false
+@@ -4644,42 +5045,53 @@
+     {
+-      "id": "RW-003",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-003"
+-      ],
+-      "changes_made": "One parent->helper->serve tree, helper session leader/serve same group, lifeline armed before spawn, lease before handshake before lsof/READY. helper_proc poll,listener_pid==serve_pid,killpg child_pgid everywhere. Explicit self-KILL terminal quiescence avoids post-KILL finally fiction.55threads,114parentFD<=128,19processes,per-slot RSS~176.8<=192MiB/full1408<=1638.4 design,live H3 NOT_RUN.",
++      "id": "FU-002",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-007"
++      ],
++      "changes_made": "VER004 writes closed ranges on TemporaryDirectory candidate copy and assert_frozen(copy); 3 expanded-frozen range mutations reject by literal hashes; no product formatter write.",
++      "packet_locations": [
++        "/verification_surface/3/command",
++        "/verification_surface/3/expected",
++        "/evidence/69/negative_write_cases"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-003",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-008"
++      ],
++      "changes_made": "Read-only serve --help confirms stdio; available evidence has no public external IPC schema. [F-30] internal child IPC versus verified [F-17]..[F-22] HTTP/SSE; Option C/A1 retained.",
++      "packet_locations": [
++        "/decisions/0/alternatives/6",
++        "/evidence/72"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
++      "decision_required_human": false
++    },
++    {
++      "id": "FU-004",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-009"
++      ],
++      "changes_made": "Helper argv=[sys.executable, \"-I\", str(Path(__file__).resolve()), \"--serve-helper\", attempt_id, str(port), ...]; start_new_session=True, child_pgid=helper_proc.pid. CLI dispatcher is inside if __name__ == \"__main__\": after existing import zen_catalog as zc and before main()/HTTP startup; all typed _run_serve_helper_cli(...) code resides directly in server.py, checked by Ruff/basedpyright with zero new Any/E402. No inline -c source, no new helper module. --serve-helper <attempt_id> follows script path at the front of ps argv, before port/other parameters; reaper verifies exact script realpath, argv position, full untruncated ps -ww command, attempt_id, UID/PID/lstart/PGID and manifest. Never put password or prompt in argv.",
+       "packet_locations": [
+         "/decisions/0/details/spawn",
+-        "/decisions/0/details/listener_ownership",
+         "/decisions/0/details/crash_recovery",
+-        "/decisions/0/details/cleanup",
+-        "/decisions/0/details/resource_accounting",
+-        "/high_load_envelope/operational_profile",
+-        "/resilience_gates/C_MULT/C-MULT-I5",
+-        "/resilience_gates/T_LIFE_v1",
+-        "/verification_surface/4/orphan_oracles",
+-        "/evolution/H3_rollout_gate"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+-      "decision_required_human": false,
+-      "absorbed_duplicate": "PANEL-A3-F-009"
+-    },
+-    {
+-      "id": "FU-001",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-004"
+-      ],
+-      "changes_made": "Cancel own identified form<=0.25s before schema checks,interrupt<=0.10s; missing title cancels normally with no ServeHealth, source mandatory title unchanged; missingid/session or cancel failure failclosed+kill<=1.2s.",
+-      "packet_locations": [
+-        "/decisions/0/details/event_contract/form.created ~1 form.cancelled",
+-        "/decisions/0/details/event_contract/frozen_v2_1_2_fixtures/form.created ~1 form.cancelled/negative_mutations",
+-        "/decisions/0/details/single_turn_control",
+-        "/verification_surface/4/process_resource_oracle/form_cancel"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++        "/decisions/0/details/resource_accounting/helper_cli_contract",
++        "/resilience_gates/T_LIFE_v1/helper_cli_contract",
++        "/verification_surface/3/command",
++        "/verification_surface/4/process_resource_oracle/topology",
++        "/evidence/71"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
+       "decision_required_human": false
+@@ -4687,16 +5099,17 @@
+     {
+-      "id": "FU-002",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-005"
+-      ],
+-      "changes_made": "Waiting byte template unified to [мост] Ожидание первого токена… plus terminalLF,without10s suffix.",
+-      "packet_locations": [
+-        "/status_protocol_examples/waiting",
+-        "/decisions/1/details/lifecycle",
+-        "/verification_surface/4/process_resource_oracle/status_waiting"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "id": "FU-005",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-010"
++      ],
++      "changes_made": "Новые диагностические/override env-переменные этого пакета: OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED, OPENCODE_ZEN_BRIDGE_TRANSPORT, OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY, OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE и watchdog overrides OPENCODE_ZEN_BRIDGE_FIRST_EVENT_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_FIRST_TOKEN_TIMEOUT_S, OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S (AD-003). Сам рабочий фичефлаг REALTIME_SERVE_ENABLED переключается boolean в dynamic_config.json без новой env для переключения и без правки start.sh/LaunchAgent; кодовый default=false, включение H7 только после H3/H6.",
++      "packet_locations": [
++        "/decisions/0/details/configuration",
++        "/decisions/0/details/configuration/feature_flag_context",
++        "/decisions/2/details/thresholds/env_classification",
++        "/evolution/feature_flag"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
+       "decision_required_human": false
+@@ -4704,66 +5117,17 @@
+     {
+-      "id": "FU-003",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-006"
+-      ],
+-      "changes_made": "Separate first_token_timeout protocol/capability and model-silence rows,mutually exclusive ServeHealth1/Upstream0 vs0/1; no delivery/retry weakening.",
+-      "packet_locations": [
+-        "/decisions/0/details/fallback_decision_table/rows/4",
+-        "/decisions/0/details/fallback_decision_table/rows/5",
+-        "/verification_surface/4/process_resource_oracle/counter_branches"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-004",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-007"
+-      ],
+-      "changes_made": "AD-003.cleanup cites EVD-055 for _stop_proc descendants; EVD-056 remains worktree evidence only.",
+-      "packet_locations": [
+-        "/decisions/2/details/cleanup"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+-      "decision_required_human": false
+-    },
+-    {
+-      "id": "FU-005",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-008"
+-      ],
+-      "changes_made": "Normal whole Keep-Alive path exactly1lsof/spawn; second proof only separate explicit control reconnect<=0.35s outside fast budgets;spies distinguish;urgent brokencontrol failclosed.",
+-      "packet_locations": [
+-        "/decisions/0/details/listener_ownership/protocol",
+-        "/resilience_gates/C_MULT/C-MULT-I5/oracle",
+-        "/verification_surface/4/process_resource_oracle/C_MULT_I5"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
+-      "decision_required_human": false
+-    },
+-    {
+       "id": "FU-006",
+-      "pass": "a3",
+-      "status": "RESOLVED",
+-      "resolution_level": "ARCHITECTURE_DELTA; future implementation/live gates NOT_RUN",
+-      "source_findings": [
+-        "PANEL-A3-F-010"
+-      ],
+-      "changes_made": "H4 cp ONLY server.py,never rsync--delete/directory sync;preserve dynamic_config.json and disable-serve bytes/absence/mode;H0/H4 readback,H5 after;H7 true only after H3/H6.",
+-      "packet_locations": [
+-        "/evolution/rollout",
+-        "/evolution/H0_precondition",
+-        "/evolution/H4_H5_sync_contract",
+-        "/verification_acceptance_matrix/rollout_boundary"
+-      ],
+-      "verification": "EVD-075 observed isolated Ruff/hash proof; EVD-076 observed isolated type/catalog proof; JSON/schema/coverage invariants checked before handoff. VER-004 all3 and VER-005/H0..H9 NOT_RUN; external a4 verdict pending.",
++      "pass": "a4",
++      "status": "RESOLVED",
++      "resolution_level": "ARCHITECTURE_DELTA; isolated local evidence observed; future Stage3/live NOT_RUN",
++      "source_findings": [
++        "PANEL-A4-F-011"
++      ],
++      "changes_made": "frozen_fixture_sha256 over wire/canonical pairs only; separate frozen_fixture_metadata_sha256 over negative_mutations/safety_order. Exact json.dumps UTF8 formulas and observed stability/sensitivity checks.",
++      "packet_locations": [
++        "/decisions/0/details/event_contract/frozen_fixture_sha256",
++        "/decisions/0/details/event_contract/frozen_fixture_metadata_sha256",
++        "/decisions/0/details/event_contract/fixture_digest_serialization",
++        "/decisions/0/details/event_contract/fixture_metadata_digest_serialization"
++      ],
++      "verification": "EVD-075..078 observed local probes plus JSON Pointer/schema/fingerprint checks; actual Stage3 VER-001..005/H0..H9 NOT_RUN; external a5/r9 review pending.",
+       "decision_required_human": false
+@@ -4778,3 +5142,5 @@
+     "EVD-075",
+-    "EVD-076"
++    "EVD-076",
++    "EVD-077",
++    "EVD-078"
+   ],

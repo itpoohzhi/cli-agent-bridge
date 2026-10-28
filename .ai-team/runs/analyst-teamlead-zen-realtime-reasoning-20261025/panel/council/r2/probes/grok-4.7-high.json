@@ -1,0 +1,26 @@
+{
+  "available": true,
+  "family": "xAI",
+  "ladder": [
+    {
+      "argv_sha256": "cea1d72954d2a1a8ffea97b5a697cbd0656cb3de6a24d2274cf3f363ca7f6479",
+      "end_utc": "2026-10-26T20:14:09.316024+00:00",
+      "error": null,
+      "pgid": "73947",
+      "pid": 73947,
+      "raw_err_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_out_sha256": "dc4e4f228d43e0e5d381c76d18902124875e061179a4866964af71ed9543bf08",
+      "rc": 0,
+      "start_utc": "2026-10-26T20:13:10.548085+00:00",
+      "status": "ok",
+      "transport": "cursor-agent"
+    }
+  ],
+  "launcher_sha256": "2123a3a8c508864327a1b9cf19460f5383194cab4f9c9581204157190c84c5d1",
+  "round": 2,
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "schema": "pol-probe/1",
+  "setup": "default",
+  "slot_id": "grok-4.7-high",
+  "stage": "council"
+}

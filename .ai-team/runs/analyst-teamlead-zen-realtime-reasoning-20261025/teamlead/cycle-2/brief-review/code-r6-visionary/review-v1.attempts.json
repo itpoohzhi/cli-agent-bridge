@@ -1,0 +1,28 @@
+{
+  "attempts": [
+    {
+      "slot": "claude-haiku-5-5",
+      "transport": "claude-p",
+      "file": "review-v1-a1.md",
+      "http_code": null,
+      "rc": 143,
+      "text_chars": 0,
+      "tool_calls": 0,
+      "result": "invalid",
+      "seconds": 722,
+      "kill_reason": null
+    },
+    {
+      "slot": "claude-haiku-5-5",
+      "transport": "claude-p",
+      "file": "review-v1-a2.md",
+      "http_code": null,
+      "rc": 0,
+      "text_chars": 1485,
+      "tool_calls": 0,
+      "result": "ok",
+      "seconds": 146,
+      "kill_reason": null
+    }
+  ]
+}

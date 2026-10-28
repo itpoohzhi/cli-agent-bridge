@@ -1,0 +1,37 @@
+> PANEL-NONCE: 999a3d5aca96cb3a
+> ARTIFACT-SHA256: 5efd0909ef787d0125d23fe80ae837ad4d39d28975f2e455501c8f98b937f830
+> Канон прочитан: AGENTS.md, 430 строк
+>
+> Корневого `AGENTS.md` в репозитории нет. Профильные стандарты `aisdlc-gcge` приложены в пакете и учтены построчно.
+>
+> 1. КОРРЕКТНОСТЬ: VERDICT=PASS
+>    WHY=Цикл 7 закрывает ровно конверт: три файла `bridges/opencode-zen-bridge/server.py`, `tests/test_realtime_reasoning.py`, `tests/test_step_interruption.py`, ноль внешних runtime-зависимостей. Verify-fixed по брифу цикла 6 закрыт на строках и зелёным L2. RW-001: `fatal_error` выставляется только на детерминированной ошибке провайдера (`server.py:5542`); `Run._execute_once` возвращает `first_event_at`/`first_token_at` (`server.py:5624-5625`); исчерпание watchdog в JSON даёт 502 `opencode <фаза>` и `xs["exit_reason"]=<фаза>` (`server.py:7656-7675`). RW-002: `_is_delivered()` включает `first_event_at` (`server.py:3396-3403`), поэтому `session.execution.started` до заголовков prompt закрывает fallback на `run`. RW-003: legacy SSE считает watchdog транзиентным отказом до единственного `attempt_done` (`server.py:6890-6901`). RW-004: стартовые фазы имеют собственные дедлайны, сторож `_watch_serve_connection` только закрывает сокет (`server.py:2593-2621`), `_serve_http` повторно проверяет фазу после `read1` и пропускает `settimeout` на закрытом fd HTTP/1.0 (`server.py:2624-2712`). FU-001: `_drain_serve_step_usage` дочитывает `session.step.ended` своего шага в окне 0,15 с (`server.py:3292`, вызов `server.py:3822`). Публичный контракт SSE сохранён; строки `[мост]…\n` заданы REQ-004/REQ-005. Замороженные `_run_env`, `_stream_google_sse`, `_execute_google_once` совпали с эталоном (`google_direct_unchanged=True`, `run_env_sha256=1c51b28f…`). L2: `VER-001` rc=0, 471 passed; `O-EXIT/v1` в логе несёт `exit_reason=first_event_timeout|first_token_timeout|stall_timeout` и `first_event_ms`/`ttft_ms`.
+> 2. ПОЛНОТА: VERDICT=PASS
+>    WHY=Матрица `verification-traceability.md` закрывает REQ-001..REQ-020 и AC-001..AC-026 поштучно статусом PASS, кроме законно отложенных VER-006/VER-007 (`DEFERRED_L3` до ACCEPT). Крайние ветки покрыты оракулами того же модуля: realtime до конца апстрима (AC-026), три фазы watchdog в SSE и JSON, барьер доставки, fail-closed 400/401/403/404/422, `form.created` cancel+interrupt до проверки схемы (`server.py:3694-3721`), native tool usage, маскирование секретов, потолок `MAX_TOTAL_SPAWNS=3` на связке serve+run. REQ-017 приводит `test_step_interruption.py` к потолку 3 запуска и изолирует `_RetryBudget` на тест; AC-023 (обратный порядок) rc=0. Живой heavy-path владельца в этом вердикте не заявлен и не требуется до ACCEPT.
+> 3. РЕАЛИЗУЕМОСТЬ: VERDICT=PASS
+>    WHY=Транспорт — короткоживущий `opencode serve` на запрос со stdlib (`http.client`, `subprocess`, `select`), kill-switch `OPENCODE_ZEN_BRIDGE_TRANSPORT` / `dynamic_config.json` / файл `disable-serve`, дефолт выключен. Ресурсы попытки снимаются в `finally`: interrupt/DELETE, `_ServeLease.cleanup`, reaper lease при старте, `OPENCODE_DB=":memory:"`, отдельный `XDG_STATE_HOME`. Фазовые бюджеты и общий `TIMEOUT_S` не дают зависшему cleanup держать слот. Выкат `~/.dsh` запрещён до ACCEPT (Forbidden Scope); операционная цена A1 ограничена слотами, `MAX_TOTAL_SPAWNS=3` и `_StartupGate`.
+> 4. РИСКИ: VERDICT=PASS
+>    WHY=Clean-room L2 (`receipts/code-gate.json`, `execution-evidence.md`): `red_sensitivity_rc=1` на `origin/dev` (ожидаемый RED AC-026), на кандидате `VER-001`/`VER-002`/`VER-003`/`VER-003b`/`VER-005`/`AC-023` все rc=0, 471 passed. `basedpyright` 0 ошибок; новый тест — 0 предупреждений. Секреты: пароль serve — `secrets.token_hex(16)`, `_error_payload` идёт через `_clean_err`/`_mask_secrets`, allowlist env, пароль и proxy-креды не попадают в клиентский текст (оракул RW-008 зелёный). Регрессии watchdog, барьера доставки, breaker и HTTP/1.0 закрыты отдельными тестами и полным suite. Скрытого долга, ломающего инвариант потолка спавнов или Google-direct, в дельте нет.
+> 5. АЛЬТЕРНАТИВЫ: VERDICT=PASS
+>    WHY=Путь A1 с откатом на `opencode run` — выбранный архитектором гибрид, который закрывает RC-1 (дельты) вместе с RC-2/RC-3. Дельта цикла 7 точечная: гонка закрытия HTTP/1.0 в стороже и `_serve_http`, без переписывания транспорта. `FALLBACK_DECISION_TABLE` остаётся декларативной; исполняют те же ветки retry/fail-closed, что уже зелёные на L2. Более дешёвый путь «только watchdog на `opencode run`» не даёт реалтайма (F-17, F-18) и постановкой не принят.
+> 6. СООТВЕТСТВИЕ КОНТЕКСТУ: VERDICT=PASS
+>    WHY=Граница слоёв сохранена: wire `serve` сводится к кортежам `(etype, payload)` через `_map_serve_event`, верхний SSE/JSON и `ToolCallParser` не переписываются. Scope — только `bridges/opencode-zen-bridge/` и тесты моста. Запрещённый контур не тронут: DSH, `muse-bridge`, Google-direct, `zen_catalog.py`, коммит `dynamic_config.json`, внешние зависимости (`pyproject.toml` `dependencies = []`). Политика инструментов `ask_reject` с reject+interrupt эквивалентна изоляции REQ-012. `O-EXIT/v1` расширен полями REQ-016 (`server.py:3928-3947`).
+>
+> SUB Корректность/логика: PASS — evidence (server.py:3396-3403, server.py:5542, server.py:5624-5625, server.py:7656-7675, RW-001/RW-002, VER-001 rc=0)
+> SUB Корректность/граничные условия: PASS — evidence (server.py:2593-2712 HTTP/1.0 fileno и check_phase после read1; server.py:3694-3721 form.created; server.py:3822 окно usage 0,15 с; test_c7_rw004/test_c6_rw007 rc=0)
+> SUB Корректность/обработка ошибок: PASS — evidence (server.py:6890-6901 watchdog → transient_failure; ServeSecurityError fail-closed; L2 exit_reason=first_*_timeout/stall_timeout/provider_fatal)
+> SUB Полнота/покрытие AC: PASS — evidence (verification-traceability.md REQ-001..020 / AC-001..026 PASS; VER-006/VER-007 DEFERRED_L3)
+> SUB Полнота/пропущенные ветки: PASS — evidence (test_realtime_reasoning.py AC-026, RW-001..004, FU-001, AC-016/AC-017; VER-005 92 passed)
+> SUB Реализуемость/общее: PASS — evidence (stdlib, kill-switch, OPENCODE_DB=:memory:, lease cleanup finally, Forbidden Scope до ACCEPT)
+> SUB Риски/безопасность: PASS — evidence (secrets.token_hex, _mask_secrets/_clean_err, allowlist, оракул RW-008; пароль serve не в логе)
+> SUB Риски/данные: PASS — evidence (server.py:3292 sessionID+assistantMessageID; usage из step.ended; SSE line 1 МиБ / HTTP body 8 МиБ)
+> SUB Риски/прод: PASS — evidence (MAX_TOTAL_SPAWNS=3, слоты, фазовые дедлайны server.py:2593-2712; живой :9883 отложен протоколом)
+> SUB Риски/regression red→green: PASS — evidence (L2-RED-sensitivity rc=1 на origin/dev; VER-005 и VER-001 rc=0 на кандидате)
+> SUB Риски/Full Suite (L2): PASS — evidence (execution-evidence.md VER-001/002/003/003b/005 и AC-023 rc=0, 471 passed)
+> SUB Риски/scope-diff: PASS — evidence (candidate-manifest.json ровно 3 файла; frozen sha256 MATCH; google_direct_unchanged=True)
+> SUB Альтернативы/общее: PASS — evidence (дельта цикла 7 — точечный CG-HTTP-CLOSE-RACE в server.py:2593-2712; гибрид A1 задан handoff-architect)
+> SUB Соответствие контексту/общее: PASS — evidence (pyproject.toml dependencies=[]; scope-and-contracts: публичный SSE сохранён, REQ-004/005 задают [мост]; Forbidden Scope не нарушен)
+>
+> ОБЩИЙ ВЕРДИКТ: ACCEPT
+> COVERAGE: 14/14 подкатегорий
+> FINDINGS_COMPLETE: 0

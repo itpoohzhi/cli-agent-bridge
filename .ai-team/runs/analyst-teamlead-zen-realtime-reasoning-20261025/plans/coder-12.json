@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "teamlead_cycle": 9,
+  "entry": "fix-from-panel",
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-11.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002"
+  ],
+  "objective": "Устранить RW-001, RW-002 и FU-001 в разрешённой дельте без изменения frozen-функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-8/final-panel-verdict.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-11.json",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/code.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/python-standards.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/scope-and-contracts.md",
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py"
+  ],
+  "stop_conditions": [
+    "Только три разрешённых продуктовых пути и отчётность coder-12",
+    "Сохранить frozen raw SHA256, ранний helper и Python 3.9; форматировать legacy только диапазонами",
+    "Без commit/push/MR; без бизнес-приёмки живого чата"
+  ],
+  "deviations": [
+    "RW-001 и FU-001 требуют более 15 строк: подтверждение конца шага, завершение всех lifecycle-вызовов и синхронизированный байтовый учёт в producer и обоих consumers. Расширения архитектуры и новых зависимостей нет.",
+    "Basedpyright выявил превышение сложности _serve_one_attempt после минимальной дельты. Существующий SSE-читатель механически перенесён в приватный helper того же модуля; ID шага, учёт байтов и подтверждение step.ended также выделены в приватные helpers. Блок _finish_serve_tool_step вызывает bool-drain и возбуждает тот же ServeProtocolError вместо дополнительной ветки в основном цикле. Алгоритм и владение ресурсами сохранены.",
+    "Для VER-004 переиспользован известный ~/work/cli-agent-bridge/coder-10-20261027/ver004-offline.py: все исходные предикаты, offline uvx и AST Python 3.9; финальный VER-004 PASS.",
+    "Первый полный pytest на промежуточной дельте: 479 passed / 1 failed (AC-016: счётчик запусков 1 вместо 2); последующие полный и отдельный прогоны AC-016 проходят. Причина единичного первого падения не установлена.",
+    "Второй полный pytest: 479 passed / 1 failed из-за чтения O-EXIT до завершения logger. Регрессия усилена threading.Event от реального logger без ослабления проверки ровно одного события. После синхронизации полный pytest: 480 passed.",
+    "Crash-guard финального полного pytest вернул 0, но предупредил о двух не записанных macOS crash-report в 17:53:43. Unified log подтверждает python3.14 и системный лимит, но не раскрывает PID/родителя; принадлежность прогону не установлена. Это ограничение наблюдаемости, а не доказательство отсутствия аварий."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "RW-001: добавить RED, подтвердить step.ended и дочитать delayed/idless вызовы",
+      "expected_evidence": "SSE/JSON сохраняют c1/c2 и usage m1; неподтверждённый шаг даёт invalid_serve_event",
+      "status": "DONE",
+      "actual_evidence": "RED red.log: delayed/idless вызовы теряются; GREEN green.log: 4 passed; regressions-final.log: 6 passed; full-pytest-final2.log: 480 passed. SSE/JSON покрывают delay=0.22, idless и inherited ID, lifecycle без called, EOF/окно без step.ended, точный usage и исключение m2."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-002: добавить RED и терминальный timeout с нейтральным breaker",
+      "expected_evidence": "Ровно один O-EXIT с timeout/client_gone, total_spawns=0, refund и failures=0",
+      "status": "DONE",
+      "actual_evidence": "RED red.log: JSON переписывал timeout в upstream_failed; full-pytest-final2.log и unittest-oexit-final.log PASS. На каждый SSE/JSON запрос ровно один O-EXIT timeout/client_gone, total_spawns=0, refund один раз, failures=0; logger синхронизирован Event."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "FU-001: ограничить байтовую очередь и накопленный ответ с RED/GREEN",
+      "expected_evidence": "Оба лимита детерминированно приводят к invalid_serve_event и lease.cleanup",
+      "status": "DONE",
+      "actual_evidence": "RED red.log: прежняя попытка успешно завершалась при малом бюджете; тест test_c9_fu001_serve_queue_and_accumulated_byte_budget_enforced проверяет очередь 8 байт и суммарный UTF-8 ответ 16 байт, invalid_serve_event, реальный cleanup и отсутствие lease-файлов; полный suite PASS."
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Проверить VER-004, целевые и полный suite, оформить передачу Reviewer",
+      "expected_evidence": "Frozen 3/3, lint/type/format, тесты и валидаторы exit=0",
+      "status": "DONE",
+      "actual_evidence": "ver004-final3.log PASS: frozen 3/3, Python 3.9, early helper/catalog, range format/lint/type, server=590 warnings в разрешённых пределах, test_realtime_reasoning=0 diagnostics; targeted=209 passed, full=480 passed, unittest=480 OK; origin/dev collect=101, rc=0; handoff и after-план валидируются после записи."
+    }
+  ],
+  "actual_evidence": "VER-004 PASS; 209 targeted, 480 full pytest, 480 unittest PASS; ограничение crash-observability явно перечислено."
+}

@@ -1,0 +1,128 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 1,
+  "panel_slug": "analyst-teamlead-zen-realtime-reasoning-20261025-arch-council-1-a3-r7",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "/verification_surface/3 (VER-004): command, expected, baseline_transition; /verification_surface/4/immutable_google_slices; /decisions/0/details/immutable_run_env",
+      "rule_ref": "VER-004; VER-005/immutable_google_slices; AD-001.details.immutable_run_env; F-001 (AGREED blocking, a3 D1); воспроизводимость CLI и побайтовая неизменность замороженных срезов",
+      "action": "В VER-004 согласованно исправить command, expected и baseline_transition: для ruff==0.17.2 использовать закрытый диапазон --range={start}:1-{end}:999 либо --range={start}:1-{end+1}:1 вместо start:end. Добавить явную побайтовую sha256-проверку def _run_env с фиксированным digest 1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31 и функций _stream_google_sse, _execute_google_once относительно неизменного origin/dev. Извлекать lineno..end_lineno из raw bytes с terminal LF; ожидаемые хэши не пересчитывать из отредактированной реализации. Гейт отклоняет изменение каждого замороженного среза, включая расширение форматтером диапазона за hunk. Подтвердить исправленную команду и отрицательные проверки реальным прогоном на текущем bridges/opencode-zen-bridge/server.py в изолированной копии, записать команды, версии, exit-коды и хэши в EVD пакета; продуктные файлы в архитектурном проходе не изменять.",
+      "acceptance": "Все три поля VER-004 используют один закрытый синтаксис ruff==0.17.2. EVD содержит реальный прогон раннего synthetic hunk на копии текущего server.py: форматтер не захватывает хвост и замороженные функции. _run_env имеет sha256 1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31; оба Google-среза побайтно совпадают с origin/dev, baseline/candidate sha256 записаны. Отдельные отрицательные случаи изменения хотя бы одного байта в каждом из трёх срезов дают отказ гейта; тестовые мутации не остаются в продуктном файле. Полный Stage3-гейт при отсутствии нового testfile остаётся NOT_RUN; фактический formatter/hash-прогон отделён от него.",
+      "source": "a3 findings-ledger F-001: AGREED / blocking / d1; R1 panel/arch/r4 seat1 F-01; D1 panel/arch/r7 все 3 AGREE rev=1",
+      "evidence": "AGREE F-001 rev=1 — проверил: architecture-packet.json#VER-004. Команда вызывает `ruff format --check --range f'{start}:{end}'`. По RECHECK F-001 у ruff==0.17.2 формат `<start_line>:<start_column>-<end_line>:<end_column>`, конец необязателен, и без него форматируется весь документ до EOF. Строка `5:9` значит «строка 5, колонка 9, до конца файла». Гейт захватывает замороженные `_run_env` и срезы Google-direct и противоречит RW-001. Остаётся blocking.",
+      "source_findings": [
+        "F-001"
+      ]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "/decisions/0/details/typing (AD-001); /verification_surface/3 (VER-004): command, expected, baseline_transition; /scope/coder_target_files",
+      "rule_ref": "REQ-003/AC-004; scope.coder_target_files; AD-001.details.typing; VER-001/VER-002/VER-004; F-002 (AGREED blocking, a3 D1)",
+      "action": "Разрешить конфликт mutable CATALOG_SOURCE, basedpyright==1.40.2 reportConstantRedefinition и внешних чтений server.CATALOG_SOURCE в bridges/opencode-zen-bridge/tests/test_catalog_mode.py:64,93 вне coder_target_files. Предпочтительный путь: сохранить публичный модульный атрибут server.CATALOG_SOURCE, хранить изменяемое внутреннее состояние в типизированной _catalog_source и обновлять globals()[\"CATALOG_SOURCE\"] из внутренней типизированной функции без повторного присваивания верхнеуровневому имени. Согласовать решение в AD-001.details.typing, VER-004 и связанных описаниях риска/перехода baseline без расширения coder_target_files, # type: ignore, подавлений или изменения pyrightconfig. Альтернатива допустима только после явного пересогласования allowlist на две ссылки test_catalog_mode.py:64,93. Выбранное решение подтвердить реальными basedpyright и test_catalog_mode.py в EVD пакета; HTTP-ключ catalog_source сохранить.",
+      "acceptance": "Пакет задаёт один проверенный путь совместимости server.CATALOG_SOURCE без reportConstantRedefinition. EVD фиксирует реальный запуск basedpyright==1.40.2 в изолированном bridge-cwd/project с summary.errorCount == 0 и без severity=error, а также PASS tests/test_catalog_mode.py с обоими обращениями :64,93. Для предпочтительного пути coder_target_files остаётся исходным списком трёх файлов; нет # type: ignore, изменений type/lint-конфигов и HTTP-ключа catalog_source. При выборе альтернативы требуется явное пересогласование только двух ссылок :64,93 и те же PASS/zero-errors; молчаливое расширение scope не засчитывается. Прототип изолирован от продуктных файлов архитектурного прохода.",
+      "source": "a3 findings-ledger F-002: AGREED / blocking / d1; R1 panel/arch/r4 seat1 F-02; D1 panel/arch/r7 все 3 AGREE rev=1",
+      "evidence": "AGREE F-002 rev=1 — проверил: `bridges/opencode-zen-bridge/tests/test_catalog_mode.py:64` (`self.assertEqual(server.CATALOG_SOURCE, \"static\")`) и `:93` (`server.CATALOG_SOURCE` в команде). Файл вне `coder_target_files`. Пакет требует переименовать `CATALOG_SOURCE` (AD-001#typing, VER-004). Переименование ломает REQ-003/AC-004, а VER-004 при этом требует `errorCount==0`. Остаётся blocking. Решение должно быть явным: либо не переименовывать, либо добавить в allowlist только этот файл и две ссылки.",
+      "source_findings": [
+        "F-002"
+      ]
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json",
+      "line_hint": "/decisions/0/details/spawn; /decisions/0/details/listener_ownership; /decisions/0/details/crash_recovery/creation (AD-001); /high_load_envelope/operational_profile; /verification_surface/4/orphan_oracles (VER-005)",
+      "rule_ref": "T-LIFE/v1; AD-001 spawn/listener_ownership/crash_recovery; resource_accounting; high_load_envelope.operational_profile; VER-005 GroupB; F-003 (AGREED blocking, a3 D1)",
+      "action": "Устранить противоречие между прямым Popen(opencode serve) в AD-001.details.spawn и запуском под stdlib-helper в crash_recovery.creation. Выбрать и сквозным образом описать ОДНО дерево процессов: кто создаёт helper и serve, кто владеет parent-pipe, когда до READY атомарно публикуются serve_pid/serve_pgid/start-time и как закрывается щель сразу после Popen при смерти родителя. Явно привязать proc.poll(), os.getpgid(listener) и os.killpg(...) к конкретным процессам и записанным PGID; развести identity helper и serve и условия безопасного reaper. Привести spawn, listener_ownership, crash_recovery.creation/parent_death/finally, resource_accounting и operational_profile к той же топологии; пересчитать процессы, потоки, pipes/FD и соответствующие формулы/потолки без бесплатных helper или lsof. В VER-005 закрепить для того же дерева оракул hard kill сразу после Popen до READY, включая окно до публикации lease; решение не оставлять на выбор Coder.",
+      "acceptance": "Во всех перечисленных разделах пакета задано одно дерево bridge/helper/serve, однозначные владельцы proc/PGID/pipe и порядок публикации lease до READY/Auth/prompt. VER-005 GroupB проверяет hard kill родителя сразу после Popen до READY, после публикации lease и во время prompt: ноль оставшихся собственных serve/descendants/helper/temp roots и ноль сигналов чужим PID/PGID, включая PID reuse. Listener PGID сопоставлен с записанным serve; каждый poll и kill имеет определённый объект. Расчёты потоков/FD/aux-процессов воспроизводятся для выбранной топологии при 6 active/12 waiters, учитывают helper/lease/pipe/lsof и действующие бюджеты; при превышении пакет не заявляет PASS и не повышает потолки молча. Проектные оракулы и расчёты отделены от NOT_RUN живых rollout H0/H9.",
+      "source": "a3 findings-ledger F-003: AGREED / blocking / d1; R1 panel/arch/r4 seat1 F-03; D1 panel/arch/r7 все 3 AGREE rev=1",
+      "evidence": "AGREE F-003 rev=1 — проверил: architecture-packet.json#AD-001. Раздел `spawn` задаёт прямой `Popen(serve, start_new_session=True)` и `child_pgid`. Раздел `crash_recovery.creation` задаёт запуск serve под stdlib-helper, который публикует идентичность ребёнка. Не определено, чьи `proc` и PGID использует `proc.poll()`, сравнение `os.getpgid(listener)==child_pgid` и `killpg`. Окно между `Popen` и записью lease при SIGKILL остаётся неоднозначным, это ядро RW-006. Находка F-009 (visionary) дублирует её содержание. Для consensus-ledger предлагаю оставить blocking: разрешать противоречие между разделами на этапе Coder нельзя. Фикс: одно дерево процессов, где helper — родитель serve и публикует pid/pgid/lstart до READY. Ту же топологию использовать в учёте потоков и FD и в оракуле VER-005 «hard kill после `Popen` до READY».",
+      "source_findings": [
+        "F-003"
+      ]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "source_findings": [
+        "F-004"
+      ],
+      "text": "F-004 rev 2, CONSENTED non-blocking: для собственной form.created с валидными data.form.sessionID и data.form.id последующая schema-ошибка не откладывает cancel: cancel ≤0.25 с либо fail-closed kill собственного PGID без ожидания watchdog. Состав обязательных полей Form.Info зафиксировать по EVD-073; ошибочную посылку rev 1 об optional Form.Info.title не переносить. VER-005 может проверить cancel до invalid_serve_event и подавление Step2. Поправка леджера дословно: rev 2 (D1 skeptic Anthropic): AMEND F-004 — priority=non-blocking; locations=architecture-packet.json#AD-001 (`event_contract.form.created / form.cancelled.negative_mutations`), architecture-packet.json#EVD-073; fix=для `form.created` с валидным вложенным `data.form.sessionID` собственной сессии и `data.form.id` любая последующая schema-ошибка не откладывает cancel. Сразу уходит `cancel` ≤0.25 с либо fail-closed kill собственного PGID без ожидания watchdog. Какие поля Form.Info обязательны, зафиксировать по EVD-073. — причина: NEW: architecture-packet.json#EVD-073 (`Form.Info={id,sessionID,title,metadata?,fields}`). Необязателен только `metadata`, а «title/required optional» относится к полю внутри `fields`. Исходная посылка F-004 «title у Form.Info необязателен» неверна, и мутация «missing title → invalid_serve_event» согласована с источником. Остаётся риск «вопрос висит до watchdog»: `invalid_serve_event` уже ведёт к cleanup и kill, но порядок «cancel раньше invalid» не зафиксирован. Это non-blocking.",
+      "reason": "realist (D1): AGREE F-004 rev=1 — проверил: architecture-packet.json#EVD-073 и #AD-001 (`event_contract` negative_mutations) — EVD-073 фиксирует `title`/`required` как необязательные поля Form.Info, а мутация требует «missing form.id/fields/title -> invalid_serve_event», поэтому валидная форма без `title` не попадёт в cancel ≤0.25 с и зависнет до watchdog (RW-003). | visionary (D1): DISPUTE F-004 — класс: invalid — контр-evidence: architecture-packet.json:829, architecture-packet.json:1506 — В схеме `opencode` v2.1.2 (`EVD-073`) опциональность `title` относится только к элементам `Form.Field`, тогда как в корневом `Form.Info` поле `title` обязательно, а при `invalid_serve_event` адаптер немедленно прерывает попытку и выполняет `finally`-очистку (`<=1.2s`, `architecture-packet.json:1866,1996`) без 60-секундного ожидания watchdog."
+    },
+    {
+      "id": "FU-002",
+      "source_findings": [
+        "F-005"
+      ],
+      "text": "Согласовать AD-002.details.lifecycle, status_protocol_examples.waiting и VER-005 на одну байтовую строку ожидания первого токена: убрать «(10 с)» из примера либо определить тот же счётчик N от такта 5.0 с во всех местах. Оракул отвергает вторую несовпадающую строку.",
+      "reason": "F-005: AGREED non-blocking, resolved_in=d1; три позиции D1 подтверждают локальное расхождение шаблона. Architect учитывает по своему решению; blocking не добавляется."
+    },
+    {
+      "id": "FU-003",
+      "source_findings": [
+        "F-006"
+      ],
+      "text": "Дополнить AD-001.details.fallback_decision_table веткой first_token_timeout при доказанном protocol/capability-дефекте: ServeHealth +1, UpstreamBreaker 0; текущую ветку valid protocol and model silence оставить с ServeHealth 0, UpstreamBreaker +1. VER-005 параметризует обе причины и проверяет единственный инкремент нужного счётчика без изменения барьера доставки.",
+      "reason": "F-006: AGREED non-blocking, resolved_in=d1; три позиции D1 подтверждают неполноту авторитетной таблицы относительно transport_health.counted_failures (FU-004/RISK-012)."
+    },
+    {
+      "id": "FU-004",
+      "source_findings": [
+        "F-007"
+      ],
+      "text": "В AD-003.details.cleanup заменить ссылку EVD-056 на EVD-055 для факта об _stop_proc и потомках после выхода leader. EVD-056 остаётся WORKTREE_UNCHANGED; норматив killpg не менять. Утверждений о поведении процессов с опорой на EVD-056 оставаться не должно.",
+      "reason": "F-007: AGREED non-blocking, resolved_in=d1; три позиции D1 подтверждают ошибку ссылки на evidence, отдельного изменения поведения не требуется."
+    },
+    {
+      "id": "FU-005",
+      "source_findings": [
+        "F-008"
+      ],
+      "text": "Развести в AD-001.listener_ownership и C-MULT-I5/VER-005 штатный горячий путь и явный control-reconnect: один lsof на успешный spawn, без дополнительных lsof для permission/form/reply/interrupt/DELETE; второй proof/lsof разрешён только при явно выделенном reconnect ≤0.35 с вне быстрых бюджетов 0.25/0.20 с. Spy-оракул различает штатный путь и reconnect; срочный control при разрыве остаётся fail-closed.",
+      "reason": "F-008: AGREED non-blocking, resolved_in=d1; три позиции D1 подтверждают, что oracle не отделяет разрешённое recovery от горячего пути (RW-004)."
+    },
+    {
+      "id": "FU-006",
+      "source_findings": [
+        "F-010"
+      ],
+      "text": "F-010 rev 2, CONSENTED non-blocking: в evolution H4/H5 явно записать sync только server.py без изменения/удаления dynamic_config.json и disable-serve; после sync H0 выполняет read-back. Требование нового подтверждения владельца снять: Q-003 RESOLVED, runtime true только H7 после H3/H6, default=false сохраняется. Поправка леджера дословно: rev 2 (D1 realist Meta): AMEND F-010 — priority=non-blocking; locations=architecture-packet.json#AD-001 (`feature_flag_context`), architecture-packet.json#EVD-074, evolution H0/H4/H5; fix=оставить только явную запись в H4/H5, что синхронизация копирует только `server.py` и не трогает `dynamic_config.json`/`disable-serve`, а требование подтверждения владельца снять — причина: architecture-packet.json#Q-003 (RESOLVED, `decision_required_human=false`) и EVD-074 фиксируют compliant-дельту cycle3b (`default=false`, runtime JSON только на H7 после H3/H6); стирание JSON при sync ведёт в безопасный `false`, а не в преждевременное включение, поэтому это уточнение протокола, а не блокер политики.",
+      "reason": "realist (D1 AMEND): AMEND F-010 — priority=non-blocking; locations=architecture-packet.json#AD-001 (`feature_flag_context`), architecture-packet.json#EVD-074, evolution H0/H4/H5; fix=оставить только явную запись в H4/H5, что синхронизация копирует только `server.py` и не трогает `dynamic_config.json`/`disable-serve`, а требование подтверждения владельца снять — причина: architecture-packet.json#Q-003 (RESOLVED, `decision_required_human=false`) и EVD-074 фиксируют compliant-дельту cycle3b (`default=false`, runtime JSON только на H7 после H3/H6); стирание JSON при sync ведёт в безопасный `false`, а не в преждевременное включение, поэтому это уточнение протокола, а не блокер политики. | visionary (D1 AGREE rev=1): AGREE F-010 rev=1 — проверил: architecture-packet.json:873, architecture-packet.json:2507 — Шаг выката `H4` синхронизирует `server.py` в каталог `~/.dsh/bridges/opencode-zen-bridge/`, где хранятся живые `dynamic_config.json` и `disable-serve`, без явного запрета на синхронизацию директории с удалением runtime-файлов (`--delete`).",
+      "decision_required_human": false
+    }
+  ],
+  "excluded": [
+    {
+      "id": "F-009",
+      "reason": "duplicate_of:F-003"
+    },
+    {
+      "id": "F-011",
+      "reason": "invalid_after_recheck"
+    }
+  ],
+  "findings_total": 11,
+  "do_not_change": [
+    "Читатель этого brief — Architect; продуктные исходники не править. Архитектурная дельта ограничена разрешёнными артефактами run; Coder и rollout не запускать.",
+    "scope.coder_target_files: server.py, tests/test_step_interruption.py, tests/test_realtime_reasoning.py внутри bridges/opencode-zen-bridge; исключение возможно только через явно пересогласованные две ссылки test_catalog_mode.py:64,93 по RW-002.",
+    "Побайтово замороженные def _run_env (sha256 1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31), _stream_google_sse и _execute_google_once; test_run_env.py, test_google_direct.py, start.sh, dependencies/lockfiles и type/lint-конфиги.",
+    "Публичные /health, /v1/models, /v1/chat/completions, OpenAI SSE/finish_reason/usage, порт :9883, HTTP-ключ catalog_source и Google-direct; contract_deltas не расширять за разрешённые CD-001/CD-002.",
+    "analysis/zen-realtime-reasoning/**, bridges/muse-bridge/**, общие opencode/georouter конфиги и DB. dynamic_config.json не создавать/не коммитить; ~/.dsh/** вне архитектурной записи.",
+    "OPENCODE_DB=:memory:, стандартный auth/XDG_DATA_HOME, default=false и runtime enable только H7 после H3/H6. H3 RSS ≤1638.4 MiB и p99 normal ≤180/degraded ≤231.6 при выборке ≥100 не смягчать; потолки 6 active/12 waiters/cap3 не повышать.",
+    "PID-safe ownership и запрет name-wide kill; чужие PID/PGID/директории не трогать, helper/lsof учитывать в ресурсах. NOT_RUN живых H0..H9 и Stage3-проверок не превращать в PASS без факта."
+  ],
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Возврат a3 идёт Architect: delta-plan по RW-001..RW-003, каждое закрыть проверяемым acceptance в новом пакете либо no_architecture_delta с evidence для следующего совета. Только три инструкции blocking; шесть follow-up не блокируют, два excluded справочны. Coder до ARCH_PANEL_PASS не стартует; coder_entry — константа схемы, не смена получателя."
+}

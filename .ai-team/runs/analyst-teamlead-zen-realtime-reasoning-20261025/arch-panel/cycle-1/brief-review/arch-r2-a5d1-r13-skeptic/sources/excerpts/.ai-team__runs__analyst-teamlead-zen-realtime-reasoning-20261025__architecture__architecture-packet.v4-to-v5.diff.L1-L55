@@ -1,0 +1,55 @@
+# Mechanical unified diff (diff -u): Architecture Packet v4 -> v5
+# old_revision: architecture-packet.v4.json sha256=a53012565332cab8140d26d43029b931ff6d6c1fe4c63612310567ecba6812b3
+# new_revision: architecture-packet.json sha256=15ea67e3215ceea9e84b9d79853677f4be86b959e87a21f24830d0c895f62657
+--- architecture-packet.v4.json (sha256=a53012565332cab8140d26d43029b931ff6d6c1fe4c63612310567ecba6812b3)
++++ architecture-packet.json (v5 sha256=15ea67e3215ceea9e84b9d79853677f4be86b959e87a21f24830d0c895f62657)
+@@ -2,3 +2,3 @@
+   "schema_version": "1.0",
+-  "packet_version": "4.0",
++  "packet_version": "5.0",
+   "task_id": "zen-realtime-reasoning",
+@@ -6,3 +6,3 @@
+   "preset": "analyst-teamlead",
+-  "cycle": 4,
++  "cycle": 5,
+   "criticality": "S2",
+@@ -11,6 +11,6 @@
+   "role_plan": {
+-    "path": "plans/architect-04.json",
+-    "sha256": "2da27b07a4d80209e2f9537b3362ea00b6d37334f21a826dce25813014d88a2a"
++    "path": "plans/architect-05.json",
++    "sha256": "5255c8728e8f00b594c3f6f6951d5a50127e5fbf5c702739aced8ab7dd401abd"
+   },
+-  "summary": "Cycle4 a3→a4 fix-from-panel:3blocking RW+6non-blockingFU закрыты архитектурной delta v4,2excluded учтены без нового scope. Сохранены OPENCODE_DB=:memory:,Keep-Alive,default=false и прежние альтернативы. APPROVED — кандидат для внешнего Совета a4,не Council PASS/ARCH_GATE_PASS; Stage3/H0..H9 NOT_RUN.",
++  "summary": "Cycle5 a4→a5 fix-from-panel:4 blocking RW-001..004 +6 FU-001..006 закрыты точечной архитектурной delta v5; duplicate PANEL-A4-F-006 absorbed in RW-003. APPROVED означает внутреннюю готовность пакета-кандидата для внешнего Совета a5/r9, не Council PASS/ARCH_GATE_PASS. Stage3/H0..H9 NOT_RUN.",
+   "scope": {
+@@ -839,8 +839,5 @@
+       "id": "EVD-075",
+-      "versions": {
+-        "ruff": "0.17.2"
+-      },
++      "source": "bridges/opencode-zen-bridge/server.py",
+       "commands": [
+         {
+-          "case": "formatted",
+           "argv": [
+@@ -854,13 +851,13 @@
+             "--range=1:1-6:999",
+-            "/tmp/zen-arch4-probe-ruff-swkgt3h8/tmp_server.py"
++            "/tmp/zen-arch5-probe-ruff-0hdpxjld/server.py"
+           ],
++          "cwd": "/Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning",
++          "exit_code": 0,
+           "returncode": 0,
+-          "elapsed_s": 3.7895,
++          "elapsed_s": 0.3669,
+           "stdout": "1 file already formatted\n",
+-          "stderr": "Downloading ruff (9.7MiB)\n Downloaded ruff\nInstalled 1 package in 4ms\n",
+-          "file_unchanged": true,
+-          "frozen_slices_unchanged": true
++          "stderr": "",
++          "case": "closed_formatted"
+         },
+         {
+-          "case": "unformatted",
+           "argv": [

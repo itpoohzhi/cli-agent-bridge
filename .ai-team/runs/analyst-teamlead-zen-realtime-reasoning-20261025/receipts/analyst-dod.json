@@ -1,0 +1,24 @@
+{
+  "stage": "system-analyst",
+  "model": "claude-sonnet-5-5",
+  "effort": "high",
+  "transport": "claude -p",
+  "artifacts": [
+    "analysis/zen-realtime-reasoning/research-plan.md",
+    "analysis/zen-realtime-reasoning/evidence-ledger.md",
+    "analysis/zen-realtime-reasoning/open-questions.md",
+    "analysis/zen-realtime-reasoning/handoff-architect.md",
+    "analysis/zen-realtime-reasoning/handoff-qa.md"
+  ],
+  "checks": {
+    "SA-DOD-001": true,
+    "SA-DOD-002": true,
+    "SA-DOD-003": true,
+    "SA-DOD-004": true,
+    "SA-DOD-005": true,
+    "SA-DOD-006": true,
+    "SA-DOD-007": true,
+    "SA-DOD-008": true
+  },
+  "status": "PASS"
+}

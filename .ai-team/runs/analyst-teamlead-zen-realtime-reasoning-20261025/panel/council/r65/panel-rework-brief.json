@@ -1,0 +1,178 @@
+{
+  "schema_version": "2.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "teamlead_cycle": 5,
+  "panel_slug": "panel/council/r65",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "gpt-6.1-sol",
+  "findings_total": 15,
+  "decision_required_human": false,
+  "coder_entry": "fix-from-panel",
+  "iteration_budget_note": "Cycle 5 Совета Тимлидов по коду завершён после R1 (panel/council/r56) и D1 (panel/council/r65) с вердиктом NEEDS_WORK (7 первичных блокеров RW-001..RW-007, 3 non-blocking FU-001..FU-003, 5 excluded duplicate_of). Бюджет следующей волны: Coder rework (coder-08, Цикл 6) -> слепой reverse-spec -> Clean-Room L2 -> Cycle 6 Совета Тимлидов по коду.",
+  "do_not_change": [
+    "Разрешено модифицировать ТОЛЬКО 3 файла из allowed_envelope_changes: bridges/opencode-zen-bridge/server.py, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py, bridges/opencode-zen-bridge/tests/test_step_interruption.py.",
+    "Запрещено менять замороженную функцию def _run_env в bridges/opencode-zen-bridge/server.py (sha256=1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31).",
+    "Запрещено менять замороженную функцию def _stream_google_sse в bridges/opencode-zen-bridge/server.py (sha256=5914c9654c7345692dd55e84cfd3765e27406f63a3df85df30bc798bc1778de3).",
+    "Запрещено менять замороженную функцию def _execute_google_once в bridges/opencode-zen-bridge/server.py (sha256=88d794cc42be4878e8ab35b00e4668c427929db2dfd0f2bb4b717a63fd0c70d6).",
+    "Запрещено добавлять любые внешние зависимости вне стандартной библиотеки Python 3.14 (dependencies = [] в pyproject.toml).",
+    "Запрещено модифицировать zen_catalog.py, start.sh, muse-bridge, существующие тестовые модули вне конверта и коммитить dynamic_config.json в git."
+  ],
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:3552-3556,3563-3566,5564-5570,5618-5622,6846-6855,6911-6912",
+      "rule_ref": "RW-001, FALLBACK_DECISION_TABLE phase=DELIVERED, REQ-009",
+      "action": "В `_serve_one_attempt` (`server.py:3552-3556`, `:3563-3566`) и перед общим выходом гарантированно переносить `bool(prompt_status.get(\"headers_at\")) or bool(texts or reasonings or native_calls)` в `result[\"delivered\"]` на всех путях выхода, включая ветку SSE-ошибки `etype == \"error\"` (`session.execution.failed`) и общий дедлайн `exit_reason = \"timeout\"`. Внешние циклы SSE (`server.py:5618-5622`) и JSON (`server.py:6911-6912`) при `result[\"delivered\"] == True` никогда не должны возвращать `False` (переход в `opencode run`) или вызывать `record_success()`: разрешён только `serve-retry` через `attempts.allow_retry()` либо терминальная SSE/502 ошибка.",
+      "acceptance": "В режиме `auto` заголовки ответа `prompt_async` получены (`headers_at is not None`), затем приходит transient SSE `session.execution.failed` (429/timeout/eof) или истекает общий deadline `timeout` до первого токена модели: ни в SSE, ни в JSON не вызываются `Run.execute`, `_spawn_with_stdin` и `record_success()`; запрос остаётся на `serve` (с учётом `attempts.allow_retry()`) или завершается терминальной ошибкой.",
+      "source": "F-001 (skeptic · R1 · skeptic-F-001; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE; duplicates merged: F-006, F-013)",
+      "source_findings": [
+        "F-001"
+      ],
+      "evidence": "Ledger F-001: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:6231-6235",
+      "rule_ref": "REQ-007, AC-010",
+      "action": "В legacy SSE `send_keepalive` (`server.py:6235`) убрать нижний пол `120.0` из `max(float(FIRST_TOKEN_TIMEOUT_S), 120.0)` и сравнивать `now_s - attempt_start > float(FIRST_TOKEN_TIMEOUT_S)` (как на `serve`-пути `server.py:3314-3316`), чтобы настроенный порог `FIRST_TOKEN_TIMEOUT_S` (включая дефолтные `60 с`) соблюдался на обоих транспортах.",
+      "acceptance": "На legacy SSE при `FIRST_TOKEN_TIMEOUT_S=0.8` (или `60`) после получения служебного события без токенов попытка завершается с `exit_reason=\"first_token_timeout\"` за `~FIRST_TOKEN_TIMEOUT_S`, а не ждёт `120 с`.",
+      "source": "F-002 (skeptic · R1 · skeptic-F-002; status=AGREED; votes: R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE; duplicates merged: F-007, F-014)",
+      "source_findings": [
+        "F-002"
+      ],
+      "evidence": "Ledger F-002: votes=[R1 skeptic=AUTHOR; D1 skeptic=AUTHOR, realist=AGREE, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:5094-5118,5147",
+      "rule_ref": "REQ-006, REQ-007, AC-008, AC-009, AC-010",
+      "action": "В non-stream JSON-пути `Run.execute` (`server.py:5094-5118`, `:5147`) отслеживать времена первого события транспорта (`first_event_at`), первого токена (`first_token_at`) и последнего токена (`last_token_at`), и в `on_idle` при превышении `FIRST_EVENT_TIMEOUT_S`, `FIRST_TOKEN_TIMEOUT_S` или `STALL_TIMEOUT_S` останавливать группу процессов `_stop_proc` и классифицировать причину выхода (`first_event_timeout`, `first_token_timeout`, `stall_timeout`) с повтором внутри общего потолка `MAX_TOTAL_SPAWNS`.",
+      "acceptance": "При `TRANSPORT=run` и `stream=false` молчащий CLI без событий, CLI со служебным событием без токенов и CLI с паузой после токена завершают попытку соответственно по `first_event_timeout`, `first_token_timeout` и `stall_timeout` за настроенные пороги (с остановкой группы процессов), не ожидая `TIMEOUT_S=1800`.",
+      "source": "F-008 (realist · R1 · realist-F-003; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE; duplicates merged: F-015)",
+      "source_findings": [
+        "F-008"
+      ],
+      "evidence": "Ledger F-008: votes=[R1 realist=AUTHOR; D1 skeptic=AGREE, realist=AUTHOR, visionary=AGREE]; dissent=[—]; amendments=[—]."
+    },
+    {
+      "id": "RW-004",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+      "line_hint": "tests/test_step_interruption.py:171,181; tests/test_realtime_reasoning.py:793; server.py:1911",
+      "rule_ref": "AC-016, AC-017, testing.md",
+      "action": "Покрыть поведенческую матрицу `step interruption` / `STEP_RECOVERY` (`AC-016`: обрыв на тексте, размышлении, tool-блоке, нативном вызове, исчерпании бюджета) и сравнительный сценарий `unmapped recovery` (`AC-017`: unmapped error -> повтор в пределах `MAX_TOTAL_SPAWNS` -> эквивалентный `finish_reason` между `serve` и `run`) явными параметризованными/зеркальными тестами на транспорте `serve` в `tests/test_realtime_reasoning.py` (или `tests/test_step_interruption.py`) и отразить их ID в `verification-traceability.md`.",
+      "acceptance": "Все сценарии матрицы `AC-016` и сравнительный сценарий `AC-017` (`unmapped recovery` на `serve` против `run`) проходят зелёными автотестами с явными test IDs в `verification-traceability.md`.",
+      "source": "F-009 (realist · R1 · realist-F-004; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AMEND, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-009"
+      ],
+      "evidence": "Ledger F-009: votes=[R1 realist=AUTHOR; D1 skeptic=AMEND, realist=AUTHOR, visionary=AGREE]; dissent=[skeptic d1 «AMEND F-009 priority=non-blocking; locations=bridges/opencode-zen-bridge/tests/test_step_interruption.py:171, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py:793; fix=добавить экв» → teamlead/cycle-5/debate/d1/skeptic.md]; amendments=[skeptic d1: priority=non-blocking; locations=bridges/opencode-zen-bridge/tests/test_step_interruption.py:171, bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py:793; fix=добавить эквивалентную serve-матрицу step-interrupti (teamlead/cycle-5/debate/d1/skeptic.md)]."
+    },
+    {
+      "id": "RW-005",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:2731,2799,2825,3101,3196",
+      "rule_ref": "FU-006, REQ-008, feature.md §2, R-BULK-I1",
+      "action": "Передавать общий `deadline` и callback `is_client_gone` в `_spawn_serve` (`server.py:2731`) и открытие подписки `/api/event` (`server.py:3196`): не запускать helper при уже истёкшем `deadline` или отключённом клиенте, ограничивать шаги handshake/listener/subscribe минимумом из собственного окна и остатка `deadline`, а отмену клиента или истечение `deadline` на старте завершать уборкой lease и прямым кодом `client_disconnect`/`timeout` без превращения в `ServeUnavailable` с последующим fallback на `run`.",
+      "acceptance": "При уже истёкшем `deadline` или отключённом клиенте `_spawn_serve` не порождает helper и не переключается в `run`; отмена клиента или истечение `deadline` на фазах handshake/listener/subscribe приводит к немедленной уборке lease/группы в пределах `REQ-008` без fallback на `run`.",
+      "source": "F-010 (realist · R1 · realist-F-005; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AMEND, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-010"
+      ],
+      "evidence": "Ledger F-010: votes=[R1 realist=AUTHOR; D1 skeptic=AMEND, realist=AUTHOR, visionary=AGREE]; dissent=[skeptic d1 «AMEND F-010 priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:2731, bridges/opencode-zen-bridge/server.py:2825, bridges/opencode-zen-bridge/server.py:3101; fix=передать ос» → teamlead/cycle-5/debate/d1/skeptic.md]; amendments=[skeptic d1: priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:2731, bridges/opencode-zen-bridge/server.py:2825, bridges/opencode-zen-bridge/server.py:3101; fix=передать остаток deadline и `is_client_gone` в `_sp (teamlead/cycle-5/debate/d1/skeptic.md)]."
+    },
+    {
+      "id": "RW-006",
+      "priority": "blocking",
+      "criterion": "РЕАЛИЗУЕМОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:181,2826,2844",
+      "rule_ref": "feature.md §2, T-LIFE/v1",
+      "action": "В `_spawn_serve` (`server.py:2826`, `:2844`) запускать фоновый поток дренажа `helper.stderr` сразу после `subprocess.Popen` (до ожидания handshake и `listener_pid`) и ограничивать буфер диагностического хвоста по числу байт (а не только по числу строк, обрезая сверхдлинные строки без `\\n`), чтобы многомегабайтный вывод `opencode serve` до bind (включая поток без `\\n`) не блокировал пайп и не срывал старт.",
+      "acceptance": "Тест с `FakeServe`, пишущим `>= 2 MiB` в stderr до открытия порта (в том числе без символов `\\n`): старт `serve` успешно проходит handshake и bind без deadlock, буфер диагностики ограничен по байтам, после cleanup процессов и лишних FD не остаётся.",
+      "source": "F-011 (realist · R1 · realist-F-006; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=AMEND, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-011"
+      ],
+      "evidence": "Ledger F-011: votes=[R1 realist=AUTHOR; D1 skeptic=AMEND, realist=AUTHOR, visionary=AGREE]; dissent=[skeptic d1 «AMEND F-011 priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:181, bridges/opencode-zen-bridge/server.py:2844; fix=запускать родительский дренаж stderr helper сразу после » → teamlead/cycle-5/debate/d1/skeptic.md]; amendments=[skeptic d1: priority=non-blocking; locations=bridges/opencode-zen-bridge/server.py:181, bridges/opencode-zen-bridge/server.py:2844; fix=запускать родительский дренаж stderr helper сразу после `Popen`, до handshake/listener, как foll (teamlead/cycle-5/debate/d1/skeptic.md)]."
+    },
+    {
+      "id": "RW-007",
+      "priority": "blocking",
+      "criterion": "РИСКИ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "server.py:2604,2610,3584,3595,3607",
+      "rule_ref": "FU-006, REQ-008, AC-011, feature.md §2",
+      "action": "В `_serve_http` (`server.py:2604`, `:2610`) пересчитывать сокетный таймаут перед каждым чтением и принудительно закрывать сокет по истечении абсолютного `deadline` (включая фазу чтения заголовков `getresponse()` и чанков `read1()`), добавить параметр `skip_body: bool = False` для `interrupt`/`DELETE` в cleanup (`server.py:3595`, `:3607`), чтобы не вычитывать ненужное тело ответа, и гарантировать вызов `lease.cleanup()` в пределах бюджета `AC-011` (`<= 7 с` до смерти группы процессов) даже при капающих байтах ответа.",
+      "acceptance": "При закрытии клиентского сокета и `FakeServe`, медленно капающем заголовки или chunked-тело на `interrupt`/`DELETE`, cleanup не зависает в `_serve_http`, вызывает `lease.cleanup()` и завершает всю группу процессов не позднее `7 с` (`AC-011`).",
+      "source": "F-012 (realist · R1 · realist-F-007; status=AGREED; votes: R1 realist=AUTHOR; D1 skeptic=DISPUTE, realist=AUTHOR, visionary=AGREE)",
+      "source_findings": [
+        "F-012"
+      ],
+      "evidence": "Ledger F-012: votes=[R1 realist=AUTHOR; D1 skeptic=DISPUTE, realist=AUTHOR, visionary=AGREE]; dissent=[skeptic d1 «DISPUTE F-012 класс: duplicate_of:F-005 — контр-evidence: bridges/opencode-zen-bridge/server.py:3595 — те же cleanup-места interrupt/DELETE и та же суть, что F-005: суммарный худший случай уборк» → teamlead/cycle-5/debate/d1/skeptic.md]; amendments=[—]."
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Ограничить размер одной SSE-строки (`sse_resp.readline(_MAX_SSE_LINE_BYTES)`, `server.py:3235`) и совокупного тела ответа `_serve_http` (`_MAX_SERVE_HTTP_BODY_BYTES`, `server.py:2613`) именованными константами с генерацией `ServeProtocolError` при превышении.",
+      "reason": "Согласовано 3/3 в D1 как non-blocking; реализуем заодно в этом же проходе с негативным unit-тестом.",
+      "source_findings": [
+        "F-003"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-002",
+      "text": "В `_map_serve_event` (`server.py:1949-1956`) проверять все четыре поля `usage` (`input`, `output`, `reasoning`, `cache.read`) единым предикатом `isinstance(v, int) and not isinstance(v, bool) and v >= 0`, выбрасывая `ServeProtocolError` на `bool` или отрицательных значениях.",
+      "reason": "Согласовано 3/3 в D1 как non-blocking; реализуем заодно в этом же проходе с unit-тестом.",
+      "source_findings": [
+        "F-004"
+      ],
+      "decision_required_human": false
+    },
+    {
+      "id": "FU-003",
+      "text": "Ужать последовательные таймауты ожидания потоков и HTTP-cleanup в `finally` `_serve_one_attempt` (`server.py:3584,3595,3607`) и добавить сквозной оракул времени от закрытия клиентского сокета до исчезновения группы процессов (`<= 7 с`).",
+      "reason": "Согласовано 3/3 в D1 как non-blocking (реализуется совместно с `RW-007` / `F-012`).",
+      "source_findings": [
+        "F-005"
+      ],
+      "decision_required_human": false
+    }
+  ],
+  "excluded": [
+    {
+      "id": "F-006",
+      "reason": "duplicate_of:F-001"
+    },
+    {
+      "id": "F-007",
+      "reason": "duplicate_of:F-002"
+    },
+    {
+      "id": "F-013",
+      "reason": "duplicate_of:F-001"
+    },
+    {
+      "id": "F-014",
+      "reason": "duplicate_of:F-002"
+    },
+    {
+      "id": "F-015",
+      "reason": "duplicate_of:F-008"
+    }
+  ]
+}

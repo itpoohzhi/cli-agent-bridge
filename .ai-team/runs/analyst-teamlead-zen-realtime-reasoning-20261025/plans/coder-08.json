@@ -1,0 +1,169 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-07.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005",
+    "RW-006",
+    "RW-007"
+  ],
+  "objective": "Устранить RW-001..RW-007 и FU-001..FU-003 Cycle 6 без изменения frozen-функций",
+  "inputs_read": [
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/handoff/panel-rework-brief.json",
+    ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/teamlead/cycle-5/final-panel-verdict.md",
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py"
+  ],
+  "stop_conditions": [
+    "Менять только 3 продуктовых/тестовых файла из брифа и файлы отчётности coder-08",
+    "Не трогать замороженные _run_env/_stream_google_sse/_execute_google_once (sha256 VER-004)",
+    "Не запускать full-file ruff format server.py; только --range по изменённым ханкам",
+    "Не делать git commit/push/gh pr create",
+    "Сохранить ранний перехват --serve-helper и совместимость ast feature_version=(3,9)"
+  ],
+  "deviations": [
+    "Остальные модули: 271 passed in 50.08s, итог 466 passed — передано владельцем в брифе восстановления; отдельного сырого лога в evidence_dir нет, независимо не подтверждено. full-pytest.log содержит ранний неуспешный прогон: 1 failed, 465 passed in 2065.27s (listener ownership в test_serve_400_fails_closed_without_health_increment).",
+    "Восстановление после 503 ограничено четырьмя отчётными JSON; тесты повторно не запускались, bridges/** не изменялись.",
+    "Локальный validate_role_plan.py не поддерживает --before-file: выполнена отдельная проверка неизменности steps/execution_steps; validate_handoff.py требует --role-plan, поэтому аргумент добавлен.",
+    "unittest-root.log: 18 import errors; успешный полный unittest не заявляется.",
+    "verification-traceability.md не изменялся: вне разрешённого scope; test IDs матрицы AC-016/017 приведены в acceptance_coverage handoff."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Добавить регрессионные тесты Cycle 6 и подтвердить RED до server.py",
+      "execution_step_ids": [
+        "RP-01"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "DONE",
+      "actual_evidence": "RED: red.log — 9 failed, 72 deselected in 98.02s; прогон прерван KeyboardInterrupt, не успешный suite. AC-017 partial RED: 1 failed, 86 deselected in 4.60s; GREEN: ac017-partial-green-2.log — 1 passed, 86 deselected in 11.48s."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Исправить доставку, watchdog, отмену старта и stderr без frozen-дельты",
+      "execution_step_ids": [
+        "RP-02",
+        "RP-04",
+        "RP-05"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "DONE",
+      "actual_evidence": "RW-001..003: барьер delivered и фазовые watchdog; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. RW-005: test_c6_rw005_spawn_serve_respects_deadline_and_client_disconnect_without_run_fallback, test_c6_rw005_startup_abort_never_falls_back_or_changes_serve_health, test_c6_rw005_subscribe_deadline_and_disconnect_cleanup; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. RW-006: test_c6_rw006_spawn_serve_drains_multi_mib_stderr_before_bind_without_deadlock; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Ограничить HTTP, SSE и cleanup и закрыть матрицу AC-016/017",
+      "execution_step_ids": [
+        "RP-03",
+        "RP-06"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "DONE",
+      "actual_evidence": "AC-016/017: test_c6_rw004_ac016_serve_step_interruption_matrix, test_c6_rw004_ac017_unmapped_recovery_serve_vs_run_equivalence; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. RW-007/FU-001..003: HTTP deadlines/skip_body, SSE/body byte caps, strict usage; соответствующие test_c6_rw007_* и test_c6_fu001*; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s."
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Прогнать VER-004, целевой pytest и полные тесты моста",
+      "execution_step_ids": [
+        "RP-07"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "DONE",
+      "actual_evidence": "ver004-final-evidence.log: PASS VER-004, frozen sha256 3/3, lint/type, errors=0, warnings=759 (server=590), catalog 8/8; target-pytest-accepted.log: 195 passed in 198.43s; baseline-collect-accepted.log: 87 tests collected in 0.05s. Все пути: ~/work/cli-agent-bridge/coder-08-20261027/ Остальные модули: 271 passed in 50.08s, итог 466 passed — передано владельцем в брифе восстановления; отдельного сырого лога в evidence_dir нет, независимо не подтверждено. full-pytest.log содержит ранний неуспешный прогон: 1 failed, 465 passed in 2065.27s (listener ownership в test_serve_400_fails_closed_without_health_increment)."
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Записать after-план, handoff и две идентичные квитанции coder-08",
+      "execution_step_ids": [
+        "RP-08"
+      ],
+      "expected_evidence": "Сырые результаты оракулов и валидаторов Cycle 6",
+      "status": "DONE",
+      "actual_evidence": "After-план и handoff coder-08 записаны; validate_role_plan --phase after и validate_handoff coder --role-plan: exit=0; steps и execution_steps сохранены относительно before (кроме status/actual_evidence); before-план и 3 исходных файла неизменны в ходе восстановления; coder.json и receipts/coder.json байтово идентичны handoffs/coder-08.json."
+    }
+  ],
+  "execution_steps": [
+    {
+      "id": "RP-01",
+      "kind": "verify",
+      "action": "Подтвердить RED-оракулы барьера доставки и фазовых watchdog",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "RED: red.log — 9 failed, 72 deselected in 98.02s; прогон прерван KeyboardInterrupt, не успешный suite. AC-017 partial RED: 1 failed, 86 deselected in 4.60s; GREEN: ac017-partial-green-2.log — 1 passed, 86 deselected in 11.48s. Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Исправить доставку headers_at и фазовые watchdog обоих путей",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "RW-001..003: барьер delivered и фазовые watchdog; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Проверить AC-016 и AC-017 матрицей serve и run",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "AC-016/017: test_c6_rw004_ac016_serve_step_interruption_matrix, test_c6_rw004_ac017_unmapped_recovery_serve_vs_run_equivalence; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Ограничить старт serve дедлайном и отменой клиента",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "RW-005: test_c6_rw005_spawn_serve_respects_deadline_and_client_disconnect_without_run_fallback, test_c6_rw005_startup_abort_never_falls_back_or_changes_serve_health, test_c6_rw005_subscribe_deadline_and_disconnect_cleanup; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    },
+    {
+      "id": "RP-05",
+      "kind": "change",
+      "action": "Дренировать stderr до handshake с байтовым пределом",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "RW-006: test_c6_rw006_spawn_serve_drains_multi_mib_stderr_before_bind_without_deadlock; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    },
+    {
+      "id": "RP-06",
+      "kind": "change",
+      "action": "Ограничить HTTP и cleanup дедлайном, SSE и usage валидаторами",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "RW-007/FU-001..003: HTTP deadlines/skip_body, SSE/body byte caps, strict usage; соответствующие test_c6_rw007_* и test_c6_fu001*; green-2.log: 12 passed, 72 deselected in 44.08s; c6-final.log: 16 passed, 71 deselected in 48.83s; target-pytest-accepted.log: 195 passed in 198.43s. Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    },
+    {
+      "id": "RP-07",
+      "kind": "verify",
+      "action": "Прогнать VER-004, целевой pytest и полные наборы моста",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "ver004-final-evidence.log: PASS VER-004, frozen sha256 3/3, lint/type, errors=0, warnings=759 (server=590), catalog 8/8; target-pytest-accepted.log: 195 passed in 198.43s; baseline-collect-accepted.log: 87 tests collected in 0.05s. Все пути: ~/work/cli-agent-bridge/coder-08-20261027/ Остальные модули: 271 passed in 50.08s, итог 466 passed — передано владельцем в брифе восстановления; отдельного сырого лога в evidence_dir нет, независимо не подтверждено. full-pytest.log содержит ранний неуспешный прогон: 1 failed, 465 passed in 2065.27s (listener ownership в test_serve_400_fails_closed_without_health_increment). Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    },
+    {
+      "id": "RP-08",
+      "kind": "report",
+      "action": "Записать валидные after-план и handoff coder-08",
+      "expected_evidence": "Регрессионные оракулы и сырой вывод проверки",
+      "status": "DONE",
+      "actual_evidence": "After-план и handoff coder-08 записаны; validate_role_plan --phase after и validate_handoff coder --role-plan: exit=0; steps и execution_steps сохранены относительно before (кроме status/actual_evidence); before-план и 3 исходных файла неизменны в ходе восстановления; coder.json и receipts/coder.json байтово идентичны handoffs/coder-08.json. Evidence: ~/work/cli-agent-bridge/coder-08-20261027/"
+    }
+  ],
+  "actual_evidence": "ver004-final-evidence.log: PASS VER-004, frozen sha256 3/3, lint/type, errors=0, warnings=759 (server=590), catalog 8/8; target-pytest-accepted.log: 195 passed in 198.43s; baseline-collect-accepted.log: 87 tests collected in 0.05s. Все пути: ~/work/cli-agent-bridge/coder-08-20261027/ Остальные модули: 271 passed in 50.08s, итог 466 passed — передано владельцем в брифе восстановления; отдельного сырого лога в evidence_dir нет, независимо не подтверждено. full-pytest.log содержит ранний неуспешный прогон: 1 failed, 465 passed in 2065.27s (listener ownership в test_serve_400_fails_closed_without_health_increment)."
+}

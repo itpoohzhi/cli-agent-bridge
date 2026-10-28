@@ -1,0 +1,26 @@
+{
+  "available": true,
+  "family": "Meta",
+  "ladder": [
+    {
+      "argv_sha256": "26ac397fb1ac2ee94f940352867b426b101dbee466ad9e70a0113f479fa6dce6",
+      "end_utc": "2026-10-26T08:45:07.343737+00:00",
+      "error": null,
+      "pgid": "11070",
+      "pid": 11070,
+      "raw_err_sha256": "0fcc0aa26f14c175b673294ba55f90c8a26c40bd99e9270f1fba246bc8ad818a",
+      "raw_out_sha256": "e4189e344587163a7a5322336b50506f39ca11ac4ae8a700e1f81390383333ab",
+      "rc": 0,
+      "start_utc": "2026-10-26T08:44:41.754125+00:00",
+      "status": "ok",
+      "transport": "muse"
+    }
+  ],
+  "launcher_sha256": "2123a3a8c508864327a1b9cf19460f5383194cab4f9c9581204157190c84c5d1",
+  "round": 16,
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "schema": "pol-probe/1",
+  "setup": "default",
+  "slot_id": "muse-wonder-full-1.0",
+  "stage": "arch"
+}

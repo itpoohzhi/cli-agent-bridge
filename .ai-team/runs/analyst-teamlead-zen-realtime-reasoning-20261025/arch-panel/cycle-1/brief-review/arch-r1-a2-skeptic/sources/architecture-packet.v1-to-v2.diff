@@ -1,0 +1,1797 @@
+# Mechanical unified diff (diff -u): Architecture Packet v1 -> v2
+# old_revision: architecture-packet.v1.json sha256=e620a689a0d665a2c7979eba5a7073af41d9ca9473ea906ff9cee316fa0c7e02
+# new_revision: architecture-packet.json sha256=c3936c99b53fc50508c113c88368f0b75b01d250d8345ee3be175c753a8b9a3d
+--- architecture-packet.v1.json (sha256=e620a689a0d665a2c7979eba5a7073af41d9ca9473ea906ff9cee316fa0c7e02)
++++ architecture-packet.json (v2 sha256=c3936c99b53fc50508c113c88368f0b75b01d250d8345ee3be175c753a8b9a3d)
+@@ -1,24 +1,24 @@
+ {
+   "schema_version": "1.0",
+-  "packet_version": "1.0",
++  "packet_version": "2.0",
+   "task_id": "zen-realtime-reasoning",
+   "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+   "preset": "analyst-teamlead",
+-  "cycle": 1,
++  "cycle": 2,
+   "criticality": "S2",
+   "profile": "python-aisdlc-gcge",
+   "status": "APPROVED",
+   "role_plan": {
+-    "path": "plans/architect-01.json",
+-    "sha256": "d435226fff3370982e236d7e5bb885d341331d70a2022e67c4d9f8a594a5283c"
++    "path": "plans/architect-02.json",
++    "sha256": "8bede3e0b7daecf01212133dee566014df3472bb244fde2fbc09bedf3ef25f1e"
+   },
+-  "summary": "Гибрид C/A1: короткоживущий serve v2 на попытку, общий нормализованный поток событий для SSE и JSON, run как kill-switch и безопасный pre-prompt fallback; grace-статусы, три watchdog и гарантированная уборка PGID. Это проектный контракт Stage 2, не утверждение о выполненных изменениях или живой приёмке.",
++  "summary": "Гибрид C/A1, цикл 2 fix-from-panel: ephemeral serve v2.1.2 с точным wire-контрактом, ask_reject, отдельными readiness/session/watchdog бюджетами, pre-response-headers fallback и sticky transport health; run kill-switch без рестарта. APPROVED означает проектный контракт-кандидат для R2, не council PASS или живую приёмку.",
+   "scope": {
+     "repo_root": "~/tmp/cli-agent-bridge/zen-realtime-reasoning",
+     "branch": "feature/zen-realtime-reasoning",
+     "architect_write_allowlist": [
+-      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-01.before.json",
+-      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-01.json",
++      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-02.before.json",
++      ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/architect-02.json",
+       ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/architecture/architecture-packet.json"
+     ],
+     "coder_target_files": [
+@@ -119,7 +119,7 @@
+       "id": "REQ-006",
+       "priority": "MUST",
+       "statement": "Watchdog первого события: нет ни одного события транспорта в течение порога (допущение 20 с, OPEN-11) — группа процессов убивается, попытка повторяется по общему бюджету либо клиент получает явную ошибку",
+-      "acceptance": "AC-008: фейковый транспорт без вывода завершается убийством и ретраем или ошибкой за порог плюс 2 с",
++      "acceptance": "AC-008: фейковый транспорт без вывода завершается убийством и ретраем или ошибкой за порог плюс 2 с На serve локальный HTTP ready не считается execution event: после отправки prompt валидного события текущей session нет20s ->first_event_timeout+cleanup<=2s.",
+       "evidence": "F-09, F-30, F-31",
+       "verification_ids": [
+         "VER-005"
+@@ -192,9 +192,9 @@
+     {
+       "id": "REQ-013",
+       "priority": "MUST",
+-      "statement": "Ротация чистых IP на каждый новый запуск, `_StartupGate`, `SPAWN_RATE_PER_S`, bulkhead слотов и Circuit Breaker действуют и для нового транспорта",
++      "statement": "REQ-013 уточнение под AC-018: per-spawn ротация _next_standalone_proxy и proxy env сохраняется на каждом child; _StartupGate, spawn rate, bulkhead и model Circuit Breaker действуют на обоих транспортах. loopback georouter baseURL=http://127.0.0.1:10830/v1 идёт по NO_PROXY в обход child HTTP_PROXY; смена реального Zen egress IP этим не гарантируется.",
+       "acceptance": "AC-018: два последовательных запуска получают разные записи пула прокси (проверка через подменённый `_next_standalone_proxy`)",
+-      "evidence": "F-10, F-11, F-15, F-32",
++      "evidence": "F-10, F-11, F-15, F-27, F-32; RW-005",
+       "verification_ids": [
+         "VER-001",
+         "VER-005"
+@@ -225,7 +225,7 @@
+       "id": "REQ-016",
+       "priority": "MUST",
+       "statement": "Наблюдаемость `O-EXIT/v1`: новые значения `exit_reason` (`first_event_timeout`, `first_token_timeout`, `stall_timeout`, `client_gone`) и поля `transport`, `first_event_ms`, `ttft_ms` в строке выхода",
+-      "acceptance": "AC-021: строка `O-EXIT/v1` содержит перечисленные поля на каждом выходе `do_POST`",
++      "acceptance": "AC-021: строка `O-EXIT/v1` содержит перечисленные поля на каждом выходе `do_POST` first_event_ms=null до валидного session SSE исполнения после prompt; local ready не подставлять; transport_history различает _ServeHealth degradation.",
+       "evidence": "F-32, F-30",
+       "verification_ids": [
+         "VER-005"
+@@ -739,6 +739,25 @@
+       "kind": "code",
+       "ref": "bridges/opencode-zen-bridge/server.py:_UpstreamBreaker.allow (1415-1428), _SlotBulkhead.__init__ (1265-1270)",
+       "claim": "Baseline HALF_OPEN probe can be re-admitted after reset_s while first is active; default slots2/configured waiters12 exceed canonical2M unless effective clamp. Dedicated oracles freeze intended single-probe/effective bound without altering deployed6/12."
++    },
++    {
++      "id": "EVD-062",
++      "kind": "code",
++      "ref": "~/.opencode/bin/opencode (v2.1.2), embedded JS byte offsets113098820,114613538,114616189,114617971,114628971,114631174,114634000..114636000,114980796,114994633,114622692,114978382,115017692,114596000..114596700",
++      "claim": "Read-only source extraction: version2.1.2; Model.Ref {providerID,id,variant}; Permission.Ruleset array{action,resource,effect}, wire permission.asked+reply decision=reject; delta data.delta/sessionID/assistantMessageID/ordinal; TokenUsage.Info {input,output,reasoning,cache:{read,write}}; tool input.started/called/failed; session prompt delivery steer|queue,resume. binary SHA256 b6dc81ec33e062a443e9d3eb1033e42f5d3e16acc4409970320cd26b9a215d0c. Synthetic frozen examples use source schemas, не live tool execution. Дополнительно source: active sessions response data — object record, не array; Session.StructuredError optional numeric status (100..599); /api/info gives app version+pid; OpenAPI.info.version=0.0.1, отдельная от CLI2.1.2.",
++      "collected_at": "2026-10-26"
++    },
++    {
++      "id": "EVD-063",
++      "kind": "document",
++      "ref": "/tmp/cel-runs/zen-realtime-reasoning-20261025/sa-poc/serve_sse.py + poc_serve.log; F-19/F-22/F-23",
++      "claim": "Существующий analyst PoC использует lightweight GET /api/session/active; create model {providerID,id,variant}, location.directory; prompt files[] delivery=steer; data.id response. Сохранённый failed event {id,created,type,data:{sessionID,error:{type:provider.free-limit,message}}}. В cycle2 процесс opencode не запускался, provider не вызывался."
++    },
++    {
++      "id": "EVD-064",
++      "kind": "document",
++      "ref": "handoff/panel-rework-brief-arch-a1.json + текущий Brief Architect cycle2 fix-from-panel",
++      "claim": "14 обязательных RW и7 FU; exact explicit choices для default true, headers barrier, permission selector,MiB/typing; role write allowlist только3 JSON. Исходные расхождения R1 перечислены в panel_resolution_choices, не выданы за единогласное одобрение изменений."
+     }
+   ],
+   "risk_triggers": [
+@@ -751,7 +770,7 @@
+       "id": "ASM-001",
+       "class": "continuable",
+       "source_open_ids": "OPEN-06/08",
+-      "statement": "Per-spawn env ротация и child192MiB design estimates; физический egress/SQLite6parallel проверяет H3.",
++      "statement": "Per-spawn proxy env rotation доказуема AC-018, Zen egress за georouter не определяется child HTTP_PROXY (F-15/F-27). child192MiB — design estimate; временный per-spawn XDG_DATA_HOME устраняет совместное открытие общей DB; фактический RSS/locks проверяет обязательный H3.",
+       "status": "ASSUMED",
+       "evidence_ids": [
+         "EVD-015",
+@@ -796,7 +815,7 @@
+       "id": "ASM-005",
+       "class": "continuable",
+       "source_open_ids": "OPEN-07",
+-      "statement": "Deny-all capability и equivalent ask-auto-reject должны пройти fake permission assertions; реальное no-file mutation доказывает H6, ещё не выполнено.",
++      "statement": "Default ask_reject и optional env=deny проверяются FakeServe; живую совместимость обеих safe policies с Zen и no-file mutation доказывает H6. Автопереключения политик нет; отсутствие safe endpoint или401/403 fail-closed.",
+       "status": "ASSUMED",
+       "evidence_ids": [
+         "EVD-022",
+@@ -832,7 +851,7 @@
+     "RC-2: многоэтапные deadline и очистка вместо 780–856 с тишины",
+     "RC-3: DSH видимость по непустому reasoning_content и завершённому абзацу",
+     "REQ-002/003: стабильный OpenAI контракт и 17 legacy test modules",
+-    "REQ-012/013/015: запрет built-ins, per-spawn proxy rotation и секреты"
++    "REQ-012/013/015: запрет built-ins, per-spawn proxy env rotation (не доказанная Zen IP ротация), безопасные secrets/loopback ownership"
+   ],
+   "verification_surface": [
+     {
+@@ -853,7 +872,7 @@
+       "kind": "command",
+       "command": "cd bridges/opencode-zen-bridge && uvx pytest -q -p no:cacheprovider tests/",
+       "expected": "exit 0; 0 failed во всех существующих 17 модулях + dedicated suite; 3 baseline tests исправлены, production cap=3",
+-      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для baseline overlay. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
++      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для frozen strict VER-004. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
+       "owner": "verifier"
+     },
+     {
+@@ -867,7 +886,7 @@
+       "kind": "command",
+       "command": "cd bridges/opencode-zen-bridge && python3 -m unittest discover -s tests -p \"test_*.py\"",
+       "expected": "exit 0; 0 failures/errors, запуск из bridge cwd (не из repo root), все новые tests используют unittest.TestCase или stdlib-compatible helper",
+-      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для baseline overlay. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
++      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для frozen strict VER-004. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
+       "owner": "verifier"
+     },
+     {
+@@ -879,7 +898,7 @@
+       "kind": "command",
+       "command": "PYTHONPATH=. uvx pytest -q -p no:cacheprovider tests/",
+       "expected": "exit 0; root cross-bridge regression без живых owner ресурсов; environment-specific skips разрешены только унаследованные",
+-      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для baseline overlay. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
++      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для frozen strict VER-004. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
+       "owner": "verifier"
+     },
+     {
+@@ -890,10 +909,15 @@
+         "REQ-017"
+       ],
+       "kind": "command",
+-      "command": "python3 - <<'VER004'\nimport collections, json, subprocess\ns=\"bridges/opencode-zen-bridge/server.py\"\nt=\"bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py\"\nr=subprocess.run([\"uvx\",\"--from\",\"ruff==0.17.2\",\"ruff\",\"check\",\"--no-cache\",\"--output-format=json\",s,t],capture_output=True,text=True)\nassert r.returncode in (0,1), r.stderr\nrd=json.loads(r.stdout)\nfrom pathlib import Path\nassert all(\"import zen_catalog\" in Path(s).read_text().splitlines()[x[\"location\"][\"row\"]-1] for x in rd), rd\nassert all(x[\"code\"]==\"E402\" and x[\"filename\"].endswith(\"/\"+s) and x[\"message\"]==\"Module level import not at top of file\" for x in rd) and len(rd)<=1, rd\nb=subprocess.run([\"uvx\",\"--from\",\"basedpyright==1.40.2\",\"basedpyright\",\"--outputjson\",s],capture_output=True,text=True)\nassert b.returncode in (0,1), b.stderr\nbd=json.loads(b.stdout); ds=bd[\"generalDiagnostics\"]\nallowed={\"reportImplicitRelativeImport\":\"zen_catalog\", \"reportConstantRedefinition\":\"CATALOG_SOURCE\"}\nerrs=[x for x in ds if x[\"severity\"]==\"error\"]\nassert all(x.get(\"rule\") in allowed and allowed[x[\"rule\"]] in x[\"message\"] for x in errs), errs\nassert all(n<=1 for n in collections.Counter(x[\"rule\"] for x in errs).values()), errs\nlimits={\"reportExplicitAny\":125,\"reportAny\":125,\"reportUnusedCallResult\":39,\"reportUnknownMemberType\":70,\"reportUnknownVariableType\":48,\"reportUnknownArgumentType\":35,\"reportUnusedFunction\":2,\"reportImplicitStringConcatenation\":27,\"reportUnannotatedClassAttribute\":81,\"reportUnusedParameter\":3,\"reportUnnecessaryIsInstance\":3,\"reportUnknownParameterType\":2,\"reportMissingParameterType\":2,\"reportUnreachable\":1,\"reportImplicitOverride\":1}\ncounts=collections.Counter(x.get(\"rule\",\"\") for x in ds if x[\"severity\"]==\"warning\")\nassert all(n<=limits.get(k,0) for k,n in counts.items()), counts\nprint(\"PASS baseline-aware VER-004; ruff inherited<=1 E402; pyright inherited<=2 errors; warnings within frozen per-rule budgets\",dict(counts))\nVER004",
+-      "expected": "exit 0 baseline overlay; новые lint/type errors запрещены. Это budget gate для существующего typed debt, НЕ заявление о полном чистом basedpyright. Legacy E402 разрешён только на zen_catalog import; 2 pyright error sites строго только указанные; warning rule budgets не растут.",
+-      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для baseline overlay. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
+-      "owner": "verifier"
++      "command": "python3 - <<'VER004'\nimport collections, json, subprocess\nfrom pathlib import Path\nfiles = ['bridges/opencode-zen-bridge/server.py','bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py','bridges/opencode-zen-bridge/tests/test_step_interruption.py']\nassert all(Path(f).is_file() for f in files), files\nfor args in ([\"uvx\",\"--from\",\"ruff==0.17.2\",\"ruff\",\"format\",\"--check\",\"--no-cache\",*files], [\"uvx\",\"--from\",\"ruff==0.17.2\",\"ruff\",\"check\",\"--no-cache\",*files]):\n    subprocess.run(args, check=True)\nb = subprocess.run([\"uvx\",\"--from\",\"basedpyright==1.40.2\",\"basedpyright\",\"--outputjson\",*files], capture_output=True, text=True)\nassert b.returncode in (0,1), b.stderr\nreport = json.loads(b.stdout)\nds = report['generalDiagnostics']\nerrors = [d for d in ds if d['severity'] == 'error']\nassert report['summary']['errorCount'] == 0 and not errors, errors\nlimits = {'reportExplicitAny': 125, 'reportAny': 125, 'reportUnusedCallResult': 39, 'reportUnknownMemberType': 70, 'reportUnknownVariableType': 48, 'reportUnknownArgumentType': 35, 'reportUnusedFunction': 2, 'reportImplicitStringConcatenation': 27, 'reportUnannotatedClassAttribute': 81, 'reportUnusedParameter': 3, 'reportUnnecessaryIsInstance': 3, 'reportUnknownParameterType': 2, 'reportMissingParameterType': 2, 'reportUnreachable': 1, 'reportImplicitOverride': 1}\nserver = Path(files[0]).resolve()\nserver_warnings = [d for d in ds if d['severity']=='warning' and Path(d['file']).resolve()==server]\ncounts = collections.Counter(d.get('rule','') for d in server_warnings)\nassert all(n <= limits.get(rule,0) for rule,n in counts.items()), dict(counts)\n# Both Any rules explicitly retain the frozen server.py ceiling even if absent in output.\nassert counts['reportAny'] <= 125 and counts['reportExplicitAny'] <= 125, dict(counts)\nprint('PASS VER-004: ruff format/check all 3 files, basedpyright 0 errors all 3, server frozen warning budgets',dict(counts))\nVER004",
++      "expected": "exit0; ruff format --check и ruff check на всех3 targetfiles без allowance; basedpyright severity==error ровно0 на всех3. server.py reportAny<=125/reportExplicitAny<=125 и остальные frozen rule warning budgets не растут. Прежние E402/2 type errors EVD052/053 не разрешены новым gate; Coder исправляет в allowlist без type-ignore/disable/изменения конфигов. Stage2 команду не запускает: новый testfile ещё не существует.",
++      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для frozen strict VER-004. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
++      "owner": "verifier",
++      "baseline_transition": {
++        "old": "v1 VER-004 разрешал1E402 и2errors server.py и пропускал test_step_interruption.py",
++        "new": "0 lint/format failures,0type errors на каждом из3files; server frozen warning budgets unchanged",
++        "owner": "Stage3 Coder устраняет pre-existing error sites в server.py; Verifier независимо проверяет. Новые Any запрещены, подавлять диагностику ради PASS нельзя."
++      }
+     },
+     {
+       "id": "VER-005",
+@@ -920,8 +944,8 @@
+       ],
+       "kind": "command",
+       "command": "cd bridges/opencode-zen-bridge && uvx pytest -q -p no:cacheprovider tests/test_realtime_reasoning.py",
+-      "expected": "exit 0; полный FakeServe v2 SSE, timing до конца upstream, grace/status, 3 watchdog, cancellation/PGID, fallback, pure reasoning, tools, 46 envelope fields + 21 stop-code/lifecycle invariants",
+-      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для baseline overlay. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
++      "expected": "exit0; exact frozen-v2.1.2 FakeServe fixture digest+negative mutations, delivery/concurrent reject, ask_reject/deny и _run_env hash, listener takeover zero leakage, budgets51.6, separate first_event20/readiness3, file kill-switch, ServeHealth3/TTL120 independent breaker, synthetic leading LF provenance, XDG cleanup, all prior tools/timing/lifecycle/resilience assertions. Implementation NOT_RUN Stage2.",
++      "environment": "Чистый clone/worktree, cwd=repo_root (кроме явного cd), Python>=3.11, uvx с pytest; ruff=0.17.2/basedpyright=1.40.2 для frozen strict VER-004. Изолированный verifier runner не монтирует home владельца/его ~/.dsh; live-only optional root tests skip. Без изменения HOME в пользовательской сессии, без обращений к production, сети Zen и без rollout. Temp fake CLI/HTTP/workdir создаёт runner в своём sandbox.",
+       "owner": "verifier"
+     }
+   ],
+@@ -931,9 +955,9 @@
+       "status": "APPROVED",
+       "kind": "two-way",
+       "question": "Как получить настоящие reasoning/text delta и сохранить обратимый legacy-путь?",
+-      "choice": "Option C с A1 primary: один короткоживущий serve v2 на попытку, HTTP+SSE, run fallback только до отправки prompt; единый canonical event source для stream=True и stream=False.",
++      "choice": "Option C/A1: один ephemeral serve v2.1.2 на попытку; canonical source для SSE/JSON. В auto run fallback только до HTTP-заголовков ответа POST /prompt И до первого валидного события исполнения текущей сессии; после барьера никакого silent run fallback.",
+       "alternatives": [
+-        "A2: общий daemon — дешевле холодного старта, но единый env/IP и failure domain, риск лимита F-15/OPEN-06.",
++        "A2: общий daemon экономит холодный старт, но объединяет failure domain и child env; самостоятельная ротация egress внутри georouter не доказана ни для A1, ни для A2 (F-15/F-27).",
+         "B: прямой HTTP Zen — меньше ресурсов, но 429 F-24/F-25 и нет подтверждённого client context; не выбирается без PoC.",
+         "L: только run watchdog/status — минимален, но не устраняет RC-1."
+       ],
+@@ -942,14 +966,16 @@
+         "REQ-002",
+         "REQ-003",
+         "REQ-012",
+-        "REQ-013",
++        "REQ-013 / AC-018: per-spawn _next_standalone_proxy/env rotation; loopback georouter bypasses child HTTP_PROXY via NO_PROXY, не гарантия смены Zen egress IP",
+         "REQ-014",
+         "F-19/F-20: 109 ms server start, 127/114 ms delta medians"
+       ],
+       "consequences": [
+         "Дополнительные SSE/control sockets и lifecycle; предел активных детей не увеличивается.",
+         "run-откат теряет realtime; это видимая деградация, не доказательство REQ-001.",
+-        "Откат флага/режима без миграций; публичная форма ответов неизменна."
++        "Откат флага/режима без миграций; публичная форма ответов неизменна.",
++        "Новый процесс получает временный XDG_DATA_HOME: история/SQLite изолированы на попытку и удаляются в finally; общий opencode.db не открываем намеренно.",
++        "Default=true разрешён текущим rework-brief; production sync лишь после изолированного H3. Файл disable-serve удерживает боевой run до приёмки."
+       ],
+       "approval_required": false,
+       "evidence_ids": [
+@@ -964,7 +990,10 @@
+         "EVD-025",
+         "EVD-040",
+         "EVD-050",
+-        "EVD-051"
++        "EVD-051",
++        "EVD-062",
++        "EVD-063",
++        "EVD-064"
+       ],
+       "confirmation": {
+         "kind": "test",
+@@ -978,8 +1007,8 @@
+       "details": {
+         "configuration": {
+           "OPENCODE_ZEN_BRIDGE_REALTIME_SERVE_ENABLED": {
+-            "default": false,
+-            "purpose": "без явного включения выполняется только run; первые инструкции optional serve-path проверяют флаг"
++            "default": true,
++            "purpose": "В auto нативный Mach-O opencode сразу использует serve после разрешённой синхронизации server.py; start.sh неизменен. Явные 0/false выключают optional serve ветвь первой инструкцией."
+           },
+           "OPENCODE_ZEN_BRIDGE_TRANSPORT": {
+             "values": [
+@@ -988,28 +1017,444 @@
+               "run"
+             ],
+             "default": "auto",
+-            "precedence": "TRANSPORT=run или REALTIME_SERVE_ENABLED=false -> run. true+auto -> безопасный eligibility-check, потом serve или run. true+serve -> force serve, ошибки capability/readiness явные без silent run fallback. Неизвестное значение -> ошибка конфигурации до bind."
++            "precedence": "REALTIME_SERVE_ENABLED=0/false или TRANSPORT=run -> run до stat/probe/allocations; затем существующий disable-file -> run; затем auto ServeHealth + shebang eligibility; иначе serve. Force serve обходит только shebang/health auto routing для FakeServe и диагностики, но не disable-file, выключенный флаг или security. Force serve errors явные, без silent fallback. Invalid value -> config error."
+           },
+-          "feature_flag_context": "Локальный stdlib-мост без gc_pytools/dynamic_config/GigaRC, как зафиксировано в эталоне. Не добавлять GigaRC/dependency/env propagation в другие системы; текущий бриф явно разрешает transport/env kill-switch. Новая ветвь default=false."
++          "OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY": {
++            "values": [
++              "ask_reject",
++              "deny"
++            ],
++            "default": "ask_reject",
++            "purpose": "Одна policy на attempt; ask_reject сохраняет tool schemas, немедленно отвечает decision=reject. deny выбирается env до запуска для отдельного H6, без пересборки. Нет автоматического deny↔ask_reject переключения ни до, ни после prompt; unsupported policy/capability -> fail-closed."
++          },
++          "OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE": {
++            "default": "~/.dsh/bridges/opencode-zen-bridge/disable-serve",
++            "purpose": "Путь expanduser/resolve при конфигурации, без создания каталога. На входе нового запроса O(1) os.path.exists(); файл есть -> run без serve UUID/password/queue/thread/Popen/probes. Ошибка проверки пути -> безопасно run с redacted reason. Создание/удаление файла меняет выбор следующего запроса без рестарта; active leases завершаются или явно отменяются, без дублирования текущего prompt."
++          },
++          "SERVE_READY_TIMEOUT_S": 3.0,
++          "SERVE_SESSION_SETUP_TIMEOUT_S": 2.0,
++          "feature_flag_context": "Текущий explicit cycle-2 brief RW-009 разрешает default=true в локальном stdlib-мосте (прецеденты STEP_RECOVERY=1 и F-40), вместо общего GigaRC default=false. Новых dependencies/GigaRC/start.sh/env propagation не добавлять. Disable-file обеспечивает live kill-switch без рестарта; H3 обязателен до production rollout."
+         },
+-        "auto_fake_compatibility": "В auto НЕ запускать --help/--version/serve ради probe на произвольном OPENCODE_BIN. После O(1) флага прочитать первые байты resolved executable и stat: shebang/текстовый launcher -> run без subprocess-пробы. Это покрывает все текущие fake scripts (включая basename opencode). Иначе bind/serve v2 handshake под readiness ceiling. Eligibility кэшируется по resolved path+mtime_ns+size, без смены глобальной модели/тестовых env. Force serve намеренно обходит shebang-фильтр для FakeServe; fake tests задают flag=true, mode=serve. Никакого распознавания по FAKE_OC_MODE/имени теста. Защита test_step counter: fallback не должен запускать fake CLI лишний раз. При flag=false любые legacy test-фикстуры остаются на run с прежним counter.",
+-        "spawn": "Перед КАЖДЫМ реальным Popen: общий _RequestAttempts/slot, spawn_limiter, _StartupGate, свежий _run_env(model_id) и _next_standalone_proxy. serve argv [launcher, serve, --hostname, 127.0.0.1, --port, ephemeral]; stdin=DEVNULL (EOF немедленно), start_new_session=True. Не передавать prompt argv/stdin serve. OS выбирает loopback port; если API не даёт port=0 адрес, reserve-bind(0), release, spawn с ограниченным retry race; не считать чужой listener своим.",
+-        "startup": "SERVE_READY_TIMEOUT_S=0.50: bounded local connect/openapi handshake, общий monotonic deadline; control socket slices <=0.25 s. Разрешён только authenticated v2 OpenAPI/event/session shape. Child EOF/unsupported serve/нет HTTP listener/несовместимый protocol -> ServeUnavailable. stdin=DEVNULL предотвращает stdin hang даже для force serve с legacy fake; exit/EOF проверяются сразу, без 5 s ожидания. stdout/stderr дренируются ограниченно и маскируются до лога. Пароль криптографически случайный per spawn, OPENCODE_SERVER_PASSWORD добавляется ПОСЛЕ whitelist, Basic opencode:<password>, никогда не в argv/URL/логе. Loopback http.client connection идёт напрямую, без env proxy и redirects.",
+-        "fallback_barrier": "Auto fallback разрешён только если prompt POST ещё НЕ НАЧАТ, нет model output/tool action, нет client_gone и security/auth failure. До fallback полностью interrupt/delete (если session создана), close socket, killpg/reap предыдущий serve. ServeUnavailable capability не считается ошибкой модели и не увеличивает breaker; фактический serve Popen всё равно расходует MAX_TOTAL_SPAWNS и токен spawn. Следующий run Popen требует общий attempts.allow_retry, _RetryBudget и Full Jitter, не может дать 4-й spawn. При исчезновении клиента fallback запрещён. HTTP 401/403, неожиданный auth/permission response -> fail-closed, никакого ослабления policy через run. Начиная с попытки отправки prompt (даже timeout с неизвестной доставкой) silent fallback запрещён; штатный transient retry возможен только в общей state machine и после cleanup, с явным retry-status.",
+-        "session_flow": "Сначала authenticate/readiness и deny-policy, затем POST /api/session(model с тем же provider/model#variant согласно v2 schema, location=текущий workdir, permissions); открыть и подтвердить подписку GET /api/event ДО POST /api/session/{id}/prompt с полным text. Отфильтровывать события только current session/execution; не выдавать чужую историю/старые события. Не вызывать generate или prompt повторно при timeout. Terminal success/failed — независимый сигнал полноты; EOF без terminal -> transport failure. На step.ended с DSH tool call прекратить дальнейшие шаги, interrupt/delete и cleanup.",
+-        "tool_policy": "Основная безопасная конфигурация — scoped OPENCODE_CONFIG_CONTENT permission={\"*\":\"deny\"} плюс deny-all session permissions; merge сохраняет provider/options, не пишет общий конфиг. F-50: deny может убрать tool schemas и вызвать Zen 403. Эквивалентная разрешённая изоляция для такого несовместимого клиента: permission=ask, session permission request -> немедленный API reply reject (никогда allow), пока prompt не начат подтверждены permission endpoints. При отсутствии безопасной deny/ask-auto-reject capability — fail-closed, не выполнять инструменты. Не переключать политику на лету после provider 403. Выбор совместимой policy проверяется FakeServe, а исполнение реально запрещено H6 перед rollout. События session.tool.* нормализуются в native mapping даже если denied: native/unmapped handling как legacy.",
++        "auto_fake_compatibility": "Auto: до любых serve allocations выполнить env/run/disable-file/health guards; затем cached stat+first bytes executable. Shebang #! или текстовый launcher -> run сразу, без --help/--version/serve subprocess. Это сохраняет 378 fake-CLI baseline tests при новом default=true, включая basename opencode; не проверять имя теста/FAKE_OC_MODE. Native Mach-O -> owned serve readiness. Eligibility/protocol metadata cache key=(resolved executable path,mtime_ns,size); смена ключа инвалидирует старую capability и transport health. Force serve обходит shebang для FakeServe, stdin=DEVNULL предотвращает stdin.read hang. false/run/disable-file spies: zero serve UUID/password/threads/probes/extra Popen; stat file разрешён только enabled selector.",
++        "spawn": "На каждую реальную попытку общий _RequestAttempts/slot, единый admission deadline<=5.0s для _SpawnRateLimiter+_StartupGate (не два ожидания по5s), свежий _serve_env(model_id) поверх одного неизменного _run_env(model_id), новая per-spawn _next_standalone_proxy запись. Parent socket.bind((127.0.0.1,0)), getsockname()[1]; держать резерв до непосредственно Popen, затем close reserve и Popen([OPENCODE_BIN,serve,--hostname,127.0.0.1,--port,str(port)],stdin=DEVNULL,start_new_session=True,close_fds=True), сохранить child_pgid. Prompt/Basic password не передавать argv/stdin. До первого Authorization или prompt доказать owner listener по listener_ownership; при port race cleanup + новый порт только в оставшемся ready deadline, каждый новый Popen расходует общий cap3 и spawn token. Ни одного бесплатного spawn при EADDRINUSE.",
++        "startup": "SERVE_READY_TIMEOUT_S=3.0s (ready_budget_s=3.0): после owner proof лёгкий authenticated GET /api/session/active, HTTP200 + $.data object map of active sessions (empty={}); не качать 281KB /openapi.json на каждом spawn. Control I/O slices<=.25s, всего<=3 readiness TCP probes, remaining request deadline/cancel всегда проверяются. Child EOF/no listener/incompatible protocol -> ServeUnavailable. Пароль secrets per spawn в OPENCODE_SERVER_PASSWORD ПОСЛЕ whitelist, Basic opencode:<password>, никогда в argv/URL/log. stdout/stderr bounded drain+redact. HTTP на loopback напрямую без proxy/redirects. Readiness не устанавливает first_event_ms и не сбрасывает first_event/token часы.",
++        "fallback_barrier": "State machine: ADMISSION -> SPAWN/OWNER/READY -> CREATE/SUBSCRIBE -> PROMPT_SENDING -> DELIVERED -> TERMINAL -> CLEANUP. Auto ServeUnavailable на старте/create/subscribe или до получения HTTP response headers POST /api/session/{id}/prompt допускает один budgeted run fallback, ТОЛЬКО если не было валидного события исполнения созданной session после начала отправки prompt, нет model/tool output, auth/security failure, cancel или deadline. Перед run полностью close/join/killpg/reap старую attempt, удалить temp data; новый Popen требует тот же retry token/Full Jitter/attempt ceiling<=3. С первого response header POST /prompt (любой status) ИЛИ первого session execution event после prompt delivery лачится DELIVERED=true; silent fallback и переключение на run для текущего запроса запрещены, включая отсутствие response body и headers-pending+SSE-started. Prompt POST исполняется daemon worker параллельно SSE; до header/события ожидание ограничено остатком first_event20s/first_token60s и total deadline. Даже до headers неизвестная доставка может дать повторную генерацию: допустимость этой границы явно задана текущим brief RW-001, это НЕ exactly-once; старый PGID должен быть убран до fallback, built-ins никогда allow. После barrier watchdog может выполнить только явный общий retry того же транспорта с retry-status/cleanup/cap, не скрытый run fallback. HTTP401/403/auth/permission/capability-security denial -> fail-closed без fallback/auto policy switching на любой фазе.",
++        "session_flow": "После listener proof/readiness и подтверждения safe permission capability POST /api/session по session_wire.create; затем GET /api/event с HTTP200 text/event-stream и reader armed ДО отправки первого байта тела prompt. На create + subscribe один SERVE_SESSION_SETUP_TIMEOUT_S=2.0s, не включая model generation или ожидание POST /prompt response. Передать полный prompt в JSON body через единственный daemon delivery worker, одновременно читать SSE в owned reader; supervisor/SSE writer не ждут блокирующий POST и остаются cancel-aware. Один POST /prompt с delivery=steer,resume=true; transport HTTP headers/ошибки передаются supervisor как control events. First-event/token часы якорятся на prompt_send_start, не на HTTP ready/создание сессии. Filter data.sessionID==created_sid; реальные v2 события не содержат executionID, поэтому использовать own per-attempt session + prompt-send generation latch, event id дедуп и assistantMessageID step key, не выдумывать executionID. server.connected/session.created/global updates/pre-prompt events не считаются first execution. Terminal success/failed независим от text end; EOF без terminal -> protocol failure. step.ended с готовым DSH tool call -> остановить дальнейшее исполнение/cleanup.",
++        "tool_policy": "Default OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY=ask_reject: _serve_env(model_id) вызывает _run_env(model_id) ровно один раз, копирует/merge scoped OPENCODE_CONFIG_CONTENT permission={\"*\":\"ask\"} с сохранением provider/options/OPENCODE_MODELS_PATH, session permissions=[{action:\"*\",resource:\"*\",effect:\"ask\"}]. _run_env(model_id) оставить ПОБАЙТОВО неизменным, tests/test_run_env.py не менять. На wire permission.asked (логическая группа session.permission.requested) немедленно POST /api/session/{id}/permission/{data.id}/reply {decision:\"reject\"}; никогда allow/once/always. Reply через bounded control lane, не ожидает completion prompt POST, HTTP budget<=.25s и cancel/deadline; failure -> явный security error+cleanup, без деградации в разрешение. Env=deny выставляет config permission={\"*\":\"deny\"} и session effect=deny, без пересборки; если всё же пришёл ask, только reject. Неподдержанная policy/отсутствие safe permission capability -> fail-closed. Нет автоматического deny↔ask_reject switching даже до prompt: разница позиций R1 закрыта явным выбором безопасного селектора. После принятия prompt 401/403 никогда не дают run fallback. EVD-050 + F-08 объясняют Zen403 с deny; FakeServe проверяет оба режима и byte hash _run_env, реальную Zen совместимость/запрещённую запись доказывает только H6.",
+         "event_contract": {
+-          "shape": "Iterator[tuple[str, dict]]; единая семантика событий в Handler._stream_sse и Run._execute_once (через _serve_json). Legacy parse_opencode_event сохранён, normalize boundary обеспечивает raw part для tool_use; forbidden: копировать все retry loops в новый transport.",
+-          "session.reasoning.delta": "(\"reasoning\", {reasoning_content: delta}); только delta bytes, ended не повторяет полный текст; reasoningEncryptedContent сохраняется reasoning_details через существующий mapping.",
+-          "session.text.delta": "(\"text\", {content: delta}) -> тот же ToolCallParser.feed или emit_content.",
+-          "session.step.ended": "(\"step_finish\", tokens с input/output/cached/reasoning), ровно один учёт по step id, не удваивать usage на execution terminal.",
+-          "session.tool.*": "(\"tool_use\", {part:{tool, state:{input,status}}, call_id}); адаптер legacy тоже вкладывает тот же canonical part; оба потребителя берут part из normalized payload. Стабильный call_id не допускает повторного DSH вызова на started/updated/ended одного инструмента. Допустим raw-event envelope внутри adapter для старых потребителей, но неизвестный tool type не игнорируется.",
+-          "session.step.failed / session.execution.failed": "(\"error\", {statusCode,message}) через существующий classifier; не удваивать одну failure cause.",
++          "shape": "Iterator canonical tuples для обоих потребителей; object/TypedDict validation. Public OpenAI unchanged; legacy parser остаётся для run. Полные wire fixtures ниже frozen v2.1.2, metadata id/created synthetic, field paths подтверждены EVD-062/EVD-063.",
++          "session.reasoning.delta": "$.data.delta -> (reasoning,{reasoning_content:delta}); delta bytes only, ended не повторяет full text. Если native encrypted metadata есть в started/ended, сохранять существующим reasoning_details mapping без повторной text delta.",
++          "session.text.delta": "$.data.delta -> (text,{content:delta}) -> тот же ToolCallParser.feed/emit_content.",
++          "session.step.ended": "$.data.tokens input/output/reasoning + $.data.tokens.cache.read -> canonical input/output/reasoning/cached; один учёт по $.data.assistantMessageID, terminal не удваивает usage.",
++          "session.tool.*": "Actual input.started(name), input.delta, input.ended(text), called(input,executed), progress(metadata), success/failed. Correlate data.sessionID+assistantMessageID+id; accumulate tool name/input, normalize tool_use part{tool,state{input,status}}+call_id. permission.asked отправляет decision=reject немедленно по отдельному control lane. Никакого встроенного allow или выполнения bridge-side.",
++          "session.step.failed / session.execution.failed": "$.data.error {type,message,status?,response?,retryAfterMs?} ->canonical error{statusCode,message}: statusCode=$.data.error.status если integer100..599; иначе explicit known type mapping provider.free-limit429/auth401/permission denial403, unknown null. Terminal independent, one cause not counted twice.",
+           "session.execution.succeeded": "terminal success metadata, не text/reasoning; гарантированно дренировать уже полученный step.ended перед финальным usage.",
+-          "other": "started/connected/lifecycle -> транспортные служебные события для first-event, не model token; unknown control events не исполняют actions.",
+-          "payload_validation": "Использовать v2 schema и фактические F-19/F-22 fixtures. Не угадывать field aliases по строке event name. SSE assembler поддерживает UTF-8 через incremental decoder, CRLF, multi-line data, comments и fragment boundaries; delta/ended сверяются на tool/reasoning/text fixtures. Конкретные field paths подтверждает Coder по v2 schema в FakeServe contract test до runtime enabling."
++          "other": "first_event latch только валидный execution/step/reasoning started текущей session после prompt; валидные current-session model delta также доказывают начало исполнения. server.connected, HTTPready, session.created, чужие session/control/comments/status не latch и не model token.",
++          "payload_validation": "Проверять exact field paths/types и mandatory sessionID до emit. Текущая schema shape mismatch -> invalid_serve_event (не пустая полезная delta), отдельный ServeHealth; permission capability mismatch ->security fail-closed. Incremental UTF8/CRLF/multiline SSE/comments/fragment boundaries, byte budgets как прежде. Никакого Coder-discovered protocol или aliases, которых нет в frozen source. Coder и FakeServe используют frozen expected независимо; мутации delta path/token/permission должны краснить тест даже если adapter и mock согласованно ошибочны.",
++          "frozen_v2_1_2_fixtures": {
++            "session.reasoning.delta": {
++              "wire": {
++                "id": "evt_fixture_1",
++                "created": 1792957431001,
++                "type": "session.reasoning.delta",
++                "data": {
++                  "sessionID": "ses_fixture_1",
++                  "assistantMessageID": "msg_fixture_1",
++                  "ordinal": 0,
++                  "delta": "Мысль без LF"
++                }
++              },
++              "field_paths": {
++                "session_id": "$.data.sessionID",
++                "step_key": "$.data.assistantMessageID",
++                "ordinal": "$.data.ordinal",
++                "delta": "$.data.delta"
++              },
++              "canonical": {
++                "etype": "reasoning",
++                "payload": {
++                  "reasoning_content": "Мысль без LF"
++                }
++              }
++            },
++            "session.text.delta": {
++              "wire": {
++                "id": "evt_fixture_2",
++                "created": 1792957431002,
++                "type": "session.text.delta",
++                "data": {
++                  "sessionID": "ses_fixture_1",
++                  "assistantMessageID": "msg_fixture_1",
++                  "ordinal": 1,
++                  "delta": "Ответ\n"
++                }
++              },
++              "field_paths": {
++                "delta": "$.data.delta",
++                "session_id": "$.data.sessionID"
++              },
++              "canonical": {
++                "etype": "text",
++                "payload": {
++                  "content": "Ответ\n"
++                }
++              }
++            },
++            "session.step.ended": {
++              "wire": {
++                "id": "evt_fixture_3",
++                "created": 1792957431003,
++                "type": "session.step.ended",
++                "data": {
++                  "sessionID": "ses_fixture_1",
++                  "assistantMessageID": "msg_fixture_1",
++                  "finish": "stop",
++                  "cost": 0,
++                  "tokens": {
++                    "input": 17,
++                    "output": 9,
++                    "reasoning": 4,
++                    "cache": {
++                      "read": 3,
++                      "write": 2
++                    }
++                  }
++                }
++              },
++              "field_paths": {
++                "tokens": "$.data.tokens",
++                "dedup_step_key": "$.data.assistantMessageID",
++                "cached": "$.data.tokens.cache.read"
++              },
++              "canonical": {
++                "etype": "step_finish",
++                "payload": {
++                  "input": 17,
++                  "output": 9,
++                  "cached": 3,
++                  "reasoning": 4
++                }
++              },
++              "note": "Реальный v2 wire cache:{read,write}; cached=cache.read в legacy canonical tuple. cache.write не суммировать с cached read. Canonical input/output/reasoning копировать по существующей семантике; считать раз по assistantMessageID. Отсутствие required tokens/cache/read — invalid_serve_event, не нули."
++            },
++            "session.permission.requested / session.tool.*": {
++              "wire_event_name": "permission.asked",
++              "logical_family": "session.permission.requested",
++              "wire": {
++                "id": "evt_fixture_4",
++                "created": 1792957431004,
++                "type": "permission.asked",
++                "data": {
++                  "id": "per_fixture_1",
++                  "sessionID": "ses_fixture_1",
++                  "action": "bash",
++                  "resources": [
++                    "*"
++                  ],
++                  "source": {
++                    "type": "tool",
++                    "messageID": "msg_fixture_1",
++                    "id": "call_fixture_1"
++                  }
++                }
++              },
++              "field_paths": {
++                "session_id": "$.data.sessionID",
++                "request_id": "$.data.id",
++                "tool_call_id": "$.data.source.id",
++                "action": "$.data.action",
++                "resources": "$.data.resources"
++              },
++              "reply": {
++                "method": "POST",
++                "path": "/api/session/ses_fixture_1/permission/per_fixture_1/reply",
++                "body": {
++                  "decision": "reject"
++                },
++                "success_status": 204
++              },
++              "tool_lifecycle": [
++                {
++                  "id": "evt_fixture_5",
++                  "created": 1792957431005,
++                  "type": "session.tool.input.started",
++                  "data": {
++                    "sessionID": "ses_fixture_1",
++                    "assistantMessageID": "msg_fixture_1",
++                    "id": "call_fixture_1",
++                    "name": "bash"
++                  }
++                },
++                {
++                  "id": "evt_fixture_6",
++                  "created": 1792957431006,
++                  "type": "session.tool.input.delta",
++                  "data": {
++                    "sessionID": "ses_fixture_1",
++                    "assistantMessageID": "msg_fixture_1",
++                    "id": "call_fixture_1",
++                    "delta": "{\"command\":\"printf probe\"}"
++                  }
++                },
++                {
++                  "id": "evt_fixture_7",
++                  "created": 1792957431007,
++                  "type": "session.tool.input.ended",
++                  "data": {
++                    "sessionID": "ses_fixture_1",
++                    "assistantMessageID": "msg_fixture_1",
++                    "id": "call_fixture_1",
++                    "text": "{\"command\":\"printf probe\"}"
++                  }
++                },
++                {
++                  "id": "evt_fixture_8",
++                  "created": 1792957431008,
++                  "type": "session.tool.called",
++                  "data": {
++                    "sessionID": "ses_fixture_1",
++                    "assistantMessageID": "msg_fixture_1",
++                    "id": "call_fixture_1",
++                    "input": {
++                      "command": "printf probe"
++                    },
++                    "executed": false
++                  }
++                },
++                {
++                  "id": "evt_fixture_9",
++                  "created": 1792957431009,
++                  "type": "session.tool.failed",
++                  "data": {
++                    "sessionID": "ses_fixture_1",
++                    "assistantMessageID": "msg_fixture_1",
++                    "id": "call_fixture_1",
++                    "error": {
++                      "type": "permission.rejected",
++                      "message": "Rejected by bridge policy"
++                    },
++                    "executed": false
++                  }
++                },
++                {
++                  "id": "evt_fixture_10",
++                  "created": 1792957431010,
++                  "type": "permission.replied",
++                  "data": {
++                    "sessionID": "ses_fixture_1",
++                    "requestID": "per_fixture_1",
++                    "reply": "reject"
++                  }
++                }
++              ],
++              "canonical": {
++                "etype": "tool_use",
++                "payload": {
++                  "part": {
++                    "tool": "bash",
++                    "state": {
++                      "input": {
++                        "command": "printf probe"
++                      },
++                      "status": "error"
++                    }
++                  },
++                  "call_id": "call_fixture_1"
++                }
++              },
++              "note": "Family label из brief — не имя wire event. В бинарнике нет session.permission.requested или session.tool.started: actual names permission.asked и session.tool.input.started/called/progress/success/failed. Имя tool копить из input.started; canonical payload emit после complete input/called, не исполнять по частичному JSON. Lifecycle updates не создают повторный DSH tool_call; own denied event не является model progress. Указанный failed message — синтетическое fixture значение типа error, не заявление о захваченном live отказе."
++            },
++            "session.execution.failed": {
++              "wire": {
++                "id": "evt_fixture_11",
++                "created": 1792957431011,
++                "type": "session.execution.failed",
++                "data": {
++                  "sessionID": "ses_fixture_1",
++                  "error": {
++                    "type": "provider.free-limit",
++                    "message": "Free usage limit reached"
++                  }
++                }
++              },
++              "field_paths": {
++                "error": "$.data.error",
++                "message": "$.data.error.message",
++                "error_type": "$.data.error.type",
++                "statusCode": "$.data.error.status if present integer100..599, else explicit type mapping"
++              },
++              "canonical": {
++                "etype": "error",
++                "payload": {
++                  "statusCode": 429,
++                  "message": "Free usage limit reached"
++                }
++              },
++              "note": "provider.free-limit ->429; provider.auth/permission denial ->fatal401/403; неизвестный type сохраняется как явная ошибка с statusCode=null, не выдумывать retryability. step.failed + execution.failed одной cause дедуп без потери terminal. Numeric wire key status, not statusCode/data.statusCode; source Session.StructuredError. Missing numeric status allowed as in captured free-limit event."
++            }
++          },
++          "fixture_provenance": {
++            "source": "EVD-062: read-only embedded schemas/API v2.1.2; EVD-063: analyst PoC script+failure envelope",
++            "binary_sha256": "b6dc81ec33e062a443e9d3eb1033e42f5d3e16acc4409970320cd26b9a215d0c",
++            "examples": "Пять минимальных семейств, synthetic ids/timestamps/texts; field/type schema extracted from binary, не live business/permission evidence.",
++            "immutable_oracle": "В Stage3 fixture literals копируются в tests/test_realtime_reasoning.py; до adapter expectations сверить fixture canonical SHA256 с пакетным fingerprint. Менять fixture по реализации запрещено."
++          },
++          "frozen_fixture_sha256": "896ae246586487a179d3be99947cc8455ed069a6e98b8b8628690158a1a80ac2"
+         },
+-        "non_stream": "serve используется и stream=False через общий source; Run копит чистые model reasoning/text/native/usage как сейчас. Synthetic [мост] статусы — только SSE presentation, в JSON reasoning_content не добавляются. Google direct dispatch остаётся первым и не создаёт serve/новые timers."
++        "non_stream": "serve используется и stream=False через общий source; Run копит чистые model reasoning/text/native/usage как сейчас. Synthetic [мост] статусы — только SSE presentation, в JSON reasoning_content не добавляются. Google direct dispatch остаётся первым и не создаёт serve/новые timers.",
++        "listener_ownership": {
++          "protocol": [
++            "bind 127.0.0.1:0 -> getsockname -> release immediately before Popen explicit port/new PGID",
++            "Дождаться LISTEN без HTTP/Authorization; bounded lsof -nP -a -iTCP:<port> -sTCP:LISTEN -Fp, только loopback listener PID, проверить os.getpgid(listener_pid)==child_pgid и child lease ещё жив. Несколько PID/ошибка lsof/PGID mismatch не являются успехом.",
++            "Проверка до первого Auth и повторно до отправки Auth на каждом новом TCP соединении; no redirects/no env proxy, connect только 127.0.0.1. Не доверять readiness чужого процесса.",
++            "Mismatch/EADDRINUSE -> abort attempt, ноль байт секрета/промпта чужому listener; закрыть собственный child/PGID, не посылать interrupt/delete чужому listener и не убивать чужой PID. Retry reserve/spawn только при remaining ready>0, admission/spawn token/cap соблюдены."
++          ],
++          "owner_probe_timeout_s": 0.25,
++          "ready_deadline_includes": "bind/spawn/owner probe, лёгкий authenticated GET /api/session/active и cache-miss protocol check вместе <=3.0s; retry port не продлевает deadline",
++          "verification_ids": [
++            "VER-005"
++          ]
++        },
++        "protocol_compatibility": {
++          "version": "2.1.2",
++          "cache_key": [
++            "resolved executable path",
++            "mtime_ns",
++            "size"
++          ],
++          "handshake": "На первом owned serve данного binary key один lightweight authenticated GET /api/info: JSON version==2.1.2 и pid с PGID==owned child group, затем один bounded GET /openapi.json<=512KiB; обе операции внутри того же aggregate ready_budget_s=3.0. OpenAPI.info.version==0.0.1 — версия API schema, НЕ версия CLI; не сравнивать её с2.1.2. Exact required-schema projection по Model.Ref, Permission.Ruleset, PromptInput, TokenUsage.Info/StructuredError/Event fixtures обязателен. Успешно сохранить app version+SHA256 raw OpenAPI+schema projection keyed(path,mtime_ns,size). Остальные spawn этого key только GET /api/session/active плюс PID/PGID ownership, без OpenAPI download и без --version Popen. Version/schema mismatch до prompt ->ServeUnavailable/_ServeHealth; permission capability gap ->security fail-closed.",
++          "invalidation": "mtime_ns/size/path change или fail exact projection -> invalidation; неизвестная patch/schema не считается compatible по одному наличию endpoint. Для новой версии нужен обновлённый подтверждённый fixture/Architect delta. Отсутствие безопасного permission endpoint — security failure, без run fallback.",
++          "fixture_source_evidence_ids": [
++            "EVD-062",
++            "EVD-063"
++          ],
++          "cache_ownership": "Per-Server bounded capability record (only executable key/version/schema hashes/projection, no password/session/prompt). Один fill-owner на binary key; конкурентные fills ждут только remaining own ready3s без блокировки writer, owner cancellation снимает in-flight; никаких live sockets/passwords в cache. Это setup capability metadata, не ControlPlane/Snapshot polling."
++        },
++        "admission": "Один monotonic pre_spawn_deadline=now+min(5.0,remaining_request) охватывает _SpawnRateLimiter и _StartupGate. Сначала получить rate token с timeout=remaining_admission; gate может ждать только остаток этого же окна и fail-open по legacy, без добавочных5s; timeout rate token -> не spawn. Hold gate<=12s не является отдельным pre-spawn wait; release при готовности собственного child/EOF/finally, HTTP ready по-прежнему не событие модели. Cancel poll<=.25s, каждый Popen включая fallback/race учитывается _RequestAttempts<=3; token не обходить.",
++        "session_wire": {
++          "schema": "opencode serve v2.1.2, EVD-062/EVD-063; paths и JSON properties заморожены до Coder",
++          "create": {
++            "method": "POST",
++            "path": "/api/session",
++            "headers": {
++              "Content-Type": "application/json",
++              "Authorization": "Basic <ephemeral runtime secret, never stored>"
++            },
++            "body": {
++              "location": {
++                "directory": "<existing absolute request workdir>"
++              },
++              "model": {
++                "providerID": "opencode",
++                "id": "deepseek-v4.1-flash-free",
++                "variant": "high"
++              },
++              "permissions": [
++                {
++                  "action": "*",
++                  "resource": "*",
++                  "effect": "ask"
++                }
++              ]
++            },
++            "success_status": 200,
++            "response_id_path": "$.data.id",
++            "permission_variant": "Для policy=deny тот же ruleset с effect=deny; ask_reject effect=ask + немедленный decision=reject. В API permissions — ARRAY rules, не config object {\"*\":\"ask\"}.",
++            "model_mapping": "Тот же resolved provider/model#variant: отделить providerID и id; #high -> model.variant=\"high\"; effort off/none -> variant отсутствует, не #off. --thinking относится к CLI presentation; HTTP thinking задаётся существующим resolved variant без несуществующего поля thinking."
++          },
++          "subscribe": {
++            "method": "GET",
++            "path": "/api/event",
++            "headers": {
++              "Accept": "text/event-stream"
++            },
++            "success_status": 200,
++            "body": "SSE data JSON envelope {id,created,type,data}; subscribe armed до prompt body, filter data.sessionID"
++          },
++          "prompt": {
++            "method": "POST",
++            "path": "/api/session/{id}/prompt",
++            "body": {
++              "text": "<full unchanged prompt>",
++              "files": [],
++              "delivery": "steer",
++              "resume": true
++            },
++            "success_status": 200,
++            "response": "$.data is Session.Inbox.User; $.data.id is inbox/message id, durable admission, не model completion",
++            "delivery": "steer/queue — admission boundary, НЕ флаг неблокирующего HTTP. Для единственного fresh session input выбран steer; один POST, worker может блокироваться на headers/body параллельно чтению SSE. Не вызывать generate, resume повторно или повторный prompt при задержке ответа.",
++            "budget": "Не session_setup2s. От prompt_send_start ограничен оставшимися first_event20s/first_token60s/общим TIMEOUT1800; при продвижении session событий supervisor не отменяет HTTP только потому, что истёк first_event, но total/cancel/terminal закрывают сокет. Response body не нужен для продолжения чтения событий после headers."
++          },
++          "permission_reply": {
++            "method": "POST",
++            "path": "/api/session/{id}/permission/{requestID}/reply",
++            "body": {
++              "decision": "reject"
++            },
++            "success_status": 204,
++            "request_id_path": "$.data.id of permission.asked; session path id=$.data.sessionID",
++            "note": "Wire key decision, не reply; permission.replied notification содержит reply=reject. Никогда once/always/allow."
++          },
++          "cleanup": {
++            "interrupt": "POST /api/session/{id}/interrupt",
++            "delete": "DELETE /api/session/{id}",
++            "aggregate_api_budget_s": 0.2
++          },
++          "readiness": {
++            "method": "GET",
++            "path": "/api/session/active",
++            "success_status": 200,
++            "response_example": {
++              "data": {}
++            },
++            "schema": "$.data is record keyed by sessionID, not an array; source byte offset114978382",
++            "budget": "part of ready_budget_s=3.0, not first_event; owner proof before auth"
++          },
++          "version_probe": {
++            "method": "GET",
++            "path": "/api/info",
++            "response_example": {
++              "version": "2.1.2",
++              "pid": "<actual child PID integer>"
++            },
++            "note": "Пример pid placeholder только в документации, wire integer; owner PGID проверяется до Auth независимо от self-reported pid. appversion2.1.2 отличается от OpenAPI.info.version0.0.1. Once per executable stat key, withinready3s."
++          }
++        },
++        "data_isolation": {
++          "XDG_DATA_HOME": "На каждый serve spawn tempfile.mkdtemp(prefix=\"zen-serve-data-\") в локальном temp вне репозитория/Drive; env[\"XDG_DATA_HOME\"]=каталог. OPENCODE_MODELS_PATH сохраняется из _run_env, не терять standalone model catalog. Не копировать/не мигрировать/не редактировать общую ~/.local/share/opencode/opencode.db (2.27 GB, F-28).",
++          "ownership": "Путь принадлежит attempt lease; child создаёт собственный SQLite. После kill/reap и закрытия readers в finally shutil.rmtree(temp_data_dir,ignore_errors=True), на каждом exit, including spawn exception/port race/setup/auth/cancel/terminal. Cleanup idempotent; директории чужих attempts не трогать.",
++          "cleanup_budget": "Входит в aggregate cleanup<=1.2s. Реальный FS cleanup/RSS/DB locking проверяются H3; превышение запрещает enable, не выдавать ignore_errors за доказанное удаление.",
++          "verification_ids": [
++            "VER-005"
++          ]
++        },
++        "typing": "Новый wire JSON декодируется в object с явным isinstance/type narrowing и TypedDict, без Any/кастов Any/type-ignore для обхода. Новый модуль serve_transport.py запрещён текущим allowlist; всё внутри server.py. VER-004: formatter/linter на всех3 файлах, basedpyright severity==error ровно0 на всех3, server reportAny<=125 и reportExplicitAny<=125, остальные frozen per-rule warning budgets не растут.",
++        "transport_health": {
++          "owner": "_ServeHealth per Server, key=(resolved executable,mtime_ns,size), lock/monotonic; состояние отдельно от model _UpstreamBreaker",
++          "consecutive_failure_threshold": 3,
++          "degrade_ttl_s": 120.0,
++          "degraded_transport": "run для новых auto requests",
++          "counted_failures": [
++            "first_event_timeout на serve после prompt и HTTP readiness, без валидных событий исполнения",
++            "invalid_serve_event / incompatible schema projection / malformed required v2 fields",
++            "serve SSE EOF без terminal; first_token_timeout только при доказанной protocol/capability причине, иначе model failure"
++          ],
++          "not_counted": "Реальные provider errors (429/free-limit,5xx,provider network), explicit auth/permission/security failure, client_gone, slot rejection и transient child DB errors не маскировать transport failure. Если валидные execution events пришли, но model token нет, first_token_timeout сохраняет обычную provider classification при отсутствии доказанного protocol defect.",
++          "state_machine": "HEALTHY consecutive0..2; третий законченный protocol-specific failure -> DEGRADED(until=now+120), последующие auto requests run без serve probe/Popen. Это НЕ повтор/переключение текущего DELIVERED prompt: транспорт текущего запроса закреплён, silent replay запрещён. В DEGRADED skipped requests не продлевают TTL. При TTL expiry ровно один HALF_OPEN serve probe request (другие auto requests run); только валидный terminal success со schema-valid source очищает consecutive/degraded. Failed protocol probe -> новый TTL120. Provider failure не объявлять protocol success/failure. Neutral cancel освобождает probe, не продлевает TTL. Force serve допускает диагностику, не обходя security/kill-switch/cap3.",
++          "breaker_isolation": "Protocol-specific failure никогда не вызывает _UpstreamBreaker.failure/commit pending model failure. Provider failures сохраняют общий breaker threshold5/cooldown jitter/HALF_OPEN1. Нейтральный transport-only финальный запрос освобождает model probe lease после cleanup; success/failure не выдумывать. _RetryBudget и MAX_TOTAL_SPAWNS остаются общими даже для protocol retry/fallback.",
++          "telemetry": "O-EXIT transport_history и attempt reason различают serve_protocol_failure, serve_health_degraded/run, serve_health_probe, policy failure и provider failure; no secrets. Skipped serve не добавляет фиктивный spawn.",
++          "verification_ids": [
++            "VER-005"
++          ]
++        },
++        "immutable_run_env": {
++          "symbol": "bridges/opencode-zen-bridge/server.py:_run_env",
++          "source_slice": "ast FunctionDef.lineno..end_lineno inclusive, raw file bytes splitlines(keepends=True), includes terminal LF",
++          "sha256": "1c51b28fcb83fcc0f4d8b5204c858e11ab5ac975bfe40dca4a0bf61978008e31",
++          "test_run_env_sha256": "d3d0baf57f7ccae7dd7846ab98d3da43c588a35e7f076fabe074c1212f232e05",
++          "start_sh_sha256": "5430e529627b3a705da4be7641a6d079408e3cf85b6ad3333330e34cb08c190c",
++          "verification": "VER-005 compare literal hashes from frozen packet; _serve_env wrapper only, never recalculate expected from edited implementation"
++        }
+       }
+     },
+     {
+@@ -1057,11 +1502,12 @@
+         "timer_anchor": "t_sse_open — flush первого role chunk. FIRST_STATUS_DELAY_S=0.30; тик writer <=0.05..0.10 s. Background setup/adapter НЕ блокирует writer на gate.acquire, rate wait, connect, POST prompt или join. Ровно один поток пишет self.wfile; worker передаёт события через bounded queue. Никаких независимых Timer-writers в wfile.",
+         "eligibility": "Только non-Google SSE с effective thinking/reasoning включённым (effort непустой; default high считается включённым). Явные off/none из _map_effort исключают synthetic reasoning даже при долгом запуске. Это явное сужение AC-005: оно относится к thinking-enabled DSH, а fast-answer/off сохраняет текущий contract. Модельные reasoning, если пришли от upstream, не выдумывать/не подменять.",
+         "initial": "На t>=0.30 при отсутствии уже ОТПРАВЛЕННОЙ непустой real reasoning_content/content delta и незавершённом запросе отправить {reasoning_content:\"[мост] Подключение к модели…\\n\"} с реальным LF, flush. Пробелы и empty keepalive не считаются real progress. При доступной real delta в том же тике сначала обработать очередь, затем проверить grace: fast fake <50ms не получает prefix. Если real text пришёл раньше grace, initial status не нужен — ответ уже видим. Если real reasoning пришёл раньше grace, Think видим без synthetic prefix; отсутствие LF в быстром Simple greeting. не даёт права мутировать текст.",
+-        "lifecycle": "Startup-gate/spawn wait статусы только после grace при фактическом ожидании, без немедленного prefix на быстром acquire. До первого real token при тишине heartbeat каждые 5.0 s: [мост] Ожидание первого токена (N с)… + LF. После real progress и затем настоящего stall можно каждые 5 s дать [мост] Ожидание продолжения… + LF. Статусы не сбрасывают transport/model watchdog timestamps и сами не считаются attempt_output. Нормальные 127 ms reasoning delta не сопровождаются heartbeat.",
+-        "retry": "При действительно принятом retry ровно одна отдельная delta [мост] Повтор попытки 2/3… + LF, далее 3/3. Писать до ожидания backoff после retry admission, не при отказе бюджета. Даже после model reasoning статус не конкатенируется в model bytes. Raw model reasonings всех попыток не дедуплицировать; обычный content prefix dedup остаётся. Synthetic status никогда не участвует в _incomplete_tool_step_prompt, model had_output, usage или accumulated raw reasoning.",
+-        "pure_reasoning": "Склейка model-origin delta равна upstream model bytes после унаследованной очистки известных interrupted artifacts; не добавлять LF для preview, пробелы и UTF-8 не переписывать. _strip_interrupted должен оставаться chunk-boundary-safe: распознанный interrupted marker удерживается/удаляется инкрементально, partial prefix не протекает; обычный текст не нормализуется. В тестах удалять synthetic delta по provenance/expected list, а не слепо вырезать любую модельную строку [мост].",
++        "lifecycle": "Startup-gate/spawn wait статусы только после grace при фактическом ожидании, без немедленного prefix на быстром acquire. До первого real token при тишине heartbeat каждые 5.0 s: [мост] Ожидание первого токена (N с)… + LF. После real progress и затем настоящего stall можно каждые 5 s дать [мост] Ожидание продолжения… + LF. Статусы не сбрасывают transport/model watchdog timestamps и сами не считаются attempt_output. Нормальные 127 ms reasoning delta не сопровождаются heartbeat. Перед synthetic status применять status_separator: ведущий LF только в synthetic delta после незавершённой model строки, никогда не в model bytes; статус не входит в watchdog/usage/prompt.",
++        "retry": "При действительно принятом retry ровно одна отдельная delta [мост] Повтор попытки 2/3… + LF, далее 3/3. Писать до ожидания backoff после retry admission, не при отказе бюджета. Даже после model reasoning статус не конкатенируется в model bytes. Raw model reasonings всех попыток не дедуплицировать; обычный content prefix dedup остаётся. Synthetic status никогда не участвует в _incomplete_tool_step_prompt, model had_output, usage или accumulated raw reasoning. Перед synthetic status применять status_separator: ведущий LF только в synthetic delta после незавершённой model строки, никогда не в model bytes; статус не входит в watchdog/usage/prompt.",
++        "pure_reasoning": "Склейка model-origin delta равна upstream model bytes после унаследованной очистки известных interrupted artifacts; не добавлять LF для preview, пробелы и UTF-8 не переписывать. _strip_interrupted должен оставаться chunk-boundary-safe: распознанный interrupted marker удерживается/удаляется инкрементально, partial prefix не протекает; обычный текст не нормализуется. В тестах удалять synthetic delta по provenance/expected list, а не слепо вырезать любую модельную строку [мост]. Перед synthetic status применять status_separator: ведущий LF только в synthetic delta после незавершённой model строки, никогда не в model bytes; статус не входит в watchdog/usage/prompt.",
+         "regression": "test_interrupted_artifact_removed_from_reasoning_stream: быстрая последовательность marker + Simple greeting. -> exactly Simple greeting., один run, zero status. В JSON тоже exactly. Slow FakeServe: first status <=1.0 s при заблокированном upstream; visible(text.strip) true, latestCompletedParagraphFirstLine получает завершённый LF. Natural reasoning LF обновляет collapsed row, bytes неизменны.",
+-        "replay": "_render_turn/_messages_to_prompt (server.py:1848-1888) по-прежнему игнорируют assistant.reasoning_content/reasoning_details. Ни bridge status, ни сырые reasonings не добавляются в повторный prompt."
++        "replay": "_render_turn/_messages_to_prompt (server.py:1848-1888) по-прежнему игнорируют assistant.reasoning_content/reasoning_details. Ни bridge status, ни сырые reasonings не добавляются в повторный prompt. Остаточный межпровайдерский replay в DSH при ручной смене модели описан RISK-011; current bridge ignore не доказывает безопасность чужого provider.",
++        "status_separator": "Перед любой synthetic [мост] delta, если ранее выданный модельный reasoning chunk не оканчивался LF и текущая видимая строка не завершена, prefix=\"\n\"; результат \"\n[мост] ...\n\". Весь prefix/status/trailing LF имеет synthetic provenance, отдельно от immutable model deltas. Если LF уже есть или модельного reasoning ещё не было, status начинается \"[мост]\" без добавочного LF. Единственный writer отслеживает line boundary; быстрый Simple greeting. до grace вообще не вызывает status helper. Фильтрация synthetic по provenance сохраняет AC-006 байт-в-байт и модельную строку, буквально начинающуюся [мост]."
+       }
+     },
+     {
+@@ -1116,11 +1562,11 @@
+           "env_prefix": "OPENCODE_ZEN_BRIDGE_",
+           "validation": "положительное finite число; недопустимое -> ошибка старта, не бесконечный timeout"
+         },
+-        "clocks": "watchdog attempt_start сразу перед gate/startup, поэтому gate/readiness не создаёт неучтённой тишины. first_event — первый валидный transport/server event (legacy step_start или validated serve readiness/SSE event), а не байт stderr/whitespace/comment/status мостa; clock одноразовый, поздние heartbeat его не продлевают. first_token — первый non-whitespace model reasoning/text/native tool intent, не encrypted-only/started/bridge status. stall запускается после first_token и обновляется только non-whitespace model delta/полезным tool event. Empty SSE ping и служебный шум не оживляют token/stall. Пределы проверять до/после каждой операции; total deadline неизменен на всех attempts.",
++        "clocks": "Общий request deadline TIMEOUT_S=1800 якорится на request t0 и не сбрасывается. Local pre-spawn admission<=5.0s, SERVE_READY_TIMEOUT_S=3.0 и create+subscribe<=2.0 имеют отдельные часы до prompt. Для serve first_event20.0 и first_token60.0 начинаются в prompt_send_start перед первым байтом POST /prompt; first_event удовлетворяется только первым валидным SSE событием исполнения created session после этого момента (session.execution.started/session.step.started/session.reasoning.started, либо валидная текущая model delta). HTTP readiness/headers, server.connected/session.created, чужие/global updates, comments, bridge statuses не гасят first_event и не ставят first_event_ms. Headers POST устанавливают только delivered barrier. Для legacy сохраняется first valid run event/step_start от attempt_start перед startup. first_token — только non-whitespace model reasoning/text или полезный model tool intent; started/control/encrypted-only/reject notification не токен. stall стартует после first_token и обновляется полезными model delta/tool progress; empty ping/status не продлевают. first_event_ms и ttft_ms в O-EXIT относительно request t0, timeout ожидания serve first_event относительно prompt_send_start. При accepted prompt + zero session SSE ->first_event_timeout20s +cleanup<=1.2s, <=22s, не ожидание60s.",
+         "disconnect": "На каждой итерации/ожидании <=0.25 s проверять cancel flag и client socket select + recv(MSG_PEEK|MSG_DONTWAIT): EOF/ECONNRESET -> client_gone без чтения данных и без переключения wfile в nonblocking. Реальная bounded empty OpenAI keepalive каждые <=2.0 s тишины страхует разрыв, который TCP ещё не сигнализировал; write deadline <=0.5 s, без write на отдельном потоке. Poll, status, write и cleanup не блокируют supervisor на 15/5 s. Суммарное обнаружение контролируемого FIN/RST <=5.0 s. Полное исчезновение сети без FIN нельзя доказать одним MSG_PEEK — bounded write/OS transport timeout и fault injection отдельно, не обещать физически невозможный мгновенный детект blackhole.",
+-        "cleanup": "T-LIFE: после cancel/terminal/watchdog/error/overflow/tool step/success в одном finally: запретить новый prompt/spawn; serve interrupt и DELETE с общим cleanup API ceiling 0.20 s (каждый <=0.10 s, ошибки не блокируют kill); close SSE/control sockets для разблокировки reader; SIGTERM сохранённому own PGID даже если proc.poll уже завершён; grace<=0.50 s, затем SIGKILL тому же PGID при наличии; reap leader и join owned readers/writer <=0.50 s суммарно. Запрет blanket pkill, чужих PID и повторного сигнала переиспользованному PGID после подтверждённого cleanup. cleanup идемпотентен и защищён lock; kill также descendant при leader exit (EVD-056). Target watchdog+2 s и disconnect detect<=5 s + cleanup<=2 s, итог orphan-free<=7 s; не сохранять старые wait(15)+join(5)+kill-parent.",
+-        "retry": "first_event_timeout/first_token_timeout/stall_timeout -> transient failure; после cleanup retry admission в _RequestAttempts, FAIL_RETRY_LIMIT и MAX_TOTAL_SPAWNS=3 без отдельного transport budget. _RetryBudget расходуется как provider retry; watchdog не выдавать за budget-free local sqlite error. Full Jitter min(cap=2,base=.5*2**retry), ограниченный remaining deadline. Sleep/pool/gate/rate waits cancellation-aware, poll<=.25; один slot удерживается на весь запрос и release exactly once в finally. failed last request -> breaker failure, recovered request -> success как текущий commit; HALF_OPEN не выдаёт лишнюю пробу. client_gone/deterministic 4xx/security denial -> без retry/fallback. HALF_OPEN проба имеет owner token до завершения/подтверждённого cleanup; никакой повторной живой пробы только из-за reset_s. FakeClock test активной пробы дольше cooldown обязателен, neutral client cancel не оставляет вечной занятости.",
+-        "telemetry": "_new_exit_state устанавливает transport=none, first_event_ms=null, ttft_ms=null до любого early exit. _log_exit на КАЖДОМ do_POST exit ровно один O-EXIT/v1 с transport(run|serve|google|none), first_event_ms и ttft_ms относительно request t0 (без status/keepalive), exit_reason и общими total_spawns/retries; attempt-local timings отдельно для диагностики. Путь с fallback показывает last transport и transport_history=[serve,run], секретов/промпта/endpoint password нет. Новый primary exit_reason не перетирается generic timeout; финальная успешная retry даёт ok + attempt exit history. Все 4 timeout/client codes проверяются на stream и JSON, including exits до попытки."
++        "cleanup": "T-LIFE: после cancel/terminal/watchdog/error/overflow/tool step/success в одном finally: запретить новый prompt/spawn; serve interrupt и DELETE с общим cleanup API ceiling 0.20 s (каждый <=0.10 s, ошибки не блокируют kill); close SSE/control sockets для разблокировки reader; SIGTERM сохранённому own PGID даже если proc.poll уже завершён; grace<=0.50 s, затем SIGKILL тому же PGID при наличии; reap leader и join owned readers/writer <=0.50 s суммарно. Запрет blanket pkill, чужих PID и повторного сигнала переиспользованному PGID после подтверждённого cleanup. cleanup идемпотентен и защищён lock; kill также descendant при leader exit (EVD-056). Target watchdog+2 s и disconnect detect<=5 s + cleanup<=2 s, итог orphan-free<=7 s; не сохранять старые wait(15)+join(5)+kill-parent. После child kill/reap обязателен finally shutil.rmtree(owned XDG_DATA_HOME,ignore_errors=True); закрыть также daemon prompt delivery socket и join его в том же aggregate cleanup<=1.2s. Interrupt/delete только после ownership proof, никогда чужому listener.",
++        "retry": "Watchdog first_event/first_token/stall -> bounded common retry after full cleanup, _RequestAttempts/MAX_TOTAL_SPAWNS3/FAIL_RETRY_LIMIT/_RetryBudget/Full Jitter как ранее. Но serve-specific no-session-event/invalid_serve_event/EOF классифицируются _ServeHealth и НЕ _UpstreamBreaker; общие provider failures по-прежнему model breaker. При DELIVERED silent run fallback запрещён: retry текущего запроса остаётся явным на закреплённом транспорте, health TTL влияет только на последующие auto requests. Legacy watchdog сохраняет provider semantics. client_gone/fatal4xx/auth/permission ->no retry/fallback. HALF_OPEN owner token жив до завершения/cleanup, cooldown не допускает второй probe; neutral transport failure/cancel освобождает probe без fake provider success/failure. Slot один на запрос, release once; cancel-aware waits<=.25s; Full Jitter capped remaining.",
++        "telemetry": "_new_exit_state устанавливает transport=none, first_event_ms=null, ttft_ms=null до любого early exit. _log_exit на КАЖДОМ do_POST exit ровно один O-EXIT/v1 с transport(run|serve|google|none), first_event_ms и ttft_ms относительно request t0 (без status/keepalive), exit_reason и общими total_spawns/retries; attempt-local timings отдельно для диагностики. Путь с fallback показывает last transport и transport_history=[serve,run], секретов/промпта/endpoint password нет. Новый primary exit_reason не перетирается generic timeout; финальная успешная retry даёт ok + attempt exit history. Все 4 timeout/client codes проверяются на stream и JSON, including exits до попытки. HTTP readiness НЕ first_event_ms: поле null до valid SSE execution current session после prompt_send_start. transport_history фиксирует отказ serve/TTL run или probe без secrets и phantom Popen; отдельный reason для protocol/model/security. early HTTP headers не ставят ни first_event_ms, ни ttft_ms."
+       }
+     },
+     {
+@@ -1209,7 +1655,7 @@
+       "quality": "compatibility",
+       "source": "legacy fake CLI",
+       "stimulus": "fake script игнорирует argv и блокируется на stdin.read",
+-      "environment": "auto/default flag disabled либо auto shebang",
++      "environment": "auto/default true + shebang filter либо explicit disabled/run/disable-file",
+       "artifact": "bridges/opencode-zen-bridge/server.py",
+       "response": "один run без serve probe, reasoning exact Simple greeting.",
+       "response_measure": "all17 modules green; runs==1, no synthetic prefix для fast fixture",
+@@ -1253,7 +1699,7 @@
+       "quality": "security",
+       "source": "модель/враждебный upstream",
+       "stimulus": "native tools пытаются писать файл или запросить allow",
+-      "environment": "serve Basic loopback и deny/ask-reject",
++      "environment": "serve loopback с listener owner proof, default ask_reject или explicit deny",
+       "artifact": "bridges/opencode-zen-bridge/server.py",
+       "response": "никогда allow, native event -> DSH tool tuple",
+       "response_measure": "fake permission requests reject; false flag no secret allocation; live H6 отдельно",
+@@ -1302,7 +1748,7 @@
+       "environment": "design envelope single-process",
+       "artifact": "bridges/opencode-zen-bridge/server.py",
+       "response": "resource manager bounds and overload",
+-      "response_measure": "memory1408<=1638.4MiB estimate; byte queue/FD/port and maxchild assertions",
++      "response_measure": "Design:1*256+6*192=1408<=1638.4 MiB. H3 измеряет parent+6*child actual RSS и отсутствие database is locked на103KB×6×3; без H3 runtime PASS отсутствует.",
+       "verification_ids": [
+         "VER-005"
+       ],
+@@ -1332,7 +1778,7 @@
+     {
+       "id": "BND-002",
+       "component": "managed serve/run source + per-Server resource manager",
+-      "responsibility": "Transport selection/auth, fresh env/proxy, bounded queue, lifecycle/PGID ownership и canonical event tuples",
++      "responsibility": "Transport selection, listener PID/PGID proof до Auth/prompt, fresh _serve_env/proxy и isolated XDG_DATA_HOME, bounded HTTP/SSE/delivery leases, canonical wire adapter и cleanup",
+       "allowed_dependencies": [
+         "stdlib http.client/socket/subprocess/queue/threading/secrets",
+         "_run_env/_RequestAttempts/_StartupGate",
+@@ -1369,7 +1815,7 @@
+     {
+       "id": "BND-004",
+       "component": "_Resilience/_RequestAttempts",
+-      "responsibility": "Один process-level bulkhead, rate/retry budget/breaker; per-request spawn count и deadlines",
++      "responsibility": "Общий process bulkhead/rate/retry budget/model breaker; отдельно _ServeHealth для protocol-specific failures, per-request cap/deadline и prompt delivered barrier",
+       "allowed_dependencies": [
+         "injected monotonic/RNG",
+         "locks"
+@@ -1444,7 +1890,7 @@
+       "scenario": "deny удаляет tool schema, Zen403 или ask непреднамеренно исполняет tool",
+       "probability": "high",
+       "impact": "high",
+-      "mitigation": "Scoped deny baseline; если несовместим, заранее выбранный ask-auto-reject, никогда allow. Capability/permission failure fail-closed. FakeServe доказывает reject/mapping, live H6 требуется перед rollout.",
++      "mitigation": "Default ask_reject в отдельном _serve_env поверх byte-identical _run_env; wire permission.asked ->decision=reject немедленно, never once/always/allow. Env deny поддержан без пересборки, без automatic policy fallback. 401/403/нет safe endpoint fail-closed; FakeServe обе policy, реальный H6 обязателен.",
+       "verification_ids": [
+         "VER-001",
+         "VER-005"
+@@ -1455,7 +1901,7 @@
+       "scenario": "Proxy env не означает фактическую per-request clean IP ротацию через loopback georouter",
+       "probability": "medium",
+       "impact": "high",
+-      "mitigation": "Сохранить _run_env на каждый child, test env calls/sequence; OPEN06 реальный egress/H3 нужно подтвердить. Shared daemon не использовать; тест env не объявлять доказательством clean IP.",
++      "mitigation": "Сохранять per-spawn _next_standalone_proxy env через неизменный _run_env; AC-018 проверяет последовательность записей пула. baseURL=http://127.0.0.1:10830/v1 georouter обходит child HTTP_PROXY по NO_PROXY (F-15/F-27); новый child не доказывает новую Zen IP. Shared daemon не выбирать ради failure isolation, не ради недоказанной egress ротации; конфиг georouter вне scope.",
+       "verification_ids": [
+         "VER-001",
+         "VER-005"
+@@ -1466,7 +1912,7 @@
+       "scenario": "6 serve на sqlite2.27GB/192MiB оценке создают lock/memory spike",
+       "probability": "medium",
+       "impact": "high",
+-      "mitigation": "Startup gate/rate+bounded6, output/queue budgets, memory1408MiB; cleanup retries. H3 RSS/FD/DB locks mandatory before enabling.",
++      "mitigation": "В _serve_env temporary XDG_DATA_HOME per Popen, preserve OPENCODE_MODELS_PATH, finally rmtree after group cleanup; shared2.27GB DB не трогать. Design memory1408<=1638.4MiB не measured RSS. H3 до production sync:6 parallel103KB×3 +7th overload, max_actual_parent_RSS+6*max_actual_child_RSS<=0.80*2048MiB и ноль database is locked (ретрай не маскирует contention). FAIL->disable-file сохраняется, rollout запрещён; slots6/waiters12 не повышать.",
+       "verification_ids": [
+         "VER-001",
+         "VER-005"
+@@ -1477,7 +1923,7 @@
+       "scenario": "Fast fake probe увеличит run counter или блокируется stdin",
+       "probability": "high",
+       "impact": "high",
+-      "mitigation": "auto shebang route directly run zero probes; force serve DEVNULL + .5s ready ceiling; cached stat key. Regress exact1run and no5s hang.",
++      "mitigation": "Auto shebang ->one run, no subprocess probes при default=true. Force serve stdin DEVNULL, ready<=3.0s/cancel-aware. Cache по path+mtime_ns+size; exact counter regressions остаются. Никакой fake5s stdin hang.",
+       "verification_ids": [
+         "VER-001",
+         "VER-005"
+@@ -1521,7 +1967,7 @@
+       "scenario": "Полный lint/type gate красный до изменения",
+       "probability": "high",
+       "impact": "medium",
+-      "mitigation": "VER004 baseline-aware точные old error sites + warning per-rule budgets; не расширять allowance и не считать budget green чистым typing. Новый test file полный ruff.",
++      "mitigation": "VER-004 заменяет прежний overlay на strict formatter/linter/type checks всех3 files. Унаследованные E402 и2 type errors EVD052/053 честно baseline, их allowance удалён: Coder должен исправить в allowlist без подавления диагностики/конфига. severity error0, reportAny/reportExplicitAny<=125 server.py, прочие frozen warning budgets не растут; format may reveal debt, FAIL нельзя объявить PASS.",
+       "verification_ids": [
+         "VER-004"
+       ]
+@@ -1531,7 +1977,7 @@
+       "scenario": "Prompt POST timeout уже после принятия способен удвоить generation при silent fallback",
+       "probability": "medium",
+       "impact": "high",
+-      "mitigation": "Fallback barrier before first prompt send; after ambiguous acceptance только общий explicit transient retry с cleanup, status и cap; builtins cannot run.",
++      "mitigation": "Текущий brief RW-001 выбирает HTTP response headers / первый current-session execution event как delivered barrier, вместо R1 начала POST. До headers и без события ServeUnavailable может fallback после полного kill/reap старого PGID; remote generation могла уже начаться, exactly-once не обещать. После barrier silent run запрещён; только явный same-transport retry+status/cap, no builtin execution. Source disagreement записан в panel_resolution_choices.",
+       "verification_ids": [
+         "VER-001",
+         "VER-005"
+@@ -1545,6 +1991,26 @@
+       "mitigation": "PGID сохранён при spawn, group kill даже leader exited, cleanup bounded1.2s; собственный lifecycle реестр, никакого pkill; finally every branch.",
+       "verification_ids": [
+         "VER-001",
++        "VER-005"
++      ]
++    },
++    {
++      "id": "RISK-011",
++      "scenario": "Статусы [мост] сохраняются DSH и при ручном переключении модели могут попасть reasoning_content другого provider (F-33/F-38/F-39)",
++      "probability": "medium",
++      "impact": "medium",
++      "mitigation": "Принятый остаточный риск: current bridge игнорирует весь replay reasoning, но чужой provider этого не обязан делать. Короткие статусы только grace/реальное ожидание не чаще5s и один на retry, no secrets/prompt text. Не менять DSH/provider контракты; уменьшить объём синтетики. Fake replay проверяет только этот мост, cross-provider H4 наблюдение не заменяет гарантии.",
++      "verification_ids": [
++        "VER-005"
++      ]
++    },
++    {
++      "id": "RISK-012",
++      "scenario": "Serve SSE/protocol деградация ошибочно открывает общий model breaker и блокирует рабочий run",
++      "probability": "high",
++      "impact": "high",
++      "mitigation": "_ServeHealth threshold3/TTL120/one recovery probe для новых auto requests, protocol failure не _UpstreamBreaker. Current accepted prompt не переигрывать скрыто. Fake5requests + expiry/probe/version-change cases; настоящие provider429/5xx сохраняют model breaker.",
++      "verification_ids": [
+         "VER-005"
+       ]
+     }
+@@ -1567,7 +2033,7 @@
+       {
+         "id": "THREAT-001",
+         "scenario": "Подмена локального serve listener/вывод случайного пароля в stdout",
+-        "mitigation": "Loopback127.0.0.1, generated password env before spawn, v2 handshake authenticated+no redirects, own process lifecycle. Не логировать Basic/header/body/raw stdout; всё маскируется перед log.",
++        "mitigation": "Parent bind loopback0/getport/release-before-Popen explicit port/newPGID; до Auth/prompt lsof listener PID->os.getpgid==childPGID, bounded<=.25s внутри ready3s. Foreign listener/owner unavailable ->zero secret/prompt bytes, cleanup own child only, bounded new port retry/cap3. Пароль secrets env до spawn, stdout redact, no redirects/proxy. VER-005 deliberate port takeover negative test.",
+         "verification_ids": [
+           "VER-005"
+         ]
+@@ -1575,7 +2041,7 @@
+       {
+         "id": "THREAT-002",
+         "scenario": "Модель выдаёт builtin bash/write/edit, пока DSH думает, что это только предложение",
+-        "mitigation": "deny-all или ask+API immediate reject, never allow; unknown permission capability fail-closed. Native события только переводятся в DSH tool_calls/unmapped. Live H6 доказывает no file mutation.",
++        "mitigation": "Default OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY=ask_reject: _serve_env(model_id) вызывает _run_env(model_id) ровно один раз, копирует/merge scoped OPENCODE_CONFIG_CONTENT permission={\"*\":\"ask\"} с сохранением provider/options/OPENCODE_MODELS_PATH, session permissions=[{action:\"*\",resource:\"*\",effect:\"ask\"}]. _run_env(model_id) оставить ПОБАЙТОВО неизменным, tests/test_run_env.py не менять. На wire permission.asked (логическая группа session.permission.requested) немедленно POST /api/session/{id}/permission/{data.id}/reply {decision:\"reject\"}; никогда allow/once/always. Reply через bounded control lane, не ожидает completion prompt POST, HTTP budget<=.25s и cancel/deadline; failure -> явный security error+cleanup, без деградации в разрешение. Env=deny выставляет config permission={\"*\":\"deny\"} и session effect=deny, без пересборки; если всё же пришёл ask, только reject. Неподдержанная policy/отсутствие safe permission capability -> fail-closed. Нет автоматического deny↔ask_reject switching даже до prompt: разница позиций R1 закрыта явным выбором безопасного селектора. После принятия prompt 401/403 никогда не дают run fallback. EVD-050 + F-08 объясняют Zen403 с deny; FakeServe проверяет оба режима и byte hash _run_env, реальную Zen совместимость/запрещённую запись доказывает только H6.",
+         "verification_ids": [
+           "VER-005"
+         ]
+@@ -1583,7 +2049,7 @@
+       {
+         "id": "THREAT-003",
+         "scenario": "Unrestricted parent env утекает в serve или proxy creds в ошибку",
+-        "mitigation": "_run_env whitelist как legacy, password добавляется только child env; no apiKey dump, redact stdout/stderr/exception before _log and response; тест secret sentinels.",
++        "mitigation": "_run_env whitelist как legacy, password добавляется только child env; no apiKey dump, redact stdout/stderr/exception before _log and response; тест secret sentinels. _serve_env wrapper не меняет _run_env и сохраняет model catalog, private XDG data удаляется finally.",
+         "verification_ids": [
+           "VER-005"
+         ]
+@@ -1591,7 +2057,7 @@
+       {
+         "id": "THREAT-004",
+         "scenario": "SSE из чужой session или reconnect replay приводит к чужому выводу/повтору инструмента",
+-        "mitigation": "Filter exact session/execution IDs, subscribe before prompt; no transparent reconnect replay после prompt; step/call IDs dedup; no raw events in public stream.",
++        "mitigation": "Filter exact data.sessionID и own prompt-send generation boundary; session v2 не даёт executionID, не ожидать выдуманного поля. subscribe armed before prompt, no transparent reconnect/replay after delivered; event id + assistantMessageID step/call id dedup; no foreign/raw events in public stream.",
+         "verification_ids": [
+           "VER-005"
+         ]
+@@ -1607,25 +2073,34 @@
+     ]
+   },
+   "evolution": {
+-    "compatibility": "OpenAI endpoints/port/auth/format/Google route preserved; canonical source powers stream and JSON. Serve default-disabled, auto text scripts direct run. New statuses scoped thinking+grace; legacy pure fast reasoning unaffected.",
+-    "migration": "NOT_APPLICABLE: нет data schema/DB миграций и новых dependencies; opencode.db/shared config не менять. Each ephemeral session DELETE в cleanup; session history child creates via штатный API, prompt retention унаследован OpenCode, не выгружать в артефакты.",
+-    "rollout": "Stage2 validators+fingerprint -> downstream external architecture panel/proof (orchestrator) -> Stage3 tests red→green/code -> independent clean-room VER001..005 all green -> отдельный deploy/sync H0 -> canary enable flag=true auto и H1..H9. 103KB+6parallel×3, DSH Think screenshots/Stop, H6 запрещённая запись, egress proxy/RSS/FD. Пока это не пройдено, business result не сдан. Ничего из ~/.dsh не входит в clean-room VER.",
+-    "rollback": "REALTIME_SERVE_ENABLED=false либо TRANSPORT=run и контролируемый restart конфигурации возвращают legacy transport; сначала отменить active leases, zero orphans, no daemon overlap. Watchdog/status fixes остаются. Если они дали регресс — revert Stage3 commit и сверить копии H0, live legacy H9. В Stage2 rollback/deploy не выполняется.",
+-    "feature_flag": "Env switch вместо GigaRC в конкретном локальном stdlib контуре явно разрешён текущим брифом и имеет default=false; нельзя выдавать его за удалённый GigaRC без рестарта."
++    "compatibility": "Публичные OpenAI endpoints/port/auth/schema и Google route неизменны, source общий для SSE/JSON. Default serve flag=true в auto только для нативного бинарника; shebang fake CLI остаётся run без probe, start.sh и _run_env byte-identical. Fast/off/JSON synthetic statuses как раньше исключены.",
++    "migration": "NOT_APPLICABLE: продуктовая схема/DB/dependencies не меняются; shared opencode.db/config не трогать. Каждый child получает свежий local-temp XDG_DATA_HOME и сохранённый OPENCODE_MODELS_PATH; наконец interrupt/delete/kill/reap и shutil.rmtree(...,ignore_errors=True). История ephemeral, долговременные prompt/secret артефакты не сохраняются.",
++    "rollout": "Stage2 packet cycle2/role-plan/schema/fingerprint -> external architecture Council R2+verify_panel_proof оркестратора -> Stage3 red→green+independent clean-room VER001..005 strict. Default=true НЕ разрешает обход H3: ДО синхронизации server.py в боевой :9883 отдельно изолированный candidate runtime с effectiveM6/waiters12, live103KB prompts6parallel+7th,3повтора и H3 memory/SQLite check. На боевом до допуска удерживать disable-file, который действует сразу при первом старте новой server.py; файлы ~/.dsh в Stage2 не создавать. Только H3 PASS и безопасная policy H6 разрешают H0 sync/read-back, без изменения start.sh; при удалении disable-file native Mach-O в auto сразу serve. После sync H1/H2/H3 повторно+DSH H4/H5/H6/H7/H8/H9; любой memory/DB/security FAIL немедленно disable-file и run. Не перекладывать pre-rollout safety на уже случившийся default-enable. На этом проходе все H0..H9 NOT_RUN.",
++    "rollback": "Мгновенный kill-switch без рестарта: создать OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE (default ~/.dsh/bridges/opencode-zen-bridge/disable-serve) -> следующий запрос run без serve allocations/probes; удаление файла возвращает auto при healthy transport. Env REALTIME_SERVE_ENABLED=0 или TRANSPORT=run также принудительно run (смена env уже живого процесса требует restart, не путать с file switch). In-flight leases drain/cancel, delivered prompt не повторять на run. H9 проверяет в живом existing DSH чате создание/удаление файла, неизменный PID сервиса, run/serve transport_history и успешные повторные/параллельные вызовы. Если status/watchdog regression -> отдельный rollback Stage3 commit+H0 identity. Stage2 rollback/deploy не выполняется.",
++    "feature_flag": "Explicit cycle2 RW-009/FU-006 override: default=true для локального auto-native пути, zero-serve-cost explicit disable и O(1) file switch без рестарта. Прецедент F-40/STEP_RECOVERY; GigaRC/start.sh dependencies вне allowlist. H3 и H6 обязательны до production enable.",
++    "H3_rollout_gate": {
++      "status": "NOT_RUN",
++      "scenario": "6 parallel реальных рабочих prompt около103KB +7th overload,3повтора; изолированный candidate перед production sync и повтор на боевом после safety допуска",
++      "memory_unit": "MiB",
++      "memory_inequality": "1*actual_parent_RSS_max + M*actual_child_RSS_max <=0.80*Mem_limit_per_pod; M=6; limit=2048MiB, rhs=1638.4MiB",
++      "database_gate": "Ноль database is locked/SQLITE_BUSY на isolated per-spawn XDG DB; ретрай в FAIL_RETRY_LIMIT не превращает lock failure в PASS. Shared2.27GB DB не изменяется.",
++      "other_evidence": "Реальные RSS/FD/CPU/TTFT каждого запроса, parent/child peaks, все owned temp dirs удалены, zero orphan PGID; design child192MiB не подставлять вместо замера",
++      "on_fail": "Rollout/enable запрещён, disable-file остаётся; не повышать slots6/12 или retry cap3. Не менять текущие shared env/config/DB."
++    }
+   },
+   "approval": {
+     "status": "NOT_REQUIRED",
+     "decision_ids": [],
+     "approved_by": null,
+     "evidence_ref": null,
+-    "rationale": "Все AD two-way и следуют текущему брифу; публичный auth/контракт/данные не меняются. APPROVED ниже означает валидированный архитектурный контракт, не голос Совета."
++    "rationale": "AD остаются reversible/two-way в рамках explicit cycle2 brief (EVD-064), включая headers barrier/default=true. APPROVED здесь — архитектурный кандидат, не ACCEPT Совета; R2 и packet/surface freeze обязательны до Coder."
+   },
+   "independent_review": {
+     "required": false,
+     "status": "NOT_REQUIRED",
+     "reviewer": null,
+     "evidence_ref": null,
+-    "rationale": "S2. Независимый downstream architecture panel остаётся обязанностью оркестратора; здесь не запускается и не подменяется валидатором."
++    "rationale": "S2: universal schema independent_review NOT_REQUIRED сохраняется; обязательный downstream Council R2 с отдельным proof ведёт оркестратор, эта роль не создаёт голос/вердикт."
+   },
+   "open_questions": [
+     {
+@@ -1636,9 +2111,9 @@
+     },
+     {
+       "id": "Q-002",
+-      "question": "Какую policy совместимости реально поддерживает установленный v2: scoped deny или schema-preserving ask-auto-reject?",
++      "question": "H6: совместимы ли с реальным Zen default ask_reject и optional env=deny при гарантированном builtin rejection?",
+       "blocking": false,
+-      "disposition": "Обе безопасные ветви заранее разрешены; FakeServe доказывает protocol, H6 доказывает реальный отказ file action до rollout. Не включать при неустановленной безопасной policy."
++      "disposition": "Default выбран, автопереключения нет. FakeServe обе policy не доказывает live H6; неизвестная safe capability fail-closed, до H6 боевой disable-file не снимать."
+     }
+   ],
+   "protected_paths": [
+@@ -1649,20 +2124,23 @@
+   "deferred": [
+     "Живая приёмка H0..H9 и синхронизация ~/.dsh выполняются только rollout-этапом после clean-room verifier и downstream panel.",
+     "OPEN-05/16: прямой Zen HTTP и другие CLI форматы не исследуются заново; текущая реализация использует подтверждённый v2 SSE.",
+-    "Измеренные CPU/RSS/FD и реальный proxy egress на 103 KB/6 parallel — обязательный rollout gate, не доказанный Stage 2 факт."
++    "Измеренные CPU/RSS/FD и реальный proxy egress на 103 KB/6 parallel — обязательный rollout gate, не доказанный Stage 2 факт.",
++    "ADR-0005: оформить docs/adr/0005-zen-serve-realtime-reasoning.md и обновить docs/adr/INDEX.md отдельной задачей вне замороженного handoff-architect.md §10. Текущий Read-Only Product Gate разрешает только3 run JSON, поэтому materialization=[] и ADR/product docs здесь не создаются."
+   ],
+   "verification_policy": {
+     "surface_frozen": true,
+     "verification_implementation_owner": "Stage 3 Coder пишет tests/test_realtime_reasoning.py; Stage L2 Verifier независимо запускает каждый VER с 0 failed; тесты не считаются выполненными Stage 2",
+     "REQ-019_clean_room": "VER-005 проверяет digest/rollout-manifest helper на двух временных fake files внутри sandbox, не ~/.dsh. Реальная синхронизация REQ-019 проверяется только H0 после отдельного rollout; невозможно подтвердить факт deploy чистым unit-тестом.",
+     "timing": "FakeClock/RNG и Event-oracles для invariants; socket arrival/CPU реальные измерения отдельными measured/heavy unittest TestCase внутри dedicated suite (stdlib-discover тоже исполняет их). Тест timing держит upstream Event закрытым до чтения 10 дельт, deadline<500ms для interarrival и<=250ms bridge overhead; timeout helper аварийно освобождает Event, чтобы assertion failure не зависала. Не подменять arrival resp.read().",
+-    "order": "Dedicated suite запускает selected TestStepInterruptionLive tests минимум в двух противоположных фиксированных порядках в subprocess/новых Server, включая error после budget tests; без случайных seed/dependency."
++    "order": "Dedicated suite запускает selected TestStepInterruptionLive tests минимум в двух противоположных фиксированных порядках в subprocess/новых Server, включая error после budget tests; без случайных seed/dependency.",
++    "wire_fixture": "Frozen fixture literals + canonical digest в AD-001 event_contract обязаны использоваться независимым expected oracle. Изменение adapter+FakeServe одной ошибкой не должно сохранять green; corruption delta/token/permission field detection required.",
++    "strict_typing": "VER-004 all3files strict0errors, no inherited-error overlay; reportAny/reportExplicitAny server each<=125 и остальные per-rule budgets<=v1. Доказательство исполнения принадлежит clean-room L2, не этой Stage2 роли."
+   },
+   "high_load_envelope": {
+     "schema": "HL-ENV/v1",
+     "ssot": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md §3.0/7.2",
+     "field_count": 46,
+-    "units": "SI: memory B (MiB=1048576B), times s, CPU cores, rates 1/s; векторы d и s именованы канонически",
++    "units": "SSoT §3.0: memory MiB; times s, CPU cores, rates req/s or conn/s, connections/descriptors/tokens; векторы d и s по канону.",
+     "required_hl_env_fields": {
+       "P_steady": 1,
+       "P_hpa_max": 1,
+@@ -1681,9 +2159,9 @@
+       "κ_skew": 1.0,
+       "u_bg_worker": 0.02,
+       "U_pod_sidecars": 0.25,
+-      "Mem_limit_per_pod": 2147483648,
+-      "Mem_rss_worker_max": 268435456,
+-      "Mem_shared_max": 1207959552,
++      "Mem_limit_per_pod": 2048,
++      "Mem_rss_worker_max": 256,
++      "Mem_shared_max": 1152,
+       "RPS_peak": 0.2,
+       "A_max": 3,
+       "SLA_p99_s": 180.0,
+@@ -1725,11 +2203,11 @@
+       "FD_worker": 128,
+       "ulimit_n": 65536,
+       "λ_new_conn_per_pod(s)": {
+-        "node_ephemeral": 3.0,
++        "node_ephemeral": 3.6,
+         "shared_snat": 1.8
+       },
+       "C_active_in_scope(s)": {
+-        "node_ephemeral": 24,
++        "node_ephemeral": 30,
+         "shared_snat": 12
+       },
+       "N_pods_in_scope(s)": {
+@@ -1770,9 +2248,9 @@
+       "κ_skew": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+       "u_bg_worker": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+       "U_pod_sidecars": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+-      "Mem_limit_per_pod": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+-      "Mem_rss_worker_max": "F-29 baseline RSS=22MiB; Architect увеличил design bound с 64 до 256MiB для parent queues/accumulators 6 requests; это расчётная квота, H3 измеряет.",
+-      "Mem_shared_max": "F-20 idle serve=152MiB; OPEN-08 допущение 192MiB на активный child ×6=1152MiB; нагрузка ещё не измерена.",
++      "Mem_limit_per_pod": "handoff-architect §7 design budget2048MiB, normalized per SSoT§3.0/RW-011; host limit not measured, H3 mandatory.",
++      "Mem_rss_worker_max": "F-29 parent baseline22MiB; design bound256MiB; H3 actual_parent_RSS_max measured in MiB.",
++      "Mem_shared_max": "F-20 idle152MiB; design child192MiB*6=1152MiB aggregate child budget, not RSS measurement. Per-spawn XDG data preserves models path, eliminates intended shared SQLite open; H3 actual6child RSS and zero locks required.",
+       "RPS_peak": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+       "A_max": "F-11/server.py:287-314; max spawns=3, retry tokens=6, refill=.05/s, backoff=.5/2s.",
+       "SLA_p99_s": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+@@ -1790,10 +2268,10 @@
+       "Min_healthy_ratio": "analysis/zen-realtime-reasoning/handoff-architect.md §7; оценка design envelope, не измеренный host limit/SLA; OPEN-08/09/11; перепроверить H1/H2/H3.",
+       "B_retry_max": "F-11/server.py:287-314; max spawns=3, retry tokens=6, refill=.05/s, backoff=.5/2s.",
+       "min_reserve_retry_rps": "F-11/server.py:287-314; max spawns=3, retry tokens=6, refill=.05/s, backoff=.5/2s.",
+-      "FD_worker": "F-29 baseline parent36; расчёт parent ≤128 с 6 clients и ≤2 control/SSE connections per attempt + bounded stdout/stderr; child20 FD каждый (F-20) считаются отдельно, суммарно host<256.",
++      "FD_worker": "F-29 parent36; bound128 covers6 clients +18 HTTP control/SSE/delivery sockets +12 drains+6 reserve sockets/handles, per-child20FD (F-20); parent+children<256 design, actual H3.",
+       "ulimit_n": "F-29 launchctl soft maxfiles=65536; не переносить значение вчерашнего reference packet=4096 как текущий факт.",
+-      "λ_new_conn_per_pod(s)": "Расчёт AD-001: readiness ≤3 connect attempts, control reusable per process + 1 SSE + egress; node ≤5×RPS_peak×A_max=3/s, active≤4×6=24; shared SNAT georouter pre_send_retries≤3 =>1.8/s, active12. Не измерено; H3 validate.",
+-      "C_active_in_scope(s)": "Расчёт AD-001: readiness ≤3 connect attempts, control reusable per process + 1 SSE + egress; node ≤5×RPS_peak×A_max=3/s, active≤4×6=24; shared SNAT georouter pre_send_retries≤3 =>1.8/s, active12. Не измерено; H3 validate.",
++      "λ_new_conn_per_pod(s)": "AD-001: <=3 readiness connects including reusable control, +1 SSE +1 prompt delivery +1 egress =6 per attempt; node<=6*.2*3=3.6conn/s; active<=5*6=30 incl client+3HTTP+egress. sharedSNAT1.8/active12 estimate unchanged; H3 validate.",
++      "C_active_in_scope(s)": "AD-001: <=3 readiness connects including reusable control, +1 SSE +1 prompt delivery +1 egress =6 per attempt; node<=6*.2*3=3.6conn/s; active<=5*6=30 incl client+3HTTP+egress. sharedSNAT1.8/active12 estimate unchanged; H3 validate.",
+       "N_pods_in_scope(s)": "handoff-architect §7 локальный host (49152..65535 inclusive=16384); topology/SNAT=1 и TIME_WAIT=60s — design assumptions, внешний shared-SNAT capacity неизвестен; H3/rollout подтвердить.",
+       "Port_range_size(s)": "handoff-architect §7 локальный host (49152..65535 inclusive=16384); topology/SNAT=1 и TIME_WAIT=60s — design assumptions, внешний shared-SNAT capacity неизвестен; H3/rollout подтвердить.",
+       "T_hold_s(s)": "handoff-architect §7 локальный host (49152..65535 inclusive=16384); topology/SNAT=1 и TIME_WAIT=60s — design assumptions, внешний shared-SNAT capacity неизвестен; H3/rollout подтвердить.",
+@@ -1808,7 +2286,7 @@
+       "max_waiters_effective": "min(configured MAX_SLOT_WAITERS, 2*effective MAX_CONCURRENT) в общей _SlotBulkhead admission; code-default2/4, deploy6/12. Deployment6/12 unchanged, configured waiters variable не повышать.",
+       "server_resource_manager": "один per-Server owner для bounded process/socket leases, после старта процесса, без parent live sockets before child exec",
+       "threads_per_worker_upper_bound": 36,
+-      "thread_accounting": "6 handlers +≤6 managed adapter workers/readers +≤6 stderr drains +≤6 stdin feed (run only) +≤6 gate timers +6 reserve; новые timers не пишут в wfile. Все owned threads bounded/joined; worker не порождает дополнительный бесконечный reader. Временные reader/socket leases учитываются тем же manager.",
++      "thread_accounting": "До6 handlers +6 SSE readers +6 daemon prompt delivery workers +6 bounded stdout/stderr drain workers +6 gate timers +6 reserve=36; run stdin feed заменяет serve delivery в том же attempt. Не добавлять сверх36 неучтённые workers; каждый owned socket/worker closed/joined вcleanup. HTTP leases: control + SSE + prompt delivery =3 per active serve, максимум18. Не блокировать reject behind POST.",
+       "stdout_queue_max_events": 4096,
+       "new_transport_queue_max_bytes": 1048576,
+       "new_transport_max_sse_frame_bytes": 1048576,
+@@ -1824,22 +2302,81 @@
+       "client_keepalive_s": 2,
+       "client_write_timeout_s": 0.5,
+       "cleanup_budget_s": 1.2,
+-      "ready_budget_s": 0.5,
+-      "session_setup_budget_s": 0.2,
+-      "startup_wait_s": 5,
+-      "spawn_wait_s": 5,
++      "ready_budget_s": 3.0,
++      "session_setup_budget_s": 2.0,
+       "slot_wait_s": 15,
+       "spawn_rate_per_s": 1,
+       "spawn_burst": 1,
+       "total_deadline_s": 1800,
+-      "estimate_status": "Будущие design ceilings; SLA p99=180s рабочая цель аналитика, не гарантия worst-case sum трёх generation watchdog по60s+aux. Watchdogs не повышают TIMEOUT_S; H1/H2/H3 проверяют actual p99/TTFT перед rollout."
++      "estimate_status": "Будущие design ceilings; SLA p99=180s рабочая цель аналитика, не гарантия worst-case sum трёх generation watchdog по60s+aux. Watchdogs не повышают TIMEOUT_S; H1/H2/H3 проверяют actual p99/TTFT перед rollout.",
++      "pre_spawn_admission_budget_s": 5.0,
++      "admission_policy": "_StartupGate + _SpawnRateLimiter делят один<=5.0s deadline на attempt; никакой суммы независимых5+5. Spawn token hard, gate wait fail-open только в остатке.",
++      "session_setup_scope": "POST /api/session + GET /api/event subscription armed<=2.0s до prompt; POST /prompt worker waits по first_event20/first_token60,total1800 и concurrent SSE, не по session_setup.",
++      "first_event_anchor": "serve prompt_send_start; first valid current-session execution SSE only; HTTPready/headers/control ignored; O-EXIT first_event_ms measured from request t0",
++      "data_isolation": "per-spawn tempfile XDG_DATA_HOME + finally rmtree, OPENCODE_MODELS_PATH preserved; common DB untouched",
++      "serve_health": {
++        "threshold": 3,
++        "ttl_s": 120.0,
++        "scope": "per Server/binary key, new auto requests; no model breaker protocol failures"
++      },
++      "http_sockets_per_serve_max": 3
+     },
+     "memory_closure_check": {
+       "status": "PASS",
+-      "lhs_bytes": 1476395008,
+-      "rhs_bytes": 1717986918.4,
+-      "substitution": "1×256MiB + 6×192MiB =1408MiB <= .80×2048MiB=1638.4MiB",
+-      "evidence_level": "design estimate, не measured peak; H3 — обязательный rollout gate"
++      "unit": "MiB",
++      "lhs_mib": 1408,
++      "rhs_mib": 1638.4,
++      "substitution": "W*Mem_rss_worker_max+Mem_shared_max=1*256+1152=1408 <=0.80*2048=1638.4 MiB",
++      "evidence_level": "design estimate only; NOT measured runtime PASS",
++      "runtime_gate": "H3: actual_parent_RSS_max+6*actual_child_RSS_max<=1638.4MiB; 103KB×6×3; zero database is locked, actual cleanup dirs/FD/CPU; FAIL forbids production enable"
++    },
++    "field_units": {
++      "P_steady": "pods",
++      "P_hpa_max": "pods",
++      "maxSurge_pct": "ratio",
++      "maxSurge_abs": "pods",
++      "maxUnavailable_pct": "ratio",
++      "maxUnavailable_abs": "pods",
++      "P_terminating_overlap": "pods",
++      "P_live": "pods",
++      "P_avail_min": "pods",
++      "W": "proc/pod",
++      "N_proc": "processes",
++      "N_proc_steady": "processes",
++      "N_proc_avail_min": "processes",
++      "CPU_limit_per_pod": "cores",
++      "κ_skew": "ratio",
++      "u_bg_worker": "cores",
++      "U_pod_sidecars": "cores",
++      "Mem_limit_per_pod": "MiB",
++      "Mem_rss_worker_max": "MiB",
++      "Mem_shared_max": "MiB",
++      "RPS_peak": "req/s",
++      "A_max": "attempts/req",
++      "SLA_p99_s": "s",
++      "N_entities_max": "items",
++      "Limit_dep_share[d]": "connections",
++      "Limit_dep_rps[d]": "req/s",
++      "W_fetchers[d]": "proc/pod",
++      "J_init_s[d]": "s",
++      "J_pod_s[d]": "s",
++      "T_poll_s[d]": "s",
++      "K_calls[d]": "calls",
++      "T_base_s[d]": "s",
++      "T_cap_s[d]": "s",
++      "Max_stale_age_s[c]": "s",
++      "Min_healthy_ratio": "ratio",
++      "B_retry_max": "tokens",
++      "min_reserve_retry_rps": "req/s",
++      "FD_worker": "descriptors",
++      "ulimit_n": "descriptors",
++      "λ_new_conn_per_pod(s)": "conn/s",
++      "C_active_in_scope(s)": "connections",
++      "N_pods_in_scope(s)": "pods",
++      "Port_range_size(s)": "ports",
++      "T_hold_s(s)": "s",
++      "SNAT_ips_count(s)": "IPs",
++      "HOTPATH_MODULES": "list[str]"
+     }
+   },
+   "resilience_gates": {
+@@ -1847,8 +2384,8 @@
+     "HL_ENV_v1": {
+       "HL-ENV-01": {
+         "status": "PASS",
+-        "substitution": "46 keys и 46 field_sources; memory=1476395008 <=1717986918.4 B, оценка. N/A содержит actual diff и граф, L2 обязан повторить на Coder diff.",
+-        "oracle": "set equality канонических 46 keys/field_sources; recompute memory; assert each N/A carries git diff and transitive proof; future Coder diff allowlist.",
++        "substitution": "46 exact keys/sources/field_units SSoT§3.0; memory inMiB:1*256+1152=1408<=0.80*2048=1638.4. N/A сохраняет actual diff и transitive graph; runtime H3 NOT_RUN.",
++        "oracle": "set equality канонических 46 keys/field_sources; recompute memory; assert each N/A carries git diff and transitive proof; future Coder diff allowlist. Assert memory units exact MiB and actual H3 inequalities separately; bytes вместо MiB FAIL.",
+         "verification_ids": [
+           "VER-005"
+         ],
+@@ -1858,17 +2395,18 @@
+     "C_MULT": {
+       "C-MULT-I1": {
+         "status": "PASS",
+-        "substitution": "roles: bridge=1 process, child session lease M=6, G_reload=1 close-before-create (fallback/retry cleanup до нового child), dedicated=0; другие роли=0. georouter 6<=.60×80=48. logical DB child bound6<=.60×10=6, это не измеренная физическая sqlite connection quota; opencode внутренний pool не увеличиваем, H3 проверяет database locks. Параллельный старый/new daemon rollout запрещён (P_overlap=0).",
+-        "oracle": "FakeServe manager active_children peak<=M для retry/fallback/reload; old.closed before new.open; exact resource math для обеих declared shares; real H3 validates sqlite. Не выдавать fake logical quota за физический DB ceiling.",
++        "substitution": "Roles bridge=1 process, M=6 exclusive child leases, G_reload=1 close-before-create; other roles0, no daemon overlap. georouter6<=.60*80=48; opencode_local_db design logical6<=.60*10=6 НЕ физическая SQLite pool quota. Каждый child own XDG_DATA_HOME и own DB, OPENCODE_MODELS_PATH preserved, shared2.27GB DB untouched. Design memory1408<=1638.4MiB, но runtime SQLite/memory PASS только после H3 actual parent+6child<=.80*2048MiB и zero database is locked на103KB×6×3.",
++        "oracle": "FakeServe manager active_children peak<=M для retry/fallback/reload; old.closed before new.open; exact resource math для обеих declared shares; real H3 validates sqlite. Не выдавать fake logical quota за физический DB ceiling. Fake XDG dirs unique per spawn and deleted on all exits; H3 real peaks/zero locks обязательны до enable, retry не маскирует lock failure; runtime_status NOT_RUN.",
+         "verification_ids": [
+           "VER-005"
+         ],
+-        "evidence_level": "design contract; implementation oracle pending Stage3/L2"
++        "evidence_level": "design contract; implementation oracle pending Stage3/L2",
++        "runtime_status": "NOT_RUN_H3_REQUIRED"
+       },
+       "C-MULT-I2": {
+         "status": "PASS",
+-        "substitution": "Per-process manager: M=effective MAX_CONCURRENT (default2/deploy6), max_waiters<=2M (default clamp4/deploy12), wait<=15s; fixed max2 HTTP sockets/active serve (control keepalive+event), queue<=4096 events И <=1MiB, frame<=1MiB; no Redis SQL connection pool added. Общий ingress _SlotBulkhead обязан применять этот effective bound и при run, иначе default M=2/waiters12 нарушил бы 2M; не вводить вторую неучтённую очередь перед manager.",
+-        "oracle": "Блокировать M+2M leases, следующий fast-fail без Popen/connect, сокетов<=2M, queue byte-overflow explicit error; inspect configured ceilings. Нельзя снижать общий production slot count или повышать max_waiters.",
++        "substitution": "Per-process manager: M=effective MAX_CONCURRENT (default2/deploy6), max_waiters<=2M (default clamp4/deploy12), wait<=15s; fixed max3 HTTP sockets/active serve (reusable control+event+prompt delivery), queue<=4096 events И <=1MiB, frame<=1MiB; no Redis SQL connection pool added. Общий ingress _SlotBulkhead обязан применять этот effective bound и при run, иначе default M=2/waiters12 нарушил бы 2M; не вводить вторую неучтённую очередь перед manager.",
++        "oracle": "Блокировать M+2M leases, следующий fast-fail без Popen/connect, сокетов<=3M, queue byte-overflow explicit error; inspect configured ceilings. Нельзя снижать общий production slot count или повышать max_waiters.",
+         "verification_ids": [
+           "VER-005"
+         ],
+@@ -1894,7 +2432,7 @@
+       },
+       "C-MULT-I5": {
+         "status": "PASS",
+-        "substitution": "Parent FD128<=.70×65536=45875.2; parent+6 children20FD<256 host descriptors. node ports:3×1×60+24=204<=8192; shared SNAT:1.8×1×60+12=120<=8192. Ceilings из field_sources — estimates; keepalive control reuse, readiness attempts<=3; close before next spawn.",
++        "substitution": "ParentFD128<=.70*65536=45875.2; parent+6children20FD<256 design. control+SSE+prompt=3HTTP sockets per child. node ports3.6*1*60+30=246<=8192; sharedSNAT1.8*1*60+12=120<=8192. Readiness<=3 connects; control reusable. Actual FD/RSS/cleanup/network closure H3 mandatory.",
+         "oracle": "Recompute both scope inequalities, count control connection creation/reuse (50 operations on one owned serve lease ->1 keepalive control TCP), readiness≤3 probes; leak counters FD/start/end stable; H3 измеряет реальные FD/egress.",
+         "verification_ids": [
+           "VER-005"
+@@ -1905,7 +2443,7 @@
+     "S_HERD": {
+       "S-HERD-I1": {
+         "status": "PASS",
+-        "substitution": "Snapshot/config startup/poll path absent: W_fetchers=0,K_calls=0 => batch K×(λ+4sqrtλ+4)=0<=.5×1=.5 и R_poll=0<=.2×1=.2. 1/s field — self-configured request spawn rate, НЕ неизвестная квота dependency; запрещено объявлять gate PASS через фиктивную внешнюю RPS. Request cold-start отдельно ограничен gate<=5s wait/12s hold + token bucket1/s burst1 для КАЖДОГО child включая fallback.",
++        "substitution": "Snapshot/config startup/poll path absent: W_fetchers=0,K_calls=0 => batch K×(λ+4sqrtλ+4)=0<=.5×1=.5 и R_poll=0<=.2×1=.2. 1/s field — self-configured request spawn rate, НЕ неизвестная квота dependency; запрещено объявлять gate PASS через фиктивную внешнюю RPS. Request cold-start отдельно ограничен combined gate+token admission<=5.0s (gate hold<=12s, не additive wait) + token bucket1/s burst1 для КАЖДОГО child включая fallback.",
+         "oracle": "AST/transitive no backend poller; zero background I/O при idle; FakeClock spawn bucket max B+r*T; ≥6 parallel requests не делают 6 Popen одновременно. Startup gate release first validated event/own EOF/max hold, cancellation-safe.",
+         "verification_ids": [
+           "VER-005"
+@@ -2013,7 +2551,7 @@
+       },
+       "H-CPU-I2": {
+         "status": "PASS",
+-        "substitution": "Regex compiled at import; нет per-delta json.loads правил/конфигов, model_validate/deepcopy/static label binding. json.loads одного входного SSE frame необходим для transport framing и не является forbidden config reload parse. Deny config merge один раз per attempt setup вне delta loop.",
++        "substitution": "Regex compiled at import; нет per-delta json.loads правил/конфигов, model_validate/deepcopy/static label binding. json.loads одного входного SSE frame необходим для transport framing и не является forbidden config reload parse. Serve ask_reject/deny config merge один раз per attempt setup вне delta loop.",
+         "oracle": "Спай на re._compile/config decoder/model_validate/typeadapter/deepcopy/static labels в delta loop ->0; wire decoder count==one per actual event, не full history; tool JSON parser exempt by input decoding purpose.",
+         "verification_ids": [
+           "VER-005"
+@@ -2022,8 +2560,8 @@
+       },
+       "H-CPU-I3": {
+         "status": "PASS",
+-        "substitution": "Первый guard optional serve branch проверяет realtime flag до UUID/password/clock/serve queue/threads/probe. flag=false -> прежний run O(1) transport-selection branch; watchdog/status — отдельное исправление RC2/RC3 для обоих транспортов, не скрытая serve allocation. У status helper первый guard thinking-enabled/SSE до форматирования/часов. Включённые data queues bounded put_nowait; overflow model events=explicit error+kill, не silent telemetry drop; optional telemetry drop increments dropped_total.",
+-        "oracle": "Flag=false spies serve allocator, password, UUID, probe, threads=0. Full bounded event queue->explicit overflow+cleanup, без ожидания; optional product event queue drop fail-open. status flag guard не отключает стандартные legacy errors.",
++        "substitution": "Первые serve guards: if disabled or TRANSPORT=run return legacy до UUID/password/clock/queue/threads/probe. Enabled selector проверяет O(1) os.path.exists(disable-file); present ->run до serve allocations/subprocess. auto health-degraded/shebang ->run без probe. Default=true native path не отменяет zero-serve-cost explicit disabled path; legacy watchdog/status остаются RC2/RC3 fixes. Status guard thinking+SSE до format; bounded put_nowait events, overflow explicit error+cleanup; optional telemetry drop counters.",
++        "oracle": "VER-005 spy explicit0/run/disable-file ->0 serve alloc/password/probe/extra Popen; while same process create/remove file next request toggles transport. Queue overflow explicit cleanup; no disabled UUID/serialization. File stat O(1), no recursive IO.",
+         "verification_ids": [
+           "VER-005"
+         ],
+@@ -2064,8 +2602,8 @@
+     "R_BULK": {
+       "R-BULK-I1": {
+         "status": "PASS",
+-        "substitution": "Slot один раз15s + Amax3×(gate5+spawn-token5+ready.5+session-control.2+cleanup1.2)+backoff caps1+2 =53.7s<=.30×180=54s. Generation model wait отделён от auxiliary: first-event20, first-token60, stall60, TIMEOUT1800 общий. Каждый HTTP/control/session operation получает min(operation_budget,remaining); cleanup имеет отдельный финальный потолок1.2s, не skip при истёкшем request. После deadline ни spawn, ни prompt, ни sleep.",
+-        "oracle": "FakeClock recompute53.7<=54; exhaust setup subbudget and total deadline before each I/O ->zero further calls. Контроль setup aggregate .2s, ready.5s, cleanup1.2s (не сумма отдельных безлимитных вызовов). При снижении SLA/увеличении budget формула обязана стать FAIL до rollout.",
++        "substitution": "15.0 + 3 * (5.0 + 3.0 + 2.0 + 1.2) + 3.0 = 51.6 s <= 0.30 * 180 = 54.0 s; headroom=2.4s. Slot15 один раз, combined pre-spawn admission5 на attempt, owner/ready3, create+subscribe2, cleanup1.2, суммарный backoff cap1+2=3. Prompt POST/generation под first_event20/first_token60/stall60 и total1800, не session_setup. Каждому I/O timeout=min(phase_remaining,request_remaining); cleanup финальный<=1.2 даже после request deadline. После deadline ни spawn/prompt/sleep.",
++        "oracle": "FakeClock recompute51.6<=54 и headroom>=2.0; admission gate+limiter sum<=5.0, ready3/create+subscribe2/cleanup1.2, prompt POST не входит в2s; slow create timeout ->one budgeted run pre-header; headers received or session event ->zero silent run, Popen<=3. Deadline exhausted->zero further I/O. Никаких leftover gate5+spawn5/ready.5/setup.2.",
+         "verification_ids": [
+           "VER-005"
+         ],
+@@ -2082,8 +2620,8 @@
+       },
+       "R-BULK-I3": {
+         "status": "PASS",
+-        "substitution": "Existing breaker threshold5,cooldown10×U(.8,1.2),HALF_OPEN=1. Watchdog/provider transient отмечаются attempt_done+commit; recovered success не накапливает pending failure. Bridge log fail-open, startup lock timeout fail-open; secret/auth/permission/unknown accepted prompt fail-closed. В baseline _UpstreamBreaker.allow lease пробы истекает по reset_s даже при ещё активном request (server.py:1415-1428); новый contract не разрешает вторую active HALF_OPEN пробу. Владение probe завершает success/failure или подтверждённый cancel/cleanup; время cooldown не освобождает живую пробу само.",
+-        "oracle": "После5 failing requests OPEN без connect/spawn; FakeClock до cooldown десять concurrent HALF_OPEN ->ровно1 probe. Продвинуть clock ещё на>reset_s при заблокированной первой пробе: allow для остальных остаётся false. После owner cleanup проба освобождена и следующая ровно одна разрешена. fake401/403 не запускает run fallback и не выдаёт secret.",
++        "substitution": "Model _UpstreamBreaker threshold5/cooldown10*U(.8,1.2), HALF_OPEN1 owner не освобождается по одному cooldown до terminal/cleanup; provider failures/успешное восстановление как прежде. Отдельный _ServeHealth threshold3/TTL120/one recovery probe для serve protocol-only failures; first_event_timeout без session execution и invalid_serve_event НЕ model breaker failure, subsequent auto->run. Accepted current prompt не получает silent run fallback. Auth/permission/security401/403 fail-closed, no policy switch; client cancel neutral. TTL/run skips не продлевают outage; native binary key change инвалидирует capability/health. Resource/retry/slot caps едины.",
++        "oracle": "После5 failing requests OPEN без connect/spawn; FakeClock до cooldown десять concurrent HALF_OPEN ->ровно1 probe. Продвинуть clock ещё на>reset_s при заблокированной первой пробе: allow для остальных остаётся false. После owner cleanup проба освобождена и следующая ровно одна разрешена. fake401/403 не запускает run fallback и не выдаёт secret. Отдельно five serve-protocol failures forced mode ->model breaker closed, no .failure calls; auto third failure arms120s,next auto run, no silent replay current request; atTTL exactly1probe, success resets, failed protocol rearms120; provider5 failures still open model breaker.",
+         "verification_ids": [
+           "VER-005"
+         ],
+@@ -2136,15 +2674,15 @@
+     },
+     "T_LIFE_v1": {
+       "status": "PASS",
+-      "substitution": "Request/attempt ownership включает PGID, stdout/stderr, SSE/control sockets, session id, queue/readers и startup gate. AD-003 cleanup на всех exits<=1.2s, child group reap; leader early-exit не оставляет grandchildren. Server shutdown manager запрещает новые leases и отменяет все активные, затем closes all.",
+-      "oracle": "VER-005: 50 cancellations + leader-exits-first descendant + blocked socket/readiness + partial prompt + overload/shutdown; zero active/waiters/children/readers/sockets; PIDs/PGIDs только свои.",
++      "substitution": "Request/attempt ownership включает PGID, stdout/stderr, SSE/control sockets, session id, queue/readers и startup gate. AD-003 cleanup на всех exits<=1.2s, child group reap; leader early-exit не оставляет grandchildren. Server shutdown manager запрещает новые leases и отменяет все активные, затем closes all. Ownership включает isolated XDG_DATA_HOME и daemon delivery socket/thread; finally rmtree owned dir после kill/reap, never common DB. Foreign listener cleanup no API/kill to foreign PID.",
++      "oracle": "VER-005: 50 cancellations + leader-exits-first descendant + blocked socket/readiness + partial prompt + overload/shutdown; zero active/waiters/children/readers/sockets; PIDs/PGIDs только свои. Assert unique data dirs and deleted after all50 cancellations/partial prompt/port race; join delivery reader and no owned temp dirs.",
+       "verification_ids": [
+         "VER-005"
+       ]
+     },
+     "O_EXIT_v1": {
+       "status": "PASS",
+-      "substitution": "Один O-EXIT/v1 до любого early return имеет mode/model/status, transport/first_event_ms/ttft_ms (null допустим до event), exit_reason, retries,total_spawns,duration; code first_event_timeout/first_token_timeout/stall_timeout/client_gone не теряется.",
++      "substitution": "Один O-EXIT/v1 до любого early return имеет mode/model/status, transport/first_event_ms/ttft_ms (null допустим до event), exit_reason, retries,total_spawns,duration; code first_event_timeout/first_token_timeout/stall_timeout/client_gone не теряется. first_event_ms только valid current-session execution SSE после prompt, относительно request t0; HTTPready/POST headers не являются first_event. transport_history/reason раздельно protocol/model/security/TTL, no phantom spawns.",
+       "oracle": "VER-005 table all exits incl 400/401/404/503/circuit, overflow, error, abort, successful retry; deterministic fake clock, no secret reflection.",
+       "verification_ids": [
+         "VER-005"
+@@ -2176,31 +2714,31 @@
+       {
+         "dependency_operation": "serve/readiness + session init",
+         "path": "hot/aux",
+-        "timeout_budget": "aggregate ready<=.5s, create+event-subscription+prompt-send<=.2s, capped remaining",
+-        "bulkhead": "manager leases<=M, control+SSE<=2M",
+-        "circuit_breaker": "_UpstreamBreaker5/10×U(.8,1.2)/HALF_OPEN1 для model failure; local capability и cleanup не provider failure",
+-        "failure_mode_fallback": "Capability unavailable before prompt in auto -> fully cleaned run retry; auth/security fail-closed, forced serve explicit error; once prompt starts no silent fallback"
++        "timeout_budget": "Owner proof+GET /api/session/active aggregate ready<=3.0s (cache-miss schema внутри3); POST session+GET event armed<=2.0s; POST prompt excluded, concurrent SSE/watchdogs",
++        "bulkhead": "manager leases<=M, control+SSE+prompt delivery<=3M sockets",
++        "circuit_breaker": "_ServeHealth3/TTL120/probe1 for protocol; _UpstreamBreaker5 for provider; auth/permission fail-closed",
++        "failure_mode_fallback": "Auto ServeUnavailable до POST prompt response headers и до current-session execution event ->cleanup+budgeted run. Headers OR event latch delivered; then no silent run.401/403/permission missing never fallback."
+       },
+       {
+         "dependency_operation": "opencode model execution (serve or run)",
+         "path": "hot",
+-        "timeout_budget": "first-event20, first-token60, stall60, request TIMEOUT1800 common",
++        "timeout_budget": "Serve first-event20/first-token60 от prompt_send_start; stall60 от useful token; requestTIMEOUT1800 common. HTTP readiness отдельно<=3 и не гасит first_event.",
+         "bulkhead": "_slots effectiveM, waiters<=2M, one child per slot",
+-        "circuit_breaker": "_UpstreamBreaker5/10×U(.8,1.2)/HALF_OPEN1 для model failure; local capability и cleanup не provider failure",
+-        "failure_mode_fallback": "Watchdog/transient -> cleanup + retry budget/jitter; no retry client_gone or fatal4xx; final explicit error even after partial output"
++        "circuit_breaker": "Provider _UpstreamBreaker5/jitter/HALF_OPEN1; serve-specific invalid/no-event ->_ServeHealth3/TTL120 only",
++        "failure_mode_fallback": "Watchdog ->cleanup+same-transport explicit budgeted retry; accepted current request never silent run. Protocol degradation directs NEW auto requests to run; fatal4xx/security/cancel no retry."
+       },
+       {
+         "dependency_operation": "_StartupGate/_SpawnRateLimiter",
+         "path": "hot/aux",
+-        "timeout_budget": "wait<=5 each, hold<=12; cancel poll<=.25",
++        "timeout_budget": "Shared pre-spawn admission<=5.0s total (gate wait only remaining after hard token); hold<=12 not additive, cancel poll<=.25",
+         "bulkhead": "1 gate, token bucket1/s burst1",
+         "circuit_breaker": "_UpstreamBreaker5/10×U(.8,1.2)/HALF_OPEN1 для model failure; local capability и cleanup не provider failure",
+-        "failure_mode_fallback": "Gate timeout fail-open as legacy; rate limiter not bypassed, every real child counted"
++        "failure_mode_fallback": "Gate wait fail-open лишь в оставшемся5s; token timeout prohibits spawn, limiter never bypassed. No independent5+5 waits."
+       },
+       {
+         "dependency_operation": "serve interrupt/delete and process cleanup",
+         "path": "cleanup",
+-        "timeout_budget": "interrupt+delete aggregate<=.2, TERM grace<=.5, reap/join<=.5; total1.2",
++        "timeout_budget": "interrupt+delete<=.2,TERM grace<=.5,reap/join delivery+SSE+owned rmtree within remaining .5; total<=1.2, bounded even on deadline",
+         "bulkhead": "only own session/PGID, no new leases",
+         "circuit_breaker": "_UpstreamBreaker5/10×U(.8,1.2)/HALF_OPEN1 для model failure; local capability и cleanup не provider failure",
+         "failure_mode_fallback": "Best effort API failure never skips socket close/killpg; force SIGKILL, idempotent cleanup"
+@@ -2220,6 +2758,14 @@
+         "bulkhead": "existing _LOG_LOCK",
+         "circuit_breaker": "_UpstreamBreaker5/10×U(.8,1.2)/HALF_OPEN1 для model failure; local capability и cleanup не provider failure",
+         "failure_mode_fallback": "Fail-open OSError; не добавлять synchronous remote logger на request path"
++      },
++      {
++        "dependency_operation": "serve permission rejection",
++        "path": "hot/control",
++        "timeout_budget": "Immediate control reply<=.25s capped request/phase remaining, never queued behind prompt response",
++        "bulkhead": "Use one idle control connection; delivery worker uses separate bounded prompt socket, <=3 sockets per active serve",
++        "circuit_breaker": "Security fail-closed, not model/protocol fallback",
++        "failure_mode_fallback": "permission.asked ->decision=reject; missing endpoint/bad reply401/403 ->cleanup+explicit error; never allow/once/always"
+       }
+     ],
+     "non_waivable_stop_codes": [
+@@ -2399,7 +2945,7 @@
+     },
+     "NON_IDEMPOTENT_RETRY": {
+       "status": "PASS",
+-      "rationale": "Built-ins deny/ask-auto-reject никогда не исполняются; при неизвестной доставке prompt не silent fallback. Повтор может дублировать reasoning, имеет отдельный status; tool ids/key dedup.",
++      "rationale": "ask_reject/deny never allow; explicit brief chooses responseheaders OR sessionexecution deliverybarrier. Beforebarrier unknown delivery may fallback only after ownedcleanup/cap; afterbarrier only explicit same-transport retry+status, never silentrun. Not exactly-once; tool IDs dedup.",
+       "verification_ids": [
+         "VER-005"
+       ],
+@@ -2444,26 +2990,27 @@
+     "waiting": "[мост] Ожидание первого токена (10 с)…\n"
+   },
+   "handoff_state": {
+-    "architecture_contract": "Stage2 approved-phase candidate; не ARCH_GATE_PASS, не council verdict",
++    "architecture_contract": "Cycle2 fix-from-panel candidate APPROVED; 14 RW+7 FU resolved at design level, R2 council verdict и ARCH_GATE не выносятся этой ролью",
+     "implementation_tests": "NOT_RUN — код/tests Stage3 ещё не создавались",
+     "live_acceptance": "NOT_RUN — H0..H9 отдельно; не менять ~/.dsh",
+     "pending_orchestrator_actions": [
+-      "validate_arch_gate/внесение packet hash в task envelope",
+-      "external architecture panel и verify_panel_proof PASS перед Coder",
+-      "Stage3 Coder и clean-room L2 VER001..005",
+-      "rollout H0..H9"
++      "Council R2 по diff v1→v2 и rework_resolutions; отдельные launch_seat/verify_panel_proof",
++      "Обновить task envelope packet/surface hashes и проверить ARCH_GATE с новыми role-plan/fingerprints (вне трёх разрешённых файлов роли)",
++      "Stage3 Coder, independent clean-room strict VER001..005",
++      "H3/H6 safety gates до production sync; H0..H9 live acceptance, ещё NOT_RUN"
+     ]
+   },
+   "verification_acceptance_matrix": {
+-    "FakeServe": "stdlib subprocess fake implements serve argv, HTTP Basic401, GET /openapi.json and /api/event, POST session/prompt/interrupt, DELETE, permission request/reject. Tests set flag=true and transport=serve, so shebang auto compatibility does not skip real serve path. Hold upstream Event after first deltas, client readline sees data before release. No real model/Zen calls.",
++    "FakeServe": "Stdlib subprocess implements exact frozen_v2_1_2_fixtures API/SSE, Basic401, /api/session/active, /openapi.json only per binary-key first handshake, session/prompt/interrupt/delete/permission decision=reject. Tests force serve for shebang; no Zen calls. Independent fixed fixture digest oracle + deliberate field/schema mutations; fake/adapter mutual agreement alone insufficient. GET active returns {data:{}} not[]; once-per-key /api/info version+PID and API schema info.version0.0.1, independent binary appversion2.1.2; invalid numeric error.status must fail validation.",
+     "mode_matrix": [
+-      "flag=false, auto/serve/run -> run, no serve allocation or Popen",
+-      "flag=true, run ->run",
+-      "flag=true, auto, legacy shebang ignores argv ->run once directly, counter1, stdin promptEOF",
+-      "flag=true, serve, FakeServe shebang ->full SSE v2; both JSON and stream",
+-      "flag=true, serve, fake legacy blocking stdin ->DEVNULL gives immediate EOF; ready failure<=.5s, explicit error, no5s hang",
+-      "flag=true, auto, binary unsupported/ready failure -> cleanup then run only pre-prompt, all Popen total<=3; exhausted budget stops",
+-      "serve401/permission failure/unknown prompt delivery/client_gone -> no silent fallback"
++      "default flag=true+auto+native MachO ->serve после safety rollout; shebang fake ->run once no probe, all378baseline existing tests target green",
++      "explicit flag0/false or TRANSPORT=run ->run before serve allocations/stat/probe; enabled disable-file present ->run after one O(1)exists; create/remove file same process toggles next request without restart",
++      "force serve+FakeServe shebang ->v2 SSE/JSON, stdinDEVNULL; fake legacy blocking stdin ->EOF/ready failure<=3s explicit no silent run",
++      "auto ServeUnavailable in spawn/create/subscribe or pre-response-headers prompt and no execution SSE ->complete cleanup then1budgeted run fallback; totalPopen<=3",
++      "POST prompt headers arrived OR valid session execution SSE while headers pending ->delivered; zero silent run, remaining first-event/token clocks active; explicit security401/403/cancel no fallback at any phase",
++      "Default ask_reject, env deny both frozen permission rules; unsupported policy/missing safe endpoints fail-closed, no automatic policy switching",
++      "Auto _ServeHealth3protocol failures ->TTL120 run new requests; provider breaker remainsclosed for protocol-only, provider failures remain independent",
++      "Compare frozen immutable_run_env function SHA256, tests/test_run_env.py/start.sh SHA256; preserving tests by editing expected hashes запрещено."
+     ],
+     "status_matrix": [
+       "slow blank upstream + startup-gate/rate-wait: grace.30 first [мост] LF<=1s",
+@@ -2472,14 +3019,16 @@
+       "whitespace/empty comments/status do not set first-token or attempt_output",
+       "retry accepted after model reasoning: exactly one retry status, raw model bytes retained, no reasoning dedup",
+       "normal127ms model reasoning: no periodic status, natural LF enables collapsed preview, no newline injected into model delta",
+-      "split interrupted marker filtering and split UTF8 must preserve all ordinary model bytes"
++      "split interrupted marker filtering and split UTF8 must preserve all ordinary model bytes",
++      "Model reasoning chunk без trailingLF ->synthetic delta \"\\n[мост] ...\\n\"; whole delta incl leading LF provenance=synthetic, model-only concatenation exact bytes, literal model [мост] survives; LF already present->no redundant prefix; fast Simple greeting.->zero statuses."
+     ],
+     "watchdog_matrix": [
+-      "first_event_timeout on silent legacy after process spawn and on fake serve event-less execution when no valid readiness/server event",
+-      "first_token_timeout on repeated started/control/keepalive events with no non-whitespace model token",
+-      "stall_timeout after first real model delta, comments/bridge statuses do not reset it",
+-      "first-event may be satisfied by valid serve readiness: an authenticated ready server with zero model tokens must timeout via first_token, not fabricate first_event failure",
+-      "all thresholds env configurable, tiny values/FakeClock; shared total deadline never resets; no retry4"
++      "Serve HTTP ready success + accepted prompt headers but zero session SSE ->first_event_timeout at20s from prompt_send_start +cleanup<=1.2 (<22s); first_event_ms remainsnull",
++      "Legacy first-event from attempt start until first valid run event/step_start; serve ready3 and create+subscribe2 bounded independently before prompt",
++      "Current session execution.started/step.started/reasoning.started SSE after prompt satisfies first_event once; first_event_ms=request-relative; foreign sessions/pre-prompt started/server.connected/session.created/comments/status do not satisfy",
++      "Valid started/control but no useful model token ->first_token_timeout60s; started/control/comments/reject not token, no indefinite reset",
++      "After first useful model delta pause>stall60 ->stall_timeout; comments/bridge statuses/repeated transport noise do not reset",
++      "POST prompt delivery blocked past2s while SSE progresses is permitted; supervisor/reader/writer concurrent and cancel-aware, no duplicate prompt; request totaldeadline neverreset, no retry4"
+     ],
+     "lifecycle_matrix": [
+       "disconnect at gate/limiter/ready/prompt/blocked SSE/after reasoning, detect<=5s and PGID absent<=7s",
+@@ -2487,7 +3036,9 @@
+       "SIGTERM ignored ->SIGKILL, leader reaped, no child/grandchild",
+       "success/tool step/error/fallback/shutdown each closes session/socket/threads/slot once",
+       "byte queue/frame/output overflow explicit error (no silent model delta loss)",
+-      "50 cancel fault-injection cycles counters in_use/waiters/sessions/sockets/readers=0"
++      "50 cancel fault-injection cycles counters in_use/waiters/sessions/sockets/readers=0",
++      "Foreign listener PID/PGID after reserve-release ->zero Authorization/password/prompt bytes, no foreign API/kill; bounded port retry ready3s and totalspawns<=3.",
++      "Unique per-spawn XDG_DATA_HOME across6parallel/retries; _run_env bytehash unchanged, OPENCODE_MODELS_PATH retained; finally tempdir removed after all exits, 50cancel cycles and deliveryworker cleanup."
+     ],
+     "tools_matrix": [
+       "every split point and single-char deltas for both tags, JSON embedded close strings/code quoting existing fixtures",
+@@ -2496,7 +3047,9 @@
+       "native call lifecycle normalized/dedup per call-id, mapped/unmapped behavior identical; no auto allow",
+       "step.ended tokens input/output/cached/reasoning counted once then tool finish, no followup synthetic step",
+       "early legacy error may recover; late transient/fatal error and incomplete recovery same on fake v2",
+-      "existing reasoning_interrupted and interrupted cleanup across delta boundaries"
++      "existing reasoning_interrupted and interrupted cleanup across delta boundaries",
++      "permission.asked {data.id,sessionID,action,resources,source} ->POST reply {decision:reject},status204; both ask_reject/deny modes; POST prompt may stayblocked while reject executes on separate control socket; never once/always/allow.",
++      "Frozen wire tokens.cache.read/write ->canonical tokens{input,output,cached=cache.read,reasoning}; mutate delta path/cache envelope/permission lifecycle ->independent oracle fail, step assistantMessageID dedup, not invented wire stepID."
+     ],
+     "baseline_matrix": [
+       "two original budget fixtures:3 spawns, no fourth tool result, stop; separate fixture unmapped->incomplete->calls within3 proves counter separation",
+@@ -2509,20 +3062,398 @@
+       "new process/socket resource manager singleton and bounded lease count, 50 control keepalive operations1 connection per lease",
+       "RPS token bucket/cancel/full jitter/retry budget/breaker HALF_OPEN1 via FakeClock/RNG",
+       "wire event JSON decode allowed; config decode/re.compile/reparse-full-history on per-delta hot path forbidden",
+-      "HALF_OPEN active probe held across reset_s boundary: zero second probes until owner cleanup; common _SlotBulkhead code-default M2/waiters4 and deploy M6/waiters12, no second uncounted ingress queue."
++      "HALF_OPEN active probe held across reset_s boundary: zero second probes until owner cleanup; common _SlotBulkhead code-default M2/waiters4 and deploy M6/waiters12, no second uncounted ingress queue.",
++      "Combined gate+limiter5,ready3,create+subscribe2,cleanup1.2;15+3*(5+3+2+1.2)+3=51.6<=54,headroom2.4; slowcreate->one preheader run; afterheader/event->no run; no fourthPopen.",
++      "_ServeHealth force5protocol failures ->zero model breakerfail; auto3failures->next run untilTTL120, expiry oneprobe, successful terminalreset, protocolfailrearm; binarymtime+size change invalidates capability; real provider5 failures modelbreakerOPEN.",
++      "Memory SSoT fields2048/256/1152 MiB exactly; design1408<=1638.4 not H3PASS.3HTTP sockets per serve supports immediate reject while promptHTTP pending; recalc nodeports246<=8192."
+     ],
+-    "rollout_boundary": "VER001..005 не обращаются к ~/.dsh. В root suite test_dsh_profile_config видит отсутствие live profile в clean-room и делает inherited skip. Actual REQ019 identity и H0..H9 отдельный rollout gate; fake digest fixture не подменяет read-back deployed file."
++    "rollout_boundary": "VER001..005 не обращаются к ~/.dsh. В root suite test_dsh_profile_config видит отсутствие live profile в clean-room и делает inherited skip. Actual REQ019 identity и H0..H9 отдельный rollout gate; fake digest fixture не подменяет read-back deployed file. Default=true не bypass: pre-production candidate H3/H6 mandatory, file disabled until safety PASS; H3 actualRSS + no DB locks103KB×6×3. H9 toggles file withoutrestart in existing chat. All H NOT_RUN in Stage2."
+   },
+   "semantic_checks": {
+-    "canonical_hl_field_set": "46/46 exact key equality and field_sources equality against team architecture.md §3.0",
++    "canonical_hl_field_set": "46/46 exact key equality and field_sources/field_units equality against team architecture.md §3.0",
+     "stop_codes": "21 main codes + T-LIFE/O-EXIT/M-SEM=24 unique",
+     "legacy_antipatterns": "21 exact keys from approved reference schema",
+     "verification_owner": "5/5 owner=verifier",
+     "decisions": "4/4 two-way with >=2 genuine alternatives",
+-    "evidence_refs": "61 unique EVD IDs; decision/assumption references checked; EVD061 identifies existing HALF_OPEN and default waiter gaps.",
+-    "VER-004_syntax": "ast.parse PASS; actual future command pending test file Stage3",
+-    "status_protocol": "3/3 examples begin [мост], end actual LF",
+-    "schema_vs_semantics": "Installed packet validator does not inspect high_load_envelope/resilience_gates/legacy checks; above explicit semantic assertions supplement it. Neither schema nor design assertions prove runtime passes."
++    "evidence_refs": "64 unique EVD IDs; analyst49 F-01..F-49 неизменны; council refs отдельный PANEL-F-NNN namespace; invalid analyst refs запрещены.",
++    "status_protocol": "3 templates begin[мост]/endLF; при model unterminated line весь дополнительный leading LF synthetic, template bytes модели не менять.",
++    "schema_vs_semantics": "Installed packet validator does not inspect high_load_envelope/resilience_gates/legacy checks; above explicit semantic assertions supplement it. Neither schema nor design assertions prove runtime passes.",
++    "VER_004_syntax": "Strict command compiled with ast.parse in cycle2; execution pending Stage3 because new test file absent",
++    "rework_coverage": "14RW+7FU exactly once in rework_resolutions; source_findings uses PANEL-F-NNN; resolved means architecture delta, NOT implementation/runtime PASS",
++    "memory_units": "All46 canonical keys+field_sources+field_units; memory2048/256/1152 MiB;1408<=1638.4MiB",
++    "aux_budget": "15+3*(5+3+2+1.2)+3=51.6<=54,headroom2.4; old independent5+5/.5/.2 absent",
++    "wire_evidence": "Actual binary2.1.2 permission.asked/decision=reject and cache.read/write normalized explicitly; fixture SHA256 locked; five families independent adapter/mock oracle Readiness data map and appversion/api schema version separated; StructuredError.status numeric mapping frozen."
+   },
+-  "routing_profile": "standard"
++  "routing_profile": "standard",
++  "panel_resolution_choices": [
++    {
++      "ids": [
++        "RW-001",
++        "RW-007"
++      ],
++      "source_positions": [
++        "PANEL-F-001: headers response barrier",
++        "RW-001.evidence: Seat2 начало POST barrier"
++      ],
++      "resolution": "Текущий explicit user brief выбирает response headers OR started session event; unknown pre-header delivery может fallback только после полного cleanup; after-header no silent run. Admission/create budgets отделены от prompt wait."
++    },
++    {
++      "ids": [
++        "RW-002"
++      ],
++      "source_positions": [
++        "PANEL-F-002: допускается один safe policy transition до prompt",
++        "PANEL-F-018: unsupported policy fail-closed без auto-switch"
++      ],
++      "resolution": "Default ask_reject и явный env deny, автоматического переключения НЕТ вообще. После accepted401/403 fatal; live H6 обязателен."
++    },
++    {
++      "ids": [
++        "RW-006",
++        "RW-009"
++      ],
++      "source_positions": [
++        "PANEL-F-006: H3 обязателен до включения",
++        "PANEL-F-010: default=true без start.sh"
++      ],
++      "resolution": "Default=true сохранён в коде design; candidate H3/H6 до production sync, боевой file switch удерживается до допуска. Нельзя сначала включить default, а потом искать RSS."
++    },
++    {
++      "ids": [
++        "RW-011",
++        "RW-012"
++      ],
++      "source_positions": [
++        "PANEL-F-012: канон MiB, byte арифметика недостаточна",
++        "PANEL-F-013: strict0error вместо старого allowance"
++      ],
++      "resolution": "MiB exact values; type allowance удалён; существующие2errors — baseline debt для исправления Coder в server.py, не текущий PASS."
++    },
++    {
++      "ids": [
++        "RW-004",
++        "RW-007"
++      ],
++      "source_positions": [
++        "Brief logical session.permission.requested/tokens.cached",
++        "EVD-062 actual v2.1.2 permission.asked/tokens.cache.read+write; permission reply decision"
++      ],
++      "resolution": "Freeze actual wire literals и canonical expected mapping, не изобретать отсутствующие поля/имена. Group labels сохранены в fixture families для механического verify-fixed."
++    }
++  ],
++  "rework_resolutions": [
++    {
++      "id": "RW-001",
++      "source_findings": [
++        "PANEL-F-001"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Pre-header fallback + session-event earlier barrier, explicit unknown-delivery risk and same-transport retries. create/subscribe budget separated from concurrent POST generation, cap3 unchanged.",
++      "packet_locations": [
++        "#/decisions/0/details/fallback_barrier",
++        "#/decisions/0/details/session_wire",
++        "#/resilience_gates/R_BULK/R-BULK-I1",
++        "#/verification_acceptance_matrix/mode_matrix"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-002",
++      "source_findings": [
++        "PANEL-F-002",
++        "PANEL-F-007",
++        "PANEL-F-018"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Default ask_reject, env deny, _serve_env over byte-identical _run_env; decision=reject only, missing capability/401/403 fail-closed, no automatic policy transition.",
++      "packet_locations": [
++        "#/decisions/0/details/configuration/OPENCODE_ZEN_BRIDGE_SERVE_PERMISSION_POLICY",
++        "#/decisions/0/details/tool_policy",
++        "#/risks/0",
++        "#/threat_model/threats/1"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-003",
++      "source_findings": [
++        "PANEL-F-003"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Parent bind0/reserve/release-before-Popen explicitport; lsof PID/PGID proof before Authorization/prompt, foreign listener zero leakage/own cleanup and bounded retry.",
++      "packet_locations": [
++        "#/decisions/0/details/listener_ownership",
++        "#/decisions/0/details/spawn",
++        "#/threat_model/threats/0",
++        "#/verification_acceptance_matrix/lifecycle_matrix"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-004",
++      "source_findings": [
++        "PANEL-F-004"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Five frozen fixture families with exact source-proven field paths+canonical expectation+SHA256; actual wire permission.asked, reply decision and tokens.cache.read normalized, not invented aliases.",
++      "packet_locations": [
++        "#/decisions/0/details/event_contract",
++        "#/evidence/61",
++        "#/verification_policy/wire_fixture"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-005",
++      "source_findings": [
++        "PANEL-F-005"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "REQ-013/AD-001/RISK-002 guarantee only per-spawn proxy-env rotation AC-018; loopback georouter NO_PROXY bypasses child HTTP_PROXY, no guaranteed clean Zen IP.",
++      "packet_locations": [
++        "#/requirements/12",
++        "#/decisions/0/drivers",
++        "#/risks/1"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-006",
++      "source_findings": [
++        "PANEL-F-006"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Per-spawn XDG_DATA_HOME+preserved OPENCODE_MODELS_PATH+finally rmtree, H3 actualRSS parent+6children<=1638.4MiB/zero DB locks103KB×6×3; no Stage2 runtime PASS.",
++      "packet_locations": [
++        "#/decisions/0/details/data_isolation",
++        "#/high_load_envelope/memory_closure_check",
++        "#/resilience_gates/C_MULT/C-MULT-I1",
++        "#/evolution/H3_rollout_gate"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-007",
++      "source_findings": [
++        "PANEL-F-008"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Lightweight active-session readiness3s; combined admission5s; create+subscribe2s; daemon POST delivery concurrent SSE; exact Model.Ref/providerID/id/variant and session permissions array; total51.6<=54.",
++      "packet_locations": [
++        "#/decisions/0/details/startup",
++        "#/decisions/0/details/admission",
++        "#/decisions/0/details/session_wire",
++        "#/high_load_envelope/operational_profile",
++        "#/resilience_gates/dependency_failure_matrix"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-008",
++      "source_findings": [
++        "PANEL-F-009"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Serve first_event20 only current-session execution SSE after prompt; HTTP readiness/headers ignored; independent clocks and request-relative first_event_ms, accepted-noevents timeout<=22s.",
++      "packet_locations": [
++        "#/decisions/2/details/clocks",
++        "#/decisions/2/details/telemetry",
++        "#/verification_acceptance_matrix/watchdog_matrix",
++        "#/resilience_gates/O_EXIT_v1"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-009",
++      "source_findings": [
++        "PANEL-F-010"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Default=true+auto native, shebang directrun all378baseline target; file disable no restart. Candidate H3/H6 before prod sync+held disable-file reconciles mandatory safety gate.",
++      "packet_locations": [
++        "#/decisions/0/details/configuration",
++        "#/decisions/0/details/auto_fake_compatibility",
++        "#/evolution/rollout",
++        "#/evolution/feature_flag"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-010",
++      "source_findings": [
++        "PANEL-F-011",
++        "PANEL-F-016"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Tool-policy reference corrected to EVD-050+F-08; analyst IDs restricted49 facts, council refs PANEL-F-NNN.",
++      "packet_locations": [
++        "#/decisions/0/details/tool_policy",
++        "#/evidence/49",
++        "#/semantic_checks/evidence_refs"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-011",
++      "source_findings": [
++        "PANEL-F-012"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "SSoT46 exact fields/sources/units, memory2048/256/1152MiB and1408<=1638.4MiB across HL-ENV/memory closure.",
++      "packet_locations": [
++        "#/high_load_envelope/required_hl_env_fields",
++        "#/high_load_envelope/units",
++        "#/high_load_envelope/field_units",
++        "#/high_load_envelope/memory_closure_check",
++        "#/resilience_gates/HL_ENV_v1/HL-ENV-01"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-012",
++      "source_findings": [
++        "PANEL-F-013"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "VER004 strict ruff format/check and basedpyright on all3files; zero errors, removed v1 error allowance; preserved server Any and other warning ceilings; inherited error debt explicitly assigned to Coder.",
++      "packet_locations": [
++        "#/verification_surface/3",
++        "#/risks/7",
++        "#/decisions/0/details/typing"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-013",
++      "source_findings": [
++        "PANEL-F-017"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Leading LF in entire synthetic status after unterminated model chunk, provenance filter preserves model bytes and literal model [мост]; fast Simple greeting unchanged.",
++      "packet_locations": [
++        "#/decisions/1/details/status_separator",
++        "#/decisions/1/details/pure_reasoning",
++        "#/verification_acceptance_matrix/status_matrix"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "RW-014",
++      "source_findings": [
++        "PANEL-F-019"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "_ServeHealth threshold3/TTL120/one recovery probe newauto requests only; protocol failure neutral to model breaker; exact version/schema cache by binary stat; no silent accepted-prompt replay.",
++      "packet_locations": [
++        "#/decisions/0/details/transport_health",
++        "#/decisions/0/details/protocol_compatibility",
++        "#/decisions/2/details/retry",
++        "#/resilience_gates/R_BULK/R-BULK-I3",
++        "#/verification_acceptance_matrix/resilience_matrix"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "FU-001",
++      "source_findings": [
++        "PANEL-F-014"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Isolated per-spawn XDG_DATA_HOME, preserve models path, cleanup finally; risk/H3 and lifetime updated.",
++      "packet_locations": [
++        "#/decisions/0/details/data_isolation",
++        "#/risks/2",
++        "#/resilience_gates/T_LIFE_v1"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "FU-002",
++      "source_findings": [
++        "PANEL-F-015"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "ADR0005+INDEX explicitly deferred outside frozen scope §10, materialization remains empty.",
++      "packet_locations": [
++        "#/deferred/3",
++        "#/materialization"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "FU-003",
++      "source_findings": [
++        "PANEL-F-020"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Residual cross-provider reasoning replay risk accepted and mitigation short/infrequent nonsecret statuses recorded.",
++      "packet_locations": [
++        "#/risks/10",
++        "#/decisions/1/details/replay"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "FU-004",
++      "source_findings": [
++        "PANEL-F-021"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "ruff format --check explicitly covers all3files alongside linter.",
++      "packet_locations": [
++        "#/verification_surface/3"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "FU-005",
++      "source_findings": [
++        "PANEL-F-022"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "New JSON typed object+narrowing/TypedDict within server.py, no new module/allowlist expansion; reportAny/reportExplicitAny each<=125.",
++      "packet_locations": [
++        "#/decisions/0/details/typing",
++        "#/verification_surface/3"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "FU-006",
++      "source_findings": [
++        "PANEL-F-023"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "File disable switch os.path.exists request-entry O(1), default ~/.dsh path/env override, same PID H9 toggle, no restart required; no live file modified.",
++      "packet_locations": [
++        "#/decisions/0/details/configuration/OPENCODE_ZEN_BRIDGE_SERVE_DISABLE_FILE",
++        "#/evolution/rollback",
++        "#/verification_acceptance_matrix/mode_matrix"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    },
++    {
++      "id": "FU-007",
++      "source_findings": [
++        "PANEL-F-024"
++      ],
++      "status": "RESOLVED",
++      "changes_made": "Budget51.6s<=54s, headroom2.4>=2.0, combinedadmission5+ready3+setup2+cleanup1.2 explicit.",
++      "packet_locations": [
++        "#/resilience_gates/R_BULK/R-BULK-I1",
++        "#/high_load_envelope/operational_profile"
++      ],
++      "verification": "Архитектурная delta внесена; JSON-pointer locations существуют и проверяются финальной semantic validation. VER-004/VER-005 — замороженные будущие проверки, НЕ выполнялись в Stage2; Council R2 и H0..H9 NOT_RUN."
++    }
++  ],
++  "rework_source": {
++    "path": "handoff/panel-rework-brief-arch-a1.json",
++    "sha256": "d173ff674c5a105fd85ab00a2a276ebcfb92d9b7295523721e9eed6503e5ed96",
++    "base_packet_path": "architecture/architecture-packet.v1.json",
++    "base_packet_sha256": "e620a689a0d665a2c7979eba5a7073af41d9ca9473ea906ff9cee316fa0c7e02",
++    "resolutions_count": 21,
++    "blocking_count": 14,
++    "nonblocking_count": 7,
++    "namespace": "Analyst F-01..F-49; council PANEL-F-001..024 = original brief finding ids prefixed PANEL-; RW/FU IDs unchanged"
++  }
+ }

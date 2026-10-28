@@ -1,0 +1,115 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "source_cycle": 9,
+  "target_cycle": 10,
+  "source_rounds": [
+    "panel/council/r140",
+    "panel/council/r144"
+  ],
+  "panel_proofs": [
+    {
+      "round": "r140",
+      "receipt": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/council-r140-proof.json",
+      "sha256": "3bc057a4b74d1531272cd53228e098947afce323871e32a8534081a62c8e3eb7"
+    },
+    {
+      "round": "r144",
+      "receipt": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/receipts/council-r144-proof.json",
+      "sha256": "f62457aae2f9e53ebeb8e42fa1900db1bb11c60dd0533d9ab03437b889bcd5b7"
+    }
+  ],
+  "blocking_rework_items": [
+    {
+      "id": "RW-001",
+      "ledger_ids": [
+        "F-001",
+        "F-002"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:3373-3401",
+        "bridges/opencode-zen-bridge/server.py:4001-4019"
+      ],
+      "summary": "Полная обработка управляющих событий и дельт (`form.created`, `permission`, `error`, `reasoning`, `text`) в окне `_drain_serve_step_usage` до `session.step.ended`.",
+      "required_oracle": "Тесты SSE и JSON: (1) `tool.called -> reasoning.delta -> permission.asked -> step.ended` (reasoning доставлен, permission получил reject+interrupt / fail-closed); (2) `tool.called -> form.created` своей сессии (по `form.sessionID`) без `step.ended` -> `cancel+interrupt`, ошибка без `finish_reason=tool_calls`; (3) `tool.called -> session.execution.failed -> EOF` и `tool.called -> session.execution.failed -> step.ended` -> ошибка попытки (детерминированный 401/403 не ретраится, `step.ended` после ошибки не даёт успешный `tool_calls`)."
+    },
+    {
+      "id": "RW-002",
+      "ledger_ids": [
+        "F-003"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:4001-4019",
+        "bridges/opencode-zen-bridge/server.py:6056",
+        "bridges/opencode-zen-bridge/server.py:6227",
+        "bridges/opencode-zen-bridge/server.py:6680"
+      ],
+      "summary": "Подтверждение `session.step.ended` как строгая граница публикации нативных tool calls (`on_tool` / `emit_tool_call`): буферизовать все нативные вызовы шага и эмитировать их только после успешного подтверждения `session.step.ended`.",
+      "required_oracle": "Тест SSE и JSON при разрешённых повторах (`MAX_TOTAL_SPAWNS=2` или `3`): попытка 1 выдаёт нативный вызов `bash(\"A\")` и обрывается EOF/таймаутом окна без `step.ended`; попытка 2 успешно выдаёт вызов `bash(\"B\")` с `step.ended` — финальный ответ содержит только `bash(\"B\")` и ни одного чанка `bash(\"A\")`."
+    },
+    {
+      "id": "RW-003",
+      "ledger_ids": [
+        "F-004"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:5708",
+        "bridges/opencode-zen-bridge/server.py:5988",
+        "bridges/opencode-zen-bridge/server.py:7005",
+        "bridges/opencode-zen-bridge/tests/test_step_interruption.py:414-430"
+      ],
+      "summary": "Побайтовая сохранность модельного `reasoning_content` (`REQ-005` / `AC-006`): убрать `_strip_interrupted` с пути `reasoning` (оставив потоковый и финальный фильтр маркеров только на `text`/`content`).",
+      "required_oracle": "Тест в `tests/test_realtime_reasoning.py` и обновлённые тесты в `tests/test_step_interruption.py:414-430`: `reasoning_content` с обоими interruption-маркерами сохраняется побайтово как на целых дельтах, так и при разрезе маркера по границе дельт, тогда как из `content` маркер удаляется, а статусы `[мост]` не попадают в `_messages_to_prompt`."
+    },
+    {
+      "id": "RW-004",
+      "ledger_ids": [
+        "F-007"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:3154-3175",
+        "bridges/opencode-zen-bridge/server.py:3381",
+        "bridges/opencode-zen-bridge/server.py:3483-3495",
+        "bridges/opencode-zen-bridge/server.py:3990"
+      ],
+      "summary": "Ограничение числа вызовов (`_MAX_SERVE_NATIVE_TOOLS`) и совокупного UTF-8 размера удерживаемых аргументов `_ServeToolState.tools` (с учётом замены существующего значения и обоих путей потребления событий) внутри байтового бюджета `_serve_accumulated_bytes` (`HL-ENV-01`).",
+      "required_oracle": "Тест в `tests/test_realtime_reasoning.py`: поток уникальных незавершённых нативных вызовов (и/или крупных `input` до `tool.called`) превышает предел `_ServeToolState` / `_MAX_SERVE_ACCUMULATED_BYTES` и завершается управляемым `ServeProtocolError` с `cleanup()`."
+    },
+    {
+      "id": "RW-005",
+      "ledger_ids": [
+        "F-008"
+      ],
+      "priority": "blocking",
+      "locations": [
+        "bridges/opencode-zen-bridge/server.py:5835",
+        "bridges/opencode-zen-bridge/server.py:5998",
+        "bridges/opencode-zen-bridge/server.py:6595"
+      ],
+      "summary": "Ограничение downstream-записи клиенту (`_LockedWfile.write` / `flush`) оставшимся сроком дедлайна запроса и конечным таймаутом сокета с независимым прерыванием (`shutdown`/`close` сокета) при зависшем клиенте (`feature.md` §2).",
+      "required_oracle": "Реальный сокетный тест в `tests/test_realtime_reasoning.py`: клиент перестаёт читать из сокета после заголовков при потоке чанков, запись прерывается по ограниченному таймауту/дедлайну, группа процессов `serve` останавливается и слот bulkhead освобождается."
+    }
+  ],
+  "non_blocking_follow_ups": [
+    {
+      "id": "FU-001",
+      "ledger_ids": [
+        "F-005"
+      ],
+      "priority": "non-blocking",
+      "summary": "Актуализация имён тестовых методов и символов в `teamlead/verification-traceability.md`."
+    },
+    {
+      "id": "FU-002",
+      "ledger_ids": [
+        "F-006"
+      ],
+      "priority": "non-blocking",
+      "summary": "Общий бюджет вспомогательного I/O запроса (`_AUX_IO_BUDGET_S = 54.0` с по `R-BULK-I1`) через все startup/subscribe/control ожидания и повторы с детерминированным тестом управляемых часов."
+    }
+  ]
+}

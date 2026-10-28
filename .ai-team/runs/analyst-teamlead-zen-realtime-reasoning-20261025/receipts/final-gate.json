@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "gate": "FINAL_GATE_PRE_COUNCIL",
+  "status": "PASS",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "timestamp": "2026-10-27T23:00:45.602281+00:00",
+  "reviewer_skip": true,
+  "downstream_panel": true,
+  "parent_skill": "analyst-teamlead",
+  "coder_handoff_sha256": "3b53335be1122153ca1ff51d301b13422308238afa2dac41e371cb5db0e819a8",
+  "code_gate_sha256": "842d90c8929974a6a6bb4bd905cf88f2f73161e05978351749be8f97aba975f0",
+  "verifier_receipt_sha256": "f0b79f296882644740a45db49fd5ce102584abc949b73c260613fa96c6cff270",
+  "candidate_diff_sha256": "06e18516ba8308cc580efcb8913287da91d4c20ef0ae5fe55e060ffb60514300",
+  "pr_description_absent_before_council": true
+}

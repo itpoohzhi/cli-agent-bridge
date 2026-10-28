@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "run_id": "analyst-teamlead-zen-realtime-reasoning-20261025",
+  "iteration": 1,
+  "plan_kind": "delta",
+  "phase": "after",
+  "parent_plan": ".ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025/plans/coder-04.json",
+  "trigger_ids": [
+    "RW-001",
+    "RW-002",
+    "RW-003",
+    "RW-004",
+    "RW-005",
+    "RW-006",
+    "RW-007",
+    "RW-008",
+    "RW-009",
+    "RW-010",
+    "RW-011",
+    "RW-012",
+    "RW-013",
+    "RW-014",
+    "RW-015",
+    "RW-016",
+    "RW-017",
+    "RW-018",
+    "RW-019"
+  ],
+  "objective": "Хирургически устранить RW-001..RW-019 и FU-001..FU-009 Совета Тимлидов Cycle 2 только в server.py, tests/test_realtime_reasoning.py, tests/test_step_interruption.py без изменения замороженных _run_env/_stream_google_sse/_execute_google_once",
+  "inputs_read": [
+    "bridges/opencode-zen-bridge/server.py",
+    "bridges/opencode-zen-bridge/tests/test_realtime_reasoning.py",
+    "bridges/opencode-zen-bridge/tests/test_step_interruption.py",
+    "/Users/aazhiry1/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/rework.md",
+    "plans/coder-04.json",
+    "бриф Coder coder-05 (RW-001..RW-019, FU-001..FU-009)"
+  ],
+  "stop_conditions": [
+    "Менять только 3 продуктовых/тестовых файла из брифа и файлы отчётности coder-05",
+    "Не трогать замороженные _run_env/_stream_google_sse/_execute_google_once (sha256 VER-004)",
+    "Не запускать full-file ruff format server.py; только --range по изменённым ханкам",
+    "Не делать git commit/push/gh pr create",
+    "Сохранить ранний перехват --serve-helper и совместимость ast feature_version=(3,9)"
+  ],
+  "deviations": [
+    "RW-008: вместо select+recv реализовано блокирующее чтение SSE без таймаута сокета (settimeout(None)) и остановка через socket.shutdown в finally: сырой recv терял бы байты, уже буферизованные в resp.fp, и chunked-фрейминг; критерий (пауза >0.5 с не закрывает поток) выполнен",
+    "RW-002: у _ServeHealth.record_failure нет параметра reason (kwarg дал бы TypeError, сигнатуру не расширял); timeout учитывается через attempts.attempt_done(True, False), serve_health не трогается (как first_token/stall)",
+    "RW-003: 400/404/422 prompt -> ServeSecurityError (существующий fail-closed канал «serve security failure», без fallback и без инкремента serve_health) вместо нового ServeProtocolError, который вызывающие не обрабатывают",
+    "RW-009: барьер доставки — модельные reasoning/text/tool чанки; синтетические статусы [мост] барьер не ставят, иначе fallback serve->run (INITIAL уходит на 0.65 с) стал бы недостижим",
+    "RW-019: _run_env заморожен и сам вызывает _next_standalone_proxy через _serve_env; убран повторный вызов proxy_url=_next_standalone_proxy() в вызывающих _run_serve_stream_attempts/_serve_json_serve (параметр proxy_url в _serve_one_attempt сохранён)",
+    "RW-017: на legacy run-пути защитный таймер статуса отменяется после получения StartupGate (покрывает ожидание гейта по критерию); иначе ожидание spawn_limiter давало [мост] перед первым чанком и ломало tests/test_go_model_routing.py::test_stream_go_model_success_with_fake_launcher в полном прогоне",
+    "RW-004: mkdtemp state_dir выполняется в _serve_env (вне _spawn_serve); каталог zen-serve-state-* и порт/FD освобождаются в _spawn_serve на любом сбое старта (_discard_spawn_leftovers), OSError -> ServeUnavailable",
+    "RW-005: окна helper — 4.0 с SIGTERM и 2.0 с подтверждения после SIGKILL; членство группы определяется через ps -A -o pid=,pgid= без самого helper (killpg(pgid,0) в helper всегда видел бы самого себя)",
+    "tests/test_step_interruption.py не менялся: замечаний на него в RW-001..RW-019 нет"
+  ],
+  "actual_evidence": "VER004_EXIT:0 (frozen sha256 совпали, basedpyright errorCount=0, server counts в лимитах, test_realtime 0 diagnostics); uvx pytest -q tests: 431 passed, 3173 subtests; python3 -W error::ResourceWarning -m unittest tests.test_realtime_reasoning tests.test_step_interruption: 160 OK coder-05b: tests/test_realtime_reasoning.py — приватные атрибуты server (_serve_one_attempt/_ServeLease/_spawn_serve/_serve_env/_StartupGate/_STARTUP_LOCK/_ACTIVE_SERVE_PORTS/_RequestAttempts) берутся лениво внутри test_* (server.X + pyright ignore[reportPrivateUsage]; cast по строковому типу), модуль собирается на непропатченном origin/dev (collect rc=0, 52 tests), падения — AssertionError внутри тестов; basedpyright 0 diagnostics на файле.",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "change",
+      "action": "Правки server.py по RW-001..RW-006, RW-008..RW-019 и FU-001..FU-009: errno в ранних импортах, exit_reason timeout/client_gone, ранняя проверка prompt_status и fail_closed 400/404/422, атомарный _spawn_serve, SIGKILL группы в helper, client_gone по errno, неблокирующий _reader, монотонный delivered, лимит спавнов в JSON, text tool_calls на step_finish, единый разделитель retry, дедуп tool_calls_all, ранний release StartupGate, бюджеты cleanup 4+2 с, lock/Event для wfile и статус-таймер на run-пути, attempt_done на транзиентных ошибках, один шаг ротации прокси",
+      "expected_evidence": "AST/grep-подтверждения по каждому RW в server.py; замороженные sha256 неизменны",
+      "status": "DONE",
+      "actual_evidence": "server.py: errno в ранних импортах (RW-001); exit_reason timeout/client_gone до record_success + attempt_done(True,False) на transient/429/5xx/timeout (RW-002/018); проверка prompt_status до events.get(0.02) и fail_closed 400/404/422 (RW-003); атомарный _spawn_serve + _discard_spawn_leftovers (RW-004); SIGKILL группы в helper и lease после смерти (RW-005); _client_gone_check по errno и проверка перед JSON-ответом (RW-006); блокирующий читатель SSE + shutdown (RW-008); монотонный delivered_any (RW-009); can_spawn в legacy-цикле _serve_json (RW-010); text tool_calls на step_finish (RW-011); единый разделитель повтора (RW-012); _add_call дедуп (RW-013); on_startup_ready+finally gate.release (RW-014); cleanup 4.0+2.0 с (RW-015); _LockedWfile+Event+Timer.cancel (RW-016/017); один сдвиг пула прокси (RW-019); FU-001..FU-004,006,007"
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "RW-007: tests/test_realtime_reasoning.py — поведенческие оракулы вместо текстовых проверок исходника (never_event/silent/пауза SSE/ранний release gate/ECONNRESET/fail_closed/helper errno)",
+      "expected_evidence": "новые поведенческие тесты проходят; basedpyright 0 ошибок",
+      "status": "DONE",
+      "actual_evidence": "test_realtime_reasoning.py: поведенческие оракулы TestServeAttemptOracles/TestSpawnAndLeaseOracles/TestHelperProcess + bridge-level тесты (never_event/silent/stall, пауза SSE 1.4 с, ранний release gate, ECONNRESET, 400/404/422 fail_closed, timeout/client_gone, один разделитель, дедуп JSON, потолок спавнов, tool_choice recovery, статус под гейтом); новые тесты падают на server.py coder-04 (28 failed из 35 выбранных); FU-009 причины pyright: ignore уточнены"
+    },
+    {
+      "id": "RP-03",
+      "kind": "verify",
+      "action": "Форматирование --range по изменённым ханкам server.py/test_step_interruption.py и целиком test_realtime_reasoning.py; VER-004 дословно; pytest и unittest по двум тестовым модулям без ResourceWarning",
+      "expected_evidence": "VER004_EXIT:0, pytest exit 0, unittest exit 0",
+      "status": "DONE",
+      "actual_evidence": "VER004_EXIT:0; uvx pytest -q tests 431 passed; unittest 160 OK без ResourceWarning; ruff range-format по ханкам server.py/test_step_interruption.py, full format test_realtime_reasoning.py; sha256 _run_env=1c51b28f…, _stream_google_sse=5914c965…, _execute_google_once=88d794cc… совпали"
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Записать plans/coder-05.json (phase after, DONE), handoffs/coder-05.json, coder.json и receipts/coder.json с sha256 плана; validate_role_plan --phase after и validate_handoff exit 0",
+      "expected_evidence": "validate_role_plan --phase after exit 0; validate_handoff coder exit 0",
+      "status": "DONE",
+      "actual_evidence": "plans/coder-05.json phase after, handoffs/coder-05.json, coder.json и receipts/coder.json записаны; validate_role_plan --phase after и validate_handoff coder выполнены (результат в handoff)"
+    }
+  ]
+}
