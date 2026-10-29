@@ -1,0 +1,12 @@
+Stage 1 завершён: 61 факт, незакрытых вопросов — 0. SA-DOD-001..008 — PASS. Все 46 существующих image-тестов прошли; код и тесты не изменены.
+
+Созданы:
+
+- [research-plan.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/analysis/agy-universal-image-fallback/research-plan.md)
+- [evidence-ledger.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/analysis/agy-universal-image-fallback/evidence-ledger.md)
+- [open-questions.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/analysis/agy-universal-image-fallback/open-questions.md)
+- [handoff-architect.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/analysis/agy-universal-image-fallback/handoff-architect.md)
+- [handoff-qa.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/analysis/agy-universal-image-fallback/handoff-qa.md)
+- [analyst/summary.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/analyst/summary.md)
+
+Совместимость достижима отдельной политикой: strict по умолчанию, universal явно включён в production. Реализация и живой DSH-сценарий ещё не проверены.

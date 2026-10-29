@@ -1,0 +1,2444 @@
+diff --git a/bridges/agy-bridge/server.py b/bridges/agy-bridge/server.py
+index f5d7405..3d31423 100644
+--- a/bridges/agy-bridge/server.py
++++ b/bridges/agy-bridge/server.py
+@@ -197,6 +197,7 @@ IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
+ IMPLEMENTED_METHODS = {"workspace-read": 1}
+ METHOD_IMPL_VERSION = 1
+ IMAGE_FLAG_NAME = "IMAGE_INPUT_ENABLED"
++IMAGE_FALLBACK_FLAG_NAME = "IMAGE_FALLBACK_ENABLED"
+ IMAGE_PROBE = os.environ.get("AGY_IMAGE_PROBE", "").strip().lower() in (
+     "1",
+     "true",
+@@ -261,6 +262,8 @@ _sha_compute_lock = threading.Lock()
+ _sha_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
+ _image_flag_lock = threading.Lock()
+ _image_flag_cache: tuple[float, bool] = (0.0, False)
++_image_fallback_flag_lock = threading.Lock()
++_image_fallback_flag_cache: tuple[float, bool] = (0.0, False)
+ _active_img_dirs: set[str] = set()
+ 
+ # Токеноподобные последовательности в логах: сам ключ моста и длинные hex/base64.
+@@ -520,6 +523,7 @@ _LOG_EVENT_NAMES = frozenset(
+         "image_spool_error",
+         "image_cleanup_error",
+         "image_sweep_removed",
++        "media-degradation-reserve",
+     }
+ )
+ 
+@@ -786,6 +790,330 @@ def _image_gate(model_id: str, effort: str | None) -> ImageReject | None:
+     return ImageReject("image_proof_invalid")
+ 
+ 
++def _read_image_fallback_flag() -> bool:
++    """IMAGE_FALLBACK_ENABLED из dynamic_config.json: строго `true`, иначе False."""
++    try:
++        path = DYNAMIC_CONFIG_PATH
++        if not path.is_file() or path.stat().st_size > DYNAMIC_CONFIG_MAX_BYTES:
++            return False
++        data = cast(object, json.loads(path.read_text(encoding="utf-8")))
++    except (OSError, ValueError):
++        return False
++    if not isinstance(data, dict):
++        return False
++    return cast("dict[str, object]", data).get(IMAGE_FALLBACK_FLAG_NAME) is True
++
++
++def _is_image_fallback_enabled() -> bool:
++    """Универсальная политика image-входа (по умолчанию False = строгий режим).
++
++    Env `AGY_IMAGE_FALLBACK_ENABLED` (непустой) решает сразу: 1|true|yes -> True,
++    любое иное значение (в т. ч. 0|false|no|on|off) -> False. Без env — флаг
++    `IMAGE_FALLBACK_ENABLED` в dynamic_config.json с кэшем TTL 1.0 с и отдельным
++    замком; не-boolean, битый или отсутствующий файл дают False. Не зависит от
++    `IMAGE_INPUT_ENABLED` (он по-прежнему управляет только staging файлов).
++    """
++    global _image_fallback_flag_cache
++    env = os.environ.get("AGY_IMAGE_FALLBACK_ENABLED", "").strip().lower()
++    if env:
++        return env in ("1", "true", "yes")
++    now = time.monotonic()
++    with _image_fallback_flag_lock:
++        checked_at, cached = _image_fallback_flag_cache
++        if checked_at > 0.0 and now - checked_at < FLAG_TTL_S:
++            return cached
++    value = _read_image_fallback_flag()
++    with _image_fallback_flag_lock:
++        _image_fallback_flag_cache = (now, value)
++    return value
++
++
++def _image_gate_universal(model_id: str, effort: str | None) -> ImageReject | None:
++    """Универсальный допуск: staging включён, модель из каталога, effort валиден.
++
++    Per-model proof, SHA бинаря и `efforts_proven` не проверяются и не читаются.
++    """
++    if not _is_image_input_enabled():
++        return ImageReject("image_input_disabled")
++    model = FLEET_MODELS.get(model_id)
++    if model is None:
++        return ImageReject("model_unknown")
++    if effort:
++        efforts = model.get("efforts")
++        if not isinstance(efforts, list) or effort not in cast("list[object]", efforts):
++            return ImageReject("effort_not_proven", "unsupported_reasoning_effort")
++    return None
++
++
++# ---- Универсальная нормализация медиа (AD-002) ---------------------------------------
++
++_IMAGE_PART_TYPES = frozenset({"image_url", "image", "input_image"})
++_IMAGE_PAYLOAD_KEYS = ("image_url", "image")
++_MEDIA_PART_NAMES = (
++    "input_audio",
++    "audio",
++    "video",
++    "video_url",
++    "file",
++    "document",
++    "inlineData",
++    "inline_data",
++    "fileData",
++    "file_data",
++)
++_MEDIA_PART_TYPES = frozenset(name.lower() for name in _MEDIA_PART_NAMES)
++_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
++_IMAGE_OMITTED = "[image omitted]"
++_MEDIA_OMITTED = "[media omitted]"
++_JSON_COPY_MAX_DEPTH = 32
++
++
++def _lower_keys(part: dict[str, object]) -> dict[str, object]:
++    """Копия part с ключами в нижнем регистре: `InlineData`/`Image_Url` не обходят классификацию."""
++    lowered: dict[str, object] = {}
++    for key, value in part.items():
++        lowered_key = str(key).lower()
++        if lowered_key not in lowered:
++            lowered[lowered_key] = value
++    return lowered
++
++
++def _classify_part(part: dict[str, object]) -> str:
++    """'image' | 'media' | 'text' | 'unknown'; медиа определяется ДО чтения `text`.
++
++    `text` с не-строковым значением (dict/list) — структурный payload, не текст.
++    """
++    lowered = _lower_keys(part)
++    raw_kind = lowered.get("type")
++    kind = raw_kind.strip().lower() if isinstance(raw_kind, str) else ""
++    if kind in _IMAGE_PART_TYPES or any(
++        lowered.get(key) is not None for key in _IMAGE_PAYLOAD_KEYS
++    ):
++        return "image"
++    if kind in _MEDIA_PART_TYPES or any(
++        lowered.get(key) is not None for key in _MEDIA_PART_TYPES
++    ):
++        return "media"
++    text = lowered.get("text")
++    only_text_keys = set(lowered) <= {"type", "text"}
++    if kind in _TEXT_PART_TYPES and (
++        isinstance(text, str) or (text is None and only_text_keys)
++    ):
++        # Пустой/None text с посторонними ключами — скрытый payload, не текст.
++        return "text" if text or only_text_keys else "unknown"
++    if not kind and isinstance(text, str):
++        return "text" if text or only_text_keys else "unknown"
++    return "unknown"
++
++
++def _part_text(part: dict[str, object]) -> str:
++    """Текст text-части (`""` для отсутствующего/None); только после `_classify_part == 'text'`."""
++    value = _lower_keys(part).get("text")
++    return value if isinstance(value, str) else ""
++
++
++def _content_items(content: object) -> list[object]:
++    """Части контента: list как есть, dict-content — одна часть, прочее — пусто."""
++    if isinstance(content, list):
++        return cast("list[object]", content)
++    if isinstance(content, dict):
++        return [content]
++    return []
++
++
++def _image_part_canonical(part: dict[str, object]) -> dict[str, object]:
++    """Image-алиас в форме `image_url`; `image_url` приоритетнее `image`, URL не угадывается."""
++    lowered = _lower_keys(part)
++    payload = lowered.get("image_url")
++    if payload is None:
++        payload = lowered.get("image")
++    url: object = None
++    if isinstance(payload, str):
++        url = payload
++    elif isinstance(payload, dict):
++        url = cast("dict[str, object]", payload).get("url")
++    return {"type": "image_url", "image_url": {"url": url}}
++
++
++def _media_part_counts(messages: object) -> tuple[int, int]:
++    """(image-частей, прочих media/неизвестных структурных частей) во всей истории.
++
++    dict-content считается одной частью (`_content_items`); не-text часть любого вида
++    попадает в счёт, чтобы нормализация не обходилась неизвестным payload.
++    """
++    images = 0
++    other = 0
++    if not isinstance(messages, list):
++        return images, other
++    for msg in cast("list[object]", messages):
++        if not isinstance(msg, dict):
++            continue
++        for item in _content_items(cast("dict[str, object]", msg).get("content")):
++            if not isinstance(item, dict):
++                continue
++            kind = _classify_part(cast("dict[str, object]", item))
++            if kind == "image":
++                images += 1
++            elif kind != "text":
++                other += 1
++    return images, other
++
++
++def _collect_image_parts_universal(
++    messages: object,
++) -> list[tuple[int, int, dict[str, object]]]:
++    """Все image-части истории (любой алиас, list и dict-content) в форме `image_url`."""
++    found: list[tuple[int, int, dict[str, object]]] = []
++    if not isinstance(messages, list):
++        return found
++    number = 0
++    for msg_index, msg in enumerate(cast("list[object]", messages)):
++        if not isinstance(msg, dict):
++            continue
++        for item in _content_items(cast("dict[str, object]", msg).get("content")):
++            if not isinstance(item, dict):
++                continue
++            part = cast("dict[str, object]", item)
++            if _classify_part(part) == "image":
++                number += 1
++                found.append((msg_index, number, _image_part_canonical(part)))
++    return found
++
++
++def _json_copy(value: object, depth: int = 0) -> object:
++    """Копия JSON-значения без разделяемых контейнеров (глубина ограничена)."""
++    if depth > _JSON_COPY_MAX_DEPTH:
++        return None
++    if isinstance(value, dict):
++        return {
++            str(k): _json_copy(v, depth + 1)
++            for k, v in cast("dict[object, object]", value).items()
++        }
++    if isinstance(value, list):
++        return [_json_copy(v, depth + 1) for v in cast("list[object]", value)]
++    if value is None or isinstance(value, (str, int, float, bool)):
++        return value
++    return str(value)
++
++
++def _flatten_content_stripped(content: object) -> str:
++    """Контент в безопасный текст без media: image -> `[image omitted]`, media -> `[media omitted]`.
++
++    Обычный текст сохраняется в порядке следования (склейка `\\n`), неизвестные
++    структурные объекты не сериализуются; сообщение только из них даёт
++    `[media omitted]`, чтобы контекст не стал пустым.
++    """
++    if content is None:
++        return ""
++    if isinstance(content, str):
++        return content
++    parts: list[str] = []
++    dropped = False
++    for item in _content_items(content):
++        if isinstance(item, str):
++            parts.append(item)
++        elif isinstance(item, dict):
++            part = cast("dict[str, object]", item)
++            kind = _classify_part(part)
++            if kind == "image":
++                parts.append(_IMAGE_OMITTED)
++            elif kind == "media":
++                parts.append(_MEDIA_OMITTED)
++            elif kind == "text":
++                parts.append(_part_text(part))
++            else:
++                dropped = True
++        elif isinstance(item, list):
++            dropped = True
++    if not parts and dropped:
++        parts.append(_MEDIA_OMITTED)
++    return "\n".join(p for p in parts if p)
++
++
++def _strip_media_from_messages(messages: object) -> list[dict[str, object]]:
++    """Новый список сообщений без media; вход не мутируется, роли и порядок сохранены."""
++    out: list[dict[str, object]] = []
++    if not isinstance(messages, list):
++        return out
++    for msg in cast("list[object]", messages):
++        if not isinstance(msg, dict):
++            continue
++        fresh: dict[str, object] = {}
++        for key, value in cast("dict[object, object]", msg).items():
++            if key == "content":
++                fresh["content"] = _flatten_content_stripped(value)
++            else:
++                fresh[str(key)] = _json_copy(value)
++        out.append(fresh)
++    return out
++
++
++def _messages_to_stripped_prompt(messages: object) -> str:
++    """Промпт всей истории без media: нет `[image N]`, `[attachments]`, путей и payload."""
++    return _messages_to_prompt(
++        cast("list[object]", _strip_media_from_messages(messages))
++    )
++
++
++def _universal_render_messages(messages: object) -> list[object]:
++    """Копия истории для оптимистичной отправки: image — каноничные, прочее media — вон.
++
++    Длина и индексы сохранены (нужны сквозной нумерации `[image N]` и resume-срезу).
++    """
++    out: list[object] = []
++    if not isinstance(messages, list):
++        return out
++    for msg in cast("list[object]", messages):
++        if not isinstance(msg, dict):
++            out.append(msg)
++            continue
++        src = cast("dict[str, object]", msg)
++        fresh = dict(src)
++        raw_content = src.get("content")
++        if isinstance(raw_content, (list, dict)):
++            items: list[object] = []
++            for item in _content_items(src.get("content")):
++                if isinstance(item, str):
++                    items.append(item)
++                elif isinstance(item, dict):
++                    part = cast("dict[str, object]", item)
++                    kind = _classify_part(part)
++                    if kind == "image":
++                        items.append(_image_part_canonical(part))
++                    elif kind == "text":
++                        items.append({"type": "text", "text": _part_text(part)})
++            fresh["content"] = items
++        out.append(fresh)
++    return out
++
++
++def _log_token(value: object, max_len: int = 64) -> str:
++    """Идентификатор для журнала: только `A-Za-z0-9_.-`, остальное `_`, длина ограничена."""
++    text = re.sub(r"[^A-Za-z0-9_.\-]", "_", str(value))[:max_len]
++    return text or "unknown"
++
++
++_IMAGE_FALLBACK_STAGES = frozenset({"collect", "post_slot", "spool", "runtime"})
++
++
++def _log_image_fallback(
++    stage: str, reason: str, model: str, attempt: int, count: int
++) -> None:
++    """Одна структурная строка `image_fallback` на фактический downgrade (без payload)."""
++    stage_token = stage if stage in _IMAGE_FALLBACK_STAGES else "unknown"
++    model_token = _log_token(model) if model in FLEET_MODELS else "unknown"
++    _log(
++        "image_fallback stage=%s reason=%s model=%s attempt=%d images=%d"
++        % (
++            stage_token,
++            _log_token(reason),
++            model_token,
++            max(0, min(int(attempt), 9)),
++            max(0, min(int(count), 1000000)),
++        )
++    )
++
++
+ def _collect_image_parts(
+     messages: object,
+ ) -> list[tuple[int, int, dict[str, object]]]:
+@@ -833,7 +1161,7 @@ def _new_img_dir() -> Path:
+ 
+ 
+ def _collect_images(
+-    messages: object, model_id: str, effort: str | None
++    messages: object, model_id: str, effort: str | None, universal: bool = False
+ ) -> list[dict[str, object]]:
+     """Проверить image-части всей истории; вернуть записи для prompt и spool.
+ 
+@@ -842,11 +1170,23 @@ def _collect_images(
+     оценка размера base64 ДО decode, строгий base64, сигнатура, лимиты. Ничего не
+     пишется на диск и не запускается. Декодированные байты не удерживаются
+     (`data` пуст): в spool они пересоздаются из base64 уже после захвата слота.
++
++    `universal=True`: image-алиасы (`image`, `input_image`, dict-content) приводятся
++    к `image_url`, а вместо proof-гейта работает `_image_gate_universal`; остальные
++    проверки те же. Любой отказ отбрасывает ВСЕ записи (исключение, без частичного набора).
+     """
+-    parts = _collect_image_parts(messages)
++    parts = (
++        _collect_image_parts_universal(messages)
++        if universal
++        else _collect_image_parts(messages)
++    )
+     if not parts:
+         return []
+-    gate = _image_gate(model_id, effort)
++    gate = (
++        _image_gate_universal(model_id, effort)
++        if universal
++        else _image_gate(model_id, effort)
++    )
+     if gate is not None:
+         raise gate
+     max_images = _limit("max_images", 16)
+@@ -977,6 +1317,62 @@ def _cleanup_img_dir(img_dir: Path) -> None:
+             _active_img_dirs.discard(str(img_dir))
+ 
+ 
++_IMAGE_MARKER = re.compile(r"\[image \d+\]")
++
++
++def _text_only_prompt_fallback(prompt: str) -> str:
++    """Безопасный media-free промпт из готового: без `[attachments]` и `[image N]`.
++
++    Запасной путь для вызывающих `_run_once` без предвычисленного
++    `stripped_full_prompt`; штатно промпт берётся из `_messages_to_stripped_prompt`.
++    """
++    cut = prompt.rfind("[attachments]\n")
++    if cut == 0 or (cut > 0 and prompt[cut - 2 : cut] == "\n\n"):
++        prompt = prompt[:cut].rstrip()
++    text = _IMAGE_MARKER.sub(_IMAGE_OMITTED, prompt).strip()
++    return text or "Reply with exactly: PONG"
++
++
++def _downgrade_to_text_in_run_once(
++    ctx: dict[str, object],
++    stage: str,
++    reason: str,
++    attempt: int,
++    img_dir: Path | None,
++) -> None:
++    """Перевести ход в text-only: журнал, каталог, CID и оба промпта (AD-003).
++
++    Порядок: событие (счёт ДО обнуления) -> удаление собственного каталога ->
++    CAS-инвалидация и снятие владения старым CID -> `prompt`/`full_prompt` из
++    предвычисленной media-free истории. Run вызывающий уже закрыл; повторный
++    вызов безопасен (cleanup идемпотентен, CID уже пуст).
++    """
++    held = cast("list[dict[str, object]]", ctx.get("images") or [])
++    _log_image_fallback(stage, reason, str(ctx.get("model") or ""), attempt, len(held))
++    if img_dir is not None:
++        _cleanup_img_dir(img_dir)
++    old_cid = str(ctx.get("conversation_id") or "")
++    if old_cid:
++        sess_key = ctx.get("sess_key")
++        if sess_key:
++            _session_invalidate(cast(tuple, sess_key), old_cid)
++        _cid_release(old_cid, str(ctx.get("turn_id") or ""))
++        if ctx.get("hot_resumed"):
++            with _session_store_lock:
++                _in_flight_cids.discard(old_cid)
++    stripped = ctx.get("stripped_full_prompt")
++    if not isinstance(stripped, str) or not stripped:
++        stripped = _text_only_prompt_fallback(
++            str(ctx.get("full_prompt") or ctx.get("prompt") or "")
++        )
++    ctx["hot_resumed"] = False
++    ctx["conversation_id"] = ""
++    ctx["images"] = []
++    ctx["img_dir"] = None
++    ctx["prompt"] = stripped
++    ctx["full_prompt"] = stripped
++
++
+ def _attachments_block(images: list[dict[str, object]]) -> str:
+     lines = [
+         "[attachments]",
+@@ -1234,9 +1630,11 @@ def _reset_sqlite_guards_for_tests() -> None:
+     global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
+     global _sqlite_divergence_count, _sqlite_drain_deadline_count
+     global _sqlite_open_connections, _sqlite_max_open_connections, _rng
+-    global _image_flag_cache
++    global _image_flag_cache, _image_fallback_flag_cache
+     with _image_flag_lock:
+         _image_flag_cache = (0.0, False)
++    with _image_fallback_flag_lock:
++        _image_fallback_flag_cache = (0.0, False)
+     with _sha_cache_lock:
+         _sha_cache.clear()
+     with _sqlite_guard_lock:
+@@ -2853,6 +3251,35 @@ class _ByteBudget:
+             self.used = max(0, self.used - amount)
+ 
+ 
++def _image_fallback_view() -> tuple[dict[str, object], dict[str, bool]]:
++    """Эффективная image-поддержка по каталогу и объект `image_fallback` для GET.
++
++    universal -> поддержка = staging включён (для каждой модели каталога, proof не
++    подделывается); иначе строгий `_model_supports_images`. Булевы `images` остаются
++    булевыми, новая информация — только в отдельном объекте.
++    """
++    universal = _is_image_fallback_enabled()
++    input_enabled = _is_image_input_enabled()
++    effective = {
++        mid: (input_enabled if universal else _model_supports_images(mid))
++        for mid in FLEET_MODELS
++    }
++    if universal:
++        acceptance = "optimistic" if input_enabled else "text-only"
++    else:
++        acceptance = "proof-gated"
++    info: dict[str, object] = {
++        "fallback_enabled": universal,
++        "input_enabled": input_enabled,
++        "mode": "universal" if universal else "strict",
++        "acceptance": acceptance,
++        "method": "workspace-read",
++        "limits": dict(IMAGE_LIMITS),
++        "models": [mid for mid, ok in effective.items() if ok],
++    }
++    return info, effective
++
++
+ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
+     """Итог хода без запуска agy (отказ до spawn)."""
+     return {
+@@ -3173,38 +3600,62 @@ class Handler(BaseHTTPRequestHandler):
+                     cast(str, ctx["model"]), unavailable, t_enter, cast(str, ctx["tag"])
+                 )
+                 return unavailable
++            universal = bool(typed_ctx.get("universal_fallback"))
+             if images and img_dir is not None:
+-                # Флаг и proof могли смениться, пока ход ждал слот: повторная проверка
+-                # до mkdir и spawn.
+-                gate = _image_gate(cast(str, model), cast(str, effort))
+-                if gate is not None:
+-                    self._log_reject(
+-                        gate.code, cast(str, model), cast(int, ctx["model_len"])
+-                    )
+-                    rejected = _terminal_state("image_reject", gate.code)
+-                    self._log_done(
+-                        cast(str, ctx["model"]),
+-                        rejected,
+-                        t_enter,
+-                        cast(str, ctx["tag"]),
+-                    )
+-                    return rejected
+-                # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
+-                with _active_lock:
+-                    _active_img_dirs.add(str(img_dir))
+-                img_registered = True
+-                try:
+-                    _stage_images(img_dir, images)
+-                except ImageSpoolError as exc:
+-                    _log(
+-                        "image_spool_error model=%s err=%s"
+-                        % (_safe_log_value(cast(str, model)), exc)
++                if universal and not _is_image_input_enabled():
++                    # Staging выключили, пока ход ждал слот: media не отправляем,
++                    # ход идёт текстом (без mkdir и --add-dir).
++                    _downgrade_to_text_in_run_once(
++                        typed_ctx, "post_slot", "flag_disabled", 1, img_dir
+                     )
+-                    failed = _terminal_state("image_spool_error", str(exc))
+-                    self._log_done(
+-                        cast(str, ctx["model"]), failed, t_enter, cast(str, ctx["tag"])
++                    images = []
++                    img_dir = None
++                else:
++                    # Флаг и proof могли смениться, пока ход ждал слот: повторная
++                    # проверка до mkdir и spawn (universal — только флаг, выше).
++                    gate = (
++                        None
++                        if universal
++                        else _image_gate(cast(str, model), cast(str, effort))
+                     )
+-                    return failed
++                    if gate is not None:
++                        self._log_reject(
++                            gate.code, cast(str, model), cast(int, ctx["model_len"])
++                        )
++                        rejected = _terminal_state("image_reject", gate.code)
++                        self._log_done(
++                            cast(str, ctx["model"]),
++                            rejected,
++                            t_enter,
++                            cast(str, ctx["tag"]),
++                        )
++                        return rejected
++                    # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
++                    with _active_lock:
++                        _active_img_dirs.add(str(img_dir))
++                    img_registered = True
++                    try:
++                        _stage_images(img_dir, images)
++                    except ImageSpoolError as exc:
++                        _log(
++                            "image_spool_error model=%s err=%s"
++                            % (_safe_log_value(cast(str, model)), exc)
++                        )
++                        if not universal:
++                            failed = _terminal_state("image_spool_error", str(exc))
++                            self._log_done(
++                                cast(str, ctx["model"]),
++                                failed,
++                                t_enter,
++                                cast(str, ctx["tag"]),
++                            )
++                            return failed
++                        _downgrade_to_text_in_run_once(
++                            typed_ctx, "spool", "image_spool_error", 1, img_dir
++                        )
++                        images = []
++                        img_dir = None
++                        img_registered = False
+             _retry_credit()
+             for attempt in (1, 2):
+                 _log(
+@@ -3272,11 +3723,40 @@ class Handler(BaseHTTPRequestHandler):
+                     break
+                 # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
+                 # JSON-режим мышление клиенту ещё не отдавал — там повтор безопасен.
++                typed_out = cast("dict[str, object]", out)
++                delivered_reasoning = bool(
++                    typed_out.get("delivered_reasoning")
++                ) or bool(typed_ctx.get("stream") and typed_out.get("reasoning"))
+                 delivered = bool(
+-                    out.get("text")
+-                    or out.get("tool_calls")
+-                    or (ctx.get("stream") and out.get("reasoning"))
++                    typed_out.get("text")
++                    or typed_out.get("tool_calls")
++                    or delivered_reasoning
+                 )
++                if (
++                    attempt == 1
++                    and universal
++                    and images
++                    and img_dir is not None
++                    and out["state"] not in ("done", "client_gone")
++                    and not delivered
++                ):
++                    # Реальная image-попытка упала без выдачи: один text-only повтор
++                    # ДО обеих legacy-веток (hot continue и transient). Один токен
++                    # бюджета, если есть; иначе — разовый резерв деградации запроса.
++                    _downgrade_to_text_in_run_once(
++                        typed_ctx,
++                        "runtime",
++                        _log_token(typed_out.get("state")),
++                        attempt,
++                        img_dir,
++                    )
++                    images = []
++                    img_dir = None
++                    img_registered = False
++                    if not _retry_take():
++                        _log(f"media-degradation-reserve state={out['state']} {tag}")
++                    time.sleep(_retry_pause_s(attempt))
++                    continue
+                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
+                     # Горячая сессия сломалась: больше её не используем, а повтор
+                     # идёт холодным вызовом с полной историей.
+@@ -3420,6 +3900,7 @@ class Handler(BaseHTTPRequestHandler):
+         if path in ("/health", "/v1/health"):
+             with _active_lock:
+                 active = len(_active)
++            fallback_info, effective = _image_fallback_view()
+             health: dict[str, object] = {
+                 "ok": True,
+                 "transport": "agy-stream-json",
+@@ -3430,7 +3911,8 @@ class Handler(BaseHTTPRequestHandler):
+                 "tool_emulation": False,
+                 "tool_translation": False,
+                 "native_tools": True,
+-                "images": any(_model_supports_images(mid) for mid in FLEET_MODELS),
++                "images": any(effective.values()),
++                "image_fallback": fallback_info,
+                 "image_input_mode": (
+                     "enabled" if _is_image_input_enabled() else "disabled"
+                 ),
+@@ -3455,9 +3937,10 @@ class Handler(BaseHTTPRequestHandler):
+             data = []
+             order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
+             image_flags: list[bool] = []
++            fallback_info, effective = _image_fallback_view()
+             for mid in order:
+                 model = FLEET["models"][mid]
+-                supports = _model_supports_images(cast(str, mid))
++                supports = effective[cast(str, mid)]
+                 image_flags.append(supports)
+                 data.append(
+                     {
+@@ -3470,7 +3953,13 @@ class Handler(BaseHTTPRequestHandler):
+                     }
+                 )
+             self._send(
+-                200, {"object": "list", "data": data, "images": any(image_flags)}
++                200,
++                {
++                    "object": "list",
++                    "data": data,
++                    "images": any(image_flags),
++                    "image_fallback": fallback_info,
++                },
+             )
+             return
+         self._send(
+@@ -3625,20 +4114,73 @@ class Handler(BaseHTTPRequestHandler):
+                 if isinstance(messages_raw, list)
+                 else []
+             )
+-            try:
+-                images = _collect_images(
+-                    messages, cast(str, model_id), cast(str, effort)
+-                )
+-            except ImageReject as rejected:
+-                _log("image_reject detail=%s" % rejected.reason)
+-                self._reject(
+-                    400,
+-                    rejected.code,
+-                    f"image rejected: {rejected.code}",
+-                    model_id,
+-                    model_len,
+-                )
+-                return
++            # Универсальная политика фиксируется один раз на принятый запрос.
++            universal = _is_image_fallback_enabled()
++            images: list[dict[str, object]] = []
++            render_messages: list[object] = messages
++            stripped_full_prompt = ""
++            force_cold = False
++            if universal:
++                # Рендер без raw dict-content и неперечисленных ключей — всегда,
++                # в т. ч. когда media нет: его читают и cold, и hot-resume путь.
++                render_messages = _universal_render_messages(messages)
++                image_parts, other_media = _media_part_counts(messages)
++                # Всегда нормализуем историю: любой cold/downgrade-путь берёт
++                # промпт только отсюда, а не из legacy `_flatten_content`.
++                stripped_full_prompt = _messages_to_stripped_prompt(messages)
++                if image_parts or other_media:
++                    if not _is_image_input_enabled():
++                        _log_image_fallback(
++                            "collect",
++                            "flag_disabled",
++                            cast(str, model_id),
++                            1,
++                            image_parts,
++                        )
++                        force_cold = True
++                    else:
++                        try:
++                            images = _collect_images(
++                                messages,
++                                cast(str, model_id),
++                                cast(str, effort),
++                                universal=True,
++                            )
++                        except ImageReject as rejected:
++                            _log_image_fallback(
++                                "collect",
++                                rejected.reason,
++                                cast(str, model_id),
++                                1,
++                                image_parts,
++                            )
++                            images = []
++                            force_cold = True
++                        else:
++                            if not images:
++                                _log_image_fallback(
++                                    "collect",
++                                    "unsupported_media",
++                                    cast(str, model_id),
++                                    1,
++                                    other_media,
++                                )
++                                force_cold = True
++            else:
++                try:
++                    images = _collect_images(
++                        messages, cast(str, model_id), cast(str, effort)
++                    )
++                except ImageReject as rejected:
++                    _log("image_reject detail=%s" % rejected.reason)
++                    self._reject(
++                        400,
++                        rejected.code,
++                        f"image rejected: {rejected.code}",
++                        model_id,
++                        model_len,
++                    )
++                    return
+             img_dir = cast(Path, images[0]["path"]).parent if images else None
+             try:
+                 _launcher()
+@@ -3658,7 +4200,12 @@ class Handler(BaseHTTPRequestHandler):
+                 else []
+             )
+             tools_count = 0 if _tool_choice_none(req.get("tool_choice")) else len(tools)
+-            full_prompt = _messages_to_prompt(messages, images)
++            if force_cold or (universal and not images):
++                full_prompt = stripped_full_prompt
++            else:
++                full_prompt = _messages_to_prompt(render_messages, images)
++                if universal:
++                    stripped_full_prompt = stripped_full_prompt or full_prompt
+             extra = (
+                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
+             )
+@@ -3679,7 +4226,11 @@ class Handler(BaseHTTPRequestHandler):
+             )
+             is_resumed = False
+             prompt = full_prompt
+-            if conversation_id:
++            if force_cold:
++                # Media убраны из истории: «грязный» явный или кэшированный CID
++                # не возобновляем, ход идёт холодным text-only с полной историей.
++                conversation_id = ""
++            elif conversation_id:
+                 if _cid_acquire(conversation_id, turn_id):
+                     owned_cid = conversation_id
+                 else:
+@@ -3691,7 +4242,7 @@ class Handler(BaseHTTPRequestHandler):
+                 if use_cid:
+                     conversation_id = use_cid
+                     is_resumed = True
+-                    prompt = _get_resumed_turn_prompt(messages, images)
++                    prompt = _get_resumed_turn_prompt(render_messages, images)
+             ctx: dict[str, object] = {
+                 "turn_id": turn_id,
+                 "sess_key": sess_key,
+@@ -3712,6 +4263,8 @@ class Handler(BaseHTTPRequestHandler):
+                 "stream": bool(req.get("stream")),
+                 "images": images,
+                 "img_dir": img_dir,
++                "universal_fallback": universal,
++                "stripped_full_prompt": stripped_full_prompt,
+             }
+             if ctx["stream"]:
+                 self._serve_sse(ctx)
+diff --git a/tests/test_agy_bridge_resilience.py b/tests/test_agy_bridge_resilience.py
+index 929414a..f7ec22b 100644
+--- a/tests/test_agy_bridge_resilience.py
++++ b/tests/test_agy_bridge_resilience.py
+@@ -6006,3 +6006,1618 @@ class AcceptanceOracleTests(unittest.TestCase):
+ 
+ if __name__ == "__main__":
+     unittest.main()
++
++
++from typing import override  # noqa: E402
++
++# ---- Universal image/media fallback: AD-001..AD-005, UF-01..UF-10 --------------------
++# Блок только дописывается после исходных строк файла: все прежние тесты, фикстуры и
++# защитный `__main__` остаются нетронутыми. Новые классы доступны import-discovery
++# (`unittest discover` / pytest), прямой запуск файла их не видит.
++
++_UF_B64: dict[str, str] = {
++    "image/png": "".join(
++        (
++            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8IWfDwMDAxAAGAA5O",
++            "ASau9k65AAAAAElFTkSuQmCC",
++        )
++    ),
++    "image/jpeg": "".join(
++        (
++            "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHB",
++            "wgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIy",
++            "MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8",
++            "QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQR",
++            "BRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISU",
++            "pTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5",
++            "usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAA",
++            "AAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKR",
++            "obHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpan",
++            "N0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX",
++            "2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDk6KKK4z9KP//Z",
++        )
++    ),
++    "image/gif": "R0lGODdhAgACAIEAAMgePAAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7",
++    "image/webp": "UklGRh4AAABXRUJQVlA4TBEAAAAvAUAAAAdQjyKXp/+BiOh/AAA=",
++}
++_UF_RASTER: dict[str, bytes] = {m: base64.b64decode(v) for m, v in _UF_B64.items()}
++_UF_TEXT_ONLY = "gpt-oss-120b"
++_UF_FAIL_ATTACHED_MODE = (
++    'mode = "error" if (scen.get("fail_attached") and "--add-dir" in argv) else '
++    + 'beh.get("mode", "ok")'
++)
++_UF_FAKE_SOURCE = _FAKE_IMG_SOURCE.replace(
++    'mode = beh.get("mode", "ok")', _UF_FAIL_ATTACHED_MODE
++)
++assert _UF_FAKE_SOURCE != _FAKE_IMG_SOURCE
++_UF_MEDIA_NEEDLES = ("[attachments]", "--add-dir", "data:image", "base64,", "/img-")
++
++
++def _uf_part(mime: str) -> dict[str, object]:
++    url = "data:%s;base64,%s" % (mime, _UF_B64[mime])
++    return {"type": "image_url", "image_url": {"url": url}}
++
++
++def _uf_url(mime: str) -> str:
++    return "data:%s;base64,%s" % (mime, _UF_B64[mime])
++
++
++def _uf_bad_part() -> dict[str, object]:
++    return {"type": "image_url", "image_url": {"url": "http://example.test/a.png"}}
++
++
++def _uf_assert_media_free(
++    test: unittest.TestCase, text: str, extra: tuple[str, ...] = ()
++) -> None:
++    test.assertIsNone(re.search(r"\[image \d+\]", text), text)
++    for needle in _UF_MEDIA_NEEDLES + extra:
++        test.assertNotIn(needle, text)
++
++
++class _UfLog:
++    """Перехват stderr моста (журнал `_log`) на время блока."""
++
++    buffer: io.StringIO
++    _patch: contextlib.AbstractContextManager[object]
++
++    def __init__(self) -> None:
++        self.buffer = io.StringIO()
++        self._patch = cast(
++            "contextlib.AbstractContextManager[object]",
++            mock.patch.object(sys, "stderr", self.buffer),
++        )
++
++    def __enter__(self) -> _UfLog:
++        _ = self._patch.__enter__()
++        return self
++
++    def __exit__(self, *_exc: object) -> None:
++        _ = self._patch.__exit__(None, None, None)
++
++    def text(self) -> str:
++        return self.buffer.getvalue()
++
++    def events(self) -> list[str]:
++        return [ln for ln in self.text().splitlines() if " image_fallback " in ln]
++
++
++_UF_EVENT_RE = re.compile(
++    r"^\[agy-bridge\] \S+ image_fallback stage=(collect|post_slot|spool|runtime)"
++    + r" reason=[A-Za-z0-9_.-]+ model=[A-Za-z0-9_.-]+ attempt=\d images=\d+$"
++)
++
++
++class _UniEnv(_ImgEnv):
++    """_ImgEnv + универсальная политика; оба флага пишутся вместе, всё восстанавливается."""
++
++    @override
++    def __enter__(self) -> _UniEnv:
++        _ = _ImgEnv.__enter__(self)
++        _ = self.fake.write_text(
++            "#!" + sys.executable + "\n" + _UF_FAKE_SOURCE, encoding="utf-8"
++        )
++        self.fx.set_env("AGY_IMAGE_FALLBACK_ENABLED", None)
++        self.cfg(True, True)
++        return self
++
++    def reset_flag_caches(self) -> None:
++        setattr(_bridge(), "_image_flag_cache", (0.0, False))
++        setattr(_bridge(), "_image_fallback_flag_cache", (0.0, False))
++
++    def cfg(self, input_enabled: object = True, fallback: object = True) -> None:
++        """Оба ключа сразу (`_ImgEnv.flag` перезаписывает файл целиком); None — ключа нет."""
++        body: dict[str, object] = {}
++        if input_enabled is not None:
++            body["IMAGE_INPUT_ENABLED"] = input_enabled
++        if fallback is not None:
++            body["IMAGE_FALLBACK_ENABLED"] = fallback
++        self.raw_cfg(json.dumps(body))
++
++    def raw_cfg(self, text: str) -> None:
++        _ = self.fx.config.write_text(text, encoding="utf-8")
++        self.reset_flag_caches()
++
++    def scen_uf(
++        self, spawns: list[dict[str, object]], fail_attached: bool = False
++    ) -> None:
++        body = {
++            "marks": str(self.marks),
++            "recs": str(self.recs),
++            "spawns": spawns,
++            "fail_attached": fail_attached,
++        }
++        _ = self.scen.write_text(json.dumps(body), encoding="utf-8")
++
++    def clear_records(self) -> None:
++        for folder in (self.marks, self.recs):
++            for child in folder.iterdir():
++                if child.is_dir():
++                    child.rmdir()
++                else:
++                    child.unlink()
++
++    def assert_clean(self, test: unittest.TestCase) -> None:
++        test.assertEqual(self.img_dirs(), [])
++        test.assertEqual(self.active_dirs(), set())
++        test.assertEqual(self.free_slots(), 4)
++
++
++class _UfRun(_SnapRun):
++    """_SnapRun + промпт, conversation_id и существование прежних каталогов в момент конструктора."""
++
++    calls: list[dict[str, object]] = []
++
++    def __init__(self, *args: object, **kwargs: object) -> None:
++        previous = [c["add_dir"] for c in _UfRun.calls if c["add_dir"] is not None]
++        _UfRun.calls.append(
++            {
++                "prompt": args[0],
++                "conversation_id": kwargs.get("conversation_id"),
++                "add_dir": None
++                if kwargs.get("add_dir") is None
++                else str(kwargs.get("add_dir")),
++                "previous_dirs_exist": [os.path.exists(str(d)) for d in previous],
++            }
++        )
++        super().__init__(*args, **kwargs)
++
++
++class _UfRaisingRun:
++    """Run, чей конструктор падает OSError (до реального spawn)."""
++
++    calls: int = 0
++
++    def __init__(self, *_args: object, **_kwargs: object) -> None:
++        _UfRaisingRun.calls += 1
++        raise OSError(24, "Too many open files")
++
++    def close(self) -> None:
++        return None
++
++
++def _uf_reset_runs() -> None:
++    _UfRun.calls.clear()
++    _SnapRun.attempts.clear()
++    _UfRaisingRun.calls = 0
++
++
++def _uf_ctx(
++    messages: list[dict[str, object]],
++    model: str = "gemini-4-argon",
++    effort: str = "low",
++    over: dict[str, object] | None = None,
++) -> dict[str, object]:
++    """ctx оптимистичного universal-хода: как собирает его do_POST."""
++    images = cast(
++        "list[dict[str, object]]",
++        _bfn("_collect_images")(messages, model, effort, True),
++    )
++    render = _bfn("_universal_render_messages")(messages)
++    prompt = _str(_bfn("_messages_to_prompt")(render, images))
++    ctx = _ctx(
++        model=model,
++        model_len=len(model),
++        effort=effort,
++        prompt=prompt,
++        full_prompt=prompt,
++        images=images,
++        img_dir=cast(Path, images[0]["path"]).parent if images else None,
++        stream=False,
++        universal_fallback=True,
++        stripped_full_prompt=_str(_bfn("_messages_to_stripped_prompt")(messages)),
++        turn_id="turn-uf",
++    )
++    ctx.update(over or {})
++    return ctx
++
++
++def _uf_run_once(
++    ctx: dict[str, object],
++    execute: Callable[..., dict[str, object]],
++    run_cls: type | None = None,
++) -> dict[str, object]:
++    handler_cls = _bval("Handler")
++    with contextlib.ExitStack() as stack:
++        _ = stack.enter_context(mock.patch.object(_bridge(), "Run", run_cls or _UfRun))
++        _ = stack.enter_context(
++            mock.patch.object(_bridge(), "_launcher", _fake_launcher_path)
++        )
++        _ = stack.enter_context(mock.patch.object(handler_cls, "_execute", execute))
++        with _Sock() as sock:
++            handler = cast(object, _make_handler(sock))
++            setattr(handler, "client_address", ("127.0.0.1", 1))
++            return _dict(
++                _ofn(handler, "_run_once")(
++                    ctx, _text_sink, _tool_sink, _text_sink, None
++                )
++            )
++
++
++def _uf_set_tenths(value: int) -> None:
++    with cast("threading.Lock", _bval("_sqlite_guard_lock")):
++        setattr(_bridge(), "_retry_tenths", value)
++
++
++def _uf_tenths() -> int:
++    return _int(_bval("_retry_tenths"))
++
++
++def _uf_store_entry(cid: str) -> dict[str, object]:
++    now = time.time()
++    return {"cid": cid, "last_used": now, "created": now, "turns": 1}
++
++
++def _uf_msgs(*parts: dict[str, object], text: str = "опиши") -> list[dict[str, object]]:
++    return [_img_msg(*parts, text=text)]
++
++
++class UniversalImageFallbackTests(unittest.TestCase):
++    """AD-005: universal image/media fallback (UF-01..UF-10), strict-режим не меняется."""
++
++    def test_uf01_all_catalog_models_and_efforts_optimistic(self) -> None:
++        models = _dict(_bval("FLEET_MODELS"))
++        gate_spy = mock.patch.object(
++            _bridge(), "_image_proof_reason", side_effect=AssertionError("proof")
++        )
++        sha_spy = mock.patch.object(
++            _bridge(), "_file_sha256", side_effect=AssertionError("sha")
++        )
++        with _UniEnv() as env:
++            bridge = _HttpBridge()
++            argon = _proof_of("gemini-4-argon")
++            broken = {"agy_binary_sha256": "0" * 64, "impl_version": 99}
++            try:
++                with (
++                    gate_spy,
++                    sha_spy,
++                    mock.patch.dict(argon, broken),
++                    mock.patch.dict(
++                        _dict(_dict(models["gemini-4-argon"])["images"]),
++                        {"status": "unsupported"},
++                    ),
++                ):
++                    spawned = 0
++                    for model_id in models:
++                        efforts = cast("list[str]", _dict(models[model_id])["efforts"])
++                        for effort in efforts:
++                            with self.subTest(model=model_id, effort=effort):
++                                body = _img_body(
++                                    _uf_msgs(_uf_part("image/png")), model=model_id
++                                )
++                                body["reasoning_effort"] = effort
++                                code, _b = bridge.post(body)
++                                self.assertEqual(code, 200)
++                                spawned += 1
++                                rec = env.records()[-1]
++                                self.assertEqual(len(env.records()), spawned)
++                                self.assertEqual(
++                                    _argv_of(rec)[_argv_of(rec).index("--effort") + 1],
++                                    effort,
++                                )
++                                _expect_files(
++                                    self,
++                                    rec,
++                                    {1: ("image/png", _UF_RASTER["image/png"])},
++                                )
++                                prompt = _str(rec["prompt"])
++                                self.assertIn("[attachments]", prompt)
++                                self.assertIn("[image 1]", prompt)
++                    for mime in _IMG_MIMES:
++                        with self.subTest(mime=mime):
++                            code, _b = bridge.post(
++                                _img_body(_uf_msgs(_uf_part(mime)), model=_UF_TEXT_ONLY)
++                            )
++                            self.assertEqual(code, 200)
++                            spawned += 1
++                            _expect_files(
++                                self,
++                                env.records()[-1],
++                                {1: (mime, _UF_RASTER[mime])},
++                            )
++                    sse = _sse_post(
++                        bridge.port,
++                        _img_body(
++                            _uf_msgs(_uf_part("image/gif")),
++                            model=_UF_TEXT_ONLY,
++                            stream=True,
++                        ),
++                    )
++                    spawned += 1
++                    self.assertIn("ответ", sse)
++                    self.assertNotIn('"error"', sse)
++                    self.assertTrue(sse.endswith("data: [DONE]\n\n"))
++                    code_m, body_m = bridge.post(
++                        _img_body(_uf_msgs(_uf_part("image/png")), model="nope")
++                    )
++                    self.assertEqual(
++                        (code_m, _err(body_m)["type"]), (400, "model_not_allowed")
++                    )
++                    bad_effort = _img_body(
++                        _uf_msgs(_uf_part("image/png")), model=_UF_TEXT_ONLY
++                    )
++                    bad_effort["reasoning_effort"] = "high"
++                    code_e, body_e = bridge.post(bad_effort)
++                    self.assertEqual(
++                        (code_e, _err(body_e)["type"]),
++                        (400, "unsupported_reasoning_effort"),
++                    )
++                    self.assertEqual(len(env.records()), spawned)
++                env.cfg(True, False)
++                code_s, body_s = bridge.post(
++                    _img_body(_uf_msgs(_uf_part("image/png")), model=_UF_TEXT_ONLY)
++                )
++                self.assertEqual(
++                    (code_s, _err(body_s)["type"]), (400, "image_input_not_supported")
++                )
++            finally:
++                bridge.close()
++            env.assert_clean(self)
++
++    def test_uf02_image_rejections_strip_all_media(self) -> None:
++        cap = 1000
++        with (
++            _UniEnv() as env,
++            _small_limits(max_image_bytes=cap, max_total_image_bytes=cap),
++        ):
++            bridge = _HttpBridge()
++            alias_cases: list[tuple[str, list[dict[str, object]]]] = [
++                ("non_user_system", [_img_msg(_uf_part("image/png"), role="system")]),
++                ("non_user_tool", [_img_msg(_uf_part("image/png"), role="tool")]),
++                (
++                    "alias_without_url",
++                    [_img_msg({"type": "input_image", "image_url": 42})],
++                ),
++                (
++                    "foreign_shape",
++                    [
++                        _img_msg(
++                            {
++                                "type": "image",
++                                "source": {"type": "base64", "data": "AAAA"},
++                            }
++                        )
++                    ],
++                ),
++                (
++                    "valid_plus_invalid",
++                    _uf_msgs(
++                        _uf_part("image/png"), _uf_bad_part(), _uf_part("image/gif")
++                    ),
++                ),
++                (
++                    "dict_content_remote",
++                    [{"role": "user", "content": _uf_bad_part()}],
++                ),
++            ]
++            cases: list[tuple[str, list[dict[str, object]]]] = [
++                (name, build())
++                for name, _reason, build in _taxonomy_cases(cap)
++                if name != "string_image_url"  # universal принимает строковый image_url
++            ] + alias_cases
++            try:
++                for name, msgs in cases:
++                    with self.subTest(case=name):
++                        env.clear_records()
++                        with _UfLog() as log:
++                            code, _b = bridge.post(_img_body(msgs))
++                        self.assertEqual(code, 200)
++                        recs = env.records()
++                        self.assertEqual(len(recs), 1)
++                        self.assertNotIn("--add-dir", _argv_of(recs[0]))
++                        _uf_assert_media_free(self, _str(recs[0]["prompt"]))
++                        events = log.events()
++                        self.assertEqual(len(events), 1)
++                        self.assertIsNotNone(_UF_EVENT_RE.match(events[0]), events[0])
++                        self.assertIn("stage=collect", events[0])
++                        self.assertNotIn("base64,", log.text())
++                        self.assertNotIn(_str(_bval("AUTH_KEY")), log.text())
++                        env.assert_clean(self)
++                env.clear_records()
++                string_url: list[dict[str, object]] = [
++                    _img_msg({"type": "image_url", "image_url": _uf_url("image/png")})
++                ]
++                code_u, _bu = bridge.post(_img_body(string_url, model=_UF_TEXT_ONLY))
++                self.assertEqual(code_u, 200)
++                _expect_files(
++                    self,
++                    env.records()[0],
++                    {1: ("image/png", _UF_RASTER["image/png"])},
++                )
++                env.clear_records()
++                conn = http.client.HTTPConnection("127.0.0.1", bridge.port, timeout=10)
++                conn.request(
++                    "POST",
++                    "/v1/chat/completions",
++                    body="{}",
++                    headers={"Authorization": "Bearer wrong-key"},
++                )
++                self.assertEqual(conn.getresponse().status, 401)
++                conn.close()
++                limit = _int(_dict(_bval("IMAGE_LIMITS"))["max_body_bytes"])
++                self.assertEqual(_post_raw_headers(bridge.port, limit + 1), 413)
++                code_m, body_m = bridge.post(
++                    _img_body(_uf_msgs(_uf_bad_part()), model="nope")
++                )
++                self.assertEqual(
++                    (code_m, _err(body_m)["type"]), (400, "model_not_allowed")
++                )
++                bad_effort = _img_body(_uf_msgs(_uf_bad_part()), model=_UF_TEXT_ONLY)
++                bad_effort["reasoning_effort"] = "high"
++                code_e, body_e = bridge.post(bad_effort)
++                self.assertEqual(
++                    (code_e, _err(body_e)["type"]),
++                    (400, "unsupported_reasoning_effort"),
++                )
++                self.assertEqual(env.records(), [])
++            finally:
++                bridge.close()
++            env.assert_clean(self)
++
++    def test_uf03_policy_matrix_recheck_and_cache(self) -> None:
++        reader = _bfn("_is_image_fallback_enabled")
++        with _UniEnv() as env:
++            bridge = _HttpBridge()
++            try:
++                expected: dict[tuple[bool, bool], tuple[int, int]] = {
++                    (False, False): (400, 400),
++                    (False, True): (400, 200),
++                    (True, False): (200, 200),
++                    (True, True): (200, 200),
++                }
++                for (universal, input_on), (code_text, code_argon) in expected.items():
++                    with self.subTest(universal=universal, input=input_on):
++                        env.cfg(input_on, universal)
++                        env.clear_records()
++                        msgs = _uf_msgs(_uf_part("image/png"))
++                        with _UfLog() as log:
++                            got_text, _bt = bridge.post(
++                                _img_body(msgs, model=_UF_TEXT_ONLY)
++                            )
++                            got_argon, _ba = bridge.post(_img_body(msgs))
++                        self.assertEqual((got_text, got_argon), (code_text, code_argon))
++                        recs = env.records()
++                        if universal and not input_on:
++                            self.assertEqual(len(recs), 2)
++                            for rec in recs:
++                                self.assertNotIn("--add-dir", _argv_of(rec))
++                                self.assertIn("[image omitted]", _str(rec["prompt"]))
++                                self.assertIn("опиши", _str(rec["prompt"]))
++                            self.assertEqual(len(log.events()), 2)
++                            for line in log.events():
++                                self.assertIn(
++                                    "stage=collect reason=flag_disabled", line
++                                )
++                        elif universal:
++                            self.assertEqual(len(recs), 2)
++                            for rec in recs:
++                                self.assertIn("--add-dir", _argv_of(rec))
++                            self.assertEqual(log.events(), [])
++                        else:
++                            self.assertEqual(len(recs), 1 if code_argon == 200 else 0)
++                        env.assert_clean(self)
++                junk: list[tuple[str, str]] = [
++                    ("string", '{"IMAGE_FALLBACK_ENABLED": "true"}'),
++                    ("int", '{"IMAGE_FALLBACK_ENABLED": 1}'),
++                    ("null", '{"IMAGE_FALLBACK_ENABLED": null}'),
++                    ("list", '{"IMAGE_FALLBACK_ENABLED": [true]}'),
++                    ("missing", '{"IMAGE_INPUT_ENABLED": true}'),
++                    ("root_list", "[true]"),
++                    ("broken", "{"),
++                    (
++                        "oversize",
++                        '{"IMAGE_FALLBACK_ENABLED": true, "pad": "'
++                        + "x" * (_int(_bval("DYNAMIC_CONFIG_MAX_BYTES")) + 1)
++                        + '"}',
++                    ),
++                ]
++                for name, text in junk:
++                    with self.subTest(config=name):
++                        env.raw_cfg(text)
++                        self.assertIs(reader(), False)
++                env.raw_cfg(
++                    '{"IMAGE_INPUT_ENABLED": true, "IMAGE_FALLBACK_ENABLED": "true"}'
++                )
++                code_j, body_j = bridge.post(
++                    _img_body(_uf_msgs(_uf_part("image/png")), model=_UF_TEXT_ONLY)
++                )
++                self.assertEqual(
++                    (code_j, _err(body_j)["type"]), (400, "image_input_not_supported")
++                )
++                env.fx.config.unlink()
++                env.reset_flag_caches()
++                self.assertIs(reader(), False)
++                tokens: dict[str, bool] = {
++                    "1": True,
++                    "true": True,
++                    "yes": True,
++                    " TRUE ": True,
++                    "0": False,
++                    "false": False,
++                    "no": False,
++                    "on": False,
++                    "off": False,
++                    "maybe": False,
++                }
++                for token, want in tokens.items():
++                    with self.subTest(env=token):
++                        env.cfg(True, not want)
++                        env.fx.set_env("AGY_IMAGE_FALLBACK_ENABLED", token)
++                        self.assertIs(reader(), want)
++                env.fx.set_env("AGY_IMAGE_FALLBACK_ENABLED", "")
++                env.cfg(True, True)
++                self.assertIs(reader(), True)
++                env.fx.set_env("AGY_IMAGE_FALLBACK_ENABLED", None)
++                env.cfg(True, True)
++                setattr(
++                    _bridge(), "_image_fallback_flag_cache", (time.monotonic(), False)
++                )
++                self.assertIs(reader(), False)  # свежий кэш не перечитывается
++                setattr(
++                    _bridge(),
++                    "_image_fallback_flag_cache",
++                    (time.monotonic() - 1.5, False),
++                )
++                self.assertIs(reader(), True)  # TTL истёк: перечитано без рестарта
++                env.cfg(True, False)
++                code_r, _br = bridge.post(
++                    _img_body(_uf_msgs(_uf_part("image/png")), model=_UF_TEXT_ONLY)
++                )
++                self.assertEqual(code_r, 400)  # откат флага действует сразу
++            finally:
++                bridge.close()
++            env.assert_clean(self)
++
++    def test_uf03b_post_slot_input_flip_and_sha_change(self) -> None:
++        with _UniEnv() as env:
++            msgs = _uf_msgs(_uf_part("image/png"))
++            real_acquire = cast(
++                "Callable[..., str]", getattr(_bval("Handler"), "_acquire_slot")
++            )
++
++            def acquire_then_flip(handler: object, keepalive: object) -> str:
++                reason = real_acquire(handler, keepalive)
++                env.cfg(False, True)
++                return reason
++
++            _uf_reset_runs()
++            ctx = _uf_ctx(msgs)
++            old_dir = _str(str(ctx["img_dir"]))
++            with (
++                _UfLog() as log,
++                mock.patch.object(_bval("Handler"), "_acquire_slot", acquire_then_flip),
++            ):
++                out = _uf_run_once(ctx, _sequence_execute([_scripted_out("done")]))
++            self.assertEqual(out["state"], "done")
++            self.assertEqual(len(_UfRun.calls), 1)
++            self.assertIsNone(_UfRun.calls[0]["add_dir"])
++            self.assertFalse(os.path.exists(old_dir))  # mkdir не выполнялся
++            _uf_assert_media_free(self, _str(_UfRun.calls[0]["prompt"]))
++            self.assertEqual(ctx["prompt"], ctx["full_prompt"])
++            self.assertEqual(len(log.events()), 1)
++            self.assertIn("stage=post_slot reason=flag_disabled", log.events()[0])
++            env.assert_clean(self)
++            env.cfg(True, True)
++            _uf_reset_runs()
++            ctx2 = _uf_ctx(msgs)
++            legacy = _img_ctx(msgs)
++            stale = {"agy_binary_sha256": "f" * 64, "impl_version": 99}
++            with mock.patch.dict(_proof_of("gemini-4-argon"), stale):
++                out2 = _uf_run_once(ctx2, _sequence_execute([_scripted_out("done")]))
++                self.assertEqual(out2["state"], "done")
++                self.assertIsNotNone(_UfRun.calls[0]["add_dir"])  # SHA не мешает
++                _uf_reset_runs()
++                strict = _run_once_direct(
++                    legacy, _sequence_execute([_scripted_out("done")])
++                )
++            self.assertEqual(strict["state"], "image_reject")  # strict без изменений
++            env.assert_clean(self)
++
++    def test_uf04_spool_failures_downgrade_before_attempt1(self) -> None:
++        real_open = os.open
++        real_mkdir = os.mkdir
++        real_rmtree = shutil.rmtree
++
++        def open_fail(
++            name: str, exc: OSError
++        ) -> contextlib.AbstractContextManager[object]:
++            def failing(path: str, flags: int, mode: int = 0o777, **kw: int) -> int:
++                if str(path).endswith(name):
++                    raise exc
++                return real_open(path, flags, mode, **kw)
++
++            return cast(
++                "contextlib.AbstractContextManager[object]",
++                mock.patch.object(os, "open", failing),
++            )
++
++        def mkdir_fail() -> contextlib.AbstractContextManager[object]:
++            def failing(path: str, mode: int = 0o777) -> None:
++                if os.path.basename(str(path)).startswith("img-"):
++                    raise OSError(13, "Permission denied")
++                real_mkdir(path, mode)
++
++            return cast(
++                "contextlib.AbstractContextManager[object]",
++                mock.patch.object(os, "mkdir", failing),
++            )
++
++        def flaky_rmtree(path: str, ignore_errors: bool = False) -> None:
++            if ignore_errors:
++                real_rmtree(path, ignore_errors=True)
++                return
++            raise OSError(1, "busy")
++
++        msgs = _uf_msgs(_uf_part("image/png"), _uf_part("image/jpeg"))
++        with _UniEnv() as env:
++            bridge = _HttpBridge()
++            cases: list[
++                tuple[str, Callable[[], contextlib.AbstractContextManager[object]]]
++            ] = [
++                (
++                    "enospc_second",
++                    lambda: open_fail("img-2.jpg", OSError(28, "ENOSPC")),
++                ),
++                (
++                    "eacces_first",
++                    lambda: open_fail("img-1.png", PermissionError(13, "EACCES")),
++                ),
++                (
++                    "o_excl_collision",
++                    lambda: open_fail("img-2.jpg", FileExistsError(17, "EEXIST")),
++                ),
++                ("mkdir", mkdir_fail),
++            ]
++            try:
++                for name, make in cases:
++                    with self.subTest(case=name):
++                        env.clear_records()
++                        with _UfLog() as log, make():
++                            code, _b = bridge.post(_img_body(msgs))
++                        self.assertEqual(code, 200)
++                        recs = env.records()
++                        self.assertEqual(len(recs), 1)
++                        self.assertNotIn("--add-dir", _argv_of(recs[0]))
++                        _uf_assert_media_free(self, _str(recs[0]["prompt"]))
++                        self.assertEqual(len(log.events()), 1)
++                        self.assertIn(
++                            "stage=spool reason=image_spool_error", log.events()[0]
++                        )
++                        self.assertIn(
++                            "image_spool_error model=gemini-4-argon", log.text()
++                        )
++                        env.assert_clean(self)
++                with self.subTest(case="cleanup_error"):
++                    env.clear_records()
++                    with (
++                        _UfLog() as log,
++                        open_fail("img-2.jpg", OSError(28, "ENOSPC")),
++                        mock.patch.object(shutil, "rmtree", flaky_rmtree),
++                    ):
++                        code, _b = bridge.post(_img_body(msgs))
++                    self.assertEqual(code, 200)
++                    recs = env.records()
++                    self.assertEqual(len(recs), 1)
++                    self.assertNotIn("--add-dir", _argv_of(recs[0]))
++                    self.assertIn("image_cleanup_error err=", log.text())
++                    self.assertEqual(len(log.events()), 1)
++                    env.assert_clean(self)
++            finally:
++                bridge.close()
++
++    def test_uf05_runtime_retry_cold_text_with_empty_budget(self) -> None:
++        msgs = _uf_msgs(_uf_part("image/png"), _uf_part("image/webp"), text="сравни")
++        pauses: list[int] = []
++
++        def pause_spy(attempt: int, rng: object = None) -> float:
++            del rng
++            pauses.append(attempt)
++            return 0.0
++
++        with _UniEnv() as env:
++            with mock.patch.object(_bridge(), "_retry_pause_s", pause_spy):
++                for state in (
++                    "agy_error",
++                    "pump_error",
++                    "timeout",
++                    "idle_timeout",
++                    "first_token_timeout",
++                ):
++                    for tenths, after in ((0, 2), (30, 20)):
++                        with self.subTest(state=state, tenths=tenths):
++                            _uf_reset_runs()
++                            pauses.clear()
++                            _uf_set_tenths(tenths)
++                            ctx = _uf_ctx(msgs)
++                            first_dir = _str(str(ctx["img_dir"]))
++                            with _UfLog() as log:
++                                out = _uf_run_once(
++                                    ctx,
++                                    _sequence_execute(
++                                        [_scripted_out(state), _scripted_out("done")]
++                                    ),
++                                )
++                            self.assertEqual(out["state"], "done")
++                            calls = _UfRun.calls
++                            self.assertEqual(len(calls), 2)
++                            self.assertEqual(calls[0]["add_dir"], first_dir)
++                            self.assertEqual(
++                                set(_dict(_SnapRun.attempts[0]["files"])),
++                                {"img-1.png", "img-2.webp"},
++                            )
++                            self.assertIsNone(calls[1]["add_dir"])
++                            self.assertEqual(calls[1]["previous_dirs_exist"], [False])
++                            self.assertEqual(calls[1]["conversation_id"], "")
++                            _uf_assert_media_free(self, _str(calls[1]["prompt"]))
++                            self.assertEqual(
++                                calls[1]["prompt"], ctx["stripped_full_prompt"]
++                            )
++                            self.assertEqual(ctx["prompt"], ctx["stripped_full_prompt"])
++                            self.assertEqual(
++                                ctx["full_prompt"], ctx["stripped_full_prompt"]
++                            )
++                            self.assertEqual(ctx["images"], [])
++                            self.assertIsNone(ctx["img_dir"])
++                            self.assertEqual(pauses, [1])
++                            self.assertEqual(_uf_tenths(), after)
++                            events = log.events()
++                            self.assertEqual(len(events), 1)
++                            self.assertIn("stage=runtime reason=%s" % state, events[0])
++                            self.assertIn("attempt=1 images=2", events[0])
++                            env.assert_clean(self)
++                with self.subTest(case="second_failure_no_third"):
++                    _uf_reset_runs()
++                    _uf_set_tenths(30)
++                    ctx = _uf_ctx(msgs)
++                    out = _uf_run_once(
++                        ctx,
++                        _sequence_execute(
++                            [_scripted_out("agy_error"), _scripted_out("agy_error")]
++                        ),
++                    )
++                    self.assertEqual(out["state"], "agy_error")
++                    self.assertEqual(len(_UfRun.calls), 2)
++                    env.assert_clean(self)
++                with self.subTest(case="done_is_excluded"):
++                    _uf_reset_runs()
++                    ctx = _uf_ctx(msgs)
++                    out = _uf_run_once(
++                        ctx,
++                        _sequence_execute([_scripted_out("done", rc=1, text="")]),
++                    )
++                    self.assertEqual(out["state"], "done")
++                    self.assertEqual(len(_UfRun.calls), 1)
++                    self.assertIsNotNone(_UfRun.calls[0]["add_dir"])
++                    env.assert_clean(self)
++                with self.subTest(case="strict_budget_zero_unchanged"):
++                    _uf_reset_runs()
++                    _uf_set_tenths(0)
++                    legacy = _img_ctx(msgs)
++                    out = _uf_run_once(
++                        legacy,
++                        _sequence_execute(
++                            [_scripted_out("agy_error"), _scripted_out("done")]
++                        ),
++                    )
++                    self.assertEqual(out["state"], "agy_error")
++                    self.assertEqual(len(_UfRun.calls), 1)
++                    self.assertIsNotNone(_UfRun.calls[0]["add_dir"])
++                    env.assert_clean(self)
++            for stream in (False, True):
++                with self.subTest(http_stream=stream):
++                    env.clear_records()
++                    _uf_set_tenths(0)
++                    env.scen_uf([{}], fail_attached=True)
++                    bridge = _HttpBridge()
++                    body = _img_body(
++                        _uf_msgs(_uf_part("image/png"), text="что тут"),
++                        model=_UF_TEXT_ONLY,
++                        stream=stream,
++                    )
++                    try:
++                        with _UfLog() as log:
++                            if stream:
++                                sse = _sse_post(bridge.port, body)
++                                self.assertIn("ответ", sse)
++                                self.assertNotIn('"error"', sse)
++                                self.assertTrue(sse.endswith("data: [DONE]\n\n"))
++                            else:
++                                code, resp = bridge.post(body)
++                                self.assertEqual(code, 200)
++                                choices = cast("list[object]", resp["choices"])
++                                message = _dict(_dict(choices[0])["message"])
++                                self.assertEqual(message["content"], "ответ")
++                    finally:
++                        bridge.close()
++                    recs = env.records()
++                    self.assertEqual(len(recs), 2)
++                    _expect_files(
++                        self, recs[0], {1: ("image/png", _UF_RASTER["image/png"])}
++                    )
++                    self.assertNotIn("--add-dir", _argv_of(recs[1]))
++                    self.assertNotIn("--conversation", _argv_of(recs[1]))
++                    self.assertIn("что тут", _str(recs[1]["prompt"]))
++                    _uf_assert_media_free(self, _str(recs[1]["prompt"]))
++                    self.assertEqual(len(log.events()), 1)
++                    env.assert_clean(self)
++
++    def test_uf06_hot_and_explicit_cid_cold_reset(self) -> None:
++        key = ("gemini-4-argon", "", "low")
++        msgs: list[dict[str, object]] = [
++            _img_msg(_uf_part("image/png")),
++            _txt_msg("assistant", "ок"),
++            _img_msg(_uf_part("image/jpeg"), text="новое"),
++        ]
++        store = cast("dict[object, object]", _bval("_session_store"))
++        owners = cast("dict[str, str]", _bval("_active_cid_owners"))
++        in_flight = cast("set[str]", _bval("_in_flight_cids"))
++        with _UniEnv() as env:
++            variants = (
++                "hot_commit",
++                "hot_cas",
++                "hot_empty_budget",
++                "explicit",
++                "plain",
++            )
++            for variant in variants:
++                with self.subTest(variant=variant):
++                    _uf_reset_runs()
++                    store.clear()
++                    owners.clear()
++                    in_flight.clear()
++                    turn = "turn-" + variant
++                    _uf_set_tenths(0 if variant == "hot_empty_budget" else 30)
++                    hot = variant.startswith("hot")
++                    over: dict[str, object] = {
++                        "turn_id": turn,
++                        "conversation_id": _CID,
++                        "hot_resumed": hot,
++                        "sess_key": None if variant == "plain" else key,
++                        "tools_count": 0 if variant == "plain" else 1,
++                    }
++                    if hot:
++                        store[key] = _uf_store_entry(_CID)
++                        in_flight.add(_CID)
++                    elif variant == "explicit":
++                        store[key] = _uf_store_entry(_CID_C)
++                    self.assertTrue(_bfn("_cid_acquire")(_CID, turn))
++                    ctx = _uf_ctx(msgs, over=over)
++                    self.assertIn("[attachments]", _str(ctx["full_prompt"]))
++                    state = {"calls": 0}
++
++                    def execute(
++                        _self: object,
++                        _run: object,
++                        *_a: object,
++                        _variant: str = variant,
++                        _state: dict[str, int] = state,
++                    ) -> dict[str, object]:
++                        _state["calls"] += 1
++                        if _state["calls"] == 1:
++                            if _variant == "hot_cas":
++                                store[key] = _uf_store_entry(_CID_C)
++                            return _scripted_out("agy_error")
++                        cid = _CID_B if _variant in ("hot_commit", "explicit") else ""
++                        return _scripted_out("done", conversation_id=cid)
++
++                    out = _uf_run_once(ctx, execute)
++                    self.assertEqual(out["state"], "done")
++                    self.assertEqual(len(_UfRun.calls), 2)
++                    self.assertEqual(_UfRun.calls[0]["conversation_id"], _CID)
++                    self.assertEqual(_UfRun.calls[1]["conversation_id"], "")
++                    self.assertIsNone(_UfRun.calls[1]["add_dir"])
++                    _uf_assert_media_free(self, _str(_UfRun.calls[1]["prompt"]))
++                    self.assertIs(ctx["hot_resumed"], False)
++                    self.assertEqual(ctx["conversation_id"], "")
++                    self.assertEqual(ctx["prompt"], ctx["full_prompt"])
++                    self.assertNotIn(_CID, owners)
++                    if hot:
++                        self.assertNotIn(_CID, in_flight)
++                    entry = _dict(store.get(key) or {})
++                    if variant == "hot_commit":
++                        self.assertEqual(entry.get("cid"), _CID_B)
++                    elif variant == "hot_cas":
++                        self.assertEqual(entry.get("cid"), _CID_C)  # чужое не тронуто
++                    elif variant == "hot_empty_budget":
++                        self.assertEqual(entry, {})  # устаревший CID инвалидирован
++                    elif variant == "explicit":
++                        self.assertEqual(entry.get("cid"), _CID_B)
++                    else:
++                        self.assertEqual(store, {})
++                    env.assert_clean(self)
++            env.scen_uf([{"cid": _CID}, {"cid": _CID_B}, {"cid": _CID_C}])
++            store.clear()
++            bridge = _HttpBridge()
++            valid: list[dict[str, object]] = [
++                _img_msg(_uf_part("image/png")),
++                _txt_msg("assistant", "ок"),
++                _txt_msg("user", "дальше"),
++            ]
++            dirty: list[dict[str, object]] = [
++                _img_msg(_uf_part("image/png")),
++                _txt_msg("assistant", "ок"),
++                _img_msg(_uf_bad_part(), text="дальше"),
++            ]
++            try:
++                self.assertEqual(bridge.post(_img_body(valid[:1], tools=True))[0], 200)
++                self.assertEqual(
++                    bridge.post(_img_body(dirty, tools=True, conv=_CID))[0], 200
++                )
++                self.assertEqual(bridge.post(_img_body(valid, tools=True))[0], 200)
++            finally:
++                bridge.close()
++            first, second, third = env.records()
++            self.assertIn("--add-dir", _argv_of(first))
++            self.assertNotIn("--conversation", _argv_of(second))  # явный CID не resume
++            self.assertNotIn("--add-dir", _argv_of(second))
++            self.assertIn("[image omitted]", _str(second["prompt"]))
++            _uf_assert_media_free(self, _str(second["prompt"]))
++            self.assertEqual(
++                _argv_of(third)[_argv_of(third).index("--conversation") + 1], _CID_B
++            )
++            env.assert_clean(self)
++
++    def test_uf07_media_normalization_is_complete(self) -> None:
++        flatten = _bfn("_flatten_content_stripped")
++        names = (
++            "image_url",
++            "image",
++            "input_image",
++            "input_audio",
++            "audio",
++            "video",
++            "video_url",
++            "file",
++            "document",
++            "inlineData",
++            "inline_data",
++            "fileData",
++            "file_data",
++        )
++        image_names = {"image_url", "image", "input_image"}
++        for name in names:
++            want = "[image omitted]" if name in image_names else "[media omitted]"
++            tainted: dict[str, object] = {
++                "type": name,
++                "text": "LEAK-T",
++                name: {"data": "PAYLOAD-P", "url": "http://leak.example/x"},
++            }
++            with self.subTest(kind="type", name=name):
++                for content in ([tainted], tainted):
++                    got = _str(flatten(content))
++                    self.assertEqual(got, want)
++            if name != "input_image":
++                keyed: dict[str, object] = {
++                    "text": "LEAK-K",
++                    name: {"data": "PAYLOAD-K"},
++                }
++                with self.subTest(kind="key", name=name):
++                    for content in ([keyed], keyed):
++                        self.assertEqual(_str(flatten(content)), want)
++        self.assertEqual(_str(flatten({"foo": {"bar": "SECRET"}})), "[media omitted]")
++        self.assertEqual(
++            _str(flatten(["a", {"foo": 1}, 7, {"type": "text", "text": "b"}])), "a\nb"
++        )
++        self.assertEqual(_str(flatten(None)), "")
++        original: list[dict[str, object]] = [
++            {"role": "system", "content": "Система: ✓"},
++            {
++                "role": "user",
++                "content": [
++                    {"type": "text", "text": "привет https://example.test/doc"},
++                    _uf_part("image/png"),
++                    {"type": "input_audio", "input_audio": {"data": "PAYLOAD"}},
++                ],
++            },
++            {
++                "role": "assistant",
++                "content": None,
++                "tool_calls": [
++                    {"id": "c1", "function": {"name": "f", "arguments": "{}"}}
++                ],
++            },
++            {
++                "role": "tool",
++                "tool_call_id": "c1",
++                "content": {"type": "file", "file": {"file_data": "PAYLOAD"}},
++            },
++            {"role": "user", "content": {"foo": "SECRET"}},
++        ]
++        snapshot = json.dumps(original, sort_keys=True)
++        stripped = cast(
++            "list[dict[str, object]]", _bfn("_strip_media_from_messages")(original)
++        )
++        self.assertEqual(json.dumps(original, sort_keys=True), snapshot)
++        self.assertEqual(
++            [m["role"] for m in stripped],
++            ["system", "user", "assistant", "tool", "user"],
++        )
++        self.assertIsNot(stripped[1], original[1])
++        self.assertEqual(stripped[3]["content"], "[media omitted]")
++        self.assertEqual(stripped[4]["content"], "[media omitted]")
++        prompt = _str(_bfn("_messages_to_stripped_prompt")(original))
++        for kept in (
++            "Система: ✓",
++            "привет https://example.test/doc",
++            "[image omitted]",
++        ):
++            self.assertIn(kept, prompt)
++        self.assertIn("[media omitted]", prompt)
++        _uf_assert_media_free(self, prompt, ("PAYLOAD", "SECRET", "leak.example"))
++        again = cast(
++            "list[dict[str, object]]", _bfn("_strip_media_from_messages")(stripped)
++        )
++        self.assertEqual(again, stripped)
++        self.assertEqual(_str(_bfn("_messages_to_stripped_prompt")(stripped)), prompt)
++        with _UniEnv() as env:
++            mixed: list[dict[str, object]] = [
++                {
++                    "role": "user",
++                    "content": [
++                        {"type": "text", "text": "сравни"},
++                        {"type": "input_image", "image_url": _uf_url("image/png")},
++                        {"type": "image", "image": {"url": _uf_url("image/jpeg")}},
++                        {
++                            "type": "input_audio",
++                            "text": "LEAK",
++                            "input_audio": {"data": "PAYLOAD"},
++                        },
++                    ],
++                },
++                {"role": "assistant", "content": "ок"},
++                {"role": "user", "content": _uf_part("image/gif")},
++            ]
++            images = cast(
++                "list[dict[str, object]]",
++                _bfn("_collect_images")(mixed, "gemini-4-argon", "low", True),
++            )
++            self.assertEqual(
++                [(_int(i["index"]), i["mime"]) for i in images],
++                [(1, "image/png"), (2, "image/jpeg"), (3, "image/gif")],
++            )
++            bridge = _HttpBridge()
++            try:
++                code, _b = bridge.post(_img_body(mixed[:1], model=_UF_TEXT_ONLY))
++                code_all, _ba = bridge.post(_img_body(mixed, model=_UF_TEXT_ONLY))
++                audio_only: list[dict[str, object]] = [
++                    {
++                        "role": "user",
++                        "content": [
++                            {"type": "text", "text": "послушай"},
++                            {
++                                "type": "audio",
++                                "text": "LEAK",
++                                "audio": {"data": "PAYLOAD"},
++                            },
++                        ],
++                    }
++                ]
++                env.clear_records()
++                with _UfLog() as log:
++                    code_a, _bu = bridge.post(
++                        _img_body(audio_only, model=_UF_TEXT_ONLY)
++                    )
++            finally:
++                bridge.close()
++            self.assertEqual((code, code_all, code_a), (200, 200, 200))
++            only_audio = env.records()
++            self.assertEqual(len(only_audio), 1)
++            self.assertNotIn("--add-dir", _argv_of(only_audio[0]))
++            self.assertIn("[media omitted]", _str(only_audio[0]["prompt"]))
++            self.assertIn("послушай", _str(only_audio[0]["prompt"]))
++            _uf_assert_media_free(
++                self, _str(only_audio[0]["prompt"]), ("LEAK", "PAYLOAD")
++            )
++            self.assertEqual(len(log.events()), 1)
++            self.assertIn("reason=unsupported_media", log.events()[0])
++            env.assert_clean(self)
++        secret = "PAYLOAD_SECRET_12345"
++        unknown_only: list[tuple[str, object]] = [
++            ("A_dict_input_video", {"type": "input_video", "data": secret}),
++            ("B_list_input_video_text", [{"type": "input_video", "text": secret}]),
++            ("C_text_with_struct", [{"type": "text", "text": {"inlineData": secret}}]),
++            ("D_case_variant_key", {"InlineData": secret}),
++            ("E_foo_bar", {"foo": {"bar": secret}}),
++        ]
++        with _UniEnv() as env_u:
++            bridge_u = _HttpBridge()
++            try:
++                for name, content in unknown_only:
++                    for stream in (False, True):
++                        with self.subTest(case=name, stream=stream):
++                            env_u.clear_records()
++                            body = _img_body(
++                                [{"role": "user", "content": content}],
++                                model=_UF_TEXT_ONLY,
++                                stream=stream,
++                            )
++                            with _UfLog() as log_u:
++                                if stream:
++                                    sse = _sse_post(bridge_u.port, body)
++                                    self.assertNotIn('"error"', sse)
++                                    self.assertTrue(sse.endswith("data: [DONE]\n\n"))
++                                    code_u = 200
++                                else:
++                                    code_u, _bu2 = bridge_u.post(body)
++                            self.assertEqual(code_u, 200)
++                            recs_u = env_u.records()
++                            self.assertEqual(len(recs_u), 1)
++                            prompt_u = _str(recs_u[0]["prompt"])
++                            self.assertNotIn(secret, prompt_u)
++                            self.assertNotIn(secret, " ".join(_argv_of(recs_u[0])))
++                            self.assertIn("[media omitted]", prompt_u)
++                            self.assertNotIn("--add-dir", _argv_of(recs_u[0]))
++                            events_u = log_u.events()
++                            self.assertEqual(len(events_u), 1, events_u)
++                            self.assertIn("stage=collect", events_u[0])
++                            self.assertIn("reason=unsupported_media", events_u[0])
++                            self.assertNotIn(secret, log_u.text())
++                            env_u.assert_clean(self)
++            finally:
++                bridge_u.close()
++        secret2 = "PAYLOAD_SECRET_99999"
++        dict_text: list[tuple[str, object, str]] = [
++            (
++                "F_dict_text_extra_data",
++                {"type": "text", "text": "hello", "data": secret2},
++                "hello",
++            ),
++            (
++                "G_dict_notype_text_extra",
++                {"text": "hello", "source": {"data": secret2}},
++                "hello",
++            ),
++            (
++                "H_dict_text_none_payload",
++                {"type": "text", "text": None, "payload": secret2},
++                "[media omitted]",
++            ),
++            (
++                "K_dict_input_text_extra",
++                {"type": "input_text", "text": "hello", "attachment": secret2},
++                "hello",
++            ),
++            ("I_dict_text_only", {"type": "text", "text": "hello"}, "hello"),
++            (
++                "J_dict_text_empty_payload",
++                {"type": "text", "text": "", "payload": secret2},
++                "[media omitted]",
++            ),
++        ]
++        classify = _bfn("_classify_part")
++        counts = _bfn("_media_part_counts")
++        render = _bfn("_universal_render_messages")
++        for name, content, want in dict_text:
++            with self.subTest(unit=name):
++                msgs_d: list[dict[str, object]] = [{"role": "user", "content": content}]
++                is_text = want == "hello" or name == "I_dict_text_only"
++                self.assertEqual(
++                    _str(classify(cast("dict[str, object]", content))),
++                    "text" if is_text else "unknown",
++                )
++                self.assertEqual(counts(msgs_d), (0, 0 if is_text else 1))
++                self.assertEqual(_str(flatten(content)), want)
++                rendered = cast("list[dict[str, object]]", render(msgs_d))
++                self.assertIsInstance(rendered[0]["content"], list)
++                self.assertNotIn(secret2, json.dumps(rendered))
++                stripped_p = _str(_bfn("_messages_to_stripped_prompt")(msgs_d))
++                self.assertIn(want, stripped_p)
++                self.assertNotIn(secret2, stripped_p)
++                self.assertNotIn("{'", stripped_p)
++        with _UniEnv() as env_d:
++            bridge_d = _HttpBridge()
++            store_d = cast("dict[object, object]", _bval("_session_store"))
++            try:
++                for name, content, want in dict_text:
++                    cold = want == "[media omitted]"
++                    for stream in (False, True):
++                        with self.subTest(case=name, stream=stream, path="cold"):
++                            env_d.clear_records()
++                            body_d = _img_body(
++                                [{"role": "user", "content": content}],
++                                model=_UF_TEXT_ONLY,
++                                stream=stream,
++                            )
++                            with _UfLog() as log_d:
++                                if stream:
++                                    sse_d = _sse_post(bridge_d.port, body_d)
++                                    self.assertNotIn('"error"', sse_d)
++                                    self.assertTrue(sse_d.endswith("data: [DONE]\n\n"))
++                                else:
++                                    self.assertEqual(bridge_d.post(body_d)[0], 200)
++                            recs_d = env_d.records()
++                            self.assertEqual(len(recs_d), 1)
++                            prompt_d = _str(recs_d[0]["prompt"])
++                            self.assertIn(want, prompt_d)
++                            self.assertNotIn(secret2, prompt_d)
++                            self.assertNotIn(secret2, " ".join(_argv_of(recs_d[0])))
++                            self.assertNotIn("{'type'", prompt_d)
++                            self.assertNotIn("{'text'", prompt_d)
++                            self.assertNotIn("--add-dir", _argv_of(recs_d[0]))
++                            self.assertNotIn(secret2, log_d.text())
++                            events_d = log_d.events()
++                            self.assertEqual(len(events_d), 1 if cold else 0, events_d)
++                            if cold:
++                                self.assertIn("stage=collect", events_d[0])
++                                self.assertIn("reason=unsupported_media", events_d[0])
++                            env_d.assert_clean(self)
++                        with self.subTest(case=name, stream=stream, path="hot"):
++                            store_d.clear()
++                            env_d.scen_uf([{"cid": _CID}, {"cid": _CID_B}])
++                            env_d.clear_records()
++                            first_d: list[dict[str, object]] = [
++                                _txt_msg("user", "start")
++                            ]
++                            history_d: list[dict[str, object]] = [
++                                _txt_msg("user", "start"),
++                                _txt_msg("assistant", "ок"),
++                                {"role": "user", "content": content},
++                            ]
++                            for turn_d, hist_d in enumerate((first_d, history_d)):
++                                body_h = _img_body(
++                                    hist_d,
++                                    tools=True,
++                                    model=_UF_TEXT_ONLY,
++                                    stream=stream,
++                                )
++                                with _UfLog() as log_h:
++                                    if stream:
++                                        sse_h = _sse_post(bridge_d.port, body_h)
++                                        self.assertNotIn('"error"', sse_h)
++                                    else:
++                                        self.assertEqual(bridge_d.post(body_h)[0], 200)
++                                if turn_d == 1:
++                                    events_h = log_h.events()
++                                    self.assertEqual(
++                                        len(events_h), 1 if cold else 0, events_h
++                                    )
++                                    self.assertNotIn(secret2, log_h.text())
++                            recs_h = env_d.records()
++                            self.assertEqual(len(recs_h), 2)
++                            prompt_h = _str(recs_h[1]["prompt"])
++                            self.assertIn(want, prompt_h)
++                            self.assertNotIn(secret2, prompt_h)
++                            self.assertNotIn(secret2, " ".join(_argv_of(recs_h[1])))
++                            self.assertNotIn("{'type'", prompt_h)
++                            self.assertNotIn("{'text'", prompt_h)
++                            self.assertNotIn("--add-dir", _argv_of(recs_h[1]))
++                            if cold:
++                                self.assertNotIn("--conversation", _argv_of(recs_h[1]))
++                            else:
++                                self.assertIn("--conversation", _argv_of(recs_h[1]))
++                            env_d.assert_clean(self)
++            finally:
++                bridge_d.close()
++                store_d.clear()
++
++    def test_uf07b_optimistic_mixed_media_keeps_raster_drops_audio(self) -> None:
++        with _UniEnv() as env:
++            msgs: list[dict[str, object]] = [
++                {
++                    "role": "user",
++                    "content": [
++                        {"type": "text", "text": "сравни"},
++                        {"type": "input_image", "image_url": _uf_url("image/png")},
++                        {"type": "image", "image": {"url": _uf_url("image/jpeg")}},
++                        {
++                            "type": "input_audio",
++                            "text": "LEAK",
++                            "input_audio": {"data": "PAYLOAD"},
++                        },
++                    ],
++                }
++            ]
++            bridge = _HttpBridge()
++            try:
++                with _UfLog() as log:
++                    code, _b = bridge.post(_img_body(msgs, model=_UF_TEXT_ONLY))
++            finally:
++                bridge.close()
++            self.assertEqual(code, 200)
++            rec = env.records()[0]
++            _expect_files(
++                self,
++                rec,
++                {
++                    1: ("image/png", _UF_RASTER["image/png"]),
++                    2: ("image/jpeg", _UF_RASTER["image/jpeg"]),
++                },
++            )
++            prompt = _str(rec["prompt"])
++            for kept in ("сравни", "[image 1]", "[image 2]", "[attachments]"):
++                self.assertIn(kept, prompt)
++            for dropped in ("LEAK", "PAYLOAD", "omitted"):
++                self.assertNotIn(dropped, prompt)
++            self.assertEqual(log.events(), [])  # лишнее аудио downgrade не вызывает
++            env.assert_clean(self)
++
++    def test_uf08_delivery_and_non_media_failures_do_not_replay(self) -> None:
++        msgs = _uf_msgs(_uf_part("image/png"))
++        with _UniEnv() as env:
++            cases: list[tuple[str, dict[str, object], dict[str, object], int]] = [
++                ("text_delivered", {}, {"text": "частично"}, 1),
++                ("tool_calls_delivered", {}, {"tool_calls": [{"id": "t"}]}, 1),
++                (
++                    "sse_reasoning_delivered",
++                    {"stream": True},
++                    {"reasoning": "мысль"},
++                    1,
++                ),
++                ("delivered_reasoning_flag", {}, {"delivered_reasoning": True}, 1),
++                ("json_reasoning_only", {"stream": False}, {"reasoning": "мысль"}, 2),
++                ("sse_empty_reasoning", {"stream": True}, {"reasoning": ""}, 2),
++            ]
++            for name, over, patch, attempts in cases:
++                with self.subTest(case=name):
++                    _uf_reset_runs()
++                    ctx = _uf_ctx(msgs, over=over)
++                    out = _uf_run_once(
++                        ctx,
++                        _sequence_execute(
++                            [_scripted_out("agy_error", **patch), _scripted_out("done")]
++                        ),
++                    )
++                    self.assertEqual(len(_UfRun.calls), attempts)
++                    self.assertEqual(
++                        out["state"], "agy_error" if attempts == 1 else "done"
++                    )
++                    if attempts == 1:
++                        self.assertIsNotNone(_UfRun.calls[0]["add_dir"])
++                    env.assert_clean(self)
++            with self.subTest(case="client_gone"):
++                _uf_reset_runs()
++                ctx = _uf_ctx(msgs)
++                out = _uf_run_once(
++                    ctx, _sequence_execute([_scripted_out("client_gone")])
++                )
++                self.assertEqual(out["state"], "client_gone")
++                self.assertEqual(len(_UfRun.calls), 1)
++                env.assert_clean(self)
++            with self.subTest(case="done_bad_rc_empty_output"):
++                _uf_reset_runs()
++                ctx = _uf_ctx(msgs)
++                out = _uf_run_once(
++                    ctx, _sequence_execute([_scripted_out("done", rc=1, text="")])
++                )
++                self.assertEqual(len(_UfRun.calls), 1)
++                self.assertEqual(out["state"], "done")
++                env.assert_clean(self)
++            with self.subTest(case="constructor_oserror"):
++                _uf_reset_runs()
++                ctx = _uf_ctx(msgs)
++                out = _uf_run_once(
++                    ctx, _sequence_execute([_scripted_out("done")]), _UfRaisingRun
++                )
++                self.assertEqual(out["state"], "pump_error")
++                self.assertEqual(_UfRaisingRun.calls, 1)
++                env.assert_clean(self)
++            with self.subTest(case="launcher_unavailable_direct"):
++                _uf_reset_runs()
++                ctx = _uf_ctx(msgs)
++                unavailable = cast("type[Exception]", _bval("LauncherUnavailable"))
++
++                def missing() -> str:
++                    raise unavailable("x")
++
++                with (
++                    mock.patch.object(_bridge(), "_launcher", missing),
++                    mock.patch.object(_bridge(), "Run", _UfRun),
++                    _Sock() as sock,
++                ):
++                    handler = cast(object, _make_handler(sock))
++                    setattr(handler, "client_address", ("127.0.0.1", 1))
++                    out = _dict(
++                        _ofn(handler, "_run_once")(
++                            ctx, _text_sink, _tool_sink, _text_sink, None
++                        )
++                    )
++                self.assertEqual(out["state"], "launcher_unavailable")
++                self.assertEqual(_UfRun.calls, [])
++                env.assert_clean(self)
++            with self.subTest(case="launcher_unavailable_http_single_response"):
++                env.fx.patch("LAUNCHER", str(env.fx.tmp / "no-such-launcher"))
++                bridge = _HttpBridge()
++                try:
++                    code, body = bridge.post(_img_body(msgs))
++                finally:
++                    bridge.close()
++                self.assertEqual(
++                    (code, _err(body)["type"]), (503, "launcher_unavailable")
++                )
++                env.assert_clean(self)
++
++    def test_uf09_full_history_idempotency_and_reentry(self) -> None:
++        history: list[dict[str, object]] = [
++            {"role": "system", "content": "Правила ✓"},
++            {
++                "role": "user",
++                "content": [
++                    {"type": "text", "text": "смотри https://example.test/x?a=1"},
++                    _uf_part("image/webp"),
++                ],
++            },
++            {"role": "assistant", "content": "вижу"},
++            {"role": "tool", "tool_call_id": "t", "content": "результат"},
++            {"role": "user", "content": [_uf_bad_part()]},
++        ]
++        normalize = _bfn("_strip_media_from_messages")
++        render = _bfn("_messages_to_stripped_prompt")
++        once = normalize(history)
++        self.assertEqual(normalize(once), once)
++        prompt = _str(render(history))
++        self.assertEqual(_str(render(once)), prompt)
++        self.assertEqual(prompt.count("[image omitted]"), 2)
++        for kept in ("Правила ✓", "https://example.test/x?a=1", "вижу", "результат"):
++            self.assertIn(kept, prompt)
++        self.assertLess(prompt.index("Правила"), prompt.index("вижу"))
++        _uf_assert_media_free(self, prompt)
++        with _UniEnv() as env:
++            env.scen_uf([{"cid": _CID}, {"cid": _CID_B}, {"cid": _CID_C}])
++            bridge = _HttpBridge()
++            cast("dict[object, object]", _bval("_session_store")).clear()
++            old_only: list[dict[str, object]] = [
++                _img_msg(_uf_part("image/png")),
++                _txt_msg("assistant", "ок"),
++                _txt_msg("user", "дальше"),
++            ]
++            broken_old: list[dict[str, object]] = [
++                _img_msg(_uf_bad_part()),
++                _txt_msg("assistant", "ок"),
++                _txt_msg("user", "дальше"),
++            ]
++            try:
++                results = [
++                    bridge.post(_img_body(old_only[:1], tools=True))[0],  # холодный
++                    bridge.post(_img_body(old_only, tools=True))[0],  # горячий
++                    bridge.post(_img_body(broken_old, tools=True))[
++                        0
++                    ],  # грязная история
++                    bridge.post(_img_body(old_only, tools=True))[0],  # политика заново
++                ]
++                latest_only = bridge.post(_img_body([_img_msg(_uf_bad_part())]))[0]
++                empty = bridge.post(_img_body([_txt_msg("user", "")]))[0]
++            finally:
++                bridge.close()
++            self.assertEqual(results + [latest_only, empty], [200] * 6)
++            recs = env.records()
++            self.assertEqual(len(recs), 6)
++            cold, hot, dirty, again, image_only, empty_rec = recs
++            self.assertNotIn("--conversation", _argv_of(cold))
++            self.assertIn("--conversation", _argv_of(hot))
++            self.assertNotIn(
++                "[attachments]", _str(hot["prompt"])
++            )  # вложения только в старой части
++            self.assertNotIn("--conversation", _argv_of(dirty))
++            self.assertNotIn("--add-dir", _argv_of(dirty))
++            _uf_assert_media_free(self, _str(dirty["prompt"]))
++            self.assertIn("[image omitted]", _str(dirty["prompt"]))
++            self.assertIn(
++                "--conversation", _argv_of(again)
++            )  # новый CID после деградации
++            self.assertIn("[image omitted]", _str(image_only["prompt"]))
++            self.assertNotIn("PONG", _str(image_only["prompt"]))
++            self.assertIn(
++                "PONG", _str(empty_rec["prompt"])
++            )  # прежнее поведение пустого запроса
++            env.assert_clean(self)
++
++    def test_uf10_observability_isolation_and_lifecycle(self) -> None:
++        models = _dict(_bval("FLEET_MODELS"))
++        with _UniEnv() as env:
++            fleet_before = json.dumps(models, sort_keys=True, default=str)
++            bridge = _HttpBridge()
++            try:
++                states: list[tuple[str, object, object, str, set[str]]] = [
++                    ("strict", True, False, "proof-gated", set(_IMG_TARGETS)),
++                    ("universal", True, True, "optimistic", set(models)),
++                    ("universal", False, True, "text-only", set()),
++                    ("strict", False, False, "proof-gated", set()),
++                ]
++                for mode, input_on, fallback, acceptance, supported in states:
++                    with self.subTest(mode=mode, input=input_on):
++                        env.cfg(input_on, fallback)
++                        code_h, health = bridge.get("/health")
++                        self.assertEqual(code_h, 200)
++                        self.assertIs(health["images"], bool(supported))
++                        info = _dict(health["image_fallback"])
++                        self.assertEqual(info["mode"], mode)
++                        self.assertEqual(info["acceptance"], acceptance)
++                        self.assertIs(info["fallback_enabled"], fallback)
++                        self.assertIs(info["input_enabled"], input_on)
++                        self.assertEqual(
++                            set(cast("list[str]", info["models"])), supported
++                        )
++                        self.assertEqual(info["method"], "workspace-read")
++                        self.assertEqual(info["limits"], _bval("IMAGE_LIMITS"))
++                        listing = _get_auth(bridge.port, "/v1/models")
++                        rows = cast("list[dict[str, object]]", listing["data"])
++                        self.assertEqual(
++                            {r["id"] for r in rows if r["images"]}, supported
++                        )
++                        self.assertTrue(all(type(r["images"]) is bool for r in rows))
++                        self.assertIs(listing["images"], bool(supported))
++                        self.assertEqual(listing["image_fallback"], info)
++                self.assertEqual(
++                    json.dumps(models, sort_keys=True, default=str), fleet_before
++                )
++                outcomes: list[int] = []
++                for universal in (False, True, False, True, False):
++                    env.cfg(True, universal)
++                    outcomes.append(
++                        bridge.post(
++                            _img_body(
++                                _uf_msgs(_uf_part("image/png")), model=_UF_TEXT_ONLY
++                            )
++                        )[0]
++                    )
++                self.assertEqual(outcomes, [400, 200, 400, 200, 400])
++                env.cfg(True, True)
++                env.clear_records()
++                env.scen_uf([{}], fail_attached=True)
++                fds_before = _open_fds()
++                results: dict[str, int] = {}
++
++                def worker(model: str) -> None:
++                    msgs = _uf_msgs(_uf_part("image/png"), text="параллельно " + model)
++                    results[model] = bridge.post(_img_body(msgs, model=model))[0]
++
++                with _UfLog() as log:
++                    threads = [
++                        threading.Thread(target=worker, args=(m,))
++                        for m in ("gemini-4-argon", _UF_TEXT_ONLY)
++                    ]
++                    for thread in threads:
++                        thread.start()
++                    for thread in threads:
++                        thread.join(60)
++                self.assertEqual(set(results.values()), {200})
++                recs = env.records()
++                self.assertEqual(len(recs), 4)
++                self.assertEqual(sum("--add-dir" in _argv_of(r) for r in recs), 2)
++                self.assertEqual(len(log.events()), 2)
++                for line in log.events():
++                    self.assertIsNotNone(_UF_EVENT_RE.match(line), line)
++                    self.assertIn("stage=runtime reason=agy_error", line)
++                text = log.text()
++                self.assertNotIn(_str(_bval("AUTH_KEY")), text)
++                self.assertNotIn(_UF_B64["image/png"], text)
++                self.assertNotIn("data:image", text)
++                self.assertEqual(
++                    cast("dict[str, str]", _bval("_active_cid_owners")), {}
++                )
++                self.assertLessEqual(_open_fds(), fds_before + 2)
++                env.assert_clean(self)
++            finally:
++                bridge.close()
++            ws = Path(_str(str(_bval("WORKSPACE"))))
++            ws.mkdir(parents=True, exist_ok=True)
++            live = ws / "img-live-uf10"
++            live.mkdir()
++            with cast("threading.Lock", _bval("_active_lock")):
++                cast("set[str]", _bval("_active_img_dirs")).add(str(live))
++            _ = _bfn("_sweep_workspace")(-1.0)
++            self.assertTrue(live.exists())  # активный каталог sweep не трогает
++            with cast("threading.Lock", _bval("_active_lock")):
++                cast("set[str]", _bval("_active_img_dirs")).discard(str(live))
++            _ = _bfn("_sweep_workspace")(-1.0)
++            self.assertFalse(live.exists())
++            self.assertEqual(env.active_dirs(), set())

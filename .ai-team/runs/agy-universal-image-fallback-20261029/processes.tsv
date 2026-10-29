@@ -1,0 +1,25 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k3	90775	90775	2026-10-29T14:37:52.077496+00:00	Thu Oct 29 17:37:52 2026	running
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k2	90781	90781	2026-10-29T14:37:52.082123+00:00	Thu Oct 29 17:37:52 2026	running
+agy-universal-image-fallback-20261029	claude-sonnet-5-5-high	panel-judge-k1	90888	90888	2026-10-29T14:37:52.196995+00:00	Thu Oct 29 17:37:52 2026	running
+agy-universal-image-fallback-20261029	claude-sonnet-5-5-high	panel-judge-k1	90888	90888	2026-10-29T14:37:52.196995+00:00	Thu Oct 29 17:37:52 2026	rc=0
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k3	90775	90775	2026-10-29T14:37:52.077496+00:00	Thu Oct 29 17:37:52 2026	rc=0
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k2	90781	90781	2026-10-29T14:37:52.082123+00:00	Thu Oct 29 17:37:52 2026	rc=0
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k1	44531	44531	2026-10-29T15:29:47.955306+00:00	Thu Oct 29 18:29:47 2026	running
+agy-universal-image-fallback-20261029	gpt-6.1-sol-high	panel-judge-k3	44533	44533	2026-10-29T15:29:47.956197+00:00	Thu Oct 29 18:29:47 2026	running
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k2	44532	44532	2026-10-29T15:29:47.955529+00:00	Thu Oct 29 18:29:47 2026	running
+agy-universal-image-fallback-20261029	gpt-6.1-sol-high	panel-judge-k3	44533	44533	2026-10-29T15:29:47.956197+00:00	Thu Oct 29 18:29:47 2026	rc=0
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k2	44532	44532	2026-10-29T15:29:47.955529+00:00	Thu Oct 29 18:29:47 2026	rc=0
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k1	44531	44531	2026-10-29T15:29:47.955306+00:00	Thu Oct 29 18:29:47 2026	rc=0
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k3	32574	32574	2026-10-29T16:04:02.096307+00:00	Thu Oct 29 19:04:02 2026	running
+agy-universal-image-fallback-20261029	gpt-6.1-sol-high	panel-judge-k2	32573	32573	2026-10-29T16:04:02.096210+00:00	Thu Oct 29 19:04:02 2026	running
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k1	32575	32575	2026-10-29T16:04:02.100173+00:00	Thu Oct 29 19:04:02 2026	running
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k1	32575	32575	2026-10-29T16:04:02.100173+00:00	Thu Oct 29 19:04:02 2026	rc=0
+agy-universal-image-fallback-20261029	gpt-6.1-sol-high	panel-judge-k2	32573	32573	2026-10-29T16:04:02.096210+00:00	Thu Oct 29 19:04:02 2026	rc=0
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k3	32574	32574	2026-10-29T16:04:02.096307+00:00	Thu Oct 29 19:04:02 2026	rc=0
+agy-universal-image-fallback-20261029	gpt-6.1-sol-high	panel-judge-k1	74230	74230	2026-10-29T18:28:55.290955+00:00	Thu Oct 29 21:28:55 2026	running
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k2	75509	75509	2026-10-29T18:29:01.512631+00:00	Thu Oct 29 21:29:01 2026	running
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k3	76618	76618	2026-10-29T18:29:07.995814+00:00	Thu Oct 29 21:29:07 2026	running
+agy-universal-image-fallback-20261029	gpt-6.1-sol-high	panel-judge-k1	74230	74230	2026-10-29T18:28:55.290955+00:00	Thu Oct 29 21:28:55 2026	rc=0
+agy-universal-image-fallback-20261029	muse-wonder-full-1.0	panel-judge-k2	75509	75509	2026-10-29T18:29:01.512631+00:00	Thu Oct 29 21:29:01 2026	rc=0
+agy-universal-image-fallback-20261029	gemini-4-argon-high	panel-judge-k3	76618	76618	2026-10-29T18:29:07.995814+00:00	Thu Oct 29 21:29:07 2026	rc=0

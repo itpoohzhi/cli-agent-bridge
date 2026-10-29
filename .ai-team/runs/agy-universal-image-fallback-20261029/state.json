@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.2",
+  "task_id": "agy-universal-image-fallback",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "criticality": "S2",
+  "entry": "full",
+  "reviewer_skip": true,
+  "parent_skill": "analyst-teamlead",
+  "phase": "READY_FOR_PR",
+  "iteration": 1,
+  "status": "COMPLETE",
+  "budgets": {
+    "code_gate_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "reviewer_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "arch_panel_to_architect": {
+      "used": 0,
+      "max": 5
+    }
+  },
+  "last_transition": "FINAL_PASS",
+  "last_blocker_id": null,
+  "same_blocker_count": 0,
+  "updated_at": "2026-10-29T18:36:30.020937+00:00",
+  "panel_proofs": {
+    "arch": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/panel/arch/r1",
+      "manifest_sha256": "97a369cc3bfac0380cbcff47ae259eb63b69b1e7edc52d8b7ab00ede3b0269a1",
+      "artifact_sha256": "f6c7a59500b8ece3b756c115b82eea5fd6de42de2825a7ed93b34345b4c49e6b",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/architecture/architecture-packet.json",
+      "receipt_sha256": "be5bff86c828dc003af7e15de57ac571abc8da75836813d5a87c1eeea05c31d8",
+      "verified_at": "2026-10-29T14:42:00.774078+00:00"
+    },
+    "council": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/panel/council/r3",
+      "manifest_sha256": "aee60057ad760fa6557ce9f9ed4420a56909f7028cf295be60e65e19ecf55e7a",
+      "artifact_sha256": "a2096e45eb15ab439865c1a3b038dca7b6aac65de3ae7c7d4f550ddc5b4b6187",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/teamlead/package.md",
+      "receipt_sha256": "387e7696b71011091a5dae2ba8cbbcea2745d3bb01c2027accd1336597634e5f",
+      "verified_at": "2026-10-29T18:36:30.016071+00:00",
+      "debate": {
+        "round": 3,
+        "prior_ledger_sha256": "fca545e76ce8b2e4594145d70c3d878ea95f73496694cdaf438899bc2bd7099d",
+        "reason": "2/3 positive verdicts"
+      }
+    }
+  }
+}

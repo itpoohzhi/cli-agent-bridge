@@ -1,0 +1,33 @@
+Iteration 2 is done: F-001 and MINOR-2 are fixed, and VER-001, 002, 003, 006, 007, 008 and 009 all exit 0.
+
+**What changed in `bridges/agy-bridge/server.py`**
+- **`_classify_part`:** payload keys are now matched case-insensitively, so `InlineData`, `Image_Url` and `Input_Audio` classify as image or media. A `text` value that isn't a string is now `unknown`, never `text`.
+- **`_part_text`:** a new helper replaces `part["text"]` in `_flatten_content_stripped` and `_universal_render_messages`. A text part with no `text` key no longer raises `KeyError`.
+- **`_media_part_counts`:** every part that isn't text now counts into `other_media`, including unknown parts and dict content. This makes `if image_parts or other_media:` fire for unknown-only requests. They now log `image_fallback stage=collect reason=unsupported_media`, set `force_cold`, and no longer reach the legacy `str(...)` flatten.
+- **`do_POST`:** when the universal policy is on, `stripped_full_prompt` is always computed with `_messages_to_stripped_prompt`.
+- **MINOR-2:** `"media-degradation-reserve"` is added to `_LOG_EVENT_NAMES`.
+
+An unknown part mixed with real text is still dropped silently. Only a message made up entirely of unknown parts becomes `[media omitted]`; an existing `test_uf07` assertion encodes that. I left it as is.
+
+**Tests:** `test_uf07` now has HTTP and SSE subtests for cases A–E, appended after the frozen 249,933-byte prefix (VER-006 confirms it is unchanged). Each of the ten checks asserts:
+- status 200;
+- `PAYLOAD_SECRET_12345` absent from the CLI prompt, argv and log;
+- `[media omitted]` present in the prompt;
+- no `--add-dir`;
+- exactly one `collect` / `unsupported_media` event.
+
+**Verification:**
+- VER-003 ran 58 tests, all OK.
+- I also ran VER-004 (typecheck delta), which you didn't list. It failed on one new warning, an unused `setdefault` result in my `_lower_keys` helper. I fixed it and re-ran everything; VER-004 now exits 0 too.
+- `plans/coder-01.json` passes `validate_role_plan.py --phase after`.
+- `handoffs/coder-01.json` passes `validate_handoff.py coder`.
+- `fingerprints/coder-after.json` is rewritten.
+- The summary is at `.ai-team/runs/agy-universal-image-fallback-20261029/coder-iter2/summary.md`.
+
+**Not verified:**
+- VER-005 (full pytest) was already red on the base commit for unrelated collection errors.
+- VER-010 (live deploy) is outside the Coder's scope.
+- During VER-003, crash-guard printed "Log limit exceeded": macOS could not write 2 crash reports. The run itself exited 0.
+
+JIRA?
+Класс: не задача (правка по результатам ревью внутри текущего прогона)

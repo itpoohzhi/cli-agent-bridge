@@ -1,0 +1,1 @@
+Read `/Users/aazhiry1/Мой диск/skils/brief-review/SKILL.md` and review the panel brief at `/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/panel/arch/brief-review/base-brief.md` against the checklist (paths exist, self-contained, neutral tone, clear output format). Output `BRIEF_REVIEW: PASS` if valid.
