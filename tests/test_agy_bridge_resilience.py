@@ -3799,5 +3799,2412 @@ class L2HarnessTests(unittest.TestCase):
             self.assertEqual(health[0]["sqlite_divergence_count"], 0)
 
 
+# ======================================================================================
+# agy-silent-agent-fix: арбитр planner-контента (AD-001), безопасный прогресс нативных
+# инструментов (AD-002), раздельные idle/max таймауты (AD-003), graceful timeout
+# (AD-004) и локальный GigaRC-совместимый снимок dynamic_config.json (AD-005).
+# ======================================================================================
+
+_FLAG_ENV = {
+    "planner_content_streaming_enabled": "AGY_PLANNER_CONTENT_STREAMING_ENABLED",
+    "emit_tool_trace": "AGY_BRIDGE_EMIT_TOOL_TRACE",
+    "extended_timeout_enabled": "AGY_EXTENDED_TIMEOUT_ENABLED",
+    "graceful_timeout_on_partial": "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL",
+}
+_FLAG_NAMES = tuple(_FLAG_ENV)
+_NOTICE_MARK = "Превышен лимит времени хода agy"
+
+
+def _clean_flags(fx: _Fixture) -> None:
+    """Все четыре env-переключателя и таймаут-алиасы сняты: действует только файл/дефолт."""
+    for env in _FLAG_ENV.values():
+        fx.set_env(env, None)
+    for env in ("AGY_IDLE_TIMEOUT_S", "AGY_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"):
+        fx.set_env(env, None)
+
+
+def _clocked(fx: _Fixture) -> _FakeClock:
+    clock = _FakeClock()
+    fx.patch("time", _fake_time(clock))
+    return clock
+
+
+def _write_cfg(fx: _Fixture, data: object, mtime_ns: int | None = None) -> None:
+    text = data if isinstance(data, str) else json.dumps(data)
+    _ = fx.config.write_text(_str(text), encoding="utf-8")
+    if mtime_ns is not None:
+        os.utime(fx.config, ns=(mtime_ns, mtime_ns))
+
+
+class RuntimeConfigSnapshotTests(unittest.TestCase):
+    """AD-005: локальный GigaRC-совместимый снимок, env > JSON bool > False (VER-005)."""
+
+    def test_runtime_config_snapshot_defaults_false_without_file_or_keys(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            new_flag = _bfn("_new_flag")
+            for name in _FLAG_NAMES:
+                self.assertIs(new_flag(name), False, name)
+            _write_cfg(fx, {"unrelated": True}, 1_000_000_000)
+            clock.advance(1.1)
+            for name in _FLAG_NAMES:
+                self.assertIs(new_flag(name), False, name)
+            self.assertEqual(_bval("FLAG_TTL_S"), 1.0)
+
+    def test_runtime_config_snapshot_json_true_enables_each_and_all_flags(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            new_flag = _bfn("_new_flag")
+            stamp = 1_000_000_000
+            for name in _FLAG_NAMES:
+                with self.subTest(flag=name):
+                    stamp += 1_000
+                    _write_cfg(fx, {name: True}, stamp)
+                    clock.advance(1.1)
+                    for other in _FLAG_NAMES:
+                        self.assertIs(new_flag(other), other == name, (name, other))
+            stamp += 1_000
+            _write_cfg(fx, dict.fromkeys(_FLAG_NAMES, True), stamp)
+            clock.advance(1.1)
+            for name in _FLAG_NAMES:
+                self.assertIs(new_flag(name), True, name)
+
+    def test_runtime_config_snapshot_env_override_beats_opposite_json(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            new_flag = _bfn("_new_flag")
+            _write_cfg(fx, dict.fromkeys(_FLAG_NAMES, True), 1_000_000_000)
+            clock.advance(1.1)
+            for name, env in _FLAG_ENV.items():
+                for raw in ("0", "false", "No", "OFF", " False "):
+                    with self.subTest(flag=name, env=raw):
+                        fx.set_env(env, raw)
+                        self.assertIs(new_flag(name), False)
+                fx.set_env(env, None)
+            _write_cfg(fx, dict.fromkeys(_FLAG_NAMES, False), 2_000_000_000)
+            clock.advance(1.1)
+            for name, env in _FLAG_ENV.items():
+                for raw in ("1", "true", "Yes", "ON", " True "):
+                    with self.subTest(flag=name, env=raw):
+                        fx.set_env(env, raw)
+                        self.assertIs(new_flag(name), True)
+                fx.set_env(
+                    env, "garbage"
+                )  # невалидный env игнорируется -> файл (False)
+                self.assertIs(new_flag(name), False)
+                fx.set_env(env, None)
+
+    def test_runtime_config_snapshot_ttl_and_stat_key_reload(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            snap = _bfn("_runtime_snapshot")
+            on = '{"emit_tool_trace":true }'
+            off = '{"emit_tool_trace":false}'
+            self.assertEqual(len(on), len(off))
+            _write_cfg(fx, on, 1_000_000_000)
+            self.assertIs(_oval(snap(), "emit_tool_trace"), True)
+            _write_cfg(fx, off, 2_000_000_000)  # тот же размер, другой mtime_ns
+            clock.advance(0.99)
+            self.assertIs(_oval(snap(), "emit_tool_trace"), True)  # до TTL — без stat
+            clock.advance(0.02)
+            self.assertIs(_oval(snap(), "emit_tool_trace"), False)
+            _write_cfg(fx, '{"emit_tool_trace":  true}', 2_000_000_000)  # другой размер
+            clock.advance(1.01)
+            self.assertIs(_oval(snap(), "emit_tool_trace"), True)
+
+    def test_runtime_config_snapshot_unchanged_stat_means_zero_json_loads(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            snap = _bfn("_runtime_snapshot")
+            _write_cfg(fx, {"graceful_timeout_on_partial": True}, 1_000_000_000)
+            first = snap()
+            with mock.patch.object(json, "loads", side_effect=json.loads) as spy:
+                clock.advance(5.0)
+                again = snap()
+                clock.advance(5.0)
+                third = snap()
+            self.assertEqual(spy.call_count, 0)
+            self.assertIs(again, first)
+            self.assertIs(third, first)
+            _write_cfg(fx, {"graceful_timeout_on_partial": False}, 3_000_000_000)
+            clock.advance(5.0)
+            with mock.patch.object(json, "loads", side_effect=json.loads) as spy:
+                changed = snap()
+            self.assertEqual(spy.call_count, 1)
+            self.assertIsNot(changed, first)
+            self.assertIs(_oval(changed, "graceful_timeout_on_partial"), False)
+
+    def test_runtime_config_snapshot_bad_file_keeps_lastgood_or_false(self) -> None:
+        bad_values = (
+            '{"emit_tool_trace": "true"}',
+            '{"emit_tool_trace": 1}',
+            '{"emit_tool_trace": null}',
+            '{"emit_tool_trace": []}',
+            '{"emit_tool_trace": {}}',
+            '{"emit_tool_trace": true, "extended_timeout_enabled": "yes"}',
+            "{broken",
+            "[]",
+            "",
+        )
+        for bad in bad_values:
+            with self.subTest(bad=bad):
+                with _Fixture() as fx:  # холодный старт: целиком отвергается -> False
+                    _clean_flags(fx)
+                    _clocked(fx)
+                    _write_cfg(fx, bad, 1_000_000_000)
+                    for name in _FLAG_NAMES:
+                        self.assertIs(_bfn("_new_flag")(name), False, name)
+                with _Fixture() as fx:  # тёплый: last-known-good сохраняется
+                    _clean_flags(fx)
+                    clock = _clocked(fx)
+                    good = {
+                        "emit_tool_trace": True,
+                        "graceful_timeout_on_partial": True,
+                    }
+                    _write_cfg(fx, good, 1_000_000_000)
+                    self.assertIs(_bfn("_new_flag")("emit_tool_trace"), True)
+                    _write_cfg(fx, bad, 2_000_000_000)
+                    clock.advance(1.1)
+                    self.assertIs(_bfn("_new_flag")("emit_tool_trace"), True)
+                    self.assertIs(
+                        _bfn("_new_flag")("graceful_timeout_on_partial"), True
+                    )
+                    self.assertIs(_bfn("_new_flag")("extended_timeout_enabled"), False)
+                    _write_cfg(fx, {"emit_tool_trace": False}, 3_000_000_000)
+                    clock.advance(1.1)  # исправленный файл снова принимается
+                    self.assertIs(_bfn("_new_flag")("emit_tool_trace"), False)
+                    self.assertIs(
+                        _bfn("_new_flag")("graceful_timeout_on_partial"), False
+                    )
+
+    def test_runtime_config_snapshot_sqlite_flag_keeps_own_fail_closed(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            flag_on = _bfn("_runtime_flag_on")
+            new_flag = _bfn("_new_flag")
+            _write_cfg(
+                fx, {"SQLITE_REASONING_ENABLED": True, "emit_tool_trace": True}, 1_000
+            )
+            self.assertIs(flag_on(), True)
+            self.assertIs(new_flag("emit_tool_trace"), True)
+            _write_cfg(fx, "{broken", 2_000)
+            clock.advance(1.1)
+            self.assertIs(flag_on(), False)  # SQLite — fail-closed без lastgood
+            self.assertIs(new_flag("emit_tool_trace"), True)  # новые флаги — lastgood
+            _write_cfg(
+                fx, {"SQLITE_REASONING_ENABLED": "true", "emit_tool_trace": True}, 3_000
+            )
+            clock.advance(1.1)
+            self.assertIs(flag_on(), False)  # не-bool -> False
+            self.assertIs(new_flag("emit_tool_trace"), True)
+            _write_cfg(fx, {"SQLITE_REASONING_ENABLED": True}, 4_000)
+            clock.advance(1.1)
+            self.assertIs(flag_on(), True)
+            _write_cfg(fx, {"emit_tool_trace": True}, 5_000)
+            clock.advance(1.1)
+            self.assertIs(flag_on(), False)  # нет ключа -> False
+            fx.config.unlink()
+            clock.advance(1.1)
+            self.assertIs(flag_on(), False)
+            for name in _FLAG_NAMES:  # файл исчез -> новые флаги тоже False
+                self.assertIs(new_flag(name), False, name)
+            _write_cfg(fx, {"SQLITE_REASONING_ENABLED": True}, 6_000)
+            clock.advance(1.1)
+            fx.set_env("AGY_SQLITE_REASONING_ENABLED", "0")
+            self.assertEqual(_bfn("_sqlite_disabled_reason")(), "env")
+            fx.set_env("AGY_SQLITE_REASONING_ENABLED", None)
+            self.assertEqual(_bfn("_sqlite_disabled_reason")(), "")
+
+
+# ---- арбитр planner-контента (AD-001, VER-001) -----------------------------------------
+
+
+def _arb(turn: str = "turn-1") -> object:
+    return _bfn("_ContentArbiter")(turn)
+
+
+def _offer(arb: object, source: str, idx: object, text: str, cid: str = _CID) -> str:
+    return _str(_ofn(arb, "offer")(source, idx, text, cid))
+
+
+def _pump_queue(
+    lines: list[dict[str, object]], content: bool = False
+) -> tuple[object, list[tuple[str, object]]]:
+    """Прогнать Run._pump по готовому stdout без процесса: (run, события очереди)."""
+    run = object.__new__(cast("type[object]", _bval("Run")))
+    payload = b"".join(json.dumps(line).encode("utf-8") + b"\n" for line in lines)
+    tail = SimpleNamespace(
+        cid="",
+        bind=lambda _cid: None,
+        drain_deadline=0.0,
+        thread=SimpleNamespace(join=lambda timeout=None: None, is_alive=lambda: False),
+    )
+    attrs: dict[str, object] = {
+        "proc": SimpleNamespace(
+            stdout=io.BytesIO(payload), wait=lambda timeout=None: 0
+        ),
+        "q": queue.Queue(),
+        "_text_seen": {},
+        "_tail": tail,
+        "_proc_done": threading.Event(),
+        "_stop_watch": threading.Event(),
+        "_emit_lock": threading.Lock(),
+        "drain_closed": False,
+        "_done_put": False,
+        "got_event": False,
+        "content_streaming": content,
+        "_arbiter": _arb("turn-pump"),
+        "run_cid": "",
+        "turn_id": "turn-pump",
+        "_activity_lock": threading.Lock(),
+        "last_producer_activity_ts": 0.0,
+        "transcript_activity_ts": None,
+        "started": 0.0,
+        "err_box": [],
+    }
+    for key, value in attrs.items():
+        setattr(run, key, value)
+    _ = _ofn(run, "_pump")()
+    items: list[tuple[str, object]] = []
+    q = cast("queue.Queue[tuple[str, object]]", _oval(run, "q"))
+    while not q.empty():
+        items.append(q.get_nowait())
+    return run, items
+
+
+def _stdout_text(idx: object, text: str) -> dict[str, object]:
+    return {
+        "event": "step_update",
+        "step_update": {
+            "step_type": "agent_response",
+            "step_index": idx,
+            "text_delta": text,
+        },
+    }
+
+
+def _stdout_tool(idx: object, name: object = "run_command") -> dict[str, object]:
+    step: dict[str, object] = {
+        "step_type": "tool",
+        "state": "DONE",
+        "tool_name": name,
+        "duration_seconds": 1.5,
+    }
+    if idx is not _MISSING:
+        step["step_index"] = idx
+    return {"event": "step_update", "step_update": step}
+
+
+_MISSING = object()
+
+
+def _tail_with(
+    emit_content: Callable[[int | None, str], bool] | None = None,
+    on_activity: Callable[[], None] | None = None,
+    base_idx: int = 0,
+    offset: int = 0,
+    resumed: bool = False,
+    cid: str = _CID,
+) -> tuple[object, list[tuple[int, str]]]:
+    plan = _bfn("_TurnPlan")()
+    setattr(plan, "mode", "OFF")
+    setattr(plan, "base_idx", base_idx)
+    setattr(plan, "offset", offset)
+    emitted: list[tuple[int, str]] = []
+
+    def emit(idx: int, delta: str, on_delivered: Callable[[], None] | None) -> bool:
+        emitted.append((idx, delta))
+        if on_delivered is not None:
+            on_delivered()
+        return True
+
+    tail = _bfn("_TranscriptTail")(
+        emit,
+        threading.Event(),
+        threading.Event(),
+        resumed,
+        plan,
+        "turn-x",
+        emit_content=emit_content,
+        on_activity=on_activity,
+    )
+    _ = _ofn(tail, "bind")(cid)
+    return tail, emitted
+
+
+def _run_turn_text(
+    ctx: dict[str, object] | None = None,
+) -> tuple[dict[str, object], list[tuple[float, str]]]:
+    texts: list[tuple[float, str]] = []
+
+    def on_text(text: str) -> bool:
+        texts.append((time.time(), text))
+        return True
+
+    with _Sock() as sock:
+        handler = cast(object, _make_handler(sock))
+        out = _dict(
+            _ofn(handler, "_run_once")(
+                ctx if ctx is not None else _ctx(),
+                on_text,
+                _tool_sink,
+                _text_sink,
+                None,
+            )
+        )
+    return out, texts
+
+
+def _planner_events(
+    stdout: list[tuple[float, str]], transcript: tuple[float, str] | None, result: str
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = [_init_ev(0.05)]
+    for at, text in stdout:
+        events.append(_text_ev(at, text, step=9))
+    if transcript is not None:
+        events.append(
+            {
+                "t": transcript[0],
+                "op": "transcript",
+                "record": {
+                    "type": "PLANNER_RESPONSE",
+                    "step_index": 9,
+                    "content": transcript[1],
+                    "tool_calls": [],
+                },
+            }
+        )
+    events.append(_result_ev(0.5, response=result))
+    events.append(_exit_ev(0.55))
+    return events
+
+
+class SilentPlannerContentTests(unittest.TestCase):
+    """AD-001: двухуровневый арбитр без потерь и дублей (VER-001)."""
+
+    def test_silent_planner_content_same_idx_in_both_source_orders(self) -> None:
+        for first, second in (("stdout", "transcript"), ("transcript", "stdout")):
+            with self.subTest(first=first):
+                arb = _arb()
+                got = [
+                    _offer(arb, first, 7, "Hel"),
+                    _offer(arb, first, 7, "Hello"),
+                    _offer(arb, second, 7, "Hello world"),
+                    _offer(arb, first, 7, "Hello"),  # устаревший короткий снимок
+                    _offer(arb, second, 7, "Hello world"),  # равный снимок
+                ]
+                self.assertEqual(got, ["Hel", "lo", " world", "", ""])
+
+    def test_silent_planner_content_missing_or_invalid_idx_never_duplicates(
+        self,
+    ) -> None:
+        bad_indices = (None, -1, -7, "7x", True, 1.5, [], "")
+        for first, second in (("stdout", "transcript"), ("transcript", "stdout")):
+            for bad in bad_indices:
+                with self.subTest(first=first, bad=repr(bad)):
+                    arb = _arb()
+                    self.assertEqual(
+                        _offer(arb, first, 3, "Hello world"), "Hello world"
+                    )
+                    self.assertEqual(_offer(arb, second, bad, "Hello world"), "")
+                    self.assertEqual(_offer(arb, second, bad, "Hello"), "")  # префикс
+                    self.assertEqual(_offer(arb, second, bad, "Hello world!!"), "!!")
+                    self.assertEqual(_offer(arb, second, bad, "Hello world!!"), "")
+                    self.assertEqual(_offer(arb, first, 3, "Hello world!!"), "")
+
+    def test_silent_planner_content_mismatched_idx_aliases_one_watermark(self) -> None:
+        for first, second in (("stdout", "transcript"), ("transcript", "stdout")):
+            with self.subTest(first=first):
+                arb = _arb()
+                self.assertEqual(_offer(arb, first, 3, "ABC"), "ABC")
+                self.assertEqual(_offer(arb, second, 12, "ABC"), "")  # alias
+                self.assertEqual(_offer(arb, second, 12, "ABCD"), "D")
+                self.assertEqual(
+                    _offer(arb, first, 3, "ABCD"), ""
+                )  # монотонный watermark
+                self.assertEqual(_offer(arb, first, 3, "ABCDE"), "E")
+                self.assertEqual(_offer(arb, second, 12, "ABCDE"), "")
+                self.assertEqual(_offer(arb, second, 12, "AB"), "")
+
+    def test_silent_planner_content_late_duplicate_of_an_old_step_is_dropped(
+        self,
+    ) -> None:
+        arb = _arb()
+        self.assertEqual(_offer(arb, "stdout", 3, "first"), "first")
+        self.assertEqual(_offer(arb, "stdout", 5, "second"), "second")
+        self.assertEqual(_offer(arb, "transcript", 3, "first"), "")  # тот же idx
+        self.assertEqual(_offer(arb, "transcript", 40, "first"), "")  # чужой idx
+        self.assertEqual(_offer(arb, "transcript", None, "firs"), "")  # префикс старого
+        self.assertEqual(_offer(arb, "transcript", 41, "second"), "")
+        self.assertEqual(_offer(arb, "transcript", 42, "third"), "third")  # новый шаг
+
+    def test_silent_planner_content_non_prefix_divergence_freezes_the_step(
+        self,
+    ) -> None:
+        arb = _arb()
+        self.assertEqual(_offer(arb, "stdout", 3, "abc"), "abc")
+        self.assertEqual(_offer(arb, "stdout", 3, "abX"), "")  # не склеивать мусор
+        self.assertEqual(_offer(arb, "stdout", 3, "abXd"), "")
+        self.assertEqual(_offer(arb, "transcript", 3, "abcdef"), "")  # заморожен
+        self.assertEqual(_offer(arb, "stdout", 3, "abc"), "")  # без повтора префикса
+        self.assertEqual(_oval(arb, "divergences"), 1)
+        self.assertEqual(_offer(arb, "stdout", 4, "другой шаг"), "другой шаг")
+
+    def test_silent_planner_content_same_source_equal_steps_are_both_kept(self) -> None:
+        for source in ("stdout", "transcript"):
+            with self.subTest(source=source):
+                arb = _arb()
+                self.assertEqual(_offer(arb, source, 3, "OK"), "OK")
+                self.assertEqual(_offer(arb, source, 7, "OK"), "OK")  # независимый шаг
+                self.assertEqual(_offer(arb, source, 3, "OK"), "")
+        arb = _arb()  # без step_index подавление по тексту допустимо
+        self.assertEqual(_offer(arb, "stdout", None, "OK"), "OK")
+        self.assertEqual(_offer(arb, "stdout", None, "OK"), "")
+
+    def test_silent_planner_content_result_response_merges_without_duplicate(
+        self,
+    ) -> None:
+        arb = _arb()
+        self.assertEqual(_offer(arb, "stdout", 3, "Part one."), "Part one.")
+        self.assertEqual(_offer(arb, "stdout", 5, "Part two."), "Part two.")
+        reconcile = _ofn(arb, "reconcile_result")
+        self.assertEqual(reconcile("Part two."), "")  # равен последнему шагу
+        self.assertEqual(reconcile("Part one.Part two."), "")  # равен конкатенации
+        self.assertEqual(reconcile("Part one."), "")  # дубль старого шага
+        self.assertEqual(
+            reconcile("Part one.Part two. Tail"), " Tail"
+        )  # только остаток
+        self.assertEqual(reconcile("Part one.Part two. Tail"), "")
+        self.assertEqual(reconcile(""), "")
+        empty = _arb()
+        self.assertEqual(
+            _ofn(empty, "reconcile_result")("только result"), "только result"
+        )
+        broken = _arb()
+        self.assertEqual(_offer(broken, "stdout", 1, "abc"), "abc")
+        self.assertEqual(_ofn(broken, "reconcile_result")("xyz"), "")  # несовместим
+        self.assertEqual(_oval(broken, "divergences"), 1)
+
+    def test_silent_planner_content_lookup_work_does_not_scan_history(self) -> None:
+        arb = _arb()
+        for idx in range(100):
+            _ = _offer(arb, "stdout", idx, "шаг-%03d текст" % idx)
+        before = _int(_oval(arb, "probes"))
+        self.assertEqual(_offer(arb, "stdout", 1000, "новый шаг"), "новый шаг")
+        self.assertLessEqual(_int(_oval(arb, "probes")) - before, 3)
+        before = _int(_oval(arb, "probes"))
+        self.assertEqual(_offer(arb, "stdout", 5, "шаг-005 текст"), "")  # keyed hit
+        self.assertLessEqual(_int(_oval(arb, "probes")) - before, 3)
+        self.assertEqual(len(cast("dict[str, object]", _oval(arb, "eq_index"))), 101)
+
+    def test_silent_planner_content_unicode_and_step_cap_overflow(self) -> None:
+        arb = _arb()
+        text = "Привет, 世界 🌍"
+        parts = [_offer(arb, "stdout", 2, text[:k]) for k in range(1, len(text) + 1)]
+        self.assertEqual("".join(parts), text)
+        capped = _arb()
+        for idx in range(_int(_bval("MAX_STEPS_TRACKED"))):
+            _ = _offer(capped, "stdout", idx, "s%d" % idx)
+        self.assertEqual(_offer(capped, "stdout", 9999, "лишний"), "")
+        self.assertIs(_oval(capped, "overflow"), True)
+        self.assertEqual(_offer(capped, "stdout", 0, "s0"), "")  # без replay
+
+    def test_silent_planner_content_run_offer_queues_only_new_suffix(self) -> None:
+        run = _bare_run()
+        setattr(run, "_arbiter", _arb())
+        setattr(run, "turn_id", "turn-1")
+        setattr(run, "run_cid", _CID)
+        offer = _ofn(run, "offer_content")
+        for source, idx, text in (
+            ("stdout", 4, "Hel"),
+            ("stdout", 4, "Hello"),
+            ("transcript", 4, "Hello"),
+            ("transcript", 4, "Hello!"),
+        ):
+            _ = offer(source, idx, text)
+        q = cast("queue.Queue[tuple[str, object]]", _oval(run, "q"))
+        queued = [q.get_nowait() for _ in range(q.qsize())]
+        self.assertEqual(queued, [("text", "Hel"), ("text", "lo"), ("text", "!")])
+        setattr(run, "drain_closed", True)
+        _ = offer("transcript", 4, "Hello!?")
+        self.assertTrue(q.empty())  # после barrier ничего не ставится
+        run_result = _ofn(run, "reconcile_result")
+        self.assertEqual(run_result("Hello!"), "")
+
+    def test_silent_planner_content_tail_emits_candidates_with_idx(self) -> None:
+        with _Fixture() as fx:
+            got: list[tuple[int | None, str]] = []
+            tail, _emitted = _tail_with(
+                emit_content=lambda idx, text: got.append((idx, text)) or True,
+                base_idx=5,
+                resumed=True,
+                offset=0,
+            )
+            fx.append_record(
+                {"type": "PLANNER_RESPONSE", "step_index": 2, "content": "история"}
+            )
+            fx.append_record(
+                {
+                    "type": "PLANNER_RESPONSE",
+                    "step_index": 6,
+                    "content": "с инструментом",
+                    "tool_calls": [{"name": "run_command"}],
+                }
+            )
+            fx.append_record(
+                {"type": "PLANNER_RESPONSE", "step_index": 7, "content": ""}
+            )
+            fx.append_record(
+                {"type": "PLANNER_RESPONSE", "step_index": 8, "content": "  "}
+            )
+            fx.append_record({"type": "PLANNER_RESPONSE", "content": "без индекса"})
+            fx.append_record(
+                {"type": "PLANNER_RESPONSE", "step_index": 9, "content": "финал"}
+            )
+            _ = _ofn(tail, "_read_transcript")()
+            self.assertEqual(
+                got, [(6, "с инструментом"), (None, "без индекса"), (9, "финал")]
+            )
+
+    def test_silent_planner_content_live_dedup_through_real_run(self) -> None:
+        with _Fixture() as fx:
+            fx.set_env(_FLAG_ENV["planner_content_streaming_enabled"], "1")
+            fx.set_env(_FLAG_ENV["emit_tool_trace"], None)
+            _ = fx.write_scenario(
+                _planner_events(
+                    [(0.1, "Hel"), (0.15, "Hello")], (0.2, "Hello world"), "Hello world"
+                )
+            )
+            out, texts = _run_turn_text()
+            self.assertEqual(out["state"], "done")
+            self.assertEqual([t for _at, t in texts], ["Hel", "lo", " world"])
+            self.assertEqual(out["text"], "Hello world")
+            self.assertLess(texts[-1][0], _exit_time(fx))  # live до завершения процесса
+            # transcript-only: result.response не дублирует уже выданный текст
+            fx.transcript().unlink()  # новый разговор: чужой транскрипт не читается
+            _ = fx.write_scenario(_planner_events([], (0.2, "Hello"), "Hello"))
+            out, texts = _run_turn_text()
+            self.assertEqual([t for _at, t in texts], ["Hello"])
+            # текст есть только в result — досылается целиком
+            fx.transcript().unlink()
+            _ = fx.write_scenario(_planner_events([], None, "только result"))
+            out, texts = _run_turn_text()
+            self.assertEqual([t for _at, t in texts], ["только result"])
+
+    def test_silent_planner_content_flag_off_keeps_legacy_stdout_only(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            _ = fx.write_scenario(
+                _planner_events(
+                    [(0.1, "Hel"), (0.15, "Hello")], (0.2, "Hello world"), "Hello world"
+                )
+            )
+            out, texts = _run_turn_text()
+            self.assertEqual(out["state"], "done")
+            self.assertEqual([t for _at, t in texts], ["Hel", "lo"])
+
+    def test_silent_planner_content_pump_routes_stdout_through_arbiter(self) -> None:
+        lines = [
+            _stdout_text(4, "Hel"),
+            _stdout_text(4, "Hello"),
+            _stdout_text("4", "Hello"),  # тот же шаг в строковом виде
+            _stdout_text(None, "Hello"),  # без idx: дубль по тексту
+        ]
+        _run, items = _pump_queue(lines, content=True)
+        self.assertEqual(
+            [p for k, p in items if k == "text"],
+            ["Hel", "lo"],
+        )
+        _run, legacy = _pump_queue(lines, content=False)
+        self.assertEqual([p for k, p in legacy if k == "text"][:2], ["Hel", "lo"])
+
+
+# ---- безопасный прогресс инструментов (AD-002, VER-002) --------------------------------
+
+
+class SilentToolProgressTests(unittest.TestCase):
+    def test_silent_tool_progress_pump_forwards_step_index_and_fallback_ordinal(
+        self,
+    ) -> None:
+        lines = [
+            _stdout_tool(4),
+            _stdout_tool("5", "read_file"),
+            _stdout_tool(None),
+            _stdout_tool(_MISSING),
+            _stdout_tool(-1),
+        ]
+        _run, items = _pump_queue(lines)
+        events = [cast("dict[str, object]", p) for k, p in items if k == "tool_trace"]
+        self.assertEqual([e["step_index"] for e in events], [4, 5, None, None, -1])
+        self.assertNotIn("fallback_ordinal", events[0])
+        self.assertNotIn("fallback_ordinal", events[1])
+        self.assertEqual(events[2]["fallback_ordinal"], 1)
+        self.assertEqual(events[3]["fallback_ordinal"], 2)
+        self.assertNotIn("fallback_ordinal", events[4])
+        self.assertEqual(events[0]["name"], "run_command")
+        self.assertEqual(events[0]["duration_s"], 1.5)
+
+    def test_silent_tool_progress_allowlist_and_sanitising(self) -> None:
+        safe = _bfn("_safe_tool_name")
+        for name in ("run_command", "read_file", "write_file", "manage_task"):
+            self.assertEqual(safe(name), name)
+        self.assertEqual(safe("default_api:run_command"), "run_command")
+        self.assertEqual(safe("  read_file "), "read_file")
+        for hostile in (
+            "unknown_tool",
+            "rm -rf / # SECRET-TOKEN-abcdef0123456789",
+            "run_command\r\nX-Injected: 1",
+            "\x1b[31mrun_command\x1b[0m",
+            "read_file\x00",
+            "/Users/me/.ssh/id_rsa",
+            "AKIAIOSFODNN7EXAMPLE",
+            "",
+            None,
+            123,
+            ["run_command"],
+        ):
+            self.assertEqual(safe(hostile), "tool", repr(hostile))
+
+    def test_silent_tool_progress_marker_format_and_no_payload_leak(self) -> None:
+        self.assertEqual(
+            _bfn("_format_tool_marker")("run_command"),
+            "\n[🔧 tool: run_command — done]\n",
+        )
+        progress = _bfn("_ToolProgress")("turn-1", _CID)
+        secret = "sk-SECRET-0123456789abcdef"
+        event = {
+            "name": "write_file",
+            "duration_s": 3.2,
+            "step_index": 9,
+            "args": {"path": "/etc/passwd", "token": secret},
+            "result": secret,
+            "env": {"KEY": secret},
+            "path": "/Users/me/secret",
+        }
+        marker = _ofn(progress, "marker")(event)
+        self.assertEqual(marker, "\n[🔧 tool: write_file — done]\n")
+        text = _str(marker)
+        for forbidden in (secret, "/etc/passwd", "args", "result", "\r", "\x1b", "3.2"):
+            self.assertNotIn(forbidden, text)
+        hostile = _ofn(progress, "marker")({"name": secret + "\r\n", "step_index": 10})
+        self.assertEqual(hostile, "\n[🔧 tool: tool — done]\n")
+
+    def test_silent_tool_progress_done_dedup_by_turn_cid_step_not_name(self) -> None:
+        progress = _bfn("_ToolProgress")("turn-1", _CID)
+        marker = _ofn(progress, "marker")
+        self.assertIsNotNone(marker({"name": "run_command", "step_index": 4}))
+        self.assertIsNone(marker({"name": "run_command", "step_index": 4}))
+        self.assertIsNone(marker({"name": "read_file", "step_index": 4}))  # имя не ключ
+        self.assertIsNotNone(marker({"name": "run_command", "step_index": 5}))
+        # один и тот же объект события (replay) с fallback ordinal — подавляется
+        replay = {"name": "run_command", "step_index": None, "fallback_ordinal": 1}
+        self.assertIsNotNone(marker(replay))
+        self.assertIsNone(marker(replay))
+        self.assertIsNotNone(
+            marker({"name": "run_command", "step_index": None, "fallback_ordinal": 2})
+        )
+        self.assertIsNotNone(marker({"name": "run_command"}))  # без ordinal: не теряем
+        other_turn = _bfn("_ToolProgress")("turn-2", _CID)
+        self.assertIsNotNone(
+            _ofn(other_turn, "marker")({"name": "run_command", "step_index": 4})
+        )
+
+    def _sse_tool_run(
+        self,
+        events: list[object],
+        env: str | None,
+        fail_on: int | None = None,
+        file_flag: bool | None = None,
+    ) -> list[object]:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["emit_tool_trace"], env)
+            if file_flag is not None:
+                _write_cfg(fx, {"emit_tool_trace": file_flag}, 1_000)
+
+            def run_once(_ctx: object, _t: object, on_tool: Any, *_a: object) -> object:
+                results.extend(on_tool(event) for event in events)
+                return {
+                    "state": "done",
+                    "rc": 0,
+                    "text": "ok",
+                    "usage": {},
+                    "conversation_id": "",
+                }
+
+            results: list[object] = []
+            _h, _s, wfile, _c = _sse_with(run_once, fail_on=fail_on)
+            return [results, wfile.writes]
+
+    def test_silent_tool_progress_disabled_is_noop_before_formatting(self) -> None:
+        event = {"name": "run_command", "step_index": 4}
+        for env, file_flag in ((None, None), ("0", True), (None, False)):
+            with self.subTest(env=env, file_flag=file_flag):
+                with mock.patch.object(
+                    _bridge(),
+                    "_format_tool_marker",
+                    side_effect=_bfn("_format_tool_marker"),
+                ) as fmt:
+                    results, writes = self._sse_tool_run([event], env, None, file_flag)
+                self.assertEqual(results, [True])
+                self.assertEqual(fmt.call_count, 0)
+                self.assertFalse(
+                    any("reasoning_content" in w for w in cast("list[str]", writes))
+                )
+
+    def test_silent_tool_progress_enabled_by_env_or_json_emits_once(self) -> None:
+        events = [
+            {"name": "run_command", "step_index": 4},
+            {"name": "run_command", "step_index": 4},
+            {"name": "weird\r\nname", "step_index": 5},
+        ]
+        for env, file_flag in (("1", None), ("true", False), (None, True)):
+            with self.subTest(env=env, file_flag=file_flag):
+                results, writes = self._sse_tool_run(events, env, None, file_flag)
+                self.assertEqual(results, [True, True, True])
+                frames = [
+                    w for w in cast("list[str]", writes) if "reasoning_content" in w
+                ]
+                self.assertEqual(len(frames), 2)
+                joined = "".join(frames)
+                self.assertIn("tool: run_command", joined)
+                self.assertIn("tool: tool", joined)
+                self.assertNotIn("weird", joined)
+
+    def test_silent_tool_progress_counter_moves_only_after_successful_emit(
+        self,
+    ) -> None:
+        # Маркер не дошёл (запись упала) -> это не «отданный прогресс»: graceful не включается.
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
+            fx.set_env(_FLAG_ENV["graceful_timeout_on_partial"], "1")
+            outcomes: list[object] = []
+
+            def run_once(ctx: Any, _t: object, on_tool: Any, *_a: object) -> object:
+                outcomes.append(on_tool({"name": "run_command", "step_index": 1}))
+                out: dict[str, object] = {
+                    "state": "timeout",
+                    "rc": 124,
+                    "text": "",
+                    "usage": {},
+                    "conversation_id": "",
+                    "timeout_limit_s": 1800.0,
+                }
+                hook = ctx.get("finalize_timeout")
+                if hook is not None:
+                    hook(out)
+                return out
+
+            _h, _s, wfile, _c = _sse_with(run_once, fail_on=2)
+            self.assertEqual(outcomes, [False])
+            frames = _frames_json(wfile.writes)
+            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertTrue(any(isinstance(f, dict) and "error" in f for f in frames))
+
+    def test_silent_tool_progress_json_mode_collects_markers(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
+            sent: list[tuple[int, dict[str, object]]] = []
+
+            def run_once(
+                _ctx: object, _t: object, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                _ = on_r("думаю. ")
+                _ = on_tool({"name": "read_file", "step_index": 1})
+                _ = on_tool({"name": "read_file", "step_index": 1})
+                return {
+                    "state": "done",
+                    "rc": 0,
+                    "text": "ответ",
+                    "reasoning": "думаю. ",
+                    "usage": {},
+                    "conversation_id": "",
+                }
+
+            with _Sock() as sock:
+                handler = cast(object, _make_handler(sock))
+                setattr(handler, "_run_once", run_once)
+                setattr(handler, "_send", lambda c, p: sent.append((c, p)))
+                _ = _ofn(handler, "_serve_json")({"model": "m"})
+            message = _dict(
+                _dict(cast("list[object]", sent[0][1]["choices"])[0])["message"]
+            )
+            self.assertEqual(
+                message["reasoning_content"],
+                "думаю. \n[🔧 tool: read_file — done]\n",
+            )
+
+
+# ---- таймауты по активности producer (AD-003, VER-003) ---------------------------------
+
+
+class _ScriptQueue:
+    """Очередь на мок-часах: каждый get() двигает часы, сценарий играет producer."""
+
+    def __init__(
+        self,
+        clock: _FakeClock,
+        run: SimpleNamespace,
+        script: Callable[[int, float, SimpleNamespace], object | None],
+    ) -> None:
+        self.clock = clock
+        self.run = run
+        self.script = script
+        self.tick = 0
+
+    def get(self, timeout: float = 1.0) -> Any:
+        self.tick += 1
+        self.clock.advance(float(timeout) if timeout else 1.0)
+        item = self.script(self.tick, self.clock(), self.run)
+        if item is None:
+            raise queue.Empty
+        return item
+
+
+def _policy(
+    clock: _FakeClock,
+    idle: float = 1800.0,
+    cap: float = 3594.5,
+    max_s: float = 3600.0,
+    can_start: bool = True,
+) -> object:
+    return _bfn("_TimeoutPolicy")(
+        t_req_start=clock(),
+        idle_timeout_s=idle,
+        max_timeout_s=max_s,
+        effective_max_timeout_s=cap,
+        can_start=can_start,
+    )
+
+
+def _ext_run(
+    clock: _FakeClock,
+    script: Callable[[int, float, SimpleNamespace], object | None],
+    got_event: bool = True,
+    policy: object | None = None,
+    controller: Any = None,
+) -> SimpleNamespace:
+    ctrl = controller or AdaptiveTimeoutController(
+        idle_timeout_s=300.0,
+        safety_cap_s=1800.0,
+        finish_reserve_s=0.0,
+        watchdog_enabled=False,
+        clock=clock,
+    )
+    run = SimpleNamespace(
+        controller=ctrl,
+        proc=SimpleNamespace(pid=424242),
+        got_event=got_event,
+        started=clock(),
+        err_box=[],
+        policy=policy if policy is not None else _policy(clock),
+        last_producer_activity_ts=clock(),
+        transcript_activity_ts=None,
+    )
+    run.q = _ScriptQueue(clock, run, script)
+    return run
+
+
+def _stamp(run: SimpleNamespace, now: float, transcript: bool = False) -> None:
+    run.last_producer_activity_ts = now
+    if transcript:
+        run.transcript_activity_ts = now
+
+
+class SilentTimeoutPolicyTests(unittest.TestCase):
+    def _exec(
+        self, fx: _Fixture, clock: _FakeClock, run: SimpleNamespace
+    ) -> dict[str, object]:
+        return _dict(cast(object, _execute_with_clock(clock, run)))
+
+    def test_silent_timeout_policy_producer_activity_extends_idle_until_max(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            start = clock()
+
+            def script(tick: int, now: float, run: SimpleNamespace) -> object | None:
+                if tick % 600 == 0:  # stdout/transcript растёт, очередь пуста
+                    _stamp(run, now, transcript=bool(tick % 1200))
+                return None
+
+            out = self._exec(fx, clock, _ext_run(clock, script))
+            self.assertEqual(out["state"], "timeout")
+            self.assertEqual(out["rc"], 124)
+            self.assertEqual(out["timeout_limit_s"], 3594.5)
+            self.assertLessEqual(clock() - start, 3596.0)
+            self.assertGreater(clock() - start, 3594.0)  # idle 1800 не сработал
+
+    def test_silent_timeout_policy_silent_producers_idle_at_configured_1800(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            start = clock()
+            spy = _SpyController(
+                AdaptiveTimeoutController(
+                    idle_timeout_s=300.0,
+                    safety_cap_s=1800.0,
+                    finish_reserve_s=0.0,
+                    watchdog_enabled=False,
+                    clock=clock,
+                ),
+                forced=(False, "", None),  # «CPU растёт» — контроллер не должен решать
+            )
+            run = _ext_run(clock, lambda *_a: None, controller=spy)
+            out = self._exec(fx, clock, run)
+            self.assertEqual(out["state"], "idle_timeout")
+            self.assertEqual(out["rc"], 124)
+            self.assertEqual(out["timeout_limit_s"], 1800.0)
+            self.assertGreaterEqual(clock() - start, 1800.0)
+            self.assertLess(clock() - start, 1802.0)
+            self.assertEqual(spy.check_calls, 0)  # cpu_delta контроллера не участвует
+
+    def test_silent_timeout_policy_activity_resets_idle_window(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            start = clock()
+
+            def script(tick: int, now: float, run: SimpleNamespace) -> object | None:
+                if tick == 1700:  # последняя активность на 1700 с
+                    _stamp(run, now)
+                return None
+
+            out = self._exec(fx, clock, _ext_run(clock, script))
+            self.assertEqual(out["state"], "idle_timeout")
+            self.assertGreaterEqual(clock() - start, 3500.0)  # 1700 + 1800
+
+    def test_silent_timeout_policy_transcript_progress_blocks_first_token_timeout(
+        self,
+    ) -> None:
+        for stamp_tick in (60, 120):  # в том числе ровно на границе окна 120 с
+            with self.subTest(stamp_tick=stamp_tick):
+                with _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+                    clock = _FakeClock()
+
+                    def script(
+                        tick: int,
+                        now: float,
+                        run: SimpleNamespace,
+                        at: int = stamp_tick,
+                    ) -> object | None:
+                        if tick == at:
+                            _stamp(run, now, transcript=True)
+                        return None
+
+                    run = _ext_run(clock, script, got_event=False)
+                    out = self._exec(fx, clock, run)
+                    self.assertNotEqual(out["state"], "first_token_timeout")
+                    self.assertEqual(out["state"], "idle_timeout")
+
+    def test_silent_timeout_policy_total_silence_is_first_token_timeout_504(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            start = clock()
+            out = self._exec(
+                fx, clock, _ext_run(clock, lambda *_a: None, got_event=False)
+            )
+            self.assertEqual(out["state"], "first_token_timeout")
+            self.assertGreater(clock() - start, _float(_bval("FIRST_TOKEN_TIMEOUT_S")))
+            self.assertLess(clock() - start, 123.0)
+            body = _dict(_ofn(_bval("Handler"), "_error_body")(out))
+            self.assertEqual(body["code"], 504)
+            self.assertEqual(body["type"], "first_token_timeout")
+
+    def test_silent_timeout_policy_cap_is_checked_with_a_non_empty_queue(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            start = clock()
+            served = [0]
+
+            def script(tick: int, now: float, run: SimpleNamespace) -> object | None:
+                _stamp(run, now)
+                served[0] += 1
+                return ("text", "x")  # очередь никогда не пуста
+
+            out = self._exec(fx, clock, _ext_run(clock, script))
+            self.assertEqual(out["state"], "timeout")
+            self.assertEqual(out["timeout_limit_s"], 3594.5)
+            self.assertLessEqual(clock() - start, 3596.0)
+            self.assertGreater(served[0], 3500)
+
+    def test_silent_timeout_policy_live_kill_switch_returns_to_legacy_deadline(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            start = clock()
+
+            def script(tick: int, now: float, run: SimpleNamespace) -> object | None:
+                _stamp(run, now)
+                if tick == 500:
+                    fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "0")
+                return None
+
+            quiet = AdaptiveTimeoutController(
+                idle_timeout_s=1e9,
+                safety_cap_s=3594.5,
+                finish_reserve_s=0.0,
+                watchdog_enabled=False,
+                clock=clock,
+            )
+            out = self._exec(fx, clock, _ext_run(clock, script, controller=quiet))
+            self.assertEqual(out["state"], "timeout")
+            self.assertEqual(out["timeout_limit_s"], float(_bval("TIMEOUT_S")))
+            self.assertLessEqual(clock() - start, 1802.0)
+            self.assertGreaterEqual(clock() - start, 1800.0)
+
+    def test_silent_timeout_policy_disabled_keeps_legacy_300_and_1800(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _FakeClock()
+            start = clock()
+            ctrl = AdaptiveTimeoutController(
+                idle_timeout_s=_float(_bval("IDLE_TIMEOUT_S")),
+                safety_cap_s=float(_bval("TIMEOUT_S")),
+                finish_reserve_s=0.0,
+                watchdog_enabled=False,
+                clock=clock,
+            )
+            out = _dict(
+                cast(
+                    object, _execute_with_clock(clock, _fake_run(clock, ctrl, [], 2000))
+                )
+            )
+            self.assertEqual(out["state"], "idle_timeout")
+            self.assertLessEqual(clock() - start, 306.0)
+            self.assertEqual(_bval("IDLE_TIMEOUT_S"), 300.0)
+            self.assertEqual(_bval("TIMEOUT_S"), 1800)
+            # даже при включённом env без policy у run действует прежний путь
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            ctrl = AdaptiveTimeoutController(
+                idle_timeout_s=1e9,
+                safety_cap_s=1800.0,
+                finish_reserve_s=0.0,
+                watchdog_enabled=False,
+                clock=clock,
+            )
+            run = _fake_run(clock, ctrl, [], 2000)
+            out = _dict(cast(object, _execute_with_clock(clock, run)))
+            self.assertEqual(out["state"], "timeout")
+            self.assertLessEqual(clock() - 1000.0, 1802.0)
+
+    def test_silent_timeout_policy_budget_math_and_env_overrides(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            build = _bfn("_build_timeout_policy")
+            t_req = clock()
+            self.assertIsNone(build(t_req))  # флаг выключен -> legacy
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            policy = build(t_req)
+            self.assertEqual(_oval(policy, "idle_timeout_s"), 1800.0)
+            self.assertEqual(_oval(policy, "max_timeout_s"), 3600.0)
+            self.assertEqual(_oval(policy, "effective_max_timeout_s"), 3594.5)
+            self.assertIs(_oval(policy, "can_start"), True)
+            clock.advance(900.0)  # admission ждал 900 с
+            policy = build(t_req)
+            self.assertEqual(_oval(policy, "effective_max_timeout_s"), 2694.5)
+            self.assertEqual(900.0 + 2694.5 + 0.5 + 5.0, 3600.0)
+            for remaining, can in (
+                (5.5, False),
+                (6.0, False),
+                (6.25, False),
+                (6.5, True),
+            ):
+                with self.subTest(remaining=remaining):
+                    clock.now = t_req + 3600.0 - remaining
+                    policy = build(t_req)
+                    self.assertIs(_oval(policy, "can_start"), can)
+                    if can:
+                        self.assertEqual(_oval(policy, "effective_max_timeout_s"), 1.0)
+            clock.now = t_req
+            fx.set_env("AGY_BRIDGE_IDLE_TIMEOUT", "77")  # старый алиас
+            self.assertEqual(_oval(build(t_req), "idle_timeout_s"), 77.0)
+            fx.set_env("AGY_IDLE_TIMEOUT_S", "50")  # новый env приоритетнее
+            fx.set_env("AGY_TIMEOUT_S", "100")
+            policy = build(t_req)
+            self.assertEqual(_oval(policy, "idle_timeout_s"), 50.0)
+            self.assertEqual(_oval(policy, "max_timeout_s"), 100.0)
+            self.assertEqual(_oval(policy, "effective_max_timeout_s"), 100.0)
+            fx.set_env("AGY_IDLE_TIMEOUT_S", "nan")
+            fx.set_env("AGY_TIMEOUT_S", "-4")
+            policy = build(t_req)
+            self.assertEqual(_oval(policy, "idle_timeout_s"), 77.0)
+            self.assertEqual(_oval(policy, "max_timeout_s"), 3600.0)
+
+    def _run_once_policy(
+        self,
+        fx: _Fixture,
+        clock: _FakeClock,
+        outs: list[dict[str, object]],
+        spend: list[float],
+        ctx_over: dict[str, object] | None = None,
+        sem: object | None = None,
+    ) -> tuple[dict[str, object], list[object]]:
+        policies: list[object] = []
+
+        class PolicyRun:
+            created: list[object] = []
+
+            def __init__(self, *_a: object, **kw: object) -> None:
+                self.kw = kw
+                PolicyRun.created.append(self)
+
+            def close(self) -> None:
+                return None
+
+        calls = [0]
+
+        def fake_execute(_self: object, run: Any, *_a: object) -> dict[str, object]:
+            policies.append(run.kw.get("policy"))
+            clock.advance(spend[calls[0]])
+            out = dict(outs[calls[0]])
+            calls[0] += 1
+            return out
+
+        ctx = _ctx(stream=False, t_req_start=clock())
+        ctx.update(ctx_over or {})
+        with contextlib.ExitStack() as stack:
+            _ = stack.enter_context(
+                mock.patch.object(_bval("Handler"), "_execute", fake_execute)
+            )
+            _ = stack.enter_context(mock.patch.object(_bridge(), "Run", PolicyRun))
+            _ = stack.enter_context(
+                mock.patch.object(_bridge(), "_launcher", _fake_launcher_path)
+            )
+            _ = stack.enter_context(mock.patch.object(_bridge(), "_rng", _zero))
+            if sem is not None:
+                _ = stack.enter_context(mock.patch.object(_bridge(), "_slots", sem))
+            with _Sock() as sock:
+                handler = cast(object, _make_handler(sock))
+                out = _dict(
+                    _ofn(handler, "_run_once")(
+                        ctx, _text_sink, _tool_sink, _text_sink, None
+                    )
+                )
+        return out, policies + [len(PolicyRun.created)]
+
+    def test_silent_timeout_policy_retry_spends_the_same_request_budget(self) -> None:
+        err = {
+            "state": "agy_error",
+            "rc": 1,
+            "text": "",
+            "err": "x",
+            "usage": {},
+            "conversation_id": "",
+        }
+        ok = {
+            "state": "done",
+            "rc": 0,
+            "text": "ok",
+            "err": "",
+            "usage": {},
+            "conversation_id": "",
+        }
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _clocked(fx)
+            out, seen = self._run_once_policy(fx, clock, [err, ok], [1000.0, 1.0])
+            self.assertEqual(out["state"], "done")
+            self.assertEqual(seen[-1], 2)
+            first, second = seen[0], seen[1]
+            self.assertEqual(_oval(first, "effective_max_timeout_s"), 3594.5)
+            # вторая попытка: бюджет НЕ перезапущен, 1000 с уже потрачены
+            self.assertEqual(_oval(second, "effective_max_timeout_s"), 2594.5)
+            clock2 = _clocked(fx)
+            out, seen = self._run_once_policy(fx, clock2, [err, ok], [3595.0, 1.0])
+            self.assertEqual(seen[-1], 1)  # remaining = 5с <= 5.5 -> 0 новых attempts
+            self.assertEqual(out["state"], "agy_error")
+            clock3 = _clocked(fx)
+            out, seen = self._run_once_policy(
+                fx, clock3, [err, ok], [3593.0, 1.0]
+            )  # остаток 7с: попытка допустима
+            self.assertEqual(seen[-1], 2)
+            clock4 = _clocked(fx)
+            out, seen = self._run_once_policy(
+                fx, clock4, [err, ok], [3594.0, 1.0]
+            )  # остаток 6с: полезное окно < 1с -> новой попытки нет
+            self.assertEqual(seen[-1], 1)
+
+    def test_silent_timeout_policy_request_clock_starts_before_admission(self) -> None:
+        class GateSem:
+            def __init__(self, clock: _FakeClock, grant_at: float) -> None:
+                self.clock = clock
+                self.grant_at = grant_at
+
+            def acquire(
+                self, blocking: bool = True, timeout: float | None = None
+            ) -> bool:
+                if not blocking:
+                    return self.clock() >= self.grant_at
+                self.clock.advance(float(timeout or 0.0))
+                return self.clock() >= self.grant_at
+
+            def release(self) -> None:
+                return None
+
+        ok = {
+            "state": "done",
+            "rc": 0,
+            "text": "ok",
+            "err": "",
+            "usage": {},
+            "conversation_id": "",
+        }
+        for wait, expected in ((0.0, 3594.5), (900.0, 2694.5)):
+            with self.subTest(wait=wait):
+                with _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+                    clock = _clocked(fx)
+                    sem = GateSem(clock, clock() + wait)
+                    out, seen = self._run_once_policy(
+                        fx,
+                        clock,
+                        [ok],
+                        [0.0],
+                        sem=sem,
+                        ctx_over={"t_req_start": clock()},
+                    )
+                    self.assertEqual(out["state"], "done")
+                    self.assertEqual(
+                        _oval(seen[0], "effective_max_timeout_s"), expected
+                    )
+
+    def test_silent_timeout_policy_exhausted_budget_never_spawns_a_run(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _clocked(fx)
+            ok = {
+                "state": "done",
+                "rc": 0,
+                "text": "ok",
+                "err": "",
+                "usage": {},
+                "conversation_id": "",
+            }
+            out, seen = self._run_once_policy(
+                fx, clock, [ok], [0.0], ctx_over={"t_req_start": clock() - 3595.0}
+            )
+            self.assertEqual(seen, [0])
+            self.assertEqual(out["state"], "timeout")
+            self.assertEqual(out["rc"], 124)
+            body = _dict(_ofn(_bval("Handler"), "_error_body")(out))
+            self.assertEqual(body["code"], 504)
+
+    def test_silent_timeout_policy_tail_deadline_follows_effective_max(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = Path(tmp) / "fake-launcher.sh"
+            _ = launcher.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
+            launcher.chmod(0o755)
+            runs: list[Any] = []
+            try:
+                with (
+                    mock.patch.object(
+                        _bridge(), "_launcher", return_value=str(launcher)
+                    ),
+                    mock.patch.object(_bridge(), "WORKSPACE", Path(tmp) / "ws"),
+                ):
+                    clock = _FakeClock(time.monotonic())
+                    policy = _bfn("_TimeoutPolicy")(
+                        t_req_start=clock(),
+                        idle_timeout_s=1800.0,
+                        max_timeout_s=3600.0,
+                        effective_max_timeout_s=3594.5,
+                        can_start=True,
+                    )
+                    ext = srv.Run("p", "m", "low", "default", "", "tag", policy=policy)
+                    runs.append(ext)
+                    legacy = srv.Run("p", "m", "low", "default", "", "tag")
+                    runs.append(legacy)
+                    self.assertEqual(ext._tail.deadline_s, 3594.5 + 60.0)
+                    self.assertEqual(ext.controller.idle_timeout_s, 1800.0)
+                    self.assertEqual(ext.controller.safety_cap_s, 3594.5)
+                    self.assertEqual(legacy._tail.deadline_s, srv.TIMEOUT_S + 60.0)
+                    self.assertIsNone(legacy.policy)
+            finally:
+                for run in runs:
+                    run.close()
+
+    def test_silent_timeout_policy_tail_loop_survives_past_1860_when_extended(
+        self,
+    ) -> None:
+        class ClockEvent:
+            def __init__(self, clock: _FakeClock) -> None:
+                self.clock = clock
+
+            def is_set(self) -> bool:
+                return False
+
+            def wait(self, timeout: float | None = None) -> bool:
+                self.clock.advance(float(timeout or 0.0))
+                return False
+
+        for deadline_s, low, high in (
+            (3594.5 + 60.0, 3654.5, 3665.0),
+            (None, 1860.0, 1871.0),
+        ):
+            with self.subTest(deadline_s=deadline_s):
+                with _Fixture() as fx:
+                    clock = _clocked(fx)
+                    fx.patch("TRANSCRIPT_POLL_S", 10.0)
+                    tail, _e = _tail_with()
+                    if deadline_s is not None:
+                        setattr(tail, "deadline_s", deadline_s)
+                    setattr(tail, "done_event", ClockEvent(clock))
+                    ticks = [0]
+                    setattr(tail, "tick", lambda: ticks.__setitem__(0, ticks[0] + 1))
+                    start = clock()
+                    _ = _ofn(tail, "_run_loop")()
+                    self.assertGreaterEqual(clock() - start, low)
+                    self.assertLessEqual(clock() - start, high)
+                    self.assertGreater(ticks[0], 180)
+
+    def test_silent_timeout_policy_tail_stamps_only_real_progress(self) -> None:
+        with _Fixture() as fx:
+            stamps: list[int] = []
+            history = [
+                {"type": "PLANNER_RESPONSE", "step_index": 0, "thinking": "h0"},
+                {"type": "PLANNER_RESPONSE", "step_index": 1, "thinking": "h1"},
+            ]
+            for record in history:
+                fx.append_record(record)
+            size = fx.transcript().stat().st_size
+            tail, _e = _tail_with(
+                on_activity=lambda: stamps.append(1),
+                base_idx=2,
+                offset=size,
+                resumed=True,
+            )
+            read = _ofn(tail, "_read_transcript")
+            _ = read()
+            _ = read()  # неизменный stat: пустой тик
+            self.assertEqual(stamps, [], "старый бэклог/пустой тик не продлевают idle")
+            fx.append_record({"type": "PLANNER_RESPONSE", "step_index": 2})
+            _ = read()
+            self.assertEqual(len(stamps), 1)
+            _ = read()
+            self.assertEqual(len(stamps), 1, "повторное чтение тех же байт")
+            with open(fx.transcript(), "a", encoding="utf-8") as fh:
+                _ = fh.write('{"type": "PLANNER_RESP')  # рост неполной строки
+            _ = read()
+            self.assertEqual(len(stamps), 2)
+            _ = fx.transcript().write_text(
+                "".join(json.dumps(r) + "\n" for r in history), encoding="utf-8"
+            )  # файл переписан: снова только история (idx < base_idx)
+            before = len(stamps)
+            _ = read()
+            self.assertEqual(len(stamps), before)
+
+    def test_silent_timeout_policy_pump_stamps_valid_stdout_events_only(self) -> None:
+        run, _items = _pump_queue([])
+        self.assertEqual(_oval(run, "last_producer_activity_ts"), 0.0)
+        run, _items = _pump_queue(
+            [{"event": "init", "conversation_id": _CID, "init": {}}]
+        )
+        self.assertGreater(_float(_oval(run, "last_producer_activity_ts")), 0.0)
+        self.assertIsNone(_oval(run, "transcript_activity_ts"))
+        _ = _ofn(run, "note_producer_activity")("transcript")
+        self.assertIsNotNone(_oval(run, "transcript_activity_ts"))
+        self.assertGreaterEqual(
+            _float(_oval(run, "last_producer_activity_ts")),
+            _float(_oval(run, "transcript_activity_ts")),
+        )
+
+
+# ---- graceful timeout (AD-004, VER-004) -------------------------------------------------
+
+
+class _FakeSocket:
+    """Сокет-заглушка: фиксирует settimeout перед каждой записью."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def settimeout(self, value: float | None) -> None:
+        if value is not None:
+            self.timeouts.append(value)
+
+
+class _FakeWfile:
+    """wfile на мок-часах: каждая запись стоит `cost` секунд, N-я запись может упасть."""
+
+    def __init__(self, clock: _FakeClock, cost: float, fail_on: int | None) -> None:
+        self.clock = clock
+        self.cost = cost
+        self.fail_on = fail_on
+        self.calls = 0
+        self.writes: list[str] = []
+
+    def write(self, data: bytes) -> None:
+        self.calls += 1
+        if self.fail_on is not None and self.calls == self.fail_on:
+            raise BrokenPipeError("client gone")
+        self.clock.advance(self.cost)
+        self.writes.append(data.decode("utf-8"))
+
+    def flush(self) -> None:
+        return None
+
+
+def _make_sse_handler(sock: _FakeSocket, wfile: _FakeWfile) -> Any:
+    handler = _make_handler(cast(socket.socket, cast(object, sock)))
+    handler.wfile = wfile
+
+    def noop(*_a: object, **_k: object) -> None:
+        return None
+
+    handler.send_response = noop
+    handler.send_header = noop
+    handler.end_headers = noop
+    return handler
+
+
+def _sse_with(
+    run_once: Callable[..., object],
+    ctx: dict[str, object] | None = None,
+    clock: _FakeClock | None = None,
+    cost: float = 0.0,
+    fail_on: int | None = None,
+) -> tuple[Any, _FakeSocket, _FakeWfile, _FakeClock]:
+    clock = clock or _FakeClock(5000.0)
+    sock = _FakeSocket()
+    wfile = _FakeWfile(clock, cost, fail_on)
+    handler = _make_sse_handler(sock, wfile)
+    handler._run_once = run_once
+    with mock.patch.object(_bridge(), "time", _fake_time(clock)):
+        handler._serve_sse(ctx if ctx is not None else {"model": "m"})
+    return handler, sock, wfile, clock
+
+
+def _frames_json(frames: list[str]) -> list[object]:
+    parsed: list[object] = []
+    for frame in frames:
+        if frame.startswith("data: [DONE]"):
+            parsed.append("[DONE]")
+        elif frame.startswith("data: "):
+            parsed.append(json.loads(frame[len("data: ") :]))
+    return parsed
+
+
+def _is_length(frame: object) -> bool:
+    if not isinstance(frame, dict) or "choices" not in frame:
+        return False
+    return (
+        _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason")
+        == "length"
+    )
+
+
+def _content_of(frame: object) -> str:
+    if not isinstance(frame, dict) or "choices" not in frame:
+        return ""
+    delta = _dict(_dict(cast("list[object]", frame["choices"])[0]).get("delta") or {})
+    return _str(delta.get("content") or "")
+
+
+def _scenario(
+    kind: str,
+    on_text: Callable[[str], object],
+    on_tool: Callable[[dict[str, object]], object],
+    on_reasoning: Callable[[str], object],
+    out: dict[str, object],
+) -> None:
+    if kind == "content":
+        _ = on_text("часть ответа")
+        out["text"] = "часть ответа"
+    elif kind == "reasoning":
+        _ = on_reasoning("мысль")
+        out["reasoning"] = "мысль"
+    elif kind == "tool":
+        _ = on_tool({"name": "run_command", "duration_s": 1.0, "step_index": 4})
+    elif kind == "retained":
+        out["retained_events"] = [("text", "удержанный хвост")]
+        out["retained_planner_text"] = "удержанный хвост"
+
+
+def _timeout_out(state: str) -> dict[str, object]:
+    limit = 1800.0 if state == "timeout" else 900.0
+    return {
+        "state": state,
+        "rc": 124,
+        "text": "",
+        "reasoning": "",
+        "usage": {},
+        "result": {},
+        "err": "x",
+        "tool_calls": [],
+        "tool_events": 0,
+        "conversation_id": _CID,
+        "timeout_limit_s": limit,
+    }
+
+
+class SilentGracefulTimeoutTests(unittest.TestCase):
+    def _flags(self, fx: _Fixture, graceful: bool) -> None:
+        _clean_flags(fx)
+        fx.set_env(_FLAG_ENV["graceful_timeout_on_partial"], "1" if graceful else "0")
+        fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
+
+    def _sse_case(
+        self, state: str, kind: str, graceful: bool
+    ) -> tuple[list[object], dict[str, object]]:
+        with _Fixture() as fx:
+            self._flags(fx, graceful)
+            holder: dict[str, object] = {}
+
+            def run_once(
+                ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out(state)
+                _scenario(kind, on_text, on_tool, on_r, out)
+                hook = ctx.get("finalize_timeout")
+                if hook is not None and out["state"] in ("timeout", "idle_timeout"):
+                    hook(out)
+                holder["out"] = out
+                return out
+
+            _h, _s, wfile, _c = _sse_with(
+                run_once, {"model": "m", "t_req_start": 5000.0}
+            )
+            return _frames_json(wfile.writes), _dict(holder["out"])
+
+    def test_silent_graceful_timeout_sse_matrix(self) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for kind in ("content", "reasoning", "tool", "retained", "silent"):
+                for graceful in (True, False):
+                    with self.subTest(state=state, kind=kind, graceful=graceful):
+                        frames, _out = self._sse_case(state, kind, graceful)
+                        self.assertEqual(frames[-1], "[DONE]")
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        errors = [
+                            f for f in frames if isinstance(f, dict) and "error" in f
+                        ]
+                        lengths = [f for f in frames if _is_length(f)]
+                        notices = [f for f in frames if _NOTICE_MARK in _content_of(f)]
+                        if graceful and kind != "silent":
+                            self.assertEqual(errors, [])
+                            self.assertEqual(len(lengths), 1)
+                            self.assertEqual(len(notices), 1)
+                            notice = _content_of(notices[0])
+                            self.assertIn(state, notice)
+                            limit = "1800" if state == "timeout" else "900"
+                            self.assertIn(limit + "s", notice)
+                            self.assertEqual(
+                                [f for f in frames if _content_of(f)][-1], notices[0]
+                            )
+                            if kind == "retained":
+                                self.assertIn(
+                                    "удержанный хвост",
+                                    "".join(_content_of(f) for f in frames),
+                                )
+                            self.assertEqual(
+                                sum(
+                                    1
+                                    for f in frames
+                                    if _is_length(f) or "error" in _dict_or_empty(f)
+                                ),
+                                1,
+                            )
+                        else:
+                            self.assertEqual(lengths, [])
+                            self.assertEqual(notices, [])
+                            self.assertEqual(len(errors), 1)
+                            err = _dict(_dict(errors[0])["error"])
+                            self.assertEqual(err["code"], 504)
+                            self.assertEqual(err["type"], state)
+
+    def test_silent_graceful_timeout_first_token_timeout_stays_504(self) -> None:
+        with _Fixture() as fx:
+            self._flags(fx, True)
+
+            def run_once(ctx: Any, *_a: object) -> object:
+                out = _timeout_out("first_token_timeout")
+                hook = ctx.get("finalize_timeout")
+                if hook is not None:
+                    hook(out)
+                return out
+
+            _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
+            frames = _frames_json(wfile.writes)
+            self.assertFalse(any(_is_length(f) for f in frames))
+            errors = [f for f in frames if isinstance(f, dict) and "error" in f]
+            self.assertEqual(
+                _dict(_dict(errors[0])["error"])["type"], "first_token_timeout"
+            )
+
+    def test_silent_graceful_timeout_json_matrix(self) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for kind in ("content", "reasoning", "tool", "retained", "silent"):
+                for graceful in (True, False):
+                    with self.subTest(state=state, kind=kind, graceful=graceful):
+                        with _Fixture() as fx:
+                            self._flags(fx, graceful)
+                            sent: list[tuple[int, dict[str, object]]] = []
+
+                            def run_once(
+                                _ctx: object,
+                                on_t: Any,
+                                on_tool: Any,
+                                on_r: Any,
+                                _k: object,
+                            ) -> object:
+                                out = _timeout_out(state)
+                                _scenario(kind, on_t, on_tool, on_r, out)
+                                return out
+
+                            with _Sock() as sock:
+                                handler = cast(object, _make_handler(sock))
+                                setattr(handler, "_run_once", run_once)
+                                setattr(
+                                    handler, "_send", lambda c, p: sent.append((c, p))
+                                )
+                                _ = _ofn(handler, "_serve_json")({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        code, payload = sent[0]
+                        if graceful and kind != "silent":
+                            self.assertEqual(code, 200)
+                            choice = _dict(cast("list[object]", payload["choices"])[0])
+                            self.assertEqual(choice["finish_reason"], "length")
+                            message = _dict(choice["message"])
+                            content = _str(message["content"])
+                            self.assertEqual(content.count(_NOTICE_MARK), 1)
+                            self.assertIn(state, content)
+                            if kind == "content":
+                                self.assertIn("часть ответа", content)
+                            if kind == "retained":
+                                self.assertIn("удержанный хвост", content)
+                            if kind == "reasoning":
+                                self.assertEqual(message["reasoning_content"], "мысль")
+                            if kind == "tool":
+                                self.assertIn(
+                                    "tool: run_command",
+                                    _str(message["reasoning_content"]),
+                                )
+                        else:
+                            self.assertEqual(code, 504)
+                            self.assertEqual(_dict(payload["error"])["type"], state)
+
+    def test_silent_graceful_timeout_final_flush_window_survives_expired_deadline(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            self._flags(fx, True)
+            clock = _FakeClock(9000.0)
+
+            def run_once(
+                ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out("timeout")
+                _scenario("retained", on_text, on_tool, on_r, out)
+                ctx["finalize_timeout"](out)
+                return out
+
+            # нативный дедлайн (1800 с) давно истёк, но запрос ещё внутри 3600 с
+            ctx = {"model": "m", "t_req_start": 9000.0 - 3000.0}
+            _h, sock, wfile, _c = _sse_with(run_once, ctx, clock=clock, cost=0.0)
+            frames = _frames_json(wfile.writes)
+            self.assertTrue(any(_is_length(f) for f in frames))
+            self.assertEqual(frames[-1], "[DONE]")
+            self.assertEqual(
+                sock.timeouts, [5.0, 5.0, 5.0, 5.0]
+            )  # суффикс+notice+length+DONE
+
+    def test_silent_graceful_timeout_one_shared_window_for_all_final_writes(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            self._flags(fx, True)
+
+            def run_once(
+                ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out("idle_timeout")
+                _scenario("retained", on_text, on_tool, on_r, out)
+                ctx["finalize_timeout"](out)
+                return out
+
+            ctx = {"model": "m", "t_req_start": 5000.0}
+            _h, sock, wfile, clock = _sse_with(run_once, ctx, cost=2.0)
+            # role-chunk (до окна) стоит 2 с; окно открывается после него.
+            # Запись 1: remaining 5 -> 5.0; 2: 3.0; 3: 1.0; остаток исчерпан -> DONE не пишется
+            self.assertEqual(sock.timeouts, [5.0, 3.0, 1.0])
+            frames = _frames_json(wfile.writes)
+            self.assertNotIn("[DONE]", frames)
+            self.assertEqual(
+                sum(1 for f in frames if _NOTICE_MARK in _content_of(f)), 1
+            )
+            self.assertEqual(
+                sum(1 for f in frames if _is_length(f)), 1
+            )  # третья запись
+            self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + length
+            self.assertLessEqual(max(sock.timeouts), 5.0)
+
+    def test_silent_graceful_timeout_window_never_crosses_request_ceiling(self) -> None:
+        with _Fixture() as fx:
+            self._flags(fx, True)
+
+            def run_once(
+                ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out("timeout")
+                _scenario("content", on_text, on_tool, on_r, out)
+                ctx["finalize_timeout"](out)
+                return out
+
+            # до потолка запроса (t_req_start + 3600) осталось 2 с
+            ctx = {"model": "m", "t_req_start": 5000.0 - 3598.0}
+            _h, sock, wfile, _c = _sse_with(run_once, ctx, cost=0.0)
+            self.assertEqual(sock.timeouts[0], 2.0)
+            self.assertTrue(all(t <= 2.0 for t in sock.timeouts))
+
+    def test_silent_graceful_timeout_write_failure_stops_all_further_writes(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            self._flags(fx, True)
+
+            def run_once(
+                ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out("timeout")
+                _scenario("retained", on_text, on_tool, on_r, out)
+                ctx["finalize_timeout"](out)
+                holder.append(out)
+                return out
+
+            holder: list[dict[str, object]] = []
+            # вызовы: 1 role, 2 суффикс, 3 notice (падает) -> length/DONE не пишутся
+            _h, sock, wfile, _c = _sse_with(
+                run_once, {"model": "m", "t_req_start": 5000.0}, fail_on=3
+            )
+            self.assertEqual(wfile.calls, 3)
+            frames = _frames_json(wfile.writes)
+            self.assertNotIn("[DONE]", frames)
+            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertFalse(any(isinstance(f, dict) and "error" in f for f in frames))
+            self.assertIs(
+                holder[0].get("graceful_done"), True
+            )  # терминал ровно один раз
+
+    def test_silent_graceful_timeout_post_hoc_path_when_run_once_skips_the_hook(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            self._flags(fx, True)
+
+            def run_once(
+                _ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out("timeout")
+                _scenario("content", on_text, on_tool, on_r, out)
+                return out
+
+            _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
+            frames = _frames_json(wfile.writes)
+            self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
+            self.assertEqual(frames[-1], "[DONE]")
+
+    def test_silent_graceful_timeout_run_once_finalizes_before_close_and_never_retries(
+        self,
+    ) -> None:
+        order: list[str] = []
+
+        class Run:
+            created: list[object] = []
+
+            def __init__(self, *_a: object, **_k: object) -> None:
+                Run.created.append(self)
+
+            def close(self) -> None:
+                order.append("close")
+
+        partial = _timeout_out("idle_timeout")
+        partial["text"] = "часть"
+
+        def fake_execute(_self: object, _run: object, *_a: object) -> dict[str, object]:
+            return dict(partial)
+
+        def finalize(out: dict[str, object]) -> None:
+            order.append("finalize:" + _str(out["state"]))
+
+        with _Fixture() as fx:
+            self._flags(fx, True)
+            before_ok = list(cast("list[float]", _bval("_last_ok")))
+            with (
+                mock.patch.object(_bval("Handler"), "_execute", fake_execute),
+                mock.patch.object(_bridge(), "Run", Run),
+                mock.patch.object(_bridge(), "_launcher", _fake_launcher_path),
+                mock.patch.object(_bridge(), "_session_commit") as commit,
+            ):
+                with _Sock() as sock:
+                    handler = cast(object, _make_handler(sock))
+                    ctx = _ctx(
+                        stream=True, sess_key=("m", "", "low"), conversation_id=_CID
+                    )
+                    ctx["finalize_timeout"] = finalize
+                    out = _dict(
+                        _ofn(handler, "_run_once")(
+                            ctx, _text_sink, _tool_sink, _text_sink, None
+                        )
+                    )
+            self.assertEqual(order, ["finalize:idle_timeout", "close"])
+            self.assertEqual(len(Run.created), 1)  # второй attempt не запускается
+            self.assertEqual(out["state"], "idle_timeout")
+            self.assertEqual(out["rc"], 124)
+            commit.assert_not_called()
+            self.assertEqual(list(cast("list[float]", _bval("_last_ok"))), [0.0])
+            del before_ok
+
+    def test_silent_graceful_timeout_execute_drains_retained_text_before_returning(
+        self,
+    ) -> None:
+        for graceful in (True, False):
+            with self.subTest(graceful=graceful):
+                with _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+                    fx.set_env(
+                        _FLAG_ENV["graceful_timeout_on_partial"],
+                        "1" if graceful else "0",
+                    )
+                    clock = _FakeClock()
+                    drains: list[float] = []
+
+                    def script(
+                        tick: int, now: float, run: SimpleNamespace
+                    ) -> object | None:
+                        _stamp(run, now)
+                        return None
+
+                    run = _ext_run(clock, script)
+                    run.content_streaming = True
+
+                    def terminal_drain(budget_s: float) -> list[tuple[str, object]]:
+                        drains.append(budget_s)
+                        return [("text", "хвост"), ("reasoning", "мысль")]
+
+                    run.terminal_drain = terminal_drain
+                    out = _dict(cast(object, _execute_with_clock(clock, run)))
+                    self.assertEqual(out["state"], "timeout")
+                    self.assertEqual(drains, [0.5])
+                    if graceful:
+                        self.assertEqual(
+                            out["retained_events"],
+                            [("text", "хвост"), ("reasoning", "мысль")],
+                        )
+                        self.assertEqual(out["retained_planner_text"], "хвост")
+                        self.assertEqual(out["text"], "")
+                    else:  # без graceful остаток уходит сразу (до legacy-ошибки)
+                        self.assertNotIn("retained_events", out)
+                        self.assertEqual(out["text"], "хвост")
+                        self.assertEqual(out["reasoning"], "мысль")
+        self.assertEqual(_bval("T_DRAIN_MAX_S"), 0.5)
+        self.assertEqual(_bval("T_FINAL_FLUSH_S"), 5.0)
+        self.assertEqual(_bval("T_REQ_BUDGET_S"), 3600.0)
+        self.assertEqual(_bval("T_MIN_ATTEMPT_S"), 1.0)
+
+    def _e2e_fixture(self, fx: _Fixture, env: dict[str, str]) -> None:
+        _clean_flags(fx)
+        for name in _FLAG_NAMES:
+            fx.set_env(_FLAG_ENV[name], "1")
+        for key, value in env.items():
+            fx.set_env(key, value)
+        events = [
+            _init_ev(0.05),
+            _text_ev(0.1, "Hello", step=9),
+            {
+                "t": 0.2,
+                "op": "transcript",
+                "record": {
+                    "type": "PLANNER_RESPONSE",
+                    "step_index": 9,
+                    "content": "Hello world",
+                    "tool_calls": [],
+                },
+            },
+            _exit_ev(40.0),  # процесс «зависает»: его добьёт зачистка группы
+        ]
+        _ = fx.write_scenario(events)
+
+    def test_silent_graceful_timeout_end_to_end_real_run_both_states_sse(self) -> None:
+        cases = (
+            ("timeout", {"AGY_TIMEOUT_S": "2", "AGY_IDLE_TIMEOUT_S": "50"}),
+            ("idle_timeout", {"AGY_TIMEOUT_S": "60", "AGY_IDLE_TIMEOUT_S": "1.5"}),
+        )
+        for state, env in cases:
+            with self.subTest(state=state), _Fixture() as fx:
+                self._e2e_fixture(fx, env)
+                started = time.monotonic()
+                frames = _frames_json(_sse_frames(_ctx()))
+                self.assertLess(time.monotonic() - started, 15.0)
+                self.assertEqual(frames[-1], "[DONE]")
+                self.assertEqual(frames.count("[DONE]"), 1)
+                self.assertEqual(
+                    [f for f in frames if isinstance(f, dict) and "error" in f], []
+                )
+                texts = [_content_of(f) for f in frames if _content_of(f)]
+                self.assertEqual(texts[:2], ["Hello", " world"])  # без дублей
+                self.assertEqual(len(texts), 3)
+                self.assertIn(_NOTICE_MARK, texts[2])
+                self.assertIn(state, texts[2])
+                self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
+                self.assertEqual(list(cast("list[float]", _bval("_last_ok"))), [0.0])
+                self.assertEqual(len(cast("dict[int, object]", _bval("_active"))), 0)
+
+    def test_silent_graceful_timeout_end_to_end_real_run_json_and_silent_504(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            self._e2e_fixture(fx, {"AGY_TIMEOUT_S": "2", "AGY_IDLE_TIMEOUT_S": "50"})
+            sent: list[tuple[int, dict[str, object]]] = []
+            with _Sock() as sock:
+                handler = cast(object, _make_handler(sock))
+                setattr(handler, "_send", lambda c, p: sent.append((c, p)))
+                _ = _ofn(handler, "_serve_json")(_ctx(stream=False))
+            code, payload = sent[0]
+            self.assertEqual(code, 200)
+            choice = _dict(cast("list[object]", payload["choices"])[0])
+            self.assertEqual(choice["finish_reason"], "length")
+            content = _str(_dict(choice["message"])["content"])
+            self.assertTrue(content.startswith("Hello world"))
+            self.assertEqual(content.count(_NOTICE_MARK), 1)
+        with _Fixture() as fx:  # полная тишина обоих источников -> прежний 504
+            _clean_flags(fx)
+            for name in ("extended_timeout_enabled", "graceful_timeout_on_partial"):
+                fx.set_env(_FLAG_ENV[name], "1")
+            fx.set_env("AGY_TIMEOUT_S", "2")
+            _ = fx.write_scenario([_init_ev(0.05), _exit_ev(40.0)])
+            sent = []
+            with _Sock() as sock:
+                handler = cast(object, _make_handler(sock))
+                setattr(handler, "_send", lambda c, p: sent.append((c, p)))
+                _ = _ofn(handler, "_serve_json")(_ctx(stream=False))
+            self.assertEqual(sent[0][0], 504)
+            self.assertEqual(_dict(sent[0][1]["error"])["type"], "timeout")
+
+
+# ---- Цикл 2 Совета: RW-001/002/003, F-004/005/007 ----------------------------------------
+
+
+class _TimeoutSocket(_FakeSocket):
+    """Сокет с gettimeout(): таймаут восстанавливается после окна финальной записи."""
+
+    def __init__(self, initial: float | None) -> None:
+        super().__init__()
+        self.current = initial
+        self.history: list[float | None] = []
+
+    def gettimeout(self) -> float | None:
+        return self.current
+
+    def settimeout(self, value: float | None) -> None:
+        self.current = value
+        self.history.append(value)
+
+
+def _tool_trace_events(items: list[tuple[str, object]]) -> list[dict[str, object]]:
+    return [cast("dict[str, object]", p) for k, p in items if k == "tool_trace"]
+
+
+class SilentCouncilCycle2Tests(unittest.TestCase):
+    def _flags(self, fx: _Fixture) -> None:
+        _clean_flags(fx)
+        fx.set_env(_FLAG_ENV["graceful_timeout_on_partial"], "1")
+        fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
+
+    # -- RW-001: окно финальной записи не отравляет keep-alive соединение -----------------
+
+    def test_silent_rw001_sse_window_reset_restores_timeout_and_deadline(self) -> None:
+        with _Fixture() as fx:
+            self._flags(fx)
+            clock = _FakeClock(5000.0)
+            sock = _TimeoutSocket(7.0)
+            handler = _make_sse_handler(sock, _FakeWfile(clock, 0.0, None))
+            armed: list[object] = []
+
+            def run_once(
+                ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out("timeout")
+                _scenario("content", on_text, on_tool, on_r, out)
+                ctx["finalize_timeout"](out)
+                armed.append(handler._flush_deadline)
+                return out
+
+            handler._run_once = run_once
+            with mock.patch.object(_bridge(), "time", _fake_time(clock)):
+                handler._serve_sse({"model": "m", "t_req_start": 5000.0})
+            self.assertIsNotNone(armed[0])
+            self.assertIsNone(handler._flush_deadline)
+            self.assertEqual(sock.current, 7.0)
+            self.assertTrue(any(t is not None and t <= 5.0 for t in sock.history))
+
+    def test_silent_rw001_sse_exception_still_resets_and_next_request_is_clean(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            self._flags(fx)
+            clock = _FakeClock(5000.0)
+            sock = _TimeoutSocket(7.0)
+            wfile = _FakeWfile(clock, 0.0, None)
+            handler = _make_sse_handler(sock, wfile)
+
+            def boom(
+                ctx: Any, on_text: Any, on_tool: Any, on_r: Any, _k: object
+            ) -> object:
+                out = _timeout_out("timeout")
+                _scenario("content", on_text, on_tool, on_r, out)
+                ctx["finalize_timeout"](out)
+                raise RuntimeError("boom")
+
+            handler._run_once = boom
+            with mock.patch.object(_bridge(), "time", _fake_time(clock)):
+                with self.assertRaises(RuntimeError):
+                    handler._serve_sse({"model": "m", "t_req_start": 5000.0})
+            self.assertIsNone(handler._flush_deadline)
+            self.assertEqual(sock.current, 7.0)
+            # Следующий запрос на том же Handler: окно закрыто, записи не отбрасываются.
+            wfile.writes.clear()
+            clock.advance(60.0)
+
+            def ok_run(*_a: object) -> object:
+                return {
+                    "state": "done",
+                    "rc": 0,
+                    "text": "ok",
+                    "usage": {},
+                    "conversation_id": "",
+                }
+
+            handler._run_once = ok_run
+            with mock.patch.object(_bridge(), "time", _fake_time(clock)):
+                handler._serve_sse({"model": "m"})
+            self.assertEqual(_frames_json(wfile.writes)[-1], "[DONE]")
+            self.assertEqual(sock.current, 7.0)
+
+    def test_silent_rw001_json_window_reset_restores_timeout_hook_and_post_hoc(
+        self,
+    ) -> None:
+        for use_hook in (True, False):
+            with self.subTest(use_hook=use_hook), _Fixture() as fx:
+                self._flags(fx)
+                sent: list[tuple[int, dict[str, object]]] = []
+
+                def run_once(ctx: Any, *_a: object) -> object:
+                    out = _timeout_out("timeout")
+                    out["text"] = "часть"
+                    if use_hook:
+                        ctx["finalize_timeout"](out)
+                    return out
+
+                with _Sock() as sock:
+                    sock.settimeout(9.0)
+                    handler = _make_handler(sock)
+                    handler._run_once = run_once
+                    handler._send = lambda c, p: sent.append((c, p))
+                    handler._serve_json({"model": "m"})
+                    self.assertEqual(sock.gettimeout(), 9.0)
+                self.assertIsNone(handler._flush_deadline)
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0][0], 200)
+                choice = _dict(cast("list[object]", sent[0][1]["choices"])[0])
+                self.assertEqual(choice["finish_reason"], "length")
+
+    def test_silent_rw001_json_finalizes_before_run_close(self) -> None:
+        order: list[str] = []
+
+        class FakeRun:
+            def __init__(self, *_a: object, **_k: object) -> None:
+                pass
+
+            def close(self) -> None:
+                order.append("close")
+
+        partial = _timeout_out("timeout")
+        partial["text"] = "часть"
+
+        def fake_execute(_self: object, _run: object, *_a: object) -> dict[str, object]:
+            return dict(partial)
+
+        with _Fixture() as fx:
+            self._flags(fx)
+            with (
+                mock.patch.object(_bval("Handler"), "_execute", fake_execute),
+                mock.patch.object(_bridge(), "Run", FakeRun),
+                mock.patch.object(_bridge(), "_launcher", _fake_launcher_path),
+            ):
+                with _Sock() as sock:
+                    handler = _make_handler(sock)
+                    handler._send = lambda c, _p: order.append("send:%d" % c)
+                    handler._serve_json(_ctx(stream=False))
+        self.assertEqual(order, ["send:200", "close"])
+
+    # -- RW-002: потолок маркеров, двухфазный учёт, стабильный ordinal --------------------
+
+    def test_silent_rw002_marker_cap_is_32_and_anonymous_events_are_capped(
+        self,
+    ) -> None:
+        self.assertEqual(_bval("MAX_TOOL_MARKERS_PER_TURN"), 32)
+        anon = _bfn("_ToolProgress")("turn-1", _CID)
+        got = [_ofn(anon, "marker")({"name": "run_command"}) for _ in range(40)]
+        self.assertEqual(sum(1 for m in got if m is not None), 32)
+        indexed = _bfn("_ToolProgress")("turn-1", _CID)
+        got = [
+            _ofn(indexed, "marker")({"name": "run_command", "step_index": i})
+            for i in range(40)
+        ]
+        self.assertEqual(sum(1 for m in got if m is not None), 32)
+
+    def test_silent_rw002_two_phase_commit_spends_budget_only_after_commit(
+        self,
+    ) -> None:
+        progress = _bfn("_ToolProgress")("turn-1", _CID, 2)
+        marker = _ofn(progress, "marker")
+        commit = _ofn(progress, "commit")
+        event = {"name": "run_command", "step_index": 1}
+        self.assertIsNotNone(marker(event, commit=False))
+        self.assertIsNotNone(
+            marker(event, commit=False)
+        )  # не засчитан: можно повторить
+        _ = commit()
+        self.assertIsNone(marker(event, commit=False))
+        self.assertIsNotNone(marker({"name": "read_file", "step_index": 2}))
+        self.assertIsNone(marker({"name": "read_file", "step_index": 3}))  # лимит 2
+
+    def test_silent_rw002_failed_sink_write_does_not_consume_marker(self) -> None:
+        event = {"name": "run_command", "step_index": 4}
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
+            results: list[object] = []
+
+            def run_once(_ctx: object, _t: object, on_tool: Any, *_a: object) -> object:
+                results.append(on_tool(event))
+                results.append(on_tool(event))
+                return {
+                    "state": "done",
+                    "rc": 0,
+                    "text": "ok",
+                    "usage": {},
+                    "conversation_id": "",
+                }
+
+            # запись 1 — role-chunk, запись 2 — первый маркер (падает), 3 — повтор
+            _h, _s, wfile, _c = _sse_with(run_once, fail_on=2)
+        self.assertEqual(results, [False, True])
+        frames = [w for w in wfile.writes if "reasoning_content" in w]
+        self.assertEqual(len(frames), 1)
+
+    def test_silent_rw002_call_id_dedups_regardless_of_ordinal(self) -> None:
+        progress = _bfn("_ToolProgress")("turn-1", _CID)
+        marker = _ofn(progress, "marker")
+        first = {"name": "run_command", "call_id": "c-1", "fallback_ordinal": 1}
+        self.assertIsNotNone(marker(first))
+        self.assertIsNone(marker({**first, "fallback_ordinal": 9}))
+        self.assertIsNotNone(marker({**first, "call_id": "c-2"}))
+
+    def test_silent_rw002_pump_ordinal_is_stable_for_replayed_call_id(self) -> None:
+        def with_id(call_id: str | None) -> dict[str, object]:
+            line = _stdout_tool(_MISSING)
+            if call_id is not None:
+                _dict(line["step_update"])["call_id"] = call_id
+            return line
+
+        _run, items = _pump_queue(
+            [with_id("c-1"), with_id("c-1"), with_id("c-2"), with_id(None)]
+        )
+        events = _tool_trace_events(items)
+        self.assertEqual([e["fallback_ordinal"] for e in events], [1, 1, 2, 3])
+        self.assertEqual(
+            [e.get("call_id") for e in events], ["c-1", "c-1", "c-2", None]
+        )
+
+    # -- RW-003: расширенный allowlist ----------------------------------------------------
+
+    def test_silent_rw003_extended_allowlist_and_mcp_names(self) -> None:
+        safe = _bfn("_safe_tool_name")
+        for name in (
+            "edit_file",
+            "search_web",
+            "invoke_subagent",
+            "grep_search",
+            "multi_replace_file_content",
+            "bash",
+        ):
+            self.assertEqual(safe(name), name)
+        self.assertEqual(safe("default_api:invoke_subagent"), "invoke_subagent")
+        self.assertEqual(safe("mcp_github_create_issue"), "mcp_github_create_issue")
+        for hostile in (
+            "unknown_tool",
+            "/bin/bash",
+            "./bash",
+            "a/../bash",
+            "mcp_" + "x" * 40 + "_y",
+            "mcp_SECRET_token",
+            "mcp_github",
+            "sk-SECRET-0123456789abcdef",
+        ):
+            self.assertEqual(safe(hostile), "tool", repr(hostile))
+
+    # -- F-004: удержание расходящегося текста и отсутствие O(n^2) ------------------------
+
+    def test_silent_f004_divergent_text_is_retained_and_capped(self) -> None:
+        arb = _arb()
+        self.assertEqual(_offer(arb, "stdout", 1, "hello"), "hello")
+        self.assertEqual(_offer(arb, "stdout", 1, "other text"), "")
+        self.assertEqual(_ofn(arb, "retained_divergent_text")(), "other text")
+        limit = _int(_bval("MAX_RETAINED_DIVERGENT_BYTES"))
+        self.assertEqual(limit, 65536)
+        self.assertEqual(_offer(arb, "stdout", 2, "a"), "a")
+        self.assertEqual(_offer(arb, "stdout", 2, "ы" * 100000), "")
+        text = _str(_ofn(arb, "retained_divergent_text")())
+        self.assertLessEqual(len(text.encode("utf-8")), limit)
+        self.assertGreater(len(text.encode("utf-8")), limit - 4)
+
+    def test_silent_f004_reconcile_result_divergence_is_retained(self) -> None:
+        arb = _arb()
+        self.assertEqual(_offer(arb, "stdout", 1, "alpha"), "alpha")
+        self.assertEqual(_ofn(arb, "reconcile_result")("совсем другое"), "")
+        self.assertEqual(_ofn(arb, "retained_divergent_text")(), "совсем другое")
+
+    def test_silent_f004_same_source_equal_steps_do_not_scan_quadratically(
+        self,
+    ) -> None:
+        arb = _arb()
+        count = 100
+        for idx in range(1, count + 1):
+            self.assertEqual(_offer(arb, "stdout", idx, "x"), "x")
+        self.assertLessEqual(_int(_oval(arb, "probes")), 3 * count)
+        # другой источник по-прежнему находит свой канонический шаг без дубля текста
+        self.assertEqual(_offer(arb, "transcript", 7, "x"), "")
+
+    def test_silent_f004_execute_finish_exposes_retained_divergent_text(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["graceful_timeout_on_partial"], "1")
+            fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
+            clock = _FakeClock()
+            run = _ext_run(clock, lambda _t, now, r: _stamp(r, now))
+            run.content_streaming = True
+            run.terminal_drain = lambda _b: []
+            run.retained_divergent_text = lambda: "расхождение"
+            out = _dict(cast(object, _execute_with_clock(clock, run)))
+        self.assertEqual(out["state"], "timeout")
+        self.assertEqual(out["retained_divergent_text"], "расхождение")
+        self.assertEqual(out["retained_planner_text"], "расхождение")
+
+    # -- F-005: terminal_drain на нормальном done -----------------------------------------
+
+    def test_silent_f005_done_drains_tail_before_reconcile(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _FakeClock()
+            order: list[str] = []
+            sent = [False]
+
+            def script(_t: int, now: float, run: SimpleNamespace) -> object | None:
+                _stamp(run, now)
+                if sent[0]:
+                    return None
+                sent[0] = True
+                return ("done", (0, "хвост итог", {}))
+
+            run = _ext_run(clock, script)
+            run.content_streaming = True
+
+            def terminal_drain(budget_s: float) -> list[tuple[str, object]]:
+                order.append("drain:%g" % budget_s)
+                return [("text", "хвост")]
+
+            def reconcile(text: str) -> str:
+                order.append("reconcile")
+                return text[len("хвост") :]
+
+            run.terminal_drain = terminal_drain
+            run.reconcile_result = reconcile
+            out = _dict(cast(object, _execute_with_clock(clock, run)))
+        self.assertEqual(order, ["drain:0.5", "reconcile"])
+        self.assertEqual(out["state"], "done")
+        self.assertEqual(out["text"], "хвост итог")
+
+    # -- F-007: устаревший читатель не затирает более свежий снимок -----------------------
+
+    def test_silent_f007_stale_reader_does_not_overwrite_newer_snapshot(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            module = _bridge()
+            for name in (
+                "_cfg_snapshot",
+                "_cfg_key",
+                "_cfg_checked_at",
+                "_cfg_generation",
+            ):
+                fx.patch(name, getattr(module, name))
+            module._cfg_key = None
+            module._cfg_checked_at = None
+            snap = _bfn("_runtime_snapshot")
+            flags = _bfn("_RuntimeFlags")
+            newer = flags(graceful_timeout_on_partial=True)
+            real_parse = _bfn("_parse_runtime_flags")
+            _write_cfg(fx, {"emit_tool_trace": True}, 7_000_000_000)
+            gen_before = _int(module._cfg_generation)
+
+            def parse_while_other_thread_wins(text: str) -> object:
+                module._cfg_snapshot = newer
+                module._cfg_key = (1, 1)
+                module._cfg_generation += 1
+                return real_parse(text)
+
+            clock.advance(5.0)
+            with mock.patch.object(
+                module, "_parse_runtime_flags", parse_while_other_thread_wins
+            ):
+                result = snap()
+            self.assertIs(result, newer)
+            self.assertIs(module._cfg_snapshot, newer)
+            self.assertEqual(module._cfg_key, (1, 1))
+            self.assertEqual(module._cfg_generation, gen_before + 1)
+            # обычное обновление без гонки двигает поколение ровно на 1
+            _write_cfg(fx, {"emit_tool_trace": False}, 8_000_000_000)
+            clock.advance(5.0)
+            self.assertIs(_oval(snap(), "emit_tool_trace"), False)
+            self.assertEqual(module._cfg_generation, gen_before + 2)
+
+
+def _dict_or_empty(value: object) -> dict[str, object]:
+    return _dict(value) if isinstance(value, dict) else {}
+
+
 if __name__ == "__main__":
     unittest.main()
