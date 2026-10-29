@@ -2872,10 +2872,92 @@ class DatabasePathTests(unittest.TestCase):
 class ReadOnlyAndAnchorTests(unittest.TestCase):
     """THREAT-003/RISK: только чтение, владение cid, якорь resume (AO-08)."""
 
+    def test_read_only_fallback_retries_connect_and_query_only_errors(self) -> None:
+        for stage in ("connect", "query_only"):
+            with self.subTest(stage=stage), _Fixture() as fx:
+                writer = fx.writer(wal=False)
+                writer.think(3, 3, "шаг")
+                writer.close()
+                fx.writers.clear()
+                failed_conn = mock.Mock(spec=sqlite3.Connection)
+                error = sqlite3.OperationalError("unable to open database file")
+                failed_conn.execute.side_effect = error
+                first = error if stage == "connect" else failed_conn
+                with mock.patch.object(
+                    sqlite3,
+                    "connect",
+                    side_effect=[first, mock.DEFAULT],
+                    wraps=sqlite3.connect,
+                ) as connect:
+                    conn = cast(
+                        sqlite3.Connection, _bfn("_sqlite_open_ro")(fx.db_path())
+                    )
+                    try:
+                        self.assertEqual(
+                            conn.execute("PRAGMA query_only").fetchone()[0], 1
+                        )
+                        self.assertEqual(_bval("_sqlite_open_connections"), 1)
+                    finally:
+                        _ = _bfn("_sqlite_close")(conn)
+                uri = _bfn("_sqlite_ro_uri")(fx.db_path())
+                self.assertEqual(
+                    [call.args[0] for call in connect.call_args_list],
+                    [uri, uri + "&immutable=1"],
+                )
+                if stage == "query_only":
+                    failed_conn.close.assert_called_once_with()
+                self.assertEqual(_bval("_sqlite_open_connections"), 0)
+
+    def test_read_only_fallback_is_blocked_by_either_sidecar(self) -> None:
+        for suffix in ("-wal", "-shm"):
+            with self.subTest(suffix=suffix), _Fixture() as fx:
+                path = fx.db_path()
+                path.with_name(path.name + suffix).touch()
+                error = sqlite3.OperationalError("unable to open database file")
+                with mock.patch.object(
+                    sqlite3, "connect", side_effect=error
+                ) as connect:
+                    with self.assertRaises(sqlite3.OperationalError) as raised:
+                        _ = _bfn("_sqlite_open_ro")(path)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(connect.call_count, 1)
+                self.assertEqual(_bval("_sqlite_open_connections"), 0)
+
+    def test_closed_wal_without_sidecars_opens_and_anchors_resume(self) -> None:
+        with _Fixture() as fx:
+            fx.set_flag(True)
+            writer = fx.writer()
+            writer.think(3, 3, "закрытая WAL-база")
+            self.assertEqual(
+                writer.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0], 0
+            )
+            path = fx.db_path()
+            for suffix in ("-wal", "-shm"):
+                path.with_name(path.name + suffix).unlink()
+            writer.close()
+            fx.writers.clear()
+            for suffix in ("-wal", "-shm"):
+                self.assertFalse(path.with_name(path.name + suffix).exists())
+
+            conn = cast(sqlite3.Connection, _bfn("_sqlite_open_ro")(path))
+            try:
+                self.assertEqual(
+                    conn.execute("SELECT MAX(idx) FROM steps").fetchone()[0], 3
+                )
+                self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
+                with self.assertRaises(sqlite3.OperationalError):
+                    _ = conn.execute("DELETE FROM steps")
+            finally:
+                _ = _bfn("_sqlite_close")(conn)
+            plan = _bfn("_prespawn_plan")(_CID, True)
+            self.assertIs(_oval(plan, "anchored"), True)
+            self.assertEqual(_oval(plan, "base_idx"), 4)
+            self.assertEqual(_oval(plan, "reason"), "")
+            self.assertEqual(_bval("_sqlite_open_connections"), 0)
+
     def test_ao08_every_connect_is_read_only_uri(self) -> None:
         source = Path(_BRIDGE_PY).read_text(encoding="utf-8")
         self.assertNotIn("BEGIN", source)
-        self.assertNotIn("immutable", source)
         self.assertNotIn("mode=rw", source)
         with _Fixture() as fx:
             fx.set_flag(True)
