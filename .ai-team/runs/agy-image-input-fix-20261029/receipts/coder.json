@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "agy-image-input-fix",
+  "run_id": "agy-image-input-fix-20261029",
+  "iteration": 1,
+  "role_plan": {
+    "path": ".ai-team/runs/agy-image-input-fix-20261029/plans/coder-01.json",
+    "sha256": "88349d4f55f8478e8fc4c9b4d138863cb1048aa7af1202d247ff3e1030b582ca"
+  },
+  "status": "DONE",
+  "summary": "Workspace-read image input for agy-bridge implemented per AD-001..AD-006 and F-001..F-010 in fleet.json, server.py and additive tests: fail-closed flag (default off) + binary-SHA proof, ordered validation before slot, global [image N] numbering with delta attachments on hot resume, --add-dir without touching cwd/sess_key, slot-bounded 0700/0600 spool with recheck after slot and finally cleanup, orphan sweep, unmasked log tokens. All VER-001..009 green on the working tree (VER-008 verbatim needs a commit); L3/VER-010 NOT RUN; flag stays off until L2/L3.",
+  "changed_files": [
+    "bridges/agy-bridge/fleet.json",
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "commands": [
+    {
+      "command": "uvx ruff@0.17.3 check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "uvx ruff@0.17.3 format --check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "uvx basedpyright@1.40.2 --outputjson bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py (compare vs baseline 5a19559: 0 new warnings; errorCount 1 == pre-existing baseline error)",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py (146 passed)",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_*agy*.py\" (146 tests OK)",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --numstat 5a19559426de7508d525e2bd465eff648665a6a7 -- tests/test_agy_bridge_resilience.py (2205 added, 0 deleted) + unittest/pytest tests/test_images_strict.py (18 passed)",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-007 AST coverage: QA_ASSERT_COVERAGE_PASS 40",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-008 equivalent on working tree (git diff --name-only BASE without HEAD): SCOPE_FROZEN_PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-009 AST stdlib/security: IMAGE_STDLIB_SECURITY_PASS",
+      "exit_code": 0
+    }
+  ],
+  "acceptance_coverage": [
+    "AC-001 test_ao01 + test_f001 (targets accept, 4 unsupported models and flag-off reject before spawn, text works)",
+    "AC-002 test_img01/02/04/05/06/07 + test_ao02 (4 MIME, 16 images, 17 rejected, limit boundaries with patched limits, body 413)",
+    "AC-003 test_ao03 + test_f003 (all reject reasons HTTP 400 before spool/spawn, proof mismatch keeps text working)",
+    "AC-004 test_hist01..10 + test_ao04 (cold, hot, explicit cid, hot->cold fallback, global numbering)",
+    "AC-005 test_ao05 + test_hist10 (cwd/sess_key untouched, discrete --add-dir, spaces/Unicode)",
+    "AC-006 test_life01..04 + test_ao06 (0700/0600, retries share one dir, cleanup on every terminal path, spool failure 500)",
+    "AC-007 test_log01/02 + test_ao07 (verbatim reasons, no secret/payload in logs)",
+    "AC-008 test_life05 + test_ao08 (sweep boundaries, active registry before mkdir, symlink safety)",
+    "AC-009 test_res01..03 + test_ao09 (slots bound, FD/dir leaks, no retry after delivered reasoning, text/SSE intact, full existing suite green)",
+    "AC-010 only repo-side pair consistency (test_ao10); live :9887 DSH L3 (VER-010) NOT RUN"
+  ],
+  "assumptions": [
+    "Fleet proof values (efforts low/medium/high, 4 formats, impl_version 1) are the post-verification target state required by the brief; only PNG/Argon/low is proven live so far, therefore IMAGE_INPUT_ENABLED must stay false in runtime dynamic_config.json until the L2/L3 matrix passes.",
+    "AGY_IMAGE_INPUT_ENABLED env follows the brief (1/true/yes/on enables, 0/false/no/off disables, anything else false); it is not set in start.sh/launchd.",
+    "Peak process memory per image request (JSON string + base64 copy + transient decode) is not bounded by this change; RES-01 must measure it before promotion."
+  ],
+  "risks": [
+    "VER-008 verbatim ('git diff --name-only BASE HEAD') fails until the three files are committed; same assertions pass on the working tree.",
+    "basedpyright errorCount is 1 both on baseline and now (existing test line '[uri, uri + \"&immutable=1\"]'); 0 new warnings.",
+    "Signature sniffing is not pixel decoding: corrupted images with a valid magic are accepted (documented by test_img10).",
+    "Request body strings stay alive during the turn, so queued image requests hold ~2x base64 size until staging (RES-01).",
+    "Runtime pair deployment, LaunchAgent restart and live DSH two-image + follow-up text check (VER-010) are not done."
+  ],
+  "open_questions": [],
+  "next_role": "reviewer"
+}

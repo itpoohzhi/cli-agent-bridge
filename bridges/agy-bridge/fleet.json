@@ -8,22 +8,26 @@
   },
   "default_model": "gemini-3.8-flash",
   "technical_ref": {
-    "agy_version": "1.3.1",
-    "agy_binary_path": "~/.local/bin/agy",
+    "agy_version": "1.4.9",
+    "agy_binary_path": "~/.local/bin/agy.real",
     "launcher_path": "~/.config/agy-launch/agy-cli.sh",
     "launcher_egress": "xray HTTP 127.0.0.1:10815 (резерв hy2 :10811; прямой вызов запрещён — гео РФ)",
     "models_source": "agy models (live, 1.3.1)",
     "invocation": "printf NDJSON | launcher --input-format stream-json --output-format stream-json --dangerously-skip-permissions --model <BASE_MODEL_ID> --effort <EFFORT> --print-timeout=0",
     "note": "effort-суффикс (-high/-medium/-low) в fleet.json БОЛЬШЕ НЕ часть id: id = база (`gemini-3.8-flash`), уровень — отдельная ось `--effort`, значение берётся из `efforts` модели. Мост передаёт `--effort` ВСЕГДА (в т.ч. при пустом reasoning_effort — `default_effort`): база без effort у agy отвергается (`--model \"gemini-3.8-flash\" requires --effort (available: low, medium, high)`).",
-    "effort_ladders": "agy models 1.3.1: gemini-4-argon = low|medium|high; gemini-3.8/3.7/3.6-flash = low|medium|high; gemini-3.1-pro = low|high; gpt-oss-120b = medium (только)"
+    "effort_ladders": "agy models 1.3.1: gemini-4-argon = low|medium|high; gemini-3.8/3.7/3.6-flash = low|medium|high; gemini-3.1-pro = low|high; gpt-oss-120b = medium (только)",
+    "agy_binary_sha256": "35605054a9dc4591dd7e6ea83a9392238153d4c55d265512ed9b5b7f97cc0423"
   },
   "image_limits": {
-    "max_images": 0,
-    "max_image_bytes": 1,
-    "max_total_image_bytes": 1,
+    "max_images": 16,
+    "max_image_bytes": 20971520,
+    "max_total_image_bytes": 20971520,
     "max_body_bytes": 33554432,
     "types": [
-      "image/png"
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/webp"
     ]
   },
   "admission": {
@@ -51,13 +55,30 @@
       "context_window": 1048576,
       "max_tokens": 65536,
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "images": {
-        "cli_registry": "explicit_unsupported",
-        "status": "unsupported",
-        "method": null,
-        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+        "cli_registry": "implicit_supported",
+        "status": "confirmed",
+        "method": "workspace-read",
+        "verified_at": "2026-10-29",
+        "proof": {
+          "agy_binary_sha256": "35605054a9dc4591dd7e6ea83a9392238153d4c55d265512ed9b5b7f97cc0423",
+          "impl_version": 1,
+          "formats": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ],
+          "efforts_proven": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "command": "agy.real -p 'Read img-1.png' --add-dir <img_dir> --model <model> --effort <effort>"
+        }
       }
     },
     {
@@ -72,13 +93,30 @@
       "context_window": 1048576,
       "max_tokens": 65536,
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "images": {
-        "cli_registry": "explicit_unsupported",
-        "status": "unsupported",
-        "method": null,
-        "proof": "agy 1.3.1 stream-json принимает только текстовые блоки контента; image_url отвергается: error: stream input content block type \"image_url\" is not supported (only \"text\") — проверено 2026-10-07"
+        "cli_registry": "implicit_supported",
+        "status": "confirmed",
+        "method": "workspace-read",
+        "verified_at": "2026-10-29",
+        "proof": {
+          "agy_binary_sha256": "35605054a9dc4591dd7e6ea83a9392238153d4c55d265512ed9b5b7f97cc0423",
+          "impl_version": 1,
+          "formats": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ],
+          "efforts_proven": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "command": "agy.real -p 'Read img-1.png' --add-dir <img_dir> --model <model> --effort <effort>"
+        }
       }
     },
     {

@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "task_id": "agy-image-input-fix",
+  "run_id": "agy-image-input-fix-20261029",
+  "base_commit": "5a19559426de7508d525e2bd465eff648665a6a7",
+  "diff_sha256": "d6e653d781484f7cf2dfbb136ecb6ae3a70c2bdec7b82c9ef0dd46caac7a9826",
+  "files": [
+    {
+      "path": "bridges/agy-bridge/fleet.json",
+      "sha256": "fe2564ea0eb1f17d681f8ccfb7224b4b44eb4c999cb5ac1cad518736a92b5baf",
+      "role": "production"
+    },
+    {
+      "path": "bridges/agy-bridge/server.py",
+      "sha256": "3227e8ef769c5ebda5b4aa5647bbd651f4a9b28c784122c61c3e1f638be9e357",
+      "role": "production"
+    },
+    {
+      "path": "tests/test_agy_bridge_resilience.py",
+      "sha256": "f318d60537ad862b11313d303644ace3ff5ae74e5d581ceeba86bcf7bddeeff5",
+      "role": "test"
+    }
+  ]
+}

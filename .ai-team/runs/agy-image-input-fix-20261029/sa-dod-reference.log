@@ -1,0 +1,6 @@
+SA-DOD-001 PASS (34 facts)
+SA-DOD-002 PASS (no guesses)
+SA-DOD-003 PASS (5 spikes)
+SA-DOD-004 FAIL: 12 vs 0
+SA-DOD-006 PASS (no AC in handoff)
+SA-DOD-008 PASS (timeboxes clean)

@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "gate": "ARCH_GATE",
+  "status": "PASS",
+  "run_id": "agy-image-input-fix-20261029",
+  "criticality": "S2",
+  "packet_sha256": "ddcbc69fd277d74079d3868eb245a3c05c7d7ea00ddae6369fdc563982433466",
+  "verification_surface_sha256": "c75ef9ccc898efa342e90d4db82a222ebfac0acf61f81e73742f38b40322167b",
+  "protected_paths_sha256": "4f4494d442225ac160c8106d0ba4969fbde62e3555da115d04802fc12896d343",
+  "architect_worktree_sha256": "81388141296d03375a6a57b676d803059e36cd26bfe1522a20784a28fbb4e737",
+  "materialized_targets": 0
+}
