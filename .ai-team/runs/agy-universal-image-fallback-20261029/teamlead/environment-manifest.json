@@ -1,0 +1,86 @@
+{
+  "schema": "environment-manifest/v1",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "base_sha": "012da99905ec27a6133afb4f3e768ff9b4426a8f",
+  "cleanroom_worktree": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback-l2-cleanroom",
+  "base_cleanroom_worktree": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback-l2-base",
+  "candidate_fingerprint": "0efcb715f698e2d4ce3c6b08f6f4a48113e02e7790d16ac74575f82c24175ed5",
+  "candidate_patch_sha256": "5c441470d4541776a3188d3cbc84bc7ecc889262b8cfa1d30dc199de1aaa166c",
+  "worktree_status": [
+    "M bridges/agy-bridge/server.py",
+    "M tests/test_agy_bridge_resilience.py"
+  ],
+  "modified_files_sha256": {
+    "bridges/agy-bridge/server.py": "ed0e0a1d8ac73b80efb1edb52b6f84e651823832ef9ec079c2c748ee385f2e7b",
+    "tests/test_agy_bridge_resilience.py": "8c622b63a1985bce2e32858b7df3016914b5488412cb367049ee3f141e8c3564"
+  },
+  "frozen_files_sha256": {
+    "bridges/agy-bridge/fleet.json": "fe2564ea0eb1f17d681f8ccfb7224b4b44eb4c999cb5ac1cad518736a92b5baf",
+    "tests/test_images_strict.py": "d9f63c9b4edad28278e98d60957cf7bfd354f870f515d921b632713c56bbb676"
+  },
+  "excluded_untracked": [
+    ".ai-team/runs/agy-universal-image-fallback-20261029/**"
+  ],
+  "runtime_toolchain": {
+    "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6 (/Users/aazhiry1/.local/share/uv/python/cpython-3.14.6-macos-aarch64-none/bin/python3, native arm64)",
+    "pytest": "9.0.3 (via uvx --python /Users/aazhiry1/.local/share/uv/python/cpython-3.14.6-macos-aarch64-none/bin/python3 --from pytest==9.0.3)",
+    "ruff": "0.15.10 (via uvx ruff@0.15.10)",
+    "basedpyright": "1.40.2 (via uvx basedpyright@1.40.2)"
+  },
+  "non_secret_env": {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/teamlead:.",
+    "PYTEST_ADDOPTS": "-p _pytest_multiroot -p no:cacheprovider"
+  },
+  "pytest_multiroot_plugin": {
+    "path": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/teamlead/_pytest_multiroot.py",
+    "sha256": "d508c7c82e1aad2ab426af0ba748d1a1162608a3080a694d4ac4e88125ec35ed",
+    "purpose": "Isolates sys.modules['server'] and sys.modules['tests.*'] between bridges/opencode-zen-bridge/tests and root tests/ on pytest_collectstart and pytest_runtest_setup so the frozen VER-005 command (pytest -q) collects and executes all 1,552 BASE / 1,564 CANDIDATE tests across the entire repository with 0 collection errors and 0 ignored directories."
+  },
+  "ver_005_paired_comparison": {
+    "base_collected": 1552,
+    "candidate_collected": 1564,
+    "delta_collected": 12,
+    "base_passed": 1550,
+    "candidate_passed": 1562,
+    "base_subtests_passed": 11642,
+    "candidate_subtests_passed": 11813,
+    "base_failures": [
+      [
+        "tests/test_b_guard.py::TestTm018Guard::test_tm018_live_check_subprocess",
+        "call",
+        "AssertionError",
+        "AssertionError: 2 != 0 : mode=PLANNED maxbytes=106496 canon=/Users/aazhiry1/Мой диск/Context/AGENTS.md size=63079"
+      ],
+      [
+        "tests/test_muse_bridge_killpg.py::AllowedModelsSyncTest::test_t00_models_and_health_include_wonder_models_400k",
+        "call",
+        "AssertionError",
+        "AssertionError: 1048576 != 400000 : wrong contextWindow for muse-wonder-full-1.0 in /Users/aazhiry1/.dsh/profiles/desktop/cordis.patch.yml"
+      ]
+    ],
+    "candidate_failures": [
+      [
+        "tests/test_b_guard.py::TestTm018Guard::test_tm018_live_check_subprocess",
+        "call",
+        "AssertionError",
+        "AssertionError: 2 != 0 : mode=PLANNED maxbytes=106496 canon=/Users/aazhiry1/Мой диск/Context/AGENTS.md size=63079"
+      ],
+      [
+        "tests/test_muse_bridge_killpg.py::AllowedModelsSyncTest::test_t00_models_and_health_include_wonder_models_400k",
+        "call",
+        "AssertionError",
+        "AssertionError: 1048576 != 400000 : wrong contextWindow for muse-wonder-full-1.0 in /Users/aazhiry1/.dsh/profiles/desktop/cordis.patch.yml"
+      ]
+    ],
+    "multiset_delta_candidate_minus_base": [],
+    "raw_logs": {
+      "ver-005-base-collect.log": "678739397fa9959138691eaf9bf75fb36571d140f59b3d5f7d91d835d7b7cc1d",
+      "ver-005-candidate-collect.log": "da7d0de2484031421f703c050517e7af468e1a756fc95ec0836790849421812f",
+      "ver-005-base.log": "0222aa69a36099d34a35fc7d6b24148ae2aaccf12743bb5c4c6d11d7c2b10bea",
+      "ver-005-candidate.log": "dcbe85699969ede84fafae6545603b799ddeaa2e85703b4df384c7bbbbe1c993"
+    }
+  },
+  "cache_policy": "Disabled (-p no:cacheprovider, PYTHONDONTWRITEBYTECODE=1); fresh detached git worktrees from 012da99905ec27a6133afb4f3e768ff9b4426a8f."
+}

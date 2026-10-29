@@ -1,0 +1,35 @@
+Реализация и тесты готовы, но не все VER зелёные: VER-005 и VER-010 не прошли, ни то ни другое не вызвано моим кодом. Правки только в двух разрешённых файлах, `fleet.json` не тронут. Коммита нет.
+
+Скилл `universal/coder/SKILL.md` на диске отсутствует. Я опирался на `orchestrate-coder-reviewer-summarizer/SKILL.md`, `references/steps.md` и `aisdlc-gcge/skills/feature.md`.
+
+**Что сделано**
+- **`bridges/agy-bridge/server.py` (AD-001..AD-004):**
+  - Добавлен флаг `IMAGE_FALLBACK_ENABLED` / `AGY_IMAGE_FALLBACK_ENABLED` со своим кэшем; кэш сбрасывается в `_reset_sqlite_guards_for_tests()`. Допуск в universal-режиме `_image_gate_universal` не смотрит на proof, SHA и `efforts_proven`.
+  - Media вычищается из всей истории; входные `messages` не мутируются, повторная нормализация даёт тот же результат.
+  - Три точки перехода на text-only: при приёме запроса, после захвата слота (включая сбой spool), и один повтор в рантайме до обеих legacy-веток повтора. При переходе удаляются каталог, старый CID и hot-сессия, оба промпта становятся media-free.
+  - `/health` и `/v1/models` оставили булевы `images` и получили объект `image_fallback`. Лог `image_fallback stage=… reason=… model=… attempt=… images=…` санитизирован.
+- **`tests/test_agy_bridge_resilience.py`:** допечатан `UniversalImageFallbackTests` (`test_uf01`..`test_uf10` плюс `uf03b`, `uf07b`). Все 249933 исходных байта на месте (VER-006), strict-режим не меняется.
+
+**Результаты VER**
+
+| ID | Результат |
+|---|---|
+| VER-001, 002, 004, 006, 007, 008, 009 | exit 0 (VER-004: новых диагностик 0) |
+| VER-003 | exit 0, 58 тестов OK |
+| VER-005 | **exit 2** |
+| VER-010 | **exit 1**, не выполнялся |
+
+- **VER-005.** Падает на сборе трёх несвязанных модулей: `tests/test_cache_usage.py`, `tests/test_fleet_v3.py`, `tests/test_tool_parser.py`. Те же три ошибки есть на BASE. Заменил эквивалентными прогонами: pytest по `tests/test_agy_bridge_resilience.py` + `tests/test_images_strict.py` дал 176 passed, 273 subtests passed. Все 146 прежних тестов файла проходят и под unittest. Годится ли такая замена, решает Teamlead.
+- **VER-010.** Это деплой `server.py`, `IMAGE_FALLBACK_ENABLED=true` в `~/.dsh/bridges/agy-bridge/dynamic_config.json` и живая приёмка в чате владельца. Это зона Teamlead и релиза, в production я не писал. Слова «готово» и «работает» для production неприменимы.
+- **Red → green.** На BASE-`server.py` новые 12 тестов падают 12 из 12, на кандидате проходят 12 из 12.
+
+**Отклонение от архитектуры.** Строковый `image_url` в universal принимается каноникализацией по AD-002. Поэтому кейс `string_image_url` из таксономии уходит оптимистично, а не в text-only; в strict он ведёт себя как раньше.
+
+**Не измерено:** квоты, p99, CPU/RSS/FD (до 2N запусков CLI в худшем батче), exactly-once. Pixel-decode не добавлялся, валидация только по сигнатуре.
+
+Артефакты лежат в `.ai-team/runs/agy-universal-image-fallback-20261029/`:
+- `coder/summary.md`
+- `coder/logs/`
+- `plans/coder-01.json` (valid, after)
+- `handoffs/coder-01.json` (`validate_handoff.py` → VALID)
+- `fingerprints/coder-after.json`

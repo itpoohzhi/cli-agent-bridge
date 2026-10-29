@@ -268,6 +268,7 @@ IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 IMPLEMENTED_METHODS = {"workspace-read": 1}
 METHOD_IMPL_VERSION = 1
 IMAGE_FLAG_NAME = "IMAGE_INPUT_ENABLED"
+IMAGE_FALLBACK_FLAG_NAME = "IMAGE_FALLBACK_ENABLED"
 IMAGE_PROBE = os.environ.get("AGY_IMAGE_PROBE", "").strip().lower() in (
     "1",
     "true",
@@ -332,6 +333,8 @@ _sha_compute_lock = threading.Lock()
 _sha_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _image_flag_lock = threading.Lock()
 _image_flag_cache: tuple[float, bool] = (0.0, False)
+_image_fallback_flag_lock = threading.Lock()
+_image_fallback_flag_cache: tuple[float, bool] = (0.0, False)
 _active_img_dirs: set[str] = set()
 
 # Токеноподобные последовательности в логах: сам ключ моста и длинные hex/base64.
@@ -591,6 +594,7 @@ _LOG_EVENT_NAMES = frozenset(
         "image_spool_error",
         "image_cleanup_error",
         "image_sweep_removed",
+        "media-degradation-reserve",
     }
 )
 
@@ -857,6 +861,330 @@ def _image_gate(model_id: str, effort: str | None) -> ImageReject | None:
     return ImageReject("image_proof_invalid")
 
 
+def _read_image_fallback_flag() -> bool:
+    """IMAGE_FALLBACK_ENABLED из dynamic_config.json: строго `true`, иначе False."""
+    try:
+        path = DYNAMIC_CONFIG_PATH
+        if not path.is_file() or path.stat().st_size > DYNAMIC_CONFIG_MAX_BYTES:
+            return False
+        data = cast(object, json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    return cast("dict[str, object]", data).get(IMAGE_FALLBACK_FLAG_NAME) is True
+
+
+def _is_image_fallback_enabled() -> bool:
+    """Универсальная политика image-входа (по умолчанию False = строгий режим).
+
+    Env `AGY_IMAGE_FALLBACK_ENABLED` (непустой) решает сразу: 1|true|yes -> True,
+    любое иное значение (в т. ч. 0|false|no|on|off) -> False. Без env — флаг
+    `IMAGE_FALLBACK_ENABLED` в dynamic_config.json с кэшем TTL 1.0 с и отдельным
+    замком; не-boolean, битый или отсутствующий файл дают False. Не зависит от
+    `IMAGE_INPUT_ENABLED` (он по-прежнему управляет только staging файлов).
+    """
+    global _image_fallback_flag_cache
+    env = os.environ.get("AGY_IMAGE_FALLBACK_ENABLED", "").strip().lower()
+    if env:
+        return env in ("1", "true", "yes")
+    now = time.monotonic()
+    with _image_fallback_flag_lock:
+        checked_at, cached = _image_fallback_flag_cache
+        if checked_at > 0.0 and now - checked_at < FLAG_TTL_S:
+            return cached
+    value = _read_image_fallback_flag()
+    with _image_fallback_flag_lock:
+        _image_fallback_flag_cache = (now, value)
+    return value
+
+
+def _image_gate_universal(model_id: str, effort: str | None) -> ImageReject | None:
+    """Универсальный допуск: staging включён, модель из каталога, effort валиден.
+
+    Per-model proof, SHA бинаря и `efforts_proven` не проверяются и не читаются.
+    """
+    if not _is_image_input_enabled():
+        return ImageReject("image_input_disabled")
+    model = FLEET_MODELS.get(model_id)
+    if model is None:
+        return ImageReject("model_unknown")
+    if effort:
+        efforts = model.get("efforts")
+        if not isinstance(efforts, list) or effort not in cast("list[object]", efforts):
+            return ImageReject("effort_not_proven", "unsupported_reasoning_effort")
+    return None
+
+
+# ---- Универсальная нормализация медиа (AD-002) ---------------------------------------
+
+_IMAGE_PART_TYPES = frozenset({"image_url", "image", "input_image"})
+_IMAGE_PAYLOAD_KEYS = ("image_url", "image")
+_MEDIA_PART_NAMES = (
+    "input_audio",
+    "audio",
+    "video",
+    "video_url",
+    "file",
+    "document",
+    "inlineData",
+    "inline_data",
+    "fileData",
+    "file_data",
+)
+_MEDIA_PART_TYPES = frozenset(name.lower() for name in _MEDIA_PART_NAMES)
+_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
+_IMAGE_OMITTED = "[image omitted]"
+_MEDIA_OMITTED = "[media omitted]"
+_JSON_COPY_MAX_DEPTH = 32
+
+
+def _lower_keys(part: dict[str, object]) -> dict[str, object]:
+    """Копия part с ключами в нижнем регистре: `InlineData`/`Image_Url` не обходят классификацию."""
+    lowered: dict[str, object] = {}
+    for key, value in part.items():
+        lowered_key = str(key).lower()
+        if lowered_key not in lowered:
+            lowered[lowered_key] = value
+    return lowered
+
+
+def _classify_part(part: dict[str, object]) -> str:
+    """'image' | 'media' | 'text' | 'unknown'; медиа определяется ДО чтения `text`.
+
+    `text` с не-строковым значением (dict/list) — структурный payload, не текст.
+    """
+    lowered = _lower_keys(part)
+    raw_kind = lowered.get("type")
+    kind = raw_kind.strip().lower() if isinstance(raw_kind, str) else ""
+    if kind in _IMAGE_PART_TYPES or any(
+        lowered.get(key) is not None for key in _IMAGE_PAYLOAD_KEYS
+    ):
+        return "image"
+    if kind in _MEDIA_PART_TYPES or any(
+        lowered.get(key) is not None for key in _MEDIA_PART_TYPES
+    ):
+        return "media"
+    text = lowered.get("text")
+    only_text_keys = set(lowered) <= {"type", "text"}
+    if kind in _TEXT_PART_TYPES and (
+        isinstance(text, str) or (text is None and only_text_keys)
+    ):
+        # Пустой/None text с посторонними ключами — скрытый payload, не текст.
+        return "text" if text or only_text_keys else "unknown"
+    if not kind and isinstance(text, str):
+        return "text" if text or only_text_keys else "unknown"
+    return "unknown"
+
+
+def _part_text(part: dict[str, object]) -> str:
+    """Текст text-части (`""` для отсутствующего/None); только после `_classify_part == 'text'`."""
+    value = _lower_keys(part).get("text")
+    return value if isinstance(value, str) else ""
+
+
+def _content_items(content: object) -> list[object]:
+    """Части контента: list как есть, dict-content — одна часть, прочее — пусто."""
+    if isinstance(content, list):
+        return cast("list[object]", content)
+    if isinstance(content, dict):
+        return [content]
+    return []
+
+
+def _image_part_canonical(part: dict[str, object]) -> dict[str, object]:
+    """Image-алиас в форме `image_url`; `image_url` приоритетнее `image`, URL не угадывается."""
+    lowered = _lower_keys(part)
+    payload = lowered.get("image_url")
+    if payload is None:
+        payload = lowered.get("image")
+    url: object = None
+    if isinstance(payload, str):
+        url = payload
+    elif isinstance(payload, dict):
+        url = cast("dict[str, object]", payload).get("url")
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _media_part_counts(messages: object) -> tuple[int, int]:
+    """(image-частей, прочих media/неизвестных структурных частей) во всей истории.
+
+    dict-content считается одной частью (`_content_items`); не-text часть любого вида
+    попадает в счёт, чтобы нормализация не обходилась неизвестным payload.
+    """
+    images = 0
+    other = 0
+    if not isinstance(messages, list):
+        return images, other
+    for msg in cast("list[object]", messages):
+        if not isinstance(msg, dict):
+            continue
+        for item in _content_items(cast("dict[str, object]", msg).get("content")):
+            if not isinstance(item, dict):
+                continue
+            kind = _classify_part(cast("dict[str, object]", item))
+            if kind == "image":
+                images += 1
+            elif kind != "text":
+                other += 1
+    return images, other
+
+
+def _collect_image_parts_universal(
+    messages: object,
+) -> list[tuple[int, int, dict[str, object]]]:
+    """Все image-части истории (любой алиас, list и dict-content) в форме `image_url`."""
+    found: list[tuple[int, int, dict[str, object]]] = []
+    if not isinstance(messages, list):
+        return found
+    number = 0
+    for msg_index, msg in enumerate(cast("list[object]", messages)):
+        if not isinstance(msg, dict):
+            continue
+        for item in _content_items(cast("dict[str, object]", msg).get("content")):
+            if not isinstance(item, dict):
+                continue
+            part = cast("dict[str, object]", item)
+            if _classify_part(part) == "image":
+                number += 1
+                found.append((msg_index, number, _image_part_canonical(part)))
+    return found
+
+
+def _json_copy(value: object, depth: int = 0) -> object:
+    """Копия JSON-значения без разделяемых контейнеров (глубина ограничена)."""
+    if depth > _JSON_COPY_MAX_DEPTH:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(k): _json_copy(v, depth + 1)
+            for k, v in cast("dict[object, object]", value).items()
+        }
+    if isinstance(value, list):
+        return [_json_copy(v, depth + 1) for v in cast("list[object]", value)]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _flatten_content_stripped(content: object) -> str:
+    """Контент в безопасный текст без media: image -> `[image omitted]`, media -> `[media omitted]`.
+
+    Обычный текст сохраняется в порядке следования (склейка `\\n`), неизвестные
+    структурные объекты не сериализуются; сообщение только из них даёт
+    `[media omitted]`, чтобы контекст не стал пустым.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    dropped = False
+    for item in _content_items(content):
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            part = cast("dict[str, object]", item)
+            kind = _classify_part(part)
+            if kind == "image":
+                parts.append(_IMAGE_OMITTED)
+            elif kind == "media":
+                parts.append(_MEDIA_OMITTED)
+            elif kind == "text":
+                parts.append(_part_text(part))
+            else:
+                dropped = True
+        elif isinstance(item, list):
+            dropped = True
+    if not parts and dropped:
+        parts.append(_MEDIA_OMITTED)
+    return "\n".join(p for p in parts if p)
+
+
+def _strip_media_from_messages(messages: object) -> list[dict[str, object]]:
+    """Новый список сообщений без media; вход не мутируется, роли и порядок сохранены."""
+    out: list[dict[str, object]] = []
+    if not isinstance(messages, list):
+        return out
+    for msg in cast("list[object]", messages):
+        if not isinstance(msg, dict):
+            continue
+        fresh: dict[str, object] = {}
+        for key, value in cast("dict[object, object]", msg).items():
+            if key == "content":
+                fresh["content"] = _flatten_content_stripped(value)
+            else:
+                fresh[str(key)] = _json_copy(value)
+        out.append(fresh)
+    return out
+
+
+def _messages_to_stripped_prompt(messages: object) -> str:
+    """Промпт всей истории без media: нет `[image N]`, `[attachments]`, путей и payload."""
+    return _messages_to_prompt(
+        cast("list[object]", _strip_media_from_messages(messages))
+    )
+
+
+def _universal_render_messages(messages: object) -> list[object]:
+    """Копия истории для оптимистичной отправки: image — каноничные, прочее media — вон.
+
+    Длина и индексы сохранены (нужны сквозной нумерации `[image N]` и resume-срезу).
+    """
+    out: list[object] = []
+    if not isinstance(messages, list):
+        return out
+    for msg in cast("list[object]", messages):
+        if not isinstance(msg, dict):
+            out.append(msg)
+            continue
+        src = cast("dict[str, object]", msg)
+        fresh = dict(src)
+        raw_content = src.get("content")
+        if isinstance(raw_content, (list, dict)):
+            items: list[object] = []
+            for item in _content_items(src.get("content")):
+                if isinstance(item, str):
+                    items.append(item)
+                elif isinstance(item, dict):
+                    part = cast("dict[str, object]", item)
+                    kind = _classify_part(part)
+                    if kind == "image":
+                        items.append(_image_part_canonical(part))
+                    elif kind == "text":
+                        items.append({"type": "text", "text": _part_text(part)})
+            fresh["content"] = items
+        out.append(fresh)
+    return out
+
+
+def _log_token(value: object, max_len: int = 64) -> str:
+    """Идентификатор для журнала: только `A-Za-z0-9_.-`, остальное `_`, длина ограничена."""
+    text = re.sub(r"[^A-Za-z0-9_.\-]", "_", str(value))[:max_len]
+    return text or "unknown"
+
+
+_IMAGE_FALLBACK_STAGES = frozenset({"collect", "post_slot", "spool", "runtime"})
+
+
+def _log_image_fallback(
+    stage: str, reason: str, model: str, attempt: int, count: int
+) -> None:
+    """Одна структурная строка `image_fallback` на фактический downgrade (без payload)."""
+    stage_token = stage if stage in _IMAGE_FALLBACK_STAGES else "unknown"
+    model_token = _log_token(model) if model in FLEET_MODELS else "unknown"
+    _log(
+        "image_fallback stage=%s reason=%s model=%s attempt=%d images=%d"
+        % (
+            stage_token,
+            _log_token(reason),
+            model_token,
+            max(0, min(int(attempt), 9)),
+            max(0, min(int(count), 1000000)),
+        )
+    )
+
+
 def _collect_image_parts(
     messages: object,
 ) -> list[tuple[int, int, dict[str, object]]]:
@@ -904,7 +1232,7 @@ def _new_img_dir() -> Path:
 
 
 def _collect_images(
-    messages: object, model_id: str, effort: str | None
+    messages: object, model_id: str, effort: str | None, universal: bool = False
 ) -> list[dict[str, object]]:
     """Проверить image-части всей истории; вернуть записи для prompt и spool.
 
@@ -913,11 +1241,23 @@ def _collect_images(
     оценка размера base64 ДО decode, строгий base64, сигнатура, лимиты. Ничего не
     пишется на диск и не запускается. Декодированные байты не удерживаются
     (`data` пуст): в spool они пересоздаются из base64 уже после захвата слота.
+
+    `universal=True`: image-алиасы (`image`, `input_image`, dict-content) приводятся
+    к `image_url`, а вместо proof-гейта работает `_image_gate_universal`; остальные
+    проверки те же. Любой отказ отбрасывает ВСЕ записи (исключение, без частичного набора).
     """
-    parts = _collect_image_parts(messages)
+    parts = (
+        _collect_image_parts_universal(messages)
+        if universal
+        else _collect_image_parts(messages)
+    )
     if not parts:
         return []
-    gate = _image_gate(model_id, effort)
+    gate = (
+        _image_gate_universal(model_id, effort)
+        if universal
+        else _image_gate(model_id, effort)
+    )
     if gate is not None:
         raise gate
     max_images = _limit("max_images", 16)
@@ -1046,6 +1386,62 @@ def _cleanup_img_dir(img_dir: Path) -> None:
     finally:
         with _active_lock:
             _active_img_dirs.discard(str(img_dir))
+
+
+_IMAGE_MARKER = re.compile(r"\[image \d+\]")
+
+
+def _text_only_prompt_fallback(prompt: str) -> str:
+    """Безопасный media-free промпт из готового: без `[attachments]` и `[image N]`.
+
+    Запасной путь для вызывающих `_run_once` без предвычисленного
+    `stripped_full_prompt`; штатно промпт берётся из `_messages_to_stripped_prompt`.
+    """
+    cut = prompt.rfind("[attachments]\n")
+    if cut == 0 or (cut > 0 and prompt[cut - 2 : cut] == "\n\n"):
+        prompt = prompt[:cut].rstrip()
+    text = _IMAGE_MARKER.sub(_IMAGE_OMITTED, prompt).strip()
+    return text or "Reply with exactly: PONG"
+
+
+def _downgrade_to_text_in_run_once(
+    ctx: dict[str, object],
+    stage: str,
+    reason: str,
+    attempt: int,
+    img_dir: Path | None,
+) -> None:
+    """Перевести ход в text-only: журнал, каталог, CID и оба промпта (AD-003).
+
+    Порядок: событие (счёт ДО обнуления) -> удаление собственного каталога ->
+    CAS-инвалидация и снятие владения старым CID -> `prompt`/`full_prompt` из
+    предвычисленной media-free истории. Run вызывающий уже закрыл; повторный
+    вызов безопасен (cleanup идемпотентен, CID уже пуст).
+    """
+    held = cast("list[dict[str, object]]", ctx.get("images") or [])
+    _log_image_fallback(stage, reason, str(ctx.get("model") or ""), attempt, len(held))
+    if img_dir is not None:
+        _cleanup_img_dir(img_dir)
+    old_cid = str(ctx.get("conversation_id") or "")
+    if old_cid:
+        sess_key = ctx.get("sess_key")
+        if sess_key:
+            _session_invalidate(cast(tuple, sess_key), old_cid)
+        _cid_release(old_cid, str(ctx.get("turn_id") or ""))
+        if ctx.get("hot_resumed"):
+            with _session_store_lock:
+                _in_flight_cids.discard(old_cid)
+    stripped = ctx.get("stripped_full_prompt")
+    if not isinstance(stripped, str) or not stripped:
+        stripped = _text_only_prompt_fallback(
+            str(ctx.get("full_prompt") or ctx.get("prompt") or "")
+        )
+    ctx["hot_resumed"] = False
+    ctx["conversation_id"] = ""
+    ctx["images"] = []
+    ctx["img_dir"] = None
+    ctx["prompt"] = stripped
+    ctx["full_prompt"] = stripped
 
 
 def _attachments_block(images: list[dict[str, object]]) -> str:
@@ -1305,13 +1701,20 @@ def _reset_sqlite_guards_for_tests() -> None:
     global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
     global _sqlite_divergence_count, _sqlite_drain_deadline_count
     global _sqlite_open_connections, _sqlite_max_open_connections, _rng
-    global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache
+    global \
+        _cfg_snapshot, \
+        _cfg_key, \
+        _cfg_checked_at, \
+        _image_flag_cache, \
+        _image_fallback_flag_cache
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
         _cfg_key = None
         _cfg_checked_at = None
     with _image_flag_lock:
         _image_flag_cache = (0.0, False)
+    with _image_fallback_flag_lock:
+        _image_fallback_flag_cache = (0.0, False)
     with _sha_cache_lock:
         _sha_cache.clear()
     with _sqlite_guard_lock:
@@ -3598,6 +4001,35 @@ class _ByteBudget:
             self.used = max(0, self.used - amount)
 
 
+def _image_fallback_view() -> tuple[dict[str, object], dict[str, bool]]:
+    """Эффективная image-поддержка по каталогу и объект `image_fallback` для GET.
+
+    universal -> поддержка = staging включён (для каждой модели каталога, proof не
+    подделывается); иначе строгий `_model_supports_images`. Булевы `images` остаются
+    булевыми, новая информация — только в отдельном объекте.
+    """
+    universal = _is_image_fallback_enabled()
+    input_enabled = _is_image_input_enabled()
+    effective = {
+        mid: (input_enabled if universal else _model_supports_images(mid))
+        for mid in FLEET_MODELS
+    }
+    if universal:
+        acceptance = "optimistic" if input_enabled else "text-only"
+    else:
+        acceptance = "proof-gated"
+    info: dict[str, object] = {
+        "fallback_enabled": universal,
+        "input_enabled": input_enabled,
+        "mode": "universal" if universal else "strict",
+        "acceptance": acceptance,
+        "method": "workspace-read",
+        "limits": dict(IMAGE_LIMITS),
+        "models": [mid for mid, ok in effective.items() if ok],
+    }
+    return info, effective
+
+
 def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     """Итог хода без запуска agy (отказ до spawn)."""
     return {
@@ -4084,38 +4516,62 @@ class Handler(BaseHTTPRequestHandler):
                     cast(str, ctx["model"]), unavailable, t_enter, cast(str, ctx["tag"])
                 )
                 return unavailable
+            universal = bool(typed_ctx.get("universal_fallback"))
             if images and img_dir is not None:
-                # Флаг и proof могли смениться, пока ход ждал слот: повторная проверка
-                # до mkdir и spawn.
-                gate = _image_gate(cast(str, model), cast(str, effort))
-                if gate is not None:
-                    self._log_reject(
-                        gate.code, cast(str, model), cast(int, ctx["model_len"])
+                if universal and not _is_image_input_enabled():
+                    # Staging выключили, пока ход ждал слот: media не отправляем,
+                    # ход идёт текстом (без mkdir и --add-dir).
+                    _downgrade_to_text_in_run_once(
+                        typed_ctx, "post_slot", "flag_disabled", 1, img_dir
                     )
-                    rejected = _terminal_state("image_reject", gate.code)
-                    self._log_done(
-                        cast(str, ctx["model"]),
-                        rejected,
-                        t_enter,
-                        cast(str, ctx["tag"]),
+                    images = []
+                    img_dir = None
+                else:
+                    # Флаг и proof могли смениться, пока ход ждал слот: повторная
+                    # проверка до mkdir и spawn (universal — только флаг, выше).
+                    gate = (
+                        None
+                        if universal
+                        else _image_gate(cast(str, model), cast(str, effort))
                     )
-                    return rejected
-                # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
-                with _active_lock:
-                    _active_img_dirs.add(str(img_dir))
-                img_registered = True
-                try:
-                    _stage_images(img_dir, images)
-                except ImageSpoolError as exc:
-                    _log(
-                        "image_spool_error model=%s err=%s"
-                        % (_safe_log_value(cast(str, model)), exc)
-                    )
-                    failed = _terminal_state("image_spool_error", str(exc))
-                    self._log_done(
-                        cast(str, ctx["model"]), failed, t_enter, cast(str, ctx["tag"])
-                    )
-                    return failed
+                    if gate is not None:
+                        self._log_reject(
+                            gate.code, cast(str, model), cast(int, ctx["model_len"])
+                        )
+                        rejected = _terminal_state("image_reject", gate.code)
+                        self._log_done(
+                            cast(str, ctx["model"]),
+                            rejected,
+                            t_enter,
+                            cast(str, ctx["tag"]),
+                        )
+                        return rejected
+                    # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
+                    with _active_lock:
+                        _active_img_dirs.add(str(img_dir))
+                    img_registered = True
+                    try:
+                        _stage_images(img_dir, images)
+                    except ImageSpoolError as exc:
+                        _log(
+                            "image_spool_error model=%s err=%s"
+                            % (_safe_log_value(cast(str, model)), exc)
+                        )
+                        if not universal:
+                            failed = _terminal_state("image_spool_error", str(exc))
+                            self._log_done(
+                                cast(str, ctx["model"]),
+                                failed,
+                                t_enter,
+                                cast(str, ctx["tag"]),
+                            )
+                            return failed
+                        _downgrade_to_text_in_run_once(
+                            typed_ctx, "spool", "image_spool_error", 1, img_dir
+                        )
+                        images = []
+                        img_dir = None
+                        img_registered = False
             _retry_credit()
             for attempt in (1, 2):
                 policy = _build_timeout_policy(t_req_start)
@@ -4215,11 +4671,40 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
                 # JSON-режим мышление клиенту ещё не отдавал — там повтор безопасен.
+                typed_out = cast("dict[str, object]", out)
+                delivered_reasoning = bool(
+                    typed_out.get("delivered_reasoning")
+                ) or bool(typed_ctx.get("stream") and typed_out.get("reasoning"))
                 delivered = bool(
-                    out.get("text")
-                    or out.get("tool_calls")
-                    or (ctx.get("stream") and out.get("reasoning"))
+                    typed_out.get("text")
+                    or typed_out.get("tool_calls")
+                    or delivered_reasoning
                 )
+                if (
+                    attempt == 1
+                    and universal
+                    and images
+                    and img_dir is not None
+                    and out["state"] not in ("done", "client_gone")
+                    and not delivered
+                ):
+                    # Реальная image-попытка упала без выдачи: один text-only повтор
+                    # ДО обеих legacy-веток (hot continue и transient). Один токен
+                    # бюджета, если есть; иначе — разовый резерв деградации запроса.
+                    _downgrade_to_text_in_run_once(
+                        typed_ctx,
+                        "runtime",
+                        _log_token(typed_out.get("state")),
+                        attempt,
+                        img_dir,
+                    )
+                    images = []
+                    img_dir = None
+                    img_registered = False
+                    if not _retry_take():
+                        _log(f"media-degradation-reserve state={out['state']} {tag}")
+                    time.sleep(_retry_pause_s(attempt))
+                    continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
                     # Горячая сессия сломалась: больше её не используем, а повтор
                     # идёт холодным вызовом с полной историей.
@@ -4367,6 +4852,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/health", "/v1/health"):
             with _active_lock:
                 active = len(_active)
+            fallback_info, effective = _image_fallback_view()
             health: dict[str, object] = {
                 "ok": True,
                 "transport": "agy-stream-json",
@@ -4377,7 +4863,8 @@ class Handler(BaseHTTPRequestHandler):
                 "tool_emulation": False,
                 "tool_translation": False,
                 "native_tools": True,
-                "images": any(_model_supports_images(mid) for mid in FLEET_MODELS),
+                "images": any(effective.values()),
+                "image_fallback": fallback_info,
                 "image_input_mode": (
                     "enabled" if _is_image_input_enabled() else "disabled"
                 ),
@@ -4402,9 +4889,10 @@ class Handler(BaseHTTPRequestHandler):
             data = []
             order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
             image_flags: list[bool] = []
+            fallback_info, effective = _image_fallback_view()
             for mid in order:
                 model = FLEET["models"][mid]
-                supports = _model_supports_images(cast(str, mid))
+                supports = effective[cast(str, mid)]
                 image_flags.append(supports)
                 data.append(
                     {
@@ -4417,7 +4905,13 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 )
             self._send(
-                200, {"object": "list", "data": data, "images": any(image_flags)}
+                200,
+                {
+                    "object": "list",
+                    "data": data,
+                    "images": any(image_flags),
+                    "image_fallback": fallback_info,
+                },
             )
             return
         self._send(
@@ -4573,20 +5067,73 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(messages_raw, list)
                 else []
             )
-            try:
-                images = _collect_images(
-                    messages, cast(str, model_id), cast(str, effort)
-                )
-            except ImageReject as rejected:
-                _log("image_reject detail=%s" % rejected.reason)
-                self._reject(
-                    400,
-                    rejected.code,
-                    f"image rejected: {rejected.code}",
-                    model_id,
-                    model_len,
-                )
-                return
+            # Универсальная политика фиксируется один раз на принятый запрос.
+            universal = _is_image_fallback_enabled()
+            images: list[dict[str, object]] = []
+            render_messages: list[object] = messages
+            stripped_full_prompt = ""
+            force_cold = False
+            if universal:
+                # Рендер без raw dict-content и неперечисленных ключей — всегда,
+                # в т. ч. когда media нет: его читают и cold, и hot-resume путь.
+                render_messages = _universal_render_messages(messages)
+                image_parts, other_media = _media_part_counts(messages)
+                # Всегда нормализуем историю: любой cold/downgrade-путь берёт
+                # промпт только отсюда, а не из legacy `_flatten_content`.
+                stripped_full_prompt = _messages_to_stripped_prompt(messages)
+                if image_parts or other_media:
+                    if not _is_image_input_enabled():
+                        _log_image_fallback(
+                            "collect",
+                            "flag_disabled",
+                            cast(str, model_id),
+                            1,
+                            image_parts,
+                        )
+                        force_cold = True
+                    else:
+                        try:
+                            images = _collect_images(
+                                messages,
+                                cast(str, model_id),
+                                cast(str, effort),
+                                universal=True,
+                            )
+                        except ImageReject as rejected:
+                            _log_image_fallback(
+                                "collect",
+                                rejected.reason,
+                                cast(str, model_id),
+                                1,
+                                image_parts,
+                            )
+                            images = []
+                            force_cold = True
+                        else:
+                            if not images:
+                                _log_image_fallback(
+                                    "collect",
+                                    "unsupported_media",
+                                    cast(str, model_id),
+                                    1,
+                                    other_media,
+                                )
+                                force_cold = True
+            else:
+                try:
+                    images = _collect_images(
+                        messages, cast(str, model_id), cast(str, effort)
+                    )
+                except ImageReject as rejected:
+                    _log("image_reject detail=%s" % rejected.reason)
+                    self._reject(
+                        400,
+                        rejected.code,
+                        f"image rejected: {rejected.code}",
+                        model_id,
+                        model_len,
+                    )
+                    return
             img_dir = cast(Path, images[0]["path"]).parent if images else None
             try:
                 _launcher()
@@ -4606,7 +5153,12 @@ class Handler(BaseHTTPRequestHandler):
                 else []
             )
             tools_count = 0 if _tool_choice_none(req.get("tool_choice")) else len(tools)
-            full_prompt = _messages_to_prompt(messages, images)
+            if force_cold or (universal and not images):
+                full_prompt = stripped_full_prompt
+            else:
+                full_prompt = _messages_to_prompt(render_messages, images)
+                if universal:
+                    stripped_full_prompt = stripped_full_prompt or full_prompt
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -4627,7 +5179,11 @@ class Handler(BaseHTTPRequestHandler):
             )
             is_resumed = False
             prompt = full_prompt
-            if conversation_id:
+            if force_cold:
+                # Media убраны из истории: «грязный» явный или кэшированный CID
+                # не возобновляем, ход идёт холодным text-only с полной историей.
+                conversation_id = ""
+            elif conversation_id:
                 if _cid_acquire(conversation_id, turn_id):
                     owned_cid = conversation_id
                 else:
@@ -4639,7 +5195,7 @@ class Handler(BaseHTTPRequestHandler):
                 if use_cid:
                     conversation_id = use_cid
                     is_resumed = True
-                    prompt = _get_resumed_turn_prompt(messages, images)
+                    prompt = _get_resumed_turn_prompt(render_messages, images)
             ctx: dict[str, object] = {
                 "t_req_start": t_req_start,
                 "turn_id": turn_id,
@@ -4661,6 +5217,8 @@ class Handler(BaseHTTPRequestHandler):
                 "stream": bool(req.get("stream")),
                 "images": images,
                 "img_dir": img_dir,
+                "universal_fallback": universal,
+                "stripped_full_prompt": stripped_full_prompt,
             }
             if ctx["stream"]:
                 self._serve_sse(ctx)

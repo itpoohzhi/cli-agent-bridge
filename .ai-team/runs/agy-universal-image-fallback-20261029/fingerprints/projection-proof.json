@@ -1,0 +1,14 @@
+{
+  "source_before": "fingerprints/architect-before.json",
+  "source_raw_sha256": "0391d9a88ed8dc47c2467fe17f62c7b7b599967653ee31d3c79e6076aad053f2",
+  "plan_before_source": "plans/architect-01.before.json",
+  "excluded_paths_only": [
+    ".git/**",
+    ".ai-team/runs/**"
+  ],
+  "baseline_source": "ORIGINAL_MANIFEST_PROJECTION_NOT_REBASE",
+  "product_files": 168,
+  "product_sha256": "ba4cbc096d7c16f55db824df6cd3250e42d2d29a95815ef5e24600a5e04a2941",
+  "changes_outside_runs": [],
+  "original_fingerprints_preserved": true
+}
