@@ -1,0 +1,11 @@
+{
+  "schema": "code-gate-receipt/v1",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "status": "PASS",
+  "coder_plan_sha256": "263611aaacb0a079e472fa8eaf805f720696efe22ccb43ac81eced58a52a5016",
+  "coder_handoff_sha256": "1733cf6d448b9dc00fc5a805e03eefc9b24d6d39d7f854359c62a282cddfe3bc",
+  "changed_files": [
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ]
+}

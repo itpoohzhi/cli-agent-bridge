@@ -1,0 +1,5 @@
+1285a908bf2793b3a19e93e2149c2bfa353d1fb8625c626658fe790e2ef48147  bridges/agy-bridge/server.py
+63869e7e51e7b067661afe074b688dfb4c9d5f86040cfcdf6a3b778e825a0680  tests/test_agy_bridge_resilience.py
+62a83bb2f0bfd9e9e975a05a5aea61991d27f49f642d1b810fc2a87dc4af2aab  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/architecture/architecture-packet.json
+707f699d147fb187b964a3c141cb5090409c0f13c6d80ec2359ec261efc5214a  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/verification-surface.json
+aaee994f9b34127c5035b643651f04c9056092f650d7d42397601c410143b30a  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/execution-evidence.md

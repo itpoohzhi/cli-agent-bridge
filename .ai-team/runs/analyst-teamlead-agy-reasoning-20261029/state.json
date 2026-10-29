@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.2",
+  "task_id": "agy-realtime-reasoning",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "criticality": "S2",
+  "entry": "full",
+  "reviewer_skip": true,
+  "parent_skill": "analyst-teamlead",
+  "phase": "READY_FOR_PR",
+  "iteration": 1,
+  "status": "COMPLETE",
+  "budgets": {
+    "code_gate_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "reviewer_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "arch_panel_to_architect": {
+      "used": 0,
+      "max": 5
+    }
+  },
+  "last_transition": "FINAL_PASS",
+  "last_blocker_id": null,
+  "same_blocker_count": 0,
+  "updated_at": "2026-10-29T10:01:25.491483+00:00",
+  "panel_proofs": {
+    "arch": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning/.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/panel/arch/r2",
+      "manifest_sha256": "5b4bcc000751a954d37bd61a47d0b4d038b4c681211f6235a97c8440fa20c931",
+      "artifact_sha256": "62a83bb2f0bfd9e9e975a05a5aea61991d27f49f642d1b810fc2a87dc4af2aab",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning/.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/architecture/architecture-packet.json",
+      "receipt_sha256": "9a71bdbf12f5b8086027a60f713a0a8c47438ba82b7daeb1eeb46b4b855c7fb6",
+      "verified_at": "2026-10-29T07:48:18.134105+00:00",
+      "debate": {
+        "round": 2,
+        "prior_ledger_sha256": "bde31a070463c7a47da5cc474d16544616cb0170b76b793b7c7c67adae402fff",
+        "reason": "2/3 positive verdicts"
+      }
+    },
+    "council": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning/.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/panel/council/r2",
+      "manifest_sha256": "e5fb35538ada2e66da5186b1c90ddeec904c1494a746e7a12e7185c6373d22f5",
+      "artifact_sha256": "7d4f3ee38549312817f33a0cc6b82ef02f69a62f9d764777b3d84d63e460838b",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning/.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/package.md",
+      "receipt_sha256": "64605302876b391829eb6fd413d27a838615d697135e33a141f31cfdcfa6dc70",
+      "verified_at": "2026-10-29T10:01:25.484319+00:00",
+      "debate": {
+        "round": 2,
+        "prior_ledger_sha256": "f6fc76a1de0676ef59e7472bcb6f02c63893c721472d38d6df729cde441ca666",
+        "reason": "2/3 positive verdicts"
+      }
+    }
+  }
+}

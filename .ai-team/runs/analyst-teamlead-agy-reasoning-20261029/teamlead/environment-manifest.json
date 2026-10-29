@@ -1,0 +1,11 @@
+{
+  "schema": "environment-manifest/v1",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "os": "macOS arm64",
+  "python3": "Python 3.14.7",
+  "sys_python3": "Python 3.9.6 (/usr/bin/python3)",
+  "ruff": "ruff 0.17.3 (uvx ruff@0.17.3)",
+  "basedpyright": "basedpyright 1.40.2 (uvx basedpyright@1.40.2)",
+  "pytest": "pytest 9.0.3 (uvx --from pytest==9.0.3 pytest)",
+  "agy_cli": "agy 1.4.9 (~/.gemini/antigravity-cli/releases/1.4.9/agy)"
+}

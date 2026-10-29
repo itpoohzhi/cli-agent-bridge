@@ -1,0 +1,54 @@
+run_id	phase	agent_or_seat	pinned_model	transport	pid	pgid	started_at	status	elapsed_s	ended_at	kill_reason	cmd
+analyst-teamlead-agy-reasoning-20261029	analyst	claude-opus-5-5-high	claude-opus-5-5	claude-p	54398	54398	2026-10-29T01:46:28+03:00	running	0			claude -p --model claude-opus-5-5 --effort high --permission-mode bypassPermissions --add-dir /Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning --add-dir /Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning --add-dir /tmp/cel-runs --add-dir /Users/aazhiry1/Мой диск --strict-mcp-config --mcp-config {"mcpServers":{}}
+analyst-teamlead-agy-reasoning-20261029	analyst	claude-opus-5-5-high	claude-opus-5-5	claude-p	54398	54398	2026-10-29T01:46:28+03:00	done	752.4	2026-10-29T01:59:00+03:00		claude -p --model claude-opus-5-5 --effort high --permission-mode bypassPermissions --add-dir /Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning --add-dir /Users/aazhiry1/tmp/cli-agent-bridge/zen-realtime-reasoning --add-dir /tmp/cel-runs --add-dir /Users/aazhiry1/Мой диск --strict-mcp-config --mcp-config {"mcpServers":{}}
+analyst-teamlead-agy-reasoning-20261029	analyst	claude-opus-5-5-high	claude-opus-5-5	claude-p	7643	7643	2026-10-29T02:00:16+03:00	done(0)	12.2	2026-10-29T02:00:28+03:00		claude -p --model claude-opus-5-5 --effort high --permission-mode bypassPermissions --add-dir /Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning --strict-mcp-config --mcp-config {"mcpServers":{}}
+analyst-teamlead-agy-reasoning-20261029	architect	claude-opus-5-5-high	claude-opus-5-5	claude-p	24107	24107	2026-10-29T02:01:46+03:00	running	0			claude -p --model claude-opus-5-5 --effort high --permission-mode bypassPermissions --add-dir /Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning --add-dir /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025 --add-dir /Users/aazhiry1/Мой диск --strict-mcp-config --mcp-config {"mcpServers":{}}
+analyst-teamlead-agy-reasoning-20261029	architect	claude-opus-5-5-high	claude-opus-5-5	claude-p	24107	24107	2026-10-29T02:01:46+03:00	done	1282.4	2026-10-29T02:23:08+03:00		claude -p --model claude-opus-5-5 --effort high --permission-mode bypassPermissions --add-dir /Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning --add-dir /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/analyst-teamlead-zen-realtime-reasoning-20261025 --add-dir /Users/aazhiry1/Мой диск --strict-mcp-config --mcp-config {"mcpServers":{}}
+analyst-teamlead-agy-reasoning-20261029	brief-review-skeptic	claude-haiku-5-5	claude-haiku-5-5	claude-p	23928	23928	2026-10-29T02:29:27+03:00	running	0			claude -p --model claude-haiku-5-5 --max-turns 1 --tools  --strict-mcp-config --mcp-config {"mcpServers":{}}
+analyst-teamlead-agy-reasoning-20261029	brief-review-realist	gpt-6.1-terra	gpt-6.1-terra	codex-exec	23929	23929	2026-10-29T02:29:27+03:00	running	0			codex exec -m gpt-6.1-terra -s read-only --ephemeral --skip-git-repo-check -
+analyst-teamlead-agy-reasoning-20261029	brief-review-visionary	gemini-3.8-flash-medium	gemini-3.8-flash-medium	agy	23931	23931	2026-10-29T02:29:27+03:00	running	0			/Users/aazhiry1/.config/agy-launch/agy-cli.sh --prompt-file /Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning/.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/arch-panel/cycle-1/brief-review/arch-r1-a1-visionary/reviewer-input-v1.md --model gemini-3.8-flash-medium --mode ask --output-format text
+analyst-teamlead-agy-reasoning-20261029	brief-review-skeptic	claude-haiku-5-5	claude-haiku-5-5	claude-p	23928	23928	2026-10-29T02:29:27+03:00	done(0)	20.9	2026-10-29T02:29:48+03:00		
+analyst-teamlead-agy-reasoning-20261029	brief-review-realist	gpt-6.1-terra	gpt-6.1-terra	codex-exec	23929	23929	2026-10-29T02:29:27+03:00	done(0)	23.3	2026-10-29T02:29:50+03:00		
+analyst-teamlead-agy-reasoning-20261029	brief-review-visionary	gemini-3.8-flash-medium	gemini-3.8-flash-medium	agy	23931	23931	2026-10-29T02:29:27+03:00	done(0)	52.0	2026-10-29T02:30:19+03:00		
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	36984	36984	2026-10-28T23:30:40.590439+00:00	Thu Oct 29 02:30:40 2026	running
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k3	36986	36986	2026-10-28T23:30:40.590389+00:00	Thu Oct 29 02:30:40 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k1	36985	36985	2026-10-28T23:30:40.590374+00:00	Thu Oct 29 02:30:40 2026	running
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	36984	36984	2026-10-28T23:30:40.590439+00:00	Thu Oct 29 02:30:40 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k3	36986	36986	2026-10-28T23:30:40.590389+00:00	Thu Oct 29 02:30:40 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k1	36985	36985	2026-10-28T23:30:40.590374+00:00	Thu Oct 29 02:30:40 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k3	34968	34968	2026-10-29T06:58:24.294372+00:00	Thu Oct 29 09:58:24 2026	running
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	34967	34967	2026-10-29T06:58:24.294405+00:00	Thu Oct 29 09:58:24 2026	running
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k1	34966	34966	2026-10-29T06:58:24.293474+00:00	Thu Oct 29 09:58:24 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k3	34968	34968	2026-10-29T06:58:24.294372+00:00	Thu Oct 29 09:58:24 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	34967	34967	2026-10-29T06:58:24.294405+00:00	Thu Oct 29 09:58:24 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k1	34966	34966	2026-10-29T06:58:24.293474+00:00	Thu Oct 29 09:58:24 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k3	26516	26516	2026-10-29T07:26:58.924622+00:00	Thu Oct 29 10:26:58 2026	running
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k1	26517	26517	2026-10-29T07:26:58.924586+00:00	Thu Oct 29 10:26:58 2026	running
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k2	26518	26518	2026-10-29T07:26:58.924744+00:00	Thu Oct 29 10:26:58 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k3	26516	26516	2026-10-29T07:26:58.924622+00:00	Thu Oct 29 10:26:58 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k2	26518	26518	2026-10-29T07:26:58.924744+00:00	Thu Oct 29 10:26:58 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k1	26517	26517	2026-10-29T07:26:58.924586+00:00	Thu Oct 29 10:26:58 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k1	84889	84889	2026-10-29T07:42:17.609470+00:00	Thu Oct 29 10:42:17 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k2	84890	84890	2026-10-29T07:42:17.610382+00:00	Thu Oct 29 10:42:17 2026	running
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k3	84891	84891	2026-10-29T07:42:17.610492+00:00	Thu Oct 29 10:42:17 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k2	84890	84890	2026-10-29T07:42:17.610382+00:00	Thu Oct 29 10:42:17 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k3	84891	84891	2026-10-29T07:42:17.610492+00:00	Thu Oct 29 10:42:17 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k1	84889	84889	2026-10-29T07:42:17.609470+00:00	Thu Oct 29 10:42:17 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k1	72526	72526	2026-10-29T09:17:22.479172+00:00	Thu Oct 29 12:17:22 2026	running
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	72984	72984	2026-10-29T09:17:24.762281+00:00	Thu Oct 29 12:17:24 2026	running
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k3	73286	73286	2026-10-29T09:17:26.748919+00:00	Thu Oct 29 12:17:26 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k1	72526	72526	2026-10-29T09:17:22.479172+00:00	Thu Oct 29 12:17:22 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	72984	72984	2026-10-29T09:17:24.762281+00:00	Thu Oct 29 12:17:24 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k3	73286	73286	2026-10-29T09:17:26.748919+00:00	Thu Oct 29 12:17:26 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k1	57575	57575	2026-10-29T09:52:55.474213+00:00	Thu Oct 29 12:52:55 2026	running
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	58119	58119	2026-10-29T09:52:58.340162+00:00	Thu Oct 29 12:52:58 2026	running
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k3	58495	58495	2026-10-29T09:53:00.873767+00:00	Thu Oct 29 12:53:00 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k1	57575	57575	2026-10-29T09:52:55.474213+00:00	Thu Oct 29 12:52:55 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k2	58119	58119	2026-10-29T09:52:58.340162+00:00	Thu Oct 29 12:52:58 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k3	58495	58495	2026-10-29T09:53:00.873767+00:00	Thu Oct 29 12:53:00 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k1	29299	29299	2026-10-29T09:58:55.349264+00:00	Thu Oct 29 12:58:55 2026	running
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k2	29534	29534	2026-10-29T09:58:57.395763+00:00	Thu Oct 29 12:58:57 2026	running
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k3	30293	30293	2026-10-29T09:59:00.191784+00:00	Thu Oct 29 12:59:00 2026	running
+analyst-teamlead-agy-reasoning-20261029	gpt-6.1-sol-high	panel-judge-k2	29534	29534	2026-10-29T09:58:57.395763+00:00	Thu Oct 29 12:58:57 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	gemini-4-argon-high	panel-judge-k3	30293	30293	2026-10-29T09:59:00.191784+00:00	Thu Oct 29 12:59:00 2026	rc=0
+analyst-teamlead-agy-reasoning-20261029	muse-wonder-full-1.0	panel-judge-k1	29299	29299	2026-10-29T09:58:55.349264+00:00	Thu Oct 29 12:58:55 2026	rc=0
