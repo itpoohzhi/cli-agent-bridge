@@ -1,0 +1,75 @@
+[
+  {
+    "id": "role-plan-before",
+    "argv": [
+      "python3",
+      "-B",
+      "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/validate_role_plan.py",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/plans/architect-01.initial.json",
+      "--phase",
+      "before"
+    ],
+    "exit_code": 0,
+    "stdout": "PASS: architect role plan is valid for before; sha256=14a9ff7d3779d4de52002ce900ceb887695b30a347e8c166f9e42e897ce17538\n",
+    "stderr": ""
+  },
+  {
+    "id": "role-plan-after",
+    "argv": [
+      "python3",
+      "-B",
+      "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/validate_role_plan.py",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/plans/architect-01.json",
+      "--phase",
+      "after"
+    ],
+    "exit_code": 0,
+    "stdout": "PASS: architect role plan is valid for after; sha256=4be065fb9f0cf884fbb8ee3f5c2810403d1f0b02cfa9e5d5e2791786741f1176\n",
+    "stderr": ""
+  },
+  {
+    "id": "architecture-packet",
+    "argv": [
+      "python3",
+      "-B",
+      "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/architecture/architecture-packet.json",
+      "--phase",
+      "approved",
+      "--run-dir",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029",
+      "--role-plan",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/plans/architect-01.json"
+    ],
+    "exit_code": 0,
+    "stdout": "PASS: architecture packet is valid for approved; sha256=f6c7a59500b8ece3b756c115b82eea5fd6de42de2825a7ed93b34345b4c49e6b\n",
+    "stderr": ""
+  },
+  {
+    "id": "arch-gate",
+    "argv": [
+      "python3",
+      "-B",
+      "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/validate_arch_gate.py",
+      "--packet",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/architecture/architecture-packet.json",
+      "--run-dir",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029",
+      "--role-plan",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/plans/architect-01.json",
+      "--repo-root",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback",
+      "--fingerprint-before",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/fingerprints/architect-before.product.json",
+      "--fingerprint-after",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/fingerprints/architect-after.product.json",
+      "--task",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/task.json",
+      "--receipt",
+      "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/receipts/arch-gate.json"
+    ],
+    "exit_code": 0,
+    "stdout": "PASS: ARCH_GATE; receipt=/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/receipts/arch-gate.json\n",
+    "stderr": ""
+  }
+]

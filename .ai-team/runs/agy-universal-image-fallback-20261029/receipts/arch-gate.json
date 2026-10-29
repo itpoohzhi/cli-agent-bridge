@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "gate": "ARCH_GATE",
+  "status": "PASS",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "criticality": "S2",
+  "packet_sha256": "f6c7a59500b8ece3b756c115b82eea5fd6de42de2825a7ed93b34345b4c49e6b",
+  "verification_surface_sha256": "c4ad6c9f03d82ffb3758d9cdd0aec361357fcf578aed7f760586b2ab96496968",
+  "protected_paths_sha256": "d6ca7c8f71a7f49915175f41520c890ab8f0891ccdd9ed04fe2d5186f94accd4",
+  "architect_worktree_sha256": "ba4cbc096d7c16f55db824df6cd3250e42d2d29a95815ef5e24600a5e04a2941",
+  "materialized_targets": 0
+}

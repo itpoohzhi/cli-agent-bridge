@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "task_id": "agy-universal-image-fallback",
+  "role": "architect",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Сформировать AP/v1, замороженные VER001..010 и task architecture_gate без изменения product/test worktree.",
+  "inputs_read": [
+    "Owner Stage2 brief",
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/teamlead-with-architect/SKILL.md",
+    "analysis/agy-universal-image-fallback/handoff-architect.md sha256=7e5f684041b65986f4ff7c8f05f67e930f497165ce5c26fd74d8ee95df9f92f6",
+    "analysis/agy-universal-image-fallback/handoff-qa.md sha256=6a71c3352f56f012e6c3e406cabad0ebbf43aad5afc325399b767b2753877377",
+    "analysis/agy-universal-image-fallback/open-questions.md sha256=f4d2914546a192f16993873c1c2d91365a65e93d2dc611963fb5eeb0af2e740e",
+    "analysis/agy-universal-image-fallback/research-plan.md sha256=e639555a5c7df5f6f4a9a7876e8902e0ee2989b410f8569e9d640ff3332cf898",
+    "analysis/agy-universal-image-fallback/evidence-ledger.md sha256=ae5bc560087d180ce4f20333028c5ad472ea772dbccf6a7b82bcb6ce7d8db59f"
+  ],
+  "stop_conditions": [
+    "Любая дельта вне .ai-team/runs/ относительно исходного fingerprint — стоп.",
+    "Не фабриковать panel approval, production activation, resource PASS или выполнение будущих uf-тестов.",
+    "Несоответствие schema/hash/role validator не позволяет объявлять механический gate PASS."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить пять Stage1 входов, legacy observability и фактические CLI-схемы валидаторов",
+      "expected_evidence": "F-* + hash всех пяти входов + факты health/CID/CLI",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Зафиксировать AD001..005, четыре состояния policy и три точки безопасного downgrade",
+      "expected_evidence": "Полная трассировка REQ/CON/INV/RISK/AC/SCN внутри AP/v1",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Заморозить десять исполняемых VER-команд с append-only и assertion coverage oracle",
+      "expected_evidence": "VER001..010, prefix6009, IDs40+10 и unittest execution",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Собрать run JSONs, закрытый role plan и неизменный product fingerprint",
+      "expected_evidence": "Packet/plan/task hashes и фактические результаты валидаторов",
+      "status": "PENDING",
+      "actual_evidence": ""
+    }
+  ],
+  "deviations": []
+}

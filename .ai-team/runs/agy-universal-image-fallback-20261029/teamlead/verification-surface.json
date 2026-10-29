@@ -1,0 +1,142 @@
+{
+  "architecture_packet_sha256": "f6c7a59500b8ece3b756c115b82eea5fd6de42de2825a7ed93b34345b4c49e6b",
+  "verifications": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env uvx ruff@0.17.3 check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; no lint errors; never use --fix on frozen baseline",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env uvx ruff@0.17.3 format --check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; no formatting writes to original prefix",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import importlib.util, os, sys, unittest\nos.environ.pop(\"AGY_IMAGE_FALLBACK_ENABLED\", None)\nsys.path.insert(0, \"tests\"); sys.path.insert(0, \".\")\nspec=importlib.util.spec_from_file_location(\"agy_frozen_suite\", \"tests/test_agy_bridge_resilience.py\")\nm=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)\nclasses=[c for n,c in vars(m).items() if isinstance(c,type) and issubclass(c,unittest.TestCase) and (n.startswith(\"Image\") or n in {\"AcceptanceOracleTests\",\"UniversalImageFallbackTests\"})]\nassert any(c.__name__==\"UniversalImageFallbackTests\" for c in classes), \"Missing universal tests\"\nloader=unittest.TestLoader(); suite=unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)\nassert suite.countTestCases()>=56, suite.countTestCases()\nresult=unittest.TextTestRunner(verbosity=2).run(suite); assert result.wasSuccessful()\nprint(\"UNIVERSAL_AND_LEGACY_EXECUTION_PASS\")'",
+      "expected": ">=56 tests: all 46 legacy image-related methods plus UniversalImageFallbackTests uf01..uf10 execute and pass; not AST-only",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import collections, io, json, subprocess, tarfile, tempfile\nfrom pathlib import Path\nroot=Path.cwd(); temp_base_dir=Path.home()/\"work/tmp\"; temp_base_dir.mkdir(parents=True,exist_ok=True)\nargs=[\"uvx\",\"basedpyright@1.40.2\",\"--outputjson\",\"bridges/agy-bridge/server.py\",\"tests/test_agy_bridge_resilience.py\"]\ndef diagnostics(cwd):\n r=subprocess.run(args,cwd=cwd,capture_output=True,text=True)\n assert r.returncode in (0,1),(r.returncode,r.stderr)\n d=json.loads(r.stdout); assert \"generalDiagnostics\" in d,d\n c=collections.Counter()\n for x in d[\"generalDiagnostics\"]:\n  f=str(Path(x[\"file\"]).relative_to(cwd)); c[(f,x.get(\"severity\"),x.get(\"rule\"),x[\"message\"])]+=1\n return c\nwith tempfile.TemporaryDirectory(prefix=\"agy-type-baseline-\",dir=temp_base_dir) as tmp:\n old=Path(tmp); archive=subprocess.check_output([\"git\",\"archive\",'\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"'])\n with tarfile.open(fileobj=io.BytesIO(archive)) as tf: tf.extractall(old,filter=\"data\")\n before=diagnostics(old); after=diagnostics(root); delta=after-before\n assert not delta,dict(delta)\n print(\"TYPECHECK_NO_NEW_DIAGNOSTICS_PASS\",\"baseline\",sum(before.values()),\"candidate\",sum(after.values()))'",
+      "expected": "same pinned basedpyright executable checks archived BASE and candidate; exact multiset file/severity/rule/message delta is empty; inherited diagnostics recorded, no baseline suppression",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider",
+      "expected": "exit 0; full repository suite including all agy/strict tests. No pyproject.toml exists; use pinned uvx, do not invent uv run project config.",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import hashlib, subprocess\nfrom pathlib import Path\np='\"'\"'tests/test_agy_bridge_resilience.py'\"'\"'; old=subprocess.check_output([\"git\",\"show\",'\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"'+\":\"+p]); new=Path(p).read_bytes()\nassert len(old)==249933 and hashlib.sha256(old).hexdigest()=='\"'\"'f318d60537ad862b11313d303644ace3ff5ae74e5d581ceeba86bcf7bddeeff5'\"'\"'\nassert new[:len(old)]==old, \"Baseline prefix changed\"\nfor b in ['\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"','\"'\"'5a19559426de7508d525e2bd465eff648665a6a7'\"'\"']:\n rows=subprocess.check_output([\"git\",\"diff\",\"--numstat\",b,\"--\",p],text=True).splitlines()\n assert all(row.split()[1]==\"0\" for row in rows), rows\nsubprocess.run([\"python3\",\"-B\",\"-m\",\"unittest\",\"discover\",\"-s\",\"tests\",\"-p\",\"test_images_strict.py\",\"-q\"],check=True)\nprint(\"APPEND_ONLY_STRICT_PASS\",len(old))'",
+      "expected": "whole baseline blob is exact prefix; 0 deleted lines against both baselines; test_images_strict.py executes successfully",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, re\nfrom pathlib import Path\nt=ast.parse(Path(\"tests/test_agy_bridge_resilience.py\").read_text())\nexpected={f\"{p}{i:02}\" for p,n in [(\"img\",10),(\"hist\",10),(\"life\",5),(\"log\",2),(\"res\",3),(\"ao\",10),(\"uf\",10)] for i in range(1,n+1)}\nfound=set(); uf=set()\nfor f in ast.walk(t):\n if isinstance(f,(ast.FunctionDef,ast.AsyncFunctionDef)) and f.name.startswith(\"test_\") and any(isinstance(a,ast.Assert) or isinstance(a,ast.Call) and isinstance(a.func,ast.Attribute) and isinstance(a.func.value,ast.Name) and a.func.value.id==\"self\" and a.func.attr.startswith(\"assert\") for a in ast.walk(f)):\n  ids={k for k in expected if re.search(r\"(?:^|_)\"+k+r\"(?:_|$)\",f.name)}; found.update(ids)\nfor c in t.body:\n if isinstance(c,ast.ClassDef) and c.name==\"UniversalImageFallbackTests\":\n  assert c.lineno>6008, c.lineno\n  uf={f\"uf{i:02}\" for f in c.body if isinstance(f,ast.FunctionDef) for i in range(1,11) if re.match(f\"test_uf{i:02}_\",f.name)}\nassert not expected-found, sorted(expected-found)\nassert uf=={f\"uf{i:02}\" for i in range(1,11)},uf\nprint(\"QA_ASSERT_COVERAGE_PASS\",len(expected))'",
+      "expected": "all 40 inherited QA IDs + uf01..uf10 have assertion-bearing test methods; appended UniversalImageFallbackTests exists; execution independently VER003/005",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-008",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import hashlib, subprocess\nfrom pathlib import Path\nbase='\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"'; allowed={'\"'\"'bridges/agy-bridge/server.py'\"'\"','\"'\"'tests/test_agy_bridge_resilience.py'\"'\"'}\npaths=set(subprocess.check_output([\"git\",\"diff\",\"--name-only\",base,\"--\"],text=True).splitlines())|set(subprocess.check_output([\"git\",\"ls-files\",\"--others\",\"--exclude-standard\"],text=True).splitlines())\npaths={p for p in paths if not p.startswith(\".ai-team/runs/\") and p not in {'\"'\"'analysis/agy-universal-image-fallback/handoff-qa.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/research-plan.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/evidence-ledger.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/handoff-architect.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/open-questions.md'\"'\"'}}\nassert paths<=allowed,paths-allowed\nassert Path('\"'\"'bridges/agy-bridge/fleet.json'\"'\"').read_bytes()==subprocess.check_output([\"git\",\"show\",base+\":\"+'\"'\"'bridges/agy-bridge/fleet.json'\"'\"'])\nfrozen={'\"'\"'analysis/agy-universal-image-fallback/evidence-ledger.md'\"'\"': '\"'\"'ae5bc560087d180ce4f20333028c5ad472ea772dbccf6a7b82bcb6ce7d8db59f'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/handoff-architect.md'\"'\"': '\"'\"'7e5f684041b65986f4ff7c8f05f67e930f497165ce5c26fd74d8ee95df9f92f6'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/handoff-qa.md'\"'\"': '\"'\"'6a71c3352f56f012e6c3e406cabad0ebbf43aad5afc325399b767b2753877377'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/open-questions.md'\"'\"': '\"'\"'f4d2914546a192f16993873c1c2d91365a65e93d2dc611963fb5eeb0af2e740e'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/research-plan.md'\"'\"': '\"'\"'e639555a5c7df5f6f4a9a7876e8902e0ee2989b410f8569e9d640ff3332cf898'\"'\"'}\nfor p,h in frozen.items(): assert hashlib.sha256(Path(p).read_bytes()).hexdigest()==h,p\ntracked=subprocess.check_output([\"git\",\"ls-files\"],text=True).splitlines(); assert not any(Path(p).name==\"dynamic_config.json\" for p in tracked)\nprint(\"SCOPE_FROZEN_PASS\")'",
+      "expected": "only two permitted product paths; fleet byte-identical; all five Stage1 hashes unchanged; production dynamic config not tracked",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-009",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast,sys\nfrom pathlib import Path\nt=ast.parse(Path(\"bridges/agy-bridge/server.py\").read_text()); funcs={n.name:n for n in ast.walk(t) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}\nrequired={\"_read_image_fallback_flag\",\"_is_image_fallback_enabled\",\"_image_gate_universal\",\"_strip_media_from_messages\",\"_flatten_content_stripped\",\"_messages_to_stripped_prompt\",\"_log_token\"}\nassert required<=funcs.keys(),required-funcs.keys()\nr=funcs[\"_reset_sqlite_guards_for_tests\"]\nassert any(isinstance(n,ast.Assign) and any(isinstance(x,ast.Name) and x.id==\"_image_fallback_flag_cache\" for x in n.targets) and ast.literal_eval(n.value)==(0.0,False) for n in ast.walk(r)),\"cache reset\"\nimports={a.name.split(\".\")[0] for n in ast.walk(t) if isinstance(n,ast.Import) for a in n.names}|{n.module.split(\".\")[0] for n in ast.walk(t) if isinstance(n,ast.ImportFrom) and n.module}\nassert imports<=set(sys.stdlib_module_names)|{\"core\"},imports-set(sys.stdlib_module_names)-{\"core\"}\nseen=set(); todo=[n for n in funcs if \"image\" in n or \"media\" in n or \"stripped\" in n]\nwhile todo:\n n=todo.pop()\n if n in seen: continue\n seen.add(n)\n for c in ast.walk(funcs[n]):\n  if isinstance(c,ast.Call):\n   name=ast.unparse(c.func)\n   assert not any(x in name for x in [\"urlopen\",\"urlretrieve\",\"urllib.request\",\"HTTPConnection\",\"HTTPSConnection\"]),name\n   if isinstance(c.func,ast.Name) and c.func.id in funcs: todo.append(c.func.id)\nprint(\"STATIC_IMAGE_SECURITY_CONTRACT_PASS\")'",
+      "expected": "named helper/cache reset/static no-fetch boundary passes; actual guard ordering, prompts, delivery, CID and reserve behavior must also pass uf03..uf10 under VER003",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-010",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import hashlib,json\nfrom pathlib import Path\nroot=Path.home()/\".dsh/bridges/agy-bridge\"; cfg=json.loads((root/\"dynamic_config.json\").read_text())\nassert cfg.get(\"IMAGE_INPUT_ENABLED\") is True and cfg.get(\"IMAGE_FALLBACK_ENABLED\") is True\nassert hashlib.sha256((root/\"server.py\").read_bytes()).hexdigest()==hashlib.sha256(Path('\"'\"'bridges/agy-bridge/server.py'\"'\"').read_bytes()).hexdigest()\nassert (root/\"fleet.json\").read_bytes()==Path('\"'\"'bridges/agy-bridge/fleet.json'\"'\"').read_bytes()\nr=json.loads(Path(\".ai-team/runs/agy-universal-image-fallback-20261029/teamlead/live-acceptance.json\").read_text())\nassert r[\"status\"]==\"PASS\" and r[\"existing_owner_chat\"] is True\nassert r[\"candidate_server_sha256\"]==hashlib.sha256(Path('\"'\"'bridges/agy-bridge/server.py'\"'\"').read_bytes()).hexdigest()\nneeded={\"image_then_text_fallback_then_history\",\"previously_text_only_model\",\"cold_and_hot\",\"explicit_cid\",\"repeat_and_parallel\",\"sse_completion_no_error\",\"cleanup_before_retry\",\"flag_rollback_reload\",\"resource_profile\",\"side_effect_safe_failure\"}\nassert needed<=set(r[\"scenarios_passed\"]),needed-set(r[\"scenarios_passed\"])\nassert r[\"unverified\"]==[] and r[\"evidence_refs\"] and all(isinstance(x,str) and x for x in r[\"evidence_refs\"])\nprint(\"LIVE_RELEASE_RECEIPT_PRESENT_CONFIG_AND_HASH_PASS\")'",
+      "expected": "deployed server SHA/fleet pair and both strict JSON booleans true; independently collected same-owner-chat live receipt covers all listed scenarios and resource profile. Receipt presence is NOT itself proof: Teamlead must inspect referenced evidence.",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    }
+  ],
+  "live_gate_note": "VER010 checks presence/readback only; Teamlead independently executes/inspects real same-owner DSH chat evidence. No receipt or resource PASS exists at Stage2."
+}
