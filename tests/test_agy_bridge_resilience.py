@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
+import gc
 import hashlib
 import http.client
 import importlib.util
@@ -34,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+import tracemalloc
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -3811,13 +3814,14 @@ _FLAG_ENV = {
     "emit_tool_trace": "AGY_BRIDGE_EMIT_TOOL_TRACE",
     "extended_timeout_enabled": "AGY_EXTENDED_TIMEOUT_ENABLED",
     "graceful_timeout_on_partial": "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL",
+    "step_scoped_usage_enabled": "AGY_STEP_SCOPED_USAGE_ENABLED",
 }
 _FLAG_NAMES = tuple(_FLAG_ENV)
 _NOTICE_MARK = "Превышен лимит времени хода agy"
 
 
 def _clean_flags(fx: _Fixture) -> None:
-    """Все четыре env-переключателя и таймаут-алиасы сняты: действует только файл/дефолт."""
+    """Все пять env-переключателей и таймаут-алиасы сняты: действует только файл/дефолт."""
     for env in _FLAG_ENV.values():
         fx.set_env(env, None)
     for env in ("AGY_IDLE_TIMEOUT_S", "AGY_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"):
@@ -8409,6 +8413,1271 @@ class AcceptanceOracleTests(unittest.TestCase):
                         _ = build(broken)
                     self.assertEqual(_oval(caught.exception, "reason"), reason)
             self.assertEqual(_dict(build(raw))["default_model"], "gemini-3.8-flash")
+
+
+# ======================================================================================
+# agy-usage-overflow-fix: usage по окну последнего шага (step_scoped_usage_enabled).
+# AD-001 ledger шагов хода из транскрипта, AD-002/AD-003 нормализованный wire-usage и
+# ограниченный fallback, AD-004 пятый runtime-флаг. Оракулы USG-01..USG-18.
+# ======================================================================================
+
+_USAGE_MODEL = "gemini-4-argon"  # окно 1048576 в fleet.json
+_USAGE_WINDOW = 1048576
+_OMIT: object = object()
+_RAW_CUMULATIVE: dict[str, object] = {
+    "input_tokens": 1552662,
+    "output_tokens": 191762,
+    "thinking_tokens": 500,
+    "total_tokens": 1745000,
+    "cache_read_tokens": 982479,
+}
+
+
+def _usage_rec(
+    idx: object,
+    inp: object = 100,
+    cache: object = _OMIT,
+    out: object = 10,
+    **extra: object,
+) -> dict[str, object]:
+    """PLANNER_RESPONSE с верхнеуровневыми счётчиками; `_OMIT` убирает ключ."""
+    rec: dict[str, object] = {
+        "type": "PLANNER_RESPONSE",
+        "step_index": idx,
+        "input_tokens": inp,
+        "cache_read_tokens": cache,
+        "output_tokens": out,
+    }
+    rec.update(extra)
+    return {key: value for key, value in rec.items() if value is not _OMIT}
+
+
+def _usage_tail(
+    base_idx: int = 0,
+    offset: int = 0,
+    resumed: bool = False,
+    enabled: bool = True,
+    plan: object | None = None,
+) -> object:
+    """Tail без процесса, SQLite OFF: только счётчики шагов из транскрипта."""
+    if plan is None:
+        plan = _bfn("_TurnPlan")()
+        setattr(plan, "mode", "OFF")
+        setattr(plan, "base_idx", base_idx)
+        setattr(plan, "offset", offset)
+
+    def emit(_idx: int, _delta: str, on_delivered: Callable[[], None] | None) -> bool:
+        if on_delivered is not None:
+            on_delivered()
+        return True
+
+    tail = _bfn("_TranscriptTail")(
+        emit,
+        threading.Event(),
+        threading.Event(),
+        resumed,
+        plan,
+        "turn-usage",
+        usage_enabled=enabled,
+    )
+    _ = _ofn(tail, "bind")(_CID)
+    return tail
+
+
+def _usage_write(path: Path, recs: list[dict[str, object]], mode: str = "a") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not recs and mode == "a":
+        return  # пустая дозапись не создаёт файл
+    with open(path, mode, encoding="utf-8") as fh:
+        for rec in recs:
+            _ = fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _usage_feed(
+    fx: _Fixture,
+    tail: object,
+    recs: list[dict[str, object]],
+    name: str = "transcript_full.jsonl",
+) -> object:
+    """Дописать записи в транскрипт, прочитать один проход, вернуть снимок usage."""
+    _usage_write(fx.transcript().parent / name, recs)
+    _ = _ofn(tail, "_read_transcript")()
+    return _ofn(tail, "usage_snapshot")()
+
+
+def _screenshot_records() -> list[dict[str, object]]:
+    """Шаги 186..602 хода со скриншота: сумма output 54601, последний 602 = (2437, 56849, 2867)."""
+    outs = [125] * 150 + [124] * 266  # 416 шагов 186..601, сумма 51734
+    recs = [_usage_rec(186 + i, 1000 + i, 50000 + i, out) for i, out in enumerate(outs)]
+    recs.append(
+        {
+            "type": "PLANNER_RESPONSE",
+            "step_index": 602,
+            "input_tokens": 2437,
+            "cache_read_tokens": 56849,
+            "output_tokens": 2867,
+        }
+    )
+    return recs
+
+
+def _usage_out(**over: object) -> dict[str, object]:
+    out: dict[str, object] = {
+        "rc": 0,
+        "state": "done",
+        "text": "ok",
+        "usage": {},
+        "result": {"status": "OK"},
+        "num_turns": None,
+        "tool_events": 0,
+    }
+    out.update(over)
+    return out
+
+
+def _snap(**fields: object) -> object:
+    return _bfn("_UsageSnapshot")(**fields)
+
+
+def _resolve(
+    out: dict[str, object],
+    snap: object | None = None,
+    window: int | None = _USAGE_WINDOW,
+    resume: bool = False,
+) -> tuple[dict[str, object], str]:
+    """(итог `_resolve_step_usage`, stderr моста за вызов)."""
+    buffer = io.StringIO()
+    with mock.patch.object(sys, "stderr", buffer):
+        resolved = _dict(
+            _bfn("_resolve_step_usage")(
+                out, snap if snap is not None else _snap(), window, resume
+            )
+        )
+    return resolved, buffer.getvalue()
+
+
+def _wire(resolved: dict[str, object]) -> dict[str, object]:
+    return _dict(resolved["wire"])
+
+
+def _usage_result_ev(
+    t: float,
+    usage: dict[str, object],
+    num_turns: int | None = None,
+    status: str = "OK",
+    error: str = "",
+) -> dict[str, object]:
+    ev = _result_ev(t, status=status, error=error)
+    result = _dict(_dict(ev["line"])["result"])
+    result["usage"] = usage
+    if num_turns is not None:
+        result["num_turns"] = num_turns
+    return ev
+
+
+def _planner_counts_ev(
+    t: float, rec: dict[str, object], late_delay: float | None = None
+) -> dict[str, object]:
+    if late_delay is None:
+        return {"t": t, "op": "transcript", "record": rec}
+    return {"t": t, "op": "late_transcript", "delay": late_delay, "record": rec}
+
+
+def _usage_turn_events(late: bool = True) -> list[dict[str, object]]:
+    """Ход со скриншота: кумулятивный result.usage и запись последнего шага после EOF."""
+    last = _usage_rec(3, 2437, 56849, 2867, content="ответ")
+    return [
+        _init_ev(0.05),
+        _text_ev(0.1),
+        _planner_counts_ev(0.11, _usage_rec(0, 900, 0, 100, tool_calls=[{"n": "x"}])),
+        _planner_counts_ev(
+            0.12, _usage_rec(1, 1500, 800, 200, tool_calls=[{"n": "x"}])
+        ),
+        _planner_counts_ev(
+            0.13, _usage_rec(2, 2000, 5000, 300, tool_calls=[{"n": "x"}])
+        ),
+        _usage_result_ev(0.15, dict(_RAW_CUMULATIVE), num_turns=3),
+        _planner_counts_ev(0.16, last, 0.09 if late else None),
+        _exit_ev(0.17),
+    ]
+
+
+_USAGE_TURN_SUM = 100 + 200 + 300 + 2867
+
+
+def _usage_flags(fx: _Fixture, on: bool = True, **extra_env: str) -> None:
+    _clean_flags(fx)
+    fx.set_env("AGY_STEP_SCOPED_USAGE_ENABLED", "1" if on else "0")
+    for key, value in extra_env.items():
+        fx.set_env(key, value)
+
+
+def _json_usage(ctx: dict[str, object]) -> tuple[int, dict[str, object]]:
+    sent: list[tuple[int, object]] = []
+
+    def send(code: int, payload: object) -> None:
+        sent.append((code, payload))
+
+    with _Sock() as sock:
+        handler = cast(object, _make_handler(sock))
+        setattr(handler, "_send", send)
+        _ = _ofn(handler, "_serve_json")(ctx)
+    code, payload = sent[0]
+    return code, _dict(payload)
+
+
+def _sse_usage(ctx: dict[str, object]) -> tuple[list[object], list[dict[str, object]]]:
+    frames = _frames_json(_sse_frames(ctx))
+    usages = [
+        _dict(_dict(frame)["usage"])
+        for frame in frames
+        if isinstance(frame, dict) and "usage" in frame
+    ]
+    return frames, usages
+
+
+def _stderr_of(call: Callable[[], object]) -> tuple[object, str]:
+    buffer = io.StringIO()
+    with mock.patch.object(sys, "stderr", buffer):
+        result = call()
+    return result, buffer.getvalue()
+
+
+class StepScopedUsageLedgerTests(unittest.TestCase):
+    """VER-001/VER-006 (USG-01..USG-05, USG-16): счётчики шагов хода из транскрипта."""
+
+    def test_step_scoped_usage_l2_screenshot_fixture_186_602(self) -> None:
+        with _Fixture() as fx:
+            history = [_usage_rec(i, 7, 7, 9999) for i in range(186)]
+            _usage_write(fx.transcript(), history)
+            tail = _usage_tail(base_idx=186, resumed=True)
+            snap = _usage_feed(fx, tail, _screenshot_records())
+            self.assertEqual(_oval(snap, "last_step_usage"), (602, 2437, 56849, 2867))
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 54601)
+            self.assertEqual(_oval(snap, "observed_planner_steps"), 417)
+            self.assertIs(_oval(snap, "completeness"), True)
+            self.assertIs(_oval(snap, "observed_planner_steps_saturated"), False)
+            out = _usage_out(usage=dict(_RAW_CUMULATIVE))
+            resolved, _log_text = _resolve(out, snap)
+            self.assertEqual(
+                _wire(resolved),
+                {
+                    "prompt_tokens": 59286,
+                    "completion_tokens": 54601,
+                    "total_tokens": 113887,
+                    "prompt_tokens_details": {"cached_tokens": 56849},
+                },
+            )
+            self.assertEqual(resolved["source"], "last_step")
+            # pi-ai: input = max(0, prompt - cacheRead); input + cacheRead = prompt.
+            prompt = _int(_wire(resolved)["prompt_tokens"])
+            cache = _int(
+                _dict(_wire(resolved)["prompt_tokens_details"])["cached_tokens"]
+            )
+            self.assertEqual(max(0, prompt - cache) + cache, 59286)
+            self.assertLessEqual(prompt, _USAGE_WINDOW)
+
+    def test_step_scoped_usage_l2_cache_missing_and_zero(self) -> None:
+        with _Fixture() as fx:
+            tail = _usage_tail()
+            snap = _usage_feed(fx, tail, [_usage_rec(0, 2437, _OMIT, 40)])
+            self.assertEqual(_oval(snap, "last_step_usage"), (0, 2437, None, 40))
+            resolved, _t = _resolve(_usage_out(usage=dict(_RAW_CUMULATIVE)), snap)
+            self.assertEqual(
+                _wire(resolved),
+                {"prompt_tokens": 2437, "completion_tokens": 40, "total_tokens": 2477},
+            )
+        with _Fixture() as fx:
+            tail = _usage_tail()
+            snap = _usage_feed(
+                fx, tail, [_usage_rec(0, 2437, 0, 40), _usage_rec(1, 5, None, 1)]
+            )
+            self.assertEqual(_oval(snap, "last_step_usage"), (1, 5, None, 1))
+            self.assertIs(
+                _oval(snap, "completeness"), True
+            )  # null cache == отсутствует
+            snap0 = _snap(
+                last_step_usage=(0, 2437, 0, 40),
+                completeness=True,
+                turn_output_tokens_sum=40,
+                observed_planner_steps=1,
+            )
+            resolved, _t = _resolve(_usage_out(), snap0)
+            self.assertEqual(
+                _wire(resolved)["prompt_tokens_details"], {"cached_tokens": 0}
+            )
+
+    def test_step_scoped_usage_l2_duplicates_and_corrections_not_double_counted(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            tail = _usage_tail()
+            snap = _usage_feed(
+                fx, tail, [_usage_rec(5, 10, 1, 100), _usage_rec(5, 10, 1, 100)]
+            )
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 100)
+            self.assertEqual(_oval(snap, "observed_planner_steps"), 1)
+            # Исправленная запись того же шага заменяет вклад: 100 -> 130.
+            snap = _usage_feed(fx, tail, [_usage_rec(5, 20, 2, 130)])
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 130)
+            self.assertEqual(_oval(snap, "last_step_usage"), (5, 20, 2, 130))
+            # Меньший индекс позже: сумма растёт, latest не откатывается.
+            snap = _usage_feed(fx, tail, [_usage_rec(3, 1, 1, 7)])
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 137)
+            self.assertEqual(_oval(snap, "last_step_usage"), (5, 20, 2, 130))
+            self.assertEqual(_oval(snap, "observed_planner_steps"), 2)
+
+    def test_step_scoped_usage_l2_rewrite_keeps_ledger_without_double_sum(self) -> None:
+        with _Fixture() as fx:
+            tail = _usage_tail()
+            recs = [_usage_rec(i, 50 + i, 10, 100) for i in range(4)]
+            snap = _usage_feed(fx, tail, recs)
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 400)
+            # Файл переписан с нуля (короче прежнего): записи снова видны tail'у.
+            _usage_write(fx.transcript(), recs[:2] + [_usage_rec(0, 1, 1, 100)], "w")
+            snap = _usage_feed(fx, tail, [])
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 400)
+            self.assertEqual(_oval(snap, "observed_planner_steps"), 4)
+
+    def test_step_scoped_usage_l2_history_before_base_idx_is_ignored(self) -> None:
+        with _Fixture() as fx:
+            tail = _usage_tail(base_idx=10, resumed=True)
+            snap = _usage_feed(
+                fx,
+                tail,
+                [
+                    _usage_rec(8, 1, 1, 500),
+                    _usage_rec(9, 2, 2, 600),
+                    _usage_rec(10, 3, 3, 7),
+                ],
+            )
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 7)
+            self.assertEqual(_oval(snap, "observed_planner_steps"), 1)
+            self.assertEqual(_oval(snap, "last_step_usage"), (10, 3, 3, 7))
+
+    def test_step_scoped_usage_l2_invalid_counts_mark_incomplete_keep_last_valid(
+        self,
+    ) -> None:
+        bad_variants: list[dict[str, object]] = [
+            _usage_rec(1, True, 1, 5),
+            _usage_rec(1, 1, True, 5),
+            _usage_rec(1, 1, 1, False),
+            _usage_rec(1, -1, 1, 5),
+            _usage_rec(1, 1, -2, 5),
+            _usage_rec(1, 1, 1, -5),
+            _usage_rec(1, "10", 1, 5),
+            _usage_rec(1, 1.5, 1, 5),
+            _usage_rec(1, 1, "3", 5),
+            _usage_rec(1, 1, 1, "5"),
+            _usage_rec(1, _OMIT, 1, 5),
+            _usage_rec(1, 1, 1, _OMIT),
+        ]
+        for bad in bad_variants:
+            with self.subTest(bad=bad), _Fixture() as fx:
+                tail = _usage_tail()
+                snap = _usage_feed(fx, tail, [_usage_rec(0, 10, 2, 50), bad])
+                self.assertIs(_oval(snap, "completeness"), False)
+                self.assertEqual(_oval(snap, "invalid_records_count"), 1)
+                self.assertEqual(_oval(snap, "last_step_usage"), (0, 10, 2, 50))
+                self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 50)
+                self.assertEqual(_oval(snap, "observed_planner_steps"), 2)
+                # Невалидная запись не затирает уже сохранённый валидный кортеж.
+                snap = _usage_feed(fx, tail, [dict(bad, step_index=0)])
+                self.assertEqual(_oval(snap, "last_step_usage"), (0, 10, 2, 50))
+                self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 50)
+        for bad_idx in (True, "7", -1, 1.0, None, _OMIT):
+            with self.subTest(step_index=bad_idx), _Fixture() as fx:
+                tail = _usage_tail()
+                snap = _usage_feed(fx, tail, [_usage_rec(bad_idx, 1, 1, 1)])
+                self.assertIs(_oval(snap, "completeness"), False)
+                self.assertIsNone(_oval(snap, "last_step_usage"))
+                self.assertEqual(_oval(snap, "observed_planner_steps"), 0)
+
+    def test_step_scoped_usage_l2_incomplete_ledger_wire_completion_zero_and_diag(
+        self,
+    ) -> None:
+        snap = _snap(
+            last_step_usage=(602, 2437, 56849, 2867),
+            turn_output_tokens_sum=54601,
+            observed_planner_steps=417,
+            completeness=False,
+            invalid_records_count=2,
+        )
+        resolved, text = _resolve(_usage_out(usage=dict(_RAW_CUMULATIVE)), snap)
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 59286)
+        self.assertEqual(_wire(resolved)["completion_tokens"], 0)
+        self.assertEqual(_wire(resolved)["total_tokens"], 59286)
+        self.assertIn("usage-step-ledger-incomplete observed_steps=417", text)
+        self.assertIn("invalid_records=2", text)
+        self.assertNotIn("***", text)
+        self.assertNotIn("usage-cumulative-fallback", text)
+
+    def test_step_scoped_usage_l2_transcript_full_priority_and_fallback_pinning(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            base = fx.transcript().parent
+            # Свежий разговор: ни одного файла — ничего не пинится, проверка повторяется.
+            tail = _usage_tail()
+            snap = _usage_feed(fx, tail, [])
+            self.assertEqual(_oval(snap, "observed_planner_steps"), 0)
+            self.assertIsNone(_oval(tail, "_path"))
+            # Появился только transcript.jsonl: он и закрепляется на попытку.
+            snap = _usage_feed(
+                fx, tail, [_usage_rec(0, 5, 1, 11)], name="transcript.jsonl"
+            )
+            self.assertEqual(_oval(tail, "_path"), base / "transcript.jsonl")
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 11)
+            # Позже появился full: не подменяет файл и смещение выбранного.
+            snap = _usage_feed(fx, tail, [_usage_rec(1, 6, 1, 4000)])
+            self.assertEqual(_oval(tail, "_path"), base / "transcript.jsonl")
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 11)
+            snap = _usage_feed(
+                fx, tail, [_usage_rec(2, 7, 1, 13)], name="transcript.jsonl"
+            )
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 24)
+        with _Fixture() as fx:
+            base = fx.transcript().parent
+            _usage_write(base / "transcript.jsonl", [_usage_rec(0, 1, 1, 999)])
+            tail = _usage_tail()
+            snap = _usage_feed(fx, tail, [_usage_rec(0, 5, 1, 11)])
+            self.assertEqual(_oval(tail, "_path"), base / "transcript_full.jsonl")
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 11)
+
+    def test_step_scoped_usage_l2_resume_prespawn_boundary_sqlite_off(self) -> None:
+        with _Fixture() as fx:
+            base = fx.transcript().parent
+            history = [_usage_rec(i, 7, 7, 9999) for i in range(10)]
+            _usage_write(base / "transcript.jsonl", history)
+            plan = _bfn("_prespawn_plan")(_CID, True, True)
+            self.assertIs(_oval(plan, "anchored"), False)  # SQLite OFF: нет БД-якоря
+            self.assertEqual(_oval(plan, "transcript_path"), base / "transcript.jsonl")
+            self.assertEqual(_oval(plan, "base_idx"), 10)
+            self.assertEqual(
+                _oval(plan, "offset"), (base / "transcript.jsonl").stat().st_size
+            )
+            tail = _usage_tail(resumed=True, plan=plan)
+            snap = _usage_feed(
+                fx,
+                tail,
+                [_usage_rec(10, 1, 1, 5), _usage_rec(11, 2, 2, 6)],
+                name="transcript.jsonl",
+            )
+            self.assertEqual(_oval(snap, "turn_output_tokens_sum"), 11)
+            self.assertEqual(_oval(snap, "observed_planner_steps"), 2)
+            legacy = _bfn("_prespawn_plan")(_CID, True)
+            self.assertIsNone(_oval(legacy, "transcript_path"))
+            self.assertEqual(_oval(legacy, "base_idx"), 0)  # full-файла нет: legacy
+
+    def test_step_scoped_usage_l2_distinct_cids_and_retries_are_isolated(self) -> None:
+        with _Fixture() as fx:
+            first = _usage_tail()
+            snap_a = _usage_feed(fx, first, [_usage_rec(0, 1, 1, 10)])
+            other = _bfn("_TranscriptTail")(
+                lambda *_a: True,
+                threading.Event(),
+                threading.Event(),
+                False,
+                _bfn("_TurnPlan")(),
+                "turn-b",
+                usage_enabled=True,
+            )
+            _ = _ofn(other, "bind")(_CID_B)
+            _usage_write(fx.transcript(_CID_B), [_usage_rec(0, 9, 9, 77)])
+            _ = _ofn(other, "_read_transcript")()
+            snap_b = _ofn(other, "usage_snapshot")()
+            self.assertEqual(_oval(snap_a, "turn_output_tokens_sum"), 10)
+            self.assertEqual(_oval(snap_b, "turn_output_tokens_sum"), 77)
+            retry = _usage_tail(
+                base_idx=1, resumed=True
+            )  # новая попытка — новый ledger
+            self.assertEqual(
+                _oval(_ofn(retry, "usage_snapshot")(), "observed_planner_steps"), 0
+            )
+
+    def test_step_scoped_usage_l2_disabled_collector_is_legacy_and_allocates_nothing(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _usage_write(
+                fx.transcript().parent / "transcript.jsonl", [_usage_rec(0, 1, 1, 5)]
+            )
+            tail = _usage_tail(enabled=False)
+            self.assertIsNone(_oval(tail, "step_records_by_index"))
+            with (
+                mock.patch.object(tail, "_record_usage") as record,
+                mock.patch.object(tail, "_publish_usage") as publish,
+            ):
+                snap = _usage_feed(fx, tail, [_usage_rec(0, 2, 2, 9)])
+            self.assertEqual(record.call_count, 0)
+            self.assertEqual(publish.call_count, 0)
+            self.assertIs(snap, _bval("_EMPTY_USAGE_SNAPSHOT"))
+            self.assertEqual(
+                _oval(tail, "_transcript_file")(), _bfn("_transcript_path")(_CID)
+            )
+
+    def test_step_scoped_usage_l2_snapshot_is_immutable_and_published_without_io(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            tail = _usage_tail()
+            snap = _usage_feed(fx, tail, [_usage_rec(0, 1, 1, 5)])
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                setattr(snap, "completeness", False)
+
+            class _SpyLock:
+                held = False
+
+                def __enter__(self) -> None:
+                    _SpyLock.held = True
+
+                def __exit__(self, *_exc: object) -> None:
+                    _SpyLock.held = False
+
+            violations: list[str] = []
+
+            def forbid(name: str) -> Callable[..., object]:
+                def guard(*_a: object, **_k: object) -> object:
+                    if _SpyLock.held:
+                        violations.append(name)
+                    return None
+
+                return guard
+
+            setattr(tail, "_usage_lock", _SpyLock())
+            setattr(tail, "_usage_dirty", True)
+            with (
+                mock.patch.object(_bridge(), "_log", forbid("log")),
+                mock.patch.object(Path, "stat", forbid("stat")),
+                mock.patch("builtins.open", forbid("open")),
+            ):
+                _ = _ofn(tail, "_publish_usage")()
+            self.assertEqual(violations, [])
+            self.assertIs(_SpyLock.held, False)
+
+    def test_step_scoped_usage_l2_saturation_16385_distinct_invalid_then_corrections(
+        self,
+    ) -> None:
+        cap = _int(_bval("USAGE_STEP_CAP"))
+        self.assertEqual(cap, 16384)
+        with _Fixture() as fx:
+            tail = _usage_tail()
+            records = cast("dict[int, object]", _oval(tail, "step_records_by_index"))
+            bad = [_usage_rec(i, "bad", 1, 1) for i in range(1, cap + 2)]
+            snap = None
+            for start in range(0, len(bad), 512):
+                snap = _usage_feed(fx, tail, bad[start : start + 512])
+            self.assertEqual(len(records), cap)
+            self.assertTrue(all(value is None for value in records.values()))
+            self.assertNotIn(cap + 1, records)
+            self.assertIs(_oval(snap, "observed_planner_steps_saturated"), True)
+            # Повтор невалидного неотслеженного idx не меняет ledger.
+            snap = _usage_feed(fx, tail, [_usage_rec(cap + 1, "bad", 1, 1)])
+            self.assertEqual(len(records), cap)
+            # Валидная коррекция отслеженного idx=100: значение на месте, len прежний.
+            snap = _usage_feed(fx, tail, [_usage_rec(100, 40, 4, 8)])
+            self.assertEqual(records[100], (40, 4, 8))
+            self.assertEqual(len(records), cap)
+            # Валидная запись неотслеженного idx: ключ не вставлен, last обновлён за O(1).
+            snap = _usage_feed(fx, tail, [_usage_rec(cap + 1, 77, 7, 9)])
+            self.assertNotIn(cap + 1, records)
+            self.assertEqual(len(records), cap)
+            self.assertEqual(_oval(tail, "last_valid_step_index"), cap + 1)
+            self.assertEqual(_oval(snap, "last_step_usage"), (cap + 1, 77, 7, 9))
+            self.assertEqual(_oval(snap, "observed_planner_steps"), cap)
+            self.assertIs(_oval(snap, "observed_planner_steps_saturated"), True)
+            self.assertIs(_oval(snap, "completeness"), False)
+            resolved, text = _resolve(_usage_out(usage=dict(_RAW_CUMULATIVE)), snap)
+            self.assertEqual(_wire(resolved)["prompt_tokens"], 84)
+            self.assertEqual(
+                _wire(resolved)["completion_tokens"], 0
+            )  # unknown, не сумма
+            self.assertIn("saturated=1", text)
+
+    def test_step_scoped_usage_l2_ledger_memory_gate_4_mib_per_turn(self) -> None:
+        cap = _int(_bval("USAGE_STEP_CAP"))
+        with _Fixture() as fx:
+            tail = _usage_tail()
+            path = fx.transcript().parent / "transcript_full.jsonl"
+            recs = [
+                _usage_rec(i, 1_000_000 + i, 2_000_000 + i, 3_000 + i)
+                for i in range(cap)
+            ]
+            _usage_write(path, recs)
+            del recs
+            gc.collect()
+            tracemalloc.start()
+            try:
+                before = tracemalloc.get_traced_memory()[0]
+                _ = _ofn(tail, "_read_transcript")()
+                gc.collect()
+                retained = tracemalloc.get_traced_memory()[0] - before
+            finally:
+                tracemalloc.stop()
+            snap = _ofn(tail, "usage_snapshot")()
+            self.assertEqual(_oval(snap, "observed_planner_steps"), cap)
+            self.assertIs(_oval(snap, "completeness"), True)
+            self.assertLessEqual(retained, 4 * 1024 * 1024)
+
+    def test_step_scoped_usage_l2_single_monotonic_terminal_drain_deadline(
+        self,
+    ) -> None:
+        window = _float(_bval("DRAIN_WINDOW_S"))
+        for enabled in (True, False):
+            with self.subTest(usage_enabled=enabled):
+                run = _bare_run()
+                setattr(run, "usage_enabled", enabled)
+                setattr(run, "_proc_done", threading.Event())
+                joins: list[float] = []
+                tail = SimpleNamespace(
+                    cid="",
+                    drain_deadline=0.0,
+                    thread=SimpleNamespace(
+                        join=lambda timeout=None: joins.append(_float(timeout)),
+                        is_alive=lambda: False,
+                    ),
+                )
+                setattr(run, "_tail", tail)
+                clock = _FakeClock(100.0)
+                setattr(run, "_drain_t0", 100.0)  # EOF/exit: старт единого окна попытки
+                with mock.patch.object(_bridge(), "time", _fake_time(clock)):
+                    clock.advance(0.2)
+                    _ = _ofn(run, "terminal_drain")(0.5)
+                    clock.advance(0.2)
+                    _ = _ofn(run, "terminal_drain")(0.5)
+                    clock.advance(0.5)
+                    _ = _ofn(run, "terminal_drain")(0.5)
+                if enabled:
+                    # Общий бюджет <= 0.5 с от EOF: второй drain получает остаток, не новое окно.
+                    self.assertAlmostEqual(joins[0], 0.3)
+                    self.assertAlmostEqual(joins[1], 0.1)
+                    self.assertAlmostEqual(joins[2], 0.0)
+                    self.assertAlmostEqual(_float(tail.drain_deadline), 100.0 + window)
+                else:
+                    self.assertEqual(
+                        joins, [0.5, 0.5, 0.5]
+                    )  # legacy: окно на каждый вызов
+
+    def test_step_scoped_usage_l2_terminal_drain_wall_time_measured_gate(self) -> None:
+        run = _bare_run()
+        setattr(run, "usage_enabled", True)
+        setattr(run, "_proc_done", threading.Event())
+        release = threading.Event()
+        blocker = threading.Thread(target=lambda: release.wait(5), daemon=True)
+        blocker.start()
+        setattr(
+            run, "_tail", SimpleNamespace(cid="", drain_deadline=0.0, thread=blocker)
+        )
+        started = time.monotonic()
+        try:
+            _ = _ofn(run, "terminal_drain")(_float(_bval("T_DRAIN_MAX_S")))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            blocker.join(5)
+        self.assertLessEqual(elapsed, 0.5 + 0.4)  # <= 0.5 с + допуск планировщика
+
+
+class StepScopedUsageFallbackTests(unittest.TestCase):
+    """VER-003 (USG-09..USG-12): ограниченный fallback и result-only ветка."""
+
+    def test_usage_fallback_cumulative_estimate_oracle_table(self) -> None:
+        cases: list[tuple[str, dict[str, object], dict[str, object], bool, int]] = [
+            ("turns2_tools202", {"num_turns": 2, "tool_events": 202}, {}, False, 7611),
+            (
+                "retry_resume",
+                {"num_turns": 3, "tool_events": 10},
+                {"input_tokens": 1596656},
+                True,
+                122819,
+            ),
+            ("single_turn_n2", {"num_turns": 1, "tool_events": 0}, {}, False, 776331),
+            (
+                "no_turn_info_n2",
+                {"num_turns": None, "tool_events": 0},
+                {},
+                False,
+                776331,
+            ),
+            (
+                "raw_eq_window",
+                {"num_turns": 1},
+                {"input_tokens": _USAGE_WINDOW},
+                False,
+                524288,
+            ),
+        ]
+        for label, over, usage_over, resume, prompt in cases:
+            with self.subTest(case=label):
+                usage = dict(_RAW_CUMULATIVE, cache_read_tokens=0)
+                usage.update(usage_over)
+                resolved, text = _resolve(
+                    _usage_out(usage=usage, **over), resume=resume
+                )
+                wire = _wire(resolved)
+                self.assertEqual(resolved["source"], "cumulative_estimate")
+                self.assertEqual(wire["prompt_tokens"], prompt)
+                self.assertLess(_int(wire["prompt_tokens"]), _USAGE_WINDOW)
+                self.assertEqual(
+                    wire["total_tokens"], prompt + _int(wire["completion_tokens"])
+                )
+                self.assertIn("usage-cumulative-fallback raw_in=", text)
+                self.assertNotIn("***", text)
+                if resume:  # область cumulative output неизвестна: 0 = unknown
+                    self.assertEqual(wire["completion_tokens"], 0)
+                else:
+                    self.assertEqual(wire["completion_tokens"], 191762 + 500)
+                self.assertEqual(
+                    usage["input_tokens"], usage_over.get("input_tokens", 1552662)
+                )
+
+    def test_usage_fallback_divisor_includes_observed_steps_and_saturated_bound(
+        self,
+    ) -> None:
+        out = _usage_out(usage={"input_tokens": 1552662}, num_turns=1, tool_events=0)
+        resolved, _t = _resolve(
+            out, _snap(observed_planner_steps=5000, invalid_records_count=1)
+        )
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 1552662 // 5000)
+        saturated = _snap(
+            observed_planner_steps=16384,
+            observed_planner_steps_saturated=True,
+            invalid_records_count=3,
+        )
+        resolved, _t = _resolve(out, saturated)
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 1552662 // 16384)
+        self.assertLessEqual(_int(_wire(resolved)["prompt_tokens"]), _USAGE_WINDOW - 1)
+        # Свежий разговор, но транскрипт частично виден: область output неизвестна.
+        self.assertEqual(_wire(resolved)["completion_tokens"], 0)
+
+    def test_usage_fallback_window_boundary_and_not_over_window(self) -> None:
+        at = _usage_out(usage={"input_tokens": _USAGE_WINDOW}, num_turns=1)
+        resolved, text = _resolve(at)
+        self.assertEqual(resolved["source"], "cumulative_estimate")
+        self.assertIn("usage-cumulative-fallback", text)
+        below = _usage_out(usage={"input_tokens": _USAGE_WINDOW - 1}, num_turns=1)
+        resolved, text = _resolve(below)
+        self.assertEqual(resolved["source"], "result")
+        self.assertEqual(_wire(resolved)["prompt_tokens"], _USAGE_WINDOW - 1)
+        self.assertNotIn("usage-cumulative-fallback", text)
+
+    def test_usage_fallback_cache_cases_follow_normalizer_policy(self) -> None:
+        # cache == prompt: details сохраняются.
+        usage = {"input_tokens": _USAGE_WINDOW, "cache_read_tokens": 524288}
+        resolved, _t = _resolve(_usage_out(usage=usage, num_turns=1))
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 524288)
+        self.assertEqual(
+            _wire(resolved)["prompt_tokens_details"], {"cached_tokens": 524288}
+        )
+        self.assertIs(resolved["inconsistent"], False)
+        # valid_cache > estimated_prompt: details опущены, cache не clamp, inconsistent.
+        usage = {"input_tokens": 1552662, "cache_read_tokens": 982479}
+        resolved, text = _resolve(_usage_out(usage=usage, num_turns=2, tool_events=202))
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 7611)
+        self.assertNotIn("prompt_tokens_details", _wire(resolved))
+        self.assertIs(resolved["inconsistent"], True)
+        self.assertIn("inconsistent=1", text)
+        self.assertEqual(usage["cache_read_tokens"], 982479)
+        # Малый input + большой cache: input + cache > window включает estimate.
+        usage = {"input_tokens": 10, "cache_read_tokens": _USAGE_WINDOW}
+        resolved, _t = _resolve(_usage_out(usage=usage, num_turns=1))
+        self.assertEqual(resolved["source"], "cumulative_estimate")
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 5)
+        self.assertNotIn("prompt_tokens_details", _wire(resolved))
+        # Вне over_window input и cache раздельны: input10/cache40 -> prompt50/cache40.
+        usage = {"input_tokens": 10, "cache_read_tokens": 40}
+        resolved, text = _resolve(_usage_out(usage=usage))
+        self.assertEqual(resolved["source"], "result")
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 50)
+        self.assertEqual(
+            _wire(resolved)["prompt_tokens_details"], {"cached_tokens": 40}
+        )
+        self.assertNotIn("usage-cumulative-fallback", text)
+        # Явный 0 сохраняется, отсутствие cache не синтезирует 0.
+        resolved, _t = _resolve(
+            _usage_out(usage={"input_tokens": 10, "cache_read_tokens": 0})
+        )
+        self.assertEqual(_wire(resolved)["prompt_tokens_details"], {"cached_tokens": 0})
+        resolved, _t = _resolve(_usage_out(usage={"input_tokens": 10}))
+        self.assertNotIn("prompt_tokens_details", _wire(resolved))
+        # camel-алиас, null, невалидный cache и конфликт алиасов.
+        resolved, _t = _resolve(
+            _usage_out(usage={"input_tokens": 10, "cacheReadTokens": 40})
+        )
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 50)
+        resolved, _t = _resolve(
+            _usage_out(
+                usage={
+                    "input_tokens": 10,
+                    "cache_read_tokens": None,
+                    "cacheReadTokens": 40,
+                }
+            )
+        )
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 50)
+        for bad in (True, -1, "40", 1.5):
+            with self.subTest(cache=bad):
+                resolved, _t = _resolve(
+                    _usage_out(usage={"input_tokens": 10, "cache_read_tokens": bad})
+                )
+                self.assertEqual(_wire(resolved)["prompt_tokens"], 10)
+                self.assertNotIn("prompt_tokens_details", _wire(resolved))
+        resolved, _t = _resolve(
+            _usage_out(
+                usage={
+                    "input_tokens": 10,
+                    "cache_read_tokens": 40,
+                    "cacheReadTokens": 41,
+                }
+            )
+        )
+        self.assertEqual(resolved["reason"], "alias_conflict")
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 10)
+        self.assertNotIn("prompt_tokens_details", _wire(resolved))
+
+    def test_usage_fallback_never_clamps_errors_timeouts_or_measured_last_step(
+        self,
+    ) -> None:
+        big = {"input_tokens": 1552662, "output_tokens": 5, "cache_read_tokens": 1}
+        error_cases: list[tuple[str, dict[str, object]]] = [
+            ("rc_nonzero", {"rc": 1}),
+            ("state_agy_error", {"state": "agy_error"}),
+            ("state_timeout", {"state": "timeout", "rc": 124}),
+            ("result_error", {"result": {"status": "ERROR", "error": "boom"}}),
+        ]
+        for label, over in error_cases:
+            with self.subTest(case=label):
+                resolved, text = _resolve(
+                    _usage_out(usage=dict(big), num_turns=2, **over)
+                )
+                self.assertEqual(resolved["source"], "result")
+                self.assertEqual(_wire(resolved)["prompt_tokens"], 1552663)
+                self.assertNotIn("usage-cumulative-fallback", text)
+        # Валидный last_step с измеренным overflow не ограничивается окном.
+        measured = _snap(
+            last_step_usage=(7, 2_000_000, 100, 9),
+            observed_planner_steps=1,
+            turn_output_tokens_sum=9,
+            completeness=True,
+        )
+        resolved, text = _resolve(_usage_out(usage=dict(big), num_turns=2), measured)
+        self.assertEqual(resolved["source"], "last_step")
+        self.assertEqual(_wire(resolved)["prompt_tokens"], 2_000_100)
+        self.assertNotIn("usage-cumulative-fallback", text)
+        # Невалидное окно: fallback выключен, clamp нет.
+        for window in (None,):
+            resolved, text = _resolve(
+                _usage_out(usage=dict(big), num_turns=2), window=window
+            )
+            self.assertEqual(_wire(resolved)["prompt_tokens"], 1552663)
+            self.assertEqual(resolved["reason"], "no_window")
+            self.assertNotIn("usage-cumulative-fallback", text)
+
+    def test_usage_fallback_model_context_window_validity(self) -> None:
+        with _Fixture() as fx:
+            fx.patch(
+                "FLEET_MODELS",
+                {
+                    "ok": {"context_window": 2048},
+                    "zero": {"context_window": 0},
+                    "neg": {"context_window": -5},
+                    "flag": {"context_window": True},
+                    "text": {"context_window": "2048"},
+                    "none": {},
+                },
+            )
+            window = _bfn("_model_context_window")
+            self.assertEqual(window("ok"), 2048)
+            for model in ("zero", "neg", "flag", "text", "none", "absent", None, 5):
+                with self.subTest(model=model):
+                    self.assertIsNone(window(model))
+
+    def test_usage_fallback_raw_usage_is_not_mutated_and_bad_types_do_not_raise(
+        self,
+    ) -> None:
+        usage: dict[str, object] = {
+            "input_tokens": "x",
+            "output_tokens": [1],
+            "thinking_tokens": None,
+            "total_tokens": {},
+            "cache_read_tokens": object.__name__,
+        }
+        before = json.dumps(usage, sort_keys=True)
+        out = _usage_out(usage=usage, num_turns="2", tool_events=None)
+        resolved, _t = _resolve(out)
+        self.assertEqual(json.dumps(usage, sort_keys=True), before)
+        self.assertIs(out["usage"], usage)
+        self.assertEqual(
+            _wire(resolved),
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
+        resolved, _t = _resolve(_usage_out(usage=None))  # type: ignore[arg-type]
+        self.assertEqual(_wire(resolved)["total_tokens"], 0)
+
+    def test_usage_fallback_run_once_attaches_one_resolution_and_logs_numbers(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _usage_flags(fx)
+            out = _scripted_out(
+                "done",
+                usage=dict(_RAW_CUMULATIVE),
+                num_turns=2,
+                tool_events=202,
+                conversation_id=_CID,
+            )
+
+            def execute(_self: object, _run: object, *_a: object) -> dict[str, object]:
+                return dict(out)
+
+            ctx = _ctx(model=_USAGE_MODEL, model_len=len(_USAGE_MODEL), stream=False)
+            result, text = _stderr_of(lambda: _run_once_direct(ctx, execute))
+            resolved = _dict(_dict(result)["usage_resolved"])
+            self.assertEqual(_wire(resolved)["prompt_tokens"], 1552662 // 204)
+            self.assertEqual(_dict(result)["usage"], dict(_RAW_CUMULATIVE))
+            done_lines = [ln for ln in text.splitlines() if " done model=" in ln]
+            self.assertEqual(len(done_lines), 1)
+            self.assertIn("usage_source=cumulative_estimate", done_lines[0])
+            self.assertIn("prompt=7611", done_lines[0])
+            self.assertIn("raw_in=1552662", done_lines[0])
+            self.assertIn("raw_out=191762", done_lines[0])
+            self.assertIn("raw_cache=982479", done_lines[0])
+            self.assertEqual(text.count("usage-cumulative-fallback"), 1)
+        with _Fixture() as fx:
+            _usage_flags(fx, on=False)
+            result, text = _stderr_of(
+                lambda: _run_once_direct(
+                    _ctx(model=_USAGE_MODEL, model_len=len(_USAGE_MODEL), stream=False),
+                    execute,
+                )
+            )
+            self.assertNotIn("usage_resolved", _dict(result))
+            self.assertNotIn("usage_source", text)
+            self.assertNotIn("usage-cumulative-fallback", text)
+
+    def test_usage_fallback_legacy_payload_unchanged_when_flag_off(self) -> None:
+        payload = _bval("Handler")._usage_payload  # type: ignore[attr-defined]
+        usage = {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "thinking_tokens": 2,
+            "total_tokens": 12,
+        }
+        self.assertEqual(
+            payload(usage),
+            {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
+        )
+        self.assertEqual(
+            payload(usage, None),
+            {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
+        )
+
+
+class StepScopedUsageHttpTests(unittest.TestCase):
+    """VER-002 (USG-06..USG-08): JSON и SSE с fake agy, один итоговый usage."""
+
+    def _ctx(self, stream: bool) -> dict[str, object]:
+        return _ctx(model=_USAGE_MODEL, model_len=len(_USAGE_MODEL), stream=stream)
+
+    def test_usage_http_json_and_sse_parity_with_late_transcript_content_streaming_off(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _usage_flags(fx)
+            _ = fx.write_scenario(_usage_turn_events())
+            expected = {
+                "prompt_tokens": 59286,
+                "completion_tokens": _USAGE_TURN_SUM,
+                "total_tokens": 59286 + _USAGE_TURN_SUM,
+                "prompt_tokens_details": {"cached_tokens": 56849},
+            }
+            (code, body), json_log = cast(
+                "tuple[tuple[int, dict[str, object]], str]",
+                _stderr_of(lambda: _json_usage(self._ctx(False))),
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(_dict(body["usage"]), expected)
+            choice = _dict(cast("list[object]", body["choices"])[0])
+            self.assertEqual(choice["finish_reason"], "stop")
+            self.assertEqual(_dict(choice["message"])["content"], "ответ")
+            (frames, usages), sse_log = cast(
+                "tuple[tuple[list[object], list[dict[str, object]]], str]",
+                _stderr_of(lambda: _sse_usage(self._ctx(True))),
+            )
+            self.assertEqual(usages, [expected])  # ровно один usage-chunk
+            self.assertEqual(frames[-1], "[DONE]")
+            self.assertTrue(any(_content_of(frame) == "ответ" for frame in frames))
+            finishes = [
+                _dict(cast("list[object]", _dict(f)["choices"])[0]).get("finish_reason")
+                for f in frames
+                if isinstance(f, dict) and "choices" in f
+            ]
+            self.assertIn("stop", finishes)
+            # pi-ai: max(0, prompt - cacheRead) + cacheRead == prompt <= окна.
+            self.assertEqual(max(0, 59286 - 56849) + 56849, 59286)
+            self.assertLessEqual(59286, _USAGE_WINDOW)
+            for text in (json_log, sse_log):  # лог done == wire usage
+                done = [ln for ln in text.splitlines() if " done model=" in ln]
+                self.assertEqual(len(done), 1)
+                self.assertIn("usage_source=last_step", done[0])
+                self.assertIn("step_idx=3", done[0])
+                self.assertIn("prompt=59286", done[0])
+                self.assertIn("cached=56849", done[0])
+                self.assertIn(f"completion={_USAGE_TURN_SUM}", done[0])
+                self.assertIn("completeness=1", done[0])
+                self.assertIn("raw_in=1552662", done[0])
+                self.assertIn("raw_out=191762", done[0])
+
+    def test_usage_http_flag_off_is_legacy_cumulative(self) -> None:
+        with _Fixture() as fx:
+            _usage_flags(fx, on=False)
+            _ = fx.write_scenario(_usage_turn_events())
+            (code, body), text = cast(
+                "tuple[tuple[int, dict[str, object]], str]",
+                _stderr_of(lambda: _json_usage(self._ctx(False))),
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(
+                _dict(body["usage"]),
+                {
+                    "prompt_tokens": 1552662,
+                    "completion_tokens": 191762 + 500,
+                    "total_tokens": 1745000,
+                },
+            )
+            self.assertNotIn("usage_source", text)
+            _frames, usages = _sse_usage(self._ctx(True))
+            self.assertEqual(
+                usages,
+                [
+                    {
+                        "prompt_tokens": 1552662,
+                        "completion_tokens": 191762 + 500,
+                        "total_tokens": 1745000,
+                    }
+                ],
+            )
+
+    def test_usage_http_late_record_after_window_is_dropped_without_hanging(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _usage_flags(fx)
+            events = _usage_turn_events()
+            late = [e for e in events if e["op"] == "late_transcript"][0]
+            late["delay"] = 1.5  # за пределом drain: в frozen usage не попадает
+            _ = fx.write_scenario(events)
+            started = time.time()
+            code, body = _json_usage(self._ctx(False))
+            self.assertEqual(code, 200)
+            usage = _dict(body["usage"])
+            self.assertEqual(
+                usage["prompt_tokens"], 2000 + 5000
+            )  # последний видимый шаг
+            self.assertEqual(usage["completion_tokens"], 600)
+            self.assertLessEqual(time.time() - started, 3.0)
+
+    def test_usage_http_both_flags_share_one_drain_and_keep_text(self) -> None:
+        with _Fixture() as fx:
+            _usage_flags(fx, AGY_PLANNER_CONTENT_STREAMING_ENABLED="1")
+            _ = fx.write_scenario(_usage_turn_events())
+            calls: list[int] = []
+            tail_cls = _bval("_TranscriptTail")
+            real = getattr(tail_cls, "_drain_post_eof")
+
+            def spy(self: object) -> None:
+                calls.append(1)
+                real(self)
+
+            with mock.patch.object(tail_cls, "_drain_post_eof", spy):
+                (code, body), text = cast(
+                    "tuple[tuple[int, dict[str, object]], str]",
+                    _stderr_of(lambda: _json_usage(self._ctx(False))),
+                )
+            self.assertEqual(code, 200)
+            self.assertEqual(calls, [1])
+            self.assertEqual(text.count(" drain cid="), 1)
+            usage = _dict(body["usage"])
+            self.assertEqual(usage["prompt_tokens"], 59286)
+            self.assertEqual(usage["completion_tokens"], _USAGE_TURN_SUM)
+            choice = _dict(cast("list[object]", body["choices"])[0])
+            self.assertEqual(_dict(choice["message"])["content"], "ответ")
+
+    def test_usage_http_agy_error_stays_error_without_clamped_usage(self) -> None:
+        with _Fixture() as fx:
+            _usage_flags(fx)
+            events = [
+                _init_ev(0.05),
+                _text_ev(0.1, "частичный ответ"),
+                _usage_result_ev(0.2, dict(_RAW_CUMULATIVE), 2, "ERROR", "boom"),
+                _exit_ev(0.25, code=1),
+            ]
+            _ = fx.write_scenario(events)
+            (code, body), text = cast(
+                "tuple[tuple[int, dict[str, object]], str]",
+                _stderr_of(lambda: _json_usage(self._ctx(False))),
+            )
+            self.assertEqual(code, 502)
+            self.assertNotIn("usage", body)
+            self.assertEqual(_dict(body["error"])["type"], "agy_error")
+            done = [ln for ln in text.splitlines() if " done model=" in ln]
+            self.assertIn("state=agy_error", done[0])
+            self.assertIn("usage_source=result", done[0])
+            self.assertIn("reason=not_success", done[0])
+            self.assertNotIn("usage-cumulative-fallback", text)
+
+    def test_usage_http_without_transcript_uses_bounded_estimate(self) -> None:
+        with _Fixture() as fx:
+            _usage_flags(fx)
+            events = [
+                _init_ev(0.05),
+                _text_ev(0.1),
+                _usage_result_ev(0.15, dict(_RAW_CUMULATIVE), 2),
+                _exit_ev(0.17),
+            ]
+            _ = fx.write_scenario(events)
+            (code, body), text = cast(
+                "tuple[tuple[int, dict[str, object]], str]",
+                _stderr_of(lambda: _json_usage(self._ctx(False))),
+            )
+            self.assertEqual(code, 200)
+            usage = _dict(body["usage"])
+            self.assertEqual(
+                usage["prompt_tokens"], 1552662 // 2
+            )  # turns=2, tools=0 -> N=2
+            self.assertNotIn("prompt_tokens_details", usage)  # cache 982479 > оценки
+            self.assertIn("usage-cumulative-fallback", text)
+
+
+class StepScopedUsageRuntimeFlagTests(unittest.TestCase):
+    """VER-004 (USG-13/USG-14): пятый флаг step_scoped_usage_enabled."""
+
+    _NAME = "step_scoped_usage_enabled"
+    _ENV = "AGY_STEP_SCOPED_USAGE_ENABLED"
+
+    def test_runtime_config_snapshot_step_scoped_usage_code_default_and_registry(
+        self,
+    ) -> None:
+        self.assertIs(getattr(_bfn("_RuntimeFlags")(), self._NAME), False)
+        self.assertEqual(_dict(_bval("_NEW_FLAG_ENV"))[self._NAME], self._ENV)
+        self.assertIn(self._NAME, _FLAG_NAMES)
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            _ = _clocked(fx)
+            self.assertIs(_bfn("_new_flag")(self._NAME), False)  # нет файла
+
+    def test_runtime_config_snapshot_step_scoped_usage_json_bool_and_neighbors_unchanged(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            new_flag = _bfn("_new_flag")
+            _write_cfg(fx, {self._NAME: True}, 1_000_000_000)
+            clock.advance(1.1)
+            self.assertIs(new_flag(self._NAME), True)
+            for other in _FLAG_NAMES:
+                if other != self._NAME:
+                    self.assertIs(new_flag(other), False, other)
+            _write_cfg(fx, {"emit_tool_trace": True}, 2_000_000_000)
+            clock.advance(1.1)
+            self.assertIs(new_flag(self._NAME), False)  # нет ключа -> False
+            self.assertIs(new_flag("emit_tool_trace"), True)
+
+    def test_runtime_config_snapshot_step_scoped_usage_env_spellings_beat_json(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            new_flag = _bfn("_new_flag")
+            _write_cfg(fx, {self._NAME: True}, 1_000_000_000)
+            clock.advance(1.1)
+            for raw in ("0", "false", "No", "OFF", " False "):
+                with self.subTest(off=raw):
+                    fx.set_env(self._ENV, raw)
+                    self.assertIs(new_flag(self._NAME), False)
+            _write_cfg(fx, {self._NAME: False}, 2_000_000_000)
+            clock.advance(1.1)
+            for raw in ("1", "true", "Yes", "ON", " True "):
+                with self.subTest(on=raw):
+                    fx.set_env(self._ENV, raw)
+                    self.assertIs(new_flag(self._NAME), True)
+            fx.set_env(self._ENV, "garbage")
+            self.assertIs(new_flag(self._NAME), False)
+
+    def test_runtime_config_snapshot_step_scoped_usage_ttl_stat_key_and_lastgood(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            snap = _bfn("_runtime_snapshot")
+            on = '{"step_scoped_usage_enabled":true }'
+            off = '{"step_scoped_usage_enabled":false}'
+            self.assertEqual(len(on), len(off))
+            _write_cfg(fx, on, 1_000_000_000)
+            first = snap()
+            self.assertIs(_oval(first, self._NAME), True)
+            _write_cfg(fx, off, 2_000_000_000)
+            clock.advance(0.99)
+            self.assertIs(snap(), first)  # до TTL 1.0 с — без stat
+            clock.advance(0.02)
+            self.assertIs(_oval(snap(), self._NAME), False)
+            with mock.patch.object(json, "loads", side_effect=json.loads) as spy:
+                clock.advance(5.0)
+                _ = snap()
+            self.assertEqual(spy.call_count, 0)  # stat не менялся: JSON не разбирается
+            _write_cfg(fx, on, 3_000_000_000)
+            clock.advance(1.1)
+            self.assertIs(_oval(snap(), self._NAME), True)
+            for bad in ('{"step_scoped_usage_enabled": "true"}', "{broken", "[]", ""):
+                with self.subTest(bad=bad):
+                    _write_cfg(fx, bad, 4_000_000_000 + len(bad))
+                    clock.advance(1.1)
+                    self.assertIs(_oval(snap(), self._NAME), True)  # last-known-good
+        for bad in ('{"step_scoped_usage_enabled": 1}', "{broken"):
+            with self.subTest(cold=bad), _Fixture() as fx:
+                _clean_flags(fx)
+                _ = _clocked(fx)
+                _write_cfg(fx, bad, 1_000_000_000)
+                self.assertIs(_bfn("_new_flag")(self._NAME), False)
+
+    def test_runtime_config_snapshot_step_scoped_usage_live_toggle_at_finalization(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            attach = _bval("Handler")._attach_resolved_usage  # type: ignore[attr-defined]
+            run = SimpleNamespace(usage_snapshot=lambda: _snap(), run_cid="")
+            usage = {"input_tokens": 5, "output_tokens": 2}
+
+            def final_out() -> dict[str, object]:
+                out = _usage_out(usage=dict(usage))
+                with mock.patch.object(sys, "stderr", io.StringIO()):
+                    attach(run, out, _USAGE_MODEL)
+                return out
+
+            _write_cfg(fx, {self._NAME: True}, 1_000_000_000)
+            self.assertIn("usage_resolved", final_out())
+            _write_cfg(fx, {self._NAME: False}, 2_000_000_000)
+            clock.advance(1.1)  # без рестарта: следующий финал снова legacy
+            self.assertNotIn("usage_resolved", final_out())
+            fx.set_env(self._ENV, "1")
+            self.assertIn("usage_resolved", final_out())  # env выше файла, сразу
+            fx.set_env(self._ENV, "0")
+            self.assertNotIn("usage_resolved", final_out())
+
+    def test_runtime_config_snapshot_step_scoped_usage_log_event_names_are_not_masked(
+        self,
+    ) -> None:
+        for name in ("usage-cumulative-fallback", "usage-step-ledger-incomplete"):
+            with self.subTest(event=name):
+                self.assertGreaterEqual(len(name), 24)
+                self.assertIn(name, _bval("_LOG_EVENT_NAMES"))
+                self.assertEqual(_bfn("_mask_secrets")(f"{name} a=1"), f"{name} a=1")
+        self.assertEqual(_bfn("_mask_secrets")("x" * 30), "***")
 
 
 if __name__ == "__main__":
