@@ -1,0 +1,14 @@
+{
+  "schema": "brief-review-verdict/1",
+  "panel": "arch",
+  "round": "R1",
+  "hat": "visionary",
+  "brief_sha256": "4a45dc6cdbdbb1e42a2b3bc14cdfd708eb645b3aa84cc7ec63e4619cd7438459",
+  "checklist_gen": 1,
+  "checklist_sha256": "ee24542499f9f79f051e8740b37fae1d6eec2ffd1a1b54e1d6281bcb5782bfe1",
+  "reviewer_slot": "gemini-3.8-flash-medium",
+  "transport": "agy-cli",
+  "rc": 0,
+  "wall_seconds": 28.1,
+  "verdict": "APPROVE"
+}

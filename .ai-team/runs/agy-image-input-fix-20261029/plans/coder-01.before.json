@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "agy-image-input-fix",
+  "run_id": "agy-image-input-fix-20261029",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Implement workspace-read image input in agy-bridge (AD-001..AD-006, F-001..F-010) in exactly fleet.json, server.py and additive tests; all VER-001..VER-009 gates green; no git mutations.",
+  "inputs_read": [
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/bugfix.md",
+    ".ai-team/runs/agy-image-input-fix-20261029/architecture/architecture-packet.json sha256=ddcbc69fd277d74079d3868eb245a3c05c7d7ea00ddae6369fdc563982433466",
+    ".ai-team/runs/agy-image-input-fix-20261029/panel/arch/final-panel-verdict.md (section B, F-001..F-010)",
+    ".ai-team/runs/agy-image-input-fix-20261029/teamlead/verification-surface.json",
+    "analysis/agy-image-input-fix/handoff-architect.md",
+    "analysis/agy-image-input-fix/handoff-qa.md",
+    "bridges/agy-bridge/fleet.json",
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "scope_paths": [
+    "bridges/agy-bridge/fleet.json",
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "stop_conditions": [
+    "Any change outside the three allowed product files or any git mutation is forbidden",
+    "No dynamic_config.json may remain in the repo; no type-ignore comments; existing test lines are never modified or deleted",
+    "A failing VER gate that cannot be fixed inside scope stops the handoff with BLOCKED instead of a false DONE"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Read mandatory inputs, server.py request/run/spool paths and existing test harness; capture basedpyright baseline",
+      "expected_evidence": "Baseline basedpyright JSON saved under /tmp/coder-01; list of reuse points (_Fixture, _HttpBridge, fake launcher)",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Update fleet.json: limits, technical_ref and workspace-read confirmed proof for gemini-4-argon and gemini-3.8-flash only",
+      "expected_evidence": "fleet.json parses; server catalogue loads with 2 image-capable models and 4 text-only models",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Implement flag, binary proof, ordered validation, global numbering, --add-dir, slot-bounded spool, sweep and log unmasking in server.py",
+      "expected_evidence": "server.py compiles on /usr/bin/python3 3.9; AST gates VER-009 pass; text-only path unchanged",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Append unittest classes covering 40 QA ids and F-002/F-003/F-005/F-006/F-007 to tests/test_agy_bridge_resilience.py without touching existing lines",
+      "expected_evidence": "git diff numstat shows 0 deleted lines; VER-007 prints QA_ASSERT_COVERAGE_PASS 40",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Run VER-001..VER-009 verbatim and record exit codes; then write plan, handoff and coder.json and validate them",
+      "expected_evidence": "All nine gates exit 0; validate_role_plan and validate_handoff print PASS",
+      "status": "PENDING",
+      "actual_evidence": null
+    }
+  ],
+  "deviations": []
+}

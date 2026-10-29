@@ -60,6 +60,14 @@ env приоритетнее файла (0/false/no/off — hard-off, 1/true/yes
   * `graceful_timeout_on_partial` / `AGY_GRACEFUL_TIMEOUT_ON_PARTIAL` — timeout и
     idle_timeout после частичной выдачи завершаются `finish_reason="length"` вместо 504.
 
+Изображения (метод `workspace-read`): `image_url` в NDJSON парсер agy не принимает, поэтому
+проверенные data-URL (PNG/JPEG/GIF/WebP) кладутся файлами в `WORKSPACE/img-<uuid>` на время
+хода, каталог отдаётся CLI через `--add-dir`, а в промпте они идут как `[image N]` и блок
+`[attachments]` с абсолютными путями (модель читает их нативным view_file). Вход выключен по
+умолчанию: флаг `IMAGE_INPUT_ENABLED` в `dynamic_config.json` (env `AGY_IMAGE_INPUT_ENABLED`
+решает сразу) и proof модели в fleet.json (sha256 бинаря agy, версия метода, форматы, effort).
+Проверка идёт до слота и spawn; запись на диск — только после захвата слота, удаление — в finally.
+
 Секреты с диска не читаются: ключ авторизации берётся только из окружения
 AGY_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в окружение дочернего
 процесса ключ моста не передаётся. Прокси-переменные выставляет сам лончер.
@@ -68,6 +76,7 @@ AGY_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в �
 from __future__ import annotations
 
 import bisect
+import base64
 import hashlib
 import json
 import os
@@ -253,7 +262,26 @@ _SAFE_MCP_TOOL_RE = re.compile(r"mcp_[a-z0-9_-]{1,32}_[a-z0-9_]{1,32}\Z")
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
 CLI_EFFORT_LEVELS = ("low", "medium", "high")
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
-IMPLEMENTED_METHODS: dict = {}
+# Доставка изображений агенту: проверенные файлы в WORKSPACE/img-<uuid>, каталог отдаётся
+# через `--add-dir`, модель читает их нативным view_file. Прямой image_url в NDJSON
+# парсер agy не принимает (см. fleet.json, proof 1.3.1).
+IMPLEMENTED_METHODS = {"workspace-read": 1}
+METHOD_IMPL_VERSION = 1
+IMAGE_FLAG_NAME = "IMAGE_INPUT_ENABLED"
+IMAGE_PROBE = os.environ.get("AGY_IMAGE_PROBE", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+SHA_CHUNK_BYTES = 1024 * 1024
+DYNAMIC_CONFIG_MAX_BYTES = 65536
+SWEEP_INTERVAL_S = 600.0
 
 CWD_MAX_LEN = 4096
 
@@ -296,6 +324,15 @@ _sqlite_drain_deadline_count: int = 0
 _sqlite_open_connections: int = 0
 _sqlite_max_open_connections: int = 0
 _rng: Callable[[], float] = random.random
+
+# Изображения: хеш бинаря agy (кэш по идентичности файла), отдельный от SQLite-флага
+# кэш IMAGE_INPUT_ENABLED и реестр активных каталогов img-* (под _active_lock).
+_sha_cache_lock = threading.Lock()
+_sha_compute_lock = threading.Lock()
+_sha_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
+_image_flag_lock = threading.Lock()
+_image_flag_cache: tuple[float, bool] = (0.0, False)
+_active_img_dirs: set[str] = set()
 
 # Токеноподобные последовательности в логах: сам ключ моста и длинные hex/base64.
 _SECRET = re.compile(r"[A-Za-z0-9_\-]{24,}")
@@ -395,17 +432,26 @@ def _build_catalog(data: Any) -> dict:
             and status != "unsupported"
         ):
             raise FleetViolation("status_inconsistent", mid)
-        # agy-мост изображений не принимает вовсе: max_images = 0, поэтому любая
-        # модель обязана быть text-only. Расширение — сначала proof-метод.
+        # unsupported/unverified — text-only. confirmed/probe допустимы только с
+        # реализованным методом доставки и входом image; proof проверяется на каждом
+        # image-запросе (`_image_proof_reason`), а не при старте.
         if status in ("unsupported", "unverified"):
             if images.get("method") is not None or input_types != ["text"]:
                 raise FleetViolation("status_inconsistent", mid)
-        if status == "confirmed":
-            raise FleetViolation("method_not_implemented", mid)
-        if status == "probe":
+        if status == "probe" and not IMAGE_PROBE:
             raise FleetViolation("probe_flag_missing", mid)
         method = images.get("method")
-        if method is not None and method not in IMPLEMENTED_METHODS:
+        proof = cast(object, images.get("proof"))
+        if status in ("confirmed", "probe"):
+            if method not in IMPLEMENTED_METHODS:
+                raise FleetViolation("method_not_implemented", mid)
+            if "image" not in input_types or "text" not in input_types:
+                raise FleetViolation("status_inconsistent", mid)
+            if status == "confirmed" and not isinstance(proof, dict):
+                raise FleetViolation("proof_invalid", mid)
+            if limits["max_images"] <= 0 or not limits["types"]:
+                raise FleetViolation("limits_invalid", mid)
+        elif method is not None and method not in IMPLEMENTED_METHODS:
             raise FleetViolation("method_not_implemented", mid)
         models[mid] = {
             "id": mid,
@@ -419,7 +465,7 @@ def _build_catalog(data: Any) -> dict:
                 "status": str(status),
                 "cli_registry": str(images.get("cli_registry") or ""),
                 "method": method,
-                "proof": images.get("proof"),
+                "proof": proof,
             },
         }
         order.append(mid)
@@ -489,6 +535,8 @@ except FleetViolation as _violation:
     raise SystemExit(1)
 
 MODEL_ID = ENV_MODEL or FLEET["default_model"]
+FLEET_MODELS = cast("dict[str, dict[str, object]]", cast(object, FLEET["models"]))
+IMAGE_LIMITS = cast("dict[str, object]", cast(object, FLEET["image_limits"]))
 
 
 def _log(msg: str) -> None:
@@ -521,10 +569,29 @@ def _is_watchdog_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-# Имена диагностических событий источника мышления длиннее 24 символов, но секретами
-# не являются: без исключения маска скрыла бы их в логах.
+# Имена диагностических событий и причин отказа (мышление, изображения) длиннее 24
+# символов, но секретами не являются: без исключения маска скрыла бы их в логах.
+# Только точное совпадение токена целиком, не префикс и не подстрока.
 _LOG_EVENT_NAMES = frozenset(
-    {"sqlite_snapshot_divergence", "sqlite_transcript_divergence"}
+    {
+        "sqlite_snapshot_divergence",
+        "sqlite_transcript_divergence",
+        "image_input_not_supported",
+        "unsupported_reasoning_effort",
+        "invalid_reasoning_effort",
+        "unsupported_image_type",
+        "invalid_image_content",
+        "invalid_image_base64",
+        "image_url_not_allowed",
+        "image_type_mismatch",
+        "image_proof_invalid",
+        "images_too_large",
+        "image_too_large",
+        "too_many_images",
+        "image_spool_error",
+        "image_cleanup_error",
+        "image_sweep_removed",
+    }
 )
 
 
@@ -590,16 +657,24 @@ def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
     return handler.headers.get("x-api-key", "") == AUTH_KEY or hdr.strip() == AUTH_KEY
 
 
-def _flatten_content(content: Any) -> str:
+def _flatten_content(content: Any, img_counter: list[int] | None = None) -> str:
+    """Контент сообщения в текст; с `img_counter` image-части дают маркеры `[image N]`."""
     if content is None:
         return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
+        parts: list[str] = []
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
+            elif (
+                img_counter is not None
+                and isinstance(item, dict)
+                and item.get("type") == "image_url"
+            ):
+                img_counter[0] += 1
+                parts.append("[image %d]" % img_counter[0])
             elif isinstance(item, dict) and "text" in item:
                 parts.append(str(item["text"]))
         return "\n".join(p for p in parts if p)
@@ -610,30 +685,403 @@ def _tool_choice_none(tool_choice: Any) -> bool:
     return isinstance(tool_choice, str) and tool_choice.strip().lower() == "none"
 
 
-def _has_image_parts(messages: Any) -> bool:
-    """Есть ли в истории запроса image-части (мост их не поддерживает)."""
-    if not isinstance(messages, list):
+@final
+class ImageReject(ValueError):
+    """Отказ по изображениям: `reason` — деталь для журнала, `code` — тип HTTP 400."""
+
+    def __init__(self, reason: str, code: str = "image_input_not_supported") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.code = code
+
+
+@final
+class ImageSpoolError(RuntimeError):
+    """Проверенные изображения не удалось материализовать на диск."""
+
+
+_B64_WS = re.compile(r"[ \t\r\n\f\v]")
+_STATUS_REASONS = frozenset(
+    {"status_unsupported", "status_probe", "model_unknown", "input_not_image"}
+)
+
+
+def _safe_log_value(value: object) -> str:
+    """Значение из запроса для строки журнала: управляющие символы -> `_`."""
+    return re.sub(r"[\x00-\x1f\x7f]", "_", str(value))
+
+
+def _file_sha256(path: object) -> str:
+    """SHA-256 файла чанками по 1 MiB; '' — файл недоступен или изменился при чтении.
+
+    Кэш по пути с идентичностью (st_dev, st_ino, st_mtime_ns, st_size): неизменный
+    бинарь (~190 MiB) хешируется один раз. Хеширование идёт вне `_sha_cache_lock`,
+    под отдельным замком единственного вычислителя.
+    """
+    resolved = os.path.expanduser(str(path))
+
+    def identity() -> tuple[int, int, int, int]:
+        info = os.stat(resolved)
+        return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+
+    try:
+        key = identity()
+        with _sha_cache_lock:
+            cached = _sha_cache.get(resolved)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        with _sha_compute_lock:
+            with _sha_cache_lock:
+                cached = _sha_cache.get(resolved)
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            digest = hashlib.sha256()
+            with open(resolved, "rb") as handle:
+                for chunk in iter(lambda: handle.read(SHA_CHUNK_BYTES), b""):
+                    digest.update(chunk)
+            if identity() != key:
+                return ""
+            hexdigest = digest.hexdigest()
+            with _sha_cache_lock:
+                _sha_cache[resolved] = (key, hexdigest)
+            return hexdigest
+    except OSError:
+        return ""
+
+
+def _read_image_flag() -> bool:
+    """IMAGE_INPUT_ENABLED из dynamic_config.json: строго `true`, иначе False."""
+    try:
+        path = DYNAMIC_CONFIG_PATH
+        if not path.is_file() or path.stat().st_size > DYNAMIC_CONFIG_MAX_BYTES:
+            return False
+        data = cast(object, json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
         return False
-    for msg in messages:
+    if not isinstance(data, dict):
+        return False
+    return cast("dict[str, object]", data).get(IMAGE_FLAG_NAME) is True
+
+
+def _is_image_input_enabled() -> bool:
+    """Fail-closed выключатель image-входа (по умолчанию False).
+
+    Env `AGY_IMAGE_INPUT_ENABLED` (непустой) решает сразу: 0|false|no|off -> False,
+    1|true|yes|on -> True, любое иное значение -> False. Без env — флаг
+    `IMAGE_INPUT_ENABLED` в dynamic_config.json с кэшем TTL 1.0 с; не-boolean,
+    битый или отсутствующий файл дают False. Не зависит от SQLITE_REASONING_ENABLED.
+    """
+    global _image_flag_cache
+    env = os.environ.get("AGY_IMAGE_INPUT_ENABLED", "").strip().lower()
+    if env:
+        return env in ("1", "true", "yes", "on")
+    now = time.monotonic()
+    with _image_flag_lock:
+        checked_at, cached = _image_flag_cache
+        if checked_at > 0.0 and now - checked_at < FLAG_TTL_S:
+            return cached
+    value = _read_image_flag()
+    with _image_flag_lock:
+        _image_flag_cache = (now, value)
+    return value
+
+
+def _image_proof_reason(model_id: str, effort: str | None = None) -> str | None:
+    """None — image-вход модели доказан; иначе короткая причина (без секретов)."""
+    model = FLEET_MODELS.get(model_id)
+    if model is None:
+        return "model_unknown"
+    raw_images = model.get("images")
+    images = (
+        cast("dict[str, object]", raw_images) if isinstance(raw_images, dict) else {}
+    )
+    raw_input = model.get("input")
+    if not isinstance(raw_input, list) or "image" not in cast(
+        "list[object]", raw_input
+    ):
+        return "input_not_image"
+    status = images.get("status")
+    if status == "probe":
+        if not IMAGE_PROBE:
+            return "status_probe"
+    elif status != "confirmed":
+        return "status_unsupported"
+    method = images.get("method")
+    if not isinstance(method, str) or method not in IMPLEMENTED_METHODS:
+        return "method_not_implemented"
+    proof_raw = images.get("proof")
+    if not isinstance(proof_raw, dict):
+        return "proof_missing"
+    proof = cast("dict[str, object]", proof_raw)
+    if proof.get("impl_version") != IMPLEMENTED_METHODS[method]:
+        return "impl_version_mismatch"
+    formats_raw = proof.get("formats")
+    types_raw = IMAGE_LIMITS.get("types")
+    types = cast("list[object]", types_raw) if isinstance(types_raw, list) else []
+    if not isinstance(formats_raw, list) or not formats_raw:
+        return "formats_mismatch"
+    if not {str(t).lower() for t in types} <= {
+        str(f).lower() for f in cast("list[object]", formats_raw)
+    }:
+        return "formats_mismatch"
+    efforts_raw = proof.get("efforts_proven")
+    if not isinstance(efforts_raw, list):
+        return "efforts_missing"
+    if effort is not None and effort not in cast("list[object]", efforts_raw):
+        return "effort_not_proven"
+    expected = proof.get("agy_binary_sha256")
+    if not isinstance(expected, str) or len(expected) != 64:
+        return "binary_sha_missing"
+    actual = _file_sha256(AGY_BIN)
+    if not actual or actual != expected.lower():
+        return "binary_sha_mismatch"
+    return None
+
+
+def _model_supports_images(model_id: str) -> bool:
+    return _is_image_input_enabled() and _image_proof_reason(model_id) is None
+
+
+def _image_gate(model_id: str, effort: str | None) -> ImageReject | None:
+    """Флаг и proof для image-запроса: None — можно, иначе отказ (без I/O с телом)."""
+    if not _is_image_input_enabled():
+        return ImageReject("image_input_disabled")
+    reason = _image_proof_reason(model_id, effort)
+    if reason is None:
+        return None
+    if reason in _STATUS_REASONS:
+        return ImageReject(reason)
+    if reason == "effort_not_proven":
+        return ImageReject(reason, "unsupported_reasoning_effort")
+    _log("image_proof_invalid model=%s reason=%s" % (_safe_log_value(model_id), reason))
+    return ImageReject("image_proof_invalid")
+
+
+def _collect_image_parts(
+    messages: object,
+) -> list[tuple[int, int, dict[str, object]]]:
+    """Все image_url-части истории: (индекс сообщения с 0, сквозной номер с 1, часть)."""
+    found: list[tuple[int, int, dict[str, object]]] = []
+    if not isinstance(messages, list):
+        return found
+    number = 0
+    for msg_index, msg in enumerate(cast("list[object]", messages)):
         if not isinstance(msg, dict):
             continue
-        content = msg.get("content")
+        content = cast("dict[str, object]", msg).get("content")
         if not isinstance(content, list):
             continue
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "image_url":
-                return True
-    return False
+        for item in cast("list[object]", content):
+            if isinstance(item, dict):
+                part = cast("dict[str, object]", item)
+                if part.get("type") == "image_url":
+                    number += 1
+                    found.append((msg_index, number, part))
+    return found
 
 
-def _render_message(msg: Any, counter: list) -> str:
+def _sniff_image_type(raw: bytes) -> str | None:
+    """MIME по сигнатуре (не декодирование пикселей); None — формат неизвестен."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _limit(name: str, default: int) -> int:
+    value = IMAGE_LIMITS.get(name, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def _new_img_dir() -> Path:
+    """Путь (без обращений к диску) каталога изображений одного хода."""
+    return Path(os.path.abspath(str(WORKSPACE))) / ("img-" + uuid.uuid4().hex)
+
+
+def _collect_images(
+    messages: object, model_id: str, effort: str | None
+) -> list[dict[str, object]]:
+    """Проверить image-части всей истории; вернуть записи для prompt и spool.
+
+    Нет image-частей — `[]` сразу, без stat/хеша/флага. Порядок отказов: флаг и
+    proof -> число частей -> по каждой части: роль, форма, `data:` URL, MIME,
+    оценка размера base64 ДО decode, строгий base64, сигнатура, лимиты. Ничего не
+    пишется на диск и не запускается. Декодированные байты не удерживаются
+    (`data` пуст): в spool они пересоздаются из base64 уже после захвата слота.
+    """
+    parts = _collect_image_parts(messages)
+    if not parts:
+        return []
+    gate = _image_gate(model_id, effort)
+    if gate is not None:
+        raise gate
+    max_images = _limit("max_images", 16)
+    if max_images <= 0:
+        raise ImageReject("images_disabled")
+    if len(parts) > max_images:
+        raise ImageReject("too_many_images", "too_many_images")
+    max_bytes = _limit("max_image_bytes", 0)
+    max_total = _limit("max_total_image_bytes", 0)
+    allowed_raw = IMAGE_LIMITS.get("types")
+    allowed = {
+        str(t).lower()
+        for t in (
+            cast("list[object]", allowed_raw) if isinstance(allowed_raw, list) else []
+        )
+    }
+    msgs = cast("list[object]", messages)
+    img_dir = _new_img_dir()
+    entries: list[dict[str, object]] = []
+    total = 0
+    for msg_index, number, part in parts:
+        msg = cast("dict[str, object]", msgs[msg_index])
+        if msg.get("role") != "user":
+            raise ImageReject("non_user_image", "invalid_image_content")
+        ref = part.get("image_url")
+        url = (
+            cast("dict[str, object]", ref).get("url") if isinstance(ref, dict) else None
+        )
+        if not isinstance(url, str) or not url:
+            raise ImageReject("invalid_image_url", "invalid_image_content")
+        if url[:5].lower() != "data:":
+            raise ImageReject("remote_or_file_url", "image_url_not_allowed")
+        comma = url.find(",")
+        if comma < 0:
+            raise ImageReject("malformed_data_url", "invalid_image_content")
+        header = [h.strip().lower() for h in url[5:comma].split(";")]
+        mime = header[0]
+        if not mime or "base64" not in header[1:]:
+            raise ImageReject("malformed_data_url", "invalid_image_content")
+        if mime not in allowed or mime not in _EXT:
+            raise ImageReject("unsupported_mime", "unsupported_image_type")
+        payload = url[comma + 1 :]
+        if _B64_WS.search(payload) is not None:
+            payload = _B64_WS.sub("", payload)
+        if not payload:
+            raise ImageReject("empty_payload", "invalid_image_base64")
+        pad = 2 if payload.endswith("==") else (1 if payload.endswith("=") else 0)
+        if (len(payload) * 3) // 4 - pad > max_bytes:
+            raise ImageReject("image_too_large", "image_too_large")
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except Exception:
+            raise ImageReject("invalid_base64", "invalid_image_base64") from None
+        if not raw:
+            raise ImageReject("empty_image", "invalid_image_content")
+        actual = _sniff_image_type(raw)
+        if actual is None:
+            raise ImageReject("unknown_magic", "unsupported_image_type")
+        if actual != mime:
+            raise ImageReject("mime_mismatch", "image_type_mismatch")
+        size = len(raw)
+        del raw
+        if size > max_bytes:
+            raise ImageReject("image_too_large", "image_too_large")
+        if total + size > max_total:
+            raise ImageReject("images_too_large", "images_too_large")
+        total += size
+        ext = _EXT[mime]
+        entries.append(
+            {
+                "index": number,
+                "msg_index": msg_index,
+                "mime": mime,
+                "ext": ext,
+                "size": size,
+                "data": b"",
+                "b64": payload,
+                "path": img_dir / ("img-%d.%s" % (number, ext)),
+            }
+        )
+    return entries
+
+
+def _stage_images(img_dir: Path, images: list[dict[str, object]]) -> None:
+    """Материализовать проверенные изображения: каталог 0700, файлы 0600, O_EXCL.
+
+    Байты берутся из base64 здесь, после захвата слота, и сразу сбрасываются.
+    Любая ошибка ввода-вывода удаляет частичный каталог и даёт ImageSpoolError.
+    """
+    try:
+        os.makedirs(str(img_dir.parent), exist_ok=True)
+        os.mkdir(str(img_dir), 0o700)
+        for img in images:
+            held = img.get("data")
+            data = (
+                bytes(cast(bytes, held))
+                if held
+                else base64.b64decode(cast(str, img["b64"]), validate=True)
+            )
+            if len(data) != cast(int, img["size"]):
+                raise ValueError("size mismatch")
+            fd = os.open(str(img["path"]), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                handle = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with handle:
+                _ = handle.write(data)
+            img["data"] = b""
+            _ = img.pop("b64", None)
+    except (OSError, ValueError) as exc:
+        shutil.rmtree(str(img_dir), ignore_errors=True)
+        raise ImageSpoolError(type(exc).__name__) from None
+
+
+def _cleanup_img_dir(img_dir: Path) -> None:
+    """Удалить каталог хода и снять его с реестра активных (ошибка видна в журнале)."""
+    try:
+        shutil.rmtree(str(img_dir))
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _log("image_cleanup_error err=%s" % type(exc).__name__)
+        shutil.rmtree(str(img_dir), ignore_errors=True)
+    finally:
+        with _active_lock:
+            _active_img_dirs.discard(str(img_dir))
+
+
+def _attachments_block(images: list[dict[str, object]]) -> str:
+    lines = [
+        "[attachments]",
+        "The user attached %d image file(s), accessible in the workspace directory"
+        % len(images)
+        + " via --add-dir:",
+    ]
+    for img in images:
+        lines.append(
+            "- [image %d] %s (%s, %d bytes)"
+            % (
+                cast(int, img["index"]),
+                str(img["path"]),
+                cast(str, img["mime"]),
+                cast(int, img["size"]),
+            )
+        )
+    lines.append(
+        "Read every attached image file listed above using your file/image inspection"
+        + " tool (e.g. view_file) before answering."
+    )
+    return "\n".join(lines)
+
+
+def _render_message(
+    msg: Any, counter: list, img_counter: list[int] | None = None
+) -> str:
     """Сообщение OpenAI в текстовый блок промпта (роли не теряются)."""
     if not isinstance(msg, dict):
         return ""
     role = str(msg.get("role") or "user")
     name = msg.get("name")
     label = role if not name else "%s(%s)" % (role, name)
-    body = _flatten_content(msg.get("content"))
+    body = _flatten_content(msg.get("content"), img_counter)
     lines = []
     calls = msg.get("tool_calls")
     if isinstance(calls, list):
@@ -662,25 +1110,41 @@ def _render_message(msg: Any, counter: list) -> str:
     return "### %d. %s\n%s" % (counter[0], label, prepared)
 
 
-def _messages_to_prompt(messages: list) -> str:
+def _messages_to_prompt(
+    messages: list,
+    images: list[dict[str, object]] | None = None,
+    img_start: int = 0,
+) -> str:
     """Собрать единый текстовый промпт хода.
 
     Секции протокола инструментов нет намеренно: agy исполняет СВОИ нативные
     инструменты, а не инструменты DSH (см. README, раздел «Инструменты»).
+    Image-части получают сквозные маркеры `[image N]` (нумерация с `img_start + 1`),
+    а `images` описываются блоком `[attachments]` с абсолютными путями файлов.
     """
     counter = [0]
-    blocks = []
+    img_counter = [img_start]
+    blocks: list[str] = []
     for msg in messages:
-        rendered = _render_message(msg, counter)
+        rendered = _render_message(msg, counter, img_counter)
         if rendered:
             blocks.append(rendered)
+    if images:
+        blocks.append(_attachments_block(images))
     text = "\n\n".join(blocks).strip()
     if not text:
         text = "Reply with exactly: PONG"
     return text
 
 
-def _get_resumed_turn_prompt(messages: list) -> str:
+def _get_resumed_turn_prompt(
+    messages: list, images: list[dict[str, object]] | None = None
+) -> str:
+    """Промпт хода продолжения: сообщения после последнего assistant.
+
+    Маркеры сохраняют сквозные номера всей истории; `[attachments]` — только для
+    изображений новых сообщений. Без assistant в истории — вся история целиком.
+    """
     last_asst = -1
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], dict) and messages[i].get("role") == "assistant":
@@ -688,10 +1152,18 @@ def _get_resumed_turn_prompt(messages: list) -> str:
             break
     if last_asst >= 0 and last_asst + 1 < len(messages):
         new_msgs = messages[last_asst + 1 :]
-        prompt = _messages_to_prompt(new_msgs)
+        skipped = len(
+            _collect_image_parts(cast("list[object]", messages[: last_asst + 1]))
+        )
+        delta = [
+            img
+            for img in (images or [])
+            if cast(int, img.get("msg_index", 0)) > last_asst
+        ]
+        prompt = _messages_to_prompt(new_msgs, delta, skipped)
         if prompt:
             return prompt
-    return _messages_to_prompt(messages)
+    return _messages_to_prompt(messages, images)
 
 
 def _session_claim(sess_key: tuple, turn_id: str = "") -> str:
@@ -833,11 +1305,15 @@ def _reset_sqlite_guards_for_tests() -> None:
     global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
     global _sqlite_divergence_count, _sqlite_drain_deadline_count
     global _sqlite_open_connections, _sqlite_max_open_connections, _rng
-    global _cfg_snapshot, _cfg_key, _cfg_checked_at
+    global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
         _cfg_key = None
         _cfg_checked_at = None
+    with _image_flag_lock:
+        _image_flag_cache = (0.0, False)
+    with _sha_cache_lock:
+        _sha_cache.clear()
     with _sqlite_guard_lock:
         _breaker_state = "CLOSED"
         _breaker_failures = 0
@@ -2661,6 +3137,7 @@ class Run:
         conversation_id: str = "",
         turn_id: str = "",
         policy: _TimeoutPolicy | None = None,
+        add_dir: Path | None = None,
     ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -2680,6 +3157,9 @@ class Run:
             effort,
             "--print-timeout=" + str(PRINT_TIMEOUT),
         ]
+        # Изображения хода: каталог файлов отдельным аргументом, cwd не подменяется.
+        if add_dir is not None:
+            cmd += ["--add-dir", str(add_dir)]
         # RESUME: продолжение треда — отдельным флагом, промпт всё равно через stdin.
         self.run_cid = conversation_id or ""
         self.turn_id: str = turn_id or uuid.uuid4().hex
@@ -3118,6 +3598,23 @@ class _ByteBudget:
             self.used = max(0, self.used - amount)
 
 
+def _terminal_state(name: str, err: str = "") -> dict[str, object]:
+    """Итог хода без запуска agy (отказ до spawn)."""
+    return {
+        "state": name,
+        "rc": 1,
+        "text": "",
+        "usage": {},
+        "result": {},
+        "err": err,
+        "tool_calls": [],
+        "tool_events": 0,
+        "conversation_id": "",
+        "num_turns": None,
+        "duration_s": None,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "agy-bridge/1.0"
@@ -3207,8 +3704,8 @@ class Handler(BaseHTTPRequestHandler):
         self, reason: str, model: str = "unknown", model_len: int = 0
     ) -> None:
         _log(
-            f"reject reason={reason} model={model} model_len={model_len} "
-            f"client={self._client_tag()}"
+            f"reject reason={reason} model={_safe_log_value(model)} "
+            f"model_len={model_len} client={self._client_tag()}"
         )
 
     def _reject(
@@ -3561,6 +4058,10 @@ class Handler(BaseHTTPRequestHandler):
             return early
         t0 = time.monotonic()
         out: dict = {}
+        typed_ctx = cast("dict[str, object]", ctx)
+        images = cast("list[dict[str, object]]", typed_ctx.get("images") or [])
+        img_dir = cast("Path | None", typed_ctx.get("img_dir")) if images else None
+        img_registered = False
         try:
             try:
                 _launcher()
@@ -3583,6 +4084,38 @@ class Handler(BaseHTTPRequestHandler):
                     cast(str, ctx["model"]), unavailable, t_enter, cast(str, ctx["tag"])
                 )
                 return unavailable
+            if images and img_dir is not None:
+                # Флаг и proof могли смениться, пока ход ждал слот: повторная проверка
+                # до mkdir и spawn.
+                gate = _image_gate(cast(str, model), cast(str, effort))
+                if gate is not None:
+                    self._log_reject(
+                        gate.code, cast(str, model), cast(int, ctx["model_len"])
+                    )
+                    rejected = _terminal_state("image_reject", gate.code)
+                    self._log_done(
+                        cast(str, ctx["model"]),
+                        rejected,
+                        t_enter,
+                        cast(str, ctx["tag"]),
+                    )
+                    return rejected
+                # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
+                with _active_lock:
+                    _active_img_dirs.add(str(img_dir))
+                img_registered = True
+                try:
+                    _stage_images(img_dir, images)
+                except ImageSpoolError as exc:
+                    _log(
+                        "image_spool_error model=%s err=%s"
+                        % (_safe_log_value(cast(str, model)), exc)
+                    )
+                    failed = _terminal_state("image_spool_error", str(exc))
+                    self._log_done(
+                        cast(str, ctx["model"]), failed, t_enter, cast(str, ctx["tag"])
+                    )
+                    return failed
             _retry_credit()
             for attempt in (1, 2):
                 policy = _build_timeout_policy(t_req_start)
@@ -3622,6 +4155,7 @@ class Handler(BaseHTTPRequestHandler):
                         conversation_id=ctx.get("conversation_id") or "",
                         turn_id=str(ctx.get("turn_id") or ""),
                         policy=policy,
+                        add_dir=img_dir if images else None,
                     )
                 except LauncherUnavailable:
                     self._reject(
@@ -3733,6 +4267,9 @@ class Handler(BaseHTTPRequestHandler):
                     else 0.0
                 )
         finally:
+            # Каталог изображений живёт весь ход (все попытки) и уходит до слота.
+            if img_registered and img_dir is not None:
+                _cleanup_img_dir(img_dir)
             _slots.release()
         self._log_done(
             cast(str, ctx["model"]),
@@ -3793,6 +4330,15 @@ class Handler(BaseHTTPRequestHandler):
             }
         if st == "client_gone":
             return {"message": "client gone", "type": "client_gone", "code": 499}
+        if st == "image_reject":
+            code = cast(str, out["err"]) or "image_input_not_supported"
+            return {"message": f"image rejected: {code}", "type": code, "code": 400}
+        if st == "image_spool_error":
+            return {
+                "message": "image spool failed",
+                "type": "image_spool_error",
+                "code": 500,
+            }
         if st == "pump_error":
             return {
                 "message": "bridge reader failed",
@@ -3831,7 +4377,10 @@ class Handler(BaseHTTPRequestHandler):
                 "tool_emulation": False,
                 "tool_translation": False,
                 "native_tools": True,
-                "images": False,
+                "images": any(_model_supports_images(mid) for mid in FLEET_MODELS),
+                "image_input_mode": (
+                    "enabled" if _is_image_input_enabled() else "disabled"
+                ),
                 "uptime_s": int(time.time() - _started),
             }
             health.update(_sqlite_health_fields())
@@ -3852,8 +4401,11 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/v1/models", "/models"):
             data = []
             order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
+            image_flags: list[bool] = []
             for mid in order:
                 model = FLEET["models"][mid]
+                supports = _model_supports_images(cast(str, mid))
+                image_flags.append(supports)
                 data.append(
                     {
                         "id": mid,
@@ -3861,9 +4413,12 @@ class Handler(BaseHTTPRequestHandler):
                         "owned_by": "antigravity",
                         "created": 0,
                         "context_length": model["context_window"],
+                        "images": supports,
                     }
                 )
-            self._send(200, {"object": "list", "data": data})
+            self._send(
+                200, {"object": "list", "data": data, "images": any(image_flags)}
+            )
             return
         self._send(
             404,
@@ -4018,15 +4573,21 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(messages_raw, list)
                 else []
             )
-            if _has_image_parts(messages):
+            try:
+                images = _collect_images(
+                    messages, cast(str, model_id), cast(str, effort)
+                )
+            except ImageReject as rejected:
+                _log("image_reject detail=%s" % rejected.reason)
                 self._reject(
                     400,
-                    "image_input_not_supported",
-                    "image rejected: image_input_not_supported",
+                    rejected.code,
+                    f"image rejected: {rejected.code}",
                     model_id,
                     model_len,
                 )
                 return
+            img_dir = cast(Path, images[0]["path"]).parent if images else None
             try:
                 _launcher()
             except LauncherUnavailable:
@@ -4045,7 +4606,7 @@ class Handler(BaseHTTPRequestHandler):
                 else []
             )
             tools_count = 0 if _tool_choice_none(req.get("tool_choice")) else len(tools)
-            full_prompt = _messages_to_prompt(messages)
+            full_prompt = _messages_to_prompt(messages, images)
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -4078,7 +4639,7 @@ class Handler(BaseHTTPRequestHandler):
                 if use_cid:
                     conversation_id = use_cid
                     is_resumed = True
-                    prompt = _get_resumed_turn_prompt(messages)
+                    prompt = _get_resumed_turn_prompt(messages, images)
             ctx: dict[str, object] = {
                 "t_req_start": t_req_start,
                 "turn_id": turn_id,
@@ -4098,6 +4659,8 @@ class Handler(BaseHTTPRequestHandler):
                     f"ua={(self.headers.get('User-Agent') or '-')[:60]}"
                 ),
                 "stream": bool(req.get("stream")),
+                "images": images,
+                "img_dir": img_dir,
             }
             if ctx["stream"]:
                 self._serve_sse(ctx)
@@ -4446,15 +5009,47 @@ class Server(ThreadingHTTPServer):
             self._conn_sem.release()
 
 
-def _sweep_workspace() -> None:
-    """Удалить временные каталоги ходов старше часа (наследие упавших ходов)."""
-    cutoff = time.time() - 3600
-    for path in WORKSPACE.glob("run-*"):
+def _sweep_workspace(cutoff_s: float = 3600.0) -> int:
+    """Удалить каталоги ходов run-*/img-* старше cutoff_s (наследие упавших ходов).
+
+    Симлинки не разыменовываются и не удаляются; каталоги из `_active_img_dirs`
+    (живые ходы) сохраняются при любом возрасте. Возвращает число удалённых img-*.
+    """
+    removed = 0
+    now = time.time()
+    try:
+        entries = list(os.scandir(str(WORKSPACE)))
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.startswith(("run-", "img-")):
+            continue
         try:
-            if path.is_dir() and path.stat().st_mtime < cutoff:
-                shutil.rmtree(str(path), ignore_errors=True)
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                continue
+            if now - entry.stat(follow_symlinks=False).st_mtime <= cutoff_s:
+                continue
         except OSError:
-            pass
+            continue
+        with _active_lock:
+            if os.path.abspath(entry.path) in _active_img_dirs:
+                continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+        if entry.name.startswith("img-"):
+            removed += 1
+    if removed:
+        _log(f"image_sweep_removed count={removed}")
+    return removed
+
+
+def _sweep_loop() -> None:
+    """Периодическая зачистка осиротевших каталогов (daemon-поток)."""
+    while True:
+        time.sleep(SWEEP_INTERVAL_S)
+        try:
+            _ = _sweep_workspace()
+        except Exception as exc:  # noqa: BLE001 — поток зачистки не должен умирать
+            _log(f"sweep_error err={type(exc).__name__}")
 
 
 def main() -> None:
@@ -4465,7 +5060,10 @@ def main() -> None:
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
     _reset_sqlite_guards_for_tests()  # чистое процессное состояние guardrails на старте
     WORKSPACE.mkdir(parents=True, exist_ok=True)
-    _sweep_workspace()
+    _ = _sweep_workspace()
+    threading.Thread(target=_sweep_loop, daemon=True).start()
+    # Хеш бинаря agy считается заранее, чтобы первый image-ход не платил за него.
+    threading.Thread(target=_file_sha256, args=(AGY_BIN,), daemon=True).start()
     _log(f"fleet_sha256={FLEET['sha256']} models={len(FLEET['order'])}")
     try:
         _launcher()

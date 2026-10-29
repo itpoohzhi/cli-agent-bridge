@@ -1,0 +1,21 @@
+{
+  "task_id": "agy-image-input-fix",
+  "run_id": "agy-image-input-fix-20261029",
+  "preset": "analyst-teamlead",
+  "setup": "default",
+  "criticality": "S2",
+  "downstream_panel": true,
+  "reviewer_skip": true,
+  "parent_skill": "analyst-teamlead",
+  "goal": "Поддержка изображений (workspace-read через --add-dir и нативный view_file) в agy-bridge (:9887) для gemini-4-argon и gemini-3.8-flash, сохранение валидации и нумерации изображений в истории диалога (cold/hot resume/cold fallback) без подмены пользовательского cwd и sess_key, эфемерный spool с очисткой в finally и sweep, и снятие маскирования канонических кодов отказа в _LOG_EVENT_NAMES.",
+  "target_files": [
+    "bridges/agy-bridge/server.py",
+    "bridges/agy-bridge/fleet.json",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "architecture_gate": {
+    "packet_sha256": "ddcbc69fd277d74079d3868eb245a3c05c7d7ea00ddae6369fdc563982433466",
+    "verification_surface_sha256": "c75ef9ccc898efa342e90d4db82a222ebfac0acf61f81e73742f38b40322167b",
+    "protected_paths_sha256": "4f4494d442225ac160c8106d0ba4969fbde62e3555da115d04802fc12896d343"
+  }
+}

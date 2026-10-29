@@ -1,0 +1,73 @@
+Пока работаешь, каждые 4,5 минуты выводи отдельной строкой ровно `[hb] ок`; команду дольше 4 минут не жди молча — запусти в фоне и каждые 4,5 минуты выводи `[hb] ок`, проверяя, завершилась ли. Строки `[hb]` служебные, не часть ответа.
+
+# Бриф: Системный аналитик (Stage 1 `system-analyst`, пресет `analyst-teamlead`)
+
+- **Роль:** Системный аналитик (только анализ As-Is, выявление корневых причин, формулировка верифицируемых требований `REQ-*`, критериев приёмки `AC-*`, `HL-ENV/v1` из 46 полей и передача `handoff-architect.md` + `handoff-qa.md`). Код продукта НЕ менять!
+- **Обязательный скилл для чтения (ровно один):**
+  `~/Мой диск/skils/ai-sdlc/universal/system-analyst/SKILL.md` (а также его `references/artifacts-and-handoff.md` и SSoT 46 полей `HL-ENV/v1` в `~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md`).
+
+## Уже известно (пре-флайт путей)
+- `repo_root`: `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix`
+- `branch`: `fix/agy-image-input-fix`
+- `run_dir`: `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/.ai-team/runs/agy-image-input-fix-20261029`
+- `analysis_dir` (куда записать 5 выходных файлов): `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix`
+- Целевые файлы продукта (читать As-Is, НЕ модифицировать):
+  - `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/bridges/agy-bridge/server.py`
+  - `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/bridges/agy-bridge/fleet.json`
+  - `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/server.py` (строки `180-195`, `560-735`, `4295-4335`, `5240-5255` — эталонная реализация `workspace-read`, `_collect_images`, `_parse_data_url`, `_sniff_image`)
+  - `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/core/tool_emulation.py` (строки `20-65`, `190-240` — эталон `_render_content` с `[image N]` и `_attachments_section`)
+  - `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/tests/test_images_strict.py`
+  - `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/tests/test_agy_bridge_resilience.py`
+- Образец успешно прошедшего `SA-DOD-001..008` анализа в этом же репозитории (можно сверить структуру и табличный формат 46 полей `HL-ENV/v1`):
+  - `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-realtime-reasoning/handoff-architect.md`
+
+## Контекст задачи и подтверждённые факты исследования (Explorers A, B, C + live logs)
+Владелец прислал скриншот инцидента в DeepSeek Harness Desktop (`Gemini 4 Argon (AGY) Max`, воркспейс `knowledge-base`):
+- **Ход 1 (13:53:41 MSK):** пользователь отправил сообщение с 2 прикреплёнными скриншотами (`"я просто зотел посмотреть когда следующий биллинг"`). Ответ:
+  `Failed • This turn failed 400: {"message":"image rejected: image_input_not_supported","type":"image_input_not_supported","code":400} INVALID_REQUEST`
+  Запись в `~/.dsh/bridges/agy-bridge/logs/bridge.err:4127`:
+  `[agy-bridge] 13:53:41 reject reason=*** model=gemini-4-argon model_len=14 client=127.0.0.1:59752`
+- **Ход 2 (14:17:10 MSK):** пользователь отправил в том же чате чисто текстовое сообщение без картинок (`"скажи а как долго будет действовать? ..."`). Ответ:
+  `Failed • This turn failed 400: {"message":"image rejected: image_input_not_supported","type":"image_input_not_supported","code":400} INVALID_REQUEST`
+  Запись в `~/.dsh/bridges/agy-bridge/logs/bridge.err:4307`:
+  `[agy-bridge] 14:17:10 reject reason=*** model=gemini-4-argon model_len=14 client=127.0.0.1:54567`
+
+Разведка кодовой базы и живого окружения выявила 4 корневые причины (`RC-1..RC-4`):
+1. **RC-1 (Отсутствие реализации `workspace-read` для изображений в `bridges/agy-bridge/server.py` и блокирующая конфигурация `bridges/agy-bridge/fleet.json` при объявленном `input: [text, image]` в DSH):**
+   - В профилях DSH (`~/.dsh/profiles/desktop/cordis.patch.yml:410-435`, `headless:94-119`, `web:492-517`) провайдер `agy-bridge` (`http://127.0.0.1:9887/v1`) объявляет для `gemini-4-argon` и `gemini-3.8-flash` поддержку `input: [ text, image ]`. Поэтому UI DSH разрешает прикреплять изображения и отправляет их как части `{"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}`.
+   - Однако в `bridges/agy-bridge/server.py:3072-3080` стоит безусловный блок:
+     `if _has_image_parts(messages): self._reject(400, "image_input_not_supported", "image rejected: image_input_not_supported", model_id, model_len); return`
+   - В `bridges/agy-bridge/server.py:185` `IMPLEMENTED_METHODS: dict = {}`, в `_build_catalog` (`L329-L338`) статусы `"confirmed"` и `"probe"` безусловно вызывают `FleetViolation`, в `/health` (`L2886`) зашито `"images": False`, а в `bridges/agy-bridge/fleet.json:20-28,42-164` выставлено `max_images: 0`, `input: ["text"]`, `images.status: "unsupported"`.
+   - Причина исторического запрета (записанная в `bridges/agy-bridge/fleet.json:60`): парсер `--input-format stream-json` бинарника `agy.real` (смещение `57498104`) отвергает блоки `"type": "image_url"` напрямую в NDJSON-строке `stdin`. Но `agy.real` (`1.4.9`), запускаемый мостом с `--dangerously-skip-permissions`, имеет встроенный мультимодальный инструмент `view_file` (`multimodal_view_file`, смещения `55208733`, `56206397`) и повторяемый флаг `--add-dir <dir>`, что позволяет передавать изображения через метод `workspace-read` (материализация проверенных вложений во временный каталог хода `WORKSPACE/img-<uuid>` с правами `0o700`/`0o600`, передача `--add-dir <img_dir>`, подстановка `[image N]` и секции `[attachments]` в промпт с инструкцией открыть файлы через `view_file`, удаление `img_dir` в `finally`), по образцу корневого `server.py:626-733,4298-4333`.
+2. **RC-2 (Отравление истории сессии на последующих текстовых ходах и взаимодействие `workspace-read` с горячими сессиями `--conversation`):**
+   - Клиент DSH сохраняет отправленное пользователем сообщение Хода 1 (вместе с `{"type": "image_url"}`) в массиве `messages[]` сессии даже после получения HTTP `400`. На Ходе 2 (текстовом) DSH присылает `messages = [Turn1_user_with_images, Turn2_user_text]`. Поскольку `_has_image_parts(messages)` (`bridges/agy-bridge/server.py:542-555`) сканирует все сообщения в `messages[]`, весь чат оказывается необратимо сломанным («отравленным»): любой следующий текстовый ход снова падает с `400 image_input_not_supported`.
+   - Кроме того, в `bridges/agy-bridge/server.py` действуют горячие сессии (`--conversation <cid>`, `L612-624, 3120-3133`) и холодный фоллбэк при сбое горячей сессии (`L2745-2763`):
+     - На холодном ходе (и при холодном фоллбэке) в `agy` отправляется `full_prompt = _messages_to_prompt(messages, images)`, где все `image_url` во всей истории `messages` должны быть пронумерованы `[image 1]..[image K]` и сматчены с материализованными файлами в `img_dir`.
+     - На горячем продолжении (`is_resumed = True`) `_get_resumed_turn_prompt(messages)` рендерит только новые сообщения после последнего `assistant` (`messages[last_asst + 1:]`): если новые сообщения содержат новые картинки, их нумерация и `[attachments]` должны соответствовать материализованным файлам в `img_dir` этого хода; при этом если горячая сессия упадёт и сработает холодный фоллбэк (`ctx["prompt"] = ctx["full_prompt"]`, `L2754`), в `img_dir` должны присутствовать все изображения из `messages`, чтобы вторая попытка в рамках `_run_once` прочитала их без ошибки!
+     - Важно: `Run.__init__` (`L2038`) использует `work_dir = cwd if (cwd and os.path.isdir(cwd)) else str(WORKSPACE)`. В отличие от `droid-bridge`, в `agy-bridge` `cwd` — это реальная рабочая папка проекта пользователя (и часть ключа горячей сессии `sess_key = (model_id, cwd, effort)`). Подменять `cwd` на `img_dir` нельзя (это сломает относительные пути проекта и `sess_key`). Вместо этого `img_dir` создаётся в `WORKSPACE / ("img-" + uuid.uuid4().hex)` (`0o700`), передаётся в `agy` через `--add-dir <img_dir>`, а в секции `[attachments]` указываются абсолютные пути файлов `<img_dir>/img-N.<ext>` (или относительные, если `cwd` не задан и `work_dir == img_dir`).
+     - В `_sweep_workspace()` (`L3325-3333`) сейчас убираются только `run-*`; необходимо также убирать осиротевшие `img-*` старше 1 часа.
+3. **RC-3 (Ограничение MIME-типов и маскирование не-секретных `reason` в `_mask_secrets`):**
+   - Пользователи DSH прикрепляют скриншоты и изображения в форматах `image/png`, `image/jpeg`, `image/gif`, `image/webp` (`KNOWN_IMAGE_MIMES` в корневом `server.py:187`). Если в `fleet.json` разрешить только `image/png`, то JPEG/WebP-скриншоты будут падать с `400 unsupported_image_type`. В `bridges/agy-bridge/fleet.json` в `image_limits.types` и `proof.formats` для мультимодальных моделей должны поддерживаться все 4 формата `["image/png", "image/jpeg", "image/gif", "image/webp"]` (`max_images: 16`, `max_image_bytes: 20971520`, `max_total_image_bytes: 20971520`, `max_body_bytes: 33554432`).
+   - В `bridges/agy-bridge/server.py:230,455-470` регулярка `_SECRET = re.compile(r"[A-Za-z0-9_\-]{24,}")` маскирует `image_input_not_supported` (25 символов), `unsupported_reasoning_effort` (28 символов) и `image_proof_invalid`-причины в логах как `***`. Все канонические коды отказов (`reject reason=...`) и диагностические токены моста должны входить в `_LOG_EVENT_NAMES`, чтобы лог отказов соответствовал строгому контракту `reject reason=<reason> model=<model> model_len=<N> client=<peer>`.
+4. **RC-4 (Поставка в боевой контур `~/.dsh/bridges/agy-bridge/`):**
+   - Живой процесс `:9887` (`com.user.dsh-agy-bridge`) запускается из `~/.dsh/bridges/agy-bridge/server.py` (обычные файлы, не симлинки). Для доведения до прода необходима поставка обновлённых `bridges/agy-bridge/{server.py,fleet.json}` в `~/.dsh/bridges/agy-bridge/`, перезапуск `launchctl kickstart -k gui/$(id -u)/com.user.dsh-agy-bridge` и L3 проверка тяжёлым путём (живой ход 1 с картинками + живой ход 2 текстовый в той же сессии).
+
+## Требуемые выходные артефакты (строго в `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix/`)
+Создай все 5 файлов:
+1. `research-plan.md` — план исследования, гипотезы `INV-01..INV-05`, источники фактов, статус выполнения (`closed`).
+2. `evidence-ledger.md` — реестр пронумерованных фактов `F-01`, `F-02`, ... с точными ссылками на строки `bridges/agy-bridge/server.py`, `bridges/agy-bridge/fleet.json`, `server.py`, `core/tool_emulation.py`, `tests/test_images_strict.py`, `~/.dsh/profiles/desktop/cordis.patch.yml` и `~/.dsh/bridges/agy-bridge/logs/bridge.err`.
+3. `open-questions.md` — таблица `OPEN-01`, `OPEN-02`, ... с колонками `| ID | Класс | Вопрос | Допущение / закрытие | Статус |`. **ВАЖНО:** ни один вопрос не должен оставаться в статусе `open` / `не закрыт` / `pending` с классом `[BLOCKER]` (все вопросы должны быть закрыты фактами или явно помечены `[ASSUMPTION]` / `closed`, чтобы `SA-DOD-002` прошёл!).
+4. `handoff-architect.md` — полный архитектурный handoff, содержащий:
+   - Постановку и цепочку корневых причин (`RC-1..RC-4`) со ссылками на `F-NN`.
+   - As-Is карту потока с привязкой к `F-NN`.
+   - Таблицу требований `REQ-001..REQ-010` (каждый `REQ-NNN` в одной строке содержит приоритет `MUST` или `SHOULD`, ссылки на факты `F-NN` и измеримый критерий `AC-NNN` — требование `SA-DOD-004`!).
+   - Сравнение вариантов дизайна для Архитектора (реализация `workspace-read` в `bridges/agy-bridge/server.py` + `bridges/agy-bridge/fleet.json`, работа с `--add-dir <img_dir>` без разрушения `cwd` и `sess_key`, обработка истории `messages` при холодном старте, горячем resume и холодном фоллбэке, таксономия валидации `ImageReject` C-08..C-11, `_LOG_EVENT_NAMES` для немаскирования `reason`, уборка `img-*`).
+   - Полный раздел `HL-ENV/v1` со всеми **46 атомарными полями** из `REQUIRED_HL_ENV_FIELDS` (`W`, `P_pods`, `G_reload`, `T_threads_per_worker`, `Limit_dep_total`, `Limit_dep_share`, `Pool_app_size`, `Pool_app_overflow`, `Max_in_flight_per_worker`, `N_roles`, `W_role`, `Pool_role_size`, `Pool_role_overflow`, `M_other_apps_max`, `Ephemeral_port_range_size`, `TIME_WAIT_s`, `ulimit_n`, `FD_non_socket_overhead`, `N_bg_tasks`, `T_poll_s`, `Jitter_Ratio`, `Startup_Delay_Range_s`, `K_calls`, `Limit_dep_rps`, `Cold_start_concurrent_pods`, `Singleflight_Scope`, `Cache_TTL_s`, `Max_stale_age_s`, `Payload_bytes_max`, `N_items_max`, `Hot_path_call_rate_rps`, `CPU_budget_pct_per_core`, `Serde_lib`, `P_avail_min`, `Mem_limit_per_pod`, `Mem_rss_worker_max`, `Mem_shared_max`, `SLA_p99_s`, `T_connect_s`, `T_read_s`, `Retries_max`, `Retry_Budget_pct`, `Retry_Window_s`, `Min_Retry_Floor_rps`, `N_candidates`, `N_floor`) — проверь, что все 46 идентификаторов дословно присутствуют в `handoff-architect.md` и каждый `F-NN` в `handoff-architect.md` объявлен в `evidence-ledger.md`!
+5. `handoff-qa.md` — матрица верификации `AC-NNN`, позитивные/негативные/граничные тест-кейсы (включая приём 1..16 картинок PNG/JPEG/GIF/WebP, multi-turn сценарий «ход 1 с картинками → ход 2 текстовый» в холодной и горячей сессии + холодный фоллбэк, сохранение `img_dir` на ретраях и удаление в `finally`, `--add-dir <img_dir>` с сохранением пользовательского `cwd`, таксономию отказов `image_url_not_allowed`, `unsupported_image_type`, `invalid_image_base64`, `image_type_mismatch`, `invalid_image_content`, `too_many_images`, `image_too_large`, `images_too_large`, `image_input_not_supported` для `unsupported`-моделей вроде `gpt-oss-120b`, отсутствие маскирования `reason` в `reject`-логах и отсутствие утечки base64 в логи), а также сценарий L3 тяжёлой проверки на `:9887`.
+
+Перед завершением работы запусти композитный самочек `SA-DOD-001..008` из `analyst-teamlead/SKILL.md` на каталоге `/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix` и убедись, что выводится `SA-DOD-001..008 PASS`, а `git status --porcelain` показывает изменения только в `analysis/agy-image-input-fix/` и `.ai-team/`.
+
+## Живое эмпирическое доказательство работы `workspace-read` на `agy` 1.4.9 (включить в `evidence-ledger.md`)
+- Проведён живой замер `agy-cli.sh` (`~/.local/bin/agy.real` 1.4.9) с материализованной PNG-картинкой `1x1` (`68 bytes`) в `bridges/agy-bridge/workspace/img-probe-test/img-1.png` и флагом `--add-dir`:
+  - Команда: `printf '%s\n' "$NDJSON" | ~/.config/agy-launch/agy-cli.sh --input-format stream-json --output-format stream-json --dangerously-skip-permissions --model gemini-4-argon --effort low --print-timeout=0 --add-dir "$PROBE_DIR"`
+  - Результат (`conversation_id = d6266547-4f77-4a4f-af67-b0ae1408a1fe`, `status = SUCCESS`, `duration_seconds = 35.304594`): модель успешно открыла файл `img-1.png` нативным мультимодальным инструментом `view_file` и вернула точный ответ: `Размер: 1 × 1 пиксель, Формат: PNG (image/png, 8-bit/color RGBA, non-interlaced)`.

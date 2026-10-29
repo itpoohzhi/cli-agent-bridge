@@ -1,0 +1,27 @@
+run_id	phase	agent_or_seat	pinned_model	transport	pid	pgid	started_at	status	elapsed_s	ended_at	kill_reason	cmd
+agy-image-input-fix-20261029	analyst	system-analyst-01	gpt-6.1-sol	codex-exec	45804	45804	2026-10-29T14:33:09+03:00	running	0			codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C /Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix -
+agy-image-input-fix-20261029	analyst	system-analyst-01	gpt-6.1-sol	codex-exec	45804	45804	2026-10-29T14:33:09+03:00	done(0)	848.6	2026-10-29T14:47:18+03:00		codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C /Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix -
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k1	17612	17612	2026-10-29T12:17:38.361038+00:00	Thu Oct 29 15:17:38 2026	running
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k3	17611	17611	2026-10-29T12:17:38.361083+00:00	Thu Oct 29 15:17:38 2026	running
+agy-image-input-fix-20261029	claude-sonnet-5-5-high	panel-judge-k2	17654	17654	2026-10-29T12:17:38.457377+00:00	Thu Oct 29 15:17:38 2026	running
+agy-image-input-fix-20261029	claude-sonnet-5-5-high	panel-judge-k2	17654	17654	2026-10-29T12:17:38.457377+00:00	Thu Oct 29 15:17:38 2026	rc=0
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k3	17611	17611	2026-10-29T12:17:38.361083+00:00	Thu Oct 29 15:17:38 2026	rc=0
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k1	17612	17612	2026-10-29T12:17:38.361038+00:00	Thu Oct 29 15:17:38 2026	rc=0
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k1	94093	94093	2026-10-29T12:24:57.143283+00:00	Thu Oct 29 15:24:57 2026	running
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k2	94094	94094	2026-10-29T12:24:57.143227+00:00	Thu Oct 29 15:24:57 2026	running
+agy-image-input-fix-20261029	claude-sonnet-5-5-high	panel-judge-k3	94162	94162	2026-10-29T12:24:57.241164+00:00	Thu Oct 29 15:24:57 2026	running
+agy-image-input-fix-20261029	claude-sonnet-5-5-high	panel-judge-k3	94162	94162	2026-10-29T12:24:57.241164+00:00	Thu Oct 29 15:24:57 2026	rc=0
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k2	94094	94094	2026-10-29T12:24:57.143227+00:00	Thu Oct 29 15:24:57 2026	rc=0
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k1	94093	94093	2026-10-29T12:24:57.143283+00:00	Thu Oct 29 15:24:57 2026	rc=0
+agy-image-input-fix-20261029	gpt-6.1-sol-high	panel-judge-k1	26808	26808	2026-10-29T13:13:53.354264+00:00	Thu Oct 29 16:13:53 2026	running
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k2	27661	27661	2026-10-29T13:13:56.165114+00:00	Thu Oct 29 16:13:56 2026	running
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k3	28206	28206	2026-10-29T13:13:58.962916+00:00	Thu Oct 29 16:13:58 2026	running
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k2	27661	27661	2026-10-29T13:13:56.165114+00:00	Thu Oct 29 16:13:56 2026	rc=0
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k3	28206	28206	2026-10-29T13:13:58.962916+00:00	Thu Oct 29 16:13:58 2026	rc=0
+agy-image-input-fix-20261029	gpt-6.1-sol-high	panel-judge-k1	26808	26808	2026-10-29T13:13:53.354264+00:00	Thu Oct 29 16:13:53 2026	rc=0
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k1	13121	13121	2026-10-29T13:21:31.885663+00:00	Thu Oct 29 16:21:31 2026	running
+agy-image-input-fix-20261029	gpt-6.1-sol-high	panel-judge-k2	13696	13696	2026-10-29T13:21:34.766367+00:00	Thu Oct 29 16:21:34 2026	running
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k3	14508	14508	2026-10-29T13:21:36.939225+00:00	Thu Oct 29 16:21:36 2026	running
+agy-image-input-fix-20261029	gpt-6.1-sol-high	panel-judge-k2	13696	13696	2026-10-29T13:21:34.766367+00:00	Thu Oct 29 16:21:34 2026	rc=0
+agy-image-input-fix-20261029	gemini-4-argon-high	panel-judge-k3	14508	14508	2026-10-29T13:21:36.939225+00:00	Thu Oct 29 16:21:36 2026	rc=0
+agy-image-input-fix-20261029	muse-wonder-full-1.0	panel-judge-k1	13121	13121	2026-10-29T13:21:31.885663+00:00	Thu Oct 29 16:21:31 2026	rc=0
