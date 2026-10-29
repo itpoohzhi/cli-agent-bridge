@@ -1,0 +1,40 @@
+{
+  "check_id": "VER-011",
+  "status": "PASS",
+  "exit_code": 0,
+  "executed_at": "2026-10-29T13:02:49+03:00",
+  "endpoint": "http://127.0.0.1:9887/v1/chat/completions",
+  "model": "gemini-4-argon",
+  "reasoning_effort": "high",
+  "turn1_shadow_canary": {
+    "elapsed_s": 25.128,
+    "reasoning_chunks": 1,
+    "reasoning_chars": 2077,
+    "first_reasoning_t_s": 24.477,
+    "content_chunks": 1,
+    "content_chars": 15,
+    "first_content_t_s": 24.477,
+    "health_after": {
+      "sqlite_reasoning_mode": "live",
+      "sqlite_breaker_state": "closed",
+      "sqlite_divergence_count": 0,
+      "sqlite_drain_deadline_count": 0
+    }
+  },
+  "turn2_live_sqlite_realtime": {
+    "elapsed_s": 26.779,
+    "reasoning_chunks": 6,
+    "reasoning_chars": 1274,
+    "first_reasoning_t_s": 15.61,
+    "content_chunks": 1,
+    "content_chars": 196,
+    "first_content_t_s": 25.443,
+    "lead_time_before_content_s": 9.833,
+    "health_after": {
+      "sqlite_reasoning_mode": "live",
+      "sqlite_breaker_state": "closed",
+      "sqlite_divergence_count": 0,
+      "sqlite_drain_deadline_count": 0
+    }
+  }
+}

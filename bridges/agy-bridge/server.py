@@ -39,6 +39,14 @@ agy отвергает базу без effort — `--model "gemini-3.8-flash" re
 `step_type: tool` -> трассировка в stderr, `state: DONE` -> завершение) и
 `result` (`response` -> финальный текст, `usage` -> токены, `status`/`error`).
 
+Мышление шагов (`reasoning_content`) идёт клиенту в реальном времени: пока шаг ещё
+генерируется (`status=8`), подполе 20.3 его `step_payload` растёт в SQLite разговора
+`~/.gemini/antigravity-cli/conversations/<cid>.db`. База открывается только на чтение
+(`mode=ro`), разбор wire-формата — на stdlib. Источник вспомогателен и fail-open:
+транскрипт `transcript_full.jsonl` остаётся минимальным источником. Включение — флаг
+`SQLITE_REASONING_ENABLED` в `dynamic_config.json` (по умолчанию выключен) и аварийный
+выключатель `AGY_SQLITE_REASONING_ENABLED=0`.
+
 Секреты с диска не читаются: ключ авторизации берётся только из окружения
 AGY_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в окружение дочернего
 процесса ключ моста не передаётся. Прокси-переменные выставляет сам лончер.
@@ -50,11 +58,13 @@ import hashlib
 import json
 import os
 import queue
+import random
 import re
 import select
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -62,7 +72,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast, final
 
 # Корень репозитория cli-agent-bridge: resolve() раскрывает симлинк деплоя
 # (~/.dsh/bridges/agy-bridge -> <repo>/bridges/agy-bridge), parents[2] = <repo>.
@@ -81,7 +91,9 @@ HOME = Path.home()
 HOST = os.environ.get("AGY_BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AGY_BRIDGE_PORT", "9887"))
 AUTH_KEY = os.environ.get("AGY_BRIDGE_KEY", "").strip()
-LAUNCHER = os.environ.get("AGY_LAUNCHER", str(HOME / ".config" / "agy-launch" / "agy-cli.sh"))
+LAUNCHER = os.environ.get(
+    "AGY_LAUNCHER", str(HOME / ".config" / "agy-launch" / "agy-cli.sh")
+)
 FLEET_PATH = Path(os.environ.get("AGY_BRIDGE_FLEET", "") or str(ROOT / "fleet.json"))
 ENV_MODEL = os.environ.get("AGY_BRIDGE_MODEL", "").strip()
 WORKSPACE = ROOT / "workspace"
@@ -94,15 +106,76 @@ KEEPALIVE_S = float(os.environ.get("AGY_BRIDGE_KEEPALIVE", "15"))
 FIRST_TOKEN_TIMEOUT_S = float(os.environ.get("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT", "120"))
 PRINT_TIMEOUT = os.environ.get("AGY_BRIDGE_PRINT_TIMEOUT", "0")
 
+
+def _env_float(name: str, default: float, low: float, high: float) -> float:
+    """Число из окружения, зажатое в [low, high]; невалидное значение -> default."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        value = default
+    if value != value:
+        value = default
+    return min(high, max(low, value))
+
+
 # Мышление шагов agy: CLI кладёт его в транскрипт разговора пошагово, в середине
 # хода. Путь и имя файла фиксированы CLI (проверено на agy 1.3.1).
-BRAIN_DIR = Path(os.environ.get("AGY_BRIDGE_BRAIN",
-                                "") or str(HOME / ".gemini" / "antigravity-cli" / "brain"))
+BRAIN_DIR = Path(
+    os.environ.get("AGY_BRIDGE_BRAIN", "")
+    or str(HOME / ".gemini" / "antigravity-cli" / "brain")
+)
 TRANSCRIPT_NAME = "transcript_full.jsonl"
 TRANSCRIPT_POLL_S = float(os.environ.get("AGY_BRIDGE_TRANSCRIPT_POLL", "0.05"))
-# Процесс вышел: один финальный проход по файлу, чтобы поймать запись последнего шага.
-TRANSCRIPT_GRACE_S = float(os.environ.get("AGY_BRIDGE_TRANSCRIPT_GRACE", "0.4"))
 TRANSCRIPT_READ_MAX = 4 * 1024 * 1024
+
+# Живой источник мышления: SQLite-база разговора agy (таблица `steps`, шаг
+# планировщика `step_type=15`, подполе 20.3 `step_payload` растёт в `status=8`).
+# База открывается только на чтение; транскрипт остаётся минимальным источником.
+CONV_DIR = Path(
+    os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
+    or str(HOME / ".gemini" / "antigravity-cli" / "conversations")
+)
+# Бинарь agy: его идентичность (mtime_ns, size) ключует семантический canary.
+AGY_BIN = os.environ.get("AGY_BRIDGE_AGY_BIN", "") or str(
+    HOME / ".local" / "bin" / "agy.real"
+)
+SQLITE_POLL_S = _env_float("AGY_BRIDGE_SQLITE_POLL", 0.5, 0.5, 2.0)
+# Рантайм-флаг SQLITE_REASONING_ENABLED лежит рядом с server.py (в git не коммитится).
+DYNAMIC_CONFIG_PATH = ROOT / "dynamic_config.json"
+FLAG_NAME = "SQLITE_REASONING_ENABLED"
+FLAG_TTL_S = 1.0
+# Процесс вышел: окно финального дренирования источников мышления. Env
+# AGY_BRIDGE_TRANSCRIPT_GRACE задаёт само окно, граница DRAIN_MAX_S жёсткая.
+DRAIN_MAX_S = 0.50
+DRAIN_WINDOW_S = _env_float("AGY_BRIDGE_TRANSCRIPT_GRACE", 0.35, 0.20, DRAIN_MAX_S)
+DRAIN_MIN_S = min(_env_float("AGY_BRIDGE_DRAIN_MIN", 0.15, 0.05, 0.25), DRAIN_WINDOW_S)
+DRAIN_POLL_STEP_S = 0.05
+JOIN_TIMEOUT_S = _env_float("AGY_BRIDGE_DRAIN_JOIN", 0.15, 0.05, 0.20)
+PROC_EXIT_WAIT_S = 0.05
+# Потолки памяти и работы одной итерации опроса.
+MAX_REASONING_BYTES_PER_TURN = 2 * 1024 * 1024
+MAX_STEP_BLOB_BYTES = 262144
+MAX_STEPS_TRACKED = 128
+SQLITE_ROW_LIMIT = 16
+# Константы схемы привязаны к agy 1.4.9 и подтверждаются canary.
+STEP_TYPE_PLANNER = 15
+STEP_STATUS_GENERATING = 8
+STEP_STATUS_DONE = 3
+# cid, из которого строится путь к базе, обязан быть hex-строкой с дефисами.
+_CID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
+_STEP_INDEX_RE = re.compile(rb'"step_index"\s*:\s*(\d+)')
+# Процессные guardrails (AD-005): breaker, бюджеты, окно проб.
+BREAKER_FAILURES_TO_OPEN = 3
+BREAKER_COOLDOWN_S = 30.0
+BREAKER_PROBE_LEASE_S = 60.0
+RETRY_CAPACITY_TENTHS = 30
+RETRY_CREDIT_TENTHS = 2
+RETRY_COST_TENTHS = 10
+POLL_BUCKET_CAPACITY_TENTHS = 30
+POLL_BUCKET_REFILL_TENTHS_PER_S = 20
+POLL_BUCKET_COST_TENTHS = 10
+RETRY_PAUSE_CAP_S = 2.0
 
 # Effort-оси. `--effort` у agy принимает low|medium|high; id модели — база без уровня,
 # уровень всегда уходит отдельным флагом (см. модуль-docstring).
@@ -128,10 +201,36 @@ _last_ok = [0.0]
 _session_store_lock = threading.Lock()
 _session_store: dict[tuple[str, str, str], dict[str, Any]] = {}
 _in_flight_cids: set[str] = set()
+# Владение разговором: cid -> turn_id активного хода (под _session_store_lock).
+# Два живых хода никогда не читают один <cid>.db и не делят один cid.
+_active_cid_owners: dict[str, str] = {}
+
+# Процессное состояние SQLite-источника мышления. Один замок охватывает breaker,
+# бюджеты, compat-canary, кэш флага и счётчики /health; I/O под ним не выполняется.
+_sqlite_guard_lock = threading.Lock()
+_breaker_state: str = "CLOSED"
+_breaker_failures: int = 0
+_breaker_opened_at: float = 0.0
+_breaker_probe_gen: int = 0
+_breaker_active_probe_gen: int | None = None
+_breaker_probe_started_at: float = 0.0
+_retry_tenths: int = RETRY_CAPACITY_TENTHS
+_compat_ident: tuple[int, int] | None = None
+_compat_state: str = "SHADOW"
+_flag_value: bool = False
+_flag_key: tuple[int, int] | None = None
+_flag_checked_at: float | None = None
+_sqlite_divergence_count: int = 0
+_sqlite_drain_deadline_count: int = 0
+_sqlite_open_connections: int = 0
+_sqlite_max_open_connections: int = 0
+_rng: Callable[[], float] = random.random
 
 # Токеноподобные последовательности в логах: сам ключ моста и длинные hex/base64.
 _SECRET = re.compile(r"[A-Za-z0-9_\-]{24,}")
-_NOISE = re.compile(r"NODE_TLS_REJECT_UNAUTHORIZED|--trace-warnings|^\(node:\d+\)", re.I)
+_NOISE = re.compile(
+    r"NODE_TLS_REJECT_UNAUTHORIZED|--trace-warnings|^\(node:\d+\)", re.I
+)
 
 
 class FleetViolation(Exception):
@@ -159,19 +258,32 @@ def _build_catalog(data: Any) -> dict:
     # (only "text")` — проверено 2026-10-07 на 1.3.1). max_body_bytes — это лимит
     # HTTP-тела запроса, он всегда > 0, поэтому проверяется отдельно.
     for key in ("max_images", "max_image_bytes", "max_total_image_bytes"):
-        if not isinstance(limits.get(key), int) or isinstance(limits.get(key), bool) or limits[key] < 0:
+        if (
+            not isinstance(limits.get(key), int)
+            or isinstance(limits.get(key), bool)
+            or limits[key] < 0
+        ):
             raise FleetViolation("limits_invalid", "-")
-    if not isinstance(limits.get("max_body_bytes"), int) or isinstance(limits.get("max_body_bytes"), bool) \
-            or limits["max_body_bytes"] <= 0:
+    if (
+        not isinstance(limits.get("max_body_bytes"), int)
+        or isinstance(limits.get("max_body_bytes"), bool)
+        or limits["max_body_bytes"] <= 0
+    ):
         raise FleetViolation("limits_invalid", "-")
     # Типы обязаны быть непустым списком только если изображения вообще принимаются.
-    if not isinstance(limits.get("types"), list) or (limits["max_images"] > 0 and not limits["types"]):
+    if not isinstance(limits.get("types"), list) or (
+        limits["max_images"] > 0 and not limits["types"]
+    ):
         raise FleetViolation("limits_invalid", "-")
     admission = data.get("admission")
     if not isinstance(admission, dict):
         raise FleetViolation("admission_invalid", "-")
     for key in ("max_http_connections", "max_inflight_body_bytes"):
-        if not isinstance(admission.get(key), int) or isinstance(admission.get(key), bool) or admission[key] <= 0:
+        if (
+            not isinstance(admission.get(key), int)
+            or isinstance(admission.get(key), bool)
+            or admission[key] <= 0
+        ):
             raise FleetViolation("admission_invalid", "-")
     raw_models = data.get("models")
     if not isinstance(raw_models, list) or not raw_models:
@@ -187,9 +299,12 @@ def _build_catalog(data: Any) -> dict:
         if mid in models:
             raise FleetViolation("duplicate_id", mid)
         efforts = item.get("efforts")
-        if (not isinstance(efforts, list) or not efforts
-                or not all(isinstance(e, str) for e in efforts)
-                or any(e not in EFFORT_LEVELS for e in efforts)):
+        if (
+            not isinstance(efforts, list)
+            or not efforts
+            or not all(isinstance(e, str) for e in efforts)
+            or any(e not in EFFORT_LEVELS for e in efforts)
+        ):
             raise FleetViolation("efforts_invalid", mid)
         if item.get("default_effort") not in efforts:
             raise FleetViolation("default_effort_invalid", mid)
@@ -200,9 +315,14 @@ def _build_catalog(data: Any) -> dict:
         if status not in IMAGE_STATUSES:
             raise FleetViolation("status_invalid", mid)
         input_types = item.get("input")
-        if not isinstance(input_types, list) or not all(isinstance(t, str) for t in input_types):
+        if not isinstance(input_types, list) or not all(
+            isinstance(t, str) for t in input_types
+        ):
             raise FleetViolation("status_inconsistent", mid)
-        if images.get("cli_registry") == "explicit_unsupported" and status != "unsupported":
+        if (
+            images.get("cli_registry") == "explicit_unsupported"
+            and status != "unsupported"
+        ):
             raise FleetViolation("status_inconsistent", mid)
         # agy-мост изображений не принимает вовсе: max_images = 0, поэтому любая
         # модель обязана быть text-only. Расширение — сначала proof-метод.
@@ -237,10 +357,15 @@ def _build_catalog(data: Any) -> dict:
         raise FleetViolation("default_model_invalid", "-")
     if ENV_MODEL and ENV_MODEL not in models:
         raise FleetViolation("env_model_invalid", ENV_MODEL)
-    technical_ref = data.get("technical_ref") if isinstance(data.get("technical_ref"), dict) else {}
+    technical_ref_raw = cast(object, data.get("technical_ref"))
+    technical_ref = (
+        cast("dict[str, object]", technical_ref_raw)
+        if isinstance(technical_ref_raw, dict)
+        else {}
+    )
     return {
         "schema_version": data.get("schema_version"),
-        "catalogue": str(data.get("catalogue") or ""),
+        "catalogue": str(cast("dict[str, object]", data).get("catalogue") or ""),
         "default_model": default_model,
         "order": order,
         "models": models,
@@ -274,7 +399,7 @@ def _load_fleet() -> dict:
             raise
         except (ValueError, UnicodeDecodeError):
             catalog = None
-    if catalog is None:
+    if catalog is None or raw is None:
         sys.stderr.write("fleet_invalid model=- reason=fleet_unreadable\n")
         sys.stderr.flush()
         raise SystemExit(1)
@@ -286,7 +411,9 @@ def _load_fleet() -> dict:
 try:
     FLEET = _load_fleet()
 except FleetViolation as _violation:
-    sys.stderr.write(f"fleet_invalid model={_violation.model} reason={_violation.reason}\n")
+    sys.stderr.write(
+        f"fleet_invalid model={_violation.model} reason={_violation.reason}\n"
+    )
     sys.stderr.flush()
     raise SystemExit(1)
 
@@ -294,7 +421,9 @@ MODEL_ID = ENV_MODEL or FLEET["default_model"]
 
 
 def _log(msg: str) -> None:
-    sys.stderr.write("[agy-bridge] %s %s\n" % (time.strftime("%H:%M:%S"), _mask_secrets(msg)))
+    sys.stderr.write(
+        "[agy-bridge] %s %s\n" % (time.strftime("%H:%M:%S"), _mask_secrets(msg))
+    )
     sys.stderr.flush()
 
 
@@ -308,7 +437,9 @@ def _idle_timeout_from_env() -> float:
     except ValueError:
         value = 0.0
     if not value > 0.0 or value != value or value == float("inf"):
-        _log(f"AGY_BRIDGE_IDLE_TIMEOUT={raw!r} invalid, using {_CORE_IDLE_TIMEOUT_S:g}s")
+        _log(
+            f"AGY_BRIDGE_IDLE_TIMEOUT={raw!r} invalid, using {_CORE_IDLE_TIMEOUT_S:g}s"
+        )
         return float(_CORE_IDLE_TIMEOUT_S)
     return value
 
@@ -319,12 +450,24 @@ def _is_watchdog_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+# Имена диагностических событий источника мышления длиннее 24 символов, но секретами
+# не являются: без исключения маска скрыла бы их в логах.
+_LOG_EVENT_NAMES = frozenset(
+    {"sqlite_snapshot_divergence", "sqlite_transcript_divergence"}
+)
+
+
+def _mask_token(match: re.Match[str]) -> str:
+    token = match.group(0)
+    return token if token in _LOG_EVENT_NAMES else "***"
+
+
 def _mask_secrets(text: str) -> str:
     """Погасить токеноподобные последовательности и сам ключ моста."""
     out = str(text)
     if AUTH_KEY:
         out = out.replace(AUTH_KEY, "***")
-    return _SECRET.sub("***", out)
+    return _SECRET.sub(_mask_token, out)
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
@@ -337,6 +480,8 @@ IDLE_TIMEOUT_S = _idle_timeout_from_env()
 # Зачистка группы: сколько ждать после SIGTERM и сколько — reap лидера после SIGKILL.
 KILL_TERM_GRACE_S = 2.0
 KILL_WAIT_S = 5.0
+# После result ERROR процесс обязан выйти сам: сколько ждать done, прежде чем сдаться.
+RESULT_EXIT_GRACE_S = 5.0
 # События очереди, считающиеся активностью агента (result/done/pump_error — терминальные).
 _ACTIVITY_KINDS = frozenset({"init", "text", "reasoning", "tool_trace"})
 
@@ -428,8 +573,12 @@ def _render_message(msg: Any, counter: list) -> str:
             fname = str(fn.get("name") or "unknown")
             fargs = fn.get("arguments")
             if not isinstance(fargs, str):
-                fargs = json.dumps(fargs, ensure_ascii=False) if fargs is not None else "{}"
-            lines.append("[tool call %s] %s(%s)" % (call.get("id") or "call", fname, fargs))
+                fargs = (
+                    json.dumps(fargs, ensure_ascii=False) if fargs is not None else "{}"
+                )
+            lines.append(
+                "[tool call %s] %s(%s)" % (call.get("id") or "call", fname, fargs)
+            )
     if role == "tool":
         cid = msg.get("tool_call_id") or "call"
         lines.append("[tool result %s] %s" % (cid, body))
@@ -467,33 +616,41 @@ def _get_resumed_turn_prompt(messages: list) -> str:
             last_asst = i
             break
     if last_asst >= 0 and last_asst + 1 < len(messages):
-        new_msgs = messages[last_asst + 1:]
+        new_msgs = messages[last_asst + 1 :]
         prompt = _messages_to_prompt(new_msgs)
         if prompt:
             return prompt
     return _messages_to_prompt(messages)
 
 
-def _session_claim(sess_key: tuple) -> str:
+def _session_claim(sess_key: tuple, turn_id: str = "") -> str:
     """Найти живую свободную сессию и занять её; '' — сессии нет.
 
     Проверка и занятие идут под одним замком: два параллельных запроса не
-    получат один и тот же conversation_id.
+    получат один и тот же conversation_id. При непустом `turn_id` владение cid
+    регистрируется в `_active_cid_owners` в той же критической секции.
     """
     now = time.time()
     with _session_store_lock:
         entry = _session_store.get(sess_key)
         if entry is None:
             return ""
-        if (now - entry["last_used"] > SESSION_IDLE_TTL_S
-                or now - entry["created"] > SESSION_MAX_TTL_S
-                or entry["turns"] >= SESSION_MAX_TURNS):
+        if (
+            now - entry["last_used"] > SESSION_IDLE_TTL_S
+            or now - entry["created"] > SESSION_MAX_TTL_S
+            or entry["turns"] >= SESSION_MAX_TURNS
+        ):
             _session_store.pop(sess_key, None)
             return ""
-        cid = entry["cid"]
+        cid = cast(str, entry["cid"])
         if cid in _in_flight_cids:
             return ""
+        owner = _active_cid_owners.get(cid)
+        if owner is not None and owner != turn_id:
+            return ""
         _in_flight_cids.add(cid)
+        if turn_id:
+            _active_cid_owners[cid] = turn_id
         return cid
 
 
@@ -512,8 +669,12 @@ def _session_commit(sess_key: tuple, cid: str) -> None:
             entry["last_used"] = now
             entry["turns"] += 1
         else:
-            _session_store[sess_key] = {"cid": cid, "last_used": now,
-                                        "created": now, "turns": 1}
+            _session_store[sess_key] = {
+                "cid": cid,
+                "last_used": now,
+                "created": now,
+                "turns": 1,
+            }
 
 
 def _ndjson_user_line(prompt: str) -> str:
@@ -591,134 +752,1270 @@ def _kill_all(*_: Any) -> None:
     os._exit(0)
 
 
-class _TranscriptTail:
-    """Мышление шагов agy из транскрипта разговора.
+# ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
 
-    CLI пишет `<BRAIN_DIR>/<conversation_id>/.system_generated/logs/transcript_full.jsonl`
-    пошагово, не дожидаясь конца хода: запись `PLANNER_RESPONSE` с непустым
-    `thinking` появляется сразу после завершения шага. Файл читается
-    инкрементально по байтовому смещению, наружу уходит только приращение текста
-    мышления (`_reasoning_suffix` защищает от повторной выдачи того же шага).
 
-    Поток вспомогательный и не может влиять на ответ: нет каталога, нет файла,
-    пустой файл, битая строка, оборванный JSON — просто «мышления нет». У
-    одновременных запросов разные conversation_id, поэтому и разные файлы.
+def _reset_sqlite_guards_for_tests() -> None:
+    """Сбросить процессные глобалы guardrails (хелпер тестов)."""
+    global _breaker_state, _breaker_failures, _breaker_opened_at, _breaker_probe_gen
+    global _breaker_active_probe_gen, _breaker_probe_started_at, _retry_tenths
+    global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
+    global _sqlite_divergence_count, _sqlite_drain_deadline_count
+    global _sqlite_open_connections, _sqlite_max_open_connections, _rng
+    with _sqlite_guard_lock:
+        _breaker_state = "CLOSED"
+        _breaker_failures = 0
+        _breaker_opened_at = 0.0
+        _breaker_probe_gen = 0
+        _breaker_active_probe_gen = None
+        _breaker_probe_started_at = 0.0
+        _retry_tenths = RETRY_CAPACITY_TENTHS
+        _compat_ident = None
+        _compat_state = "SHADOW"
+        _flag_value = False
+        _flag_key = None
+        _flag_checked_at = None
+        _sqlite_divergence_count = 0
+        _sqlite_drain_deadline_count = 0
+        _sqlite_open_connections = 0
+        _sqlite_max_open_connections = 0
+        _rng = random.random
+    with _session_store_lock:
+        _active_cid_owners.clear()
+
+
+def _runtime_flag_on() -> bool:
+    """Рантайм-флаг SQLITE_REASONING_ENABLED из dynamic_config.json (fail-closed).
+
+    Файл читается со stat-кэшем (mtime_ns, size) и TTL 1.0 с: JSON разбирается
+    один раз, пока stat не изменился. Любая ошибка чтения, отсутствие ключа или
+    не-boolean значение дают False.
+    """
+    global _flag_value, _flag_key, _flag_checked_at
+    now = time.monotonic()
+    with _sqlite_guard_lock:
+        if _flag_checked_at is not None and now - _flag_checked_at < FLAG_TTL_S:
+            return _flag_value
+        known_key = _flag_key
+        known_value = _flag_value
+    value = False
+    key: tuple[int, int] | None = None
+    try:
+        info = DYNAMIC_CONFIG_PATH.stat()
+        key = (info.st_mtime_ns, info.st_size)
+        if key == known_key:
+            value = known_value
+        else:
+            data = cast(
+                object, json.loads(DYNAMIC_CONFIG_PATH.read_text(encoding="utf-8"))
+            )
+            if isinstance(data, dict):
+                value = cast("dict[str, object]", data).get(FLAG_NAME) is True
+    except (OSError, ValueError):
+        value = False
+        key = None
+    with _sqlite_guard_lock:
+        _flag_value = value
+        _flag_key = key
+        _flag_checked_at = now
+    return value
+
+
+def _sqlite_disabled_reason() -> str:
+    """'' — источник включён; иначе причина выключения: env или flag."""
+    env = os.environ.get("AGY_SQLITE_REASONING_ENABLED", "1").strip().lower()
+    if env in ("0", "false"):
+        return "env"
+    if not _runtime_flag_on():
+        return "flag"
+    return ""
+
+
+def _is_sqlite_reasoning_enabled() -> bool:
+    """Двухуровневый fail-closed выключатель SQLite-источника (REQ-011)."""
+    return _sqlite_disabled_reason() == ""
+
+
+def _breaker_blocks_now() -> bool:
+    """Быстрая проверка без побочных эффектов: breaker OPEN и cooldown не истёк."""
+    with _sqlite_guard_lock:
+        return (
+            _breaker_state == "OPEN"
+            and time.monotonic() - _breaker_opened_at < BREAKER_COOLDOWN_S
+        )
+
+
+def _breaker_acquire() -> tuple[bool, int | None]:
+    """Допуск хода к SQLite: (разрешено, probe_gen пробного хода или None)."""
+    global _breaker_state, _breaker_probe_gen, _breaker_active_probe_gen
+    global _breaker_probe_started_at
+    now = time.monotonic()
+    with _sqlite_guard_lock:
+        if _breaker_state == "CLOSED":
+            return True, None
+        if _breaker_state == "OPEN":
+            if now - _breaker_opened_at < BREAKER_COOLDOWN_S:
+                return False, None
+            _breaker_state = "HALF_OPEN"
+            _breaker_active_probe_gen = None
+        leased = (
+            _breaker_active_probe_gen is not None
+            and now - _breaker_probe_started_at < BREAKER_PROBE_LEASE_S
+        )
+        if leased:
+            return False, None
+        _breaker_probe_gen += 1
+        _breaker_active_probe_gen = _breaker_probe_gen
+        _breaker_probe_started_at = now
+        return True, _breaker_probe_gen
+
+
+def _breaker_permits(probe_gen: int | None) -> bool:
+    """Можно ли выполнять SELECT: CLOSED-ход — пока CLOSED, пробный — пока его поколение актуально."""
+    with _sqlite_guard_lock:
+        if probe_gen is None:
+            return _breaker_state == "CLOSED"
+        return _breaker_state == "HALF_OPEN" and _breaker_active_probe_gen == probe_gen
+
+
+def _breaker_report(probe_gen: int | None, selects_ok: int, failed: bool) -> None:
+    """Исход хода для FSM breaker'а; устаревшая проба (другое поколение) — no-op."""
+    global _breaker_state, _breaker_failures, _breaker_opened_at
+    global _breaker_active_probe_gen
+    now = time.monotonic()
+    change = ""
+    with _sqlite_guard_lock:
+        if probe_gen is not None:
+            if _breaker_active_probe_gen != probe_gen or _breaker_state != "HALF_OPEN":
+                return
+            _breaker_active_probe_gen = None
+            if failed:
+                _breaker_state = "OPEN"
+                _breaker_opened_at = now
+                change = "OPEN"
+            elif selects_ok >= 1:
+                _breaker_state = "CLOSED"
+                _breaker_failures = 0
+                change = "CLOSED"
+            current_state = _breaker_state
+            gen_now = probe_gen
+        else:
+            if _breaker_state != "CLOSED":
+                return
+            if failed:
+                _breaker_failures += 1
+                if _breaker_failures >= BREAKER_FAILURES_TO_OPEN:
+                    _breaker_state = "OPEN"
+                    _breaker_opened_at = now
+                    change = "OPEN"
+            elif selects_ok >= 1:
+                _breaker_failures = 0
+            current_state = _breaker_state
+            gen_now = _breaker_probe_gen
+    if change:
+        _log(f"breaker state={current_state} probe_gen={gen_now}")
+
+
+def _retry_credit() -> None:
+    """Первичный запрос пополняет бюджет повторов (+0.2 токена, не выше ёмкости)."""
+    global _retry_tenths
+    with _sqlite_guard_lock:
+        _retry_tenths = min(RETRY_CAPACITY_TENTHS, _retry_tenths + RETRY_CREDIT_TENTHS)
+
+
+def _retry_take() -> bool:
+    """Списать один повтор (1.0 токена); False — бюджет исчерпан."""
+    global _retry_tenths
+    with _sqlite_guard_lock:
+        if _retry_tenths < RETRY_COST_TENTHS:
+            return False
+        _retry_tenths -= RETRY_COST_TENTHS
+        return True
+
+
+def _retry_pause_s(attempt: int, rng: Callable[[], float] | None = None) -> float:
+    """Full Jitter: U(0, min(2.0, 2.0 * 2^(attempt-1))) через инъецируемый RNG."""
+    cap = min(RETRY_PAUSE_CAP_S, RETRY_PAUSE_CAP_S * float(1 << max(0, attempt - 1)))
+    source = rng if rng is not None else _rng
+    return source() * cap
+
+
+@final
+class _PollBucket:
+    """Token bucket опроса SQLite одного хода в целых десятых токена.
+
+    Ёмкость 3.0, пополнение 2.0 токена/с, SELECT стоит 1.0: на любом окне Δt
+    приходит не более 3 + 2·Δt запросов. Время ведётся целыми микросекундами.
     """
 
-    def __init__(self, emit, stop_event: threading.Event, done_event: threading.Event,
-                 resumed: bool):
+    def __init__(self) -> None:
+        self.tenths: int = POLL_BUCKET_CAPACITY_TENTHS
+        self.last_us: int = int(time.monotonic() * 1_000_000)
+
+    def take(self) -> bool:
+        now_us = int(time.monotonic() * 1_000_000)
+        elapsed = now_us - self.last_us
+        if elapsed > 0:
+            add = elapsed * POLL_BUCKET_REFILL_TENTHS_PER_S // 1_000_000
+            if add > 0:
+                if self.tenths + add >= POLL_BUCKET_CAPACITY_TENTHS:
+                    self.tenths = POLL_BUCKET_CAPACITY_TENTHS
+                    self.last_us = now_us
+                else:
+                    self.tenths += add
+                    self.last_us += add * 1_000_000 // POLL_BUCKET_REFILL_TENTHS_PER_S
+        if self.tenths >= POLL_BUCKET_COST_TENTHS:
+            self.tenths -= POLL_BUCKET_COST_TENTHS
+            return True
+        return False
+
+
+def _agy_binary_identity() -> tuple[int, int] | None:
+    """Идентичность бинаря agy (st_mtime_ns, st_size); None — stat не удался."""
+    try:
+        info = os.stat(AGY_BIN)
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size)
+
+
+def _compat_turn_state(identity: tuple[int, int] | None) -> str:
+    """Режим хода из процессного canary: новый или неизвестный бинарь -> SHADOW."""
+    global _compat_ident, _compat_state
+    changed = False
+    with _sqlite_guard_lock:
+        if identity is None or identity != _compat_ident:
+            changed = _compat_state != "SHADOW" or _compat_ident is not None
+            _compat_ident = identity
+            _compat_state = "SHADOW"
+        state = _compat_state
+    if changed:
+        _log("compat state=SHADOW reason=binary_identity")
+    return state
+
+
+def _compat_promote(turn_identity: tuple[int, int] | None) -> bool:
+    """SHADOW -> LIVE для будущих ходов: бинарь хода совпал с текущим на диске."""
+    global _compat_ident, _compat_state
+    with _sqlite_guard_lock:
+        current = _agy_binary_identity()
+        if turn_identity is None or turn_identity != current:
+            return False
+        _compat_ident = turn_identity
+        _compat_state = "LIVE"
+    return True
+
+
+def _compat_demote() -> None:
+    """Любая расходимость в LIVE возвращает следующие ходы в SHADOW."""
+    global _compat_state
+    with _sqlite_guard_lock:
+        was_live = _compat_state == "LIVE"
+        _compat_state = "SHADOW"
+    if was_live:
+        _log("compat state=SHADOW reason=divergence")
+
+
+def _count_divergence() -> None:
+    global _sqlite_divergence_count
+    with _sqlite_guard_lock:
+        _sqlite_divergence_count += 1
+
+
+def _count_drain_deadline() -> None:
+    global _sqlite_drain_deadline_count
+    with _sqlite_guard_lock:
+        _sqlite_drain_deadline_count += 1
+
+
+def _sqlite_health_fields() -> dict[str, object]:
+    """Аддитивные диагностические поля /health (без SQLite-вызовов и секретов)."""
+    disabled = _sqlite_disabled_reason()
+    with _sqlite_guard_lock:
+        if disabled:
+            mode = "off"
+        elif _breaker_state == "OPEN":
+            mode = "breaker_open"
+        else:
+            mode = _compat_state.lower()
+        return {
+            "sqlite_reasoning_mode": mode,
+            "sqlite_breaker_state": _breaker_state.lower(),
+            "sqlite_divergence_count": _sqlite_divergence_count,
+            "sqlite_drain_deadline_count": _sqlite_drain_deadline_count,
+        }
+
+
+def _cid_acquire(cid: str, turn_id: str) -> bool:
+    """Занять разговор за ходом; False — cid занят другим активным ходом."""
+    if not cid or not turn_id:
+        return True
+    with _session_store_lock:
+        owner = _active_cid_owners.get(cid)
+        if owner is not None and owner != turn_id:
+            return False
+        _active_cid_owners[cid] = turn_id
+        return True
+
+
+def _cid_release(cid: str, turn_id: str) -> None:
+    """Снять владение, только если оно принадлежит этому ходу."""
+    if not cid or not turn_id:
+        return
+    with _session_store_lock:
+        if _active_cid_owners.get(cid) == turn_id:
+            _ = _active_cid_owners.pop(cid, None)
+
+
+# ---- Чтение SQLite разговора agy: только на чтение, без побочных эффектов --------
+
+
+def _db_path_for(cid: str) -> Path | None:
+    """Путь к <cid>.db строго внутри CONV_DIR; невалидный cid -> None."""
+    if _CID_RE.fullmatch(cid) is None:
+        return None
+    path = CONV_DIR / (cid + ".db")
+    try:
+        if path.resolve().parent != CONV_DIR.resolve():
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return path
+
+
+def _sqlite_ro_uri(path: Path) -> str:
+    text = str(path).replace("%", "%25").replace("?", "%3f").replace("#", "%23")
+    return f"file:{text}?mode=ro"
+
+
+def _sqlite_open_ro(path: Path) -> sqlite3.Connection:
+    """Открыть БД только на чтение; каждый connect обязан закрываться _sqlite_close."""
+    global _sqlite_open_connections, _sqlite_max_open_connections
+    conn = sqlite3.connect(
+        _sqlite_ro_uri(path),
+        uri=True,
+        timeout=0.05,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    try:
+        _ = conn.execute("PRAGMA query_only = ON")
+        _ = conn.execute("PRAGMA busy_timeout = 50")
+        _ = conn.execute("PRAGMA cache_size = -1024")
+    except BaseException:
+        conn.close()
+        raise
+    with _sqlite_guard_lock:
+        _sqlite_open_connections += 1
+        _sqlite_max_open_connections = max(
+            _sqlite_max_open_connections, _sqlite_open_connections
+        )
+    return conn
+
+
+def _sqlite_close(conn: sqlite3.Connection) -> None:
+    global _sqlite_open_connections
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+    with _sqlite_guard_lock:
+        _sqlite_open_connections = max(0, _sqlite_open_connections - 1)
+
+
+def _sqlite_max_idx(db_path: Path) -> int | None:
+    """Наибольший idx шага в БД (или -1); None — прочитать не удалось."""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _sqlite_open_ro(db_path)
+        row = cast(
+            "tuple[object, ...]",
+            conn.execute("SELECT COALESCE(MAX(idx), -1) FROM steps").fetchone(),
+        )
+        value = row[0]
+        return value if isinstance(value, int) else None
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            _sqlite_close(conn)
+
+
+def _transcript_path(cid: str) -> Path:
+    return BRAIN_DIR / cid / ".system_generated" / "logs" / TRANSCRIPT_NAME
+
+
+def _transcript_anchor(cid: str) -> tuple[int, int] | None:
+    """(наибольший step_index, размер файла) транскрипта до старта хода.
+
+    Нет файла — (-1, 0); ошибка чтения — None.
+    """
+    path = _transcript_path(cid)
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return (-1, 0)
+    except OSError:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            _ = fh.seek(max(0, size - TRANSCRIPT_READ_MAX))
+            data = fh.read(TRANSCRIPT_READ_MAX)
+    except OSError:
+        return None
+    t_max = -1
+    for match in _STEP_INDEX_RE.finditer(data):
+        t_max = max(t_max, int(match.group(1)))
+    return (t_max, size)
+
+
+@final
+class _TurnPlan:
+    """Решения по источнику мышления хода: якорь resume и режим LIVE|SHADOW|OFF."""
+
+    def __init__(self) -> None:
+        self.mode: str = "OFF"
+        self.reason: str = ""
+        self.base_idx: int = 0
+        self.offset: int = 0
+        self.anchored: bool = True
+        self.probe_gen: int | None = None
+        self.identity: tuple[int, int] | None = None
+
+
+def _prespawn_plan(cid: str, resumed: bool) -> _TurnPlan:
+    """Якорь хода ДО spawn: байтовый водяной знак транскрипта и максимум idx в БД.
+
+    Свежий разговор: base_idx=0. Продолжение треда (resume): оба водяных знака
+    обязательны, иначе SQLite-опрос на весь ход выключается (resume_unanchored),
+    а мышление идёт из транскрипта с pre-spawn смещением.
+    """
+    plan = _TurnPlan()
+    if not resumed:
+        return plan
+    plan.anchored = False
+    if _CID_RE.fullmatch(cid) is None:
+        plan.reason = "cid"
+        plan.offset = -1
+        return plan
+    anchor = _transcript_anchor(cid)
+    if anchor is None:
+        plan.reason = "resume_unanchored"
+        plan.offset = -1
+        return plan
+    t_max, plan.offset = anchor
+    plan.base_idx = t_max + 1
+    if not _is_sqlite_reasoning_enabled():
+        plan.reason = _sqlite_disabled_reason() or "flag"
+        return plan
+    if _breaker_blocks_now():
+        plan.reason = "breaker"
+        return plan
+    db_path = _db_path_for(cid)
+    db_max = _sqlite_max_idx(db_path) if db_path is not None else None
+    if db_max is None:
+        plan.reason = "resume_unanchored"
+        return plan
+    plan.anchored = True
+    plan.base_idx = max(t_max, db_max) + 1
+    return plan
+
+
+def _decide_turn_mode(plan: _TurnPlan) -> None:
+    """Режим хода фиксируется один раз: флаг, якорь, breaker, compat-canary."""
+    disabled = _sqlite_disabled_reason()
+    if disabled:
+        plan.mode, plan.reason = "OFF", plan.reason or disabled
+        return
+    if not plan.anchored:
+        plan.mode, plan.reason = "OFF", plan.reason or "resume_unanchored"
+        return
+    allowed, probe_gen = _breaker_acquire()
+    if not allowed:
+        plan.mode, plan.reason = "OFF", "breaker"
+        return
+    plan.probe_gen = probe_gen
+    plan.identity = _agy_binary_identity()
+    plan.mode = _compat_turn_state(plan.identity)
+    plan.reason = ""
+
+
+# ---- Разбор protobuf-wire формата step_payload (чистый Python, stdlib) -------------
+
+
+def _read_varint(buf: bytes, pos: int, end: int) -> tuple[int, int]:
+    """(значение, новая позиция); (-1, pos) — обрыв или варинт длиннее 10 байт."""
+    value = 0
+    shift = 0
+    cur = pos
+    while cur < end and shift < 70:
+        byte = buf[cur]
+        cur += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, cur
+        shift += 7
+    return -1, pos
+
+
+def _wire_find(
+    buf: bytes, start: int, end: int, field_no: int, stop: threading.Event | None
+) -> list[tuple[int, int]] | None:
+    """Границы length-delimited вхождений поля field_no в [start, end).
+
+    None — разбор невозможен (неподдерживаемый wire type, выход за границу, stop).
+    Каждые 64 тега проверяется stop: частичный результат не выдаётся.
+    """
+    found: list[tuple[int, int]] = []
+    pos = start
+    tags = 0
+    while pos < end:
+        tags += 1
+        if tags % 64 == 0 and stop is not None and stop.is_set():
+            return None
+        tag, pos = _read_varint(buf, pos, end)
+        if tag < 0:
+            return None
+        wire = tag & 7
+        number = tag >> 3
+        if wire == 0:
+            value, pos = _read_varint(buf, pos, end)
+            if value < 0:
+                return None
+        elif wire == 1:
+            pos += 8
+        elif wire == 5:
+            pos += 4
+        elif wire == 2:
+            length, pos = _read_varint(buf, pos, end)
+            if length < 0 or pos + length > end:
+                return None
+            if number == field_no:
+                found.append((pos, pos + length))
+            pos += length
+        else:
+            return None
+        if pos > end:
+            return None
+    return found
+
+
+def _trim_incomplete_utf8(data: bytes) -> bytes:
+    """Отбросить неполный многобайтовый символ в конце снимка status=8."""
+    size = len(data)
+    for back in range(1, min(4, size) + 1):
+        byte = data[size - back]
+        if 0x80 <= byte <= 0xBF:
+            continue
+        if 0xC0 <= byte <= 0xF4:
+            need = 2 if byte < 0xE0 else (3 if byte < 0xF0 else 4)
+            if back < need:
+                return data[: size - back]
+        break
+    return data
+
+
+def _extract_thinking_from_step_blob(
+    raw: bytes | None, final: bool, stop: threading.Event | None = None
+) -> str:
+    """Мышление шага из step_payload: корневое поле 20 -> подполе 3 (UTF-8).
+
+    '' означает «мышления нет». Функция чистая: без I/O, логов и исключений
+    наружу; битый или усечённый payload даёт ''. Для нефинального снимка
+    (status=8) неполный UTF-8 хвост отбрасывается и придёт целым со следующим.
+    """
+    if not raw:
+        return ""
+    try:
+        data = bytes(raw)
+        roots = _wire_find(data, 0, len(data), 20, stop)
+        if not roots:
+            return ""
+        chosen: tuple[int, int] | None = None
+        for begin, finish in roots:
+            subs = _wire_find(data, begin, finish, 3, stop)
+            if subs is None:
+                return ""
+            if subs:
+                chosen = subs[-1]
+        if chosen is None:
+            return ""
+        text = data[chosen[0] : chosen[1]]
+        if not final:
+            text = _trim_incomplete_utf8(text)
+        return text.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+@final
+class _StepState:
+    """Состояние одного шага планировщика (общее для SQLite и транскрипта).
+
+    Текст мышления не хранится: только длины и sha256. observed_* — последний
+    SQLite-снимок (любой режим), delivered_* — реально отданное клиенту.
+    """
+
+    def __init__(self) -> None:
+        self.blob_len: int = -1
+        self.blob_sha: str = ""
+        self.observed_len: int = 0
+        self.observed_sha: str = ""
+        self.observed_final: bool = False
+        self.delivered_len: int = 0
+        self.delivered_sha = hashlib.sha256()
+        self.final_len: int = 0
+        self.final_sha: str = ""
+        self.diverged: bool = False
+        self.finalized: bool = False
+        self.sql_seen: bool = False
+        self.sql_done: bool = False
+        self.canary_done: bool = False
+
+
+_STEPS_SQL = (
+    "SELECT idx, status, length(step_payload) AS blob_len, "
+    + "CASE WHEN length(step_payload) <= %d THEN step_payload ELSE NULL END AS step_payload "
+    + "FROM steps WHERE step_type = %d AND idx >= ? AND status IN (%d, %d) "
+    + "ORDER BY idx ASC LIMIT %d"
+) % (
+    MAX_STEP_BLOB_BYTES,
+    STEP_TYPE_PLANNER,
+    STEP_STATUS_GENERATING,
+    STEP_STATUS_DONE,
+    SQLITE_ROW_LIMIT,
+)
+
+
+@final
+class _TranscriptTail:
+    """Источник мышления шагов agy: транскрипт разговора и SQLite `conversations/<cid>.db`.
+
+    Один daemon-поток на ход — единственный писатель состояния шагов (без замков).
+    Транскрипт `<BRAIN_DIR>/<cid>/.system_generated/logs/transcript_full.jsonl`
+    читается инкрементально по байтовому смещению: запись `PLANNER_RESPONSE`
+    появляется после завершения шага. Параллельно, пока шаг ещё генерируется
+    (`status=8`), подполе 20.3 его `step_payload` в SQLite растёт — оттуда мышление
+    уходит клиенту дельтами. База открывается строго на чтение, на каждый опрос
+    своё соединение, закрываемое в `finally`.
+
+    Режим хода `LIVE|SHADOW|OFF` фиксируется на старте: в SHADOW SQLite только
+    наблюдается (canary совместимости agy), клиенту выдаёт транскрипт. Дедупликация
+    по `idx == step_index` с проверкой префикса sha256: непрефиксный снимок
+    замораживает выдачу шага на уже отданном префиксе.
+
+    Поток вспомогательный и не может влиять на ответ: нет каталога, нет файла,
+    битая строка, ошибка SQLite — просто «мышления нет».
+    """
+
+    def __init__(
+        self,
+        emit: Callable[[int, str, Callable[[], None] | None], bool],
+        stop_event: threading.Event,
+        done_event: threading.Event,
+        resumed: bool,
+        plan: _TurnPlan | None = None,
+        turn_id: str = "",
+    ) -> None:
         self.emit = emit
         self.stop_event = stop_event
         self.done_event = done_event
         self.resumed = resumed
-        self.cid = ""
+        self.plan: _TurnPlan = plan if plan is not None else _TurnPlan()
+        self.turn_id: str = turn_id
+        self.mode: str = self.plan.mode
+        self.base_idx: int = self.plan.base_idx
+        self.probe_gen: int | None = self.plan.probe_gen
+        self.cid: str = ""
+        self.seen: dict[int, _StepState] = {}
+        self.poll_watermark: int = self.plan.base_idx
+        self.sqlite_active: bool = self.plan.mode in ("LIVE", "SHADOW")
+        self.bucket: _PollBucket = _PollBucket()
+        self.selects_ok: int = 0
+        self.failed: bool = False
+        self.emitted: int = 0
+        self.dead: bool = False
+        self.end_marker: bool = False
+        self.final_planner: bool = False
+        self.drain_deadline: float = 0.0
+        self.drain_outcome: str = ""
+        self.last_poll: str = ""
         self._ready = threading.Event()
+        self._offset: int = self.plan.offset
+        self._buf: bytes = b""
+        self._transcript_ok: bool = True
+        self._owned_cid: str = ""
+        self._next_poll_at: float = 0.0
+        self._interrupted: bool = False
+        self._active_conn: sqlite3.Connection | None = None
+        self._conn_lock = threading.Lock()
+        self._db_path: Path | None = None
+        self._open_fail_logged: bool = False
+        self._oversize_logged: set[int] = set()
+        self._finished: bool = False
         self.thread = threading.Thread(target=self._run, daemon=True)
 
+    # ---- жизненный цикл ----------------------------------------------------------
     def start(self) -> None:
         self.thread.start()
 
-    def bind(self, cid: str) -> None:
-        """Привязать watcher к разговору из события `init` потока agy."""
-        if cid and not self.cid:
-            self.cid = cid
-            self._ready.set()
+    def _cid8(self) -> str:
+        return self.cid[:8] or "-"
 
-    def _path(self) -> Path:
-        return (BRAIN_DIR / self.cid / ".system_generated" / "logs" / TRANSCRIPT_NAME)
+    def bind(self, cid: str) -> None:
+        """Привязать источник к разговору из события `init` потока agy."""
+        if not cid or self.cid:
+            return
+        self.cid = cid
+        if _CID_RE.fullmatch(cid) is None:
+            self._transcript_ok = False
+            self._sqlite_off("cid")
+        else:
+            if self.sqlite_active:
+                if _cid_acquire(cid, self.turn_id):
+                    self._owned_cid = cid
+                else:
+                    self._sqlite_off("cid_busy")
+            self._db_path = _db_path_for(cid)
+            if self._db_path is None:
+                self._sqlite_off("cid")
+            if self.resumed and self._offset < 0:
+                try:
+                    self._offset = _transcript_path(cid).stat().st_size
+                except OSError:
+                    self._offset = 0
+        _log(
+            f"turn_mode cid={self._cid8()} mode={self.mode if self.sqlite_active else 'OFF'}"
+        )
+        if self.plan.mode == "OFF" and self.plan.reason:
+            _log(f"sqlite-off cid={self._cid8()} reason={self.plan.reason}")
+        self._ready.set()
+
+    def interrupt_active_query(self) -> None:
+        """Прервать активный SELECT из другого потока; ошибки закрытого соединения гасятся."""
+        with self._conn_lock:
+            conn = self._active_conn
+            if conn is not None:
+                self._interrupted = True
+                try:
+                    conn.interrupt()
+                except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                    pass
 
     def _run(self) -> None:
-        # Файл появляется только после первого завершённого шага — ждём привязки к
-        # разговору, но не дольше, чем ждали бы первого события agy.
+        try:
+            self._run_loop()
+        except Exception as exc:
+            _log(f"tail-error cid={self._cid8()} err={type(exc).__name__}")
+        finally:
+            self._finish()
+
+    def _run_loop(self) -> None:
+        # Файл и БД появляются только после первого шага — ждём привязки к разговору,
+        # но не дольше, чем ждали бы первого события agy; выход процесса или stop
+        # прерывают ожидание сразу (поток не висит до FIRST_TOKEN_TIMEOUT_S).
         waited = 0.0
-        while not self._ready.wait(timeout=0.2):
-            waited += 0.2
-            if self.stop_event.is_set() or waited >= FIRST_TOKEN_TIMEOUT_S:
-                if not self.stop_event.is_set():
-                    # Диагностический след: хвост умер, не дождавшись привязки.
-                    _log(f"tail-timeout cid={self.cid[:8] or '-'}: "
-                         f"no bind within {FIRST_TOKEN_TIMEOUT_S:g}s")
+        while not self._ready.wait(timeout=0.05):
+            waited += 0.05
+            if self.stop_event.is_set() or self.done_event.is_set():
                 return
-        path = self._path()
-        offset = 0
-        if self.resumed:
-            # Продолжение треда: в файле уже лежит история, отдавать её повторно
-            # нельзя — читаем только то, что допишется после старта хода.
-            try:
-                offset = path.stat().st_size
-            except OSError:
-                offset = 0
-        buf = b""
-        seen: dict = {}
+            if waited >= FIRST_TOKEN_TIMEOUT_S:
+                _log(
+                    f"tail-timeout cid={self._cid8()}: no bind within {FIRST_TOKEN_TIMEOUT_S:g}s"
+                )
+                return
         deadline = time.monotonic() + TIMEOUT_S + 60
         while time.monotonic() < deadline:
-            offset, buf = self._read(path, offset, buf, seen)
-            if self.done_event.is_set() or self.stop_event.is_set():
-                # Ход закончился: последняя запись шага ложится в файл вплотную к
-                # событию `result` — один финальный проход и выход из потока.
-                time.sleep(TRANSCRIPT_GRACE_S)
-                self._read(path, offset, buf, seen)
+            if self.stop_event.is_set():
                 return
-            time.sleep(TRANSCRIPT_POLL_S)
+            if self.done_event.is_set():
+                self._drain_post_eof()
+                return
+            self.tick()
+            _ = self.done_event.wait(TRANSCRIPT_POLL_S)
 
-    def _read(self, path: Path, offset: int, buf: bytes, seen: dict) -> tuple:
-        """Дочитать файл с offset; вернуть новое смещение и неполный хвост."""
+    def _finish(self) -> None:
+        """Закрыть соединение, вернуть исход breaker'у и снять владение cid (один раз)."""
+        if self._finished:
+            return
+        self._finished = True
+        with self._conn_lock:
+            conn = self._active_conn
+            self._active_conn = None
+            if conn is not None:
+                _sqlite_close(conn)
+        if self.plan.mode in ("LIVE", "SHADOW"):
+            _breaker_report(self.probe_gen, self.selects_ok, self.failed)
+        if self._owned_cid:
+            _cid_release(self._owned_cid, self.turn_id)
+
+    # ---- один проход ---------------------------------------------------------------
+    def tick(self) -> None:
+        """Транскрипт каждый тик; SQLite — не чаще SQLITE_POLL_S (и по токенам bucket)."""
+        self._read_transcript()
+        if self.dead:
+            return
+        _ = self._sqlite_permitted()
+        now = time.monotonic()
+        if self.sqlite_active and now >= self._next_poll_at:
+            self._next_poll_at = now + SQLITE_POLL_S
+            _ = self._poll_sqlite()
+
+    def _sqlite_off(self, reason: str) -> None:
+        """Выключить SQLite-опрос до конца хода; транскрипт продолжает работу."""
+        if not self.sqlite_active:
+            return
+        self.sqlite_active = False
+        self.interrupt_active_query()
+        _log(f"sqlite-off cid={self._cid8()} reason={reason}")
+
+    def _sqlite_permitted(self) -> bool:
+        """Флаг, breaker и режим хода на каждую итерацию и перед каждой строкой."""
+        if not self.sqlite_active or self.dead:
+            return False
+        disabled = _sqlite_disabled_reason()
+        if disabled:
+            self._sqlite_off(disabled)
+            return False
+        if not _breaker_permits(self.probe_gen):
+            self._sqlite_off("breaker" if self.probe_gen is None else "probe_stale")
+            return False
+        return True
+
+    # ---- транскрипт ----------------------------------------------------------------
+    def _read_transcript(self) -> None:
+        """Дочитать файл с offset; неполный хвост строки ждёт следующего прохода."""
+        if not self.cid or not self._transcript_ok:
+            return
+        path = _transcript_path(self.cid)
         try:
             size = path.stat().st_size
         except OSError:
-            return offset, buf
-        if size < offset:  # файл переписан с нуля — читаем заново
-            # Диагностический след: ротация переписала транскрипт с нуля.
-            _log(f"tail-rewrite cid={self.cid[:8] or '-'}: size {size} < offset {offset}")
-            offset, buf = 0, b""
-        if size == offset:
-            return offset, buf
+            return
+        if size < self._offset:  # файл переписан с нуля — читаем заново
+            _log(
+                f"tail-rewrite cid={self._cid8()}: size {size} < offset {self._offset}"
+            )
+            self._offset, self._buf = 0, b""
+        if size == self._offset:
+            return
         try:
             with open(path, "rb") as fh:
-                fh.seek(offset)
-                buf += fh.read(TRANSCRIPT_READ_MAX)
+                _ = fh.seek(self._offset)
+                self._buf += fh.read(TRANSCRIPT_READ_MAX)
         except OSError:
-            return offset, buf
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            offset += len(line) + 1
+            return
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            self._offset += len(line) + 1
             try:
-                self._emit_record(line, seen)
-            except Exception:  # noqa: BLE001 — вспомогательный поток не роняет ход
+                self._emit_record(line)
+            except Exception:
                 pass
-        return offset, buf
 
-    def _emit_record(self, raw: bytes, seen: dict) -> None:
+    def _emit_record(self, raw: bytes) -> None:
         line = raw.strip()
-        if not line or b"PLANNER_RESPONSE" not in line:
+        if not line:
+            return
+        if (
+            b"PLANNER_RESPONSE" not in line
+            and b"END_TURN" not in line
+            and b"TURN_COMPLETE" not in line
+        ):
             return  # быстрый отсев служебных записей без разбора JSON
         try:
-            rec = json.loads(line.decode("utf-8", "replace"))
+            parsed = cast(object, json.loads(line.decode("utf-8", "replace")))
         except ValueError:
             return
-        if not isinstance(rec, dict) or str(rec.get("type") or "") != "PLANNER_RESPONSE":
+        if not isinstance(parsed, dict):
             return
-        thinking = str(rec.get("thinking") or "")
-        if not thinking:
+        rec = cast("dict[str, object]", parsed)
+        rtype = str(rec.get("type") or "")
+        idx = _as_int(rec.get("step_index"))
+        if idx is not None and idx < self.base_idx:
+            return  # история прошлых ходов
+        if rtype in ("END_TURN", "TURN_COMPLETE"):
+            self.end_marker = True
             return
-        suffix = _reasoning_suffix(seen, str(rec.get("step_index", "")), thinking)
-        if suffix:
-            # Диагностический след: хвост увидел запись мышления в транскрипте.
-            _log(f"tail-emit cid={self.cid[:8] or '-'} step={rec.get('step_index')} "
-                 f"len={len(suffix)}")
-            self.emit(suffix)
+        if rtype != "PLANNER_RESPONSE" or idx is None:
+            return
+        content = rec.get("content")
+        if isinstance(content, str) and content.strip() and not rec.get("tool_calls"):
+            self.final_planner = True
+        thinking = rec.get("thinking")
+        self._apply_final(idx, thinking if isinstance(thinking, str) else "")
+
+    # ---- состояние шагов -----------------------------------------------------------
+    def _state(self, idx: int) -> _StepState:
+        state = self.seen.get(idx)
+        if state is not None:
+            return state
+        if len(self.seen) >= MAX_STEPS_TRACKED:
+            evictable = [
+                k
+                for k, s in self.seen.items()
+                if s.finalized and k < self.poll_watermark
+            ]
+            if evictable:
+                del self.seen[min(evictable)]
+            else:
+                self._sqlite_off("seen_cap")
+                del self.seen[min(self.seen)]
+        state = _StepState()
+        self.seen[idx] = state
+        return state
+
+    def _step_done(self, state: _StepState) -> bool:
+        return state.sql_done or (
+            state.finalized and (self.mode != "SHADOW" or state.canary_done)
+        )
+
+    def _advance_watermark(self) -> None:
+        """Сдвинуть нижнюю границу SELECT через непрерывный префикс завершённых шагов."""
+        mark = self.poll_watermark
+        for key in sorted(self.seen):
+            if key < mark:
+                continue
+            if not self._step_done(self.seen[key]):
+                break
+            mark = key + 1
+        self.poll_watermark = mark
+
+    def _emit_delta(self, idx: int, state: _StepState, delta: str, source: str) -> bool:
+        def delivered() -> None:
+            state.delivered_len += len(delta)
+            state.delivered_sha.update(delta.encode("utf-8"))
+
+        ok = self.emit(idx, delta, delivered)
+        if not ok:
+            self.dead = True
+            return False
+        self.emitted += 1
+        _log(f"{source}-emit cid={self._cid8()} step={idx} len={len(delta)}")
+        return True
+
+    def _diverge(
+        self, idx: int, state: _StepState, source: str, len_prev: int, len_new: int
+    ) -> None:
+        """Непрефиксное изменение: выдача шага замораживается на отданном префиксе."""
+        state.diverged = True
+        self.failed = True
+        _count_divergence()
+        if self.mode == "LIVE":
+            _compat_demote()
+        _log(
+            f"sqlite_{source}_divergence cid={self._cid8()} step={idx} len_prev={len_prev} len_new={len_new}"
+        )
+        self._sqlite_off("divergence")
+
+    def _apply_snapshot(self, idx: int, state: _StepState, text: str) -> None:
+        """SQLite-снимок 20.3: выдать приращение, только если это префиксное продолжение."""
+        if self.mode != "LIVE" or state.diverged or not text:
+            return
+        sent = state.delivered_len
+        if sent == 0:
+            _ = self._emit_delta(idx, state, text, "sqlite")
+        elif len(text) < sent:
+            return  # устаревший снимок
+        elif _sha(text[:sent]) != state.delivered_sha.hexdigest():
+            self._diverge(idx, state, "snapshot", sent, len(text))
+        elif len(text) > sent:
+            _ = self._emit_delta(idx, state, text[sent:], "sqlite")
+
+    def _apply_final(self, idx: int, final_text: str) -> None:
+        """Финал шага из транскрипта: докинуть хвост или заморозить при расхождении."""
+        state = self._state(idx)
+        if state.finalized:
+            return
+        state.final_len = len(final_text)
+        state.final_sha = _sha(final_text) if final_text else ""
+        sent = state.delivered_len
+        if state.diverged:
+            pass
+        elif sent == 0:
+            if final_text:
+                _ = self._emit_delta(idx, state, final_text, "tail")
+        elif (
+            len(final_text) >= sent
+            and _sha(final_text[:sent]) == state.delivered_sha.hexdigest()
+        ):
+            if len(final_text) > sent:
+                _ = self._emit_delta(idx, state, final_text[sent:], "tail")
+        else:
+            self._diverge(idx, state, "transcript", sent, len(final_text))
+        state.finalized = True
+        self._judge_canary(idx, state)
+        self._advance_watermark()
+
+    def _judge_canary(self, idx: int, state: _StepState) -> None:
+        """Семантический canary: финал транскрипта против status=3 снимка того же шага."""
+        if (
+            state.canary_done
+            or not state.finalized
+            or not state.observed_final
+            or state.final_len == 0
+            or state.diverged
+        ):
+            return
+        state.canary_done = True
+        if state.observed_len == 0:
+            _compat_demote()
+            _log(f"sqlite-live-loss cid={self._cid8()} step={idx}")
+        elif state.observed_sha == state.final_sha:
+            if self.mode == "SHADOW" and _compat_promote(self.plan.identity):
+                _log("compat state=LIVE")
+        elif self.mode == "SHADOW":
+            state.diverged = True
+            self.failed = True
+            _count_divergence()
+            _log(
+                f"sqlite_transcript_divergence cid={self._cid8()} step={idx} len_prev={state.observed_len} len_new={state.final_len}"
+            )
+            self._sqlite_off("divergence")
+
+    # ---- SQLite --------------------------------------------------------------------
+    def _poll_sqlite(self) -> tuple[int, int] | None:
+        """Один опрос: свой connect mode=ro, один SELECT, close в finally.
+
+        Возвращает (число строк, число строк status=8) после успешного SELECT.
+        """
+        self.last_poll = "skip"
+        if not self._sqlite_permitted() or self._db_path is None:
+            return None
+        if not self.bucket.take():
+            return None
+        conn: sqlite3.Connection | None = None
+        result: tuple[int, int] | None = None
+        try:
+            conn = _sqlite_open_ro(self._db_path)
+            with self._conn_lock:
+                self._active_conn = conn
+            result = self._select_rows(conn)
+            self.last_poll = "ok"
+        except sqlite3.Error as exc:
+            self.last_poll = "error"
+            self._on_sqlite_error(exc)
+        except Exception as exc:
+            self.last_poll = "error"
+            _log(f"sqlite-error cid={self._cid8()} err={type(exc).__name__}")
+            self._sqlite_off("internal")
+        finally:
+            with self._conn_lock:
+                self._active_conn = None
+                if conn is not None:
+                    _sqlite_close(conn)
+        return result
+
+    def _on_sqlite_error(self, exc: sqlite3.Error) -> None:
+        message = str(exc).lower()
+        if "interrupted" in message and (self._interrupted or self.stop_event.is_set()):
+            return  # собственный stop/interrupt отказом не считается
+        operational = isinstance(exc, sqlite3.OperationalError)
+        schema = operational and (
+            "no such table" in message or "no such column" in message
+        )
+        cold = False
+        if schema:
+            self.failed = True
+            _log(f"sqlite-schema-mismatch cid={self._cid8()}")
+            self._sqlite_off("schema")
+        elif operational:
+            # cold-open: базы или её -wal ещё нет либо ошибка до первого успешного SELECT.
+            wal = Path(str(self._db_path) + "-wal")
+            cold = self.selects_ok == 0 or not wal.exists()
+            if not cold:
+                self.failed = True
+        elif isinstance(exc, sqlite3.DatabaseError):
+            self.failed = True
+            self._sqlite_off("db_error")
+        if not self._open_fail_logged:
+            self._open_fail_logged = True
+            _log(
+                f"sqlite-open-fail cid={self._cid8()} err={type(exc).__name__} cold={1 if cold else 0}"
+            )
+
+    def _select_rows(self, conn: sqlite3.Connection) -> tuple[int, int]:
+        start = max(self.poll_watermark, self.base_idx)
+        cur = conn.execute(_STEPS_SQL, (start,))
+        rows = 0
+        generating = 0
+        try:
+            while True:
+                if self.stop_event.is_set() or not self._sqlite_permitted():
+                    break
+                batch = cast("list[tuple[object, ...]]", cur.fetchmany(1))
+                if not batch:
+                    self.selects_ok += 1
+                    break
+                row = batch[0]
+                idx, status, blob_len, payload = row[0], row[1], row[2], row[3]
+                if not isinstance(idx, int) or not isinstance(status, int):
+                    continue
+                rows += 1
+                if status == STEP_STATUS_GENERATING:
+                    generating += 1
+                self._handle_row(idx, status, blob_len, payload)
+                if self.dead:
+                    break
+        finally:
+            cur.close()
+        self._advance_watermark()
+        return rows, generating
+
+    def _handle_row(
+        self, idx: int, status: int, blob_len: object, payload: object
+    ) -> None:
+        state = self._state(idx)
+        if state.finalized:
+            if status == STEP_STATUS_DONE and not state.canary_done and state.final_len:
+                self._observe_final_snapshot(idx, state, payload)
+            return
+        if state.diverged:
+            return
+        state.sql_seen = True
+        if payload is None or not isinstance(payload, (bytes, bytearray)):
+            if (
+                isinstance(blob_len, int)
+                and blob_len > MAX_STEP_BLOB_BYTES
+                and idx not in self._oversize_logged
+            ):
+                self._oversize_logged.add(idx)
+                _log(
+                    f"sqlite-oversize cid={self._cid8()} step={idx} blob_len={blob_len}"
+                )
+            if status == STEP_STATUS_DONE:
+                state.sql_done = True
+            return
+        data = bytes(payload)
+        digest = hashlib.sha256(data).hexdigest()
+        if state.blob_len == len(data) and state.blob_sha == digest:
+            # Снимок не менялся: парсер не вызывается, меняется только статус шага.
+            if status == STEP_STATUS_DONE:
+                state.sql_done = True
+                state.observed_final = True
+                self._judge_canary(idx, state)
+            return
+        text = _extract_thinking_from_step_blob(
+            data, final=(status == STEP_STATUS_DONE), stop=self.stop_event
+        )
+        if self.stop_event.is_set():
+            return
+        state.blob_len, state.blob_sha = len(data), digest
+        first_gen = state.observed_len == 0 and bool(text)
+        state.observed_len = len(text)
+        state.observed_sha = _sha(text) if text else ""
+        state.observed_final = status == STEP_STATUS_DONE
+        if status == STEP_STATUS_DONE:
+            state.sql_done = True
+        if first_gen and status == STEP_STATUS_GENERATING:
+            _log(f"sqlite-gen cid={self._cid8()} step={idx}")
+        self._apply_snapshot(idx, state, text)
+        self._judge_canary(idx, state)
+
+    def _observe_final_snapshot(
+        self, idx: int, state: _StepState, payload: object
+    ) -> None:
+        """Шаг уже финализирован транскриптом: status=3 снимок нужен только для canary."""
+        if not isinstance(payload, (bytes, bytearray)):
+            state.canary_done = True
+            return
+        text = _extract_thinking_from_step_blob(
+            bytes(payload), final=True, stop=self.stop_event
+        )
+        if self.stop_event.is_set():
+            return
+        state.observed_len = len(text)
+        state.observed_sha = _sha(text) if text else ""
+        state.observed_final = True
+        state.sql_done = True
+        self._judge_canary(idx, state)
+
+    # ---- финальное дренирование ----------------------------------------------------
+    def _pending_steps(self) -> int:
+        return sum(
+            1
+            for key, state in self.seen.items()
+            if key >= self.base_idx and state.sql_seen and not state.finalized
+        )
+
+    def _drain_post_eof(self) -> None:
+        """Процесс вышел: дочитать источники в окне DRAIN_WINDOW_S (≤ DRAIN_MAX_S).
+
+        Эвристического раннего выхода нет: досрочно после DRAIN_MIN_S — только по
+        авторитетному маркеру конца хода (END_TURN/TURN_COMPLETE, exit=end_turn)
+        или по stop_event (exit=stop). Финальный PLANNER_RESPONSE без END_TURN/
+        TURN_COMPLETE выдерживает полное окно DRAIN_WINDOW_S (exit=window).
+        """
+        started = time.monotonic()
+        deadline = (
+            self.drain_deadline if self.drain_deadline > 0 else started + DRAIN_WINDOW_S
+        )
+        deadline = min(deadline, started + DRAIN_MAX_S)
+        earliest = started + DRAIN_MIN_S
+        emitted_before = self.emitted
+        exit_kind = "window"
+        while True:
+            if self.stop_event.is_set():
+                exit_kind = "stop"
+                break
+            self._read_transcript()
+            if self.sqlite_active:
+                _ = self._poll_sqlite()
+            now = time.monotonic()
+            if now >= earliest and self.end_marker:
+                exit_kind = "end_turn"
+                break
+            if now >= deadline:
+                break
+            time.sleep(min(DRAIN_POLL_STEP_S, max(0.0, deadline - now)))
+        pending = self._pending_steps()
+        complete = pending == 0 and (self.final_planner or self.end_marker)
+        self.drain_outcome = "complete" if complete else "window_complete"
+        if exit_kind != "stop" and pending > 0:
+            _count_drain_deadline()
+        ms = int((time.monotonic() - started) * 1000)
+        _log(
+            f"drain cid={self._cid8()} ms={ms} emitted={self.emitted - emitted_before} outcome={self.drain_outcome} pending_steps={pending} exit={exit_kind}"
+        )
 
 
+@final
 class Run:
     """Один процесс `agy`; поток-читатель превращает stdout NDJSON в события очереди.
 
     Промпт подаётся на stdin одной NDJSON-строкой и поток закрывается (`communicate`
     через отдельный поток-писатель): CLI читает stdin до EOF. `-p` не передаётся
     никогда — см. модуль-docstring.
+
+    Очередь закрывается атомарно: ни одно ("reasoning", …) не ставится после
+    ("done", …) — оба события кладутся под `_emit_lock`.
     """
 
-    def __init__(self, prompt: str, model: str, effort: str, effort_source: str,
-                 cwd: str, tag: str, conversation_id: str = ""):
+    def __init__(
+        self,
+        prompt: str,
+        model: str,
+        effort: str,
+        effort_source: str,
+        cwd: str,
+        tag: str,
+        conversation_id: str = "",
+        turn_id: str = "",
+    ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         work_dir = cwd if (cwd and os.path.isdir(cwd)) else str(WORKSPACE)
@@ -726,29 +2023,47 @@ class Run:
         self.stdin_line = _ndjson_user_line(prompt)
         cmd = [
             launcher,
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
             "--dangerously-skip-permissions",
-            "--model", model,
-            "--effort", effort,
+            "--model",
+            model,
+            "--effort",
+            effort,
             "--print-timeout=" + str(PRINT_TIMEOUT),
         ]
         # RESUME: продолжение треда — отдельным флагом, промпт всё равно через stdin.
         self.run_cid = conversation_id or ""
+        self.turn_id: str = turn_id or uuid.uuid4().hex
         if self.run_cid:
             cmd += ["--conversation", self.run_cid]
-        self.proc = subprocess.Popen(
-            cmd, cwd=work_dir, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True, env=_launch_env(),
-        )
+        # Водяной знак resume снимается ДО spawn: история разговора не переотдаётся.
+        plan = _prespawn_plan(self.run_cid, bool(self.run_cid))
+        if self.run_cid and not _cid_acquire(self.run_cid, self.turn_id):
+            plan.anchored = False
+            plan.reason = "cid_busy"
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                cwd=work_dir,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                env=_launch_env(),
+            )
+        except BaseException:
+            _cid_release(self.run_cid, self.turn_id)
+            raise
         self.started = time.monotonic()
         enabled = _is_watchdog_enabled()
         # Kill-switch выключен: порог неактивности = сквозной таймаут, `ps` не вызывается.
         self.controller = AdaptiveTimeoutController(
             idle_timeout_s=IDLE_TIMEOUT_S if enabled else float(TIMEOUT_S),
             safety_cap_s=float(TIMEOUT_S),  # дефолт core (3600 с) не используется
-            finish_reserve_s=0.0,           # эффективный потолок ровно TIMEOUT_S
+            finish_reserve_s=0.0,  # эффективный потолок ровно TIMEOUT_S
             watchdog_enabled=enabled,
             log_fn=_log,
         )
@@ -762,18 +2077,72 @@ class Run:
         # Последний виденный текст agent_response по id шага: CLI присылает
         # накопительный снимок, новым считается только хвост сверх него.
         self._text_seen: dict = {}
-        # Мышление шагов: отдельный поток следит за транскриптом разговора и
+        # Выдача мышления: счётчик байт и закрытие очереди под одним замком.
+        self._emit_lock = threading.Lock()
+        self.drain_closed: bool = False
+        self._done_put: bool = False
+        self._reasoning_bytes: int = 0
+        self._cap_logged: bool = False
+        # Мышление шагов: отдельный поток следит за транскриптом и SQLite разговора и
         # кладёт в очередь события ("reasoning", текст).
         self._proc_done = threading.Event()
         self._stop_watch = threading.Event()
+        _decide_turn_mode(plan)
         self._tail = _TranscriptTail(
-            emit=lambda text: self.q.put(("reasoning", text)),
-            stop_event=self._stop_watch, done_event=self._proc_done,
-            resumed=bool(self.run_cid))
+            emit=self._emit_reasoning,
+            stop_event=self._stop_watch,
+            done_event=self._proc_done,
+            resumed=bool(self.run_cid),
+            plan=plan,
+            turn_id=self.turn_id,
+        )
+        if self.run_cid:
+            self._tail.bind(self.run_cid)
         threading.Thread(target=self._feed_stdin, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
         threading.Thread(target=self._pump, daemon=True).start()
         self._tail.start()
+
+    def _emit_reasoning(
+        self, idx: int, delta: str, on_delivered: Callable[[], None] | None = None
+    ) -> bool:
+        """Поставить дельту мышления в очередь; False — очередь закрыта или потолок.
+
+        Закрытие очереди, счётчик байт и учёт выданного (`on_delivered`) идут под
+        одним `_emit_lock`: после ("done", …) ни одно ("reasoning", …) не попадает.
+        """
+        size = len(delta.encode("utf-8"))
+        outcome = ""
+        log_cap = False
+        with self._emit_lock:
+            if self.drain_closed:
+                outcome = "late"
+            elif self._reasoning_bytes + size > MAX_REASONING_BYTES_PER_TURN:
+                outcome = "cap"
+                log_cap = not self._cap_logged
+                self._cap_logged = True
+            else:
+                self._reasoning_bytes += size
+                self.q.put(("reasoning", delta))
+                if on_delivered is not None:
+                    on_delivered()
+                return True
+            total = self._reasoning_bytes
+        cid8 = self._tail.cid[:8] or "-"
+        if outcome == "late":
+            _log(f"reasoning-late-drop cid={cid8} step={idx} len={len(delta)}")
+        elif log_cap:
+            _log(f"reasoning-cap cid={cid8} bytes={total}")
+        return False
+
+    def _close_and_put_done(self, kind: str, payload: object) -> None:
+        """Атомарно закрыть выдачу мышления и поставить терминальное событие (один раз)."""
+        with self._emit_lock:
+            if self._done_put:
+                return
+            self._done_put = True
+            self.drain_closed = True
+            self.q.put((kind, payload))
 
     def _feed_stdin(self) -> None:
         """Отдать промпт на stdin и закрыть поток: agy читает stdin до EOF."""
@@ -810,9 +2179,16 @@ class Run:
         `step_update.agent_response` несёт накопительный `text_delta` — наружу
         уходит только хвост. `step_update.tool` — трассировка нативного
         инструмента (в stderr моста). `result` — финальный текст, usage, ошибка.
+
+        После EOF: ждём выход процесса не дольше PROC_EXIT_WAIT_S, затем даём
+        источнику мышления дренировать окно DRAIN_WINDOW_S (join с бюджетом) и
+        только потом ставим ("done", …). Терминальное событие кладётся ровно один
+        раз в `finally`, поэтому очередь закрывается при любом исходе.
         """
         final_text = ""
         result_ev = {}
+        term_kind = "pump_error"
+        term_payload: object = "pump terminated"
         try:
             for raw in iter(self.proc.stdout.readline, b""):
                 line = raw.decode("utf-8", "replace").strip()
@@ -826,50 +2202,105 @@ class Run:
                 etype = ev.get("event")
                 if etype == "init":
                     init = ev.get("init") if isinstance(ev.get("init"), dict) else {}
-                    tools = init.get("tools") if isinstance(init.get("tools"), list) else []
-                    self.q.put(("init", {
-                        "conversation_id": ev.get("conversation_id") or "",
-                        "tools": len(tools),
-                        "permission_mode": init.get("permission_mode") or "",
-                    }))
+                    tools_raw = cast(object, init.get("tools"))
+                    tools = (
+                        cast("list[object]", tools_raw)
+                        if isinstance(tools_raw, list)
+                        else []
+                    )
+                    self.q.put(
+                        (
+                            "init",
+                            {
+                                "conversation_id": ev.get("conversation_id") or "",
+                                "tools": len(tools),
+                                "permission_mode": init.get("permission_mode") or "",
+                            },
+                        )
+                    )
                     self._tail.bind(str(ev.get("conversation_id") or ""))
                 elif etype == "step_update":
-                    step = ev.get("step_update") if isinstance(ev.get("step_update"), dict) else {}
+                    step = (
+                        ev.get("step_update")
+                        if isinstance(ev.get("step_update"), dict)
+                        else {}
+                    )
                     kind = step.get("step_type")
                     if kind == "agent_response" and step.get("text_delta"):
                         suffix = _reasoning_suffix(
-                            self._text_seen, str(step.get("step_index", "")), str(step["text_delta"]))
+                            self._text_seen,
+                            str(step.get("step_index", "")),
+                            str(step["text_delta"]),
+                        )
                         if suffix:
                             self.q.put(("text", suffix))
                     elif kind == "tool" and step.get("state") == "DONE":
-                        self.q.put(("tool_trace", {
-                            "name": str(step.get("tool_name") or "tool"),
-                            "duration_s": step.get("duration_seconds"),
-                        }))
+                        self.q.put(
+                            (
+                                "tool_trace",
+                                {
+                                    "name": str(step.get("tool_name") or "tool"),
+                                    "duration_s": step.get("duration_seconds"),
+                                },
+                            )
+                        )
                 elif etype == "result":
-                    result = ev.get("result") if isinstance(ev.get("result"), dict) else {}
+                    result = (
+                        ev.get("result") if isinstance(ev.get("result"), dict) else {}
+                    )
                     result_ev = result
                     final_text = str(result.get("response") or "")
-                    self.q.put(("result", {
-                        "conversation_id": result.get("conversation_id") or "",
-                        "status": str(result.get("status") or ""),
-                        "error": str(result.get("error") or ""),
-                        "duration_s": result.get("duration_seconds"),
-                        "num_turns": result.get("num_turns"),
-                        "usage": result.get("usage") or {},
-                    }))
-            rc = self.proc.wait()
-        except Exception as exc:  # noqa: BLE001 — читатель не должен умирать молча
+                    self.q.put(
+                        (
+                            "result",
+                            {
+                                "conversation_id": result.get("conversation_id") or "",
+                                "status": str(result.get("status") or ""),
+                                "error": str(result.get("error") or ""),
+                                "duration_s": result.get("duration_seconds"),
+                                "num_turns": result.get("num_turns"),
+                                "usage": result.get("usage") or {},
+                            },
+                        )
+                    )
+            rc: int | None
+            try:
+                rc = self.proc.wait(timeout=PROC_EXIT_WAIT_S)
+            except subprocess.TimeoutExpired:
+                rc = None  # процесс ещё жив после EOF: добьёт Run.close
+            time.sleep(0.05)  # дать стоку stderr дозавершиться
+            t_exit = time.monotonic()
+            self._tail.drain_deadline = t_exit + DRAIN_WINDOW_S
             self._proc_done.set()
-            self.q.put(("pump_error", repr(exc)))
+            self._join_source(t_exit)
+            if rc is None:
+                rc = 0 if result_ev else 1
+            term_kind = "done"
+            term_payload = cast(object, (rc, final_text, result_ev))
+        except Exception as exc:  # noqa: BLE001 — читатель не должен умирать молча
+            self._stop_watch.set()
+            term_kind = "pump_error"
+            term_payload = repr(exc)
+        finally:
+            self._proc_done.set()
+            self._close_and_put_done(term_kind, term_payload)
+
+    def _join_source(self, t_exit: float) -> None:
+        """Дождаться потока источника мышления в бюджете окна drain, затем прервать SELECT."""
+        thread = self._tail.thread
+        thread.join(timeout=max(0.0, t_exit + DRAIN_WINDOW_S - time.monotonic()))
+        if not thread.is_alive():
             return
-        time.sleep(0.05)  # дать стоку stderr дозавершиться
-        self._proc_done.set()
-        self.q.put(("done", (rc, final_text, result_ev)))
+        self._tail.interrupt_active_query()
+        thread.join(timeout=JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            _count_drain_deadline()
+            _log(f"drain-timeout cid={self._tail.cid[:8] or '-'}")
 
     def close(self) -> None:
         self._stop_watch.set()
         self._proc_done.set()
+        self._tail.interrupt_active_query()
         self.controller.close()
         # Группа зачищается всегда: лидер мог выйти, оставив потомков (фоновые задачи agy).
         _kill_group(self.proc)
@@ -881,6 +2312,9 @@ class Run:
                     stream.close()
             except OSError:
                 pass
+        thread = self._tail.thread
+        if thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=JOIN_TIMEOUT_S)
 
 
 def _reasoning_suffix(seen: dict, rid: str, text: str) -> str:
@@ -888,7 +2322,7 @@ def _reasoning_suffix(seen: dict, rid: str, text: str) -> str:
 
     Пустой результат означает «дубликат, не эмитить»."""
     prev = seen.get(rid, "")
-    suffix = text[len(prev):] if text.startswith(prev) else text
+    suffix = text[len(prev) :] if text.startswith(prev) else text
     seen[rid] = text
     return suffix
 
@@ -925,8 +2359,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "agy-bridge/1.0"
 
-    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
-        return
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        del format, args
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         return
@@ -957,12 +2391,22 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return False
 
-    def _log_reject(self, reason: str, model: str = "unknown", model_len: int = 0) -> None:
-        _log(f"reject reason={reason} model={model} model_len={model_len} "
-             f"client={self._client_tag()}")
+    def _log_reject(
+        self, reason: str, model: str = "unknown", model_len: int = 0
+    ) -> None:
+        _log(
+            f"reject reason={reason} model={model} model_len={model_len} "
+            f"client={self._client_tag()}"
+        )
 
-    def _reject(self, code: int, reason: str, message: str,
-                model: str = "unknown", model_len: int = 0) -> None:
+    def _reject(
+        self,
+        code: int,
+        reason: str,
+        message: str,
+        model: str = "unknown",
+        model_len: int = 0,
+    ) -> None:
         self._log_reject(reason, model, model_len)
         self._send(code, {"error": {"message": message, "type": reason, "code": code}})
 
@@ -978,8 +2422,9 @@ class Handler(BaseHTTPRequestHandler):
                 return "client_gone"
         return "queue_timeout"
 
-    def _execute(self, run: Run, on_text, on_tool_trace, on_reasoning,
-                 keepalive) -> dict:
+    def _execute(
+        self, run: Run, on_text, on_tool_trace, on_reasoning, keepalive
+    ) -> dict:
         """Гнать ход до конца; сквозной таймаут TIMEOUT_S на весь ход.
 
         Колбэки возвращают False, если клиент ушёл.
@@ -990,6 +2435,8 @@ class Handler(BaseHTTPRequestHandler):
         usage = {}
         result_ev = {}
         conversation_id = ""
+        result_error = ""
+        result_error_at = 0.0
         tool_events = 0
         last_ka = time.monotonic()
         last_wd_check = time.monotonic()
@@ -997,13 +2444,20 @@ class Handler(BaseHTTPRequestHandler):
         gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
-            return {"rc": rc, "text": "".join(pieces),
-                    "reasoning": "".join(reasoning_pieces), "usage": usage,
-                    "result": result_ev, "state": name, "err": err,
-                    "conversation_id": conversation_id,
-                    "duration_s": result_ev.get("duration_s"),
-                    "num_turns": result_ev.get("num_turns"),
-                    "tool_events": tool_events, "tool_calls": []}
+            return {
+                "rc": rc,
+                "text": "".join(pieces),
+                "reasoning": "".join(reasoning_pieces),
+                "usage": usage,
+                "result": result_ev,
+                "state": name,
+                "err": err,
+                "conversation_id": conversation_id,
+                "duration_s": result_ev.get("duration_s"),
+                "num_turns": result_ev.get("num_turns"),
+                "tool_events": tool_events,
+                "tool_calls": [],
+            }
 
         def add_content(text: str) -> None:
             if gone[0] or not text:
@@ -1018,19 +2472,33 @@ class Handler(BaseHTTPRequestHandler):
             ok = on_reasoning(text)
             reasoning_pieces.append(text)
             # Диагностический след эмита мышления: что хвост добыл и дошло ли до клиента.
-            _log(f"reasoning-emit cid={conversation_id[:8] or '-'} "
-                 f"n={len(reasoning_pieces)} len={len(text)} ok={int(bool(ok))}")
+            _log(
+                f"reasoning-emit cid={conversation_id[:8] or '-'} "
+                f"n={len(reasoning_pieces)} len={len(text)} ok={int(bool(ok))}"
+            )
             if not ok:
                 gone[0] = True
 
         while True:
             if time.monotonic() > deadline:
                 return state("timeout", 124, f"proxy timeout after {TIMEOUT_S}s")
-            if not run.got_event and time.monotonic() - run.started > FIRST_TOKEN_TIMEOUT_S:
-                return state("first_token_timeout", 124,
-                             f"no agy event within {FIRST_TOKEN_TIMEOUT_S:g}s")
+            if (
+                not run.got_event
+                and time.monotonic() - run.started > FIRST_TOKEN_TIMEOUT_S
+            ):
+                return state(
+                    "first_token_timeout",
+                    124,
+                    f"no agy event within {FIRST_TOKEN_TIMEOUT_S:g}s",
+                )
             if _client_gone(self.connection):
                 return state("client_gone", 1)
+            if (
+                result_error
+                and time.monotonic() - result_error_at > RESULT_EXIT_GRACE_S
+            ):
+                # agy прислал result ERROR, но не завершился: ждать done бесконечно нельзя.
+                return state("agy_error", 1, result_error)
             try:
                 kind, payload = run.q.get(timeout=1.0)
             except queue.Empty:
@@ -1039,15 +2507,24 @@ class Handler(BaseHTTPRequestHandler):
                 now = time.monotonic()
                 if now - last_wd_check >= WATCHDOG_INTERVAL_S:
                     last_wd_check = now
-                    should_stop, wd_reason, _metrics = run.controller.check(run.proc.pid)
+                    should_stop, wd_reason, _metrics = run.controller.check(
+                        run.proc.pid
+                    )
                     if should_stop and wd_reason == "idle_timeout":
-                        _log(f"watchdog idle_timeout pgid={run.proc.pid} "
-                             f"idle>={IDLE_TIMEOUT_S:g}s")
-                        return state("idle_timeout", 124,
-                                     f"proxy idle timeout after {IDLE_TIMEOUT_S:g}s "
-                                     "(no activity in process group)")
+                        _log(
+                            f"watchdog idle_timeout pgid={run.proc.pid} "
+                            f"idle>={IDLE_TIMEOUT_S:g}s"
+                        )
+                        return state(
+                            "idle_timeout",
+                            124,
+                            f"proxy idle timeout after {IDLE_TIMEOUT_S:g}s "
+                            "(no activity in process group)",
+                        )
                     if should_stop and wd_reason == "absolute_cap":
-                        return state("timeout", 124, f"proxy timeout after {TIMEOUT_S}s")
+                        return state(
+                            "timeout", 124, f"proxy timeout after {TIMEOUT_S}s"
+                        )
                     # wd_reason == "child_exited": штатно, "done"/"pump_error" придут из очереди
                 if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
                     last_ka = time.monotonic()
@@ -1058,9 +2535,11 @@ class Handler(BaseHTTPRequestHandler):
                 run.controller.on_activity(kind)
             if kind == "init":
                 conversation_id = str(payload.get("conversation_id") or "")
-                _log(f"init conversation={conversation_id[:8] or '-'} "
-                     f"tools={payload.get('tools')} "
-                     f"permission_mode={payload.get('permission_mode')}")
+                _log(
+                    f"init conversation={conversation_id[:8] or '-'} "
+                    f"tools={payload.get('tools')} "
+                    f"permission_mode={payload.get('permission_mode')}"
+                )
             elif kind == "reasoning":
                 add_reasoning(str(payload))
                 if gone[0]:
@@ -1079,14 +2558,17 @@ class Handler(BaseHTTPRequestHandler):
                 usage = payload.get("usage") or {}
                 conversation_id = str(payload.get("conversation_id") or conversation_id)
                 if str(payload.get("status") or "").upper() == "ERROR":
+                    # Не выходим по result ERROR: мышление последнего шага ещё в очереди
+                    # перед done, и оно обязано попасть в out до решения о повторе.
                     message = str(payload.get("error") or "agy reported an error")
-                    if not message:
-                        message = "agy reported an error"
-                    return state("agy_error", 1, message[:500])
+                    result_error = message[:500]
+                    result_error_at = time.monotonic()
             elif kind == "pump_error":
                 return state("pump_error", 1, str(payload))
             elif kind == "done":
                 rc, final_text, raw_result = payload
+                if result_error:
+                    return state("agy_error", 1, result_error)
                 if not result_ev and raw_result:
                     result_ev = raw_result
                 if not pieces and final_text:
@@ -1097,21 +2579,57 @@ class Handler(BaseHTTPRequestHandler):
                 err = "".join(run.err_box).strip()
                 status = str(result_ev.get("status") or "").upper()
                 if rc != 0 and (status == "ERROR" or not pieces):
-                    return state("agy_error", rc, (str(result_ev.get("error") or "") or err)[:500])
+                    return state(
+                        "agy_error",
+                        rc,
+                        (str(result_ev.get("error") or "") or err)[:500],
+                    )
                 return state("done", rc, err)
 
-    def _run_once(self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive) -> dict:
+    def _log_done(
+        self, model: str, out: dict[str, object], t0: float, tag: str
+    ) -> None:
+        """Одна строка done на каждом выходе _run_once (O-EXIT)."""
+        conversation = str(out.get("conversation_id") or "-")[:8]
+        out_bytes = len(str(out.get("text") or "").encode())
+        _log(
+            f"done model={model} rc={out.get('rc')} state={out.get('state')} "
+            f"conversation={conversation} "
+            f"turns={out.get('num_turns')} tool_events={out.get('tool_events')} "
+            f"out_bytes={out_bytes} "
+            f"wall_s={time.monotonic() - t0:.1f} "
+            f"err={_err_summary(out.get('err'))!r} {tag}"
+        )
+
+    def _run_once(
+        self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
+    ) -> dict:
         model = ctx["model"]
         effort = ctx["effort"]
         tag = ctx["tag"]
+        t_enter = time.monotonic()
         reason = self._acquire_slot(keepalive)
         if reason:
             _log(f"no slot ({reason}) model={model} {tag}")
             if reason == "queue_timeout":
                 self._log_reject("overloaded", model, ctx["model_len"])
-            return {"state": reason, "rc": 1, "text": "", "usage": {}, "result": {},
-                    "err": "", "tool_calls": [], "tool_events": 0,
-                    "conversation_id": "", "num_turns": None, "duration_s": None}
+            early: dict[str, object] = {
+                "state": reason,
+                "rc": 1,
+                "text": "",
+                "usage": {},
+                "result": {},
+                "err": "",
+                "tool_calls": [],
+                "tool_events": 0,
+                "conversation_id": "",
+                "num_turns": None,
+                "duration_s": None,
+            }
+            self._log_done(
+                cast(str, ctx["model"]), early, t_enter, cast(str, ctx["tag"])
+            )
+            return early
         t0 = time.monotonic()
         out: dict = {}
         try:
@@ -1119,71 +2637,148 @@ class Handler(BaseHTTPRequestHandler):
                 _launcher()
             except LauncherUnavailable:
                 self._log_reject("launcher_unavailable", model, ctx["model_len"])
-                return {"state": "launcher_unavailable", "rc": 1, "text": "",
-                        "usage": {}, "result": {}, "err": "", "tool_calls": [],
-                        "tool_events": 0, "conversation_id": "", "num_turns": None,
-                        "duration_s": None}
+                unavailable: dict[str, object] = {
+                    "state": "launcher_unavailable",
+                    "rc": 1,
+                    "text": "",
+                    "usage": {},
+                    "result": {},
+                    "err": "",
+                    "tool_calls": [],
+                    "tool_events": 0,
+                    "conversation_id": "",
+                    "num_turns": None,
+                    "duration_s": None,
+                }
+                self._log_done(
+                    cast(str, ctx["model"]), unavailable, t_enter, cast(str, ctx["tag"])
+                )
+                return unavailable
+            _retry_credit()
             for attempt in (1, 2):
-                _log(f"exec model={model} effort={effort} effort_source={ctx['effort_source']} "
-                     f"prompt_bytes={len(ctx['prompt'].encode())} "
-                     f"tools={ctx['tools_count']} resume={1 if ctx.get('conversation_id') else 0} {tag}")
+                _log(
+                    f"exec model={model} effort={effort} effort_source={ctx['effort_source']} "
+                    f"prompt_bytes={len(ctx['prompt'].encode())} "
+                    f"tools={ctx['tools_count']} resume={1 if ctx.get('conversation_id') else 0} "
+                    f"sess={'agentic' if ctx.get('sess_key') else 'plain'} {tag}"
+                )
                 try:
-                    run = Run(ctx["prompt"], model, effort, ctx["effort_source"],
-                              ctx["cwd"], tag, conversation_id=ctx.get("conversation_id") or "")
+                    run = Run(
+                        ctx["prompt"],
+                        model,
+                        effort,
+                        ctx["effort_source"],
+                        ctx["cwd"],
+                        tag,
+                        conversation_id=ctx.get("conversation_id") or "",
+                        turn_id=str(ctx.get("turn_id") or ""),
+                    )
                 except LauncherUnavailable:
-                    self._reject(503, "launcher_unavailable",
-                                 "canonical launcher is missing or not executable",
-                                 model=model, model_len=ctx["model_len"])
-                    out = {"state": "launcher_unavailable", "rc": 1, "text": "",
-                           "usage": {}, "result": {}, "err": "", "tool_calls": [],
-                           "tool_events": 0, "conversation_id": "", "num_turns": None,
-                           "duration_s": None}
+                    self._reject(
+                        503,
+                        "launcher_unavailable",
+                        "canonical launcher is missing or not executable",
+                        model=model,
+                        model_len=ctx["model_len"],
+                    )
+                    out = {
+                        "state": "launcher_unavailable",
+                        "rc": 1,
+                        "text": "",
+                        "usage": {},
+                        "result": {},
+                        "err": "",
+                        "tool_calls": [],
+                        "tool_events": 0,
+                        "conversation_id": "",
+                        "num_turns": None,
+                        "duration_s": None,
+                    }
                     break
                 except OSError as exc:
-                    out = {"state": "pump_error", "rc": 1, "text": "", "usage": {},
-                           "result": {}, "err": repr(exc), "tool_calls": [],
-                           "tool_events": 0, "conversation_id": "", "num_turns": None,
-                           "duration_s": None}
+                    out = {
+                        "state": "pump_error",
+                        "rc": 1,
+                        "text": "",
+                        "usage": {},
+                        "result": {},
+                        "err": repr(exc),
+                        "tool_calls": [],
+                        "tool_events": 0,
+                        "conversation_id": "",
+                        "num_turns": None,
+                        "duration_s": None,
+                    }
                     break
                 try:
-                    out = self._execute(run, on_text, on_tool_trace, on_reasoning, keepalive)
+                    out = self._execute(
+                        run, on_text, on_tool_trace, on_reasoning, keepalive
+                    )
                 finally:
                     run.close()
                 if out["state"] == "done":
                     break
-                delivered = bool(out.get("text") or out.get("tool_calls"))
+                # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
+                # JSON-режим мышление клиенту ещё не отдавал — там повтор безопасен.
+                delivered = bool(
+                    out.get("text")
+                    or out.get("tool_calls")
+                    or (ctx.get("stream") and out.get("reasoning"))
+                )
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
                     # Горячая сессия сломалась: больше её не используем, а повтор
                     # идёт холодным вызовом с полной историей.
                     _session_invalidate(ctx["sess_key"], ctx["conversation_id"])
+                    _cid_release(
+                        str(ctx["conversation_id"]), str(ctx.get("turn_id") or "")
+                    )
                     ctx["hot_resumed"] = False
                     ctx["conversation_id"] = ""
                     ctx["prompt"] = ctx["full_prompt"]
                     if out["state"] == "agy_error" and not delivered:
-                        _log(f"hot session failed err={_err_summary(out.get('err'), 120)!r}, "
-                             f"cold fallback {tag}")
+                        if not _retry_take():
+                            _log(f"retry-budget-exhausted state={out['state']} {tag}")
+                            break
+                        _log(
+                            f"hot session failed err={_err_summary(out.get('err'), 120)!r}, "
+                            f"cold fallback {tag}"
+                        )
                         continue
-                # Транзиентный сбой до выдачи текста клиенту — один невидимый повтор.
-                transient = out["state"] in ("agy_error", "pump_error", "done") and not delivered
+                # Транзиентный сбой до выдачи клиенту — один невидимый повтор.
+                transient = (
+                    out["state"] in ("agy_error", "pump_error", "done")
+                    and not delivered
+                )
                 if not transient or attempt == 2:
                     break
-                _log(f"transient failure state={out['state']} rc={out.get('rc')} "
-                     f"err={_err_summary(out.get('err'), 120)!r}, retry {attempt} {tag}")
-                time.sleep(2 * attempt)
-            if (out.get("state") == "done" and out.get("conversation_id")
-                    and ctx.get("sess_key")):
+                if not _retry_take():
+                    _log(f"retry-budget-exhausted state={out['state']} {tag}")
+                    break
+                _log(
+                    f"transient failure state={out['state']} rc={out.get('rc')} "
+                    f"err={_err_summary(out.get('err'), 120)!r}, retry {attempt} {tag}"
+                )
+                time.sleep(_retry_pause_s(attempt))
+            if (
+                out.get("state") == "done"
+                and out.get("conversation_id")
+                and ctx.get("sess_key")
+            ):
                 _session_commit(ctx["sess_key"], str(out["conversation_id"]))
             if out.get("state") != "client_gone":
-                _last_ok[0] = (time.monotonic()
-                               if (out.get("state") == "done" and out.get("rc") == 0) else 0.0)
+                _last_ok[0] = (
+                    time.monotonic()
+                    if (out.get("state") == "done" and out.get("rc") == 0)
+                    else 0.0
+                )
         finally:
             _slots.release()
-        _log(f"done model={model} rc={out.get('rc')} state={out.get('state')} "
-             f"conversation={(out.get('conversation_id') or '-')[:8]} "
-             f"turns={out.get('num_turns')} tool_events={out.get('tool_events')} "
-             f"out_bytes={len((out.get('text') or '').encode())} "
-             f"wall_s={time.monotonic() - t0:.1f} "
-             f"err={_err_summary(out.get('err'))!r} {tag}")
+        self._log_done(
+            cast(str, ctx["model"]),
+            cast("dict[str, object]", out),
+            t0,
+            cast(str, ctx["tag"]),
+        )
         return out
 
     @staticmethod
@@ -1191,7 +2786,8 @@ class Handler(BaseHTTPRequestHandler):
         """usage agy -> OpenAI-поля. thinking_tokens прибавляем к completion."""
         return {
             "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0) + usage.get("thinking_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0)
+            + usage.get("thinking_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
         }
 
@@ -1199,33 +2795,59 @@ class Handler(BaseHTTPRequestHandler):
     def _error_body(out: dict) -> Any:
         st = out.get("state")
         if st == "timeout":
-            return {"message": f"agy timed out after {TIMEOUT_S}s",
-                    "type": "timeout", "code": 504}
+            return {
+                "message": f"agy timed out after {TIMEOUT_S}s",
+                "type": "timeout",
+                "code": 504,
+            }
         if st == "idle_timeout":
-            return {"message": f"agy execution idle timeout after {IDLE_TIMEOUT_S:g}s "
-                               "(no activity or progress in process group)",
-                    "type": "idle_timeout", "code": 504}
+            return {
+                "message": f"agy execution idle timeout after {IDLE_TIMEOUT_S:g}s "
+                "(no activity or progress in process group)",
+                "type": "idle_timeout",
+                "code": 504,
+            }
         if st == "first_token_timeout":
-            return {"message": f"first_token_timeout: agy gave no event within "
-                               f"{FIRST_TOKEN_TIMEOUT_S:g}s",
-                    "type": "first_token_timeout", "code": 504}
+            return {
+                "message": f"first_token_timeout: agy gave no event within "
+                f"{FIRST_TOKEN_TIMEOUT_S:g}s",
+                "type": "first_token_timeout",
+                "code": 504,
+            }
         if st == "queue_timeout":
-            return {"message": f"bridge busy: queue full over {QUEUE_TIMEOUT_S}s",
-                    "type": "overloaded", "code": 503}
+            return {
+                "message": f"bridge busy: queue full over {QUEUE_TIMEOUT_S}s",
+                "type": "overloaded",
+                "code": 503,
+            }
         if st == "launcher_unavailable":
-            return {"message": "canonical launcher is missing or not executable",
-                    "type": "launcher_unavailable", "code": 503}
+            return {
+                "message": "canonical launcher is missing or not executable",
+                "type": "launcher_unavailable",
+                "code": 503,
+            }
         if st == "client_gone":
             return {"message": "client gone", "type": "client_gone", "code": 499}
         if st == "pump_error":
-            return {"message": "bridge reader failed", "detail": str(out.get("err"))[:500],
-                    "type": "proxy_error", "code": 502}
+            return {
+                "message": "bridge reader failed",
+                "detail": str(out.get("err"))[:500],
+                "type": "proxy_error",
+                "code": 502,
+            }
         if st == "agy_error":
-            return {"message": str(out.get("err") or "agy reported an error")[:500],
-                    "type": "agy_error", "code": 502}
+            return {
+                "message": str(out.get("err") or "agy reported an error")[:500],
+                "type": "agy_error",
+                "code": 502,
+            }
         if out.get("rc") != 0 or not out.get("text"):
-            return {"message": f"agy exited rc={out.get('rc')}",
-                    "detail": str(out.get("err"))[:500], "type": "proxy_error", "code": 502}
+            return {
+                "message": f"agy exited rc={out.get('rc')}",
+                "detail": str(out.get("err"))[:500],
+                "type": "proxy_error",
+                "code": 502,
+            }
         return None
 
     # ---- HTTP --------------------------------------------------------------------
@@ -1234,41 +2856,75 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/health", "/v1/health"):
             with _active_lock:
                 active = len(_active)
-            self._send(200, {
-                "ok": True, "transport": "agy-stream-json", "model": MODEL_ID,
-                "active": active, "max_concurrent": MAX_CONCURRENT,
+            health: dict[str, object] = {
+                "ok": True,
+                "transport": "agy-stream-json",
+                "model": MODEL_ID,
+                "active": active,
+                "max_concurrent": MAX_CONCURRENT,
                 "hot_sessions": len(_session_store),
                 "tool_emulation": False,
                 "tool_translation": False,
                 "native_tools": True,
                 "images": False,
                 "uptime_s": int(time.time() - _started),
-            })
+            }
+            health.update(_sqlite_health_fields())
+            self._send(200, health)
             return
         if not _auth_ok(self):
-            self._send(401, {"error": {"message": "unauthorized",
-                                       "type": "auth_error", "code": 401}})
+            self._send(
+                401,
+                {
+                    "error": {
+                        "message": "unauthorized",
+                        "type": "auth_error",
+                        "code": 401,
+                    }
+                },
+            )
             return
         if path in ("/v1/models", "/models"):
             data = []
             order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
             for mid in order:
                 model = FLEET["models"][mid]
-                data.append({
-                    "id": mid, "object": "model", "owned_by": "antigravity",
-                    "created": 0, "context_length": model["context_window"],
-                })
+                data.append(
+                    {
+                        "id": mid,
+                        "object": "model",
+                        "owned_by": "antigravity",
+                        "created": 0,
+                        "context_length": model["context_window"],
+                    }
+                )
             self._send(200, {"object": "list", "data": data})
             return
-        self._send(404, {"error": {"message": f"not found: {path}",
-                                   "type": "not_found", "code": 404}})
+        self._send(
+            404,
+            {
+                "error": {
+                    "message": f"not found: {path}",
+                    "type": "not_found",
+                    "code": 404,
+                }
+            },
+        )
 
     def do_POST(self) -> None:  # noqa: N802
         if not _auth_ok(self):
             # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
             self.close_connection = True
-            self._send(401, {"error": {"message": "unauthorized",
-                                       "type": "auth_error", "code": 401}})
+            self._send(
+                401,
+                {
+                    "error": {
+                        "message": "unauthorized",
+                        "type": "auth_error",
+                        "code": 401,
+                    }
+                },
+            )
             return
         if self.headers.get_all("Transfer-Encoding") is not None:
             self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
@@ -1282,16 +2938,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             length = int(values[0])
         if length > int((FLEET.get("image_limits") or {}).get("max_body_bytes") or 0):
-            self._reject(413, "payload_too_large", "request body exceeds the bridge limit")
+            self._reject(
+                413, "payload_too_large", "request body exceeds the bridge limit"
+            )
             return
         reserved = 0
         budget = _budget
         if budget is not None and length:
             if not budget.reserve(length):
-                self._reject(503, "overloaded", "bridge overloaded: body budget exhausted")
+                self._reject(
+                    503, "overloaded", "bridge overloaded: body budget exhausted"
+                )
                 return
             reserved = length
         use_cid = ""
+        owned_cid = ""
+        turn_id = uuid.uuid4().hex
         try:
             raw = self.rfile.read(length) if length else b""
             if len(raw) < length:
@@ -1308,8 +2970,16 @@ class Handler(BaseHTTPRequestHandler):
             path = self.path.split("?", 1)[0]
             if path not in ("/v1/chat/completions", "/chat/completions"):
                 self.close_connection = True
-                self._send(404, {"error": {"message": f"not found: {path}",
-                                           "type": "not_found", "code": 404}})
+                self._send(
+                    404,
+                    {
+                        "error": {
+                            "message": f"not found: {path}",
+                            "type": "not_found",
+                            "code": 404,
+                        }
+                    },
+                )
                 return
             raw_model = req.get("model")
             model_len = len(raw_model) if isinstance(raw_model, str) else 0
@@ -1319,12 +2989,22 @@ class Handler(BaseHTTPRequestHandler):
                 candidate = raw_model.strip()
                 model_id = candidate if candidate else MODEL_ID
             else:
-                self._reject(400, "model_not_allowed",
-                             "model must be a string from the catalogue", "unknown", model_len)
+                self._reject(
+                    400,
+                    "model_not_allowed",
+                    "model must be a string from the catalogue",
+                    "unknown",
+                    model_len,
+                )
                 return
             if model_id not in FLEET["models"]:
-                self._reject(400, "model_not_allowed", "model is not in the catalogue",
-                             "unknown", model_len)
+                self._reject(
+                    400,
+                    "model_not_allowed",
+                    "model is not in the catalogue",
+                    "unknown",
+                    model_len,
+                )
                 return
             model = FLEET["models"][model_id]
             raw_effort = req.get("reasoning_effort")
@@ -1340,50 +3020,101 @@ class Handler(BaseHTTPRequestHandler):
                     effort = candidate
                     effort_source = "request"
                 else:
-                    self._reject(400, "unsupported_reasoning_effort",
-                                 "reasoning_effort is not allowed for this model",
-                                 model_id, model_len)
+                    self._reject(
+                        400,
+                        "unsupported_reasoning_effort",
+                        "reasoning_effort is not allowed for this model",
+                        model_id,
+                        model_len,
+                    )
                     return
             else:
-                self._reject(400, "unsupported_reasoning_effort",
-                             "reasoning_effort must be a string", model_id, model_len)
+                self._reject(
+                    400,
+                    "unsupported_reasoning_effort",
+                    "reasoning_effort must be a string",
+                    model_id,
+                    model_len,
+                )
                 return
             if "reasoning" in req and req.get("reasoning") is not None:
-                self._reject(400, "unsupported_parameter",
-                             "reasoning parameter is not supported", model_id, model_len)
+                self._reject(
+                    400,
+                    "unsupported_parameter",
+                    "reasoning parameter is not supported",
+                    model_id,
+                    model_len,
+                )
                 return
-            messages = req.get("messages") if isinstance(req.get("messages"), list) else []
+            messages_raw = cast(object, req.get("messages"))
+            messages = (
+                cast("list[object]", messages_raw)
+                if isinstance(messages_raw, list)
+                else []
+            )
             if _has_image_parts(messages):
-                self._reject(400, "image_input_not_supported",
-                             "image rejected: image_input_not_supported",
-                             model_id, model_len)
+                self._reject(
+                    400,
+                    "image_input_not_supported",
+                    "image rejected: image_input_not_supported",
+                    model_id,
+                    model_len,
+                )
                 return
             try:
                 _launcher()
             except LauncherUnavailable:
-                self._reject(503, "launcher_unavailable",
-                             "canonical launcher is missing or not executable",
-                             model_id, model_len)
+                self._reject(
+                    503,
+                    "launcher_unavailable",
+                    "canonical launcher is missing or not executable",
+                    model_id,
+                    model_len,
+                )
                 return
             raw_tools = req.get("tools")
-            tools = [t for t in raw_tools if isinstance(t, dict)] if isinstance(raw_tools, list) else []
+            tools = (
+                [t for t in raw_tools if isinstance(t, dict)]
+                if isinstance(raw_tools, list)
+                else []
+            )
             tools_count = 0 if _tool_choice_none(req.get("tool_choice")) else len(tools)
             full_prompt = _messages_to_prompt(messages)
-            extra = req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
+            extra = (
+                req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
+            )
             cwd = str(extra.get("cwd") or "")
             if len(cwd) > CWD_MAX_LEN:
                 cwd = ""
-            conversation_id = str(extra.get("conversation_id") or req.get("conversation_id") or "")
-            sess_key = (model_id, cwd, effort)
+            conversation_id = str(
+                extra.get("conversation_id") or req.get("conversation_id") or ""
+            )
+            # Горячие сессии — только агентным запросам с инструментами. Фоновые и
+            # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
+            # и не пишут: ни claim, ни commit, ни invalidate.
+            use_session_store = tools_count > 0
+            sess_key: tuple[str, str, str] | None = (
+                (cast(str, model_id), cwd, cast(str, effort))
+                if use_session_store
+                else None
+            )
             is_resumed = False
             prompt = full_prompt
-            if not conversation_id:
-                use_cid = _session_claim(sess_key)
+            if conversation_id:
+                if _cid_acquire(conversation_id, turn_id):
+                    owned_cid = conversation_id
+                else:
+                    # cid занят другим активным ходом: два хода не делят один разговор.
+                    _log(f"cid-busy-fresh cid={conversation_id[:8]}")
+                    conversation_id = ""
+            elif sess_key is not None:
+                use_cid = _session_claim(sess_key, turn_id)
                 if use_cid:
                     conversation_id = use_cid
                     is_resumed = True
                     prompt = _get_resumed_turn_prompt(messages)
-            ctx = {
+            ctx: dict[str, object] = {
+                "turn_id": turn_id,
                 "sess_key": sess_key,
                 "hot_resumed": is_resumed,
                 "full_prompt": full_prompt,
@@ -1395,8 +3126,10 @@ class Handler(BaseHTTPRequestHandler):
                 "cwd": cwd,
                 "tools_count": tools_count,
                 "conversation_id": conversation_id,
-                "tag": (f"client={self._client_tag()} "
-                        f"ua={(self.headers.get('User-Agent') or '-')[:60]}"),
+                "tag": (
+                    f"client={self._client_tag()} "
+                    f"ua={(self.headers.get('User-Agent') or '-')[:60]}"
+                ),
                 "stream": bool(req.get("stream")),
             }
             if ctx["stream"]:
@@ -1407,11 +3140,14 @@ class Handler(BaseHTTPRequestHandler):
             if use_cid:
                 with _session_store_lock:
                     _in_flight_cids.discard(use_cid)
+            _cid_release(use_cid or owned_cid, turn_id)
             if reserved and budget is not None:
                 budget.release(reserved)
 
     def _serve_json(self, ctx: dict) -> None:
-        out = self._run_once(ctx, lambda _v: True, lambda _e: True, lambda _r: True, None)
+        out = self._run_once(
+            ctx, lambda _v: True, lambda _e: True, lambda _r: True, None
+        )
         if out.get("state") == "client_gone":
             return
         err = self._error_body(out)
@@ -1426,8 +3162,10 @@ class Handler(BaseHTTPRequestHandler):
             # ассистента так же, как из дельты потока.
             message["reasoning_content"] = reasoning
         payload = {
-            "id": f"chatcmpl-agy-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
-            "created": int(time.time()), "model": ctx["model"],
+            "id": f"chatcmpl-agy-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": ctx["model"],
             "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
             "usage": self._usage_payload(usage),
         }
@@ -1450,10 +3188,16 @@ class Handler(BaseHTTPRequestHandler):
             _log("client gone before headers")
             return
 
-        def chunk(delta: dict, finish=None, usage: dict | None = None,
-                  conversation_id: str = "") -> str:
+        def chunk(
+            delta: dict,
+            finish=None,
+            usage: dict | None = None,
+            conversation_id: str = "",
+        ) -> str:
             body: dict = {
-                "id": completion_id, "object": "chat.completion.chunk", "created": created,
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
                 "model": shown_model,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
             }
@@ -1497,7 +3241,9 @@ class Handler(BaseHTTPRequestHandler):
             if usage["prompt_tokens"] or usage["completion_tokens"]:
                 self._emit(chunk({}, "stop", usage, conversation_id=conv_id))
         else:
-            self._emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
+            self._emit(
+                "data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n"
+            )
         self._emit("data: [DONE]\n\n")
 
 
@@ -1511,13 +3257,19 @@ class Server(ThreadingHTTPServer):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._conn_sem = threading.BoundedSemaphore(
-            int(FLEET["admission"]["max_http_connections"]))
+            int(FLEET["admission"]["max_http_connections"])
+        )
 
     def _send_raw_503(self, request: socket.socket) -> None:
-        body = json.dumps({
-            "error": {"message": "bridge overloaded: connection limit",
-                      "type": "overloaded", "code": 503},
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "error": {
+                    "message": "bridge overloaded: connection limit",
+                    "type": "overloaded",
+                    "code": 503,
+                },
+            }
+        ).encode("utf-8")
         head = (
             b"HTTP/1.1 503 Service Unavailable\r\n"
             b"Content-Type: application/json; charset=utf-8\r\n"
@@ -1526,22 +3278,27 @@ class Server(ThreadingHTTPServer):
         )
         request.sendall(head + body)
 
-    def process_request(self, request: socket.socket, client_address: Any) -> None:
+    def process_request(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: Any
+    ) -> None:
         if not self._conn_sem.acquire(blocking=False):
             try:
                 peer = f"{client_address[0]}:{client_address[1]}"
             except (TypeError, IndexError):
                 peer = "unknown"
             _log(f"reject reason=overloaded model=unknown model_len=0 client={peer}")
+            sock = request if isinstance(request, socket.socket) else request[1]
             try:
-                self._send_raw_503(request)
+                self._send_raw_503(sock)
             except OSError:
                 pass
             self.shutdown_request(request)
             return
         super().process_request(request, client_address)
 
-    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+    def process_request_thread(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: Any
+    ) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
@@ -1565,6 +3322,7 @@ def main() -> None:
         sys.stderr.write("AGY_BRIDGE_KEY is required; refusing to start\n")
         raise SystemExit(1)
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
+    _reset_sqlite_guards_for_tests()  # чистое процессное состояние guardrails на старте
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     _sweep_workspace()
     _log(f"fleet_sha256={FLEET['sha256']} models={len(FLEET['order'])}")
@@ -1576,9 +3334,11 @@ def main() -> None:
     signal.signal(signal.SIGINT, _kill_all)
     api_key_present = "yes" if AUTH_KEY else "no"
     server = Server((HOST, PORT), Handler)
-    _log(f"listen {HOST}:{PORT} model={MODEL_ID} max_concurrent={MAX_CONCURRENT} "
-         f"queue_timeout={QUEUE_TIMEOUT_S}s timeout={TIMEOUT_S}s keepalive={KEEPALIVE_S}s "
-         f"api_key={api_key_present}")
+    _log(
+        f"listen {HOST}:{PORT} model={MODEL_ID} max_concurrent={MAX_CONCURRENT} "
+        f"queue_timeout={QUEUE_TIMEOUT_S}s timeout={TIMEOUT_S}s keepalive={KEEPALIVE_S}s "
+        f"api_key={api_key_present}"
+    )
     print(f"[agy-bridge] listening on http://{HOST}:{PORT}/v1", flush=True)
     server.serve_forever()
 

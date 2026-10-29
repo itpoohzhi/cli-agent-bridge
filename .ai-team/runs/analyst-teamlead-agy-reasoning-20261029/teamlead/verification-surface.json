@@ -1,0 +1,311 @@
+{
+  "schema": "verification-surface/v1",
+  "created_at_utc": "2026-10-28T23:00:42.258669+00:00",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "risk_level": "medium",
+  "criticality": "S2",
+  "base_sha": "e00da0621fc95f7c63cd1565f4a5d1fd490c8d66",
+  "worktree_fingerprint_before_coder": null,
+  "worktree_file_count_before_coder": 12609,
+  "runtime_toolchain": {
+    "python3": "Python 3.14.7",
+    "sys_python3": "Python 3.9.6",
+    "uv": "uv 0.12.19 (bea138450 2026-09-24 aarch64-apple-darwin)",
+    "ruff": "ruff (via uvx ruff)",
+    "basedpyright": "basedpyright (via uvx basedpyright)",
+    "agy": "agy 1.4.9 (~/.gemini/antigravity-cli/releases/1.4.9/agy)"
+  },
+  "container_image_digest": null,
+  "lock_files": {},
+  "config_and_ci_files": {
+    "ruff.toml": "571ccfac063812ed2b0b7e134f3b3d227cc016c7f88bdbb2b8ccfbed1e8703b3",
+    "bridges/agy-bridge/fleet.json": "4afce0e2ed3a8c381235fca73ea595e6ffb1aba27708c6aa69e4bfc431f3c6ad",
+    "bridges/agy-bridge/start.sh": "ac4f2debc9bc930414608bf254a30593215d2561a1357a5552836c6fed8c003c"
+  },
+  "mandatory_ci_jobs": [],
+  "oracle_test_hashes_before_coder": {
+    "tests/bridge_testlib.py": "6a9b1131097b809dc48eb31c886f68c6eff4f5ed02603d73ce595f73f7064917",
+    "tests/context_testlib.py": "ec4485b5c52c3ff4bd02d96b43f75d39f8e76132ec4fe0df5b847981bbccf758",
+    "tests/fake_droid.py": "947bd4f65dddeb3a563c83be85115921f70c7f2528687a050903f72400d4c4af",
+    "tests/rpc_testlib.py": "221d6b502b64b3cf503dc34759b0f4d7eae632f507b9e1c3dfaa5a2a876b7933",
+    "tests/test_adaptive_idle_watchdog.py": "04ed486e7cf7c62cb4edd2e04ee34504cd61e710ce91f47d4edfd3c6c5f9f1db",
+    "tests/test_agy_bridge_resilience.py": "e96c2871a51859e235b99236c8ade5712d6bd40db200bad5f3115b96d9781119",
+    "tests/test_b_guard.py": "ec1ec30ed82353ba379c0ed0db860b9877de6a93849f9a4f764ed53703e351ed",
+    "tests/test_backend_contract.py": "89d281bdd850f472cf1ee0888b4c60fa27e75c970a85553ae41a8f3128ab3abb",
+    "tests/test_bridge_http.py": "b36c4987f41330eaadd9a4256bce4c868ae0770259ec8be5342da78d64ec1383",
+    "tests/test_bridge_strict.py": "5ea51505c881b7a4022e51e26085b7adeaad45d7798b34768c4922387b4232cb",
+    "tests/test_cache_usage.py": "5c53254f4d890f3e1281f882847757ef589761ce85e3de38d3b2e61c867420b3",
+    "tests/test_context_resilience.py": "ee2b521278bea30881d5056443d90dd0dd873b321b6bf7d4ad2e75442a14bc87",
+    "tests/test_context_resilience_failures.py": "978cf1362f7e88648758abb51c689cd85a6a78fa2903e593ef051cecc4bcb789",
+    "tests/test_context_resilience_protocols.py": "3d77df00075bde4f359335576b7cd628b5692fd791e401d44b75b4f4527bd4fa",
+    "tests/test_context_resilience_resident.py": "caaaf1e7a3e9f18f25a4b5ce09d6f862f622007d9e9638a06b65d86d18fb9d09",
+    "tests/test_context_resilience_routing.py": "6c0bcd10c13f6299002982d43ab4e4ce57702af7d6472fcda8c6988ac6f3acd6",
+    "tests/test_context_resilience_switching.py": "0c30e4f49efeaec87e5606322bb650bc95b1ae1c419c1c4242fae92380de42e0",
+    "tests/test_cycle4_tools.py": "64c9c848ed9f25c9cde5414046b69753ba661e4f64e39b84db2b4ac00758713d",
+    "tests/test_cycle5_rework.py": "88bba572ac4cb3f6d862c283ed9bc84d19f22c7068dc07825fe33acc3014194b",
+    "tests/test_cycle6_rework.py": "2db840faa7348a057184e2b7800e08ede02c0f6df65595fae7331861e0fe1502",
+    "tests/test_detached_turn_execution.py": "4e74fc98568e8e54347e303630a057435e0bc7ee9baf60dce6b4ec2ef0b30313",
+    "tests/test_dsh_profile_config.py": "5a6a5a5a10b007e10735a02cca207dcc0f98414d228f2c82501f551c025a045b",
+    "tests/test_fleet_v3.py": "26f8cab589f599aba7e66b028c70984c87036d0536f73128f5d18c5fa775c60e",
+    "tests/test_framing_strict.py": "dcea631c22f481b841588bd3beefbc100df10ab25485cffa86d53ae5569f3305",
+    "tests/test_graceful_shutdown_drain.py": "3a5ad0050b357b2b6a0b6d786192610f7660459bcd66d6a684589f80e3aa5860",
+    "tests/test_hub_integration.py": "389fbcd9e1ab0cf25f854021f819302da548efcc5790c970d5a428df3d4e8b61",
+    "tests/test_images_strict.py": "d9f63c9b4edad28278e98d60957cf7bfd354f870f515d921b632713c56bbb676",
+    "tests/test_launch_env.py": "e7103c796f37bad9eab38d0a00db7a9acbc6f9d27198a143108094c3994fbce6",
+    "tests/test_live_stream.py": "96fc008050cc260357cd582c60d3a6683bf94887b53b2adc3e0f8234eee69a37",
+    "tests/test_muse_adapter.py": "f0f68113f86b5d995c3ef3aae225eb0a3c9b57088e5f35c3c57aeb00af41cf5b",
+    "tests/test_muse_bridge_killpg.py": "05457d09213e0f965ed6fcdc238c628cd01be359154c5fb54b249ede5db01400",
+    "tests/test_rpc_core.py": "0743cab97bb36610b970984d334a096ba146f8eb6add7faa38e989c4c7f34cda",
+    "tests/test_rpc_cycle3.py": "95e54124c4e42e7d0d30d8ecb45eab68412e60b8771a1294a81ea286e3c88110",
+    "tests/test_rpc_cycle4.py": "4c7cbc9cb43352fe35b632a466d0de889fdbf52c1bb596ac1c59fa3650e8738e",
+    "tests/test_rpc_lifecycle.py": "c828843a100ae50408913d0ba1533736513f05aa4ea01b8dcb6b8ed9167d7171",
+    "tests/test_rpc_rework.py": "1195cf1e0e8dfed253d12c1ef329252a86f6e743c85bc77fd9ee133d96f0a7b1",
+    "tests/test_run_integration.py": "232998884333884d1fadc2d612f50b0ae1724066f0194fb5b264573901209628",
+    "tests/test_tool_parser.py": "75418bbb4981d912138c68c88459f8b31a742122093b8d568b4a567dbecd9dca",
+    "tests/test_turn_cancel_and_gap.py": "44238612a9b68b30fb75b2c92894e9cf4a366c2f369234b161745690bf588bac"
+  },
+  "testdata_golden_snapshot_hashes": {},
+  "coverage_and_quality_thresholds": {
+    "ruff_check_errors": 0,
+    "basedpyright_errors": 0,
+    "agy_bridge_unit_tests_min_passed": 22
+  },
+  "baseline": {
+    "command": "PYTHONPATH=. uvx pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py",
+    "exit_code": 0,
+    "passed": 22,
+    "subtests_passed": 19,
+    "failed": 0
+  },
+  "allowed_envelope_changes": {
+    "new_test_functions_allowed_in": [
+      "tests/test_agy_bridge_resilience.py"
+    ],
+    "existing_oracle_assertions_mutable": false
+  },
+  "levels": {
+    "L1": "Static & Unit: uvx ruff check bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py && uvx basedpyright bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py && PYTHONPATH=. uvx pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py && PYTHONPATH=. /usr/bin/python3 -m unittest tests/test_agy_bridge_resilience.py",
+    "L2": "Clean-room worktree verification with SHA-256 manifest (execution-evidence.md + evidence-manifest.sha256)",
+    "L3": "Live heavy verification on 127.0.0.1:9887/v1/chat/completions after Council ACCEPT and MR merge"
+  },
+  "acceptance_manifest_ref": "analysis/agy-realtime-reasoning/handoff-qa.md",
+  "architecture_packet_sha256": "62a83bb2f0bfd9e9e975a05a5aea61991d27f49f642d1b810fc2a87dc4af2aab",
+  "verifications": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-010"
+      ],
+      "kind": "command",
+      "command": "uvx ruff@0.17.3 check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; «All checks passed!» — 0 ошибок и 0 предупреждений ruff (ruff.toml репозитория, порог Teamlead ruff_check_errors=0; baseline зелёный EVD-059/EVD-074)",
+      "environment": "cwd=repo_root, ruff 0.17.3 строго (uvx ruff@0.17.3); кэш uvx прогрет до clean-room (RISK-016), без записи .ruff_cache (--no-cache)",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-010"
+      ],
+      "kind": "command",
+      "command": "uvx ruff@0.17.3 format --check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; «2 files already formatted» — 0 файлов к переформатированию. На baseline server.py не отформатирован (EVD-073): Coder выполняет механический uvx ruff@0.17.3 format bridges/agy-bridge/server.py отдельным коммитом style без изменения поведения; tests/test_agy_bridge_resilience.py уже отформатирован, поэтому VER-006 (только добавления в тестах) не задевается",
+      "environment": "cwd=repo_root, ruff 0.17.3 строго, --no-cache",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "AD-001",
+        "AD-002",
+        "AD-003",
+        "AD-004",
+        "AD-005",
+        "AD-006",
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010",
+        "REQ-011",
+        "REQ-012"
+      ],
+      "kind": "command",
+      "command": "PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; 0 failed, 0 errors; passed ≥ 22 + все новые тесты TC/AO из VER-007; 22 существующих теста зелёные без правок (baseline EVD-074: 22 passed на pytest 9.0.3)",
+      "environment": "Чистый clone/worktree кандидата, cwd=repo_root, pytest 9.0.3 строго (uvx --from pytest==9.0.3), кэш uvx прогрет; без сети, без ~/.gemini и ~/.dsh владельца: фикстурные AGY_BRIDGE_BRAIN/AGY_BRIDGE_CONVERSATIONS/AGY_BRIDGE_AGY_BIN/фейковый AGY_LAUNCHER во временном каталоге раннера; процессные guard'ы сбрасываются хелпером между тестами",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-010",
+        "RISK-011"
+      ],
+      "kind": "command",
+      "command": "set -e; B=\"$(mktemp -d)\"; H=\"$(mktemp)\"; S=\"$(mktemp)\"; git worktree add -q --detach \"$B/base\" e00da0621fc95f7c63cd1565f4a5d1fd490c8d66; uvx basedpyright@1.40.2 --outputjson bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py > \"$H\" || true; (cd \"$B/base\" && uvx basedpyright@1.40.2 --outputjson bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py > \"$S\" || true); git worktree remove --force \"$B/base\"; python3 -I - \"$H\" \"$S\" <<'PY'\nimport json,sys,collections\nh=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))\ndef ms(x,sev): return collections.Counter((d['file'].rsplit('/',1)[-1],d.get('rule'),d['message']) for d in x['generalDiagnostics'] if d['severity']==sev)\nerr=h['summary']['errorCount']; new_w=ms(h,'warning')-ms(s,'warning')\nprint('version',h['version'],'errors',err,'warnings',h['summary']['warningCount'],'new_warnings',sum(new_w.values()))\n[print('NEW',k) for k in sorted(new_w)]\nsys.exit(0 if err==0 and not new_w and h['version'].startswith('1.40.2') else 1)\nPY",
+      "expected": "exit 0; строка «errors 0 … new_warnings 0»: errorCount кандидата == 0 на target-scope (порог Teamlead basedpyright_errors=0 сохранён; 12 baseline-ошибок EVD-060 в target-файлах (точный список и исправления — EVD-076) устраняются в этом MR типизацией без изменения поведения, inline-подавления `# pyright: ignore`/`# type: ignore` запрещены); 0 новых предупреждений — мультимножество (файл, правило, сообщение) предупреждений кандидата ⊆ baseline e00da06 на той же версии 1.40.2, поэтому новая диагностика ловится даже при неизменном общем числе",
+      "environment": "Clean-room clone кандидата с доступным e00da0621fc95f7c63cd1565f4a5d1fd490c8d66, cwd=repo_root, basedpyright 1.40.2 строго (uvx basedpyright@1.40.2), pyrightconfig.json репозитория, python3 -I для сравнения; временный git worktree базы удаляется командой",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "AD-001",
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010",
+        "RISK-002",
+        "RISK-012"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_*agy*.py\" && PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; unittest «OK» на боевом /usr/bin/python3 3.9.6 (SQLite 3.54.x) и pytest 0 failed — 0 падений в обоих прогонах (baseline EVD-074: Ran 22 tests OK); зелёный прогон только на Python 3.14 не засчитывается",
+      "environment": "macOS /usr/bin/python3 3.9.6 (CommandLineTools) + pytest 9.0.3, cwd=repo_root, PYTHONDONTWRITEBYTECODE=1",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": [
+        "REQ-010",
+        "QA-006"
+      ],
+      "kind": "command",
+      "command": "test \"$(git diff --unified=0 e00da0621fc95f7c63cd1565f4a5d1fd490c8d66 HEAD -- tests/test_agy_bridge_resilience.py | grep -cE '^-[^-]')\" = 0 && test -z \"$(git diff --name-only e00da0621fc95f7c63cd1565f4a5d1fd490c8d66 HEAD -- tests/ core/ | grep -vx 'tests/test_agy_bridge_resilience.py')\" && echo OK",
+      "expected": "exit 0 и «OK»: в tests/test_agy_bridge_resilience.py нет удалённых/изменённых строк относительно e00da06 (только добавления), другие файлы tests/ и core/ не изменены",
+      "environment": "git clone кандидата с доступным base e00da0621fc95f7c63cd1565f4a5d1fd490c8d66, HEAD = коммит кандидата",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": [
+        "AD-005",
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010",
+        "REQ-011",
+        "REQ-012",
+        "THREAT-001",
+        "THREAT-002",
+        "THREAT-003",
+        "THREAT-004",
+        "THREAT-005"
+      ],
+      "kind": "command",
+      "command": "python3 -I - <<'PY'\nimport ast,re,sys,pathlib\ns=pathlib.Path('tests/test_agy_bridge_resilience.py').read_text(encoding='utf-8')\nt=ast.parse(s)\nneed={'tc%02d'%i for i in list(range(1,13))+[20,21,23,24,30,31,32,33,40,41,42,43,44,50,51,60,61,62,63,70,71,72,80,81,82,91,92]}|{'ao%02d'%i for i in range(1,13)}\ndef asserted(f):\n    for n in ast.walk(f):\n        if isinstance(n,ast.Assert): return True\n        if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr.startswith('assert'): return True\n    return False\ngot=set(); noassert=[]\nfor f in ast.walk(t):\n    if isinstance(f,(ast.FunctionDef,ast.AsyncFunctionDef)) and f.name.startswith('test_'):\n        ids=set(re.findall(r'(tc\\d{2}|ao\\d{2})',f.name))&need\n        if not ids: continue\n        if asserted(f): got|=ids\n        else: noassert.append(f.name)\nmiss=sorted(need-got)\nerrs=(['MISSING '+' '.join(miss)] if miss else [])+(['NO_ASSERT '+' '.join(sorted(noassert))] if noassert else [])\nprint('; '.join(errs) if errs else 'OK %d ids, all asserted'%len(need)); sys.exit(1 if errs else 0)\nPY",
+      "expected": "exit 0; «OK 51 ids, all asserted»: имена тестовых функций покрывают TC-01..12, 20, 21, 23, 24, 30..33, 40..44, 50, 51, 60..63, 70..72, 80..82, 91, 92 и архитектурные оракулы AO-01..AO-12 (в имени test_..._tcNN / _aoNN, допускается несколько id в одном имени), и каждая тестовая функция с требуемым id содержит в AST ≥1 оператор assert или вызов *.assert*(...) (self.assertEqual, self.assertTrue, …); функция без проверок → FAIL «NO_ASSERT <имя>», непокрытый id → «MISSING <id>»",
+      "environment": "cwd=repo_root, python3 -I",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-008",
+      "requirement_ids": [
+        "REQ-010",
+        "RISK-011",
+        "AD-006"
+      ],
+      "kind": "command",
+      "command": "test \"$(git diff --name-only e00da0621fc95f7c63cd1565f4a5d1fd490c8d66 HEAD -- . ':(exclude).ai-team' ':(exclude)analysis' | sort | tr '\\n' ' ')\" = \"bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py \" && test -z \"$(git ls-files bridges/agy-bridge/dynamic_config.json)\" && printf '%s  %s\\n' 81dffc06ac79c490968e7efb8321f464d5963f414fcc6bd67a278a99d5985e32 analysis/agy-realtime-reasoning/research-plan.md e9c8afb2684a7621e9fdb0455640e86f972aab600989142119fb440397842ff1 analysis/agy-realtime-reasoning/evidence-ledger.md 47b16bab51b31bb06c35fb02d08dbd3409a9cfb057a52e828d079054a20d9202 analysis/agy-realtime-reasoning/open-questions.md cb1ecde9e00f06d72b75e43f973add3ab93ca27433d7145cbf8ec4f4800b17cd analysis/agy-realtime-reasoning/handoff-architect.md 5ed84fc039f7fea5983404442461e734ec9dae03f57359e2bb441dfae6cb7afe analysis/agy-realtime-reasoning/handoff-qa.md | shasum -a 256 -c --status - && echo OK",
+      "expected": "exit 0 и «OK»: изменены ровно bridges/agy-bridge/server.py и tests/test_agy_bridge_resilience.py (вне .ai-team и analysis); bridges/agy-bridge/dynamic_config.json не в git; нет правок fleet.json/start.sh/ruff.toml/core/зависимостей; 5 замороженных входов аналитика analysis/agy-realtime-reasoning/{research-plan.md, evidence-ledger.md, open-questions.md, handoff-architect.md, handoff-qa.md} побайтово совпадают с sha256 EVD-077 (любое расхождение или отсутствие файла → exit ≠ 0)",
+      "environment": "worktree кандидата (HEAD = коммит кандидата) с доступным base e00da06 и каталогом analysis/agy-realtime-reasoning/ (из коммита MR или рабочего worktree прогона), shasum (macOS)",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-009",
+      "requirement_ids": [
+        "AD-001",
+        "AD-006",
+        "BND-003",
+        "REQ-002",
+        "REQ-004",
+        "REQ-011",
+        "THREAT-003"
+      ],
+      "kind": "command",
+      "command": "python3 -I - <<'PY'\nimport ast,sys,pathlib\nsrc=pathlib.Path('bridges/agy-bridge/server.py').read_text(encoding='utf-8')\nt=ast.parse(src)\nallowed={'__future__','hashlib','json','os','queue','re','select','shutil','signal','socket','subprocess','sys','threading','time','uuid','http','pathlib','typing','core','sqlite3','random'}\nroots=set()\nfor n in ast.walk(t):\n    if isinstance(n,ast.Import):\n        roots|={a.name.split('.')[0] for a in n.names}\n    elif isinstance(n,ast.ImportFrom) and n.level==0:\n        roots.add((n.module or '').split('.')[0])\ncalls=[n for n in ast.walk(t) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='connect' and isinstance(n.func.value,ast.Name) and n.func.value.id=='sqlite3']\nnouri=[c.lineno for c in calls if not any(k.arg=='uri' and isinstance(k.value,ast.Constant) and k.value.value is True for k in c.keywords)]\nrw=[n.lineno for n in ast.walk(t) if isinstance(n,ast.Constant) and isinstance(n.value,str) and ('mode=rw' in n.value or 'immutable' in n.value)]\nneed=[x for x in ('AGY_SQLITE_REASONING_ENABLED','SQLITE_REASONING_ENABLED','AGY_BRIDGE_CONVERSATIONS','mode=ro','query_only','busy_timeout') if x not in src]\nerrs=[]\nif sorted(roots-allowed): errs.append('non-stdlib imports %s'%sorted(roots-allowed))\nif not calls: errs.append('no sqlite3.connect call')\nif nouri: errs.append('sqlite3.connect without uri=True at %s'%nouri)\nif rw: errs.append('write-mode or immutable URI literal at %s'%rw)\nif 'immutable' in src: errs.append('substring immutable present in server.py')\nif need: errs.append('missing %s'%need)\nprint('FAIL: '+'; '.join(errs) if errs else 'OK'); sys.exit(1 if errs else 0)\nPY",
+      "expected": "exit 0 и «OK»: корни импортов ⊆ stdlib baseline ∪ {sqlite3, random}; каждый sqlite3.connect с uri=True; нет URI mode=rw/rwc и подстроки immutable нигде в server.py (F-007); присутствуют AGY_SQLITE_REASONING_ENABLED, SQLITE_REASONING_ENABLED, AGY_BRIDGE_CONVERSATIONS, mode=ro, query_only, busy_timeout",
+      "environment": "cwd=repo_root, python3 -I (ast)",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-010",
+      "requirement_ids": [
+        "QA-001",
+        "QA-002",
+        "QA-003",
+        "QA-008",
+        "QA-010",
+        "QA-012",
+        "REQ-001",
+        "REQ-003",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-010",
+        "REQ-012",
+        "RISK-005",
+        "RISK-006",
+        "RISK-007"
+      ],
+      "kind": "command",
+      "command": "PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py -k \"tc93 or l2_harness\" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_agy_bridge_resilience.py\" -k tc93 -k l2_harness",
+      "expected": "exit 0 в обоих прогонах; pytest выбрал ≥1 тест (0 выбранных → rc 5 = FAIL). Детерминированный L2-харнесс (test_..._tc93 и test_..._l2_harness): мост из кандидата в процессе теста с фейковым AGY_LAUNCHER (подпроцесс-писатель), фикстурами AGY_BRIDGE_BRAIN/AGY_BRIDGE_CONVERSATIONS/AGY_BRIDGE_AGY_BIN во временном каталоге и dynamic_config.json {\"SQLITE_REASONING_ENABLED\": true} рядом с server.py (env-форсирования нет); canary пройден прогревочным ходом; писатель многоходово обновляет WAL-БД 523→810→1088→1419→2156 байт. PASS только если одновременно: 8 параллельных ходов; RSS — resource.getrusage(RUSAGE_SELF).ru_maxrss (байты на macOS, KiB на Linux, нормализуется) ≤ 112 MiB; CPU — Δtime.process_time() / (Δwall · 8) ≤ 0.01 ядра на ход на минимальном SQLITE_POLL_S=0.5; задержка коммит снимка → сокет ≤ SQLITE_POLL_S + 0.5 с на каждом снимке; TC-20 ≥2 чанка до status=3; TC-60/TC-61 100/100; EOF→stop ≤0.65 с при дефолтах и ≤0.85 с при AGY_BRIDGE_TRANSCRIPT_GRACE=0.5, AGY_BRIDGE_DRAIN_JOIN=0.2, AGY_BRIDGE_DRAIN_MIN=0.25 (≤1.0 с гейт); kill-switch: запись false посреди хода → SELECT прекращаются и соединение закрыто ≤2.0 с (дизайн 1.30 с) при SQLITE_POLL_S 0.5 и 2.0; outcome=window_complete или complete в каждой строке drain; resumed-ход с внешним writer'ом — 0 переотданных шагов прошлых ходов, 0 SQLITE_CORRUPT/SQLITE_BUSY у писателя; 0 строк sqlite_snapshot_divergence; /health содержит 4 аддитивных поля; в stderr нет текста мышления фикстуры. Квитанция — вывод обеих команд в run_dir/teamlead/execution-evidence.md + evidence-manifest.sha256",
+      "environment": "Clean-room worktree кандидата, cwd=repo_root, временные каталоги, без сети (кэш uvx прогрет заранее, RISK-016) и без доступа к ~/.gemini и ~/.dsh владельца; pytest 9.0.3 строго и боевой /usr/bin/python3 3.9.6; ~60 с, запускать в фоне",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-011",
+      "requirement_ids": [
+        "QA-001",
+        "QA-002",
+        "QA-005",
+        "QA-007",
+        "QA-010",
+        "QA-012",
+        "REQ-001",
+        "REQ-003",
+        "REQ-008",
+        "REQ-009",
+        "RISK-001",
+        "RISK-003",
+        "RISK-008",
+        "THREAT-005"
+      ],
+      "kind": "manual",
+      "command": null,
+      "expected": "Бинарный гейт L3 (handoff-qa.md §6) на 127.0.0.1:9887 после ACCEPT Совета и merge MR. Входная зависимость: владелец переключает аккаунт agy с квотой или ждёт сброса квоты (≈2026-10-31 07:09 MSK, Q-003); без этого L3 не стартует. Бэкап ~/work/backups/agy-bridge-<ts>/, копия server.py + sha256, kickstart, /health. Фаза A (флаг выключен): S3 изоляция — второй агентный ход resume=1 с тем же cid, plain-запрос без tools не трогает стор; S4 у всех ходов есть мышление до stop; квотный/ошибочный ход без повторного чанка мышления. Фаза B: атомарная запись dynamic_config.json {SQLITE_REASONING_ENABLED: true} в каталог деплоя без рестарта; первый ход с мышлением после kickstart идёт в SHADOW (canary), S1 меряется со следующего: первый чанк reasoning_content ≤5.0 с от первой строки status=8 шага с непустым 20.3 (время коммита фиксирует внешний read-only наблюдатель mode=ro с опросом 0.1 с) и задержка снимок→сокет ≤ SQLITE_POLL_S+0.5 с; интервалы ≤6 с — наблюдение SHOULD; S2 блок Think обновляется по шагам, в bridge.err строки sqlite-emit без текста; 0 строк sqlite_snapshot_divergence/sqlite_transcript_divergence на ≥5 многошаговых ходах (живое подтверждение префиксности ASM-001; иначе флаг false и эскалация владельцу); kill-switch: запись false посреди долгого хода → sqlite-off reason=flag ≤2.0 с (дизайн 1.30 с, контракт ≤5.0 с), ход завершается штатно; /health показывает sqlite_reasoning_mode, sqlite_breaker_state, sqlite_divergence_count == 0, sqlite_drain_deadline_count. Откат: SQLITE_REASONING_ENABLED=false (≤1.30 с, без рестарта) или восстановление бэкапа + kickstart. Отчёт ПРОВЕРЕНО ЛЁГКИМ/ТЯЖЁЛЫМ/НЕ ПРОВЕРЕНО; непустое НЕ ПРОВЕРЕНО = не сдано",
+      "environment": "Боевой LaunchAgent com.user.dsh-agy-bridge, существующий рабочий чат DSH, gemini-4-argon effort high, аккаунт agy с квотой; факты в ~/Мой диск/tmp/trace/<дата>/agy-realtime-reasoning/<run-id>/",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-012",
+      "requirement_ids": [
+        "REQ-010",
+        "QA-006"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_*agy*.py\"",
+      "expected": "exit 0; «OK», 0 failures и 0 errors на боевом /usr/bin/python3 3.9.6 по всем agy-тестам (22 существующих + все TC/AO tests/test_agy_bridge_resilience.py). Full Suite Gate канона (uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider -rf tests/, 0 failed) не снят: он выполняется как pre-MR rollout checkpoint Q-005 — ровно 3 baseline-красных F-56 вне scope (EVD-056: test_b_guard.py::TestTm018Guard::test_tm018_live_check_subprocess, test_muse_bridge_killpg.py::AllowedModelsSyncTest::test_t00_models_and_health_include_wonder_models_400k, test_rpc_rework.py::TestRpcWriteDeadline::test_rw011_shutdown_all_within_budget_with_stuck_child) = BLOCKED: OWNER_DECISION_REQUIRED до MR; любой другой красный = FAIL",
+      "environment": "Чистый clone кандидата, cwd=repo_root, /usr/bin/python3 3.9.6 (CommandLineTools), PYTHONDONTWRITEBYTECODE=1; pre-MR checkpoint Q-005 — pytest 9.0.3, ~6 мин, в фоне",
+      "owner": "Teamlead"
+    }
+  ]
+}

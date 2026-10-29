@@ -2019,6 +2019,14 @@ def _map_serve_event(
         return "error", err_out
     if etype == "permission.asked":
         return "permission", data
+    if etype == "permission.replied":
+        # Каскадный reject serve: учитываем только подтверждённый reject с непустым id.
+        raw_id = data.get("requestID") or data.get("id") or data.get("permissionID")
+        if (data.get("reply") == "reject" or data.get("decision") == "reject") and (
+            isinstance(raw_id, str) and raw_id.strip()
+        ):
+            return "permission_replied", {**data, "id": raw_id.strip()}
+        return None
     if etype == "form.created":
         return "form_created", data
     if etype.startswith("session.tool."):
@@ -3483,6 +3491,8 @@ def _drain_serve_step_usage(
     emulate_tools: bool = False,
     accumulated_bytes: list[int] | None = None,
     t0: float = 0.0,
+    replied_permissions: set[str] | None = None,
+    cascade_reject_state: dict[str, bool] | None = None,
 ) -> bool:
     """Дочитать все события шага до подтверждённого конца того же шага.
 
@@ -3491,6 +3501,14 @@ def _drain_serve_step_usage(
     """
     pending: list[dict[str, object]] = (
         pending_calls if pending_calls is not None else []
+    )
+    replied_perms: set[str] = (
+        replied_permissions if replied_permissions is not None else set()
+    )
+    cascade_state = (
+        cascade_reject_state
+        if cascade_reject_state is not None
+        else {"succeeded": False}
     )
 
     def _check_bytes(event_kind: str, payload: dict[str, object]) -> None:
@@ -3554,6 +3572,7 @@ def _drain_serve_step_usage(
         ev_sid = data.get("sessionID")
         sid_optional = ev_sid is None and event_type in (
             "permission.asked",
+            "permission.replied",
             "session.execution.failed",
             "session.step.failed",
         )
@@ -3574,8 +3593,19 @@ def _drain_serve_step_usage(
                     + min(_STEP_DRAIN_WINDOW_S, float(STALL_TIMEOUT_S)),
                 ),
             )
+        if mapped_kind == "permission_replied":
+            replied_id = str(payload.get("id") or "").strip()
+            if replied_id:
+                replied_perms.add(replied_id)
+            continue
         if mapped_kind == "permission":
-            request_id = str(payload.get("id") or "")
+            request_id = str(payload.get("id") or "").strip()
+            if not request_id:
+                _ctrl_quiet(f"/api/session/{session_id}/interrupt")
+                raise ServeSecurityError("permission reject failed")
+            if request_id in replied_perms:
+                # Уже закрыт каскадным reject serve: повторный POST не нужен.
+                continue
             reject_failed = ctrl_http is None
             if ctrl_http is not None:
                 try:
@@ -3584,7 +3614,16 @@ def _drain_serve_step_usage(
                         f"/api/session/{session_id}/permission/{request_id}/reply",
                         {"decision": "reject"},
                     )
-                    reject_failed = status >= 300
+                    if status in (200, 204):
+                        cascade_state["succeeded"] = True
+                        replied_perms.add(request_id)
+                        reject_failed = False
+                    elif status == 404 and cascade_state.get("succeeded"):
+                        # Идемпотентное подтверждение каскада после успешного reject.
+                        replied_perms.add(request_id)
+                        reject_failed = False
+                    else:
+                        reject_failed = True
                 except (
                     OSError,
                     http.client.HTTPException,
@@ -3794,6 +3833,8 @@ def _finish_serve_tool_step(
     emulate_tools: bool = False,
     accumulated_bytes: list[int] | None = None,
     t0: float = 0.0,
+    replied_permissions: set[str] | None = None,
+    cascade_reject_state: dict[str, bool] | None = None,
 ) -> bool:
     """Закрыть инструментальный шаг только после подтверждённого step.ended.
 
@@ -3819,6 +3860,8 @@ def _finish_serve_tool_step(
         emulate_tools=emulate_tools,
         accumulated_bytes=accumulated_bytes,
         t0=t0,
+        replied_permissions=replied_permissions,
+        cascade_reject_state=cascade_reject_state,
     )
     if result["error"] is not None:
         return False
@@ -3985,7 +4028,11 @@ def _serve_one_attempt(
         return _ctrl_http(method, path, body, timeout=0.25)
 
     def _reject_and_interrupt(
-        path: str, body: dict[str, object] | None, label: str
+        path: str,
+        body: dict[str, object] | None,
+        label: str,
+        *,
+        permission_id: str = "",
     ) -> None:
         """Всегда попробовать interrupt после reject/cancel; ошибки закрывают попытку."""
         failures: list[str] = []
@@ -3994,6 +4041,25 @@ def _serve_one_attempt(
             (f"/api/session/{session_id}/interrupt", None, "interrupt"),
         ):
             try:
+                if control_label == "permission reply":
+                    if not permission_id:
+                        failures.append(f"{control_label} missing id")
+                        continue
+                    if permission_id in replied_permissions:
+                        # Уже закрыт каскадным reject serve: POST не нужен, interrupt ниже.
+                        continue
+                    status, _body = _ctrl_http(
+                        "POST", control_path, control_body, timeout=0.25
+                    )
+                    if status in (200, 204):
+                        cascade_reject_state["succeeded"] = True
+                        replied_permissions.add(permission_id)
+                    elif status == 404 and cascade_reject_state.get("succeeded"):
+                        # Идемпотентное подтверждение каскада после успешного reject.
+                        replied_permissions.add(permission_id)
+                    else:
+                        failures.append(f"{control_label} HTTP {status}")
+                    continue
                 status, _body = _ctrl_http(
                     "POST", control_path, control_body, timeout=0.25
                 )
@@ -4207,6 +4273,8 @@ def _serve_one_attempt(
         prompt_thread = threading.Thread(target=_prompt_worker, daemon=True)
         prompt_thread.start()
         tool_state = _ServeToolState()
+        replied_permissions: set[str] = set()
+        cascade_reject_state: dict[str, bool] = {"succeeded": False}
         pending_step_calls: list[dict[str, object]] = []
         seen_steps: set[str] = set()
         deadline = min(
@@ -4365,13 +4433,19 @@ def _serve_one_attempt(
                 result["first_event_ms"] = int(
                     ((result["first_event_at"] or 0.0) - t0) * 1000
                 )
+            if etype == "permission_replied":
+                replied_id = str(payload.get("id") or "").strip()
+                if replied_id:
+                    replied_permissions.add(replied_id)
+                continue
             if etype == "permission":
                 result["step_closed"] = True
-                request_id = str(payload.get("id") or "")
+                request_id = str(payload.get("id") or "").strip()
                 _reject_and_interrupt(
                     f"/api/session/{session_id}/permission/{request_id}/reply",
                     {"decision": "reject"},
                     "permission reply",
+                    permission_id=request_id,
                 )
                 continue
             if result["step_closed"] and etype in ("reasoning", "text"):
@@ -4445,6 +4519,8 @@ def _serve_one_attempt(
                                 emulate_tools=emulate_tools,
                                 accumulated_bytes=_acc_box,
                                 t0=t0,
+                                replied_permissions=replied_permissions,
+                                cascade_reject_state=cascade_reject_state,
                             )
                             accumulated_bytes = _acc_box[0]
                             break

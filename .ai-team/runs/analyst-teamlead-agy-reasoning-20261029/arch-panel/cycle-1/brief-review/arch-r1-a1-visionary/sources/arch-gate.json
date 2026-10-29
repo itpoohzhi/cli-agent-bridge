@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "gate": "ARCH_GATE",
+  "status": "PASS",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "criticality": "S2",
+  "packet_sha256": "f0471a6116bcea5831736dee36a85386c27f2758b7c41fdc354e96aa793229f4",
+  "verification_surface_sha256": "bfdda127ad86e2497f8bab40790015668e3196ae033677cf181d4a9dfc5eeab4",
+  "protected_paths_sha256": "388ccd7b2843e8f7719d7ed0c552e9fc6365604834adb3ea8181c6020892f498",
+  "architect_worktree_sha256": "aed3274571859b39f08788443955470300be30a9dfd8ea5d0e994001433a0bbb",
+  "materialized_targets": 0
+}

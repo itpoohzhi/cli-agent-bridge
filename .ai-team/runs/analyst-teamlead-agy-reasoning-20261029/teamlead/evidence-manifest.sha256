@@ -1,0 +1,10 @@
+1285a908bf2793b3a19e93e2149c2bfa353d1fb8625c626658fe790e2ef48147  bridges/agy-bridge/server.py
+63869e7e51e7b067661afe074b688dfb4c9d5f86040cfcdf6a3b778e825a0680  tests/test_agy_bridge_resilience.py
+1d2292a0a437a2dcbcca10f66ddd5fc8a11970ea79ad3c97790ac76e4f7b12a6  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/candidate.diff
+935615bcddddc2a68d021c59e600c0cfffddec91330d105831d43d22c445cb5b  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/candidate-manifest.json
+572c2dec5a6c7658708f66fdf5c374f999f7e103d70c610058fb7409a4fd984d  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/environment-manifest.json
+9a78ba7857ff210dbba7d681bdc6bf52918d7c30c1ecf05971c64e3c28dea1b0  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/execution-evidence.md
+fa59bfe4cc7a242b532c94bfabf2b2ea80579a9ca26fa5937fb584837aab32b3  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/verification-traceability.md
+5e75914de327dc00147bec08728f1fdfca4d474a40b7586390538b8655df5ec6  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/reverse-spec.md
+4b5890ffcb75e4398044ea4182e135060f6a7d249b0e0fca32e4388e6054ad9b  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/coder.json
+1fc20712182872ce2c8e5f19dd6be5dd8ea762203cc84267766e7e7558c6d1a8  .ai-team/runs/analyst-teamlead-agy-reasoning-20261029/verifier.json

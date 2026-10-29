@@ -1,0 +1,127 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "preset": "analyst-teamlead",
+  "child_preset": "teamlead-with-architect",
+  "parent_skill": "analyst-teamlead",
+  "analyst_required": true,
+  "architect_required": true,
+  "downstream_panel": true,
+  "reviewer_skip": true,
+  "criticality": "S2",
+  "criticality_source": "orchestrator",
+  "criticality_reason": "Доработка протокола стриминга размышлений (SQLite conversations/<cid>.db protobuf 20.3), синхронизации финального дренирования _TranscriptTail, сохранения reasoning при mid-turn ошибках и изоляции sess_key в bridges/agy-bridge/server.py (S2).",
+  "profile": "python-aisdlc-gcge",
+  "routing_approval": "auto",
+  "approved_by_user": true,
+  "entry": "full",
+  "setup": "default",
+  "analyst": {
+    "slot": "claude-opus-5-5-high",
+    "backend": "claude-cli",
+    "family": "Anthropic",
+    "requested_model": "claude-opus-5-5",
+    "requested_effort": "high",
+    "fallback": {
+      "slot": "gpt-6.1-sol",
+      "backend": "codex-cli",
+      "family": "OpenAI",
+      "requested_model": "gpt-6.1-sol",
+      "requested_effort": "high"
+    }
+  },
+  "roles": {
+    "explorer": {
+      "role": "explorer",
+      "mode": "agent",
+      "agent": "agy-research",
+      "backend": "agy",
+      "family": "Google",
+      "requested_model": "gemini-4-argon-high",
+      "requested_effort": "high",
+      "permissions": "read-only",
+      "fallback": {
+        "agent": "claude-cli",
+        "backend": "claude-cli",
+        "family": "Anthropic",
+        "requested_model": "claude-sonnet-5-5",
+        "requested_effort": "high"
+      }
+    },
+    "architect": {
+      "role": "architect",
+      "mode": "agent",
+      "agent": "claude-cli",
+      "backend": "claude-cli",
+      "family": "Anthropic",
+      "requested_model": "claude-opus-5-5",
+      "requested_effort": "high",
+      "permissions": "run-artifacts-write",
+      "fallback": {
+        "agent": "codex-cli",
+        "backend": "codex-cli",
+        "family": "OpenAI",
+        "requested_model": "gpt-6.1-sol",
+        "requested_effort": "high"
+      }
+    },
+    "coder": {
+      "role": "coder",
+      "mode": "agent",
+      "agent": "codex-cli",
+      "backend": "codex-cli",
+      "family": "OpenAI",
+      "requested_model": "gpt-6.1-sol",
+      "requested_effort": "high",
+      "permissions": "write",
+      "fallback": {
+        "agent": "claude-cli",
+        "backend": "claude-cli",
+        "family": "Anthropic",
+        "requested_model": "claude-sonnet-5-5",
+        "requested_effort": "high"
+      }
+    },
+    "verifier": {
+      "role": "verifier",
+      "mode": "deterministic"
+    }
+  },
+  "brief_review": {
+    "arch_R1_cycle1": {
+      "skeptic": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "6419aa143fcf59574a632cf9517d18f5501080da808ce5ef3e4fbb1e91a94ee4",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a1-skeptic/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 21,
+        "transport": "claude-p"
+      },
+      "realist": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "2b811d5828675f60d5c32a142548f077e165ac3ec5ab72ab5dff5662fe5f7dbf",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a1-realist/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 23,
+        "transport": "codex-exec"
+      },
+      "visionary": {
+        "verdict": "APPROVE",
+        "blocked_reason": null,
+        "iterations": 1,
+        "checklist_gen": 1,
+        "approved_sha256": "197b2f35aa587c5cf9729bd635068a3a6b276d2f144fff6fe98c0044161e0c63",
+        "verdict_path": "arch-panel/cycle-1/brief-review/arch-r1-a1-visionary/verdict-v1.json",
+        "brief_review_calls": 1,
+        "wall_seconds": 52,
+        "transport": "agy"
+      }
+    }
+  }
+}

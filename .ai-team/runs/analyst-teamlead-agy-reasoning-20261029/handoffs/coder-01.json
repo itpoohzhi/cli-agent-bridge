@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "agy-realtime-reasoning",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "iteration": 1,
+  "status": "DONE",
+  "summary": "Реализованы AD-001..AD-006 в bridges/agy-bridge/server.py (SQLite live-источник мышления mode=ro, wire-парсер, drain до done, delivered с reasoning, изоляция горячих сессий, breaker/бюджеты, флаг SQLITE_REASONING_ENABLED, /health +4 поля), исправлены 12 baseline-ошибок basedpyright и аддитивно добавлены тесты в tests/test_agy_bridge_resilience.py. VER-001..VER-010, VER-012 и VER-003 дали exit 0; git commit не выполнялся. Доработка J3 (iteration 1, rework по J3-001/J3-002/MINOR-2): _drain_post_eof без раннего выхода planner_final (только end_turn/stop/window), _state жёстко держит len(seen) <= MAX_STEPS_TRACKED (вытеснение старейшего ключа после sqlite-off seen_cap), _compat_promote читает _agy_binary_identity() под _sqlite_guard_lock; тесты ao03 (полное окно 0.35 с, exit=window) и test_seen_cap_evicts_oldest_when_no_finalized_below_watermark. ruff check/format, basedpyright (0 errors, 0 new warnings vs e00da06), pytest (97 passed) и unittest discover — exit 0.",
+  "changed_files": [
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "commands": [
+    {
+      "command": "uvx ruff@0.17.3 check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "uvx ruff@0.17.3 format --check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "set -e; B=\"$(mktemp -d)\"; H=\"$(mktemp)\"; S=\"$(mktemp)\"; git worktree add -q --detach \"$B/base\" e00da0621fc95f7c63cd1565f4a5d1fd490c8d66; uvx basedpyright@1.40.2 --outputjson bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py > \"$H\" || true; (cd \"$B/base\" && uvx basedpyright@1.40.2 --outputjson bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py > \"$S\" || true); git worktree remove --force \"$B/base\"; python3 -I - \"$H\" \"$S\" <<'PY'\nimport json,sys,collections\nh=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))\ndef ms(x,sev): return collections.Counter((d['file'].rsplit('/',1)[-1],d.get('rule'),d['message']) for d in x['generalDiagnostics'] if d['severity']==sev)\nerr=h['summary']['errorCount']; new_w=ms(h,'warning')-ms(s,'warning')\nprint('version',h['version'],'errors',err,'warnings',h['summary']['warningCount'],'new_warnings',sum(new_w.values()))\n[print('NEW',k) for k in sorted(new_w)]\nsys.exit(0 if err==0 and not new_w and h['version'].startswith('1.40.2') else 1)\nPY",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_*agy*.py\" && PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "test \"$(git diff --unified=0 e00da0621fc95f7c63cd1565f4a5d1fd490c8d66 HEAD -- tests/test_agy_bridge_resilience.py | grep -cE '^-[^-]')\" = 0 && test -z \"$(git diff --name-only e00da0621fc95f7c63cd1565f4a5d1fd490c8d66 HEAD -- tests/ core/ | grep -vx 'tests/test_agy_bridge_resilience.py')\" && echo OK",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 -I - <<'PY'\nimport ast,re,sys,pathlib\ns=pathlib.Path('tests/test_agy_bridge_resilience.py').read_text(encoding='utf-8')\nt=ast.parse(s)\nneed={'tc%02d'%i for i in list(range(1,13))+[20,21,23,24,30,31,32,33,40,41,42,43,44,50,51,60,61,62,63,70,71,72,80,81,82,91,92]}|{'ao%02d'%i for i in range(1,13)}\ndef asserted(f):\n    for n in ast.walk(f):\n        if isinstance(n,ast.Assert): return True\n        if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr.startswith('assert'): return True\n    return False\ngot=set(); noassert=[]\nfor f in ast.walk(t):\n    if isinstance(f,(ast.FunctionDef,ast.AsyncFunctionDef)) and f.name.startswith('test_'):\n        ids=set(re.findall(r'(tc\\d{2}|ao\\d{2})',f.name))&need\n        if not ids: continue\n        if asserted(f): got|=ids\n        else: noassert.append(f.name)\nmiss=sorted(need-got)\nerrs=(['MISSING '+' '.join(miss)] if miss else [])+(['NO_ASSERT '+' '.join(sorted(noassert))] if noassert else [])\nprint('; '.join(errs) if errs else 'OK %d ids, all asserted'%len(need)); sys.exit(1 if errs else 0)\nPY",
+      "exit_code": 0
+    },
+    {
+      "command": "test \"$(git diff --name-only e00da0621fc95f7c63cd1565f4a5d1fd490c8d66 HEAD -- . ':(exclude).ai-team' ':(exclude)analysis' | sort | tr '\\n' ' ')\" = \"bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py \" && test -z \"$(git ls-files bridges/agy-bridge/dynamic_config.json)\" && printf '%s  %s\\n' 81dffc06ac79c490968e7efb8321f464d5963f414fcc6bd67a278a99d5985e32 analysis/agy-realtime-reasoning/research-plan.md e9c8afb2684a7621e9fdb0455640e86f972aab600989142119fb440397842ff1 analysis/agy-realtime-reasoning/evidence-ledger.md 47b16bab51b31bb06c35fb02d08dbd3409a9cfb057a52e828d079054a20d9202 analysis/agy-realtime-reasoning/open-questions.md cb1ecde9e00f06d72b75e43f973add3ab93ca27433d7145cbf8ec4f4800b17cd analysis/agy-realtime-reasoning/handoff-architect.md 5ed84fc039f7fea5983404442461e734ec9dae03f57359e2bb441dfae6cb7afe analysis/agy-realtime-reasoning/handoff-qa.md | shasum -a 256 -c --status - && echo OK",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 -I - <<'PY'\nimport ast,sys,pathlib\nsrc=pathlib.Path('bridges/agy-bridge/server.py').read_text(encoding='utf-8')\nt=ast.parse(src)\nallowed={'__future__','hashlib','json','os','queue','re','select','shutil','signal','socket','subprocess','sys','threading','time','uuid','http','pathlib','typing','core','sqlite3','random'}\nroots=set()\nfor n in ast.walk(t):\n    if isinstance(n,ast.Import):\n        roots|={a.name.split('.')[0] for a in n.names}\n    elif isinstance(n,ast.ImportFrom) and n.level==0:\n        roots.add((n.module or '').split('.')[0])\ncalls=[n for n in ast.walk(t) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='connect' and isinstance(n.func.value,ast.Name) and n.func.value.id=='sqlite3']\nnouri=[c.lineno for c in calls if not any(k.arg=='uri' and isinstance(k.value,ast.Constant) and k.value.value is True for k in c.keywords)]\nrw=[n.lineno for n in ast.walk(t) if isinstance(n,ast.Constant) and isinstance(n.value,str) and ('mode=rw' in n.value or 'immutable' in n.value)]\nneed=[x for x in ('AGY_SQLITE_REASONING_ENABLED','SQLITE_REASONING_ENABLED','AGY_BRIDGE_CONVERSATIONS','mode=ro','query_only','busy_timeout') if x not in src]\nerrs=[]\nif sorted(roots-allowed): errs.append('non-stdlib imports %s'%sorted(roots-allowed))\nif not calls: errs.append('no sqlite3.connect call')\nif nouri: errs.append('sqlite3.connect without uri=True at %s'%nouri)\nif rw: errs.append('write-mode or immutable URI literal at %s'%rw)\nif 'immutable' in src: errs.append('substring immutable present in server.py')\nif need: errs.append('missing %s'%need)\nprint('FAIL: '+'; '.join(errs) if errs else 'OK'); sys.exit(1 if errs else 0)\nPY",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py -k \"tc93 or l2_harness\" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_agy_bridge_resilience.py\" -k tc93 -k l2_harness",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_*agy*.py\"",
+      "exit_code": 0
+    },
+    {
+      "command": "uvx ruff@0.17.3 check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py  # J3 rework",
+      "exit_code": 0
+    },
+    {
+      "command": "uvx ruff@0.17.3 format --check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py  # J3 rework",
+      "exit_code": 0
+    },
+    {
+      "command": "uvx basedpyright@1.40.2 bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py  # J3 rework: 0 errors, 800 warnings, VER-003 new_warnings=0",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py  # J3 rework: 97 passed, 52 subtests passed",
+      "exit_code": 0
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_*agy*.py\"  # J3 rework: Ran 97 tests OK",
+      "exit_code": 0
+    }
+  ],
+  "acceptance_coverage": [
+    "REQ-001/AC-001/AC-002: TC-20, TC-21, TC-23, TC-24, tc93 (задержка снимок->сокет <= SQLITE_POLL_S+0.5 с, >=2 чанка до status=3)",
+    "REQ-002/AC-003: TC-01..TC-12 на /usr/bin/python3 3.9.6 и pytest 3.14",
+    "REQ-003/AC-004/AC-005/AC-013: TC-30..TC-33, AO-12",
+    "REQ-004/AC-006: TC-40..TC-44, AO-01",
+    "REQ-005/AC-007: TC-50, TC-51, AO-08",
+    "REQ-006/REQ-007/AC-008/AC-009: TC-60..TC-63, AO-03, AO-11, tc93 (100/100, EOF->stop)",
+    "REQ-008/AC-010: TC-70..TC-72, AO-11",
+    "REQ-009/AC-011: TC-80..TC-82",
+    "REQ-010/AC-012: 22 существующих теста без правок (VER-006: 0 удалённых строк), AO-06 (/health additive)",
+    "REQ-011/AC-014: TC-91, AO-09 (kill-switch <= 1.30 с), AO-07",
+    "REQ-012/AC-015/AC-016: TC-92, AO-04, AO-05, tc93 (RSS <= 112 MiB, CPU <= 0.01 ядра/ход)",
+    "J3-001/F-005: test_ao03_planner_final_with_two_quiet_selects_holds_full_window (exit=window, 0.34..0.40 с); J3-002: test_seen_cap_evicts_oldest_when_no_finalized_below_watermark (len(seen)<=128, seen_cap); MINOR-2: _compat_promote под _sqlite_guard_lock"
+  ],
+  "assumptions": [
+    "ASM-001: снимки подполя 20.3 префиксно монотонны; при нарушении выдача шага замораживается (sqlite_snapshot_divergence), мышление не искажается",
+    "Python 3.9.6 не открывает закрытую WAL-БД с mode=ro (F-52): такие ходы идут на транскрипте без live-дельт",
+    "Формат step_payload и константы step_type=15/status=8,3 соответствуют agy 1.4.9; canary держит новый бинарь в SHADOW",
+    "J3: досрочный выход drain — только по END_TURN/TURN_COMPLETE (end_turn) или stop_event; финальный PLANNER_RESPONSE без маркера выдерживает полное окно DRAIN_WINDOW_S=0.35 с"
+  ],
+  "risks": [
+    "L3 на живом :9887 не выполнялся (квота agy, VER-011 manual): живая приёмка и включение флага — этап Teamlead",
+    "Холодные plain-чаты теряют горячие продолжения (RISK-009, AD-004)",
+    "Расхождение размеров блока Think: при quota-ошибке после мышления клиент получает кадр error без повтора (RISK-008, UX DSH)",
+    "Полный Full Suite Gate (pytest tests/) не запускался: ожидаемо 3 красных baseline-теста вне scope (VER-012 note)"
+  ],
+  "open_questions": [],
+  "next_role": "reviewer",
+  "role_plan": {
+    "path": ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/plans/coder-01.json",
+    "sha256": "263611aaacb0a079e472fa8eaf805f720696efe22ccb43ac81eced58a52a5016"
+  }
+}
