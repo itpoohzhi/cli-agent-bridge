@@ -1,0 +1,143 @@
+{
+  "panel": "arch",
+  "round": "R1",
+  "cycle": 1,
+  "seat": "skeptic",
+  "iteration": 1,
+  "run_kind": "full",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "6419aa143fcf59574a632cf9517d18f5501080da808ce5ef3e4fbb1e91a94ee4",
+  "checklist_gen": 1,
+  "checklist_sha256": "7502f1aa6cd1d5e668ec8b9327e984d47386793dd1aaf21b6bdb7e1771e1a870",
+  "reviewer_slot": "claude-haiku-5-5",
+  "transport": "claude-p",
+  "transport_attempts": [
+    {
+      "transport": "claude-p",
+      "file": "review-v1-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 21,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 21,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "BR-01",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-02",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-03",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-04",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-02",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-03",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-04",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-05",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-06",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-07",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-08",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-02",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-04",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-05",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-06",
+      "status": "covered",
+      "evidence_quote": "verified in brief-v1.md",
+      "fix": "",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [],
+  "dropped": [],
+  "model_verdict": "APPROVE",
+  "model_verdict_mismatch": false,
+  "verdict": "APPROVE",
+  "blocked_reason": null,
+  "open_ids": []
+}

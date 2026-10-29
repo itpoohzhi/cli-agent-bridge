@@ -1,0 +1,12 @@
+**BLOCKED: CONTRACT_CONFLICT B-001.** Требования несовместимы: AC-004 требует полной выдачи монотонного финала, AO-05 ограничивает её двумя MiB. Контрпример: 16 допустимых шагов по 131 073 байта превышают лимит на 16 байт.
+
+Продуктовые файлы не изменены. VER-гейты не запускались. Panel-proof проверен: exit 0.
+
+Записаны и валидированы:
+
+- [План до работы](.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/plans/coder-01.before.json)
+- [Итоговый план BLOCKED](.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/plans/coder-01.json)
+- [Handoff с контрпримером](.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/handoffs/coder-01.json)
+- [coder.json](.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/coder.json)
+
+Требуется согласовать в архитектурном контракте поведение при превышении лимита.

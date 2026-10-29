@@ -1,0 +1,44 @@
+PANEL-NONCE: ff6f0809edcf89ca
+ARTIFACT-SHA256: 7d4f3ee38549312817f33a0cc6b82ef02f69a62f9d764777b3d84d63e460838b
+Подтверждаю: прочитал общий канон `~/Мой диск/Context/AGENTS.md` целиком (до `<!-- КАНОН-КОНЕЦ -->`); проектных файлов правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочей папке не обнаружено.
+
+=== КАРТОЧКА СУДЬИ ===
+Место: #1 | Слот: gemini-4-argon-high | Семейство: Google | Транспорт: agy
+Режим: code | Раунд: r1 | Шляпа: Скептик (ищет ошибки, гонки, утечки дескрипторов, нарушения F-001..F-010 и инвариантов)
+seed_recheck_duty: да
+seed_recheck: PASS (sha256(seed_input)==seed_hex, PoL-V13 selection contract verified)
+package_path: /Users/aazhiry1/tmp/cli-agent-bridge/agy-realtime-reasoning/.ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/package.md
+Вердикт места: ACCEPT
+Блокеров: 0 | Существенных: 0 | Замечаний: 0
+
+[SUB COVERAGE]
+| Подкатегория | Статус (PASS/CONCERN/BLOCKER) | Доказательство (файл:строки / тест / VER-ID) | Комментарий |
+|---|---|---|---|
+| SUB-CORRECT-01 | PASS | `bridges/agy-bridge/server.py:1186-1240, 1698-1790, 1955-1993, 2723-2767`; `TC-01..92`, `AO-01..12`, `VER-003`, `VER-007` | Все требования `REQ-001..REQ-012`, `AC-001..AC-016` и обязательные предохранители `F-001..F-009` реализованы точно по спецификации; в `_drain_post_eof` (`server.py:1955-1993`) удалён эвристический выход `planner_final` и выдерживается полное окно `DRAIN_WINDOW_S = 0.35 s` при отсутствии `END_TURN`/`TURN_COMPLETE`. |
+| SUB-EDGE-02 | PASS | `bridges/agy-bridge/server.py:1246-1348, 1663-1680, 1823-1849`; `TC-04..12`, `TC-40..44`, `AO-12`, `VER-003` | Корректно обработаны обрезанные varint/wire-поля, незавершённые UTF-8 последовательности (`_trim_incomplete_utf8`), отсутствие БД/таблицы `steps`, пустое мышление и жёсткое вытеснение `del self.seen[min(self.seen)]` при `MAX_STEPS_TRACKED = 128` (`server.py:1667-1678`). |
+| SUB-ARCH-03 | PASS | `teamlead/candidate-manifest.json`; `VER-006`, `VER-008`, `VER-009` | Изменения строго локализованы в `bridges/agy-bridge/server.py` и аддитивных тестах `tests/test_agy_bridge_resilience.py` (`0` удалённых строк в существующих тестах); используются исключительно модули стандартной библиотеки Python. |
+| SUB-API-04 | PASS | `bridges/agy-bridge/server.py:2863-2902, 3157-3247`; `TC-61`, `AO-06`, `VER-003`, `VER-012` | Полностью сохранена обратная совместимость HTTP/SSE контрактов (`POST /chat`, `GET /health` с 4 аддитивными полями, OpenAI SSE `delta.reasoning_content` и финальный `data: [DONE]`). |
+| SUB-ERR-05 | PASS | `bridges/agy-bridge/server.py:1809-1849, 2192-2286`; `TC-40..44`, `AO-01`, `VER-003` | Приоритет схемной ошибки (`no such table` / `no such column`) над `cold-open` соблюдён (`F-002`, `server.py:1828-1841`); любые ошибки SQLite и парсинга деградируют fail-open на транскрипт без обрыва пользовательского хода. |
+| SUB-SEC-06 | PASS | `bridges/agy-bridge/server.py:1073-1104, 1708, 1991`; `TC-92`, `AO-07`, `AO-08`, `VER-009` | Валидация `_CID_RE` и `resolve().parent` защищает от path traversal (`server.py:1073-1083`), подключение открывается строго с `file:...?mode=ro` (`uri=True`) и `PRAGMA query_only = ON`, диагностические логи не содержат сырого текста мыслей. |
+| SUB-CONC-07 | PASS | `bridges/agy-bridge/server.py:997-1006, 1049-1067, 1508-1565, 2117-2145, 2272-2299`; `AO-03`, `AO-08`, `AO-10`, `tc93` | Захват `_active_cid_owners` атомарен под `_session_store_lock` (`F-004`), `_compat_promote` считывает `_agy_binary_identity()` внутри `_sqlite_guard_lock` (`F-003`/`MINOR-2`), `_close_and_put_done` идемпотентен под `_emit_lock` в `try/finally` (`F-005`), `conn.interrupt()` защищён `_conn_lock`. |
+| SUB-RES-08 | PASS | `bridges/agy-bridge/server.py:1091-1124, 1551-1565, 1667-1678, 1816-1820, 2120-2125`; `AO-04`, `AO-05`, `AO-12`, `tc93` | Соединения `sqlite3.Connection` и курсоры гарантированно закрываются в `finally` (`_sqlite_open_connections == 0` после завершения хода), словарь шагов ограничен `MAX_STEPS_TRACKED = 128`, объём мышления на ход ограничен `MAX_REASONING_BYTES_PER_TURN = 2 MiB` (`F-008`). |
+| SUB-PERF-09 | PASS | `bridges/agy-bridge/server.py:944-970, 1390-1401, 1904-1911`; `AO-05`, `tc93`, `VER-010` | Token bucket `_PollBucket` удерживает частоту опроса в пределах `N(Δt) <= 3 + 2*Δt`, SQL-запрос ограничивает выдачу `LIMIT 16` и `blob_len <= 262144`, неизменившиеся снимки пропускаются по `(blob_len, blob_sha)`, стресс-тест `VER-010` (`tc93`) подтверждает соблюдение бюджетов RSS и CPU. |
+| SUB-TEST-10 | PASS | `tests/test_agy_bridge_resilience.py:L221-L3674`; `VER-003`, `VER-005`, `VER-006`, `VER-007`, `VER-010`, `VER-012`, `VER-013` | Все 22 исходных теста сохранены без изменений, добавлено 75 новых тестовых методов `unittest.TestCase` (всего 97/97 PASS на Python 3.9.6 и Python 3.14.7, 52 subtests PASS), полный прогон репозитория `VER-013` (974 теста против 899 базовых) подтвердил 0 новых регрессий. |
+| SUB-MAINT-11 | PASS | `VER-001`, `VER-002`, `VER-004` | `ruff check` и `ruff format --check` дают 0 замечаний; `basedpyright 1.40.2` проходит с `0 errors` и `0 new_warnings` относительно базового коммита без директив `# type: ignore` / `# pyright: ignore`. |
+| SUB-SIMP-12 | PASS | `bridges/agy-bridge/server.py:787-1993` | Код лаконичен, структуры данных (`_TurnPlan`, `_StepState`, `_PollBucket`) минимально достаточны, мёртвый код и избыточные абстракции отсутствуют. |
+| SUB-OBS-13 | PASS | `bridges/agy-bridge/server.py:1031-1046, 1990-1993, 2872`; `TC-92`, `AO-06` | Эндпоинт `GET /health` возвращает 4 новых диагностических поля (`sqlite_reasoning_mode`, `sqlite_breaker_state`, `sqlite_divergence_count`, `sqlite_drain_deadline_count`), структурные логи фиксируют режимы, расхождения и исходы дренирования без утечки содержимого мыслей. |
+| SUB-DEPS-14 | PASS | `bridges/agy-bridge/server.py:1-60`; `VER-009` | Внешние зависимости не добавлялись (`0` новых пакетов), используются только штатные модули стандартной библиотеки Python (`sqlite3`, `random`, `hashlib`, `threading`). |
+
+[FINDINGS]
+Замечаний класса BLOCKER и MAJOR не обнаружено.
+
+[ОБОСНОВАНИЕ ВЕРДИКТА]
+Реализация в `bridges/agy-bridge/server.py` и тестовом наборе `tests/test_agy_bridge_resilience.py` полностью соответствует утверждённому архитектурному пакету `AD-001..AD-006` и всем обязательным требованиям `F-001..F-009` Архитектурного Совета Тимлидов:
+1. Дедупликация между SQLite и `transcript_full.jsonl` по `step_index` гарантирует отсутствие дублей и немедленную заморозку шага при `divergence` (`F-001`), а также отключение SQLite на весь `resume`-ход при отсутствии pre-spawn якоря.
+2. Классификация схемных ошибок SQLite выполняется строго до проверки `cold-open` (`F-002`), корректно переводя circuit breaker в состояние `OPEN` после 3 сбоев.
+3. Продвижение `poll_watermark`, проверка идентичности бинаря под `_sqlite_guard_lock` (`F-003`) и атомарное владение `_active_cid_owners` под `_session_store_lock` (`F-004`) исключают гонки между параллельными ходами и фоновыми запросами без инструментов (`tools_count == 0`).
+4. Финальное дренирование `_drain_post_eof` выдерживает полное окно `DRAIN_WINDOW_S = 0.35 s` без эвристического раннего выхода по `planner_final` (`F-005`), а `try/finally` в `_pump` гарантирует ровно одно терминальное событие `done`.
+5. Ограничения ресурсов (`MAX_STEPS_TRACKED = 128` с жёстким вытеснением старейшего ключа и `MAX_REASONING_BYTES_PER_TURN = 2 MiB` по `F-008`) и быстрый отклик kill-switch `SQLITE_REASONING_ENABLED` с `conn.interrupt()` (`F-006`) подтверждены результатами чистой комнаты `VER-001..VER-013` (97/97 целевых тестов и 974 теста полного прогона без регрессий).
+
+FINDINGS_COMPLETE: YES
+ОБЩИЙ ВЕРДИКТ: ACCEPT

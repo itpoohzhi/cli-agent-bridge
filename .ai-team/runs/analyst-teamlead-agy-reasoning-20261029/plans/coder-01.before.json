@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "agy-realtime-reasoning",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Реализовать в bridges/agy-bridge/server.py AD-001..AD-006 (SQLite live-мышление, drain, delivered, изоляция сессий, breaker/bucket, флаг) с F-001..F-009, исправить 12 baseline-ошибок basedpyright и аддитивно добавить 52 теста в tests/test_agy_bridge_resilience.py до зелёных VER-001..VER-010, VER-012",
+  "inputs_read": [
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/feature.md",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/architecture/architecture-packet.json (decisions AD-001..AD-006, contract_deltas, architect_oracles AO-01..AO-12, EVD-076)",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/panel/arch/final-panel-verdict.md (Раздел Б F-001..F-009)",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/verification-surface.json",
+    "analysis/agy-realtime-reasoning/handoff-architect.md",
+    "analysis/agy-realtime-reasoning/handoff-qa.md",
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "stop_conditions": [
+    "Изменяются только bridges/agy-bridge/server.py и tests/test_agy_bridge_resilience.py; analysis/**, core/**, fleet.json, start.sh, ruff.toml и dynamic_config.json не трогаются",
+    "Ни одной удалённой или изменённой строки существующих тестов (VER-006); без git commit/push/reset/checkout/stash",
+    "Без # type: ignore, # pyright: ignore, # noqa и без подстроки immutable / mode=rw в server.py (VER-004, VER-009)",
+    "Красный VER-001..VER-010 или VER-012, который не удаётся исправить в рамках двух файлов, фиксируется как BLOCKED с фактом, а не обходится"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Свериться с AD-001..AD-006, AO-01..AO-12, F-001..F-009 и EVD-076 по architecture-packet.json и текущему server.py",
+      "expected_evidence": "Список точек правки в server.py и 12 baseline-ошибок basedpyright с исправлениями",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Реализовать в bridges/agy-bridge/server.py SQLite-источник мышления, парсер wire-формата, drain/_close_and_put_done, delivered с reasoning, изоляцию сессий, breaker/bucket, флаг и /health, исправив 12 ошибок basedpyright",
+      "expected_evidence": "git diff bridges/agy-bridge/server.py, VER-001/VER-002/VER-004/VER-009 зелёные",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Аддитивно дописать в tests/test_agy_bridge_resilience.py 52 теста tc*/ao*/tc93 как методы unittest.TestCase плюс 3 добавленные строки типизации без правки существующих строк",
+      "expected_evidence": "VER-006 равно 0 удалённых строк, VER-007 OK 51 ids all asserted",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Прогнать VER-001..VER-010 и VER-012 (ruff, pytest 9.0.3, basedpyright 1.40.2, unittest на /usr/bin/python3 3.9.6) и зафиксировать exit_code каждой команды",
+      "expected_evidence": "exit_code 0 у каждой команды VER-001..VER-010, VER-012 в выводе",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Записать plans/coder-01.json, handoffs/coder-01.json и coder.json и пройти validate_role_plan.py --phase after и validate_handoff.py coder",
+      "expected_evidence": "PASS role plan after и PASS handoff coder",
+      "status": "PENDING",
+      "actual_evidence": null
+    }
+  ],
+  "deviations": []
+}

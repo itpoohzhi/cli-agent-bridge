@@ -1,0 +1,145 @@
+{
+  "panel": "arch",
+  "round": "R1",
+  "cycle": 1,
+  "seat": "realist",
+  "iteration": 1,
+  "run_kind": "full",
+  "brief_path": "brief-v1.md",
+  "brief_sha256": "2b811d5828675f60d5c32a142548f077e165ac3ec5ab72ab5dff5662fe5f7dbf",
+  "checklist_gen": 1,
+  "checklist_sha256": "ac66b01ea2d8ab739eb976d38ea84af37d9cfb5b32b4bc7223263f2abbbe7120",
+  "reviewer_slot": "gpt-6.1-terra",
+  "transport": "codex-exec",
+  "transport_attempts": [
+    {
+      "transport": "codex-exec",
+      "file": "review-v1-a1.md",
+      "http_code": null,
+      "result": "ok",
+      "seconds": 23,
+      "kill_reason": null
+    }
+  ],
+  "wall_seconds": 23,
+  "tool_calls": 0,
+  "prelint_failed": [],
+  "items": [
+    {
+      "id": "BR-01",
+      "status": "covered",
+      "evidence_quote": "Локальная SQLite-база `~/.gemini/antigravity-cli/conversations/<cid>.db` ... `status=8` GENERATING ... подполе `20.3` в `step_payload` содержит накопленный текст `thinking`",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-02",
+      "status": "covered",
+      "evidence_quote": "RC-2` синхронизация финального дренирования `_TranscriptTail` до `done`, `RC-3` учёт `reasoning` в `delivered`, `RC-4` изоляция горячих сессий `_session_store` от фоновых запросов без `tools`",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-03",
+      "status": "covered",
+      "evidence_quote": "Проверь соответствие Architecture Packet каждому требованию `REQ-001..REQ-012`, каждому приёмочному критерию `AC-001..AC-016` и разделам `handoff-architect.md`.",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "BR-04",
+      "status": "covered",
+      "evidence_quote": "конверт `HL-ENV/v1` из 46 полей ... а также проверяемость `verification_surface` и все пункты `Definition of Done overlay` из `aisdlc-gcge/skills/architecture.md`",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-02",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-03",
+      "status": "covered",
+      "evidence_quote": "суди ЗАНОВО, не подтверждай прошлый вердикт автоматически",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-04",
+      "status": "covered",
+      "evidence_quote": "ФОРМАТ ОТВЕТА (строго):",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-05",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-06",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-07",
+      "status": "covered",
+      "evidence_quote": "КОНТЕКСТ:; 📋 ФАКТ-КАРТА; РЕЖИМ: architecture",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "JD-08",
+      "status": "violated",
+      "evidence_quote": "",
+      "fix": "Вложить блок «ЯКОРЯ ПАКЕТА» с вариантами (а)–(г) и полную рубрику подкатегорий для COVERAGE и self-sweep. Восстановить полный текст пункта 6: приложенный фрагмент council.md обрывается посреди предложения.",
+      "downgraded": false
+    },
+    {
+      "id": "HY-02",
+      "status": "violated",
+      "evidence_quote": "",
+      "fix": "Согласовать допустимые значения вердикта по критериям: начальный формат разрешает PASS|FAIL, а вложенный фрагмент предписывает PASS/INCONCLUSIVE.",
+      "downgraded": false
+    },
+    {
+      "id": "HY-04",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    },
+    {
+      "id": "HY-05",
+      "status": "violated",
+      "evidence_quote": "",
+      "fix": "Исключить из передаваемого судье фрагмента упоминание brief-review при сохранении необходимых правил архитектурного совета.",
+      "downgraded": false
+    },
+    {
+      "id": "HY-06",
+      "status": "covered",
+      "evidence_quote": "",
+      "fix": "",
+      "downgraded": false
+    }
+  ],
+  "unmapped_requirements": [],
+  "bloat_flags": [],
+  "leakage_flags": [
+    "Во вложенном фрагменте arch-council.md присутствует упоминание brief-review."
+  ],
+  "dropped": [],
+  "model_verdict": "REJECT",
+  "model_verdict_mismatch": false,
+  "verdict": "APPROVE",
+  "blocked_reason": null,
+  "open_ids": []
+}

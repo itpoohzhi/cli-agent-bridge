@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "task_id": "agy-realtime-reasoning",
+  "role": "architect",
+  "iteration": 3,
+  "plan_kind": "full",
+  "goal": "Точечная ревизия Architecture Packet agy-realtime-reasoning по находкам ARCH_PANEL R2 (Seat 1 F-001..F-012, Seat 2 F-001..F-008) с сохранением одобренного Seat 3 и без изменения продуктового worktree",
+  "objective": "Architecture Packet S2 (python-aisdlc-gcge), закрывающий R2: полное окно drain 0.35 с без эвристического раннего выхода и outcome=window_complete; заморозка выдачи шага при divergence (0 склеенных символов, AC-004 при ASM-001 / AC-005 при нарушении); turn_mode на ход и раздельные observed/delivered; _active_cid_owners и обязательный двойной pre-spawn якорь resumed (иначе OFF); LIMIT 16, BLOB ≤256 KiB, stop-проверки и conn.interrupt(); run._emit_lock; kill-switch 1.30 с ≤ 5.0 с; probe_gen и определение cold-open; 2 MiB на ход, огибающая N(Δt) ≤ 3 + 2·Δt, поля /health, VER-007 с assert, VER-008 с sha256, исполняемый VER-010, VER-012 на /usr/bin/python3 и EVD-076",
+  "scope_paths": [
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/architecture/architecture-packet.json",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/plans/architect-01.json",
+    "bridges/agy-bridge/server.py (только чтение)",
+    "tests/test_agy_bridge_resilience.py (только чтение)"
+  ],
+  "inputs_read": [
+    "бриф оркестратора architect R1-fix (обязательные исправления 1–6, в задаче)",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/panel/arch/r1/seats/{1,2,3}/verdict.md и panel/arch/r1/manifest.json",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/arch-panel/cycle-1/brief-review/*/verdict-v1.json",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/architecture/architecture-packet.json (R1, sha256 f0471a61…)",
+    ".ai-team/runs/analyst-teamlead-agy-reasoning-20261029/teamlead/verification-surface.json (пороги ruff_check_errors=0, basedpyright_errors=0)",
+    "analysis/agy-realtime-reasoning/evidence-ledger.md (F-25, F-30..F-33, F-52, F-56) и handoff-qa.md (TC-04, TC-05, TC-20..TC-33, TC-60..TC-63, TC-91..TC-93)",
+    "bridges/agy-bridge/server.py:104,130,477-515,807-868,981-1101,1129-1175,1370-1409 (TRANSCRIPT_GRACE_S, _in_flight_cids, стор, _pump, _execute result ERROR, _run_once, sess_key)",
+    "pyrightconfig.json, ruff.toml",
+    "~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/validate_role_plan.py",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py",
+    "бриф оркестратора architect R3-fix (8 обязательных хирургических правок; находки ARCH_PANEL R2 Seat 1 F-001..F-012, Seat 2 F-001..F-008; Seat 3 PASS 6/6)",
+    "~/work/tmp/agy-arch-r2/v4.json (вывод basedpyright 1.40.2 на e00da06: 12 ошибок)",
+    "bridges/agy-bridge/server.py:230-284,828-834,925-930,1355-1388,1526-1546 и tests/test_agy_bridge_resilience.py:160-168,545-560 (места 12 ошибок, только чтение)",
+    "analysis/agy-realtime-reasoning/{research-plan,evidence-ledger,open-questions,handoff-architect,handoff-qa}.md (только shasum -a 256)"
+  ],
+  "stop_conditions": [
+    "Любая запись вне architecture/architecture-packet.json и plans/architect-01.json запрещена; worktree_fingerprint обязан остаться aed3274571859b39f08788443955470300be30a9dfd8ea5d0e994001433a0bbb",
+    "Факт о схеме/коде, не подтверждённый ledger или чтением server.py, в packet не попадает; при конфликте брифа с фактом приоритет у факта с записью в deviations",
+    "FAIL любого валидатора или неустранённая находка R1 запрещают handoff; секреты и текст мышления в артефакты не пишутся"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сопоставить находки трёх мест ARCH_PANEL R1 и шесть пунктов брифа оркестратора с якорями packet (AD/QA/VER/RISK/HL-ENV/гейты); R3: сопоставить 8 пунктов брифа R3 (ARCH_PANEL R2 Seat 1 F-001..F-012, Seat 2 F-001..F-008) с якорями packet",
+      "expected_evidence": "Карта находка → раздел packet для Seat 1 #1..#5, Seat 2 #1..#3, Seat 3 F-001..F-010",
+      "status": "DONE",
+      "actual_evidence": "Прочитаны panel/arch/r1/seats/{1,2,3}/verdict.md (все NEEDS WORK) и brief-review verdict-v1.json; карта: drain/join/_execute → AD-002/AD-003, plain-сессии → AD-004, query/UTF-8/dedup/seen/immutable/compat → AD-001, float/breaker/lock → AD-005, kill-switch → AD-006, AO-04/порог 5 с/пины/риски → VER/QA/RISK, F-009 → VER-001..005/012. F-010 (жеребьёвка) — зона оркестратора. Зафиксировано как EVD-075. R3: Карта: F-001 → AD-002.drain_loop/AO-03; F-002/S2 F-001 → AD-001.dedup_and_emit/AO-12/REQ-003/ASM-001; F-003 → AD-001.compat/seen_state/QA-012/AO-10; F-004/F-005 → AD-001.watermark_resume/BND-005/AD-004/AO-08; F-006/F-007 → AD-001.query/parser, AD-002.pump_order/join_before_done/late_events; F-008/S2 F-003 → AD-006/QA-010/AO-09; F-009/S2 F-002 → AD-005/AO-01/R-BULK-I3; F-010..F-012/S2 F-004..F-007 → HL-ENV, S-HERD-I1, CD-003, REQ-010, VER-007/008/010/012, EVD-076."
+    },
+    {
+      "id": "RP-02",
+      "kind": "inspect",
+      "action": "Перепроверить факты, на которые опираются исправления: схему SQLite F-31, бинарь agy F-25, места server.py и baseline запиненных гейтов на e00da06; R3: снять список 12 ошибок basedpyright с контекстом кода и sha256 замороженных analysis-файлов",
+      "expected_evidence": "Подтверждённые имена таблицы/колонок, строки server.py и вывод dry-run VER-001..VER-005",
+      "status": "DONE",
+      "actual_evidence": "F-31: таблица steps(idx, step_type, status, step_payload) — имена trajectory_steps/step_idx из брифа сопоставлены фактической схеме. F-25: ~/.local/bin/agy.real 1.4.9. server.py: result ERROR → немедленный выход _execute L1077-1085, _in_flight_cids L130/494, TRANSCRIPT_GRACE_S L104. Dry-run (EVD-073/074): ruff@0.17.3 check rc=0; format --check rc=1 (не отформатирован только server.py); pytest==9.0.3 22 passed; unittest discover на /usr/bin/python3 22 OK; basedpyright@1.40.2 errors 12, warnings 868. R3: ~/work/tmp/agy-arch-r2/v4.json — 12 ошибок (server.py 9: 259×2, 282, 832, 928, 1371, 1385, 1529, 1544; tests 3: 165×2, 557), места прочитаны, исправления — EVD-076; sha256 5 analysis/*.md сняты и проверены dry-run'ом VER-008 (SHA_OK) — EVD-077."
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Переписать AD-001 и AD-002: mode=ro без immutable, водяной знак resumed под per-cid замком, SELECT с BLOB ≤1 MiB и статусами 8/3, UTF-8 trim, seen ≤128 с sha256-префиксом, контракт divergence, compat canary, drain 0.15/0.50 + join 0.15 и дочитывание _execute до done; R3: заморозка шага при divergence, turn_mode и observed/delivered, _active_cid_owners и двойной якорь resumed (иначе OFF), LIMIT 16/256 KiB/interrupt, 2 MiB, /health",
+      "expected_evidence": "Обновлённые details AD-001/AD-002 с бюджетом EOF→stop ≤1.0 с на всех разрешённых настройках",
+      "status": "DONE",
+      "actual_evidence": "AD-001.details: enablement (проверка на каждой итерации), open, query, watermark_resume, parser, seen_state, dedup_and_emit, compat, observability. AD-002.details: pump_order (proc.wait ≤0.05), drain_loop (ранний выход только при a∧b), join_before_done, execute_drain, late_events, budget: дефолт 0.80 с, максимумы 0.95 с ≤ 1.0 с. R3: AD-001.details enablement/open/query/watermark_resume/parser/seen_state/dedup_and_emit/compat/observability переписаны, добавлен memory_bounds; AD-002 pump_order (_emit_lock, _close_and_put_done), drain_loop (окно 0.35 с, outcome=window_complete), join_before_done (interrupt), budget: EOF→stop 0.65/0.85 с."
+    },
+    {
+      "id": "RP-04",
+      "kind": "decide",
+      "action": "Переписать AD-003..AD-006: учёт reasoning после result ERROR, стор только для агентных запросов, целочисленные retry/poll бакеты, FSM breaker K=3/30 с с атомарной пробой под одним замком, fail-closed флаг с кэшем 5 с и kill-switch активного хода; R3: probe_gen и определение cold-open в AD-005, TTL 1.0 с + срезы 0.25 с в AD-006, владение cid в AD-004",
+      "expected_evidence": "AD-003..AD-006 с альтернативами R1 как отвергнутыми и confirmation на AO-01..AO-12",
+      "status": "DONE",
+      "actual_evidence": "AD-003 + AO-11; AD-004 use_session_store=(tools_count>0) and not is_bg; AD-005: 30/+2/−10 десятых, per-turn bucket 30/20 в с/10, FSM CLOSED→OPEN→HALF_OPEN с тремя исходами пробы и автоистечением 60 с, _sqlite_guard_lock и тестовый reset; AD-006: env AGY_SQLITE_REASONING_ENABLED (аварийное выключение) AND dynamic_config.json, сброс в False на любой ошибке. Все решения остаются two-way. R3: AD-005 — огибающая N(Δt) ≤ 3 + 2·Δt, сбойный ход только DatabaseError/OperationalError после успешного SELECT/схема/divergence, probe_gen с no-op устаревшей пробы; AD-006 — 1.0 + 0.25 + 0.05 = 1.30 с ≤ 5.0 с; AD-004 — _active_cid_owners; альтернативы R2 записаны отвергнутыми."
+    },
+    {
+      "id": "RP-05",
+      "kind": "decide",
+      "action": "Перестроить verification surface VER-001..VER-012 с запиненными ruff/basedpyright/pytest и гейтами 0 ошибок/0 падений, пересчитать HL-ENV, resilience gates, риски RISK-014..018 и оракулы AO-01..AO-12; R3: VER-007 (assert в AST), VER-008 (sha256), VER-010 (kind=command), VER-012 (/usr/bin/python3 + checkpoint Q-005), HL-ENV 112 MiB, RISK-019/020",
+      "expected_evidence": "Гейты Teamlead не ослаблены, неравенства памяти/опроса/бюджета пересчитаны, новые риски и оракулы заведены",
+      "status": "DONE",
+      "actual_evidence": "VER-001 ruff check, VER-002 format --check, VER-003 pytest, VER-004 basedpyright errorCount==0 и 0 новых предупреждений против baseline e00da06, VER-005 unittest 3.9.6 + pytest, VER-012 полный набор 0 failed (3 baseline-красных → BLOCKED владельцу); VER-007 = 51 id; VER-009 запрещает подстроку immutable. Память 1·112+32=144 ≤ 409.6 MiB; S-HERD-I1 2.0 ≤ 4.0 на всём SQLITE_POLL_S ∈ [0.5, 2.0]; R-BULK-I1 4.0 ≤ 540 с; C-MULT-I1 «≤1 одновременного соединения на ход». QA-001/QA-010/QA-012, RISK-014..018, BND-007, BD-005. R3: Скрипты правок ~/work/tmp/agy-arch-r3/update_packet_r3.py и update_packet_r3b.py (якорные замены с assert), бэкап R2 packet-r2.json sha256 e66a24b1…; контрольный поиск устаревших значений: 0 вхождений LIMIT 128, outcome=deadline, _reasoning_cids, кэш 5.0, 1·96; оставшиеся «≤5.0 с» — L3 S1 первый чанк и контракт QA-010. Бюджеты: EOF→stop 0.65/0.85 с, kill-switch 1.30 с, память 1·112+32=144 ≤ 409.6 MiB (HL-ENV-01 гармонизирован); VER-007 dry-run на baseline — MISSING по 51 id (red до фикса)."
+    },
+    {
+      "id": "RP-06",
+      "kind": "report",
+      "action": "Записать architecture-packet.json, связать sha256 этого плана и прогнать validate_role_plan.py after и validate_architecture_packet.py approved",
+      "expected_evidence": "PASS обоих валидаторов (rc=0) и согласованный role_plan.sha256",
+      "status": "DONE",
+      "actual_evidence": "Packet перезаписан скриптом вне репозитория (~/work/tmp/agy-arch-r2/update_packet.py), R1-копии сохранены там же; оба валидатора запущены с фактической сигнатурой (позиционный путь + --phase), результат и sha256 передаются в ответе оркестратору. R3: role_plan.sha256 пересвязан после записи плана; validate_role_plan.py --phase after и validate_architecture_packet.py --phase approved перезапущены, результат в ответе."
+    },
+    {
+      "id": "RP-07",
+      "kind": "report",
+      "action": "Сверить fingerprint продуктового worktree с fingerprints/architect-before.json и git status, передать хеши артефактов оркестратору",
+      "expected_evidence": "WORKTREE_UNCHANGED aed32745…, записи только в двух target-файлах run_dir",
+      "status": "DONE",
+      "actual_evidence": "worktree_fingerprint.py --compare fingerprints/architect-before.json выполнен после записи артефактов; git status показывает только неотслеживаемые .ai-team/runs/… и analysis/agy-realtime-reasoning/ как до работы. Результат сравнения передан в ответе. R3: повторно — git status и fingerprints/architect-before.json не изменялись; записаны только два target-файла."
+    }
+  ],
+  "deviations": [
+    "Команды валидаторов из брифа (--plan/--packet/--role) не соответствуют argparse установленных скриптов (позиционный путь + --phase, rc=2 на неизвестных аргументах); запуск выполнен с фактической сигнатурой, role=architect проверяется внутри JSON. Валидаторы не менялись.",
+    "Бриф называет таблицу trajectory_steps и колонку step_idx; фактическая схема agy 1.4.9 (F-31) — steps(idx, step_type, status, step_payload). В AD-001.query использованы фактические имена и сохранён фильтр step_type = 15; семантика запроса брифа (BLOB ≤1 MiB в SQL, статусы 8 → 8/3 после якоря, LIMIT 128) сохранена.",
+    "Пункт брифа «token bucket 30/20/10 десятых на опрос» и находка Seat 1 #5 (float retry budget) — разные механизмы: оба реализованы в целых десятых — процессный retry budget 30/+2/−10 (Seat 1) и per-turn bucket SQLite-опроса 30/+20 в с/−10 (бриф), иначе один процессный бакет 2 SELECT/с душил бы 8 параллельных ходов.",
+    "VER-004: «0 errors / 0 warnings» для basedpyright реализован как errorCount == 0 (порог Teamlead basedpyright_errors=0) и 0 новых предупреждений против baseline e00da06 по мультимножеству (файл, правило, сообщение). Буквальный 0 предупреждений потребовал бы переписать 868 унаследованных предупреждений target-файлов (EVD-074) — это новый гейт, которого нет в порогах Teamlead, и расширение scope, против которого предупреждает F-009. Выбор вынесен владельцу (Q-005).",
+    "Полный набор tests/ не удалён из поверхности: перенесён в VER-012 с гейтом 0 failed; ровно 3 baseline-красных F-56 дают BLOCKED: OWNER_DECISION_REQUIRED, а не PASS (F-009 — без самостоятельного допуска).",
+    "Seat 3 F-010 (пересчёт SEED/ранжирования панели) — зона оркестратора и manifest панели, не Architecture Packet; в packet не исправлялся.",
+    "Для F-005 выбран семантический canary по идентичности бинаря agy (st_mtime_ns, st_size, F-25) вместо проверки строки версии: запуск agy --version на каждом ходе добавил бы подпроцесс в горячий путь.",
+    "independent_review NOT_REQUIRED (S2) и approval APPROVED без human decision_ids (все AD two-way): это пакет-кандидат для ARCH_PANEL R2, не вердикт Совета и не ARCH_GATE_PASS.",
+    "R3: бриф называет 3 legacy-теста Q-005 «claude_bridge/start_stop»; фактические имена по EVD-056 — test_b_guard, test_muse_bridge_killpg, test_rpc_rework; в packet использованы фактические.",
+    "R3: VER-012 переведён на /usr/bin/python3 unittest по agy-набору (по брифу); Full Suite Gate не удалён — перенесён в pre-MR rollout checkpoint Q-005 с тем же правилом «ровно 3 F-56 = BLOCKED, иначе FAIL».",
+    "R3: END_TURN/TURN_COMPLETE как маркеры конца хода в transcript_full.jsonl фактами F-29/F-33 для agy 1.4.9 не подтверждены; в AD-002 они приняты условно (если наблюдаются), рабочий путь досрочного выхода — PLANNER_RESPONSE с непустым финальным ответом + 0 строк status=8 на двух тиках.",
+    "R3: «join(timeout=0.15)» брифа реализован как conn.interrupt() по истечении окна drain перед финальным join(JOIN_TIMEOUT_S), а не перед каждым join, — иначе прерывался бы последний легальный SELECT окна.",
+    "R3: VER-010 стал kind=command (pytest 9.0.3 -k \"tc93 or l2_harness\" + unittest на /usr/bin/python3); тесты tc93/l2_harness в обязательные 51 id VER-007 не добавлены (бриф фиксирует 51), их наличие гарантирует rc 5 pytest при пустом выборе.",
+    "R3: DRAIN_WINDOW_S=0.35 (окно) и DRAIN_MAX_S=0.50 (жёсткая граница окна) трактуются как дефолт и верхний предел одного параметра AGY_BRIDGE_TRANSCRIPT_GRACE; бюджет EOF→stop пересчитан: 0.65 с дефолт, 0.85 с максимум."
+  ]
+}

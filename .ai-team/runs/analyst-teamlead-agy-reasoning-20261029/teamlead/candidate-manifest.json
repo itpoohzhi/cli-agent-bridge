@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "task_id": "agy-realtime-reasoning",
+  "run_id": "analyst-teamlead-agy-reasoning-20261029",
+  "base_commit": "e00da0621fc95f7c63cd1565f4a5d1fd490c8d66",
+  "diff_sha256": "1d2292a0a437a2dcbcca10f66ddd5fc8a11970ea79ad3c97790ac76e4f7b12a6",
+  "files": [
+    {
+      "path": "bridges/agy-bridge/server.py",
+      "sha256": "1285a908bf2793b3a19e93e2149c2bfa353d1fb8625c626658fe790e2ef48147",
+      "role": "production"
+    },
+    {
+      "path": "tests/test_agy_bridge_resilience.py",
+      "sha256": "63869e7e51e7b067661afe074b688dfb4c9d5f86040cfcdf6a3b778e825a0680",
+      "role": "test"
+    }
+  ]
+}
