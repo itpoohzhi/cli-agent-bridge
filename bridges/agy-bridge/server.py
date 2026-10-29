@@ -47,6 +47,19 @@ agy отвергает базу без effort — `--model "gemini-3.8-flash" re
 `SQLITE_REASONING_ENABLED` в `dynamic_config.json` (по умолчанию выключен) и аварийный
 выключатель `AGY_SQLITE_REASONING_ENABLED=0`.
 
+Политика хода «тихий агент» (AD-001..AD-005) выключена по умолчанию (кодовый False) и
+включается флагами `dynamic_config.json` (JSON bool, перечитывается с TTL 1 с) либо env;
+env приоритетнее файла (0/false/no/off — hard-off, 1/true/yes/on — включение):
+
+  * `planner_content_streaming_enabled` / `AGY_PLANNER_CONTENT_STREAMING_ENABLED` —
+    live `PLANNER_RESPONSE.content` из транскрипта с дедупликацией против stdout;
+  * `emit_tool_trace` / `AGY_BRIDGE_EMIT_TOOL_TRACE` — безопасные маркеры нативных
+    инструментов в `reasoning_content` (без args/result/путей);
+  * `extended_timeout_enabled` / `AGY_EXTENDED_TIMEOUT_ENABLED` — idle 1800 с по активности
+    stdout/transcript и потолок 3600 с (`AGY_IDLE_TIMEOUT_S`, `AGY_TIMEOUT_S`);
+  * `graceful_timeout_on_partial` / `AGY_GRACEFUL_TIMEOUT_ON_PARTIAL` — timeout и
+    idle_timeout после частичной выдачи завершаются `finish_reason="length"` вместо 504.
+
 Изображения (метод `workspace-read`): `image_url` в NDJSON парсер agy не принимает, поэтому
 проверенные data-URL (PNG/JPEG/GIF/WebP) кладутся файлами в `WORKSPACE/img-<uuid>` на время
 хода, каталог отдаётся CLI через `--add-dir`, а в промпте они идут как `[image N]` и блок
@@ -62,6 +75,7 @@ AGY_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в �
 
 from __future__ import annotations
 
+import bisect
 import base64
 import hashlib
 import json
@@ -81,7 +95,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, cast, final
+from typing import Any, Callable, NamedTuple, cast, final
 
 # Корень репозитория cli-agent-bridge: resolve() раскрывает симлинк деплоя
 # (~/.dsh/bridges/agy-bridge -> <repo>/bridges/agy-bridge), parents[2] = <repo>.
@@ -185,6 +199,63 @@ POLL_BUCKET_CAPACITY_TENTHS = 30
 POLL_BUCKET_REFILL_TENTHS_PER_S = 20
 POLL_BUCKET_COST_TENTHS = 10
 RETRY_PAUSE_CAP_S = 2.0
+# Сквозные бюджеты запроса (AD-003/AD-004). Резерв 5.5 с = drain 0.5 + финальный flush 5.0.
+T_REQ_BUDGET_S = 3600.0
+T_DRAIN_MAX_S = 0.5
+T_FINAL_FLUSH_S = 5.0
+T_RESERVE_S = T_DRAIN_MAX_S + T_FINAL_FLUSH_S
+T_MIN_ATTEMPT_S = 1.0
+# Настроенные idle/max при extended_timeout_enabled (AD-003): idle 1800 с, потолок 3600 с.
+EXT_IDLE_TIMEOUT_S = 1800.0
+EXT_MAX_TIMEOUT_S = 3600.0
+# Границы арбитра planner-контента одного хода (AD-001).
+MAX_CONTENT_STEPS = MAX_STEPS_TRACKED
+MAX_CONTENT_BYTES_PER_TURN = 8 * 1024 * 1024
+MAX_TOOL_MARKERS_PER_TURN = 32
+# Расходящийся (непрефиксный) planner-текст удерживается для graceful-хвоста до 64 КиБ.
+MAX_RETAINED_DIVERGENT_BYTES = 65536
+# Закрытый список имён нативных инструментов для маркера прогресса (AD-002).
+TOOL_NAME_ALLOWLIST = frozenset(
+    {
+        "run_command",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "manage_task",
+        "search_web",
+        "search_marketplace",
+        "ask_question",
+        "schedule",
+        "send_message",
+        "invoke_subagent",
+        "define_subagent",
+        "manage_subagents",
+        "list_resources",
+        "read_resource",
+        "grep_search",
+        "find_by_name",
+        "list_dir",
+        "view_file_outline",
+        "view_code_item",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "command_status",
+        "send_command_input",
+        "read_url_content",
+        "view_content_chunk",
+        "browser_subagent",
+        "generate_image",
+        "task_boundary",
+        "notify_user",
+        "bash",
+        "glob",
+        "grep",
+        "read",
+        "edit",
+        "write",
+    }
+)
+_SAFE_MCP_TOOL_RE = re.compile(r"mcp_[a-z0-9_-]{1,32}_[a-z0-9_]{1,32}\Z")
 
 # Effort-оси. `--effort` у agy принимает low|medium|high; id модели — база без уровня,
 # уровень всегда уходит отдельным флагом (см. модуль-docstring).
@@ -1234,7 +1305,11 @@ def _reset_sqlite_guards_for_tests() -> None:
     global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
     global _sqlite_divergence_count, _sqlite_drain_deadline_count
     global _sqlite_open_connections, _sqlite_max_open_connections, _rng
-    global _image_flag_cache
+    global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache
+    with _cfg_lock:
+        _cfg_snapshot = _COLD_FLAGS
+        _cfg_key = None
+        _cfg_checked_at = None
     with _image_flag_lock:
         _image_flag_cache = (0.0, False)
     with _sha_cache_lock:
@@ -1311,6 +1386,173 @@ def _sqlite_disabled_reason() -> str:
 def _is_sqlite_reasoning_enabled() -> bool:
     """Двухуровневый fail-closed выключатель SQLite-источника (REQ-011)."""
     return _sqlite_disabled_reason() == ""
+
+
+# ---- Флаги новой политики (AD-005): локальный GigaRC-совместимый снимок -------------
+# Stdlib-only LaunchAgent: ни SDK, ни удалённого транспорта. Все четыре флага имеют
+# строгий кодовый False (прежнее поведение до явного включения). Приоритет:
+# env override > JSON bool из dynamic_config.json > False.
+
+
+class _RuntimeFlags(NamedTuple):
+    """Неизменяемый валидированный снимок флагов новой политики."""
+
+    planner_content_streaming_enabled: bool = False
+    emit_tool_trace: bool = False
+    extended_timeout_enabled: bool = False
+    graceful_timeout_on_partial: bool = False
+
+
+_NEW_FLAG_ENV = {
+    "planner_content_streaming_enabled": "AGY_PLANNER_CONTENT_STREAMING_ENABLED",
+    "emit_tool_trace": "AGY_BRIDGE_EMIT_TOOL_TRACE",
+    "extended_timeout_enabled": "AGY_EXTENDED_TIMEOUT_ENABLED",
+    "graceful_timeout_on_partial": "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL",
+}
+_ENV_TRUE = frozenset({"1", "true", "yes", "on"})
+_ENV_FALSE = frozenset({"0", "false", "no", "off"})
+_COLD_FLAGS = _RuntimeFlags()
+_cfg_lock = threading.Lock()
+_cfg_snapshot: _RuntimeFlags = _COLD_FLAGS
+_cfg_key: tuple[int, int] | None = None
+_cfg_checked_at: float | None = None
+_cfg_generation: int = 0
+
+
+def _parse_runtime_flags(text: str) -> _RuntimeFlags:
+    """Разобрать dynamic_config.json; ValueError — файл отвергается целиком."""
+    data = cast(object, json.loads(text))
+    if not isinstance(data, dict):
+        raise ValueError("dynamic_config: not an object")
+    raw = cast("dict[str, object]", data)
+    values: dict[str, bool] = {}
+    for name in _RuntimeFlags._fields:
+        value = raw.get(name, False)
+        if not isinstance(value, bool):
+            raise ValueError("dynamic_config: %s is not boolean" % name)
+        values[name] = value
+    return _RuntimeFlags(**values)
+
+
+def _runtime_snapshot() -> _RuntimeFlags:
+    """Снимок флагов из dynamic_config.json: TTL 1.0 с, ключ версии (mtime_ns, size).
+
+    Пока stat не изменился, JSON не разбирается (identity снимка сохраняется). Битый
+    JSON или не-bool значение отвергают файл целиком: действует last-known-good,
+    на холодном старте — False. Отсутствие файла — валидное состояние «все False».
+    """
+    global _cfg_snapshot, _cfg_key, _cfg_checked_at, _cfg_generation
+    now = time.monotonic()
+    with _cfg_lock:
+        if _cfg_checked_at is not None and now - _cfg_checked_at < FLAG_TTL_S:
+            return _cfg_snapshot
+        known_key = _cfg_key
+        snapshot = _cfg_snapshot
+        gen = _cfg_generation
+    key = known_key
+    try:
+        info = DYNAMIC_CONFIG_PATH.stat()
+    except FileNotFoundError:
+        snapshot, key = _COLD_FLAGS, None
+    except OSError:
+        pass  # транзиентная ошибка: остаётся last-known-good
+    else:
+        new_key = (info.st_mtime_ns, info.st_size)
+        if new_key != known_key:
+            try:
+                parsed = _parse_runtime_flags(
+                    DYNAMIC_CONFIG_PATH.read_text(encoding="utf-8")
+                )
+            except OSError:
+                pass  # повторим на следующем TTL
+            except ValueError:
+                key = (
+                    new_key  # битый файл: lastgood, без повторного разбора того же stat
+                )
+            else:
+                snapshot, key = parsed, new_key
+    with _cfg_lock:
+        if _cfg_generation != gen:
+            # Параллельный читатель уже записал более свежий снимок: не затираем его.
+            return _cfg_snapshot
+        _cfg_snapshot = snapshot
+        _cfg_key = key
+        _cfg_checked_at = time.monotonic()
+        _cfg_generation = gen + 1
+    return snapshot
+
+
+def _new_flag(name: str) -> bool:
+    """Флаг новой политики: явный env (0/false/no/off, 1/true/yes/on) > JSON bool > False."""
+    env = os.environ.get(_NEW_FLAG_ENV[name], "").strip().lower()
+    if env in _ENV_TRUE:
+        return True
+    if env in _ENV_FALSE:
+        return False
+    return bool(getattr(_runtime_snapshot(), name))
+
+
+def _positive_env(name: str) -> float | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not value > 0.0 or value != value or value == float("inf"):
+        return None
+    return value
+
+
+def _extended_timeouts() -> tuple[float, float]:
+    """(idle, max) настроенные таймауты: env AGY_IDLE_TIMEOUT_S/AGY_TIMEOUT_S, иначе 1800/3600."""
+    idle = (
+        _positive_env("AGY_IDLE_TIMEOUT_S")
+        or _positive_env("AGY_BRIDGE_IDLE_TIMEOUT")
+        or EXT_IDLE_TIMEOUT_S
+    )
+    cap = _positive_env("AGY_TIMEOUT_S") or EXT_MAX_TIMEOUT_S
+    return min(idle, cap), cap
+
+
+@final
+class _TimeoutPolicy:
+    """Политика одной попытки при extended_timeout_enabled (AD-003)."""
+
+    def __init__(
+        self,
+        t_req_start: float,
+        idle_timeout_s: float,
+        max_timeout_s: float,
+        effective_max_timeout_s: float,
+        can_start: bool = True,
+    ) -> None:
+        self.t_req_start = t_req_start
+        self.idle_timeout_s = idle_timeout_s
+        self.max_timeout_s = max_timeout_s
+        self.effective_max_timeout_s = effective_max_timeout_s
+        self.can_start = can_start
+
+
+def _build_timeout_policy(t_req_start: float) -> _TimeoutPolicy | None:
+    """Политика попытки; None — extended выключен (прежние TIMEOUT_S/IDLE_TIMEOUT_S).
+
+    Бюджет запроса T_REQ_BUDGET_S считается от t_req_start (до admission) и не
+    перезапускается на retry; на drain и финальный flush резервируется T_RESERVE_S.
+    """
+    if not _new_flag("extended_timeout_enabled"):
+        return None
+    idle, cap = _extended_timeouts()
+    usable = t_req_start + T_REQ_BUDGET_S - time.monotonic() - T_RESERVE_S
+    can_start = usable >= T_MIN_ATTEMPT_S
+    return _TimeoutPolicy(
+        t_req_start=t_req_start,
+        idle_timeout_s=idle,
+        max_timeout_s=cap,
+        effective_max_timeout_s=min(cap, usable) if can_start else 0.0,
+        can_start=can_start,
+    )
 
 
 def _breaker_blocks_now() -> bool:
@@ -1896,6 +2138,356 @@ _STEPS_SQL = (
 
 
 @final
+class _ArbStep:
+    """Канонический шаг арбитра: источник-создатель, выданный префикс, заморозка."""
+
+    __slots__ = ("origin", "emitted", "frozen")
+
+    def __init__(self, origin: str) -> None:
+        self.origin = origin
+        self.emitted = ""
+        self.frozen = False
+
+
+@final
+class _ContentArbiter:
+    """Двухуровневый арбитр planner-текста двух источников (stdout и transcript), AD-001.
+
+    Вызывается под `Run._emit_lock`; ввода-вывода внутри нет. Кандидат — кумулятивный
+    снимок текста шага.
+
+    Уровень 1 — ключ `(turn_id, cid, step_idx)` при валидном `step_idx >= 0`: равный
+    снимок или его префикс дают 0 байт, расширение — только суффикс, непрефиксное
+    расхождение замораживает шаг (без повтора старого префикса и склейки мусора).
+
+    Уровень 2 — turn-level: кандидат без валидного idx (None/<0/не-int) либо со
+    «чужим» idx сверяется со снимками шагов, созданных ДРУГИМ источником (при idx
+    None — любым): равный/префикс -> 0 байт, расширение последнего снимка -> суффикс;
+    совпавший шаг получает alias (source, idx) -> канонический watermark. Два
+    валидных шага одного источника с одинаковым текстом сохраняются оба.
+
+    Индексы: equality — dict, префикс — bisect по отсортированным снимкам; обхода
+    всей истории на каждый чанк нет. При исчерпании лимитов приём прекращается с
+    явным `overflow` (accepted-текст молча не отбрасывается и не переотдаётся).
+    """
+
+    def __init__(self, turn_id: str) -> None:
+        self.turn_id = turn_id
+        self.by_key: dict[tuple[str, str, int], _ArbStep] = {}
+        self.step_count = 0
+        self.eq_index: dict[str, list[_ArbStep]] = {}
+        self.sorted_texts: list[str] = []
+        # Те же индексы в разрезе источника-создателя: кандидат с валидным idx
+        # сверяется только с шагами ДРУГИХ источников, без скана одноимённых.
+        self._eq_by_source: dict[str, dict[str, list[_ArbStep]]] = {}
+        self._sorted_by_source: dict[str, list[str]] = {}
+        self.retained_divergent: list[str] = []
+        self.retained_divergent_bytes = 0
+        self.last_step: _ArbStep | None = None
+        self.last_by_source: dict[str, _ArbStep] = {}
+        self.chunks: list[str] = []
+        self.bytes_total = 0
+        self.overflow = False
+        self.divergences = 0
+        self.probes = 0
+
+    def _set_overflow(self, why: str) -> None:
+        if not self.overflow:
+            self.overflow = True
+            _log(f"content-overflow turn={self.turn_id[:8] or '-'} why={why}")
+
+    def _retain_divergent(self, text: str) -> None:
+        """Удержать расходящийся текст (до MAX_RETAINED_DIVERGENT_BYTES суммарно)."""
+        room = MAX_RETAINED_DIVERGENT_BYTES - self.retained_divergent_bytes
+        if room <= 0 or not text:
+            return
+        data = text.encode("utf-8")
+        if len(data) > room:
+            text = data[:room].decode("utf-8", "ignore")
+            data = text.encode("utf-8")
+        if text:
+            self.retained_divergent.append(text)
+            self.retained_divergent_bytes += len(data)
+
+    def retained_divergent_text(self) -> str:
+        return "".join(self.retained_divergent)
+
+    @staticmethod
+    def _drop(
+        eq: dict[str, list[_ArbStep]],
+        texts: list[str],
+        step: _ArbStep,
+        old: str,
+    ) -> None:
+        bucket = eq.get(old)
+        if bucket is None:
+            return
+        bucket.remove(step)
+        if not bucket:
+            del eq[old]
+            pos = bisect.bisect_left(texts, old)
+            if pos < len(texts) and texts[pos] == old:
+                del texts[pos]
+
+    @staticmethod
+    def _put(
+        eq: dict[str, list[_ArbStep]], texts: list[str], step: _ArbStep, text: str
+    ) -> None:
+        bucket = eq.setdefault(text, [])
+        if not bucket:
+            bisect.insort(texts, text)
+        bucket.append(step)
+
+    def _unindex(self, step: _ArbStep) -> None:
+        old = step.emitted
+        if not old:
+            return
+        self._drop(self.eq_index, self.sorted_texts, step, old)
+        self._drop(
+            self._eq_by_source.setdefault(step.origin, {}),
+            self._sorted_by_source.setdefault(step.origin, []),
+            step,
+            old,
+        )
+
+    def _index(self, step: _ArbStep, text: str) -> None:
+        self._put(self.eq_index, self.sorted_texts, step, text)
+        self._put(
+            self._eq_by_source.setdefault(step.origin, {}),
+            self._sorted_by_source.setdefault(step.origin, []),
+            step,
+            text,
+        )
+
+    def _eligible(self, step: _ArbStep, source: str, idx: int | None) -> bool:
+        self.probes += 1
+        return idx is None or step.origin != source
+
+    def _match(self, source: str, idx: int | None, text: str) -> _ArbStep | None:
+        """Шаг, к которому относится кандидат без прямого ключа (уровень 2)."""
+        if idx is None:
+            found = self._scan(self.eq_index, self.sorted_texts, source, idx, text)
+        else:
+            # Валидный idx: подходят только шаги других источников; одноимённые
+            # (N одинаковых шагов одного источника) не просматриваются вовсе.
+            found = None
+            for other, eq in self._eq_by_source.items():
+                if other == source:
+                    continue
+                found = self._scan(eq, self._sorted_by_source[other], source, idx, text)
+                if found is not None:
+                    break
+        if found is not None:
+            return found
+        refs: list[_ArbStep] = []
+        if self.last_step is not None:
+            refs.append(self.last_step)
+        for other, step in self.last_by_source.items():
+            if other != source and step not in refs:
+                refs.append(step)
+        for step in refs:
+            if (
+                step.emitted
+                and text.startswith(step.emitted)
+                and self._eligible(step, source, idx)
+            ):
+                return step
+        return None
+
+    def _scan(
+        self,
+        eq: dict[str, list[_ArbStep]],
+        texts: list[str],
+        source: str,
+        idx: int | None,
+        text: str,
+    ) -> _ArbStep | None:
+        for step in eq.get(text, ()):
+            if self._eligible(step, source, idx):
+                return step
+        pos = bisect.bisect_left(texts, text)
+        while pos < len(texts) and texts[pos].startswith(text):
+            for step in eq[texts[pos]]:
+                if self._eligible(step, source, idx):
+                    return step
+            pos += 1
+        return None
+
+    def _advance(self, step: _ArbStep, source: str, text: str) -> str:
+        if step.frozen:
+            return ""
+        prefix = step.emitted
+        if text == prefix or (len(text) < len(prefix) and prefix.startswith(text)):
+            return ""
+        if not text.startswith(prefix):
+            step.frozen = True
+            self._retain_divergent(text)
+            self.divergences += 1
+            _log(f"content-divergence turn={self.turn_id[:8] or '-'} source={source}")
+            return ""
+        suffix = text[len(prefix) :]
+        size = len(suffix.encode("utf-8"))
+        if self.bytes_total + size > MAX_CONTENT_BYTES_PER_TURN:
+            self._set_overflow("bytes")
+            return ""
+        self._unindex(step)
+        step.emitted = text
+        self._index(step, text)
+        self.chunks.append(suffix)
+        self.bytes_total += size
+        self.last_step = step
+        self.last_by_source[source] = step
+        return suffix
+
+    def offer(self, source: str, step_index: object, text: str, cid: str = "") -> str:
+        """Кумулятивный снимок -> новый суффикс ('' — дубль, префикс или заморозка)."""
+        if self.overflow or not text:
+            return ""
+        idx = (
+            step_index
+            if isinstance(step_index, int)
+            and not isinstance(step_index, bool)
+            and step_index >= 0
+            else None
+        )
+        key = (self.turn_id, cid, idx) if idx is not None else None
+        step = self.by_key.get(key) if key is not None else None
+        if step is None:
+            step = self._match(source, idx, text)
+            if step is None:
+                if self.step_count >= MAX_CONTENT_STEPS:
+                    self._set_overflow("steps")
+                    return ""
+                step = _ArbStep(source)
+                self.step_count += 1
+            if key is not None:
+                if len(self.by_key) >= 4 * MAX_CONTENT_STEPS:
+                    self._set_overflow("aliases")
+                    return ""
+                self.by_key[key] = step
+        return self._advance(step, source, text)
+
+    def reconcile_result(self, text: str) -> str:
+        """`result.response` как агрегат: досылается только то, чего ещё не было выдано."""
+        if self.overflow or not text:
+            return ""
+        emitted = "".join(self.chunks)
+        if not emitted:
+            if self.step_count >= MAX_CONTENT_STEPS:
+                self._set_overflow("steps")
+                return ""
+            self.step_count += 1
+            return self._advance(_ArbStep("result"), "result", text)
+        if text == emitted or emitted.startswith(text):
+            return ""
+        if text.startswith(emitted):
+            if self.step_count >= MAX_CONTENT_STEPS:
+                self._set_overflow("steps")
+                return ""
+            self.step_count += 1
+            return self._advance(_ArbStep("result"), "result", text[len(emitted) :])
+        if text in self.eq_index:
+            self.probes += 1
+            return ""
+        pos = bisect.bisect_left(self.sorted_texts, text)
+        if pos < len(self.sorted_texts) and self.sorted_texts[pos].startswith(text):
+            self.probes += 1
+            return ""
+        last = self.last_step
+        if last is not None and last.emitted and text.startswith(last.emitted):
+            return self._advance(last, "result", text)
+        self._retain_divergent(text)
+        self.divergences += 1
+        _log(f"content-divergence turn={self.turn_id[:8] or '-'} source=result")
+        return ""
+
+
+def _safe_tool_name(raw: object) -> str:
+    """Имя инструмента для маркера: только закрытый список, всё остальное -> `tool`."""
+    if not isinstance(raw, str):
+        return "tool"
+    name = raw.strip()
+    if (
+        not name
+        or len(name) > 128
+        or name[0] in "/."
+        or ".." in name
+        or re.fullmatch(r"[A-Za-z0-9_:./-]+", name) is None
+    ):
+        return "tool"
+    bare = re.split(r"[:./]", name)[-1]
+    if bare in TOOL_NAME_ALLOWLIST or _SAFE_MCP_TOOL_RE.fullmatch(bare) is not None:
+        return bare
+    return "tool"
+
+
+def _format_tool_marker(safe_name: str) -> str:
+    return "\n[🔧 tool: %s — done]\n" % safe_name
+
+
+@final
+class _ToolProgress:
+    """Дедупликация DONE нативных инструментов хода и безопасный маркер (AD-002).
+
+    Идентичность — `(turn_id, cid, step_index)`; без валидного `step_index` —
+    `("id", call_id)`, затем монотонный `("ord", fallback_ordinal)` из `Run._pump`,
+    иначе уникальный `("anon", n)` (событие не теряется, но тоже под потолком
+    `max_markers`). Имя инструмента ключом не является. Ни args, ни result, ни пути
+    в маркер не попадают.
+
+    Двухфазный учёт: `marker(ev, commit=False)` ключ лишь резервирует, а `commit()`
+    расходует лимит только после успешной записи маркера клиенту.
+    """
+
+    def __init__(
+        self, turn_id: str, cid: str, max_markers: int = MAX_TOOL_MARKERS_PER_TURN
+    ) -> None:
+        self.turn_id = turn_id
+        self.cid = cid
+        self.max_markers = max_markers
+        self._seen: set[tuple[object, ...]] = set()
+        self._anon_seq = 0
+        self._pending_key: tuple[object, ...] | None = None
+
+    def _key_for(self, ev: dict[str, object]) -> tuple[object, ...]:
+        step = _as_int(ev.get("step_index"))
+        if step is not None and step >= 0:
+            return (self.turn_id, self.cid, step)
+        raw_id = ev.get("call_id") or ev.get("tool_call_id") or ev.get("id")
+        if isinstance(raw_id, (str, int)) and str(raw_id).strip():
+            return ("id", str(raw_id).strip())
+        ordinal = _as_int(ev.get("fallback_ordinal"))
+        if ordinal is not None:
+            return ("ord", ordinal)
+        self._anon_seq += 1
+        return ("anon", self._anon_seq)
+
+    def marker(self, event: object, *, commit: bool = True) -> str | None:
+        """Строка маркера или None (дубль DONE того же шага / лимит маркеров)."""
+        self._pending_key = None
+        if not isinstance(event, dict):
+            return None
+        ev = cast("dict[str, object]", event)
+        key = self._key_for(ev)
+        if key in self._seen or len(self._seen) >= self.max_markers:
+            return None
+        if commit:
+            self._seen.add(key)
+        else:
+            self._pending_key = key
+        return _format_tool_marker(_safe_tool_name(ev.get("name")))
+
+    def commit(self, event: object | None = None) -> None:
+        """Засчитать маркер после успешной записи (ключ из последнего `commit=False`)."""
+        key = self._pending_key
+        self._pending_key = None
+        if key is None and isinstance(event, dict):
+            key = self._key_for(cast("dict[str, object]", event))
+        if key is not None and len(self._seen) < self.max_markers:
+            self._seen.add(key)
+
+
+@final
 class _TranscriptTail:
     """Источник мышления шагов agy: транскрипт разговора и SQLite `conversations/<cid>.db`.
 
@@ -1924,8 +2516,17 @@ class _TranscriptTail:
         resumed: bool,
         plan: _TurnPlan | None = None,
         turn_id: str = "",
+        emit_content: Callable[[int | None, str], bool] | None = None,
+        on_activity: Callable[[], None] | None = None,
     ) -> None:
         self.emit = emit
+        # PLANNER_RESPONSE.content -> арбитр (AD-001); None — прежнее поведение.
+        self.emit_content = emit_content
+        # Реальный прогресс транскрипта/SQLite текущего хода -> producer activity (AD-003).
+        self.on_activity = on_activity
+        # Дедлайн потока: синхронизируется с effective_max_timeout_s политики (AD-003).
+        self.deadline_s: float = TIMEOUT_S + 60.0
+        self._in_rewrite: bool = False
         self.stop_event = stop_event
         self.done_event = done_event
         self.resumed = resumed
@@ -2032,8 +2633,8 @@ class _TranscriptTail:
                     f"tail-timeout cid={self._cid8()}: no bind within {FIRST_TOKEN_TIMEOUT_S:g}s"
                 )
                 return
-        deadline = time.monotonic() + TIMEOUT_S + 60
-        while time.monotonic() < deadline:
+        started = time.monotonic()
+        while time.monotonic() - started < self.deadline_s:
             if self.stop_event.is_set():
                 return
             if self.done_event.is_set():
@@ -2090,6 +2691,14 @@ class _TranscriptTail:
             return False
         return True
 
+    def _note_activity(self) -> None:
+        callback = self.on_activity
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                pass
+
     # ---- транскрипт ----------------------------------------------------------------
     def _read_transcript(self) -> None:
         """Дочитать файл с offset; неполный хвост строки ждёт следующего прохода."""
@@ -2100,19 +2709,27 @@ class _TranscriptTail:
             size = path.stat().st_size
         except OSError:
             return
+        rewritten = False
         if size < self._offset:  # файл переписан с нуля — читаем заново
             _log(
                 f"tail-rewrite cid={self._cid8()}: size {size} < offset {self._offset}"
             )
             self._offset, self._buf = 0, b""
+            rewritten = True
         if size == self._offset:
             return
         try:
             with open(path, "rb") as fh:
                 _ = fh.seek(self._offset)
-                self._buf += fh.read(TRANSCRIPT_READ_MAX)
+                chunk = fh.read(TRANSCRIPT_READ_MAX)
         except OSError:
             return
+        self._buf += chunk
+        # Рост файла хода — активность producer (и неполная строка). При перезаписи
+        # перечитывается старая история: активностью считаются только записи хода.
+        self._in_rewrite = rewritten
+        if chunk and not rewritten:
+            self._note_activity()
         while b"\n" in self._buf:
             line, self._buf = self._buf.split(b"\n", 1)
             self._offset += len(line) + 1
@@ -2142,12 +2759,21 @@ class _TranscriptTail:
         idx = _as_int(rec.get("step_index"))
         if idx is not None and idx < self.base_idx:
             return  # история прошлых ходов
+        if self._in_rewrite:
+            self._note_activity()
         if rtype in ("END_TURN", "TURN_COMPLETE"):
             self.end_marker = True
             return
-        if rtype != "PLANNER_RESPONSE" or idx is None:
+        if rtype != "PLANNER_RESPONSE":
             return
         content = rec.get("content")
+        emit_content = self.emit_content
+        if emit_content is not None and isinstance(content, str) and content.strip():
+            _ = emit_content(
+                idx, content
+            )  # live planner-текст, независимо от tool_calls
+        if idx is None:
+            return
         if isinstance(content, str) and content.strip() and not rec.get("tool_calls"):
             self.final_planner = True
         thinking = rec.get("thinking")
@@ -2199,6 +2825,7 @@ class _TranscriptTail:
             self.dead = True
             return False
         self.emitted += 1
+        self._note_activity()
         _log(f"{source}-emit cid={self._cid8()} step={idx} len={len(delta)}")
         return True
 
@@ -2509,6 +3136,7 @@ class Run:
         tag: str,
         conversation_id: str = "",
         turn_id: str = "",
+        policy: _TimeoutPolicy | None = None,
         add_dir: Path | None = None,
     ):
         launcher = _launcher()
@@ -2556,12 +3184,19 @@ class Run:
             _cid_release(self.run_cid, self.turn_id)
             raise
         self.started = time.monotonic()
+        # Политика попытки (AD-003): None — прежние TIMEOUT_S/IDLE_TIMEOUT_S.
+        self.policy = policy
         enabled = _is_watchdog_enabled()
         # Kill-switch выключен: порог неактивности = сквозной таймаут, `ps` не вызывается.
+        if policy is not None:
+            idle_s, cap_s = policy.idle_timeout_s, policy.effective_max_timeout_s
+        else:
+            idle_s = IDLE_TIMEOUT_S if enabled else float(TIMEOUT_S)
+            cap_s = float(TIMEOUT_S)  # дефолт core (3600 с) не используется
         self.controller = AdaptiveTimeoutController(
-            idle_timeout_s=IDLE_TIMEOUT_S if enabled else float(TIMEOUT_S),
-            safety_cap_s=float(TIMEOUT_S),  # дефолт core (3600 с) не используется
-            finish_reserve_s=0.0,  # эффективный потолок ровно TIMEOUT_S
+            idle_timeout_s=idle_s,
+            safety_cap_s=cap_s,
+            finish_reserve_s=0.0,  # эффективный потолок ровно cap_s
             watchdog_enabled=enabled,
             log_fn=_log,
         )
@@ -2585,6 +3220,13 @@ class Run:
         # кладёт в очередь события ("reasoning", текст).
         self._proc_done = threading.Event()
         self._stop_watch = threading.Event()
+        # Арбитр planner-контента двух источников (AD-001): работает под _emit_lock.
+        self.content_streaming = _new_flag("planner_content_streaming_enabled")
+        self._arbiter = _ContentArbiter(self.turn_id)
+        # Реальная активность producer'ов (stdout/transcript), независимо от cpu_delta.
+        self._activity_lock = threading.Lock()
+        self.last_producer_activity_ts: float = self.started
+        self.transcript_activity_ts: float | None = None
         _decide_turn_mode(plan)
         self._tail = _TranscriptTail(
             emit=self._emit_reasoning,
@@ -2593,7 +3235,11 @@ class Run:
             resumed=bool(self.run_cid),
             plan=plan,
             turn_id=self.turn_id,
+            emit_content=self._offer_transcript if self.content_streaming else None,
+            on_activity=self._on_tail_activity,
         )
+        if policy is not None:
+            self._tail.deadline_s = policy.effective_max_timeout_s + 60.0
         if self.run_cid:
             self._tail.bind(self.run_cid)
         threading.Thread(target=self._feed_stdin, daemon=True).start()
@@ -2642,6 +3288,72 @@ class Run:
             self.drain_closed = True
             self.q.put((kind, payload))
 
+    def note_producer_activity(self, source: str) -> None:
+        """Новый прогресс producer'а (stdout/transcript): продлевает idle, не зависит от CPU."""
+        now = time.monotonic()
+        with self._activity_lock:
+            self.last_producer_activity_ts = now
+            if source == "transcript":
+                self.transcript_activity_ts = now
+
+    def _on_tail_activity(self) -> None:
+        self.note_producer_activity("transcript")
+
+    def offer_content(self, source: str, step_index: object, text: str) -> bool:
+        """Кандидат planner-текста в арбитр; новый суффикс уходит в очередь под _emit_lock.
+
+        Сокетного ввода-вывода здесь нет: потребитель (`_execute`) пишет в сокет сам.
+        False — выдача уже закрыта terminal barrier'ом.
+        """
+        with self._emit_lock:
+            if self.drain_closed:
+                return False
+            suffix = self._arbiter.offer(
+                source, step_index, text, self._tail.cid or self.run_cid
+            )
+            if suffix:
+                self.q.put(("text", suffix))
+        return True
+
+    def _offer_transcript(self, step_index: int | None, text: str) -> bool:
+        return self.offer_content("transcript", step_index, text)
+
+    def reconcile_result(self, text: str) -> str:
+        """Недостающий хвост `result.response` относительно уже принятого арбитром."""
+        with self._emit_lock:
+            return self._arbiter.reconcile_result(text)
+
+    def retained_divergent_text(self) -> str:
+        """Расходящийся (непрефиксный) planner-текст, удержанный арбитром."""
+        with self._emit_lock:
+            return self._arbiter.retained_divergent_text()
+
+    def terminal_drain(self, budget_s: float) -> list[tuple[str, object]]:
+        """Ограниченный (<= budget_s) финальный дренаж на timeout/ошибке: хвост источников,
+        заморозка выдачи и остаток очереди ДО terminal marker'а.
+
+        Процесс при этом ещё жив: окно дренирования хвоста открывает `_proc_done`.
+        Возвращает необработанные потребителем события ("text"/"reasoning"/"tool_trace").
+        """
+        started = time.monotonic()
+        self._tail.drain_deadline = started + min(budget_s, DRAIN_WINDOW_S)
+        self._proc_done.set()
+        thread = self._tail.thread
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, budget_s - (time.monotonic() - started)))
+        with self._emit_lock:
+            self.drain_closed = True
+            self._done_put = True
+        events: list[tuple[str, object]] = []
+        while True:
+            try:
+                kind, payload = self.q.get_nowait()
+            except queue.Empty:
+                break
+            if kind in ("text", "reasoning", "tool_trace"):
+                events.append((kind, payload))
+        return events
+
     def _feed_stdin(self) -> None:
         """Отдать промпт на stdin и закрыть поток: agy читает stdin до EOF."""
         try:
@@ -2685,6 +3397,8 @@ class Run:
         """
         final_text = ""
         result_ev = {}
+        tool_ordinal = 0
+        tool_ordinal_by_id: dict[str, int] = {}
         term_kind = "pump_error"
         term_payload: object = "pump terminated"
         try:
@@ -2697,6 +3411,7 @@ class Run:
                 except ValueError:
                     continue
                 self.got_event = True
+                self.note_producer_activity("stdout")
                 etype = ev.get("event")
                 if etype == "init":
                     init = ev.get("init") if isinstance(ev.get("init"), dict) else {}
@@ -2725,23 +3440,53 @@ class Run:
                     )
                     kind = step.get("step_type")
                     if kind == "agent_response" and step.get("text_delta"):
-                        suffix = _reasoning_suffix(
-                            self._text_seen,
-                            str(step.get("step_index", "")),
-                            str(step["text_delta"]),
-                        )
-                        if suffix:
-                            self.q.put(("text", suffix))
-                    elif kind == "tool" and step.get("state") == "DONE":
-                        self.q.put(
-                            (
-                                "tool_trace",
-                                {
-                                    "name": str(step.get("tool_name") or "tool"),
-                                    "duration_s": step.get("duration_seconds"),
-                                },
+                        if self.content_streaming:
+                            _ = self.offer_content(
+                                "stdout",
+                                _as_int(step.get("step_index")),
+                                str(step["text_delta"]),
                             )
-                        )
+                        else:
+                            suffix = _reasoning_suffix(
+                                self._text_seen,
+                                str(step.get("step_index", "")),
+                                str(step["text_delta"]),
+                            )
+                            if suffix:
+                                self.q.put(("text", suffix))
+                    elif kind == "tool" and step.get("state") == "DONE":
+                        step_idx = _as_int(step.get("step_index"))
+                        trace: dict[str, object] = {
+                            "name": str(step.get("tool_name") or "tool"),
+                            "duration_s": step.get("duration_seconds"),
+                            "step_index": step_idx,
+                        }
+                        if step_idx is None:
+                            # Идентичность DONE без step_index: монотонный ordinal хода,
+                            # назначается один раз и переживает повторную доставку события.
+                            raw_id = (
+                                step.get("call_id")
+                                or step.get("tool_call_id")
+                                or step.get("id")
+                            )
+                            call_id = (
+                                str(raw_id).strip()
+                                if isinstance(raw_id, (str, int))
+                                else ""
+                            )
+                            if call_id:
+                                # Повтор события с тем же call_id получает тот же ordinal.
+                                ord_val = tool_ordinal_by_id.get(call_id)
+                                if ord_val is None:
+                                    tool_ordinal += 1
+                                    ord_val = tool_ordinal
+                                    tool_ordinal_by_id[call_id] = ord_val
+                                trace["fallback_ordinal"] = ord_val
+                                trace["call_id"] = call_id
+                            else:
+                                tool_ordinal += 1
+                                trace["fallback_ordinal"] = tool_ordinal
+                        self.q.put(("tool_trace", trace))
                 elif etype == "result":
                     result = (
                         ev.get("result") if isinstance(ev.get("result"), dict) else {}
@@ -2897,9 +3642,58 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
+    # Дедлайн единого окна финальной записи (AD-004); None — обычный режим исполнения.
+    _flush_deadline: float | None = None
+    # Исходный таймаут сокета, сохранённый на время окна: окно не должно отравлять
+    # следующий keep-alive запрос на том же соединении.
+    _flush_socket_dirty: bool = False
+    _saved_socket_timeout: float | None = None
+    # Вход HTTP-запроса (monotonic): бюджет запроса считается до admission.
+    _t_req_start: float | None = None
+
+    def _arm_flush_window(self, ctx: dict) -> None:
+        """Открыть окно T_FINAL_FLUSH_S: min(now + 5.0, t_req_start + T_REQ_BUDGET_S).
+
+        Истёкший нативный дедлайн попытки окно не обнуляет и не сокращает.
+        """
+        deadline = time.monotonic() + T_FINAL_FLUSH_S
+        t_req = ctx.get("t_req_start")
+        if isinstance(t_req, (int, float)):
+            deadline = min(deadline, float(t_req) + T_REQ_BUDGET_S)
+        self._flush_deadline = deadline
+
+    def _prepare_flush_write(self) -> bool:
+        """Перед записью в окне: settimeout(min(5.0, остаток)); False — окно исчерпано."""
+        deadline = self._flush_deadline
+        if deadline is None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        if not self._flush_socket_dirty:
+            get_to = getattr(self.connection, "gettimeout", None)
+            self._saved_socket_timeout = get_to() if callable(get_to) else None
+            self._flush_socket_dirty = True
+        self.connection.settimeout(min(T_FINAL_FLUSH_S, remaining))
+        return True
+
+    def _reset_flush_window(self) -> None:
+        """Закрыть окно финальной записи: дедлайн -> None, вернуть таймаут сокета."""
+        self._flush_deadline = None
+        if self._flush_socket_dirty:
+            self._flush_socket_dirty = False
+            saved = self._saved_socket_timeout
+            self._saved_socket_timeout = None
+            try:
+                self.connection.settimeout(saved)
+            except (OSError, ValueError, AttributeError):
+                pass
+
     def _emit(self, data: str) -> bool:
-        """Отправить SSE-строку; False — клиент ушёл."""
+        """Отправить SSE-строку; False — клиент ушёл или окно финальной записи исчерпано."""
         try:
+            if not self._prepare_flush_write():
+                return False
             self.wfile.write(data.encode("utf-8"))
             self.wfile.flush()
             return True
@@ -2926,10 +3720,17 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, {"error": {"message": message, "type": reason, "code": code}})
 
     def _acquire_slot(self, keepalive) -> str:
-        """Занять слот исполнения; '' — успех, иначе причина отказа."""
+        """Занять слот исполнения; '' — успех, иначе причина отказа.
+
+        При extended_timeout_enabled ожидание не длиннее остатка бюджета запроса
+        за вычетом резерва drain + финального flush.
+        """
         if _slots.acquire(blocking=False):
             return ""
         deadline = time.monotonic() + QUEUE_TIMEOUT_S
+        t_req_start = self._t_req_start
+        if t_req_start is not None and _new_flag("extended_timeout_enabled"):
+            deadline = min(deadline, t_req_start + T_REQ_BUDGET_S - T_RESERVE_S)
         while time.monotonic() < deadline:
             if _slots.acquire(timeout=1.0):
                 return ""
@@ -2944,6 +3745,12 @@ class Handler(BaseHTTPRequestHandler):
 
         Колбэки возвращают False, если клиент ушёл.
         Превышение deadline -> kill группы (в run.close()), state=timeout.
+
+        При extended_timeout_enabled (политика `run.policy`) действуют раздельные
+        idle (по реальной активности producer'ов stdout/transcript, независимо от
+        cpu_delta) и потолок `effective_max_timeout_s`; оба проверяются на каждой
+        итерации, в том числе при непустой очереди. Выключение флага на лету
+        возвращает legacy-дедлайн `run.started + TIMEOUT_S`.
         """
         pieces = []
         reasoning_pieces = []
@@ -2956,6 +3763,8 @@ class Handler(BaseHTTPRequestHandler):
         last_ka = time.monotonic()
         last_wd_check = time.monotonic()
         deadline = time.monotonic() + TIMEOUT_S
+        policy = getattr(run, "policy", None)
+        content_streaming = bool(getattr(run, "content_streaming", False))
         gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
@@ -2994,13 +3803,98 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 gone[0] = True
 
-        while True:
-            if time.monotonic() > deadline:
-                return state("timeout", 124, f"proxy timeout after {TIMEOUT_S}s")
-            if (
-                not run.got_event
-                and time.monotonic() - run.started > FIRST_TOKEN_TIMEOUT_S
+        def deliver(events: list) -> None:
+            nonlocal tool_events
+            for kind, payload in events:
+                if gone[0]:
+                    break
+                if kind == "text":
+                    add_content(str(payload))
+                elif kind == "reasoning":
+                    add_reasoning(str(payload))
+                elif kind == "tool_trace":
+                    tool_events += 1
+                    if not on_tool_trace(payload):
+                        gone[0] = True
+
+        def finish(
+            name: str, rc: int, err: str = "", limit: float | None = None
+        ) -> dict:
+            """Терминальное состояние с bounded drain (<= T_DRAIN_MAX_S) остатка источников.
+
+            timeout/idle_timeout при graceful: остаток откладывается в `retained_events`
+            (доставка и notice — в окне финальной записи). Иначе остаток уходит сразу.
+            """
+            retained: list = []
+            drain = getattr(run, "terminal_drain", None)
+            graceful = name in (
+                "timeout",
+                "idle_timeout",
+            ) and _new_flag("graceful_timeout_on_partial")
+            if drain is not None and (
+                graceful
+                or (
+                    content_streaming
+                    and name in ("timeout", "idle_timeout", "agy_error", "pump_error")
+                )
             ):
+                retained = list(drain(T_DRAIN_MAX_S))
+                if not graceful:
+                    deliver(retained)
+                    retained = []
+            out = state(name, rc, err)
+            if limit is not None:
+                out["timeout_limit_s"] = limit
+            if retained:
+                out["retained_events"] = retained
+                out["retained_planner_text"] = "".join(
+                    str(payload) for kind, payload in retained if kind == "text"
+                )
+            divergent = getattr(run, "retained_divergent_text", None)
+            div_text = divergent() if callable(divergent) else ""
+            if isinstance(div_text, str) and div_text:
+                out["retained_divergent_text"] = div_text
+                if (graceful or content_streaming) and not out.get(
+                    "retained_planner_text"
+                ):
+                    out["retained_planner_text"] = div_text
+            return out
+
+        while True:
+            now = time.monotonic()
+            ext = policy is not None and _new_flag("extended_timeout_enabled")
+            if ext:
+                cap = policy.effective_max_timeout_s
+                if now - run.started >= cap:
+                    return finish("timeout", 124, f"proxy timeout after {cap:g}s", cap)
+                last_progress = max(
+                    run.started,
+                    getattr(run, "last_producer_activity_ts", run.started),
+                )
+                if now - last_progress >= policy.idle_timeout_s:
+                    return finish(
+                        "idle_timeout",
+                        124,
+                        f"proxy idle timeout after {policy.idle_timeout_s:g}s "
+                        "(no stdout/transcript progress)",
+                        policy.idle_timeout_s,
+                    )
+                # Прогресс transcript — тоже «первое событие upstream», keepalive моста — нет.
+                no_first_event = (
+                    not run.got_event
+                    and getattr(run, "transcript_activity_ts", None) is None
+                )
+            else:
+                limit_at = run.started + TIMEOUT_S if policy is not None else deadline
+                if now > limit_at:
+                    return finish(
+                        "timeout",
+                        124,
+                        f"proxy timeout after {TIMEOUT_S}s",
+                        float(TIMEOUT_S),
+                    )
+                no_first_event = not run.got_event
+            if no_first_event and now - run.started > FIRST_TOKEN_TIMEOUT_S:
                 return state(
                     "first_token_timeout",
                     124,
@@ -3013,14 +3907,14 @@ class Handler(BaseHTTPRequestHandler):
                 and time.monotonic() - result_error_at > RESULT_EXIT_GRACE_S
             ):
                 # agy прислал result ERROR, но не завершился: ждать done бесконечно нельзя.
-                return state("agy_error", 1, result_error)
+                return finish("agy_error", 1, result_error)
             try:
                 kind, payload = run.q.get(timeout=1.0)
             except queue.Empty:
                 # check() запускает `ps`: не чаще WATCHDOG_INTERVAL_S. Пока идут события,
                 # on_activity() и так сбрасывает таймер, поэтому пропуск безопасен.
                 now = time.monotonic()
-                if now - last_wd_check >= WATCHDOG_INTERVAL_S:
+                if not ext and now - last_wd_check >= WATCHDOG_INTERVAL_S:
                     last_wd_check = now
                     should_stop, wd_reason, _metrics = run.controller.check(
                         run.proc.pid
@@ -3030,15 +3924,19 @@ class Handler(BaseHTTPRequestHandler):
                             f"watchdog idle_timeout pgid={run.proc.pid} "
                             f"idle>={IDLE_TIMEOUT_S:g}s"
                         )
-                        return state(
+                        return finish(
                             "idle_timeout",
                             124,
                             f"proxy idle timeout after {IDLE_TIMEOUT_S:g}s "
                             "(no activity in process group)",
+                            float(IDLE_TIMEOUT_S),
                         )
                     if should_stop and wd_reason == "absolute_cap":
-                        return state(
-                            "timeout", 124, f"proxy timeout after {TIMEOUT_S}s"
+                        return finish(
+                            "timeout",
+                            124,
+                            f"proxy timeout after {TIMEOUT_S}s",
+                            float(TIMEOUT_S),
                         )
                     # wd_reason == "child_exited": штатно, "done"/"pump_error" придут из очереди
                 if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
@@ -3079,14 +3977,21 @@ class Handler(BaseHTTPRequestHandler):
                     result_error = message[:500]
                     result_error_at = time.monotonic()
             elif kind == "pump_error":
-                return state("pump_error", 1, str(payload))
+                return finish("pump_error", 1, str(payload))
             elif kind == "done":
                 rc, final_text, raw_result = payload
                 if result_error:
                     return state("agy_error", 1, result_error)
                 if not result_ev and raw_result:
                     result_ev = raw_result
-                if not pieces and final_text:
+                if content_streaming:
+                    # Хвост транскрипта, записанный прямо перед done, дренируется
+                    # ДО reconcile: result.response — агрегат, досылается лишь недостающее.
+                    drain = getattr(run, "terminal_drain", None)
+                    if callable(drain):
+                        deliver(list(drain(T_DRAIN_MAX_S)))
+                    add_content(run.reconcile_result(final_text))
+                elif not pieces and final_text:
                     add_content(final_text)
                 if gone[0]:
                     return state("client_gone", 1)
@@ -3123,6 +4028,12 @@ class Handler(BaseHTTPRequestHandler):
         effort = ctx["effort"]
         tag = ctx["tag"]
         t_enter = time.monotonic()
+        # Бюджет запроса считается от входа HTTP-запроса, до ожидания admission.
+        raw_req_start = ctx.get("t_req_start")
+        t_req_start = (
+            float(raw_req_start) if isinstance(raw_req_start, (int, float)) else t_enter
+        )
+        self._t_req_start = t_req_start
         reason = self._acquire_slot(keepalive)
         if reason:
             _log(f"no slot ({reason}) model={model} {tag}")
@@ -3207,6 +4118,26 @@ class Handler(BaseHTTPRequestHandler):
                     return failed
             _retry_credit()
             for attempt in (1, 2):
+                policy = _build_timeout_policy(t_req_start)
+                if policy is not None and not policy.can_start:
+                    # Бюджет запроса исчерпан: новой попытки нет, остаток не перезапускается.
+                    _log(f"request-budget-exhausted attempt={attempt} {tag}")
+                    if attempt == 1:
+                        out = {
+                            "state": "timeout",
+                            "rc": 124,
+                            "text": "",
+                            "usage": {},
+                            "result": {},
+                            "err": "request budget exhausted before the first attempt",
+                            "tool_calls": [],
+                            "tool_events": 0,
+                            "conversation_id": "",
+                            "num_turns": None,
+                            "duration_s": None,
+                            "timeout_limit_s": policy.max_timeout_s,
+                        }
+                    break
                 _log(
                     f"exec model={model} effort={effort} effort_source={ctx['effort_source']} "
                     f"prompt_bytes={len(ctx['prompt'].encode())} "
@@ -3223,6 +4154,7 @@ class Handler(BaseHTTPRequestHandler):
                         tag,
                         conversation_id=ctx.get("conversation_id") or "",
                         turn_id=str(ctx.get("turn_id") or ""),
+                        policy=policy,
                         add_dir=img_dir if images else None,
                     )
                 except LauncherUnavailable:
@@ -3266,6 +4198,17 @@ class Handler(BaseHTTPRequestHandler):
                     out = self._execute(
                         run, on_text, on_tool_trace, on_reasoning, keepalive
                     )
+                    finalize = ctx.get("finalize_timeout")
+                    if finalize is not None and out.get("state") in (
+                        "timeout",
+                        "idle_timeout",
+                    ):
+                        # Graceful-финал пишется ДО зачистки процесса: kill/reap не
+                        # съедает окно финальной записи. Внутренний state/rc не меняются.
+                        try:
+                            finalize(out)
+                        except Exception as exc:  # noqa: BLE001
+                            _log(f"graceful-finalize-error err={type(exc).__name__}")
                 finally:
                     run.close()
                 if out["state"] == "done":
@@ -3349,15 +4292,19 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _error_body(out: dict) -> Any:
         st = out.get("state")
+        limit = out.get("timeout_limit_s")
+        has_limit = isinstance(limit, (int, float))
         if st == "timeout":
+            shown = f"{limit:g}" if has_limit else str(TIMEOUT_S)
             return {
-                "message": f"agy timed out after {TIMEOUT_S}s",
+                "message": f"agy timed out after {shown}s",
                 "type": "timeout",
                 "code": 504,
             }
         if st == "idle_timeout":
+            shown = f"{limit:g}" if has_limit else f"{IDLE_TIMEOUT_S:g}"
             return {
-                "message": f"agy execution idle timeout after {IDLE_TIMEOUT_S:g}s "
+                "message": f"agy execution idle timeout after {shown}s "
                 "(no activity or progress in process group)",
                 "type": "idle_timeout",
                 "code": 504,
@@ -3485,6 +4432,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802
+        t_req_start = time.monotonic()  # старт бюджета запроса: до admission
         if not _auth_ok(self):
             # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
             self.close_connection = True
@@ -3693,6 +4641,7 @@ class Handler(BaseHTTPRequestHandler):
                     is_resumed = True
                     prompt = _get_resumed_turn_prompt(messages, images)
             ctx: dict[str, object] = {
+                "t_req_start": t_req_start,
                 "turn_id": turn_id,
                 "sess_key": sess_key,
                 "hot_resumed": is_resumed,
@@ -3725,36 +4674,132 @@ class Handler(BaseHTTPRequestHandler):
             if reserved and budget is not None:
                 budget.release(reserved)
 
-    def _serve_json(self, ctx: dict) -> None:
-        out = self._run_once(
-            ctx, lambda _v: True, lambda _e: True, lambda _r: True, None
+    @staticmethod
+    def _graceful_notice(reason: str, limit_s: object) -> str:
+        """Диагностика мягкого завершения: фактическая причина и сработавший лимит."""
+        if isinstance(limit_s, (int, float)):
+            shown = f"{limit_s:g}"
+        elif reason == "idle_timeout":
+            shown = f"{IDLE_TIMEOUT_S:g}"
+        else:
+            shown = str(TIMEOUT_S)
+        return (
+            f"\n\n[⚠️ Превышен лимит времени хода agy ({reason}, {shown}s). "
+            "Частичный ответ сохранён без аварийного сброса сессии.]\n\n"
         )
+
+    def _serve_json(self, ctx: dict) -> None:
+        self._reset_flush_window()
+        try:
+            self._serve_json_body(ctx)
+        finally:
+            self._reset_flush_window()
+
+    def _serve_json_body(self, ctx: dict) -> None:
+        progress = _ToolProgress(
+            str(ctx.get("turn_id") or ""), str(ctx.get("conversation_id") or "")
+        )
+        markers: list[str] = []
+        retained_cache: list[tuple[str, str]] = []
+
+        def on_tool_trace(event: object) -> bool:
+            # Выключенный флаг — полный no-op до любого форматирования.
+            if not _new_flag("emit_tool_trace"):
+                return True
+            marker = progress.marker(event, commit=False)
+            if marker is not None:
+                markers.append(marker)
+                progress.commit()
+            return True
+
+        def consume_retained(out: dict) -> tuple[str, str]:
+            """Остаток terminal drain: (текст, мышление); tool_trace -> маркеры, один раз."""
+            if retained_cache:
+                return retained_cache[0]
+            retained = list(out.get("retained_events") or [])
+            retained_text = "".join(str(p) for k, p in retained if k == "text")
+            retained_reasoning = ""
+            for kind, payload in retained:
+                if kind == "reasoning":
+                    retained_reasoning += str(payload)
+                elif kind == "tool_trace":
+                    _ = on_tool_trace(payload)
+            retained_cache.append((retained_text, retained_reasoning))
+            return retained_cache[0]
+
+        def build_payload(
+            out: dict, content: str, reasoning: str, finish_reason: str
+        ) -> dict:
+            message = {"role": "assistant", "content": content}
+            if reasoning:
+                # OpenAI-совместимое поле мышления: Harness читает его из сообщения
+                # ассистента так же, как из дельты потока.
+                message["reasoning_content"] = reasoning
+            payload = {
+                "id": f"chatcmpl-agy-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": ctx["model"],
+                "choices": [
+                    {"index": 0, "message": message, "finish_reason": finish_reason}
+                ],
+                "usage": self._usage_payload(out.get("usage") or {}),
+            }
+            if out.get("conversation_id"):
+                payload["conversation_id"] = out["conversation_id"]
+            return payload
+
+        def finalize_timeout(out: dict) -> None:
+            """Graceful-финал timeout/idle_timeout: 200/length (идемпотентно, до run.close())."""
+            state = out.get("state")
+            if out.get("graceful_done") or state not in ("timeout", "idle_timeout"):
+                return
+            if not _new_flag("graceful_timeout_on_partial"):
+                return
+            # Остаток источников из terminal drain + полезный partial -> 200/length.
+            retained_text, retained_reasoning = consume_retained(out)
+            content = str(out.get("text") or "")
+            base_reasoning = str(out.get("reasoning") or "")
+            reasoning = base_reasoning + retained_reasoning + "".join(markers)
+            if not (content.strip() or reasoning.strip() or retained_text.strip()):
+                return  # полная тишина: прежняя ошибка 504
+            content += retained_text
+            content += self._graceful_notice(str(state), out.get("timeout_limit_s"))
+            self._arm_flush_window(ctx)
+            out["graceful_done"] = True
+            _log(f"graceful-timeout state={state} mode=json")
+            if not self._prepare_flush_write():
+                return
+            self._send(200, build_payload(out, content, reasoning, "length"))
+
+        ctx["finalize_timeout"] = finalize_timeout
+        out = self._run_once(ctx, lambda _v: True, on_tool_trace, lambda _r: True, None)
         if out.get("state") == "client_gone":
             return
+        if out.get("graceful_done"):
+            return
+        finalize_timeout(out)  # страховка, если _run_once не вызвал hook
+        if out.get("graceful_done"):
+            return
+        retained_reasoning = retained_cache[0][1] if retained_cache else ""
+        reasoning = str(out.get("reasoning") or "") + retained_reasoning
+        reasoning += "".join(markers)
         err = self._error_body(out)
         if err is not None:
             self._send(err["code"], {"error": err})
             return
-        usage = out.get("usage") or {}
-        message = {"role": "assistant", "content": out["text"]}
-        reasoning = out.get("reasoning") or ""
-        if reasoning:
-            # OpenAI-совместимое поле мышления: Harness читает его из сообщения
-            # ассистента так же, как из дельты потока.
-            message["reasoning_content"] = reasoning
-        payload = {
-            "id": f"chatcmpl-agy-{uuid.uuid4().hex[:12]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": ctx["model"],
-            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
-            "usage": self._usage_payload(usage),
-        }
-        if out.get("conversation_id"):
-            payload["conversation_id"] = out["conversation_id"]
-        self._send(200, payload)
+        self._send(
+            200, build_payload(out, str(out.get("text") or ""), reasoning, "stop")
+        )
 
     def _serve_sse(self, ctx: dict) -> None:
+        self._reset_flush_window()
+        try:
+            self._serve_sse_body(ctx)
+        finally:
+            self._reset_flush_window()
+
+    def _serve_sse_body(self, ctx: dict) -> None:
         completion_id = f"chatcmpl-agy-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         shown_model = ctx["model"]
@@ -3788,27 +4833,105 @@ class Handler(BaseHTTPRequestHandler):
                 body["conversation_id"] = conversation_id
             return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
 
+        # Счётчики полезной выдачи растут только после УСПЕШНОЙ записи клиенту
+        # (role-chunk, keepalive и пустые/whitespace-дельты не в счёт).
+        emitted_content = [0]
+        emitted_reasoning_or_tool = [0]
+        progress = _ToolProgress(
+            str(ctx.get("turn_id") or ""), str(ctx.get("conversation_id") or "")
+        )
+
         def on_text(value: str) -> bool:
-            return self._emit(chunk({"content": value}))
+            ok = self._emit(chunk({"content": value}))
+            if ok and value.strip():
+                emitted_content[0] += len(value.strip())
+            return ok
 
         def on_reasoning(value: str) -> bool:
             # Мышление шага: Harness читает первое непустое из
             # reasoning_content|reasoning|reasoning_text — отдаём только первое.
-            return self._emit(chunk({"reasoning_content": value}))
+            ok = self._emit(chunk({"reasoning_content": value}))
+            if ok and value.strip():
+                emitted_reasoning_or_tool[0] += 1
+            return ok
 
-        def on_tool_trace(_event: dict) -> bool:
-            # Нативный инструмент agy исполняется внутри CLI и наружу не транслируется:
-            # клиенту нечего добавлять к его же истории вызовов. Трассировка — в stderr.
-            return True
+        def on_tool_trace(event: dict) -> bool:
+            # Нативный инструмент agy исполняется внутри CLI и наружу не уходит как
+            # tool_call. Безопасный маркер прогресса — только при emit_tool_trace;
+            # выключенный флаг — полный no-op до любого форматирования строк.
+            if not _new_flag("emit_tool_trace"):
+                return True
+            marker = progress.marker(event, commit=False)
+            if marker is None:
+                return True
+            ok = on_reasoning(marker)
+            if ok:
+                progress.commit()
+            return ok
 
         def keepalive() -> bool:
             return self._emit(": keepalive\n\n")
 
+        def finalize_timeout(out: dict) -> None:
+            """Graceful-финал timeout/idle_timeout после полезной выдачи (идемпотентно).
+
+            Один общий arbiter-досыл, один notice, один `finish_reason="length"`, один
+            [DONE] — всё в одном окне T_FINAL_FLUSH_S; ошибка записи прекращает записи.
+            """
+            if out.get("graceful_done") or out.get("state") not in (
+                "timeout",
+                "idle_timeout",
+            ):
+                return
+            if not _new_flag("graceful_timeout_on_partial"):
+                return
+            retained = list(out.get("retained_events") or [])
+            retained_text = "".join(str(p) for k, p in retained if k == "text")
+            if not (
+                emitted_content[0] > 0
+                or emitted_reasoning_or_tool[0] > 0
+                or retained_text.strip()
+            ):
+                return  # полная тишина: прежняя ошибка 504
+            self._arm_flush_window(ctx)
+            ok = True
+            for kind, payload in retained:
+                if kind == "text":
+                    ok = on_text(str(payload))
+                elif kind == "reasoning":
+                    ok = on_reasoning(str(payload))
+                elif kind == "tool_trace":
+                    ok = on_tool_trace(payload)
+                if not ok:
+                    break
+            reason = str(out.get("state"))
+            conv_id = str(out.get("conversation_id") or "")
+            if ok:
+                ok = self._emit(
+                    chunk(
+                        {
+                            "content": self._graceful_notice(
+                                reason, out.get("timeout_limit_s")
+                            )
+                        }
+                    )
+                )
+            if ok:
+                ok = self._emit(chunk({}, "length", conversation_id=conv_id))
+            if ok:
+                _ = self._emit("data: [DONE]\n\n")
+            out["graceful_done"] = True
+            _log(f"graceful-timeout state={reason} mode=sse ok={int(bool(ok))}")
+
+        ctx["finalize_timeout"] = finalize_timeout
         if not self._emit(chunk({"role": "assistant", "content": ""})):
             return
         out = self._run_once(ctx, on_text, on_tool_trace, on_reasoning, keepalive)
         if out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
+            return
+        finalize_timeout(out)  # страховка, если _run_once не вызвал hook
+        if out.get("graceful_done"):
             return
         err = self._error_body(out)
         if err is None:
