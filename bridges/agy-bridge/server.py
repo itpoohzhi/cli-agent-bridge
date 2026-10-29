@@ -58,7 +58,11 @@ env приоритетнее файла (0/false/no/off — hard-off, 1/true/yes
   * `extended_timeout_enabled` / `AGY_EXTENDED_TIMEOUT_ENABLED` — idle 1800 с по активности
     stdout/transcript и потолок 3600 с (`AGY_IDLE_TIMEOUT_S`, `AGY_TIMEOUT_S`);
   * `graceful_timeout_on_partial` / `AGY_GRACEFUL_TIMEOUT_ON_PARTIAL` — timeout и
-    idle_timeout после частичной выдачи завершаются `finish_reason="length"` вместо 504.
+    idle_timeout после частичной выдачи завершаются `finish_reason="length"` вместо 504;
+  * `step_scoped_usage_enabled` / `AGY_STEP_SCOPED_USAGE_ENABLED` — `usage` по окну
+    последнего шага (prompt = input + cache последнего `PLANNER_RESPONSE`, completion =
+    сумма output шагов хода) вместо накопительного `result.usage`; без валидного шага —
+    ограниченная оценка для успешного хода с окном модели.
 
 Изображения (метод `workspace-read`): `image_url` в NDJSON парсер agy не принимает, поэтому
 проверенные data-URL (PNG/JPEG/GIF/WebP) кладутся файлами в `WORKSPACE/img-<uuid>` на время
@@ -93,6 +97,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, cast, final
@@ -108,6 +113,7 @@ from core.watchdog import (  # noqa: E402
     WATCHDOG_INTERVAL_S,
     AdaptiveTimeoutController,
 )
+from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
@@ -149,6 +155,7 @@ BRAIN_DIR = Path(
     or str(HOME / ".gemini" / "antigravity-cli" / "brain")
 )
 TRANSCRIPT_NAME = "transcript_full.jsonl"
+TRANSCRIPT_FALLBACK_NAME = "transcript.jsonl"
 TRANSCRIPT_POLL_S = float(os.environ.get("AGY_BRIDGE_TRANSCRIPT_POLL", "0.05"))
 TRANSCRIPT_READ_MAX = 4 * 1024 * 1024
 
@@ -594,6 +601,8 @@ _LOG_EVENT_NAMES = frozenset(
         "image_spool_error",
         "image_cleanup_error",
         "image_sweep_removed",
+        "usage-cumulative-fallback",
+        "usage-step-ledger-incomplete",
         "media-degradation-reserve",
     }
 )
@@ -1792,7 +1801,7 @@ def _is_sqlite_reasoning_enabled() -> bool:
 
 
 # ---- Флаги новой политики (AD-005): локальный GigaRC-совместимый снимок -------------
-# Stdlib-only LaunchAgent: ни SDK, ни удалённого транспорта. Все четыре флага имеют
+# Stdlib-only LaunchAgent: ни SDK, ни удалённого транспорта. Все пять флагов имеют
 # строгий кодовый False (прежнее поведение до явного включения). Приоритет:
 # env override > JSON bool из dynamic_config.json > False.
 
@@ -1804,6 +1813,7 @@ class _RuntimeFlags(NamedTuple):
     emit_tool_trace: bool = False
     extended_timeout_enabled: bool = False
     graceful_timeout_on_partial: bool = False
+    step_scoped_usage_enabled: bool = False
 
 
 _NEW_FLAG_ENV = {
@@ -1811,6 +1821,7 @@ _NEW_FLAG_ENV = {
     "emit_tool_trace": "AGY_BRIDGE_EMIT_TOOL_TRACE",
     "extended_timeout_enabled": "AGY_EXTENDED_TIMEOUT_ENABLED",
     "graceful_timeout_on_partial": "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL",
+    "step_scoped_usage_enabled": "AGY_STEP_SCOPED_USAGE_ENABLED",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
@@ -2284,12 +2295,30 @@ def _transcript_path(cid: str) -> Path:
     return BRAIN_DIR / cid / ".system_generated" / "logs" / TRANSCRIPT_NAME
 
 
-def _transcript_anchor(cid: str) -> tuple[int, int] | None:
+def _select_transcript_path(cid: str) -> Path | None:
+    """Существующий файл транскрипта: `transcript_full.jsonl`, при ENOENT — `transcript.jsonl`.
+
+    None — ни одного файла (свежий разговор до первого шага) или ошибка stat.
+    """
+    base = _transcript_path(cid).parent
+    for name in (TRANSCRIPT_NAME, TRANSCRIPT_FALLBACK_NAME):
+        path = base / name
+        try:
+            _ = path.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        return path
+    return None
+
+
+def _transcript_anchor(cid: str, path: Path | None = None) -> tuple[int, int] | None:
     """(наибольший step_index, размер файла) транскрипта до старта хода.
 
     Нет файла — (-1, 0); ошибка чтения — None.
     """
-    path = _transcript_path(cid)
+    path = path if path is not None else _transcript_path(cid)
     try:
         size = path.stat().st_size
     except FileNotFoundError:
@@ -2320,9 +2349,11 @@ class _TurnPlan:
         self.anchored: bool = True
         self.probe_gen: int | None = None
         self.identity: tuple[int, int] | None = None
+        # Файл транскрипта, закреплённый на попытку (только step_scoped_usage_enabled).
+        self.transcript_path: Path | None = None
 
 
-def _prespawn_plan(cid: str, resumed: bool) -> _TurnPlan:
+def _prespawn_plan(cid: str, resumed: bool, usage_enabled: bool = False) -> _TurnPlan:
     """Якорь хода ДО spawn: байтовый водяной знак транскрипта и максимум idx в БД.
 
     Свежий разговор: base_idx=0. Продолжение треда (resume): оба водяных знака
@@ -2337,7 +2368,10 @@ def _prespawn_plan(cid: str, resumed: bool) -> _TurnPlan:
         plan.reason = "cid"
         plan.offset = -1
         return plan
-    anchor = _transcript_anchor(cid)
+    if usage_enabled:
+        # Выбранный файл (full, иначе transcript.jsonl) и его водяной знак — на попытку.
+        plan.transcript_path = _select_transcript_path(cid)
+    anchor = _transcript_anchor(cid, plan.transcript_path)
     if anchor is None:
         plan.reason = "resume_unanchored"
         plan.offset = -1
@@ -2890,6 +2924,40 @@ class _ToolProgress:
             self._seen.add(key)
 
 
+# ---- Step-scoped usage (step_scoped_usage_enabled): счётчики шагов хода из транскрипта --
+# Потолок числа различных step_index на попытку (N_entities_max): один словарь служит и
+# дедупликацией, и ledger; отдельный потолок мышления MAX_STEPS_TRACKED=128 не затронут.
+USAGE_STEP_CAP = 16384
+
+
+def _count_or_none(value: object) -> int | None:
+    """Счётное значение токенов: int >= 0; bool, строки, float и отрицательные — не число."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+@dataclass(frozen=True)
+class _UsageSnapshot:
+    """Неизменяемый снимок счётчиков хода; публикуется читателем транскрипта целиком.
+
+    `last_step_usage` — `(step_index, input, cache_read | None, output)` валидного
+    `PLANNER_RESPONSE` с наибольшим индексом. `completeness` истинна, только когда
+    наблюдался хотя бы один шаг, ledger не насыщен и ни одна запись хода не имела
+    отсутствующих/невалидных счётчиков: иначе сумма output не точна.
+    """
+
+    last_step_usage: tuple[int, int, int | None, int] | None = None
+    turn_output_tokens_sum: int = 0
+    observed_planner_steps: int = 0
+    observed_planner_steps_saturated: bool = False
+    completeness: bool = False
+    invalid_records_count: int = 0
+
+
+_EMPTY_USAGE_SNAPSHOT = _UsageSnapshot()
+
+
 @final
 class _TranscriptTail:
     """Источник мышления шагов agy: транскрипт разговора и SQLite `conversations/<cid>.db`.
@@ -2921,6 +2989,7 @@ class _TranscriptTail:
         turn_id: str = "",
         emit_content: Callable[[int | None, str], bool] | None = None,
         on_activity: Callable[[], None] | None = None,
+        usage_enabled: bool = False,
     ) -> None:
         self.emit = emit
         # PLANNER_RESPONSE.content -> арбитр (AD-001); None — прежнее поведение.
@@ -2965,6 +3034,21 @@ class _TranscriptTail:
         self._open_fail_logged: bool = False
         self._oversize_logged: set[int] = set()
         self._finished: bool = False
+        # Закреплённый на попытку файл транскрипта (только при usage_enabled).
+        self._path: Path | None = self.plan.transcript_path
+        # Счётчики шагов хода: единственный писатель — поток tail; наружу — снимок.
+        self.usage_enabled: bool = usage_enabled
+        self.step_records_by_index: (
+            dict[int, tuple[int, int | None, int] | None] | None
+        ) = {} if usage_enabled else None
+        self.last_valid_step_index: int | None = None
+        self.last_step_usage: tuple[int, int, int | None, int] | None = None
+        self.observed_planner_steps_saturated: bool = False
+        self._usage_out_sum: int = 0
+        self._usage_invalid: int = 0
+        self._usage_dirty: bool = False
+        self._usage_lock = threading.Lock()
+        self._usage_snapshot: _UsageSnapshot = _EMPTY_USAGE_SNAPSHOT
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     # ---- жизненный цикл ----------------------------------------------------------
@@ -2993,7 +3077,9 @@ class _TranscriptTail:
                 self._sqlite_off("cid")
             if self.resumed and self._offset < 0:
                 try:
-                    self._offset = _transcript_path(cid).stat().st_size
+                    pinned = self._transcript_file() if self.usage_enabled else None
+                    path = pinned if pinned is not None else _transcript_path(cid)
+                    self._offset = path.stat().st_size
                 except OSError:
                     self._offset = 0
         _log(
@@ -3107,7 +3193,9 @@ class _TranscriptTail:
         """Дочитать файл с offset; неполный хвост строки ждёт следующего прохода."""
         if not self.cid or not self._transcript_ok:
             return
-        path = _transcript_path(self.cid)
+        path = self._transcript_file()
+        if path is None:
+            return
         try:
             size = path.stat().st_size
         except OSError:
@@ -3140,6 +3228,94 @@ class _TranscriptTail:
                 self._emit_record(line)
             except Exception:
                 pass
+        if self._usage_dirty:
+            self._publish_usage()
+
+    def _transcript_file(self) -> Path | None:
+        """Файл транскрипта: прежний путь; при usage_enabled — закреплённый на попытку.
+
+        Приоритет `transcript_full.jsonl`, при ENOENT — `transcript.jsonl`; пока ни
+        одного файла нет, проверка повторяется, а найденный путь не меняется до конца
+        попытки (появившийся позже full не подменяет смещение другого файла).
+        """
+        if not self.usage_enabled:
+            return _transcript_path(self.cid)
+        if self._path is None:
+            self._path = _select_transcript_path(self.cid)
+        return self._path
+
+    # ---- счётчики usage ------------------------------------------------------------
+    def _record_usage(self, rec: dict[str, object]) -> None:
+        """Учесть счётчики `PLANNER_RESPONSE` текущего хода за O(1) без хранения текста."""
+        records = self.step_records_by_index
+        if records is None:
+            return
+        self._usage_dirty = True
+        idx = rec.get("step_index")
+        if (
+            not isinstance(idx, int)
+            or isinstance(idx, bool)
+            or idx < 0
+            or idx < self.base_idx
+        ):
+            self._usage_invalid += 1  # шаг без пригодного индекса не атрибутируется
+            return
+        inp = _count_or_none(rec.get("input_tokens"))
+        out = _count_or_none(rec.get("output_tokens"))
+        cache_raw = rec.get("cache_read_tokens")
+        cache = _count_or_none(cache_raw)
+        counts: tuple[int, int | None, int] | None = None
+        if (
+            inp is not None
+            and out is not None
+            and (cache_raw is None or cache is not None)
+        ):
+            counts = (inp, cache, out)
+        if idx in records:
+            if counts is not None:
+                old = records[idx]
+                self._usage_out_sum += counts[2] - (old[2] if old is not None else 0)
+                records[idx] = counts
+        elif len(records) < USAGE_STEP_CAP:
+            records[idx] = counts
+            if counts is not None:
+                self._usage_out_sum += counts[2]
+        else:
+            # Насыщение: ключ не вставляется, сумма output считается неполной.
+            self.observed_planner_steps_saturated = True
+        if counts is None:
+            self._usage_invalid += 1
+            return
+        last = self.last_valid_step_index
+        if last is None or idx >= last:
+            self.last_valid_step_index = idx
+            self.last_step_usage = (idx, counts[0], counts[1], counts[2])
+
+    def _publish_usage(self) -> None:
+        """Опубликовать неизменяемый снимок под коротким замком (без I/O под замком)."""
+        records = self.step_records_by_index
+        if records is None:
+            return
+        observed = len(records)
+        snap = _UsageSnapshot(
+            last_step_usage=self.last_step_usage,
+            turn_output_tokens_sum=self._usage_out_sum,
+            observed_planner_steps=observed,
+            observed_planner_steps_saturated=self.observed_planner_steps_saturated,
+            completeness=(
+                observed > 0
+                and not self.observed_planner_steps_saturated
+                and self._usage_invalid == 0
+            ),
+            invalid_records_count=self._usage_invalid,
+        )
+        self._usage_dirty = False
+        with self._usage_lock:
+            self._usage_snapshot = snap
+
+    def usage_snapshot(self) -> _UsageSnapshot:
+        with self._usage_lock:
+            return self._usage_snapshot
 
     def _emit_record(self, raw: bytes) -> None:
         line = raw.strip()
@@ -3169,6 +3345,8 @@ class _TranscriptTail:
             return
         if rtype != "PLANNER_RESPONSE":
             return
+        if self.usage_enabled:
+            self._record_usage(rec)
         content = rec.get("content")
         emit_content = self.emit_content
         if emit_content is not None and isinstance(content, str) and content.strip():
@@ -3568,8 +3746,13 @@ class Run:
         self.turn_id: str = turn_id or uuid.uuid4().hex
         if self.run_cid:
             cmd += ["--conversation", self.run_cid]
+        # Флаг usage по окну шага фиксируется на попытку: коллектор счётчиков и выбор
+        # файла транскрипта живут весь ход, финальный выбор формы usage — в _run_once.
+        self.usage_enabled: bool = _new_flag("step_scoped_usage_enabled")
+        # Единая монотонная точка отсчёта terminal drain попытки (<= DRAIN_MAX_S).
+        self._drain_t0: float | None = None
         # Водяной знак resume снимается ДО spawn: история разговора не переотдаётся.
-        plan = _prespawn_plan(self.run_cid, bool(self.run_cid))
+        plan = _prespawn_plan(self.run_cid, bool(self.run_cid), self.usage_enabled)
         if self.run_cid and not _cid_acquire(self.run_cid, self.turn_id):
             plan.anchored = False
             plan.reason = "cid_busy"
@@ -3640,6 +3823,7 @@ class Run:
             turn_id=self.turn_id,
             emit_content=self._offer_transcript if self.content_streaming else None,
             on_activity=self._on_tail_activity,
+            usage_enabled=self.usage_enabled,
         )
         if policy is not None:
             self._tail.deadline_s = policy.effective_max_timeout_s + 60.0
@@ -3739,11 +3923,23 @@ class Run:
         Возвращает необработанные потребителем события ("text"/"reasoning"/"tool_trace").
         """
         started = time.monotonic()
-        self._tail.drain_deadline = started + min(budget_s, DRAIN_WINDOW_S)
+        join_budget = budget_s
+        if getattr(self, "usage_enabled", False):
+            # Один монотонный дедлайн попытки от EOF/первого drain: content-drain и
+            # usage-drain делят его, второго окна нет.
+            t0 = getattr(self, "_drain_t0", None)
+            t0 = started if t0 is None else t0
+            self._drain_t0 = t0
+            limit = t0 + min(budget_s, DRAIN_MAX_S)
+            if not getattr(self._tail, "drain_deadline", 0.0):
+                self._tail.drain_deadline = min(limit, t0 + DRAIN_WINDOW_S)
+            join_budget = max(0.0, limit - started)
+        else:
+            self._tail.drain_deadline = started + min(budget_s, DRAIN_WINDOW_S)
         self._proc_done.set()
         thread = self._tail.thread
         if thread is not threading.current_thread():
-            thread.join(timeout=max(0.0, budget_s - (time.monotonic() - started)))
+            thread.join(timeout=max(0.0, join_budget - (time.monotonic() - started)))
         with self._emit_lock:
             self.drain_closed = True
             self._done_put = True
@@ -3756,6 +3952,20 @@ class Run:
             if kind in ("text", "reasoning", "tool_trace"):
                 events.append((kind, payload))
         return events
+
+    def usage_snapshot(self) -> _UsageSnapshot:
+        """Снимок счётчиков хода; пока поток tail жив, полнота суммы не гарантируется."""
+        getter = getattr(self._tail, "usage_snapshot", None)
+        snap = getter() if callable(getter) else _EMPTY_USAGE_SNAPSHOT
+        thread = getattr(self._tail, "thread", None)
+        if (
+            snap.completeness
+            and thread is not None
+            and thread is not threading.current_thread()
+            and thread.is_alive()
+        ):
+            return replace(snap, completeness=False)
+        return snap
 
     def _feed_stdin(self) -> None:
         """Отдать промпт на stdin и закрыть поток: agy читает stdin до EOF."""
@@ -3916,6 +4126,7 @@ class Run:
                 rc = None  # процесс ещё жив после EOF: добьёт Run.close
             time.sleep(0.05)  # дать стоку stderr дозавершиться
             t_exit = time.monotonic()
+            self._drain_t0 = t_exit
             self._tail.drain_deadline = t_exit + DRAIN_WINDOW_S
             self._proc_done.set()
             self._join_source(t_exit)
@@ -3999,6 +4210,192 @@ class _ByteBudget:
     def release(self, amount: int) -> None:
         with self.lock:
             self.used = max(0, self.used - amount)
+
+
+# ---- Step-scoped usage: итоговое нормализованное usage попытки ---------------------------
+# `result.usage` agy кумулятивен по всем вызовам модели хода: input_tokens бывает
+# больше окна модели, и клиент (pi-ai) принимает успешный ход за overflow контекста.
+# При step_scoped_usage_enabled prompt берётся из окна последнего шага транскрипта.
+
+
+def _model_context_window(model_id: object) -> int | None:
+    """Окно модели из fleet.json; None — нет модели или окно не положительный int."""
+    info = FLEET_MODELS.get(model_id) if isinstance(model_id, str) else None
+    window = info.get("context_window") if info is not None else None
+    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        return window
+    return None
+
+
+def _raw_cache_tokens(raw: dict) -> tuple[int | None, bool]:
+    """(cache_read, конфликт алиасов) из сырого usage: snake-ключ, иначе camel-ключ."""
+    snake = raw.get("cache_read_tokens")
+    camel = raw.get("cacheReadTokens")
+    if snake is not None and camel is not None and snake != camel:
+        return None, True  # алиасы расходятся: cache неизвестен, удобное не выбирается
+    return _count_or_none(snake if snake is not None else camel), False
+
+
+def _num_text(value: object) -> str:
+    """Число для лога; всё остальное — `missing` (исходная строка не печатается)."""
+    count = _count_or_none(value)
+    return "missing" if count is None else str(count)
+
+
+def _resolve_step_usage(
+    out: dict, snap: _UsageSnapshot, window: int | None, resume: bool
+) -> dict[str, object]:
+    """Один неизменяемый wire-`usage` попытки; сырой `out["usage"]` не мутируется.
+
+    Порядок: валидный последний шаг транскрипта (измеренное окно, без clamp) ->
+    ограниченная оценка для успешного хода с накопительным raw выше окна ->
+    result-only (input + cache, без clamp).
+    """
+    raw_obj = out.get("usage")
+    raw = cast("dict[str, object]", raw_obj) if isinstance(raw_obj, dict) else {}
+    raw_in = _count_or_none(raw.get("input_tokens"))
+    raw_out = _count_or_none(raw.get("output_tokens"))
+    raw_th = _count_or_none(raw.get("thinking_tokens"))
+    raw_cache, conflict = _raw_cache_tokens(raw)
+    details: dict[str, int] | None
+    inconsistent = False
+    reason = ""
+    step_idx: int | None = None
+    last = snap.last_step_usage
+    if last is not None:
+        source = "last_step"
+        step_idx, last_in, last_cache, _last_out = last
+        prompt = last_in + (last_cache if last_cache is not None else 0)
+        details, inconsistent = normalize_prompt_cache_details(prompt, last_cache)
+        if snap.completeness:
+            completion = snap.turn_output_tokens_sum
+        else:
+            completion = 0
+            reason = "ledger_incomplete"
+            _log(
+                "usage-step-ledger-incomplete observed_steps=%d saturated=%d "
+                "invalid_records=%d raw_output=%s raw_thinking=%s"
+                % (
+                    snap.observed_planner_steps,
+                    int(snap.observed_planner_steps_saturated),
+                    snap.invalid_records_count,
+                    _num_text(raw_out),
+                    _num_text(raw_th),
+                )
+            )
+    else:
+        result_obj = out.get("result")
+        result = (
+            cast("dict[str, object]", result_obj)
+            if isinstance(result_obj, dict)
+            else {}
+        )
+        success = (
+            out.get("rc") == 0
+            and out.get("state") == "done"
+            and str(result.get("status") or "").upper() != "ERROR"
+            and not result.get("error")
+        )
+        cache_sum = raw_cache if raw_cache is not None else 0
+        over_window = (
+            window is not None
+            and raw_in is not None
+            and (raw_in >= window or raw_in + cache_sum > window)
+        )
+        if success and window is not None and raw_in is not None and over_window:
+            source = "cumulative_estimate"
+            turns = _count_or_none(out.get("num_turns")) or 0
+            tools = _count_or_none(out.get("tool_events")) or 0
+            divisor = max(2, turns + tools, snap.observed_planner_steps)
+            prompt = min(raw_in // divisor, window - 1)
+            reason = "over_window"
+        else:
+            source = "result"
+            prompt = (raw_in or 0) + cache_sum
+            reason = (
+                "alias_conflict"
+                if conflict
+                else "not_success"
+                if not success
+                else "no_window"
+                if window is None
+                else "within_window"
+            )
+        details, inconsistent = normalize_prompt_cache_details(prompt, raw_cache)
+        # Без ledger область raw output известна только у свежего разговора.
+        if not resume and snap.observed_planner_steps == 0:
+            completion = (raw_out or 0) + (raw_th or 0)
+        else:
+            completion = 0
+        if source == "cumulative_estimate":
+            _log(
+                "usage-cumulative-fallback raw_in=%s raw_cache=%s window=%d n=%d "
+                "prompt=%d turns=%d tools=%d observed_steps=%d inconsistent=%d "
+                "raw_output=%s raw_thinking=%s"
+                % (
+                    _num_text(raw_in),
+                    _num_text(raw_cache),
+                    cast(int, window),
+                    divisor,
+                    prompt,
+                    turns,
+                    tools,
+                    snap.observed_planner_steps,
+                    int(inconsistent),
+                    _num_text(raw_out),
+                    _num_text(raw_th),
+                )
+            )
+    wire: dict[str, object] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+    if details is not None:
+        wire["prompt_tokens_details"] = details
+    return {
+        "wire": wire,
+        "source": source,
+        "reason": reason,
+        "step_idx": step_idx,
+        "completeness": snap.completeness,
+        "inconsistent": inconsistent,
+        "cached": details["cached_tokens"] if details is not None else None,
+        "raw_in": raw_in,
+        "raw_out": raw_out,
+        "raw_thinking": raw_th,
+        "raw_total": _count_or_none(raw.get("total_tokens")),
+        "raw_cache": raw_cache,
+    }
+
+
+def _usage_log_fields(resolved: object) -> str:
+    """Числовая диагностика usage для строки done; пусто, если usage не нормализовался."""
+    if not isinstance(resolved, dict):
+        return ""
+    info = cast("dict[str, object]", resolved)
+    wire = cast("dict[str, object]", info.get("wire") or {})
+    return (
+        " usage_source=%s reason=%s step_idx=%s prompt=%s cached=%s completion=%s "
+        "total=%s completeness=%d inconsistent=%d raw_in=%s raw_out=%s "
+        "raw_thinking=%s raw_total=%s raw_cache=%s"
+        % (
+            _safe_log_value(str(info.get("source") or "")),
+            _safe_log_value(str(info.get("reason") or "")) or "-",
+            _num_text(info.get("step_idx")),
+            _num_text(wire.get("prompt_tokens")),
+            _num_text(info.get("cached")),
+            _num_text(wire.get("completion_tokens")),
+            _num_text(wire.get("total_tokens")),
+            int(bool(info.get("completeness"))),
+            int(bool(info.get("inconsistent"))),
+            _num_text(info.get("raw_in")),
+            _num_text(info.get("raw_out")),
+            _num_text(info.get("raw_thinking")),
+            _num_text(info.get("raw_total")),
+            _num_text(info.get("raw_cache")),
+        )
+    )
 
 
 def _image_fallback_view() -> tuple[dict[str, object], dict[str, bool]]:
@@ -4197,6 +4594,7 @@ class Handler(BaseHTTPRequestHandler):
         deadline = time.monotonic() + TIMEOUT_S
         policy = getattr(run, "policy", None)
         content_streaming = bool(getattr(run, "content_streaming", False))
+        usage_enabled = bool(getattr(run, "usage_enabled", False))
         gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
@@ -4416,12 +4814,15 @@ class Handler(BaseHTTPRequestHandler):
                     return state("agy_error", 1, result_error)
                 if not result_ev and raw_result:
                     result_ev = raw_result
-                if content_streaming:
+                if content_streaming or usage_enabled:
                     # Хвост транскрипта, записанный прямо перед done, дренируется
                     # ДО reconcile: result.response — агрегат, досылается лишь недостающее.
+                    # При usage_enabled тот же drain — барьер счётчиков шагов (единый
+                    # дедлайн попытки <= T_DRAIN_MAX_S, второго окна нет).
                     drain = getattr(run, "terminal_drain", None)
                     if callable(drain):
                         deliver(list(drain(T_DRAIN_MAX_S)))
+                if content_streaming:
                     add_content(run.reconcile_result(final_text))
                 elif not pieces and final_text:
                     add_content(final_text)
@@ -4438,6 +4839,24 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 return state("done", rc, err)
 
+    @staticmethod
+    def _attach_resolved_usage(run: object, out: dict, model: object) -> None:
+        """Финальный выбор формы usage один раз на попытку, после terminal drain.
+
+        Флаг выключен на финализации — usage остаётся прежним (legacy). Иначе
+        `out["usage_resolved"]` — единый источник для лога, JSON и SSE.
+        """
+        if not _new_flag("step_scoped_usage_enabled"):
+            return
+        getter = getattr(run, "usage_snapshot", None)
+        snap = getter() if callable(getter) else _EMPTY_USAGE_SNAPSHOT
+        if not isinstance(snap, _UsageSnapshot):
+            snap = _EMPTY_USAGE_SNAPSHOT
+        resume = bool(getattr(run, "run_cid", ""))
+        out["usage_resolved"] = _resolve_step_usage(
+            out, snap, _model_context_window(model), resume
+        )
+
     def _log_done(
         self, model: str, out: dict[str, object], t0: float, tag: str
     ) -> None:
@@ -4449,7 +4868,8 @@ class Handler(BaseHTTPRequestHandler):
             f"conversation={conversation} "
             f"turns={out.get('num_turns')} tool_events={out.get('tool_events')} "
             f"out_bytes={out_bytes} "
-            f"wall_s={time.monotonic() - t0:.1f} "
+            f"wall_s={time.monotonic() - t0:.1f}"
+            f"{_usage_log_fields(out.get('usage_resolved'))} "
             f"err={_err_summary(out.get('err'))!r} {tag}"
         )
 
@@ -4654,6 +5074,7 @@ class Handler(BaseHTTPRequestHandler):
                     out = self._execute(
                         run, on_text, on_tool_trace, on_reasoning, keepalive
                     )
+                    self._attach_resolved_usage(run, out, model)
                     finalize = ctx.get("finalize_timeout")
                     if finalize is not None and out.get("state") in (
                         "timeout",
@@ -4765,8 +5186,16 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     @staticmethod
-    def _usage_payload(usage: dict) -> dict:
-        """usage agy -> OpenAI-поля. thinking_tokens прибавляем к completion."""
+    def _usage_payload(usage: dict, resolved: object = None) -> dict:
+        """usage agy -> OpenAI-поля. thinking_tokens прибавляем к completion.
+
+        `resolved` — итог `_resolve_step_usage` (флаг включён): одна и та же форма
+        для JSON и SSE; без него — прежнее отображение сырого usage.
+        """
+        if isinstance(resolved, dict):
+            wire = cast("dict[str, object]", resolved).get("wire")
+            if isinstance(wire, dict):
+                return dict(cast("dict[str, object]", wire))
         return {
             "prompt_tokens": usage.get("input_tokens", 0),
             "completion_tokens": usage.get("output_tokens", 0)
@@ -5301,7 +5730,9 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [
                     {"index": 0, "message": message, "finish_reason": finish_reason}
                 ],
-                "usage": self._usage_payload(out.get("usage") or {}),
+                "usage": self._usage_payload(
+                    out.get("usage") or {}, out.get("usage_resolved")
+                ),
             }
             if out.get("conversation_id"):
                 payload["conversation_id"] = out["conversation_id"]
@@ -5499,7 +5930,9 @@ class Handler(BaseHTTPRequestHandler):
             # (dsh-llm-pi-ai toStreamChunks: usage-chunk -> session usage).
             # Шлём только при ненулевых токенах, чтобы пустой usage от agy
             # не превращался в ложные «0 tok/s / 0%».
-            usage = self._usage_payload(out.get("usage") or {})
+            usage = self._usage_payload(
+                out.get("usage") or {}, out.get("usage_resolved")
+            )
             if usage["prompt_tokens"] or usage["completion_tokens"]:
                 self._emit(chunk({}, "stop", usage, conversation_id=conv_id))
         else:
