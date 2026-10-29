@@ -14,6 +14,7 @@ kill-switch, контракт ошибки `idle_timeout` (HTTP 504 / SSE), за
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import http.client
@@ -3797,6 +3798,2210 @@ class L2HarnessTests(unittest.TestCase):
             ):
                 self.assertIn(key, health[0])
             self.assertEqual(health[0]["sqlite_divergence_count"], 0)
+
+
+# ---- Image input (workspace-read): AD-001..AD-006, F-001..F-010 ---------------------
+
+_IMG_TARGETS = ("gemini-4-argon", "gemini-3.8-flash")
+_IMG_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
+_IMG_MAGIC: dict[str, bytes] = {
+    "image/png": b"\x89PNG\r\n\x1a\n",
+    "image/jpeg": b"\xff\xd8\xff\xe0",
+    "image/gif": b"GIF89a",
+    "image/webp": b"RIFF\x00\x00\x00\x00WEBP",
+}
+_IMG_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+_IMG_CAP = 20971520
+_FAKE_IMG_SOURCE = """
+import hashlib, json, os, stat, sys, time, uuid
+
+argv = sys.argv[1:]
+scen = json.load(open(os.environ["FAKE_IMG_SCEN"]))
+raw_in = sys.stdin.read()
+try:
+    prompt = json.loads(raw_in)["message"]["content"][0]["text"]
+except Exception:
+    prompt = ""
+idx = 0
+while True:
+    try:
+        os.mkdir(os.path.join(scen["marks"], str(idx)))
+        break
+    except FileExistsError:
+        idx += 1
+rec = {"idx": idx, "argv": argv, "cwd": os.getcwd(), "prompt": prompt,
+       "t0": time.time(), "pid": os.getpid()}
+if "--add-dir" in argv:
+    d = argv[argv.index("--add-dir") + 1]
+    rec["dir"] = d
+    rec["dir_mode"] = stat.S_IMODE(os.stat(d).st_mode)
+    files = {}
+    for name in sorted(os.listdir(d)):
+        p = os.path.join(d, name)
+        with open(p, "rb") as fh:
+            data = fh.read()
+        files[name] = {"sha": hashlib.sha256(data).hexdigest(),
+                       "mode": stat.S_IMODE(os.stat(p).st_mode), "size": len(data)}
+    rec["files"] = files
+
+
+def save():
+    path = os.path.join(scen["recs"], "%d.json" % idx)
+    with open(path + ".tmp", "w") as fh:
+        json.dump(rec, fh)
+    os.replace(path + ".tmp", path)
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\\n")
+    sys.stdout.flush()
+
+
+spawns = scen.get("spawns") or [{}]
+beh = spawns[min(idx, len(spawns) - 1)]
+cid = argv[argv.index("--conversation") + 1] if "--conversation" in argv else beh.get("cid") or str(uuid.uuid4())
+save()
+emit({"event": "init", "conversation_id": cid, "init": {"tools": [], "permission_mode": "x"}})
+time.sleep(beh.get("sleep", 0))
+mode = beh.get("mode", "ok")
+if mode in ("ok", "text_then_error"):
+    emit({"event": "step_update", "step_update": {"step_type": "agent_response", "step_index": 9, "text_delta": "ответ"}})
+status = "ERROR" if mode in ("error", "text_then_error") else "OK"
+emit({"event": "result", "result": {"response": "" if status == "ERROR" else "ответ", "status": status,
+      "error": "boom" if status == "ERROR" else "", "conversation_id": cid,
+      "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
+rec["t1"] = time.time()
+save()
+sys.exit(1 if status == "ERROR" else 0)
+"""
+
+
+def _img_raw(mime: str, tag: str = "x", size: int = 0) -> bytes:
+    body = _IMG_MAGIC[mime] + tag.encode("ascii")
+    return body.ljust(size, b"\x00") if size else body
+
+
+def _img_url(mime: str, raw: bytes) -> str:
+    return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
+
+
+def _img_part(mime: str, raw: bytes) -> dict[str, object]:
+    return {"type": "image_url", "image_url": {"url": _img_url(mime, raw)}}
+
+
+def _img_msg(
+    *parts: dict[str, object], text: str = "", role: str = "user"
+) -> dict[str, object]:
+    content: list[dict[str, object]] = []
+    if text:
+        content.append({"type": "text", "text": text})
+    content.extend(parts)
+    return {"role": role, "content": content}
+
+
+def _txt_msg(role: str, text: str) -> dict[str, object]:
+    return {"role": role, "content": text}
+
+
+def _png_part(tag: str) -> dict[str, object]:
+    return _img_part("image/png", _img_raw("image/png", tag))
+
+
+def _collect(
+    messages: list[dict[str, object]],
+    model: str = "gemini-4-argon",
+    effort: str = "low",
+) -> list[dict[str, object]]:
+    return cast(
+        "list[dict[str, object]]",
+        _bfn("_collect_images")(messages, model, effort),
+    )
+
+
+def _reject_of(call: Callable[[], object]) -> tuple[str, str]:
+    """(reason, code) исключения ImageReject; иначе тест падает."""
+    reject_cls = cast("type[Exception]", _bval("ImageReject"))
+    try:
+        _ = call()
+    except reject_cls as exc:
+        return _str(_oval(exc, "reason")), _str(_oval(exc, "code"))
+    raise AssertionError("ImageReject expected")
+
+
+def _proof_of(model_id: str) -> dict[str, object]:
+    models = _dict(_bval("FLEET_MODELS"))
+    images = _dict(_dict(models[model_id])["images"])
+    return _dict(images["proof"])
+
+
+def _err(body: dict[str, object]) -> dict[str, object]:
+    return _dict(body["error"])
+
+
+def _img_body(
+    messages: list[dict[str, object]],
+    tools: bool = False,
+    cwd: str = "",
+    conv: str = "",
+    model: str = "gemini-4-argon",
+    stream: bool = False,
+) -> dict[str, object]:
+    body: dict[str, object] = {"model": model, "messages": messages, "stream": stream}
+    if tools:
+        body["tools"] = [
+            {"type": "function", "function": {"name": "x", "parameters": {}}}
+        ]
+    extra: dict[str, object] = {}
+    if cwd:
+        extra["cwd"] = cwd
+    if conv:
+        extra["conversation_id"] = conv
+    if extra:
+        body["extra_body"] = extra
+    return body
+
+
+def _small_limits(**limits: int) -> contextlib.AbstractContextManager[object]:
+    """Временно уменьшить image_limits (границы те же, память теста — нет)."""
+    return cast(
+        "contextlib.AbstractContextManager[object]",
+        mock.patch.dict(
+            _dict(_bval("IMAGE_LIMITS")), cast("dict[str, object]", limits)
+        ),
+    )
+
+
+def _restore_key(target: dict[str, object], key: str, value: object) -> None:
+    target[key] = value
+
+
+class _ImgEnv:
+    """Фикстура image-входа: флаг включён, proof подогнан под фиксчер-бинарь, фейковый agy."""
+
+    fx: _Fixture
+    fake: Path
+    marks: Path
+    recs: Path
+    scen: Path
+
+    def __init__(self) -> None:
+        self.fx = _Fixture()
+        self.fake = self.fx.tmp / "fake-img-agy.py"
+        self.marks = self.fx.tmp / "marks"
+        self.recs = self.fx.tmp / "recs"
+        self.scen = self.fx.tmp / "img-scenario.json"
+
+    def __enter__(self) -> _ImgEnv:
+        _ = self.fx.__enter__()
+        fx = self.fx
+        _ = self.fake.write_text(
+            "#!" + sys.executable + "\n" + _FAKE_IMG_SOURCE, encoding="utf-8"
+        )
+        self.fake.chmod(0o755)
+        self.marks.mkdir()
+        self.recs.mkdir()
+        fx.patch("LAUNCHER", str(self.fake))
+        fx.patch("_slots", threading.BoundedSemaphore(4))
+        fx.patch("_rng", _zero)
+        fx.set_env("FAKE_IMG_SCEN", str(self.scen))
+        fx.set_env("AGY_IMAGE_INPUT_ENABLED", None)
+        sha = hashlib.sha256(fx.agy_bin.read_bytes()).hexdigest()
+        for model_id in _IMG_TARGETS:
+            proof = _proof_of(model_id)
+            original = proof["agy_binary_sha256"]
+            proof["agy_binary_sha256"] = sha
+            _ = fx.stack.callback(_restore_key, proof, "agy_binary_sha256", original)
+        self.write_scen([{}])
+        self.flag(True)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.fx.__exit__()
+
+    def write_scen(self, spawns: list[dict[str, object]]) -> None:
+        body = {"marks": str(self.marks), "recs": str(self.recs), "spawns": spawns}
+        _ = self.scen.write_text(json.dumps(body), encoding="utf-8")
+
+    def flag(self, value: bool | None) -> None:
+        """IMAGE_INPUT_ENABLED в dynamic_config.json (None — файла нет) + сброс кэша."""
+        if value is None:
+            self.fx.config.unlink(missing_ok=True)
+        else:
+            _ = self.fx.config.write_text(
+                json.dumps({"IMAGE_INPUT_ENABLED": value}), encoding="utf-8"
+            )
+        setattr(_bridge(), "_image_flag_cache", (0.0, False))
+
+    def records(self) -> list[dict[str, object]]:
+        rows = [
+            _dict(cast(object, json.loads(p.read_text(encoding="utf-8"))))
+            for p in self.recs.glob("*.json")
+        ]
+        return sorted(rows, key=lambda r: _int(r["idx"]))
+
+    def img_dirs(self) -> list[Path]:
+        ws = Path(_str(str(_bval("WORKSPACE"))))
+        return sorted(ws.glob("img-*")) if ws.exists() else []
+
+    def free_slots(self) -> int:
+        slots = cast(threading.BoundedSemaphore, _bval("_slots"))
+        taken = 0
+        while slots.acquire(blocking=False):
+            taken += 1
+        for _i in range(taken):
+            _ = slots.release()
+        return taken
+
+    def active_dirs(self) -> set[str]:
+        return set(cast("set[str]", _bval("_active_img_dirs")))
+
+
+def _file_map(rec: dict[str, object]) -> dict[str, dict[str, object]]:
+    files = _dict(rec.get("files") or {})
+    return {name: _dict(info) for name, info in files.items()}
+
+
+def _argv_of(rec: dict[str, object]) -> list[str]:
+    return cast("list[str]", rec["argv"])
+
+
+def _add_dir_of(rec: dict[str, object]) -> str:
+    argv = _argv_of(rec)
+    return argv[argv.index("--add-dir") + 1]
+
+
+def _sha_hex(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+class _SnapRun:
+    """Подмена Run: снимок каталога изображений в момент каждой попытки, процесс не стартует."""
+
+    attempts: list[dict[str, object]] = []
+    add_dir: object
+
+    def __init__(self, *_args: object, **kwargs: object) -> None:
+        add_dir = kwargs.get("add_dir")
+        self.add_dir = add_dir
+        snap: dict[str, object] = {"add_dir": None if add_dir is None else str(add_dir)}
+        if add_dir is not None and os.path.isdir(str(add_dir)):
+            root = str(add_dir)
+            snap["dir_mode"] = os.stat(root).st_mode & 0o777
+            files: dict[str, dict[str, object]] = {}
+            for name in sorted(os.listdir(root)):
+                path = os.path.join(root, name)
+                with open(path, "rb") as handle:
+                    data = handle.read()
+                files[name] = {
+                    "sha": _sha_hex(data),
+                    "mode": os.stat(path).st_mode & 0o777,
+                }
+            snap["files"] = files
+        _SnapRun.attempts.append(snap)
+
+    def close(self) -> None:
+        return None
+
+
+def _scripted_out(state: str, **over: object) -> dict[str, object]:
+    out: dict[str, object] = {
+        "rc": 0 if state == "done" else 1,
+        "text": "ok" if state == "done" else "",
+        "usage": {},
+        "result": {},
+        "err": "e",
+        "tool_calls": [],
+        "tool_events": 0,
+        "conversation_id": "",
+        "num_turns": None,
+        "duration_s": None,
+        "state": state,
+    }
+    out.update(over)
+    return out
+
+
+def _img_ctx(
+    messages: list[dict[str, object]],
+    model: str = "gemini-4-argon",
+    effort: str = "low",
+    over: dict[str, object] | None = None,
+) -> dict[str, object]:
+    images = _collect(messages, model, effort)
+    img_dir = cast(Path, images[0]["path"]).parent if images else None
+    prompt = _str(_bfn("_messages_to_prompt")(messages, images))
+    ctx = _ctx(
+        model=model,
+        model_len=len(model),
+        effort=effort,
+        prompt=prompt,
+        full_prompt=prompt,
+        images=images,
+        img_dir=img_dir,
+        stream=False,
+    )
+    ctx.update(over or {})
+    return ctx
+
+
+def _run_once_direct(
+    ctx: dict[str, object], execute: Callable[..., dict[str, object]] | None = None
+) -> dict[str, object]:
+    """Handler._run_once с подменой Run (_SnapRun) и, при желании, _execute."""
+    handler_cls = _bval("Handler")
+    with contextlib.ExitStack() as stack:
+        _ = stack.enter_context(mock.patch.object(_bridge(), "Run", _SnapRun))
+        _ = stack.enter_context(
+            mock.patch.object(_bridge(), "_launcher", _fake_launcher_path)
+        )
+        if execute is not None:
+            _ = stack.enter_context(mock.patch.object(handler_cls, "_execute", execute))
+        with _Sock() as sock:
+            handler = cast(object, _make_handler(sock))
+            setattr(handler, "client_address", ("127.0.0.1", 1))
+            return _dict(
+                _ofn(handler, "_run_once")(
+                    ctx, _text_sink, _tool_sink, _text_sink, None
+                )
+            )
+
+
+def _sequence_execute(
+    outs: list[dict[str, object]],
+) -> Callable[..., dict[str, object]]:
+    queue_outs = list(outs)
+
+    def execute(_self: object, _run: object, *_a: object) -> dict[str, object]:
+        return dict(queue_outs.pop(0) if len(queue_outs) > 1 else queue_outs[0])
+
+    return execute
+
+
+def _post_raw_headers(port: int, content_length: int) -> int:
+    """Только заголовки с заявленным Content-Length (без тела): HTTP-статус ответа."""
+    key = _str(_bval("AUTH_KEY"))
+    head = "\r\n".join(
+        [
+            "POST /v1/chat/completions HTTP/1.1",
+            "Host: x",
+            "Authorization: Bearer " + key,
+            "Content-Type: application/json",
+            "Content-Length: %d" % content_length,
+            "",
+            "",
+        ]
+    )
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(head.encode("ascii"))
+        data = sock.recv(4096).decode("ascii", "replace")
+    return int(data.split(" ", 2)[1])
+
+
+def _sse_post(port: int, body: dict[str, object]) -> str:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + _str(_bval("AUTH_KEY")),
+    }
+    conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers=headers)
+    text = conn.getresponse().read().decode("utf-8")
+    conn.close()
+    return text
+
+
+def _get_auth(port: int, path: str) -> dict[str, object]:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    headers = {"Authorization": "Bearer " + _str(_bval("AUTH_KEY"))}
+    conn.request("GET", path, headers=headers)
+    raw = conn.getresponse().read()
+    conn.close()
+    return _dict(cast(object, json.loads(raw.decode("utf-8"))))
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def _expect_files(
+    test: unittest.TestCase,
+    rec: dict[str, object],
+    expected: dict[int, tuple[str, bytes]],
+) -> None:
+    """Файлы каталога изображений в момент spawn: имена, байты (sha) и права 0600."""
+    files = _file_map(rec)
+    names = {"img-%d.%s" % (n, _IMG_EXT[m]) for n, (m, _r) in expected.items()}
+    test.assertEqual(set(files), names)
+    for number, (mime, raw) in expected.items():
+        info = files["img-%d.%s" % (number, _IMG_EXT[mime])]
+        test.assertEqual(info["sha"], _sha_hex(raw))
+        test.assertEqual(info["mode"], 0o600)
+    test.assertEqual(rec["dir_mode"], 0o700)
+
+
+class ImageValidationTests(unittest.TestCase):
+    """AD-002: упорядоченная fail-closed проверка image-частей (IMG-01..IMG-10)."""
+
+    def test_img01_four_mimes_one_three_sixteen_accepted_and_staged(self) -> None:
+        with _ImgEnv() as env:
+            for mime in _IMG_MIMES:
+                for count in (1, 3, 16):
+                    with self.subTest(mime=mime, count=count):
+                        raws = [_img_raw(mime, "n%d" % i) for i in range(count)]
+                        msgs = [_img_msg(*[_img_part(mime, r) for r in raws])]
+                        images = _collect(msgs)
+                        numbers = [_int(i["index"]) for i in images]
+                        self.assertEqual(numbers, list(range(1, count + 1)))
+                        self.assertTrue(all(i["mime"] == mime for i in images))
+                        self.assertTrue(all(i["data"] == b"" for i in images))
+                        names = [Path(str(i["path"])).name for i in images]
+                        self.assertEqual(
+                            names,
+                            ["img-%d.%s" % (n, _IMG_EXT[mime]) for n in numbers],
+                        )
+                        parents = {Path(str(i["path"])).parent for i in images}
+                        self.assertEqual(len(parents), 1)
+                        self.assertTrue(Path(str(images[0]["path"])).is_absolute())
+            self.assertEqual(env.img_dirs(), [])  # проверка ничего не пишет на диск
+            raws = {m: _img_raw(m, "stage-" + m[-3:]) for m in _IMG_MIMES}
+            msgs = [_img_msg(*[_img_part(m, r) for m, r in raws.items()])]
+            images = _collect(msgs)
+            img_dir = Path(str(images[0]["path"])).parent
+            _ = _bfn("_stage_images")(img_dir, images)
+            try:
+                for number, mime in enumerate(_IMG_MIMES, start=1):
+                    path = img_dir / ("img-%d.%s" % (number, _IMG_EXT[mime]))
+                    self.assertEqual(path.read_bytes(), raws[mime])
+                    self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+                self.assertEqual(os.stat(img_dir).st_mode & 0o777, 0o700)
+                self.assertTrue(all(i["data"] == b"" for i in images))
+                self.assertTrue(all("b64" not in i for i in images))
+            finally:
+                shutil.rmtree(img_dir, ignore_errors=True)
+
+    def test_img02_sixteen_mixed_mimes_keep_global_order(self) -> None:
+        with _ImgEnv():
+            seq = [
+                (_IMG_MIMES[i % 4], _img_raw(_IMG_MIMES[i % 4], "m%d" % i))
+                for i in range(16)
+            ]
+            parts = [_img_part(m, r) for m, r in seq]
+            msgs = [
+                _img_msg(*parts[:5], text="a"),
+                _txt_msg("assistant", "ok"),
+                _img_msg(*parts[5:11]),
+                _img_msg(*parts[11:], text="z"),
+            ]
+            images = _collect(msgs)
+            self.assertEqual([_int(i["index"]) for i in images], list(range(1, 17)))
+            self.assertEqual(
+                [_int(i["msg_index"]) for i in images], [0] * 5 + [2] * 6 + [3] * 5
+            )
+            self.assertEqual([i["mime"] for i in images], [m for m, _r in seq])
+            self.assertEqual([i["ext"] for i in images], [_IMG_EXT[m] for m, _r in seq])
+
+    def test_img03_seventeen_images_rejected_before_any_decode(self) -> None:
+        with _ImgEnv() as env:
+            msgs = [_img_msg(*[_png_part("c%d" % i) for i in range(17)])]
+            calls: list[int] = []
+            real = base64.b64decode
+
+            def spy(data: str, altchars: None = None, validate: bool = False) -> bytes:
+                calls.append(1)
+                return real(data, altchars, validate)
+
+            with mock.patch.object(base64, "b64decode", spy):
+                reason, code = _reject_of(lambda: _collect(msgs))
+            self.assertEqual((reason, code), ("too_many_images", "too_many_images"))
+            self.assertEqual(calls, [])
+            self.assertEqual(env.img_dirs(), [])
+
+    def test_img04_single_image_boundary_for_every_base64_padding(self) -> None:
+        # Лимиты уменьшены патчем: граница та же, но тест не раздувает RSS процесса.
+        with _ImgEnv(), _small_limits(max_image_bytes=1000, max_total_image_bytes=1000):
+            for size in range(997, 1004):  # все остатки по модулю 3 (паддинг 0/1/2)
+                with self.subTest(size=size):
+                    msgs = [
+                        _img_msg(
+                            _img_part("image/png", _img_raw("image/png", "b", size))
+                        )
+                    ]
+                    if size <= 1000:
+                        self.assertEqual(_int(_collect(msgs)[0]["size"]), size)
+                    else:
+                        self.assertEqual(
+                            _reject_of(lambda: _collect(msgs)),
+                            ("image_too_large", "image_too_large"),
+                        )
+
+    def test_img05_single_image_one_byte_over_limit_rejected_before_total(self) -> None:
+        with _ImgEnv(), _small_limits(max_image_bytes=1000, max_total_image_bytes=500):
+            raw = _img_raw("image/png", "big", size=1001)
+            msgs = [_img_msg(_img_part("image/png", raw))]
+            self.assertEqual(
+                _reject_of(lambda: _collect(msgs)),
+                ("image_too_large", "image_too_large"),
+            )
+
+    def test_img06_total_limit_boundary(self) -> None:
+        with _ImgEnv(), _small_limits(max_image_bytes=1000, max_total_image_bytes=1000):
+            first = _img_part("image/png", _img_raw("image/png", "a", size=500))
+            ok = _img_part("image/jpeg", _img_raw("image/jpeg", "b", size=500))
+            over = _img_part("image/jpeg", _img_raw("image/jpeg", "b", size=501))
+            self.assertEqual(len(_collect([_img_msg(first, ok)])), 2)
+            self.assertEqual(
+                _reject_of(lambda: _collect([_img_msg(first, over)])),
+                ("images_too_large", "images_too_large"),
+            )
+
+    def test_img07_http_body_limit_boundary(self) -> None:
+        with _ImgEnv() as env, _small_limits(max_body_bytes=8192):
+            bridge = _HttpBridge()
+            try:
+                head = b'{"messages":[{"role":"user","content":"'
+                tail = b'"}]}'
+                data = head + b"x" * (8192 - len(head) - len(tail)) + tail
+                self.assertEqual(len(data), 8192)
+                conn = http.client.HTTPConnection("127.0.0.1", bridge.port, timeout=60)
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + _str(_bval("AUTH_KEY")),
+                }
+                conn.request("POST", "/v1/chat/completions", body=data, headers=headers)
+                self.assertEqual(conn.getresponse().status, 200)
+                conn.close()
+                self.assertEqual(_post_raw_headers(bridge.port, 8193), 413)
+            finally:
+                bridge.close()
+            self.assertEqual(
+                len(env.records()), 1
+            )  # 413 не дошёл ни до decode, ни до spawn
+        with _ImgEnv():
+            bridge = _HttpBridge()
+            try:
+                limit = _int(_dict(_bval("IMAGE_LIMITS"))["max_body_bytes"])
+                self.assertEqual(limit, 33554432)
+                self.assertEqual(_post_raw_headers(bridge.port, limit + 1), 413)
+            finally:
+                bridge.close()
+
+    def test_img08_image_only_user_message_keeps_marker_and_attachment(self) -> None:
+        with _ImgEnv():
+            msgs = [_img_msg(_png_part("only"))]
+            images = _collect(msgs)
+            prompt = _str(_bfn("_messages_to_prompt")(msgs, images))
+            self.assertNotIn("PONG", prompt)
+            self.assertIn("[image 1]", prompt)
+            self.assertIn("[attachments]", prompt)
+            self.assertIn(str(images[0]["path"]), prompt)
+            self.assertIn("(image/png, %d bytes)" % _int(images[0]["size"]), prompt)
+
+    def test_img09_text_only_history_has_zero_image_overhead(self) -> None:
+        with _ImgEnv() as env:
+            calls: list[str] = []
+
+            def spy_for(name: str) -> Callable[..., object]:
+                def spy(*_a: object, **_k: object) -> bool:
+                    calls.append(name)
+                    return False
+
+                return spy
+
+            msgs: list[dict[str, object]] = [
+                _txt_msg("user", "hi"),
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "a"},
+                        {"type": "mystery", "x": 1},
+                        cast(object, "plain"),
+                    ],
+                },
+            ]
+            with contextlib.ExitStack() as stack:
+                for name in (
+                    "_is_image_input_enabled",
+                    "_file_sha256",
+                    "_new_img_dir",
+                    "_image_proof_reason",
+                ):
+                    _ = stack.enter_context(
+                        mock.patch.object(_bridge(), name, spy_for(name))
+                    )
+                self.assertEqual(_collect(msgs), [])
+            self.assertEqual(calls, [])
+            prompt = _str(_bfn("_messages_to_prompt")(msgs))
+            self.assertEqual(prompt, "### 1. user\nhi\n\n### 2. user\na\nplain")
+            self.assertEqual(env.img_dirs(), [])
+
+    def test_img10_signature_check_is_not_pixel_decoding(self) -> None:
+        with _ImgEnv():
+            truncated = _IMG_MAGIC["image/png"] + b"\x00truncated-body"
+            msgs = [_img_msg(_img_part("image/png", truncated))]
+            images = _collect(
+                msgs
+            )  # сигнатура ок: файл принят, пиксели не декодируются
+            self.assertEqual(len(images), 1)
+            prompt = _str(_bfn("_messages_to_prompt")(msgs, images))
+            self.assertIn("view_file", prompt)
+            self.assertIn("Read every attached image file", prompt)
+
+    def test_f003_count_and_base64_length_checked_before_b64decode(self) -> None:
+        with _ImgEnv(), _small_limits(max_image_bytes=1000, max_total_image_bytes=1000):
+            calls: list[int] = []
+            real = base64.b64decode
+
+            def spy(data: str, altchars: None = None, validate: bool = False) -> bytes:
+                calls.append(1)
+                return real(data, altchars, validate)
+
+            huge = "data:image/png;base64," + "A" * 1336  # оценка 1002 B > лимита 1000
+            msgs = [_img_msg({"type": "image_url", "image_url": {"url": huge}})]
+            with mock.patch.object(base64, "b64decode", spy):
+                self.assertEqual(
+                    _reject_of(lambda: _collect(msgs)),
+                    ("image_too_large", "image_too_large"),
+                )
+                many = [_img_msg(*[_png_part("k%d" % i) for i in range(17)])]
+                self.assertEqual(
+                    _reject_of(lambda: _collect(many))[1], "too_many_images"
+                )
+            self.assertEqual(calls, [])
+
+    def test_f006_data_url_is_case_insensitive_and_log_values_are_sanitized(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            raw = _img_raw("image/png", "case")
+            url = "DATA:IMAGE/PNG;BASE64," + base64.b64encode(raw).decode("ascii")
+            msgs = [_img_msg({"type": "image_url", "image_url": {"url": url}})]
+            images = _collect(msgs)
+            self.assertEqual(images[0]["mime"], "image/png")
+            self.assertEqual(
+                _str(_bfn("_safe_log_value")("a\nb\tc\rd\x00e")), "a_b_c_d_e"
+            )
+            buffer = io.StringIO()
+            with _Sock() as sock, mock.patch.object(sys, "stderr", buffer):
+                handler = cast(object, _make_handler(sock))
+                setattr(handler, "client_address", ("127.0.0.1", 1))
+                _ = _ofn(handler, "_log_reject")(
+                    "image_too_large", "gem\nini\tfake\r", 3
+                )
+            lines = buffer.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("model=gem_ini_fake_ ", lines[0])
+            self.assertIsNot(_bval("_image_flag_lock"), _bval("_sqlite_guard_lock"))
+            self.assertEqual(env.img_dirs(), [])
+
+    def test_f006_sha_cache_keyed_by_identity_and_hash_runs_outside_cache_lock(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            target = env.fx.tmp / "sha-subject.bin"
+            _ = target.write_bytes(b"first-content")
+            self.assertEqual(_bfn("_file_sha256")(target), _sha_hex(b"first-content"))
+            held: list[bool] = []
+
+            class _ProbeHash:
+                chunks: list[bytes]
+
+                def __init__(self) -> None:
+                    self.chunks = []
+
+                def update(self, data: bytes) -> None:
+                    held.append(bool(_ofn(_bval("_sha_cache_lock"), "locked")()))
+                    self.chunks.append(data)
+
+                def hexdigest(self) -> str:
+                    return hashlib.sha256(b"".join(self.chunks)).hexdigest()
+
+            replacement = env.fx.tmp / "sha-subject.new"
+            _ = replacement.write_bytes(b"second-content")
+            os.replace(replacement, target)  # другой inode/mtime при том же пути
+            probe_module = SimpleNamespace(sha256=_ProbeHash)
+            with mock.patch.object(_bridge(), "hashlib", probe_module):
+                digest = _bfn("_file_sha256")(target)
+            self.assertEqual(digest, _sha_hex(b"second-content"))
+            self.assertTrue(held)
+            self.assertFalse(any(held))
+            self.assertEqual(_bfn("_file_sha256")(env.fx.tmp / "absent.bin"), "")
+
+
+_IMG_RAW_A = _img_raw("image/png", "alpha")
+_IMG_RAW_B = _img_raw("image/jpeg", "bravo")
+_IMG_RAW_C = _img_raw("image/gif", "charlie")
+
+
+def _post_many(
+    bridge: _HttpBridge, bodies: list[dict[str, object]]
+) -> list[tuple[int, dict[str, object]]]:
+    return [bridge.post(body) for body in bodies]
+
+
+class ImageHistoryTests(unittest.TestCase):
+    """AD-003/AD-004: сквозная нумерация истории, cold/hot/explicit/fallback (HIST-01..10)."""
+
+    def test_hist01_cold_images_then_text_resends_full_history(self) -> None:
+        with _ImgEnv() as env:
+            turn1 = [
+                _img_msg(
+                    _img_part("image/png", _IMG_RAW_A),
+                    _img_part("image/jpeg", _IMG_RAW_B),
+                    text="смотри",
+                )
+            ]
+            turn2 = turn1 + [
+                _txt_msg("assistant", "вижу"),
+                _txt_msg("user", "а теперь текст"),
+            ]
+            bridge = _HttpBridge()
+            try:
+                results = _post_many(bridge, [_img_body(turn1), _img_body(turn2)])
+            finally:
+                bridge.close()
+            self.assertEqual([code for code, _b in results], [200, 200])
+            recs = env.records()
+            self.assertEqual(len(recs), 2)
+            for rec in recs:
+                _expect_files(
+                    self,
+                    rec,
+                    {1: ("image/png", _IMG_RAW_A), 2: ("image/jpeg", _IMG_RAW_B)},
+                )
+                prompt = _str(rec["prompt"])
+                for needle in (
+                    "[image 1]",
+                    "[image 2]",
+                    "[attachments]",
+                    "img-1.png",
+                    "img-2.jpg",
+                ):
+                    self.assertIn(needle, prompt)
+                self.assertNotIn("--conversation", _argv_of(rec))
+            self.assertEqual(env.img_dirs(), [])
+
+    def test_hist02_rejected_history_without_assistant_keeps_all_images(self) -> None:
+        with _ImgEnv() as env:
+            msgs = [
+                _img_msg(
+                    _img_part("image/png", _IMG_RAW_A),
+                    _img_part("image/jpeg", _IMG_RAW_B),
+                    text="скриншоты",
+                ),
+                _txt_msg("user", "следующий текстовый ход"),
+            ]
+            bridge = _HttpBridge()
+            try:
+                code, _body = bridge.post(_img_body(msgs))
+            finally:
+                bridge.close()
+            self.assertEqual(code, 200)
+            rec = env.records()[0]
+            _expect_files(
+                self, rec, {1: ("image/png", _IMG_RAW_A), 2: ("image/jpeg", _IMG_RAW_B)}
+            )
+            prompt = _str(rec["prompt"])
+            self.assertIn("[image 1]", prompt)
+            self.assertIn("[image 2]", prompt)
+            self.assertIn("следующий текстовый ход", prompt)
+
+    def test_hist03_hot_text_turn_after_images_has_no_new_attachments(self) -> None:
+        with _ImgEnv() as env:
+            cwd = env.fx.tmp / "proj"
+            cwd.mkdir()
+            turn1 = [
+                _img_msg(
+                    _img_part("image/png", _IMG_RAW_A),
+                    _img_part("image/jpeg", _IMG_RAW_B),
+                )
+            ]
+            turn2 = turn1 + [
+                _txt_msg("assistant", "ок"),
+                _txt_msg("user", "только текст"),
+            ]
+            bridge = _HttpBridge()
+            try:
+                code1, body1 = bridge.post(_img_body(turn1, tools=True, cwd=str(cwd)))
+                code2, _body2 = bridge.post(_img_body(turn2, tools=True, cwd=str(cwd)))
+            finally:
+                bridge.close()
+            self.assertEqual((code1, code2), (200, 200))
+            first, second = env.records()
+            argv = _argv_of(second)
+            self.assertEqual(
+                argv[argv.index("--conversation") + 1], body1["conversation_id"]
+            )
+            prompt = _str(second["prompt"])
+            self.assertIn("только текст", prompt)
+            self.assertNotIn("[attachments]", prompt)
+            self.assertNotIn("[image", prompt)
+            _expect_files(
+                self,
+                second,
+                {1: ("image/png", _IMG_RAW_A), 2: ("image/jpeg", _IMG_RAW_B)},
+            )
+            self.assertEqual(
+                os.path.realpath(_str(second["cwd"])), os.path.realpath(cwd)
+            )
+            store = cast("dict[tuple[str, str, str], object]", _bval("_session_store"))
+            self.assertEqual(list(store), [("gemini-4-argon", str(cwd), "high")])
+            self.assertNotEqual(_add_dir_of(first), _add_dir_of(second))
+
+    def test_hist04_hot_new_image_keeps_global_index_and_correct_bytes(self) -> None:
+        with _ImgEnv() as env:
+            turn1 = [_img_msg(_img_part("image/png", _IMG_RAW_A))]
+            turn2 = turn1 + [
+                _txt_msg("assistant", "ок"),
+                _img_msg(_img_part("image/jpeg", _IMG_RAW_B), text="новая картинка"),
+            ]
+            bridge = _HttpBridge()
+            try:
+                _ = bridge.post(_img_body(turn1, tools=True))
+                code, _body = bridge.post(_img_body(turn2, tools=True))
+            finally:
+                bridge.close()
+            self.assertEqual(code, 200)
+            second = env.records()[1]
+            self.assertIn("--conversation", _argv_of(second))
+            prompt = _str(second["prompt"])
+            self.assertIn("[image 2]", prompt)
+            self.assertNotIn("[image 1]", prompt)
+            self.assertIn("- [image 2] ", prompt)
+            self.assertIn("(image/jpeg, %d bytes)" % len(_IMG_RAW_B), prompt)
+            self.assertNotIn("img-1.png (", prompt)
+            _expect_files(
+                self,
+                second,
+                {1: ("image/png", _IMG_RAW_A), 2: ("image/jpeg", _IMG_RAW_B)},
+            )
+
+    def test_hist05_hot_failure_falls_back_to_cold_with_all_files(self) -> None:
+        with _ImgEnv() as env:
+            env.write_scen([{"cid": _CID}, {"mode": "error"}, {"mode": "ok"}])
+            turn1 = [_img_msg(_img_part("image/png", _IMG_RAW_A))]
+            turn2 = turn1 + [
+                _txt_msg("assistant", "ок"),
+                _img_msg(_img_part("image/jpeg", _IMG_RAW_B)),
+            ]
+            bridge = _HttpBridge()
+            try:
+                _ = bridge.post(_img_body(turn1, tools=True))
+                code, _body = bridge.post(_img_body(turn2, tools=True))
+            finally:
+                bridge.close()
+            self.assertEqual(code, 200)
+            recs = env.records()
+            self.assertEqual(len(recs), 3)  # ход 1 + hot-попытка + cold fallback
+            hot, cold = recs[1], recs[2]
+            self.assertIn("--conversation", _argv_of(hot))
+            self.assertNotIn("--conversation", _argv_of(cold))
+            expected = {1: ("image/png", _IMG_RAW_A), 2: ("image/jpeg", _IMG_RAW_B)}
+            _expect_files(self, hot, expected)
+            _expect_files(self, cold, expected)
+            self.assertEqual(_add_dir_of(hot), _add_dir_of(cold))
+            for needle in ("[image 1]", "[image 2]", "img-1.png", "img-2.jpg"):
+                self.assertIn(needle, _str(cold["prompt"]))
+            self.assertEqual(env.img_dirs(), [])
+
+    def test_hist06_no_second_spawn_after_content_was_delivered(self) -> None:
+        with _ImgEnv() as env:
+            env.write_scen([{"cid": _CID}, {"mode": "text_then_error"}])
+            turn1 = [_img_msg(_img_part("image/png", _IMG_RAW_A))]
+            turn2 = turn1 + [_txt_msg("assistant", "ок"), _txt_msg("user", "ещё")]
+            bridge = _HttpBridge()
+            try:
+                _ = bridge.post(_img_body(turn1, tools=True))
+                code, body = bridge.post(_img_body(turn2, tools=True))
+            finally:
+                bridge.close()
+            self.assertEqual(code, 502)
+            self.assertEqual(_err(body)["type"], "agy_error")
+            self.assertEqual(len(env.records()), 2)
+            self.assertEqual(env.img_dirs(), [])
+
+    def test_hist07_explicit_conversation_id_and_automatic_hot_prompt_differ(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            history = [
+                _img_msg(_img_part("image/png", _IMG_RAW_A)),
+                _txt_msg("assistant", "ок"),
+                _img_msg(_img_part("image/jpeg", _IMG_RAW_B)),
+            ]
+            explicit_cid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            bridge = _HttpBridge()
+            try:
+                code, _b = bridge.post(_img_body(history, conv=explicit_cid))
+                self.assertEqual(code, 200)
+                _ = bridge.post(_img_body(history[:1], tools=True))
+                code2, _b2 = bridge.post(_img_body(history, tools=True))
+                self.assertEqual(code2, 200)
+            finally:
+                bridge.close()
+            explicit, _first, hot = env.records()
+            argv = _argv_of(explicit)
+            self.assertEqual(argv[argv.index("--conversation") + 1], explicit_cid)
+            expected = {1: ("image/png", _IMG_RAW_A), 2: ("image/jpeg", _IMG_RAW_B)}
+            _expect_files(self, explicit, expected)
+            for needle in ("[image 1]", "[image 2]", "img-1.png", "img-2.jpg"):
+                self.assertIn(needle, _str(explicit["prompt"]))
+            self.assertNotIn("[image 1]", _str(hot["prompt"]))
+            self.assertIn("[image 2]", _str(hot["prompt"]))
+            _expect_files(self, hot, expected)
+
+    def test_hist08_plain_and_background_requests_do_not_touch_agentic_session(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            env.write_scen([{"cid": _CID}, {"cid": _CID_B}, {}])
+            first = [_img_msg(_img_part("image/png", _IMG_RAW_A))]
+            bridge = _HttpBridge()
+            try:
+                _ = bridge.post(_img_body(first, tools=True))
+                _ = bridge.post(
+                    _img_body([_img_msg(_img_part("image/jpeg", _IMG_RAW_B))])
+                )
+                follow = first + [
+                    _txt_msg("assistant", "ок"),
+                    _txt_msg("user", "дальше"),
+                ]
+                code, _b = bridge.post(_img_body(follow, tools=True))
+            finally:
+                bridge.close()
+            self.assertEqual(code, 200)
+            agentic1, plain, agentic2 = env.records()
+            self.assertNotIn("--conversation", _argv_of(plain))
+            argv = _argv_of(agentic2)
+            self.assertEqual(argv[argv.index("--conversation") + 1], _CID)
+            self.assertEqual(
+                len({_add_dir_of(r) for r in (agentic1, plain, agentic2)}), 3
+            )
+            store = cast("dict[object, dict[str, object]]", _bval("_session_store"))
+            self.assertEqual([entry["cid"] for entry in store.values()], [_CID])
+
+    def test_hist09_parallel_requests_with_other_cwd_and_model_stay_separate(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            env.write_scen([{"sleep": 0.8, "cid": _CID}, {"sleep": 0.8, "cid": _CID_B}])
+            dir_a = env.fx.tmp / "proj-a"
+            dir_b = env.fx.tmp / "proj-b"
+            dir_a.mkdir()
+            dir_b.mkdir()
+            bridge = _HttpBridge()
+            results: list[int] = []
+
+            def worker(cwd: Path, model: str, raw: bytes) -> None:
+                body = _img_body(
+                    [_img_msg(_img_part("image/png", raw))],
+                    tools=True,
+                    cwd=str(cwd),
+                    model=model,
+                )
+                results.append(bridge.post(body)[0])
+
+            threads = [
+                threading.Thread(
+                    target=worker, args=(dir_a, "gemini-4-argon", _IMG_RAW_A)
+                ),
+                threading.Thread(
+                    target=worker,
+                    args=(dir_b, "gemini-3.8-flash", _img_raw("image/png", "other")),
+                ),
+            ]
+            try:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(60)
+            finally:
+                bridge.close()
+            self.assertEqual(sorted(results), [200, 200])
+            recs = env.records()
+            self.assertEqual(len(recs), 2)
+            self.assertTrue(all("--conversation" not in _argv_of(r) for r in recs))
+            self.assertEqual(
+                {os.path.realpath(_str(r["cwd"])) for r in recs},
+                {os.path.realpath(dir_a), os.path.realpath(dir_b)},
+            )
+            self.assertEqual(len({_add_dir_of(r) for r in recs}), 2)
+            self.assertLess(
+                max(_float(r["t0"]) for r in recs), min(_float(r["t1"]) for r in recs)
+            )
+            store = cast("dict[tuple[str, str, str], object]", _bval("_session_store"))
+            self.assertEqual(len(store), 2)
+
+    def test_hist10_cwd_with_spaces_and_unicode_is_not_replaced_by_image_dir(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            proj = env.fx.tmp / "проект с пробелом"
+            proj.mkdir()
+            _ = (proj / "rel.txt").write_text("project-file", encoding="utf-8")
+            msgs = [_img_msg(_img_part("image/png", _IMG_RAW_A), text="файл")]
+            bridge = _HttpBridge()
+            try:
+                code, _b = bridge.post(_img_body(msgs, cwd=str(proj)))
+                code_missing, _b2 = bridge.post(
+                    _img_body(msgs, cwd="/nonexistent-agy-cwd/проект")
+                )
+            finally:
+                bridge.close()
+            self.assertEqual((code, code_missing), (200, 200))
+            rec, missing = env.records()
+            self.assertEqual(os.path.realpath(_str(rec["cwd"])), os.path.realpath(proj))
+            self.assertTrue((Path(_str(rec["cwd"])) / "rel.txt").is_file())
+            argv = _argv_of(rec)
+            self.assertEqual(argv.count("--add-dir"), 1)
+            add_dir = _add_dir_of(rec)
+            self.assertTrue(os.path.isabs(add_dir))
+            ws = os.path.realpath(_str(str(_bval("WORKSPACE"))))
+            self.assertTrue(os.path.realpath(add_dir).startswith(ws + os.sep))
+            self.assertNotEqual(os.path.realpath(add_dir), os.path.realpath(proj))
+            match = re.search(
+                r"- \[image 1\] (/[^\n]+?) \(image/png, \d+ bytes\)",
+                _str(rec["prompt"]),
+            )
+            self.assertIsNotNone(match)
+            attached = Path(cast("re.Match[str]", match).group(1))
+            self.assertEqual(attached.parent, Path(add_dir))
+            self.assertIn(attached.name, _file_map(rec))
+            self.assertEqual(os.path.realpath(_str(missing["cwd"])), ws)
+
+
+class ImageLifecycleTests(unittest.TestCase):
+    """AD-005: каталог изображений живёт ход, удаляется в finally, sweep (LIFE-01..05)."""
+
+    def _assert_clean(self, env: _ImgEnv, ctx: dict[str, object]) -> None:
+        self.assertFalse(os.path.exists(_str(str(ctx["img_dir"]))))
+        self.assertEqual(env.active_dirs(), set())
+        self.assertEqual(env.free_slots(), 4)
+
+    def test_life01_dir_removed_on_every_terminal_path(self) -> None:
+        with _ImgEnv() as env:
+            msgs = [_img_msg(_img_part("image/png", _IMG_RAW_A))]
+            scripted = {
+                "done": [_scripted_out("done")],
+                "agy_error": [_scripted_out("agy_error")],
+                "client_gone": [_scripted_out("client_gone")],
+            }
+            for name, outs in scripted.items():
+                with self.subTest(path=name):
+                    _SnapRun.attempts.clear()
+                    ctx = _img_ctx(msgs)
+                    out = _run_once_direct(ctx, _sequence_execute(outs))
+                    self.assertEqual(out["state"], name)
+                    self.assertGreaterEqual(len(_SnapRun.attempts), 1)
+                    for attempt in _SnapRun.attempts:
+                        self.assertEqual(
+                            _dict(attempt["files"])["img-1.png"],
+                            {"sha": _sha_hex(_IMG_RAW_A), "mode": 0o600},
+                        )
+                    self._assert_clean(env, ctx)
+            with self.subTest(path="exception"):
+                _SnapRun.attempts.clear()
+                ctx = _img_ctx(msgs)
+
+                def boom(_self: object, _run: object, *_a: object) -> dict[str, object]:
+                    raise RuntimeError("boom")
+
+                with self.assertRaises(RuntimeError):
+                    _ = _run_once_direct(ctx, boom)
+                self.assertEqual(len(_SnapRun.attempts), 1)
+                self._assert_clean(env, ctx)
+            with self.subTest(path="launcher_unavailable"):
+                _SnapRun.attempts.clear()
+                ctx = _img_ctx(msgs)
+                unavailable = cast("type[Exception]", _bval("LauncherUnavailable"))
+
+                def missing() -> str:
+                    raise unavailable("x")
+
+                with (
+                    mock.patch.object(_bridge(), "_launcher", missing),
+                    mock.patch.object(_bridge(), "Run", _SnapRun),
+                    _Sock() as sock,
+                ):
+                    handler = cast(object, _make_handler(sock))
+                    setattr(handler, "client_address", ("127.0.0.1", 1))
+                    out = _dict(
+                        _ofn(handler, "_run_once")(
+                            ctx, _text_sink, _tool_sink, _text_sink, None
+                        )
+                    )
+                self.assertEqual(out["state"], "launcher_unavailable")
+                self.assertEqual(_SnapRun.attempts, [])
+                self._assert_clean(env, ctx)
+
+    def test_life02_retry_and_hot_cold_fallback_reuse_one_directory(self) -> None:
+        with _ImgEnv() as env:
+            msgs = [
+                _img_msg(_img_part("image/png", _IMG_RAW_A)),
+                _txt_msg("assistant", "ок"),
+                _img_msg(_img_part("image/jpeg", _IMG_RAW_B)),
+            ]
+            variants: dict[str, dict[str, object]] = {
+                "transient_retry": {},
+                "hot_to_cold": {
+                    "hot_resumed": True,
+                    "conversation_id": _CID,
+                    "sess_key": ("gemini-4-argon", "", "low"),
+                    "turn_id": "turn-life02",
+                },
+            }
+            for name, over in variants.items():
+                with self.subTest(variant=name):
+                    _SnapRun.attempts.clear()
+                    ctx = _img_ctx(msgs, over=over)
+                    out = _run_once_direct(
+                        ctx,
+                        _sequence_execute(
+                            [_scripted_out("agy_error"), _scripted_out("done")]
+                        ),
+                    )
+                    self.assertEqual(out["state"], "done")
+                    self.assertEqual(len(_SnapRun.attempts), 2)
+                    first, second = _SnapRun.attempts
+                    self.assertEqual(first["add_dir"], second["add_dir"])
+                    self.assertEqual(first["files"], second["files"])
+                    self.assertEqual(
+                        set(_dict(second["files"])), {"img-1.png", "img-2.jpg"}
+                    )
+                    self._assert_clean(env, ctx)
+
+    def test_life03_spool_failure_returns_500_and_leaves_no_directory(self) -> None:
+        with _ImgEnv() as env:
+            real_open = os.open
+            created: list[str] = []
+
+            def failing_open(
+                path: str, flags: int, mode: int = 0o777, **kw: int
+            ) -> int:
+                if str(path).endswith("img-2.png"):
+                    raise OSError(28, "No space left on device")
+                if str(path).endswith(".png"):
+                    created.append(str(path))
+                return real_open(path, flags, mode, **kw)
+
+            msgs = [_img_msg(_png_part("one"), _png_part("two"), text="две")]
+            bridge = _HttpBridge()
+            buffer = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(os, "open", failing_open),
+                    mock.patch.object(sys, "stderr", buffer),
+                ):
+                    code, body = bridge.post(_img_body(msgs))
+            finally:
+                bridge.close()
+            self.assertEqual(code, 500)
+            self.assertEqual(
+                _err(body),
+                {
+                    "message": "image spool failed",
+                    "type": "image_spool_error",
+                    "code": 500,
+                },
+            )
+            self.assertEqual(len(created), 1)  # img-1.png успел записаться, затем откат
+            self.assertEqual(env.records(), [])  # spawn не было
+            self.assertEqual(env.img_dirs(), [])
+            self.assertEqual(env.active_dirs(), set())
+            self.assertEqual(env.free_slots(), 4)
+            log = buffer.getvalue()
+            self.assertIn("image_spool_error model=gemini-4-argon err=OSError", log)
+            self.assertNotIn(
+                base64.b64encode(_img_raw("image/png", "one")).decode("ascii"), log
+            )
+
+    def test_life04_parallel_turns_never_touch_each_others_directory(self) -> None:
+        with _ImgEnv() as env:
+            ctx_a = _img_ctx([_img_msg(_png_part("turn-a"))])
+            ctx_b = _img_ctx([_img_msg(_png_part("turn-b"))])
+            dir_a = _str(str(ctx_a["img_dir"]))
+            dir_b = _str(str(ctx_b["img_dir"]))
+            self.assertNotEqual(dir_a, dir_b)
+            entered = threading.Event()
+            gate = threading.Event()
+
+            def execute(_self: object, run: object, *_a: object) -> dict[str, object]:
+                if _str(str(_oval(run, "add_dir"))) == dir_a:
+                    entered.set()
+                    _ = gate.wait(20)
+                return _scripted_out("done")
+
+            outs: dict[str, dict[str, object]] = {}
+            with contextlib.ExitStack() as stack:
+                _ = stack.enter_context(mock.patch.object(_bridge(), "Run", _SnapRun))
+                _ = stack.enter_context(
+                    mock.patch.object(_bridge(), "_launcher", _fake_launcher_path)
+                )
+                _ = stack.enter_context(
+                    mock.patch.object(_bval("Handler"), "_execute", execute)
+                )
+
+                def run_a() -> None:
+                    with _Sock() as sock:
+                        handler = cast(object, _make_handler(sock))
+                        setattr(handler, "client_address", ("127.0.0.1", 1))
+                        outs["a"] = _dict(
+                            _ofn(handler, "_run_once")(
+                                ctx_a, _text_sink, _tool_sink, _text_sink, None
+                            )
+                        )
+
+                thread = threading.Thread(target=run_a)
+                thread.start()
+                self.assertTrue(entered.wait(20))
+                with _Sock() as sock:
+                    handler = cast(object, _make_handler(sock))
+                    setattr(handler, "client_address", ("127.0.0.1", 2))
+                    outs["b"] = _dict(
+                        _ofn(handler, "_run_once")(
+                            ctx_b, _text_sink, _tool_sink, _text_sink, None
+                        )
+                    )
+                self.assertFalse(os.path.exists(dir_b))
+                self.assertEqual(env.active_dirs(), {dir_a})
+                self.assertEqual(
+                    Path(dir_a, "img-1.png").read_bytes(),
+                    _img_raw("image/png", "turn-a"),
+                )
+                gate.set()
+                thread.join(20)
+            self.assertEqual((outs["a"]["state"], outs["b"]["state"]), ("done", "done"))
+            self.assertFalse(os.path.exists(dir_a))
+            self.assertEqual(env.active_dirs(), set())
+
+    def test_life05_sweep_removes_only_stale_orphans(self) -> None:
+        with _ImgEnv() as env:
+            ws = Path(_str(str(_bval("WORKSPACE"))))
+            ws.mkdir(parents=True, exist_ok=True)
+            now = 1_700_000_000.0
+
+            def make(name: str, age: float) -> Path:
+                path = ws / name
+                path.mkdir()
+                _ = (path / "f.bin").write_bytes(b"x")
+                os.utime(path, (now - age, now - age))
+                return path
+
+            stale = make("img-stale", 3601)
+            exact = make("img-exact", 3600)
+            fresh = make("img-fresh", 10)
+            active = make("img-active", 7200)
+            old_run = make("run-old", 7200)
+            other = make("keep-me", 7200)
+            outside = env.fx.tmp / "outside-target"
+            outside.mkdir()
+            _ = (outside / "secret.txt").write_text("keep", encoding="utf-8")
+            os.utime(outside, (now - 9999, now - 9999))
+            link = ws / "img-link"
+            link.symlink_to(outside, target_is_directory=True)
+            registry = cast("set[str]", _bval("_active_img_dirs"))
+            registry.add(str(active))
+            try:
+                with mock.patch.object(time, "time", lambda: now):
+                    removed = _bfn("_sweep_workspace")()
+            finally:
+                registry.discard(str(active))
+            self.assertEqual(removed, 1)
+            self.assertFalse(stale.exists())
+            self.assertFalse(old_run.exists())
+            for survivor in (exact, fresh, active, other):
+                self.assertTrue(survivor.exists(), survivor.name)
+            self.assertTrue(link.is_symlink())
+            self.assertTrue((outside / "secret.txt").is_file())
+
+
+_LOG_REASONS = (
+    "image_input_not_supported",
+    "unsupported_reasoning_effort",
+    "invalid_reasoning_effort",
+    "unsupported_image_type",
+    "invalid_image_content",
+    "invalid_image_base64",
+    "image_url_not_allowed",
+    "image_type_mismatch",
+    "image_proof_invalid",
+    "images_too_large",
+    "image_too_large",
+    "too_many_images",
+    "image_spool_error",
+    "image_cleanup_error",
+    "image_sweep_removed",
+)
+
+
+class ImageLogTests(unittest.TestCase):
+    """AD-006: reason видны дословно, секреты и payload в журнал не попадают (LOG-01/02)."""
+
+    def test_log01_every_reason_is_verbatim_and_masking_stays_strict(self) -> None:
+        with _ImgEnv():
+            with _Sock() as sock:
+                handler = cast(object, _make_handler(sock))
+                setattr(handler, "client_address", ("127.0.0.1", 1))
+                for token in _LOG_REASONS:
+                    with self.subTest(reason=token):
+                        buffer = io.StringIO()
+                        with mock.patch.object(sys, "stderr", buffer):
+                            _ = _ofn(handler, "_log_reject")(
+                                token, "gemini-4-argon", 14
+                            )
+                        pattern = (
+                            r"^\[agy-bridge\] \d\d:\d\d:\d\d reject reason=%s " % token
+                            + r"model=gemini-4-argon model_len=14 client=127.0.0.1:1$"
+                        )
+                        self.assertRegex(buffer.getvalue().strip(), pattern)
+                buffer = io.StringIO()
+                with mock.patch.object(sys, "stderr", buffer):
+                    _ = _ofn(handler, "_log_reject")(
+                        "image_input_not_supportedXY", "m", 1
+                    )
+                    _ = _ofn(handler, "_log_reject")(
+                        "abcdefghijklmnopqrstuvwxyz012345", "m", 1
+                    )
+                text = buffer.getvalue()
+                self.assertNotIn("not_supportedXY", text)
+                self.assertNotIn("abcdefghijklmnopqrstuvwxyz012345", text)
+                self.assertEqual(text.count("reason=***"), 2)
+
+    def test_log01_http_proof_and_effort_rejects_are_visible(self) -> None:
+        with _ImgEnv() as env:
+            msgs = [_img_msg(_png_part("log"))]
+            bridge = _HttpBridge()
+            buffer = io.StringIO()
+            try:
+                with mock.patch.object(sys, "stderr", buffer):
+                    with mock.patch.dict(
+                        _proof_of("gemini-4-argon"), {"agy_binary_sha256": "0" * 64}
+                    ):
+                        code1, body1 = bridge.post(_img_body(msgs))
+                    with mock.patch.dict(
+                        _proof_of("gemini-4-argon"), {"efforts_proven": ["low"]}
+                    ):
+                        body = _img_body(msgs)
+                        body["reasoning_effort"] = "high"
+                        code2, body2 = bridge.post(body)
+            finally:
+                bridge.close()
+            self.assertEqual((code1, code2), (400, 400))
+            self.assertEqual(_err(body1)["type"], "image_input_not_supported")
+            self.assertEqual(_err(body2)["type"], "unsupported_reasoning_effort")
+            log = buffer.getvalue()
+            self.assertIn(
+                "image_proof_invalid model=gemini-4-argon reason=binary_sha_mismatch",
+                log,
+            )
+            self.assertRegex(
+                log,
+                r"reject reason=image_input_not_supported model=gemini-4-argon model_len=14 client=",
+            )
+            self.assertRegex(
+                log,
+                r"reject reason=unsupported_reasoning_effort model=gemini-4-argon model_len=14 client=",
+            )
+            self.assertEqual(env.records(), [])
+
+    def test_log02_auth_key_and_image_payload_never_reach_the_log(self) -> None:
+        with _ImgEnv() as env:
+            marker_raw = _IMG_MAGIC["image/jpeg"] + b"SECRET-PAYLOAD-MARKER-" * 8
+            marker_b64 = base64.b64encode(marker_raw).decode("ascii")
+            bad = _img_msg(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64," + marker_b64},
+                }
+            )
+            good = _img_msg(
+                _img_part("image/png", _img_raw("image/png", "SECRET-OK-MARKER-" * 8))
+            )
+            bridge = _HttpBridge()
+            buffer = io.StringIO()
+            try:
+                with mock.patch.object(sys, "stderr", buffer):
+                    code_bad, _b = bridge.post(_img_body([bad]))
+                    code_ok, _b2 = bridge.post(_img_body([good]))
+            finally:
+                bridge.close()
+            self.assertEqual((code_bad, code_ok), (400, 200))
+            log = buffer.getvalue()
+            self.assertIn("reject reason=image_type_mismatch", log)
+            self.assertNotIn(_str(_bval("AUTH_KEY")), log)
+            self.assertNotIn(marker_b64, log)
+            self.assertNotIn(marker_b64[:40], log)
+            self.assertNotIn("SECRET-PAYLOAD-MARKER", log)
+            self.assertNotIn(
+                base64.b64encode(b"SECRET-OK-MARKER-").decode("ascii")[:16], log
+            )
+            self.assertEqual(len(env.records()), 1)
+
+
+class ImageResourceTests(unittest.TestCase):
+    """REQ-009/F-002/F-005: слоты, FD, повторная проверка после очереди, отказ без деградации."""
+
+    def test_res01_concurrent_turns_bounded_by_slots_without_fd_or_dir_leaks(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            env.fx.patch("_slots", threading.BoundedSemaphore(2))
+            env.write_scen([{"sleep": 0.5}])
+            bridge = _HttpBridge()
+            codes: list[int] = []
+            sampled: list[int] = []
+            stop = threading.Event()
+
+            def sampler() -> None:
+                while not stop.is_set():
+                    sampled.append(len(env.img_dirs()))
+                    time.sleep(0.02)
+
+            def worker(n: int) -> None:
+                parts = [_png_part("r%da" % n), _png_part("r%db" % n)]
+                codes.append(
+                    bridge.post(_img_body([_img_msg(*parts, text="req-%d" % n)]))[0]
+                )
+
+            watcher = threading.Thread(target=sampler)
+            threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+            fd_before = _open_fds()
+            try:
+                watcher.start()
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(120)
+            finally:
+                stop.set()
+                watcher.join(10)
+                bridge.close()
+            self.assertEqual(codes, [200] * 8)
+            self.assertLessEqual(
+                max(sampled), 2
+            )  # каталоги только у ходов, занявших слот
+            recs = env.records()
+            self.assertEqual(len(recs), 8)
+            events = sorted(
+                [(_float(r["t0"]), 1) for r in recs]
+                + [(_float(r["t1"]), -1) for r in recs]
+            )
+            running = peak = 0
+            for _t, delta in events:
+                running += delta
+                peak = max(peak, running)
+            self.assertLessEqual(peak, 2)
+            for rec in recs:
+                found = re.search(r"req-(\d+)", _str(rec["prompt"]))
+                self.assertIsNotNone(found)
+                number = int(cast("re.Match[str]", found).group(1))
+                expected = {
+                    1: ("image/png", _img_raw("image/png", "r%da" % number)),
+                    2: ("image/png", _img_raw("image/png", "r%db" % number)),
+                }
+                _expect_files(self, rec, expected)
+            self.assertEqual(len({_add_dir_of(r) for r in recs}), 8)
+            self.assertEqual(env.img_dirs(), [])
+            self.assertEqual(env.active_dirs(), set())
+            self.assertEqual(env.free_slots(), 2)
+            deadline = time.monotonic() + 5
+            while _open_fds() > fd_before and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertLessEqual(_open_fds(), fd_before)
+
+    def test_res02_disabled_or_unproven_image_path_leaves_text_untouched(self) -> None:
+        with _ImgEnv() as env:
+            bridge = _HttpBridge()
+            try:
+                env.flag(False)
+                code, body = bridge.post(_img_body([_img_msg(_png_part("a"))]))
+                self.assertEqual(
+                    (code, _err(body)["type"]), (400, "image_input_not_supported")
+                )
+                self.assertEqual((env.records(), env.img_dirs()), ([], []))
+                health = bridge.get("/health")[1]
+                self.assertEqual(
+                    (health["images"], health["image_input_mode"]), (False, "disabled")
+                )
+                text_code, _b = bridge.post(
+                    _img_body([_txt_msg("user", "просто текст")])
+                )
+                self.assertEqual(text_code, 200)
+                sse = _sse_post(
+                    bridge.port, _img_body([_txt_msg("user", "поток")], stream=True)
+                )
+                self.assertIn("ответ", sse)
+                self.assertIn("data: [DONE]", sse)
+                env.flag(True)
+                health = bridge.get("/health")[1]
+                self.assertEqual(
+                    (health["images"], health["image_input_mode"]), (True, "enabled")
+                )
+                before = len(env.records())
+                with (
+                    mock.patch.dict(
+                        _proof_of("gemini-4-argon"), {"agy_binary_sha256": "f" * 64}
+                    ),
+                    mock.patch.dict(
+                        _proof_of("gemini-3.8-flash"), {"agy_binary_sha256": "f" * 64}
+                    ),
+                ):
+                    health = bridge.get("/health")[1]
+                    self.assertEqual(health["images"], False)
+                    code2, body2 = bridge.post(_img_body([_img_msg(_png_part("b"))]))
+                    self.assertEqual(
+                        (code2, _err(body2)["type"]), (400, "image_input_not_supported")
+                    )
+                    text2, _b2 = bridge.post(
+                        _img_body([_txt_msg("user", "текст при чужом бинаре")])
+                    )
+                    self.assertEqual(text2, 200)
+                self.assertEqual(len(env.records()), before + 1)
+                self.assertEqual(env.img_dirs(), [])
+            finally:
+                bridge.close()
+
+    def test_res03_at_most_two_attempts_and_retry_budget_is_respected(self) -> None:
+        with _ImgEnv() as env:
+            msgs = [_img_msg(_png_part("retry"))]
+            for budget, expected in ((30, 2), (0, 1)):
+                with self.subTest(budget_tenths=budget):
+                    _SnapRun.attempts.clear()
+                    setattr(_bridge(), "_retry_tenths", budget)
+                    ctx = _img_ctx(msgs)
+                    out = _run_once_direct(
+                        ctx, _sequence_execute([_scripted_out("agy_error")])
+                    )
+                    self.assertEqual(out["state"], "agy_error")
+                    self.assertEqual(len(_SnapRun.attempts), expected)
+                    self.assertFalse(os.path.exists(_str(str(ctx["img_dir"]))))
+            self.assertEqual(env.free_slots(), 4)
+
+    def test_f002_flag_and_proof_are_rechecked_after_waiting_for_a_slot(self) -> None:
+        with _ImgEnv() as env:
+            handler_cls = _bval("Handler")
+            real_acquire = cast(
+                Callable[..., str], getattr(handler_cls, "_acquire_slot")
+            )
+            real_mkdir = os.mkdir
+            mkdirs: list[str] = []
+            flips: list[Callable[[], None]] = []
+
+            def acquire_then_flip(self: object, keepalive: object) -> str:
+                result = real_acquire(self, keepalive)
+                flips.pop(0)()
+                return result
+
+            def spy_mkdir(path: str, mode: int = 0o777, **kw: int) -> None:
+                if "img-" in str(path):
+                    mkdirs.append(str(path))
+                real_mkdir(path, mode, **kw)
+
+            def disable_flag() -> None:
+                env.fx.set_env("AGY_IMAGE_INPUT_ENABLED", "0")
+
+            def break_proof() -> None:
+                env.fx.set_env("AGY_IMAGE_INPUT_ENABLED", None)
+                _proof_of("gemini-4-argon")["agy_binary_sha256"] = "e" * 64
+
+            bridge = _HttpBridge()
+            buffer = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_acquire_slot", acquire_then_flip),
+                    mock.patch.object(os, "mkdir", spy_mkdir),
+                    mock.patch.object(sys, "stderr", buffer),
+                ):
+                    for flip in (disable_flag, break_proof):
+                        env.fx.set_env("AGY_IMAGE_INPUT_ENABLED", None)
+                        flips.append(flip)
+                        code, body = bridge.post(
+                            _img_body([_img_msg(_png_part("late"))])
+                        )
+                        self.assertEqual(
+                            (code, _err(body)["type"]),
+                            (400, "image_input_not_supported"),
+                        )
+            finally:
+                bridge.close()
+            self.assertEqual(mkdirs, [])
+            self.assertEqual(env.records(), [])
+            self.assertEqual(env.img_dirs(), [])
+            self.assertEqual(env.free_slots(), 4)
+            self.assertIn(
+                "image_proof_invalid model=gemini-4-argon reason=binary_sha_mismatch",
+                buffer.getvalue(),
+            )
+
+    def test_f001_flag_defaults_false_and_follows_env_then_strict_config(self) -> None:
+        with _ImgEnv() as env:
+            is_enabled = _bfn("_is_image_input_enabled")
+            env.flag(None)
+            self.assertIs(is_enabled(), False)  # код по умолчанию fail-closed
+            for raw, expected in (
+                ("0", False),
+                ("off", False),
+                ("1", True),
+                ("yes", True),
+                ("maybe", False),
+            ):
+                with self.subTest(env=raw):
+                    env.fx.set_env("AGY_IMAGE_INPUT_ENABLED", raw)
+                    self.assertIs(is_enabled(), expected)
+            env.fx.set_env("AGY_IMAGE_INPUT_ENABLED", None)
+            payloads = {
+                "true": ('{"IMAGE_INPUT_ENABLED": true}', True),
+                "string": ('{"IMAGE_INPUT_ENABLED": "true"}', False),
+                "int": ('{"IMAGE_INPUT_ENABLED": 1}', False),
+                "other_key": ('{"SQLITE_REASONING_ENABLED": true}', False),
+                "list": ("[true]", False),
+                "corrupt": ("{not json", False),
+                "huge": (
+                    '{"IMAGE_INPUT_ENABLED": true, "pad": "' + "x" * 70000 + '"}',
+                    False,
+                ),
+            }
+            for name, (text, expected) in payloads.items():
+                with self.subTest(config=name):
+                    _ = env.fx.config.write_text(text, encoding="utf-8")
+                    setattr(_bridge(), "_image_flag_cache", (0.0, False))
+                    self.assertIs(is_enabled(), expected)
+            _ = env.fx.config.write_text(
+                '{"IMAGE_INPUT_ENABLED": true}', encoding="utf-8"
+            )
+            setattr(_bridge(), "_image_flag_cache", (0.0, False))
+            self.assertIs(is_enabled(), True)
+            _ = env.fx.config.write_text(
+                '{"IMAGE_INPUT_ENABLED": false}', encoding="utf-8"
+            )
+            self.assertIs(is_enabled(), True)  # кэш TTL 1.0 с ещё действует
+            setattr(_bridge(), "_image_flag_cache", (0.0, False))
+            self.assertIs(is_enabled(), False)
+            _ = env.fx.config.write_text(
+                json.dumps(
+                    {"SQLITE_REASONING_ENABLED": True, "IMAGE_INPUT_ENABLED": False}
+                ),
+                encoding="utf-8",
+            )
+            setattr(_bridge(), "_image_flag_cache", (0.0, False))
+            self.assertIs(is_enabled(), False)  # SQLite-флаг image-вход не включает
+
+
+_UNSUPPORTED_MODELS = (
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-pro",
+    "gpt-oss-120b",
+)
+
+
+def _bad_url_msg(url: object) -> list[dict[str, object]]:
+    return [_img_msg({"type": "image_url", "image_url": {"url": url}})]
+
+
+def _taxonomy_cases(
+    cap: int,
+) -> list[tuple[str, str, Callable[[], list[dict[str, object]]]]]:
+    png = _img_raw("image/png", "ok")
+    ok_b64 = base64.b64encode(png).decode("ascii")
+
+    def data(mime: str, raw: bytes) -> list[dict[str, object]]:
+        return [_img_msg(_img_part(mime, raw))]
+
+    def assistant_image() -> list[dict[str, object]]:
+        return [_img_msg(_png_part("role"), role="assistant")]
+
+    def string_image_url() -> list[dict[str, object]]:
+        return [
+            _img_msg({"type": "image_url", "image_url": _img_url("image/png", png)})
+        ]
+
+    return [
+        (
+            "remote_http",
+            "image_url_not_allowed",
+            lambda: _bad_url_msg("http://example.test/a.png"),
+        ),
+        (
+            "remote_https",
+            "image_url_not_allowed",
+            lambda: _bad_url_msg("https://example.test/a.png"),
+        ),
+        (
+            "file_url",
+            "image_url_not_allowed",
+            lambda: _bad_url_msg("file:///etc/passwd"),
+        ),
+        ("relative_path", "image_url_not_allowed", lambda: _bad_url_msg("img/a.png")),
+        (
+            "bmp_mime",
+            "unsupported_image_type",
+            lambda: _bad_url_msg("data:image/bmp;base64," + ok_b64),
+        ),
+        (
+            "unknown_magic",
+            "unsupported_image_type",
+            lambda: data("image/png", b"not-an-image-at-all"),
+        ),
+        (
+            "bad_alphabet",
+            "invalid_image_base64",
+            lambda: _bad_url_msg("data:image/png;base64,@@@@"),
+        ),
+        (
+            "empty_payload",
+            "invalid_image_base64",
+            lambda: _bad_url_msg("data:image/png;base64,"),
+        ),
+        (
+            "bad_padding",
+            "invalid_image_base64",
+            lambda: _bad_url_msg("data:image/png;base64,abc"),
+        ),
+        (
+            "png_as_jpeg",
+            "image_type_mismatch",
+            lambda: data("image/png", _img_raw("image/jpeg")),
+        ),
+        (
+            "gif_as_webp",
+            "image_type_mismatch",
+            lambda: data("image/webp", _img_raw("image/gif")),
+        ),
+        ("string_image_url", "invalid_image_content", string_image_url),
+        (
+            "url_missing",
+            "invalid_image_content",
+            lambda: [_img_msg({"type": "image_url", "image_url": {}})],
+        ),
+        ("url_not_string", "invalid_image_content", lambda: _bad_url_msg(42)),
+        (
+            "no_comma",
+            "invalid_image_content",
+            lambda: _bad_url_msg("data:image/png;base64"),
+        ),
+        (
+            "no_base64_param",
+            "invalid_image_content",
+            lambda: _bad_url_msg("data:image/png," + ok_b64),
+        ),
+        ("assistant_role", "invalid_image_content", assistant_image),
+        (
+            "too_many",
+            "too_many_images",
+            lambda: [_img_msg(*[_png_part("t%d" % i) for i in range(17)])],
+        ),
+        (
+            "one_byte_over",
+            "image_too_large",
+            lambda: data("image/png", _img_raw("image/png", "b", size=cap + 1)),
+        ),
+        (
+            "sum_over",
+            "images_too_large",
+            lambda: [
+                _img_msg(
+                    _img_part("image/png", _img_raw("image/png", "a", size=cap // 2)),
+                    _img_part(
+                        "image/jpeg", _img_raw("image/jpeg", "b", size=cap // 2 + 1)
+                    ),
+                )
+            ],
+        ),
+    ]
+
+
+class AcceptanceOracleTests(unittest.TestCase):
+    """AC-001..AC-010: приёмочные оракулы image-входа на уровне HTTP-обработчика (L1/L2)."""
+
+    def test_ao01_target_models_accept_images_unsupported_and_flag_off_reject(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            bridge = _HttpBridge()
+            try:
+                for model in _IMG_TARGETS:
+                    with self.subTest(model=model):
+                        before = len(env.records())
+                        code, _b = bridge.post(
+                            _img_body([_img_msg(_png_part(model))], model=model)
+                        )
+                        self.assertEqual(code, 200)
+                        rec = env.records()[before]
+                        self.assertIn("--add-dir", _argv_of(rec))
+                        self.assertEqual(set(_file_map(rec)), {"img-1.png"})
+                listing = _get_auth(bridge.port, "/v1/models")
+                flags = {
+                    _str(_dict(m)["id"]): _dict(m)["images"]
+                    for m in cast("list[object]", listing["data"])
+                }
+                self.assertEqual(
+                    {mid for mid, on in flags.items() if on}, set(_IMG_TARGETS)
+                )
+                self.assertIs(listing["images"], True)
+                self.assertIs(bridge.get("/health")[1]["images"], True)
+                spawned = len(env.records())
+                for model in _UNSUPPORTED_MODELS:
+                    with self.subTest(unsupported=model):
+                        code, body = bridge.post(
+                            _img_body([_img_msg(_png_part("u"))], model=model)
+                        )
+                        self.assertEqual(code, 400)
+                        self.assertEqual(
+                            _err(body),
+                            {
+                                "message": "image rejected: image_input_not_supported",
+                                "type": "image_input_not_supported",
+                                "code": 400,
+                            },
+                        )
+                self.assertEqual(len(env.records()), spawned)
+                env.fx.set_env("AGY_IMAGE_INPUT_ENABLED", "0")
+                code_off, body_off = bridge.post(
+                    _img_body([_img_msg(_png_part("off"))])
+                )
+                self.assertEqual(
+                    (code_off, _err(body_off)["type"]),
+                    (400, "image_input_not_supported"),
+                )
+                code_text, _bt = bridge.post(
+                    _img_body([_txt_msg("user", "текст при выключенном флаге")])
+                )
+                self.assertEqual(code_text, 200)
+                self.assertEqual(len(env.records()), spawned + 1)
+                env.fx.set_env("AGY_IMAGE_INPUT_ENABLED", None)
+                env.flag(False)
+                code_cfg, _bc = bridge.post(_img_body([_img_msg(_png_part("cfg"))]))
+                self.assertEqual(code_cfg, 400)
+            finally:
+                bridge.close()
+
+    def test_ao02_mixed_formats_sixteen_accepted_and_seventeen_rejected_over_http(
+        self,
+    ) -> None:
+        with _ImgEnv() as env:
+            seq = [
+                (_IMG_MIMES[i % 4], _img_raw(_IMG_MIMES[i % 4], "h%d" % i))
+                for i in range(16)
+            ]
+            bridge = _HttpBridge()
+            try:
+                code, _b = bridge.post(
+                    _img_body([_img_msg(*[_img_part(m, r) for m, r in seq])])
+                )
+                self.assertEqual(code, 200)
+                code17, body17 = bridge.post(
+                    _img_body([_img_msg(*[_png_part("x%d" % i) for i in range(17)])])
+                )
+            finally:
+                bridge.close()
+            self.assertEqual((code17, _err(body17)["type"]), (400, "too_many_images"))
+            rec = env.records()[0]
+            _expect_files(self, rec, {n: seq[n - 1] for n in range(1, 17)})
+            self.assertEqual(len(env.records()), 1)
+
+    def test_ao03_every_reject_reason_is_400_before_spool_and_spawn(self) -> None:
+        with (
+            _ImgEnv() as env,
+            _small_limits(max_image_bytes=1000, max_total_image_bytes=1000),
+        ):
+            bridge = _HttpBridge()
+            try:
+                for name, reason, build in _taxonomy_cases(1000):
+                    with self.subTest(case=name):
+                        code, body = bridge.post(_img_body(build()))
+                        self.assertEqual(code, 400)
+                        self.assertEqual(
+                            _err(body),
+                            {
+                                "message": "image rejected: " + reason,
+                                "type": reason,
+                                "code": 400,
+                            },
+                        )
+                code, body = bridge.post(
+                    _img_body([_img_msg(_png_part("g"))], model="gpt-oss-120b")
+                )
+                self.assertEqual(_err(body)["type"], "image_input_not_supported")
+                self.assertEqual((env.records(), env.img_dirs()), ([], []))
+                with mock.patch.dict(_proof_of("gemini-4-argon"), {"impl_version": 99}):
+                    code_p, body_p = bridge.post(_img_body([_img_msg(_png_part("p"))]))
+                    code_t, _bt = bridge.post(_img_body([_txt_msg("user", "текст")]))
+                self.assertEqual(
+                    (code_p, _err(body_p)["type"], code_t),
+                    (400, "image_input_not_supported", 200),
+                )
+            finally:
+                bridge.close()
+            self.assertEqual(
+                len(env.records()), 1
+            )  # только текстовый ход дошёл до spawn
+
+    def test_ao04_global_numbering_for_cold_hot_and_fallback_prompts(self) -> None:
+        with _ImgEnv():
+            msgs = [
+                _img_msg(
+                    _img_part("image/png", _IMG_RAW_A),
+                    _img_part("image/jpeg", _IMG_RAW_B),
+                ),
+                _txt_msg("assistant", "ок"),
+                _img_msg(_img_part("image/gif", _IMG_RAW_C), text="новая"),
+            ]
+            images = _collect(msgs)
+            full = _str(_bfn("_messages_to_prompt")(msgs, images))
+            resumed = _str(_bfn("_get_resumed_turn_prompt")(msgs, images))
+            for n in (1, 2, 3):
+                self.assertIn("[image %d]" % n, full)
+            self.assertEqual(full.count("- [image "), 3)
+            self.assertIn("[image 3]", resumed)
+            self.assertNotIn("[image 1]", resumed)
+            self.assertNotIn("[image 2]", resumed)
+            self.assertEqual(resumed.count("- [image "), 1)
+            self.assertIn("img-3.gif (image/gif, %d bytes)" % len(_IMG_RAW_C), resumed)
+            followup = msgs + [
+                _txt_msg("assistant", "ещё"),
+                _txt_msg("user", "просто текст"),
+            ]
+            images2 = _collect(followup)
+            self.assertEqual([_int(i["index"]) for i in images2], [1, 2, 3])
+            hot = _str(_bfn("_get_resumed_turn_prompt")(followup, images2))
+            self.assertNotIn("[attachments]", hot)
+            self.assertNotIn("[image", hot)
+            self.assertIn("просто текст", hot)
+            self.assertEqual(
+                _str(_bfn("_get_resumed_turn_prompt")(msgs[:1], images[:2])),
+                _str(_bfn("_messages_to_prompt")(msgs[:1], images[:2])),
+            )
+
+    def test_ao05_cwd_session_key_and_add_dir_argv(self) -> None:
+        with _ImgEnv() as env:
+            cwd = env.fx.tmp / "каталог с пробелом"
+            cwd.mkdir()
+            bridge = _HttpBridge()
+            try:
+                code, _b = bridge.post(
+                    _img_body([_img_msg(_png_part("cwd"))], tools=True, cwd=str(cwd))
+                )
+            finally:
+                bridge.close()
+            self.assertEqual(code, 200)
+            rec = env.records()[0]
+            argv = _argv_of(rec)
+            self.assertEqual(os.path.realpath(_str(rec["cwd"])), os.path.realpath(cwd))
+            self.assertEqual(argv.count("--add-dir"), 1)
+            self.assertNotEqual(
+                os.path.realpath(_add_dir_of(rec)), os.path.realpath(cwd)
+            )
+            for flag in ("--dangerously-skip-permissions", "--model", "--effort"):
+                self.assertIn(flag, argv)
+            store = cast("dict[tuple[str, str, str], object]", _bval("_session_store"))
+            self.assertEqual(list(store), [("gemini-4-argon", str(cwd), "high")])
+
+    def test_ao06_modes_during_turn_and_cleanup_after_success_and_error(self) -> None:
+        with _ImgEnv() as env:
+            env.write_scen([{}, {"mode": "error"}])
+            bridge = _HttpBridge()
+            try:
+                code_ok, _b = bridge.post(_img_body([_img_msg(_png_part("ok"))]))
+                code_err, body_err = bridge.post(
+                    _img_body([_img_msg(_png_part("fail"))])
+                )
+            finally:
+                bridge.close()
+            self.assertEqual((code_ok, code_err), (200, 502))
+            self.assertEqual(_err(body_err)["type"], "agy_error")
+            recs = env.records()
+            self.assertGreaterEqual(len(recs), 2)
+            for rec in recs:
+                self.assertEqual(rec["dir_mode"], 0o700)
+                self.assertTrue(
+                    all(info["mode"] == 0o600 for info in _file_map(rec).values())
+                )
+            self.assertEqual(env.img_dirs(), [])
+            self.assertEqual(env.active_dirs(), set())
+
+    def test_ao07_reject_lines_follow_the_strict_template(self) -> None:
+        with _ImgEnv():
+            bridge = _HttpBridge()
+            buffer = io.StringIO()
+            try:
+                with mock.patch.object(sys, "stderr", buffer):
+                    for _name, _reason, build in _taxonomy_cases(1000)[:12]:
+                        _ = bridge.post(_img_body(build()))
+            finally:
+                bridge.close()
+            lines = [
+                ln for ln in buffer.getvalue().splitlines() if " reject reason=" in ln
+            ]
+            self.assertGreaterEqual(len(lines), 12)
+            for line in lines:
+                self.assertRegex(
+                    line,
+                    r"^\[agy-bridge\] \d\d:\d\d:\d\d reject reason=[a-z0-9_]+ model=gemini-4-argon model_len=14 client=127\.0\.0\.1:\d+$",
+                )
+                self.assertNotIn("reason=***", line)
+
+    def test_ao08_directory_is_registered_before_mkdir_and_survives_sweep(self) -> None:
+        with _ImgEnv() as env:
+            env.write_scen([{"sleep": 1.0}])
+            real_mkdir = os.mkdir
+            observed: list[bool] = []
+
+            def spy_mkdir(path: str, mode: int = 0o777, **kw: int) -> None:
+                if os.path.basename(str(path)).startswith("img-"):
+                    observed.append(
+                        str(path) in cast("set[str]", _bval("_active_img_dirs"))
+                    )
+                real_mkdir(path, mode, **kw)
+
+            bridge = _HttpBridge()
+            results: list[int] = []
+            with mock.patch.object(os, "mkdir", spy_mkdir):
+                thread = threading.Thread(
+                    target=lambda: results.append(
+                        bridge.post(_img_body([_img_msg(_png_part("sw"))]))[0]
+                    )
+                )
+                try:
+                    thread.start()
+                    deadline = time.monotonic() + 30
+                    while not env.records() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    dirs = env.img_dirs()
+                    self.assertEqual(len(dirs), 1)
+                    removed = _bfn("_sweep_workspace")(
+                        -1.0
+                    )  # всё «старше» отсечки, кроме активного
+                    self.assertEqual(removed, 0)
+                    self.assertTrue(dirs[0].is_dir())
+                    thread.join(60)
+                finally:
+                    bridge.close()
+            self.assertEqual(results, [200])
+            self.assertEqual(observed, [True])
+            self.assertEqual(env.img_dirs(), [])
+
+    def test_ao09_delivered_reasoning_is_never_retried_with_images(self) -> None:
+        with _ImgEnv() as env:
+            msgs = [_img_msg(_png_part("rs"))]
+            for hot in (False, True):
+                with self.subTest(hot=hot):
+                    _SnapRun.attempts.clear()
+                    over: dict[str, object] = {"stream": True}
+                    if hot:
+                        over.update(
+                            hot_resumed=True,
+                            conversation_id=_CID,
+                            sess_key=("gemini-4-argon", "", "low"),
+                            turn_id="turn-ao09",
+                        )
+                    ctx = _img_ctx(msgs, over=over)
+                    out = _run_once_direct(
+                        ctx,
+                        _sequence_execute(
+                            [_scripted_out("agy_error", reasoning="мышление")]
+                        ),
+                    )
+                    self.assertEqual(out["state"], "agy_error")
+                    self.assertEqual(len(_SnapRun.attempts), 1)
+                    self.assertFalse(os.path.exists(_str(str(ctx["img_dir"]))))
+            bridge = _HttpBridge()
+            try:
+                health = bridge.get("/health")[1]
+            finally:
+                bridge.close()
+            for key in (
+                "ok",
+                "transport",
+                "native_tools",
+                "hot_sessions",
+                "max_concurrent",
+                "images",
+                "sqlite_reasoning_mode",
+            ):
+                self.assertIn(key, health)
+            self.assertEqual(env.free_slots(), 4)
+
+    def test_ao10_repo_fleet_and_server_form_one_consistent_pair(self) -> None:
+        # L3 (живой :9887 + DSH Desktop) этим тестом НЕ проверяется: нужен деплой пары.
+        with _Fixture() as fx:
+            fx.set_flag(None)
+            fx.set_env("AGY_IMAGE_INPUT_ENABLED", None)
+            self.assertEqual(_bval("IMPLEMENTED_METHODS"), {"workspace-read": 1})
+            self.assertEqual(_bval("METHOD_IMPL_VERSION"), 1)
+            catalog = _dict(_bval("FLEET"))
+            ref = _dict(catalog["technical_ref"])
+            self.assertEqual(ref["agy_version"], "1.4.9")
+            sha = _str(ref["agy_binary_sha256"])
+            limits = _dict(catalog["image_limits"])
+            self.assertEqual(
+                (
+                    limits["max_images"],
+                    limits["max_image_bytes"],
+                    limits["max_total_image_bytes"],
+                    limits["max_body_bytes"],
+                ),
+                (16, _IMG_CAP, _IMG_CAP, 33554432),
+            )
+            self.assertEqual(limits["types"], list(_IMG_MIMES))
+            models = _dict(catalog["models"])
+            for model_id, model in models.items():
+                info = _dict(model)
+                images = _dict(info["images"])
+                if model_id in _IMG_TARGETS:
+                    proof = _dict(images["proof"])
+                    self.assertEqual(
+                        (images["status"], images["method"], info["input"]),
+                        ("confirmed", "workspace-read", ["text", "image"]),
+                    )
+                    self.assertEqual(proof["agy_binary_sha256"], sha)
+                    self.assertEqual(proof["impl_version"], 1)
+                    self.assertEqual(proof["formats"], list(_IMG_MIMES))
+                    self.assertTrue(
+                        set(cast("list[str]", proof["efforts_proven"]))
+                        <= set(cast("list[str]", info["efforts"]))
+                    )
+                else:
+                    self.assertEqual(
+                        (images["status"], images["method"], info["input"]),
+                        ("unsupported", None, ["text"]),
+                    )
+            self.assertIs(_bfn("_is_image_input_enabled")(), False)
+            self.assertIs(_bfn("_model_supports_images")("gemini-4-argon"), False)
+            build = _bfn("_build_catalog")
+            violation = cast("type[Exception]", _bval("FleetViolation"))
+            raw = cast(
+                "dict[str, object]",
+                json.loads(
+                    Path(_str(_dict(catalog)["path"])).read_text(encoding="utf-8")
+                ),
+            )
+
+            def drop_method(model: dict[str, object]) -> None:
+                _dict(model["images"])["method"] = None
+
+            def drop_proof(model: dict[str, object]) -> None:
+                _dict(model["images"])["proof"] = None
+
+            def text_only_input(model: dict[str, object]) -> None:
+                model["input"] = ["text"]
+
+            mutations: list[tuple[str, Callable[[dict[str, object]], None], str]] = [
+                ("method_none", drop_method, "method_not_implemented"),
+                ("proof_missing", drop_proof, "proof_invalid"),
+                ("input_text_only", text_only_input, "status_inconsistent"),
+            ]
+            for label, mutate, reason in mutations:
+                with self.subTest(violation=label):
+                    broken = cast("dict[str, object]", json.loads(json.dumps(raw)))
+                    mutate(_dict(cast("list[object]", broken["models"])[0]))
+                    with self.assertRaises(violation) as caught:
+                        _ = build(broken)
+                    self.assertEqual(_oval(caught.exception, "reason"), reason)
+            self.assertEqual(_dict(build(raw))["default_model"], "gemini-3.8-flash")
 
 
 if __name__ == "__main__":
