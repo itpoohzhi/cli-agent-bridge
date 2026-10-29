@@ -1,0 +1,11 @@
+Созданы все пять файлов:
+
+- [research-plan.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix/research-plan.md)
+- [evidence-ledger.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix/evidence-ledger.md)
+- [open-questions.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix/open-questions.md)
+- [handoff-architect.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix/handoff-architect.md)
+- [handoff-qa.md](/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/analysis/agy-image-input-fix/handoff-qa.md)
+
+Самочек по критериям брифа: **SA-DOD-001..008 PASS**. Штатный `SA-DOD-004` остаётся **FORMAT FAIL**: он требует семь колонок вместо предписанных пяти. Различие отражено в [протоколе проверок](/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/.ai-team/runs/agy-image-input-fix-20261029/sa-dod-report.md).
+
+Git scope соблюдён. Код продукта не изменён; деплой и L3 не выполнялись.

@@ -1,0 +1,24 @@
+SA-DOD-001 PASS: 34 unique facts, ISO dates and source fields
+SA-DOD-002 PASS: 11 questions closed as facts or explicit assumptions, no open blockers or hidden guesses
+SA-DOD-003 PASS: INV-01..INV-05: 12 columns and closed status
+SA-DOD-004 PASS: REQ-001..010 each has priority, facts and measurable AC on the same line
+SA-DOD-005 PASS: all 34 architect fact references declared; dates ISO; missing=[]
+SA-DOD-006 PASS: 46 current SSoT rows + 46 literal brief rows; UNKNOWN explicitly qualified, no claim of resource-gate PASS
+SA-DOD-007 PASS: QA covers all 10 AC, taxonomy, count/MIME boundaries, retry lifecycle and L3
+SA-DOD-008 PASS: five artifacts only; git scope analysis/agy-image-input-fix + .ai-team; timeboxes accounted
+?? .ai-team/runs/agy-image-input-fix-20261029/analyst-01.stderr.log
+?? .ai-team/runs/agy-image-input-fix-20261029/analyst-01.stdout.log
+?? .ai-team/runs/agy-image-input-fix-20261029/briefs/analyst-01.md
+?? .ai-team/runs/agy-image-input-fix-20261029/processes.tsv
+?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-reference.log
+?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-reference.sh
+?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-report.md
+?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-stage1.json
+?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-stage1.py
+?? .ai-team/runs/agy-image-input-fix-20261029/state.json
+?? analysis/agy-image-input-fix/evidence-ledger.md
+?? analysis/agy-image-input-fix/handoff-architect.md
+?? analysis/agy-image-input-fix/handoff-qa.md
+?? analysis/agy-image-input-fix/open-questions.md
+?? analysis/agy-image-input-fix/research-plan.md
+SA-DOD-001..008 PASS

@@ -1,0 +1,56 @@
+{
+  "schema": "l3-heavy-verification/v1",
+  "run_id": "agy-image-input-fix-20261029",
+  "status": "PASS",
+  "models_capabilities_images": {
+    "gemini-3.8-flash": true,
+    "gemini-4-argon": true,
+    "gemini-3.7-flash": false,
+    "gemini-3.6-flash": false,
+    "gemini-3.1-pro": false,
+    "gpt-oss-120b": false
+  },
+  "turn1_argon_2images_stream": {
+    "status": 200,
+    "duration_sec": 27.33,
+    "conversation_id": "3582f83e-aba5-45c6-8f68-36c810c5415f",
+    "answer": "Прочитан общий канон `~/Мой диск/Context/AGENTS.md` целиком (до `<!-- КАНОН-КОНЕЦ -->`); проектных файлов правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочей папке нет.\n\n1. На первом изображении ([img-1.png](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/workspace/img-0c605059ed4b47559302f05d67c959ad/img-1.png)) — **красный** квадрат.\n2. На втором изображении ([img-2.png](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/workspace/img-0c605059ed4b47559302f05d67c959ad/img-2.png)) — **синий** квадрат.",
+    "reasoning_chars": 1078,
+    "leftover_img_dirs": []
+  },
+  "turn2_argon_followup_text_with_image_history": {
+    "status": 200,
+    "duration_sec": 24.24,
+    "conversation_id": "3582f83e-aba5-45c6-8f68-36c810c5415f",
+    "answer": "[Синий](file:///Users/aazhiry1/.dsh/bridges/agy-bridge/workspace/img-4eb0854fa34e467bb60a8fa37f360ef8/img-2.png)",
+    "leftover_img_dirs": []
+  },
+  "turn3_flash_1image": {
+    "status": 200,
+    "duration_sec": 24.3,
+    "answer": "Подтверждаю: общий канон `~/Мой диск/Context/AGENTS.md` прочитан целиком (до `<!-- КАНОН-КОНЕЦ -->`); в рабочей папке проектные файлы правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) отсутствуют.\n\nКрасный",
+    "leftover_img_dirs": []
+  },
+  "unsupported_model_reject": {
+    "status": 400,
+    "body": {
+      "error": {
+        "message": "image rejected: image_input_not_supported",
+        "type": "image_input_not_supported",
+        "code": 400
+      }
+    }
+  },
+  "kill_switch_drill": {
+    "health_off_images": false,
+    "reject_status_when_off": 400,
+    "reject_body_when_off": {
+      "error": {
+        "message": "image rejected: image_input_not_supported",
+        "type": "image_input_not_supported",
+        "code": 400
+      }
+    },
+    "health_restored_images": true
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0",
+  "role": "coder",
+  "task_id": "agy-image-input-fix",
+  "run_id": "agy-image-input-fix-20261029",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Implement workspace-read image input in agy-bridge (AD-001..AD-006, F-001..F-010) in exactly fleet.json, server.py and additive tests; all VER-001..VER-009 gates green; no git mutations.",
+  "inputs_read": [
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/bugfix.md",
+    ".ai-team/runs/agy-image-input-fix-20261029/architecture/architecture-packet.json sha256=ddcbc69fd277d74079d3868eb245a3c05c7d7ea00ddae6369fdc563982433466",
+    ".ai-team/runs/agy-image-input-fix-20261029/panel/arch/final-panel-verdict.md (section B, F-001..F-010)",
+    ".ai-team/runs/agy-image-input-fix-20261029/teamlead/verification-surface.json",
+    "analysis/agy-image-input-fix/handoff-architect.md",
+    "analysis/agy-image-input-fix/handoff-qa.md",
+    "bridges/agy-bridge/fleet.json",
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "scope_paths": [
+    "bridges/agy-bridge/fleet.json",
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "stop_conditions": [
+    "Any change outside the three allowed product files or any git mutation is forbidden",
+    "No dynamic_config.json may remain in the repo; no type-ignore comments; existing test lines are never modified or deleted",
+    "A failing VER gate that cannot be fixed inside scope stops the handoff with BLOCKED instead of a false DONE"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Read mandatory inputs, server.py request/run/spool paths and existing test harness; capture basedpyright baseline",
+      "expected_evidence": "Baseline basedpyright JSON saved under /tmp/coder-01; list of reuse points (_Fixture, _HttpBridge, fake launcher)",
+      "status": "DONE",
+      "actual_evidence": "Read all 9 mandatory inputs plus full server.py/test harness; basedpyright baseline saved: /tmp/coder-01/pyright-baseline.json (1 pre-existing error in tests line ~2906, 804 warnings). Reuse points: _Fixture, _HttpBridge, _Sock, _make_handler, _ctx, fake launcher pattern."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Update fleet.json: limits, technical_ref and workspace-read confirmed proof for gemini-4-argon and gemini-3.8-flash only",
+      "expected_evidence": "fleet.json parses; server catalogue loads with 2 image-capable models and 4 text-only models",
+      "status": "DONE",
+      "actual_evidence": "fleet.json: image_limits 16/20971520/20971520/33554432 + 4 MIME; technical_ref agy 1.4.9 / ~/.local/bin/agy.real / sha 35605054...0423; gemini-4-argon and gemini-3.8-flash = input [text,image], status confirmed, method workspace-read, proof (sha, impl_version 1, 4 formats, efforts low/medium/high); other 4 models untouched. Server loads catalog (test_ao10 asserts pair consistency). git numstat fleet.json +55/-17."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Implement flag, binary proof, ordered validation, global numbering, --add-dir, slot-bounded spool, sweep and log unmasking in server.py",
+      "expected_evidence": "server.py compiles on /usr/bin/python3 3.9; AST gates VER-009 pass; text-only path unchanged",
+      "status": "DONE",
+      "actual_evidence": "server.py +646/-47: IMPLEMENTED_METHODS={'workspace-read':1}, _is_image_input_enabled (env + strict dynamic_config flag, 1.0s cache, own lock), _file_sha256 (1 MiB chunks, identity cache, hashing outside cache lock), _image_proof_reason, ordered _collect_images with pre-decode count/size checks, global [image N] numbering + delta attachments for resumed prompts, Run add_dir (--add-dir, cwd/sess_key untouched), post-slot recheck + _stage_images (0700/0600, O_EXCL, registry before mkdir) + finally cleanup, _sweep_workspace(cutoff_s) with active/symlink protection + periodic thread, 17 log tokens unmasked, model log sanitization, /health and /v1/models images flags. /usr/bin/python3 3.9.6 parses and runs the suite; VER-009 prints IMAGE_STDLIB_SECURITY_PASS."
+    },
+    {
+      "id": "RP-04",
+      "kind": "change",
+      "action": "Append unittest classes covering 40 QA ids and F-002/F-003/F-005/F-006/F-007 to tests/test_agy_bridge_resilience.py without touching existing lines",
+      "expected_evidence": "git diff numstat shows 0 deleted lines; VER-007 prints QA_ASSERT_COVERAGE_PASS 40",
+      "status": "DONE",
+      "actual_evidence": "tests/test_agy_bridge_resilience.py +2205/-0 (git diff --numstat vs 5a19559 = 2205 0): 7 new unittest classes, all 40 QA ids (img01..10, hist01..10, life01..05, log01..02, res01..03, ao01..10) plus F-001/F-002/F-003/F-006 tests; VER-007 prints QA_ASSERT_COVERAGE_PASS 40. Mutation check: 6 server mutants (no recheck, no cleanup, no delta, no --add-dir, sweep ignores active, no precheck) all killed."
+    },
+    {
+      "id": "RP-05",
+      "kind": "verify",
+      "action": "Run VER-001..VER-009 verbatim and record exit codes; then write plan, handoff and coder.json and validate them",
+      "expected_evidence": "All nine gates exit 0; validate_role_plan and validate_handoff print PASS",
+      "status": "DONE",
+      "actual_evidence": "VER-001 exit 0; VER-002 exit 0; VER-003 basedpyright: errorCount 1 == baseline 1 (pre-existing), 0 new warnings (804 -> 791); VER-004 pytest 146 passed exit 0; VER-005 /usr/bin/python3 unittest discover 146 tests OK exit 0; VER-006 numstat 0 deletions + test_images_strict 18 passed (unittest and pytest); VER-007 PASS 40; VER-008 equivalent check on working tree SCOPE_FROZEN_PASS (verbatim form needs a commit); VER-009 PASS."
+    }
+  ],
+  "deviations": [
+    "Validator CLI has no --role/--before flags: validate_role_plan.py was run as '--phase before|after <plan>' only; validate_handoff.py needs --role-plan (supplied).",
+    "Repo fleet has 4 other models gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro, gpt-oss-120b (not the names in the brief); they stay untouched as text-only/unsupported. Targets also get cli_registry=implicit_supported (architecture packet), because the catalogue rejects explicit_unsupported with a non-unsupported status.",
+    "Existing names kept: DYNAMIC_CONFIG_PATH (not _DYNAMIC_CONFIG_PATH), AGY_BIN for the binary path; IMPLEMENTED_METHODS is a plain assignment because VER-009 only inspects ast.Assign.",
+    "image_url given as a plain string and an empty base64 payload follow the approved architecture AD-002 (invalid_image_content / invalid_image_base64), not the brief wording.",
+    "F-004: _collect_images keeps no decoded bytes (data=b'', base64 kept in b64) and _stage_images decodes after the slot; entry shape differs from the brief example accordingly.",
+    "VER-008 verbatim uses 'git diff --name-only BASE HEAD' and cannot pass before a commit (no git mutations allowed); the same assertions were run against the working tree and pass.",
+    "Size-boundary tests (img04..06, img07, f003, ao03) patch image_limits to small values: real-size payloads pushed process peak RSS over the existing test_tc93 112 MiB gate under unittest ordering. Real constants are asserted in test_ao10 and a header-only 413 check at 33554433.",
+    "basedpyright baseline already has errorCount=1 (tests, '[uri, uri + \"&immutable=1\"]', reportOperatorIssue, existing line); not introduced here and untouched because existing lines must stay unmodified."
+  ]
+}

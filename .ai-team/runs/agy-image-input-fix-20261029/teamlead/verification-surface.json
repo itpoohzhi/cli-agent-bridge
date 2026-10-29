@@ -1,0 +1,160 @@
+{
+  "architecture_packet_sha256": "ddcbc69fd277d74079d3868eb245a3c05c7d7ea00ddae6369fdc563982433466",
+  "verifications": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-009"
+      ],
+      "kind": "command",
+      "command": "uvx ruff@0.17.3 check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; zero lint errors",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-009"
+      ],
+      "kind": "command",
+      "command": "uvx ruff@0.17.3 format --check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; format clean",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-009"
+      ],
+      "kind": "command",
+      "command": "PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; no failures",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-009"
+      ],
+      "kind": "command",
+      "command": "uvx basedpyright@1.40.2 --outputjson bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "errorCount == 0 and 0 new warnings vs baseline 5a19559426de7508d525e2bd465eff648665a6a7 (compare multiset file/rule/message using same tool)",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "REQ-009"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /usr/bin/python3 -B -m unittest discover -s tests -p \"test_*agy*.py\"",
+      "expected": "exit 0; full agy unittest suite passes",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import subprocess; d=subprocess.check_output([\"git\",\"diff\",\"--numstat\",\"5a19559426de7508d525e2bd465eff648665a6a7\",\"--\",\"tests/test_agy_bridge_resilience.py\"],text=True).splitlines(); assert all(int(l.split()[1])==0 for l in d); subprocess.run([\"/usr/bin/python3\",\"-B\",\"-m\",\"unittest\",\"discover\",\"-s\",\"tests\",\"-p\",\"test_images_strict.py\"],check=True)'",
+      "expected": "0 deleted test lines vs baseline; tests/test_images_strict.py passes",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast,re; from pathlib import Path; t=ast.parse(Path(\"tests/test_agy_bridge_resilience.py\").read_text()); expected={f\"{p}{i:02}\" for p,n in [(\"img\",10),(\"hist\",10),(\"life\",5),(\"log\",2),(\"res\",3),(\"ao\",10)] for i in range(1,n+1)}; found=set();\nfor f in ast.walk(t):\n if isinstance(f,(ast.FunctionDef,ast.AsyncFunctionDef)) and f.name.startswith(\"test_\") and any(isinstance(a,ast.Assert) or isinstance(a,ast.Call) and isinstance(a.func,ast.Attribute) and isinstance(a.func.value,ast.Name) and a.func.value.id==\"self\" and a.func.attr.startswith(\"assert\") for a in ast.walk(f)):\n  found.update(k for k in expected if re.search(r\"(?:^|_)\"+k+r\"(?:_|$)\",f.name))\nassert not expected-found,sorted(expected-found); print(\"QA_ASSERT_COVERAGE_PASS\",len(expected))'",
+      "expected": "40 IDs img01..10/hist01..10/life01..05/log01..02/res01..03/ao01..10; each mapped test_* has assert or self.assert*",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-008",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import subprocess,hashlib; from pathlib import Path; b=\"5a19559426de7508d525e2bd465eff648665a6a7\"; expected={\"bridges/agy-bridge/fleet.json\",\"bridges/agy-bridge/server.py\",\"tests/test_agy_bridge_resilience.py\"}; names=subprocess.check_output([\"git\",\"diff\",\"--name-only\",b,\"HEAD\"],text=True).splitlines(); actual={n for n in names if not n.startswith((\".ai-team/\",\"analysis/\"))}; assert actual==expected,(actual,expected); tracked=subprocess.check_output([\"git\",\"ls-files\"],text=True).splitlines(); assert not any(Path(n).name==\"dynamic_config.json\" for n in tracked); frozen={'\"'\"'research-plan'\"'\"': '\"'\"'67f3bfffc4e9df6b95ee8571c34ded4a397ad164f86787b3b935fe51dcf1243a'\"'\"', '\"'\"'evidence-ledger'\"'\"': '\"'\"'aba34816b5cf6425d4fbf19187a09edd5f7158797e442d488d68626576f887a9'\"'\"', '\"'\"'open-questions'\"'\"': '\"'\"'63fe13ce25d80cb7bad68d25a57c8d1d6e58847b5b8be79dc395b555c55e5b76'\"'\"', '\"'\"'handoff-architect'\"'\"': '\"'\"'6c22f4a0ab4fc71d2e7cd88e1fe7d2df8c327193eb75bfc9d922af68a4710a8f'\"'\"', '\"'\"'handoff-qa'\"'\"': '\"'\"'007cdac728cdd6754c6617cd749ed3361f0d19c9e1adae16a3c31a90ee352cee'\"'\"'};\nfor n,h in frozen.items(): assert hashlib.sha256(Path(\"analysis/agy-image-input-fix\",n+\".md\").read_bytes()).hexdigest()==h,n\nprint(\"SCOPE_FROZEN_PASS\")'",
+      "expected": "exact three product files in baseline..HEAD, no tracked dynamic_config.json, 5 frozen hashes pass",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-009",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010"
+      ],
+      "kind": "command",
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast,sys; from pathlib import Path; s=Path(\"bridges/agy-bridge/server.py\").read_text(); t=ast.parse(s); allowed=set(getattr(sys,\"stdlib_module_names\",()))|{\"core\"}; assert allowed-{\"core\"},\"Use Python >=3.10 for stdlib inventory\"; roots={a.name.split(\".\")[0] for n in ast.walk(t) if isinstance(n,ast.Import) for a in n.names}|{n.module.split(\".\")[0] for n in ast.walk(t) if isinstance(n,ast.ImportFrom) and n.module}; assert roots<=allowed,roots-allowed; vals=[ast.literal_eval(n.value) for n in ast.walk(t) if isinstance(n,ast.Assign) and any(isinstance(a,ast.Name) and a.id==\"IMPLEMENTED_METHODS\" for a in n.targets)]; assert vals==[{\"workspace-read\":1}],vals; assert all(v in s for v in [\"IMAGE_INPUT_ENABLED\",\"AGY_IMAGE_INPUT_ENABLED\",\"--add-dir\"]); helpers={n.name:n for n in ast.walk(t) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}; todo=[n for n in helpers if \"image\" in n or \"data_url\" in n]; seen=set();\nwhile todo:\n n=todo.pop()\n if n in seen: continue\n seen.add(n); f=helpers[n]\n for a in ast.walk(f):\n  if isinstance(a,ast.Call):\n   name=ast.unparse(a.func); assert not any(v in name for v in [\"urlopen\",\"urlretrieve\",\"urllib.request\",\"http.client\",\"HTTPConnection\",\"HTTPSConnection\"]),name\n   if isinstance(a.func,ast.Name) and a.func.id in helpers: todo.append(a.func.id)\nprint(\"IMAGE_STDLIB_SECURITY_PASS\")'",
+      "expected": "stdlib+core imports only, workspace-read v1, separate flags, --add-dir, no network image loaders; alias/manual AST review supplements closure",
+      "environment": "cwd=repo_root; pinned versions; clean-room no repo caches; not run during Stage 2",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-010",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "REQ-009",
+        "REQ-010"
+      ],
+      "kind": "manual",
+      "command": null,
+      "expected": "Live :9887 existing owner conversation: Turn 1 two distinct real images, native view_file exact new paths and correct content; Turn 2 text-only same history/cid succeeds. Cold/hot/explicit/fallback and repeated/concurrent variants, all format/effort matrix, flag/proof regressions, cleanup and no crash. Hash deployed server/fleet pair; runtime flag true.",
+      "environment": "Teamlead after ARCH_PANEL/code acceptance, deploy paired server.py/fleet.json to ~/.dsh/bridges/agy-bridge; enable IMAGE_INPUT_ENABLED in runtime dynamic_config.json only; 127.0.0.1:9887",
+      "owner": "Teamlead"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schema": "brief-review-verdict/1",
+  "panel": "arch",
+  "round": "R1",
+  "hat": "realist",
+  "brief_sha256": "2e59e56b35cab1e2318308e6dc70aaa62a7767d7750f8353b24332875a5ac89d",
+  "checklist_gen": 1,
+  "checklist_sha256": "ee24542499f9f79f051e8740b37fae1d6eec2ffd1a1b54e1d6281bcb5782bfe1",
+  "reviewer_slot": "gpt-6.1-terra",
+  "transport": "codex-exec",
+  "rc": 0,
+  "wall_seconds": 28.1,
+  "verdict": "APPROVE"
+}

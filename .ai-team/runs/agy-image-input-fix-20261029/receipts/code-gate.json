@@ -1,0 +1,12 @@
+{
+  "schema": "code-gate-receipt/v1",
+  "run_id": "agy-image-input-fix-20261029",
+  "status": "PASS",
+  "coder_plan_sha256": "88349d4f55f8478e8fc4c9b4d138863cb1048aa7af1202d247ff3e1030b582ca",
+  "coder_handoff_sha256": "d24335c5652cc6b1e77709ef44e40cb0bb203555279d9e6d95286b5c56d16fde",
+  "changed_files": [
+    "bridges/agy-bridge/fleet.json",
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ]
+}
