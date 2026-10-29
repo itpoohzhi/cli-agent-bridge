@@ -5,7 +5,7 @@
   "existing_owner_chat": true,
   "owner_conversation_ref": "cdcff52d-4e31-474d-ab11-612a67aa8949",
   "explicit_cid_tested": "live-uf-cid-1793299298",
-  "candidate_server_sha256": "ed0e0a1d8ac73b80efb1edb52b6f84e651823832ef9ec079c2c748ee385f2e7b",
+  "candidate_server_sha256": "e6b30113bea2441e71fafb98d4b984b18d5f94a0f381deb2348ed31918fe55ed",
   "deployed_server_path": "/Users/aazhiry1/.dsh/bridges/agy-bridge/server.py",
   "dynamic_config_path": "/Users/aazhiry1/.dsh/bridges/agy-bridge/dynamic_config.json",
   "scenarios_passed": [
@@ -29,7 +29,7 @@
   },
   "evidence_refs": [
     ".ai-team/runs/agy-universal-image-fallback-20261029/teamlead/logs/ver-010-live-l3.log (sha256=2f878432afe89cdc28a473a4e88f73d4e585167708a63f4b48d703752fb10a0b)",
-    "/Users/aazhiry1/.dsh/bridges/agy-bridge/server.py (sha256=ed0e0a1d8ac73b80efb1edb52b6f84e651823832ef9ec079c2c748ee385f2e7b)",
+    "/Users/aazhiry1/.dsh/bridges/agy-bridge/server.py (sha256=e6b30113bea2441e71fafb98d4b984b18d5f94a0f381deb2348ed31918fe55ed)",
     "/Users/aazhiry1/.dsh/bridges/agy-bridge/dynamic_config.json"
   ]
 }
