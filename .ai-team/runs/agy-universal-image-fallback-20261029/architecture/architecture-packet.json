@@ -1,0 +1,2585 @@
+{
+  "schema_version": "1.0",
+  "protocol": "AP/v1",
+  "task_id": "agy-universal-image-fallback",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "APPROVED",
+  "approval_scope": "Author-finalized reversible design and mechanical schema/integrity gate only. No external council verdict, resource acceptance, Coder authorization or production acceptance is implied.",
+  "baseline": {
+    "branch": "feat/agy-universal-image-fallback",
+    "commit": "012da99905ec27a6133afb4f3e768ff9b4426a8f",
+    "test_prefix_bytes": 249933,
+    "test_prefix_lines": 6008,
+    "test_prefix_sha256": "f318d60537ad862b11313d303644ace3ff5ae74e5d581ceeba86bcf7bddeeff5",
+    "test_line_discrepancy": "Owner specified 1..6009; actual baseline contains 6008 lines. Preserve the ENTIRE 249933-byte blob verbatim, including trailing newline and __main__ guard; append only."
+  },
+  "requirement_ids": [
+    "REQ-01",
+    "REQ-02",
+    "REQ-03",
+    "REQ-04",
+    "REQ-05",
+    "REQ-06"
+  ],
+  "requirements": [
+    {
+      "id": "REQ-01",
+      "statement": "в universal mode любой **известный каталогу** model/поддерживаемый effort принимает image request без per-model proof/SHA/efforts_proven допуска. Валидные user raster PNG/JPEG/GIF/WebP в пределах лимитов при staging=true идут в attempt1 через img_dir, `--add-dir` и attachments. Источники: постановка; разрыв F-102/F-308.",
+      "verification_ids": [
+        "VER-003",
+        "VER-007",
+        "VER-009",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "REQ-02",
+      "statement": "ImageReject, включая malformed image content, flag-off, remote/file URLs, non-user role, unsupported MIME/base64/signature/limits, а также ImageSpoolError ведут к text-only turn в universal mode; никаких media-derived400/500 до него. Источники: постановка; F-105/F-118/F-124/F-125.",
+      "verification_ids": [
+        "VER-003",
+        "VER-005",
+        "VER-009",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "REQ-03",
+      "statement": "если первая реально image-attached попытка вернула state не done/client_gone и delivered=false, до attempt2 убрать media, файлы, прежний CID и hot eligibility. Повтор ровно один, text-only; успешный text turn возвращает обычный200 JSON/успешный SSE. Источники: постановка; F-119..F-123/F-126.",
+      "verification_ids": [
+        "VER-003",
+        "VER-005",
+        "VER-009",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "REQ-04",
+      "statement": "все существующие строки тестового файла неизменны; только append новых uf-тестов. Strict поведение и fleet/default constants сохраняются. Источники: постановка VER-006/007; F-203..F-218/F-314/F-315.",
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-003",
+        "VER-004",
+        "VER-005",
+        "VER-006",
+        "VER-007",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "REQ-05",
+      "statement": "universal acceptance и fallback фактически включены в установленном production bridge для всех catalog models. Проверка checkout/config-file или `/health` сама по себе не равна живой приёмке. Источники: постановка; F-301..F-307/F-129.",
+      "verification_ids": [
+        "VER-003",
+        "VER-008",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "REQ-06",
+      "statement": "stripping действует на всю историю, включая media-only сообщения, dict-content и non-image media; сохраняет текст, порядок, роли и непустой безопасный запрос. Никаких media payload/URL/path/attachments-инструкций от вложений после downgrade. Источники: постановка; F-104/F-111..F-115/F-312.",
+      "verification_ids": [
+        "VER-003",
+        "VER-007",
+        "VER-009",
+        "VER-010"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-101",
+      "claim": "Image flag: env имеет приоритет; strict JSON boolean true; default false и TTL 1 s | bridges/agy-bridge/server.py:681–715 _read_image_flag/_is_image_input_enabled | 2026-10-29",
+      "source_id": "F-101"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-102",
+      "claim": "Eligibility требует image input, confirmed/probe, method/proof version, formats, effort и binary SHA; _model_supports_images зависит от flag/proof | bridges/agy-bridge/server.py:718–786 _image_proof_reason/_image_gate | 2026-10-29",
+      "source_id": "F-102"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-104",
+      "claim": "Коллектор обнаруживает только type=image_url в list-content всей истории; прочие media-типы и dict-content не охватываются | bridges/agy-bridge/server.py:789–809 _collect_image_parts | 2026-10-29",
+      "source_id": "F-104"
+    },
+    {
+      "id": "EVD-004",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-105",
+      "claim": "Gate предшествует count/role/URL/MIME/base64/size/signature проверкам; без image_url коллектор возвращает пустой список без gate | bridges/agy-bridge/server.py:835–930 _collect_images | 2026-10-29",
+      "source_id": "F-105"
+    },
+    {
+      "id": "EVD-005",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-106",
+      "claim": "URL кроме data: не читаются/не скачиваются; image_url в non-user role отклоняется | bridges/agy-bridge/server.py:871–881 _collect_images | 2026-10-29",
+      "source_id": "F-106"
+    },
+    {
+      "id": "EVD-006",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-107",
+      "claim": "Sniff проверяет только PNG/JPEG/GIF/WebP magic bytes, не декодируемость пикселей | bridges/agy-bridge/server.py:812–822 _sniff_image_type | 2026-10-29",
+      "source_id": "F-107"
+    },
+    {
+      "id": "EVD-007",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-108",
+      "claim": "Collector не пишет файлы; хранит base64 и пути img-UUID/img-N.ext; размер проверяется до b64decode | bridges/agy-bridge/server.py:830–930 _new_img_dir/_collect_images | 2026-10-29",
+      "source_id": "F-108"
+    },
+    {
+      "id": "EVD-008",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-109",
+      "claim": "Staging после acquire slot использует directory 0700 и files 0600/O_EXCL; частичный spool удаляется при OSError/ValueError | bridges/agy-bridge/server.py:933–963 _stage_images; :3125–3208 _run_once | 2026-10-29",
+      "source_id": "F-109"
+    },
+    {
+      "id": "EVD-009",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-110",
+      "claim": "Cleanup best-effort удаляет каталог и всегда снимает его с active registry | bridges/agy-bridge/server.py:966–977 _cleanup_img_dir | 2026-10-29",
+      "source_id": "F-110"
+    },
+    {
+      "id": "EVD-010",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-111",
+      "claim": "Пустой images убирает attachments, но не image N markers: _messages_to_prompt всегда передаёт img_counter | bridges/agy-bridge/server.py:589–610 _flatten_content; :1042–1066 _messages_to_prompt | 2026-10-29",
+      "source_id": "F-111"
+    },
+    {
+      "id": "EVD-011",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-112",
+      "claim": "Renderer принимает любое list-part.text независимо от type, а dict-content превращает в str(content) | bridges/agy-bridge/server.py:589–610 _flatten_content | 2026-10-29",
+      "source_id": "F-112"
+    },
+    {
+      "id": "EVD-012",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-113",
+      "claim": "Пустая rendered-история получает непустой fallback Reply with exactly: PONG | bridges/agy-bridge/server.py:1063–1067 _messages_to_prompt | 2026-10-29",
+      "source_id": "F-113"
+    },
+    {
+      "id": "EVD-013",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-114",
+      "claim": "Attachments содержит file paths/MIME/size и instruction; Run передаёт отдельный --add-dir и сохраняет cwd | bridges/agy-bridge/server.py:980–1001 _attachments_block; :2517–2534 Run.__init__ | 2026-10-29",
+      "source_id": "F-114"
+    },
+    {
+      "id": "EVD-014",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-115",
+      "claim": "Resume берёт сообщения после последнего assistant, attachments новых сообщений и глобальную нумерацию; full_prompt хранится отдельно | bridges/agy-bridge/server.py:1069–1095 _get_resumed_turn_prompt; :3661–3714 do_POST | 2026-10-29",
+      "source_id": "F-115"
+    },
+    {
+      "id": "EVD-015",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-116",
+      "claim": "Store используется для tools-запросов с ключом model/cwd/effort; plain запрос не изменяет store | bridges/agy-bridge/server.py:3673–3691 do_POST | 2026-10-29",
+      "source_id": "F-116"
+    },
+    {
+      "id": "EVD-016",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-117",
+      "claim": "Запрошенный invalidate helper отсутствует; CAS-helper в этом HEAD называется _session_invalidate(sess_key,cid) | bridges/agy-bridge/server.py:1129–1133 _session_invalidate; rg -n _invalidate_hot_session_if_matches bridges/agy-bridge/server.py → no matches | 2026-10-29",
+      "source_id": "F-117"
+    },
+    {
+      "id": "EVD-017",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-118",
+      "claim": "Gate после ожидания slot возвращает image_reject, spool exception возвращает image_spool_error; текстового downgrade нет | bridges/agy-bridge/server.py:3176–3208 _run_once | 2026-10-29",
+      "source_id": "F-118"
+    },
+    {
+      "id": "EVD-018",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-119",
+      "claim": "Две попытки используют тот же img_dir/images; outer finally удаляет каталог и освобождает slot | bridges/agy-bridge/server.py:3209–3227,3326–3330 _run_once | 2026-10-29",
+      "source_id": "F-119"
+    },
+    {
+      "id": "EVD-019",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-120",
+      "claim": "Delivered равен text или tool_calls или stream reasoning; state done завершает цикл до retry | bridges/agy-bridge/server.py:3265–3279 _run_once | 2026-10-29",
+      "source_id": "F-120"
+    },
+    {
+      "id": "EVD-020",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-121",
+      "claim": "Hot failure инвалидирует session, освобождает cid и заменяет prompt на full_prompt; agy_error без delivered имеет отдельный ранний continue с retry budget | bridges/agy-bridge/server.py:3280–3298 _run_once | 2026-10-29",
+      "source_id": "F-121"
+    },
+    {
+      "id": "EVD-021",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-122",
+      "claim": "Общий retry ограничен agy_error/pump_error/done, delivered=false и retry budget; timeout states не повторяются | bridges/agy-bridge/server.py:3299–3313 _run_once; :1396–1410 _retry_take | 2026-10-29",
+      "source_id": "F-122"
+    },
+    {
+      "id": "EVD-022",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-123",
+      "claim": "Run constructor OSError и LauncherUnavailable выходят через break до общей retry-ветки; launcher ещё вызывает HTTP reject | bridges/agy-bridge/server.py:3216–3264 _run_once | 2026-10-29",
+      "source_id": "F-123"
+    },
+    {
+      "id": "EVD-023",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-124",
+      "claim": "do_POST до response ловит ImageReject и возвращает 400; ctx содержит prompt/full_prompt/images/img_dir, но не original messages | bridges/agy-bridge/server.py:3621–3644,3695–3714 do_POST | 2026-10-29",
+      "source_id": "F-124"
+    },
+    {
+      "id": "EVD-024",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-125",
+      "claim": "Image reject отображается в 400, spool в 500, CLI/pump в 502, timeout в 504, launcher/queue в 503; done с bad rc или empty text тоже proxy_error | bridges/agy-bridge/server.py:3339–3417 _error_body | 2026-10-29",
+      "source_id": "F-125"
+    },
+    {
+      "id": "EVD-025",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-126",
+      "claim": "JSON успех возвращает 200 после проверки; SSE заранее возвращает 200, а сбой кодирует error event и DONE | bridges/agy-bridge/server.py:3728–3828 _serve_json/_serve_sse | 2026-10-29",
+      "source_id": "F-126"
+    },
+    {
+      "id": "EVD-026",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-128",
+      "claim": "State done с ненулевым rc возможен и не подпадает под точный owner guard state!=done | bridges/agy-bridge/server.py:3093–3103 _execute; :3407–3414 _error_body | 2026-10-29",
+      "source_id": "F-128"
+    },
+    {
+      "id": "EVD-027",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-129",
+      "claim": "Health и models capability используют proof-and-flag eligibility; image_input_mode отражает только staging flag | bridges/agy-bridge/server.py:3420–3436,3454–3474 do_GET | 2026-10-29",
+      "source_id": "F-129"
+    },
+    {
+      "id": "EVD-028",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-130",
+      "claim": "Auth/framing/body/admission/model/effort проверки находятся раньше image collection и имеют собственные 401/400/413/503 ответы | bridges/agy-bridge/server.py:3487–3620 do_POST | 2026-10-29",
+      "source_id": "F-130"
+    },
+    {
+      "id": "EVD-029",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-132",
+      "claim": "Sweep не удаляет active/symlink dirs; возраст orphan 3600 s и период 600 s | bridges/agy-bridge/server.py:3889–3928 _sweep_workspace/_sweep_loop | 2026-10-29",
+      "source_id": "F-132"
+    },
+    {
+      "id": "EVD-030",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-201",
+      "claim": "Import loader устанавливает тестовый AUTH_KEY и удаляет AGY_BRIDGE_FLEET, но не изолирует новый fallback env | tests/test_agy_bridge_resilience.py:65–78 _load_bridge | 2026-10-29",
+      "source_id": "F-201"
+    },
+    {
+      "id": "EVD-031",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-202",
+      "claim": "Fixture подменяет DYNAMIC_CONFIG_PATH/AGY_BIN/LAUNCHER/WORKSPACE на temp; production config не участвует в test requests | tests/test_agy_bridge_resilience.py:934–964 _Fixture | 2026-10-29",
+      "source_id": "F-202"
+    },
+    {
+      "id": "EVD-032",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-203",
+      "claim": "ImgEnv.flag пишет только IMAGE_INPUT_ENABLED, сбрасывает только старый cache и снимает старый env; нового fallback ключа нет | tests/test_agy_bridge_resilience.py:3983–4039 _ImgEnv | 2026-10-29",
+      "source_id": "F-203"
+    },
+    {
+      "id": "EVD-033",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-204",
+      "claim": "f001 требует default false, strict bool/size/JSON semantics и env override | tests/test_agy_bridge_resilience.py:5439 test_f001_flag_defaults_false_and_follows_env_then_strict_config | 2026-10-29",
+      "source_id": "F-204"
+    },
+    {
+      "id": "EVD-034",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-205",
+      "claim": "ao10 фиксирует static fleet version/SHA/method/limits/proofs/input и unsupported остальных моделей; без config eligibility false | tests/test_agy_bridge_resilience.py:5928–6005 test_ao10_repo_fleet_and_server_form_one_consistent_pair | 2026-10-29",
+      "source_id": "F-205"
+    },
+    {
+      "id": "EVD-035",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-206",
+      "claim": "ao01 требует лишь две image-модели и 400 unsupported/flag-off; ao02/ao03 требуют 400 для image taxonomy до spool/spawn | tests/test_agy_bridge_resilience.py:5505 _taxonomy_cases; :5620–5742 ao01/ao02/ao03 | 2026-10-29",
+      "source_id": "F-206"
+    },
+    {
+      "id": "EVD-036",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-208",
+      "claim": "life03 требует spool ENOSPC → 500, no spawn, no directories/registry и все четыре slot свободны | tests/test_agy_bridge_resilience.py:4976 test_life03_spool_failure_returns_500_and_leaves_no_directory | 2026-10-29",
+      "source_id": "F-208"
+    },
+    {
+      "id": "EVD-037",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-209",
+      "claim": "log01/log02 требуют strict reject logs, 400 SHA/effort/MIME и отсутствие auth/payload | tests/test_agy_bridge_resilience.py:5143,5173,5210 ImageLogTests | 2026-10-29",
+      "source_id": "F-209"
+    },
+    {
+      "id": "EVD-038",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-210",
+      "claim": "res02 фиксирует strict health/eligibility/400 поведение; f002 требует recheck flag/SHA после acquire до mkdir/spawn | tests/test_agy_bridge_resilience.py:5315 test_res02; :5383 test_f002 | 2026-10-29",
+      "source_id": "F-210"
+    },
+    {
+      "id": "EVD-039",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-212",
+      "claim": "hist05/life02 требуют те же image dir/files на retry; life01 предполагает files на каждой попытке | tests/test_agy_bridge_resilience.py:4682 test_hist05; :4884 test_life01; :4940 test_life02 | 2026-10-29",
+      "source_id": "F-212"
+    },
+    {
+      "id": "EVD-040",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-213",
+      "claim": "res03: retry budget 0 даёт одну попытку, 30 две; hist06/ao09 запрещают retry после delivered text/reasoning | tests/test_agy_bridge_resilience.py:5367 test_res03; :4710 test_hist06; :5887 test_ao09 | 2026-10-29",
+      "source_id": "F-213"
+    },
+    {
+      "id": "EVD-041",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-214",
+      "claim": "Image section содержит 46 test methods: img10+hist10+life5+log3+res3+ao10+f5; весь файл содержит 146 | Python AST FunctionDef name.startswith(test_) counts for lineno>=3803 and full tests/test_agy_bridge_resilience.py | 2026-10-29",
+      "source_id": "F-214"
+    },
+    {
+      "id": "EVD-042",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-215",
+      "claim": "Тестовый diff от baseline уже имеет 2205 added и 0 deleted lines | git diff --numstat 5a19559426de7508d525e2bd465eff648665a6a7 -- tests/test_agy_bridge_resilience.py → 2205 0 | 2026-10-29",
+      "source_id": "F-215"
+    },
+    {
+      "id": "EVD-043",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-216",
+      "claim": "HttpBridge использует localhost/fake agy; post возвращает status/JSON, sse helper возвращает body без HTTP status | tests/test_agy_bridge_resilience.py:1872 _HttpBridge; :4205 _sse_post | 2026-10-29",
+      "source_id": "F-216"
+    },
+    {
+      "id": "EVD-044",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-217",
+      "claim": "Image fixtures magic+tag не являются pixel-valid; img10 явно требует принимать truncated PNG без decoding | tests/test_agy_bridge_resilience.py:3884 _img_raw; :4441 test_img10 | 2026-10-29",
+      "source_id": "F-217"
+    },
+    {
+      "id": "EVD-045",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-218",
+      "claim": "unittest.main стоит до будущего append; новые classes после guard доступны import discovery, но не direct script execution | tests/test_agy_bridge_resilience.py:6008 __main__ guard | 2026-10-29",
+      "source_id": "F-218"
+    },
+    {
+      "id": "EVD-046",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-301",
+      "claim": "Production image projection содержит только IMAGE_INPUT_ENABLED=true; fallback ключ отсутствует | ~/.dsh/bridges/agy-bridge/dynamic_config.json; read-only sanitized JSON projection on 2026-10-29 | 2026-10-29",
+      "source_id": "F-301"
+    },
+    {
+      "id": "EVD-047",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-302",
+      "claim": "Tracked bridge files: fleet.json/server.py/start.sh; tracked dynamic_config.json отсутствует | git ls-files bridges/agy-bridge | 2026-10-29",
+      "source_id": "F-302"
+    },
+    {
+      "id": "EVD-048",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-303",
+      "claim": "DYNAMIC_CONFIG_PATH находится в resolve parent server.py; отдельная runtime-копия имеет отдельный config | bridges/agy-bridge/server.py:98,154 ROOT/DYNAMIC_CONFIG_PATH | 2026-10-29",
+      "source_id": "F-303"
+    },
+    {
+      "id": "EVD-049",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-306",
+      "claim": "Runtime server/fleet обычные files и совпадают с checkout по SHA256 | read-only ls/hashlib repo and ~/.dsh/bridges/agy-bridge; server=3227e8ef769c5ebda5b4aa5647bbd651f4a9b28c784122c61c3e1f638be9e357; fleet=fe2564ea0eb1f17d681f8ccfb7224b4b44eb4c999cb5ac1cad518736a92b5baf | 2026-10-29",
+      "source_id": "F-306"
+    },
+    {
+      "id": "EVD-050",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-307",
+      "claim": "start.sh не создаёт и не синхронизирует dynamic config | bridges/agy-bridge/start.sh:7–23 | 2026-10-29",
+      "source_id": "F-307"
+    },
+    {
+      "id": "EVD-051",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-308",
+      "claim": "Только Argon/Flash 3.8 имеют confirmed workspace-read proof; четыре остальные записи text-only с историческим отказом inline agy1.3.1 | bridges/agy-bridge/fleet.json:45–203 models | 2026-10-29",
+      "source_id": "F-308"
+    },
+    {
+      "id": "EVD-052",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-310",
+      "claim": "Лимиты: 16 images; individual/total 20971520 bytes; body33554432 bytes; admission32 connections/67108864 inflight bytes | bridges/agy-bridge/fleet.json:21–43 image_limits/admission | 2026-10-29",
+      "source_id": "F-310"
+    },
+    {
+      "id": "EVD-053",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-312",
+      "claim": "Sibling omission обрабатывает image_url, но text проверяет раньше type и dict-content сериализует как str; полный media sanitizer переиспользовать нельзя | bridges/muse-bridge/server.py:633–650; bridges/opencode-zen-bridge/server.py:4677–4694 | 2026-10-29",
+      "source_id": "F-312"
+    },
+    {
+      "id": "EVD-054",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-313",
+      "claim": "Предыдущий handoff требует strict400, defaultfalse, spool failure и сохранение images на retry | analysis/agy-image-input-fix/handoff-architect.md:44–49; handoff-qa.md sections4–6 | 2026-10-29",
+      "source_id": "F-313"
+    },
+    {
+      "id": "EVD-055",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-314",
+      "claim": "VER-006 проверяет zero deleted относительно baseline и отдельно запускает test_images_strict.py | .ai-team/runs/agy-image-input-fix-20261029/teamlead/verification-surface.json object VER-006 | 2026-10-29",
+      "source_id": "F-314"
+    },
+    {
+      "id": "EVD-056",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-315",
+      "claim": "VER-007 требует 40 ID с AST asserts; это не 44 и не полный подсчёт methods и не выполнение тестов | .ai-team/runs/agy-image-input-fix-20261029/teamlead/verification-surface.json object VER-007 | 2026-10-29",
+      "source_id": "F-315"
+    },
+    {
+      "id": "EVD-057",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-401",
+      "claim": "Исходные 36 Image* tests прошли за23.005 s, run-guarded exit0; pytest в system Python отсутствует | run-guarded -- python3 -m unittest discover -s tests -p test_agy_bridge_resilience.py -k Image -q → Ran36 tests OK; exec session17642 | 2026-10-29",
+      "source_id": "F-401"
+    },
+    {
+      "id": "EVD-058",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-402",
+      "claim": "Исходные10 AcceptanceOracleTests прошли за9.759 s, run-guarded exit0; совместно с F-401 покрыты все46 image-related methods | run-guarded -- python3 -m unittest discover -s tests -p test_agy_bridge_resilience.py -k AcceptanceOracleTests -q → Ran10 tests OK; exec session5402 | 2026-10-29",
+      "source_id": "F-402"
+    },
+    {
+      "id": "EVD-059",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-403",
+      "claim": "После анализа server/fleet/test файл не изменены; strict baseline diff по-прежнему2205 added/0 deleted | git diff --exit-code -- bridges/agy-bridge/server.py bridges/agy-bridge/fleet.json tests/test_agy_bridge_resilience.py → exit0; git diff --numstat 5a19559426de7508d525e2bd465eff648665a6a7 -- tests/test_agy_bridge_resilience.py → 2205 0 | 2026-10-29",
+      "source_id": "F-403"
+    },
+    {
+      "id": "EVD-060",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-404",
+      "claim": "Repo defaults: execution slots4, retry capacity3 tokens, credit0.2/request, cost1/retry и jitter cap2s; это default constants, не измеренные production env/throughput | bridges/agy-bridge/server.py:109,181–187,1396–1417 MAX_CONCURRENT/RETRY constants | 2026-10-29",
+      "source_id": "F-404"
+    },
+    {
+      "id": "EVD-061",
+      "kind": "document",
+      "ref": "analysis/agy-universal-image-fallback/evidence-ledger.md#F-405",
+      "claim": "Repo timeout defaults: queue900s, execution1800s, first event120s; это controller ceilings, не SLA/p99 | bridges/agy-bridge/server.py:110–115 QUEUE_TIMEOUT_S/TIMEOUT_S/FIRST_TOKEN_TIMEOUT_S | 2026-10-29",
+      "source_id": "F-405"
+    },
+    {
+      "id": "EVD-100",
+      "kind": "code",
+      "ref": "bridges/agy-bridge/server.py:do_GET / _cid_release / Run.__init__ / _run_once; tests/test_agy_bridge_resilience.py:test_ao06_health_has_four_additive_fields_and_keeps_existing_ones",
+      "claim": "Direct gap checks: health.images is bool, no _log_token or log.info logger exists, _cid_release(cid,turn_id) is owner-safe, no local conv_id in _run_once; Run gets new CLI conversation when conversation_id empty; baseline6008lines/249933bytes."
+    }
+  ],
+  "risk_triggers": [
+    "security",
+    "trust-boundary"
+  ],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "source_id": "ASSUMP-01",
+      "class": "continuable",
+      "status": "ASSUMED",
+      "statement": "Owner200 requirement is media-safe admission plus a real text attempt, not guaranteed backend availability. Successful text gives200; independent protocol/admission/launcher/second failure remain truthful errors. User direct guard excludes done/client_gone.",
+      "evidence_ids": [
+        "EVD-100"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "source_id": "ASSUMP-02",
+      "class": "continuable",
+      "status": "ASSUMED",
+      "statement": "Valid decodable raster describes positive test corpus. Universal safety retains signature-only validation and no pixel decoder/dependency; this is not a proof that every signature-bearing file decodes safely.",
+      "evidence_ids": [
+        "EVD-100"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-006"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "title": "Universal Policy Flag & Dynamic Config Activation",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "How to enable universal acceptance without changing legacy strict fixtures?",
+      "choice": "An independent fail-closed IMAGE_FALLBACK_ENABLED controls universal policy; IMAGE_INPUT_ENABLED continues to control staging. Capture universal once per accepted request and recheck input after slot acquisition.",
+      "alternatives": [
+        "Universal enabled by default: rejected because it breaks strict baseline and res03/hist05/life02.",
+        "Reuse IMAGE_INPUT_ENABLED as universal: rejected because _ImgEnv sets only this flag and must remain strict."
+      ],
+      "drivers": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-04",
+        "REQ-05",
+        "CON-04",
+        "INV-01",
+        "INV-09",
+        "RISK-05"
+      ],
+      "consequences": [
+        "No fleet mutation or fake proofs.",
+        "Rollback universal=false restores strict behavior for new requests; in-flight requests retain captured universal policy.",
+        "Input disable propagates on next post-slot check subject to its existing <=1s cache; accepted running CLI is not retroactively cancelled."
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import importlib.util, os, sys, unittest\nos.environ.pop(\"AGY_IMAGE_FALLBACK_ENABLED\", None)\nsys.path.insert(0, \"tests\"); sys.path.insert(0, \".\")\nspec=importlib.util.spec_from_file_location(\"agy_frozen_suite\", \"tests/test_agy_bridge_resilience.py\")\nm=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)\nclasses=[c for n,c in vars(m).items() if isinstance(c,type) and issubclass(c,unittest.TestCase) and (n.startswith(\"Image\") or n in {\"AcceptanceOracleTests\",\"UniversalImageFallbackTests\"})]\nassert any(c.__name__==\"UniversalImageFallbackTests\" for c in classes), \"Missing universal tests\"\nloader=unittest.TestLoader(); suite=unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)\nassert suite.countTestCases()>=56, suite.countTestCases()\nresult=unittest.TextTestRunner(verbosity=2).run(suite); assert result.wasSuccessful()\nprint(\"UNIVERSAL_AND_LEGACY_EXECUTION_PASS\")'",
+        "expected": "Independent execution VER003 plus VER-003, VER-006, VER-008, VER-010 must pass after implementation."
+      },
+      "verification_ids": [
+        "VER-003",
+        "VER-006",
+        "VER-008",
+        "VER-010"
+      ],
+      "details": {
+        "names": {
+          "config": "IMAGE_FALLBACK_ENABLED",
+          "env": "AGY_IMAGE_FALLBACK_ENABLED",
+          "reader": "_read_image_fallback_flag()",
+          "predicate": "_is_image_fallback_enabled()",
+          "cache": "_image_fallback_flag_cache = (0.0, False)",
+          "ttl_s": 1.0
+        },
+        "reader_contract": "Bounded read of DYNAMIC_CONFIG_PATH; reject missing/unreadable/oversize/invalid JSON/non-object; only data.get(\"IMAGE_FALLBACK_ENABLED\") is True enables. Strings, integers, null and missing key are False. No env parsing inside JSON reader.",
+        "env_contract": "Read env every predicate call, strip whitespace and lowercase. Nonempty 1/true/yes=>True; 0/false/no=>False; other nonempty token=>False (including on/off for NEW flag). Empty/unset falls through to JSON. Env overrides cache immediately and does not mutate JSON; no production global env export in test runner.",
+        "cache_contract": "Monotonic TTL<1.0s serves cached config; age>=1.0s rereads; bounded dedicated lock _image_fallback_flag_lock protects tuple. Initialize (0.0,False); reset under that lock inside _reset_sqlite_guards_for_tests(); independent from old input, SHA and SQLite caches. Cold cache always reads current fixture path. Existing _ImgEnv/_Fixture tests need no edits.",
+        "policy_matrix": [
+          {
+            "universal": false,
+            "input_enabled": false,
+            "images": "legacy strict reject",
+            "response": "400 image_input_not_supported for image requests; pure text unchanged"
+          },
+          {
+            "universal": false,
+            "input_enabled": true,
+            "images": "legacy _image_gate proof/SHA/efforts gate",
+            "response": "legacy admission/retry same files, all old error outcomes unchanged"
+          },
+          {
+            "universal": true,
+            "input_enabled": false,
+            "images": "no staging, strip all media from full history",
+            "response": "real pure-text attempt1; collect/flag_disabled event; HTTP200 iff text backend succeeds"
+          },
+          {
+            "universal": true,
+            "input_enabled": true,
+            "images": "optimistic known catalog + valid effort + all safety checks; no model proof eligibility",
+            "response": "valid raster attached attempt1; validation/recheck/spool failure strips before attempt1; runtime guard strips before attempt2"
+          }
+        ],
+        "universal_gate": "_image_gate_universal(model_id,effort) validates catalog membership and declared valid model effort and current input flag; never calls _image_proof_reason/_file_sha256 nor uses images.status/proof/agy_binary_sha256/efforts_proven/formats proof. Unknown model/invalid effort remain ingress400, never rescued by media fallback. Startup fleet schema remains unchanged.",
+        "collector_contract": "_collect_images(messages,model_id,effort,universal=False): default strict exactly preserves existing path/order/taxonomy. universal=True uses complete media classification, canonical image aliases and _image_gate_universal, then same limits/role/dataURL/base64/MIME/signature checks. No _stage_images before slot. Any ImageReject discards ALL collected entries; no partially valid image subset is sent.",
+        "safety_limits": {
+          "images_max": 16,
+          "per_image_bytes_max": 20971520,
+          "total_image_bytes_max": 20971520,
+          "http_body_bytes_max": 33554432,
+          "allowed_roles": [
+            "user"
+          ],
+          "mime": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ],
+          "encoding": "data:<allowed-mime>;base64,<strict-base64>; signature must match declared MIME",
+          "remote_reads": "forbidden including HTTP(S), file:// and relative paths",
+          "proof_is_not_safety": "Signature-only validation retained; no new pixel decoder."
+        },
+        "production_activation": {
+          "path": "~/.dsh/bridges/agy-bridge/dynamic_config.json",
+          "required_projection": {
+            "IMAGE_INPUT_ENABLED": true,
+            "IMAGE_FALLBACK_ENABLED": true
+          },
+          "status": "PLANNED_NOT_APPLIED_STAGE2",
+          "procedure": "After architecture and code council acceptance deploy candidate server only, verify unchanged fleet SHA, preserve unrelated config keys and atomically set both strict JSON booleans true in DEPLOYED ROOT. Code replacement needs managed bridge restart; flag toggles reload <=1s without restart. Read back flags and effective capability; then existing owner DSH chat must pass VER010 live scenarios. Never add tracked dynamic_config.json.",
+          "owner_override": "Current owner explicitly selects local dynamic_config.json plus env override; this is scoped exception to general GigaRC/no-new-env preference, not a claim that GigaRC is integrated."
+        }
+      }
+    },
+    {
+      "id": "AD-002",
+      "title": "Complete Media Normalization & Stripping Contract",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "How to remove media from all history and both prompt representations without payload leakage?",
+      "choice": "Pure non-mutating content normalization classifies media by type AND payload keys before considering text. Precompute stripped full-history prompt in ctx before any session delta selection.",
+      "alternatives": [
+        "Set images=[] only: rejected, leaves [image N], full_prompt attachments and old CID.",
+        "str(content)/text-first generic renderer: rejected, exposes media dict.text and inline payloads."
+      ],
+      "drivers": [
+        "REQ-06",
+        "INV-02",
+        "INV-03",
+        "INV-04",
+        "INV-07",
+        "AC-04",
+        "AC-07"
+      ],
+      "consequences": [
+        "No in-place edits to caller messages or test fixtures.",
+        "Plain textual URLs are preserved verbatim; only structured attachment payloads are removed.",
+        "Normal universal raster rendering omits other media, fallback rendering replaces it with stable placeholders."
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import importlib.util, os, sys, unittest\nos.environ.pop(\"AGY_IMAGE_FALLBACK_ENABLED\", None)\nsys.path.insert(0, \"tests\"); sys.path.insert(0, \".\")\nspec=importlib.util.spec_from_file_location(\"agy_frozen_suite\", \"tests/test_agy_bridge_resilience.py\")\nm=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)\nclasses=[c for n,c in vars(m).items() if isinstance(c,type) and issubclass(c,unittest.TestCase) and (n.startswith(\"Image\") or n in {\"AcceptanceOracleTests\",\"UniversalImageFallbackTests\"})]\nassert any(c.__name__==\"UniversalImageFallbackTests\" for c in classes), \"Missing universal tests\"\nloader=unittest.TestLoader(); suite=unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)\nassert suite.countTestCases()>=56, suite.countTestCases()\nresult=unittest.TextTestRunner(verbosity=2).run(suite); assert result.wasSuccessful()\nprint(\"UNIVERSAL_AND_LEGACY_EXECUTION_PASS\")'",
+        "expected": "Independent execution VER003 plus VER-003, VER-007, VER-009 must pass after implementation."
+      },
+      "verification_ids": [
+        "VER-003",
+        "VER-007",
+        "VER-009"
+      ],
+      "details": {
+        "helper_contracts": {
+          "_flatten_content_stripped(content)": "Return safe string with unchanged ordinary text order and newline joining; None=>empty; recognized image=>[image omitted]; other recognized media=>[media omitted]; unknown dict/object never str(dict).",
+          "_strip_media_from_messages(messages)": "Return fresh JSON-safe message list with roles/order/name/tool-call protocol metadata preserved, content replaced by safe string, nested content structures copied/normalized without mutation. Do not use copy.deepcopy on hot path: normalization is deep by visiting content recursively once.",
+          "_messages_to_stripped_prompt(messages)": "Render normalized messages through existing role/tool message envelope with images=[] and no image counter-driven media parts; zero generated [attachments], generated [image N], media paths/URLs/base64. Existing user text is not censored."
+        },
+        "classification_order": [
+          "If structured object is image type or has image payload key, emit image placeholder BEFORE looking at text, even type=text plus image_url.",
+          "Else if other media type or media payload key, emit media placeholder BEFORE looking at text.",
+          "Else known text type/plain text value -> string text only; dict(text) supported only if safe string. Never serialize nested text object.",
+          "Lists process entries in order; plain strings pass through; None/numbers/unknown structured objects omitted; unknown object-only message gets [media omitted] to keep safe nonempty context."
+        ],
+        "image_types": [
+          "image_url",
+          "image",
+          "input_image"
+        ],
+        "image_payload_keys": [
+          "image_url",
+          "image"
+        ],
+        "other_media_types": [
+          "input_audio",
+          "audio",
+          "video",
+          "video_url",
+          "file",
+          "document",
+          "inlineData",
+          "inline_data",
+          "fileData",
+          "file_data"
+        ],
+        "other_media_payload_keys": [
+          "input_audio",
+          "audio",
+          "video",
+          "video_url",
+          "file",
+          "document",
+          "inlineData",
+          "inline_data",
+          "fileData",
+          "file_data"
+        ],
+        "dict_content": "Identical handling to list parts: recognized media types/keys win; type=text with safe str text yields that text. Dict is never rendered via str(content).",
+        "aliases_for_optimistic_collection": "Classify image aliases across list and dict content. Canonicalize on a private normalized copy to type=image_url with image_url={url:...}; URL source is string image_url/image payload or payload.url, including type=input_image with image_url string. Prefer image_url key over image if both; malformed/missing URL is ImageReject -> whole-request stripped fallback, never guessed local/file or raw base64. Preserve original role/msg_index and global image numbering. Type=image_url lacking payload remains an invalid image candidate, not silently dropped.",
+        "normal_universal_render": "For universal normal/optimistic render only: retain canonical validated raster image references and text; silently omit other media parts, including their text keys, and never serialize unknown dicts. If there are ONLY non-image media/unknown structured parts and no raster, use stripped placeholders and text-only admission (stage=collect reason=unsupported_media). Mixed valid raster + non-image media retains valid raster, excludes non-image media without forcing downgrade.",
+        "idempotency": "For normalized list N: _strip_media_from_messages(N)==N; repeated normalization yields byte-identical rendered prompt. Placeholder strings are ordinary safe strings: never wrapped/replaced/appended again.",
+        "nonempty": "Each image/media-only message retains its [image omitted]/[media omitted] marker; never becomes empty and never causes generated Reply with exactly: PONG. Truly empty/non-media requests retain existing behavior.",
+        "ctx_contract": "Always store ctx[\"stripped_full_prompt\"]=_messages_to_stripped_prompt(original messages). ctx[\"universal_fallback\"] is admission snapshot. For any actual downgrade assign BOTH ctx[\"prompt\"] and ctx[\"full_prompt\"] from stripped_full_prompt, ctx[\"images\"]=[], ctx[\"img_dir\"]=None. Never recompute from original _messages_to_prompt(messages,[]) during downgrade.",
+        "resumed_contract": "If any current or historical media was stripped, force cold text turn with full stripped history; do not resume dirty explicit or cached CID. This conservative choice is owner-permitted. Normal universal with valid raster may still use existing resumed slice numbering; stripped_full_prompt was computed from the full original history before selecting that slice.",
+        "strict_isolation": "When universal=False continue existing collector/render paths exactly, including existing strict truncated PNG and same-files retry assertions; new normalizer does not redefine strict inputs."
+      }
+    },
+    {
+      "id": "AD-003",
+      "title": "Three Safe Downgrade Points",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Where exactly does fallback override strict early exits and retry branches?",
+      "choice": "Central bounded media-to-text state transition at admission, post-slot/spool, and runtime attempt1, before both legacy retry paths. Keep all response and resource ownership invariants.",
+      "alternatives": [
+        "Only generic transient retry: rejected, misses timeouts, hot early continue, flag and spool failures.",
+        "Always replay same image attachments on failure: rejected by owner text-only fallback contract."
+      ],
+      "drivers": [
+        "REQ-02",
+        "REQ-03",
+        "INV-05",
+        "INV-06",
+        "INV-07",
+        "INV-08",
+        "INV-09",
+        "INV-11"
+      ],
+      "consequences": [
+        "Exactly at most2 CLI executions/request; degradation reserve is request-scoped and unavailable to generic retries.",
+        "Failures after client delivery, client_gone and state done never trigger this fallback.",
+        "External side effects can occur before delivery; no exactly-once promise."
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import importlib.util, os, sys, unittest\nos.environ.pop(\"AGY_IMAGE_FALLBACK_ENABLED\", None)\nsys.path.insert(0, \"tests\"); sys.path.insert(0, \".\")\nspec=importlib.util.spec_from_file_location(\"agy_frozen_suite\", \"tests/test_agy_bridge_resilience.py\")\nm=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)\nclasses=[c for n,c in vars(m).items() if isinstance(c,type) and issubclass(c,unittest.TestCase) and (n.startswith(\"Image\") or n in {\"AcceptanceOracleTests\",\"UniversalImageFallbackTests\"})]\nassert any(c.__name__==\"UniversalImageFallbackTests\" for c in classes), \"Missing universal tests\"\nloader=unittest.TestLoader(); suite=unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)\nassert suite.countTestCases()>=56, suite.countTestCases()\nresult=unittest.TextTestRunner(verbosity=2).run(suite); assert result.wasSuccessful()\nprint(\"UNIVERSAL_AND_LEGACY_EXECUTION_PASS\")'",
+        "expected": "Independent execution VER003 plus VER-003, VER-005, VER-009, VER-010 must pass after implementation."
+      },
+      "verification_ids": [
+        "VER-003",
+        "VER-005",
+        "VER-009",
+        "VER-010"
+      ],
+      "details": {
+        "point1_collect": {
+          "when": "do_POST after normal auth/body/model/effort validation, before slot, spool or response",
+          "logic": [
+            "Capture universal flag. Detect structured media throughout history using AD002. Precompute stripped_full_prompt.",
+            "universal and media and input_disabled -> log stage=collect reason=flag_disabled, images=[], img_dir=None, use stripped full history as prompt/full_prompt, prohibit resume.",
+            "universal and input_enabled -> _collect_images(...,universal=True); any ImageReject -> log stage=collect reason=rejected.reason, code sanitized separately if logged, images=[], img_dir=None; both prompts stripped; prohibit resume; no image-derived HTTP400.",
+            "Non-image media without raster -> use markers and pure text as AD002; mixed valid raster/media -> optimistic raster only.",
+            "strict -> retain exact existing exception->400 path, reason taxonomy and normal legacy render.",
+            "No valid images means do not allocate/spool img_dir. Any preallocated path is only metadata and never passed to Run."
+          ]
+        },
+        "point2_post_slot": {
+          "when": "_run_once after acquire, before register/mkdir/stage/Run",
+          "logic": [
+            "If images and universal snapshot true: recheck _is_image_input_enabled ONLY; do not perform strict proof/SHA check. If False, log post_slot/flag_disabled and execute downgrade transition; continue attempt1 as text.",
+            "If !universal keep _image_gate recheck and existing image_reject terminal state exactly.",
+            "Register only the own actual img_dir under _active_lock before mkdir. _stage_images exception ImageSpoolError in universal -> log spool/image_spool_error; cleanup partial dir and registry, img_registered=False, img_dir=None; downgrade both prompts/CID/images; proceed attempt1 text with add_dir=None.",
+            "Strict spool failure remains image_spool_error500/no spawn. No broad catch of programming errors as media fallback."
+          ]
+        },
+        "downgrade_transition_order": [
+          "Close any completed Run before deleting files (existing finally run.close). Snapshot old image count, old CID and session key for sanitized event and own CAS invalidation.",
+          "Call _cleanup_img_dir(own img_dir) if non-null; unregister under _active_lock using existing helper. Clear local img_dir and images, img_registered=False; ctx images=[], img_dir=None. Cleanup helper is idempotent; no cleanup of another request directory.",
+          "For any nonempty old/resume/explicit CID: if sess_key exists, _session_invalidate(sess_key,old_cid) (compare-and-swap); always _cid_release(old_cid,str(ctx.get(\"turn_id\") or \"\")) for own claim. Set ctx.hot_resumed=False, ctx.conversation_id=\"\" and any local resume_conv_id=None. Plain turns with sess_key=None never mutate session store.",
+          "The brief conv_id=str(uuid.uuid4()) means allocate a fresh logical conversation if implementation has such local; this HEAD has none. Contract is zero old --resume CID and Run conversation_id=\"\" so CLI creates NEW conversation, not pass a fabricated resume ID.",
+          "Set both ctx.prompt and ctx.full_prompt to ctx.stripped_full_prompt. Keep model/effort/cwd/tool protocol and acquired slot; subsequent Run.add_dir=None.",
+          "Commit only successful new text session under existing ownership rules; CAS cannot remove a concurrently replaced store value. Outer do_POST ownership cleanup remains idempotent for already released old CID."
+        ],
+        "point3_runtime": {
+          "placement": "Immediately after attempt1 _execute returns and run.close() completes, before hot_resumed early continue (baseline3280..3295) AND before transient/_retry_take branch (3297..3310). Existing done break may precede guard because guard excludes done.",
+          "guard": "attempt==1 AND ctx.universal_fallback AND bool(images) AND img_dir is not None (actually attached Run) AND out.state not in (done,client_gone) AND NOT delivered",
+          "delivery": "delivered_reasoning=bool(out.get(\"delivered_reasoning\")) OR bool(ctx.get(\"stream\") and out.get(\"reasoning\")); delivered=bool(out.get(\"text\")) OR bool(out.get(\"tool_calls\")) OR delivered_reasoning. No delivered_reasoning field exists in this HEAD; do not accidentally ignore already emitted SSE reasoning. JSON buffered reasoning alone is not delivered. Empty role delta/keepalive is not delivery.",
+          "actions": [
+            "Emit runtime/state sanitized event exactly once, count BEFORE clearing images.",
+            "Execute full downgrade transition including immediate cleanup and full history reset before text constructor.",
+            "Call _retry_take() exactly once; consume one token if available. If unavailable, consume the one per-request media-degradation reserve; do not decrement global balance below0, replenish global bucket, loop, or fail this text retry.",
+            "Always sleep pause=_rng()*RETRY_PAUSE_CAP_S (equivalent to _retry_pause_s(1)); then continue into attempt2, add_dir=None, images=[], no old CID.",
+            "No third attempt; failed second text run preserves normal JSON/SSE error. No fallback for state done even nonzero rc/empty text (RISK03), client_gone or any delivered output."
+          ]
+        },
+        "reserve_budget": {
+          "capacity": "1 fallback token per request ONLY after eligible image-attached attempt1; never reusable and never generic.",
+          "maximum": "generic+reserve still <=1 retry per request because fixed (1,2) loop. Slot retained across pause/retry; active CLI <=MAX_CONCURRENT (default4), body admission remains unchanged.",
+          "owner_override": "Owner explicitly requires degradation even when _retry_tenths<RETRY_COST_TENTHS. Therefore generic formula floor(.2*N)+3 is preserved for strict/generic-only traffic, but NOT claimed for universal fallback traffic. Total retries <= min(N, floor(.2*N)+3 + N_media_degradation_reserve). Worst all-image-fail batch reaches2N attempts; RISK08 quota and capacity must be measured before production acceptance."
+        },
+        "exclusions": "LauncherUnavailable preflight, constructor OSError before a real attached _execute, auth/framing/invalid model/invalid effort/admission/queue failures remain existing errors; do not synthesize successful text result or emit second HTTP headers. No general Exception catch or transport refactor in this patch.",
+        "error_semantics": "200 means real text completion success. Failed text retry -> existing502/504/etc JSON or SSE error event+DONE. SSE initial200 alone never proves success. Keep legacy _error_body mapping for done/bad rc/empty text, missing executable, and queue overload.",
+        "lifecycle": "Cleanup of img_dir/partial spool before downgrade; outer finally releases slot exactly once. If physical deletion fails, report safe cleanup error and NEVER reattach or falsely assert deletion; existing orphan sweep remains recovery. Cancellation/client_gone skips all retries and closes Run/resources."
+      }
+    },
+    {
+      "id": "AD-004",
+      "title": "Observability & Discoverability",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "How to report optimistic support while keeping strict health/models types and proofs intact?",
+      "choice": "Preserve existing boolean images fields; effective supports=universal&&input_enabled for all catalog models, otherwise strict predicate. Add a separate structured image_fallback object, never replace health.images with a dict.",
+      "alternatives": [
+        "Rewrite fleet proofs as confirmed: rejected by ao10 and evidence semantics.",
+        "Replace /health.images bool with dict: rejected by actual code/test_ao01 type semantics."
+      ],
+      "drivers": [
+        "REQ-01",
+        "REQ-04",
+        "REQ-05",
+        "CON-05",
+        "INV-10",
+        "AC-08"
+      ],
+      "consequences": [
+        "Optimistic acceptance is distinguished from historical proof.",
+        "No fleet.json or old _model_supports_images strict semantics changes.",
+        "No auth/payload/prompt/path leakage in new events."
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import importlib.util, os, sys, unittest\nos.environ.pop(\"AGY_IMAGE_FALLBACK_ENABLED\", None)\nsys.path.insert(0, \"tests\"); sys.path.insert(0, \".\")\nspec=importlib.util.spec_from_file_location(\"agy_frozen_suite\", \"tests/test_agy_bridge_resilience.py\")\nm=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)\nclasses=[c for n,c in vars(m).items() if isinstance(c,type) and issubclass(c,unittest.TestCase) and (n.startswith(\"Image\") or n in {\"AcceptanceOracleTests\",\"UniversalImageFallbackTests\"})]\nassert any(c.__name__==\"UniversalImageFallbackTests\" for c in classes), \"Missing universal tests\"\nloader=unittest.TestLoader(); suite=unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)\nassert suite.countTestCases()>=56, suite.countTestCases()\nresult=unittest.TextTestRunner(verbosity=2).run(suite); assert result.wasSuccessful()\nprint(\"UNIVERSAL_AND_LEGACY_EXECUTION_PASS\")'",
+        "expected": "Independent execution VER003 plus VER-003, VER-006, VER-008, VER-009, VER-010 must pass after implementation."
+      },
+      "verification_ids": [
+        "VER-003",
+        "VER-006",
+        "VER-008",
+        "VER-009",
+        "VER-010"
+      ],
+      "details": {
+        "as_is_checks": {
+          "test_ao01": "With universal false, /v1/models data.images true ONLY gemini-4-argon and gemini-3.8-flash under _ImgEnv; aggregate images is True; health.images is True identity assertion.",
+          "test_ao06_health": "test_ao06_health_has_four_additive_fields_and_keeps_existing_ones at line2764 checks presence of old health keys and sqlite reasoning fields; does not license changing images type.",
+          "test_ao10": "Static fleet binary/version/default limits/proofs and text-only unsupported entries unchanged byte-for-byte."
+        },
+        "effective_predicate": "At GET request start read universal,input once. If universal=True, effective_images(mid)=input_enabled and mid in FLEET_MODELS. If universal=False, effective_images(mid)=_model_supports_images(mid) exactly as now. _model_supports_images itself remains strict so no proof consumers silently change.",
+        "models": "Each data row retains id/object/owned_by/created/context_length/images boolean. Universal+input true => every catalog data.images=True, top-level images=any(effective flags). Add top-level image_fallback object for both policy states; never relabel static images.status/proof as confirmed.",
+        "health": "Keep health[\"images\"] boolean any(effective support) and existing image_input_mode string/sqlite fields. Add health[\"image_fallback\"]={\"fallback_enabled\":bool,\"input_enabled\":bool,\"mode\":\"universal\"|\"strict\",\"acceptance\":\"optimistic\"|\"proof-gated\"|\"text-only\",\"method\":\"workspace-read\",\"limits\":copy of IMAGE_LIMITS,\"models\":[effective supported catalog IDs]}. Same object on /v1/models. acceptance=text-only iff universal and input disabled, otherwise optimistic iff universal, else proof-gated. Brief suggestion health[\"images\"][\"fallback_enabled\"] is inapplicable to actual bool schema.",
+        "log_contract": {
+          "event": "image_fallback",
+          "template": "image_fallback stage=%s reason=%s model=%s attempt=%d images=%d",
+          "stages": [
+            "collect",
+            "post_slot",
+            "spool",
+            "runtime"
+          ],
+          "attempts": "collect/post_slot/spool =>1 upcoming attempt; runtime=>1 failed attached attempt",
+          "reason": "flag_disabled; ImageReject.reason; image_spool_error; unsupported_media; runtime state token",
+          "sanitizer": "Introduce _log_token(value,max_len=64): only ASCII identifier chars A-Za-z0-9_.- survive, all others _, length capped64; empty->unknown. Stage from finite allowlist, model validated catalog, reason/state sanitized. Counts coerced bounded integers; code if extra uses same sanitizer.",
+          "sink": "HEAD uses _log(str) -> stderr + _mask_secrets; no log.info object exists. Preserve native sink and emit exact formatted event via _log helper (semantically INFO), no new logger dependency. If log.info introduced locally, it MUST route through same masking/sink; no requirement to rewire logging.",
+          "never": [
+            "auth keys",
+            "base64 payload",
+            "URLs",
+            "prompts",
+            "file paths",
+            "raw exception repr"
+          ],
+          "frequency": "Exactly one event per actual downgrade transition, no fallback event for strict path/pure-text or simply omitted audio beside valid raster. Strict reject/proof logs unchanged."
+        }
+      }
+    },
+    {
+      "id": "AD-005",
+      "title": "Test Suite Append-Only Architecture uf01..uf10",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "How to prove new policy and retry contracts without weakening strict coverage?",
+      "choice": "Append UniversalImageFallbackTests at EOF, retaining entire baseline file bytes. Use import discovery, true raster fixtures and local flag patches; freeze assertion, execution and full suite commands independently.",
+      "alternatives": [
+        "Edit legacy _ImgEnv/_Fixture/tests to expect universal behavior: rejected, changes frozen strict baseline.",
+        "AST ID presence only: rejected, not evidence of behavior execution."
+      ],
+      "drivers": [
+        "REQ-04",
+        "AC-01",
+        "AC-02",
+        "SCN-uf01",
+        "SCN-uf10",
+        "SCN-B01",
+        "SCN-B02",
+        "SCN-R01",
+        "SCN-R02",
+        "SCN-I01"
+      ],
+      "consequences": [
+        "Existing __main__ guard remains; direct python tests/file.py would miss appended classes, so VER003/005 use import/discovery.",
+        "No suite-wide environment override enables universal.",
+        "Red regressions before product fix, then green full legacy+universal execution; future tests are not executed or claimed Stage2."
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import importlib.util, os, sys, unittest\nos.environ.pop(\"AGY_IMAGE_FALLBACK_ENABLED\", None)\nsys.path.insert(0, \"tests\"); sys.path.insert(0, \".\")\nspec=importlib.util.spec_from_file_location(\"agy_frozen_suite\", \"tests/test_agy_bridge_resilience.py\")\nm=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)\nclasses=[c for n,c in vars(m).items() if isinstance(c,type) and issubclass(c,unittest.TestCase) and (n.startswith(\"Image\") or n in {\"AcceptanceOracleTests\",\"UniversalImageFallbackTests\"})]\nassert any(c.__name__==\"UniversalImageFallbackTests\" for c in classes), \"Missing universal tests\"\nloader=unittest.TestLoader(); suite=unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)\nassert suite.countTestCases()>=56, suite.countTestCases()\nresult=unittest.TextTestRunner(verbosity=2).run(suite); assert result.wasSuccessful()\nprint(\"UNIVERSAL_AND_LEGACY_EXECUTION_PASS\")'",
+        "expected": "Independent execution VER003 plus VER-001, VER-002, VER-003, VER-004, VER-005, VER-006, VER-007, VER-008 must pass after implementation."
+      },
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-003",
+        "VER-004",
+        "VER-005",
+        "VER-006",
+        "VER-007",
+        "VER-008"
+      ],
+      "details": {
+        "prefix": {
+          "path": "tests/test_agy_bridge_resilience.py",
+          "bytes": 249933,
+          "sha256": "f318d60537ad862b11313d303644ace3ff5ae74e5d581ceeba86bcf7bddeeff5",
+          "deleted_lines_allowed": 0,
+          "preserve": "Entire BASE blob is a prefix; additions strictly after byte249933. This includes all old tests/helpers/__main__, stronger than a diff numstat check."
+        },
+        "new_class": "UniversalImageFallbackTests(unittest.TestCase)",
+        "test_methods": [
+          {
+            "name": "test_uf01_all_catalog_models_and_efforts_optimistic",
+            "scenarios": [
+              "SCN-uf01",
+              "SCN-B01"
+            ],
+            "assertions": "Every catalog model x declared effort, true raster PNG/JPEG/GIF/WebP fixture; runtime proof/SHA/status/efforts_proven corrupted or absent without startup schema violation; no strict gate invocation, attachment/files/add-dir attempt1 and real successful JSON/SSE. Catalog negatives remain ingress errors."
+          },
+          {
+            "name": "test_uf02_image_rejections_strip_all_media",
+            "scenarios": [
+              "SCN-uf02",
+              "SCN-B01",
+              "SCN-B02"
+            ],
+            "assertions": "Whole taxonomy incl malformed alias/dict content, MIME/base64/magic/roles/16vs17/size cap±1, mixed invalid+valid image; one stripped run/no partial staging/no fetch; media failure no400; auth/JSON/body413/model/effort/admission503 retain errors."
+          },
+          {
+            "name": "test_uf03_policy_matrix_recheck_and_cache",
+            "scenarios": [
+              "SCN-uf03"
+            ],
+            "assertions": "Four policy states, missing/false/malformed/string/int/null/oversize config; env token map, TTL boundary, reset; input flip while queued strips before mkdir/Run, SHA flip ignored universal; rollback/re-enable without restart and slots restored."
+          },
+          {
+            "name": "test_uf04_spool_failures_downgrade_before_attempt1",
+            "scenarios": [
+              "SCN-uf04",
+              "SCN-R02"
+            ],
+            "assertions": "mkdir/EACCES/ENOSPC/second-file/O_EXCL errors, registry and actual partial cleanup; one text constructor, no attach; unsafe permissions never broaden; cleanup-error branch accurately logged and not reattached."
+          },
+          {
+            "name": "test_uf05_runtime_retry_cold_text_with_empty_budget",
+            "scenarios": [
+              "SCN-uf05",
+              "SCN-R01"
+            ],
+            "assertions": "Each eligible agy/pump/timeout/idle/first-token state with zero/30 tenths; two runs only, immediate file cleanup before second constructor, add_dir=None, both prompts stripped, jitter invoked and tokens consumed only if available. Second failure truthful, done excluded, no third."
+          },
+          {
+            "name": "test_uf06_hot_and_explicit_cid_cold_reset",
+            "scenarios": [
+              "SCN-uf06",
+              "SCN-R02"
+            ],
+            "assertions": "Three-turn tools history, early hot agy_error must hit media guard before hot continue; CAS invalidate matching CID only, release(cid,turn_id), no resume on retry; postslot/spool/collect also cold after media removal; next history turn works."
+          },
+          {
+            "name": "test_uf07_media_normalization_is_complete",
+            "scenarios": [
+              "SCN-uf07",
+              "SCN-I01"
+            ],
+            "assertions": "All specified media types+keys incl snake_case and video_url, dict and list content, media.text taint, unknown dict not serialized; mixed raster/audio optimistic retains raster only; media-only placeholders nonempty; original input unchanged."
+          },
+          {
+            "name": "test_uf08_delivery_and_non_media_failures_do_not_replay",
+            "scenarios": [
+              "SCN-uf08"
+            ],
+            "assertions": "Delivered text/tool_calls/SSE reasoning/client_gone ->one run cleanup; JSON buffered reasoning/empty SSE delta allow guarded retry; done badrc/empty output no image retry; missing launcher/OSError no double headers/fake success."
+          },
+          {
+            "name": "test_uf09_full_history_idempotency_and_reentry",
+            "scenarios": [
+              "SCN-uf09",
+              "SCN-I01"
+            ],
+            "assertions": "Normalization fixed point, exact role/text/Unicode/order/ordinary URL preservation, old images/latest-image-only/no-assistant/history hot↔cold, both prompts no generated attachments/imageN/base64. Next request re-evaluates policy, no permanent deny."
+          },
+          {
+            "name": "test_uf10_observability_isolation_and_lifecycle",
+            "scenarios": [
+              "SCN-uf10",
+              "SCN-R01",
+              "SCN-R02"
+            ],
+            "assertions": "strict→universal→strict and reverse; bool capabilities+additive policy fields and no fake fleet proof; safe logs counts/stages/no secrets; two simultaneous distinct requests, same-key CAS replacement, active sweep, cancellation/repeated fallbacks restore slots/dirs/FD/children. Production receipt only release VER010, no unit claim."
+          }
+        ],
+        "fixture_policy": "New helpers/classes are appended ONLY; use _ImgEnv then write BOTH config keys because env.flag rewrites file. Context-managed env patch/new cache reset restores state. No process-wide fallback env in test execution. Use actual small decodable raster corpus embedded as fixtures; no Pillow/new dependency; existing magic-only strict fixtures unchanged.",
+        "counts": "Baseline146 methods total,46 image-related (36 Image*+10 AcceptanceOracleTests), inherited VER007 IDs40 because duplicate log01 and5 f-methods are not represented by those40. Preserve all146 methods and execute full project suite.",
+        "boundaries": "Use small patched caps for individual/total boundary corpus, but real HTTP body/admission boundary tests remain; no gratuitous16x20MiB allocation.",
+        "red_green": "Coder first appends regression tests and records failing universal assertions against BASE, then fixes server only. Existing tests may not be edited for lint/type/format convenience."
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "DSH client / release owner",
+      "stimulus": "media validation, spool or attached CLI fails",
+      "environment": "local fake and existing owner DSH chat",
+      "artifact": "do_POST/_run_once",
+      "response": "clean downgrade and real text attempt",
+      "response_measure": "eligible runtime exactly2 runs; pre-stage exactly1 text run; never add-dir on downgrade",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "compatibility",
+      "source": "DSH client / release owner",
+      "stimulus": "fallback policy absent or false",
+      "environment": "same process strict/universal ordering",
+      "artifact": "strict image path and fleet",
+      "response": "preserve all legacy behavior",
+      "response_measure": "146 baseline tests remain,46 image tests pass,0 deleted lines and exact249933byte prefix",
+      "verification_ids": [
+        "VER-003",
+        "VER-005",
+        "VER-006",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "quality": "privacy",
+      "source": "DSH client / release owner",
+      "stimulus": "malicious media.text/url/inline payload reaches renderer/log",
+      "environment": "all history mixed types/dict content",
+      "artifact": "normalizer/log sink",
+      "response": "classify before text, bounded sanitize tokens",
+      "response_measure": "0 structured media payload/paths/URLs in generated fallback context or fallback logs; preserve ordinary user text",
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "QA-004",
+      "quality": "operability",
+      "source": "DSH client / release owner",
+      "stimulus": "enable or rollback policy",
+      "environment": "production deployed ROOT",
+      "artifact": "flags/health/models",
+      "response": "JSON TTL and effective explicit observability",
+      "response_measure": "TTL<=1s next check, strict bool health, all catalog images true iff universal+input; no restart for flags",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "QA-005",
+      "quality": "testability",
+      "source": "DSH client / release owner",
+      "stimulus": "future fix weakens legacy coverage",
+      "environment": "independent clean-room candidate",
+      "artifact": "frozen suite and scope",
+      "response": "assertions plus actual execution",
+      "response_measure": "40+10 ID AST assertion coverage plus full execution, unchanged fleet/five inputs",
+      "verification_ids": [
+        "VER-003",
+        "VER-006",
+        "VER-007",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "QA-006",
+      "quality": "performance",
+      "source": "DSH client / release owner",
+      "stimulus": "batch image failures exhaust generic retry budget",
+      "environment": "4 default active CLI slots,32 admitted connections; effective runtime limits not measured",
+      "artifact": "reserve and slot lifecycle",
+      "response": "one bounded media retry; no new pool or third attempt",
+      "response_measure": "<=2 executions/request, unchanged active cap; CPU/RSS/FD/p99 measurement REQUIRED, no invented numeric load pass",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "Ingress policy",
+      "responsibility": "Authenticate/frame/validate body and catalog effort before universal media handling",
+      "allowed_dependencies": [
+        "existing HTTPHandler",
+        "FLEET_MODELS",
+        "bounded body admission"
+      ],
+      "forbidden_dependencies": [
+        "image gate may not waive auth/model/effort/body/slot rules"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "Media normalization/collection",
+      "responsibility": "Classify safely, enforce raster byte limits and build two prompt forms",
+      "allowed_dependencies": [
+        "AD002 private normalized copies",
+        "existing byte validator"
+      ],
+      "forbidden_dependencies": [
+        "network/file payload reads",
+        "str(media dict)",
+        "changing caller payload"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "BND-003",
+      "component": "Spool lifecycle",
+      "responsibility": "Register own directory after slot, secure permissions, immediate cleanup on downgrade",
+      "allowed_dependencies": [
+        "existing _stage_images/_cleanup_img_dir",
+        "_active_lock"
+      ],
+      "forbidden_dependencies": [
+        "pre-slot writes",
+        "foreign directory cleanup",
+        "add-dir on text retry"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "BND-004",
+      "component": "Retry/session controller",
+      "responsibility": "Close Run, guard delivery, reset CID via CAS, bounded reserve",
+      "allowed_dependencies": [
+        "existing Run",
+        "_session_invalidate",
+        "_cid_release(cid,turn_id)",
+        "_retry_take"
+      ],
+      "forbidden_dependencies": [
+        "third attempt",
+        "resume old explicit CID after stripping",
+        "invalidating concurrently replaced session"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "BND-005",
+      "component": "Observability/config",
+      "responsibility": "Expose effective optimistic support while preserving proof evidence",
+      "allowed_dependencies": [
+        "bounded local JSON",
+        "existing masked _log sink",
+        "strict boolean API fields"
+      ],
+      "forbidden_dependencies": [
+        "fleet mutation",
+        "logging content/paths/auth",
+        "confusing optimistic eligibility with proof"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-008"
+      ]
+    },
+    {
+      "id": "BND-006",
+      "component": "Verification/release",
+      "responsibility": "Enforce frozen independent tests and paired deployed evidence",
+      "allowed_dependencies": [
+        "VER001..010",
+        "external3family architecture/code councils"
+      ],
+      "forbidden_dependencies": [
+        "Coder editing verification contract",
+        "Stage2 production write/acceptance claim"
+      ],
+      "verification_ids": [
+        "VER-006",
+        "VER-007",
+        "VER-010"
+      ]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "behavior",
+      "producer": "agy do_POST",
+      "consumer": "DSH",
+      "change": "With universal=true media failures strip to text instead of strict image400/spool500; eligible image attempt failure gets one text retry.",
+      "compatibility": "Explicitly requested REQ01..03; flag absent/false exactly old behavior.",
+      "verification_ids": [
+        "VER-003",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "CD-002",
+      "type": "api",
+      "producer": "GET /v1/models and /health",
+      "consumer": "DSH capability consumers",
+      "change": "Existing images booleans use effective optimistic eligibility in universal+input; additive image_fallback object.",
+      "compatibility": "Keep bool schema and all old fields; strict expected model set unchanged, fleet proof untouched.",
+      "verification_ids": [
+        "VER-003",
+        "VER-008",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "CD-003",
+      "type": "data",
+      "producer": "deployed local dynamic_config.json",
+      "consumer": "agy runtime flags",
+      "change": "Add strict boolean IMAGE_FALLBACK_ENABLED with independent env/TTL/defaultfalse.",
+      "compatibility": "Owner explicit local JSON override; old config without key strict; no tracked config/new dependency.",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "dynamic",
+      "question": "Where are the three downgrade points and what survives attempt2?",
+      "artifact_ref": "architecture/architecture-packet.json#/runtime_view"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "dfd",
+      "question": "Which trust boundary prevents payload leakage/fetch and filesystem cross-request deletion?",
+      "artifact_ref": "architecture/architecture-packet.json#/threat_model"
+    },
+    {
+      "id": "VIEW-003",
+      "type": "deployment",
+      "question": "Why is checkout config not production activation?",
+      "artifact_ref": "architecture/architecture-packet.json#/evolution"
+    }
+  ],
+  "risks": [
+    {
+      "id": "RISK-001",
+      "source_id": "RISK-01",
+      "scenario": "Backend/native-tool side effects may precede failure even without client delivery.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Bounded one text retry; no exactly-once claim; delivered tool/text/reasoning forbids retry; live safe read-only failure oracle; do not run destructive duplicate tool action.",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "source_id": "RISK-02",
+      "scenario": "Text retry/backend/auth/queue can still fail despite media-safe admission.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Only successful real text completion returns200; preserve actual JSON/SSE failures and no double headers.",
+      "verification_ids": [
+        "VER-003",
+        "VER-005"
+      ]
+    },
+    {
+      "id": "RISK-003",
+      "source_id": "RISK-03",
+      "scenario": "done badrc/empty output and constructor exceptions do not match owner runtime guard.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Exclude done and pre-execute constructor errors; preserve mapping and one header response; test explicitly uf08.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "RISK-004",
+      "source_id": "RISK-04",
+      "scenario": "Pixel decoder can break magic-only strict fixtures or admit decompression bombs.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "No new pixel decoder; signature and byte safety unchanged; real decodable positive corpus does not assert arbitrary pixel validity.",
+      "verification_ids": [
+        "VER-003",
+        "VER-006"
+      ]
+    },
+    {
+      "id": "RISK-005",
+      "source_id": "RISK-05",
+      "scenario": "Flag cache leaks fixture/policy state or hot CID survives stripping.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Independent cache reset; consistent universal snapshot, input recheck, env contexts, full stripped prompts and owner-safe CID reset.",
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "RISK-006",
+      "source_id": "RISK-06",
+      "scenario": "Checkout, deployed runtime and config diverge.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Pair hash readback, actual deployed ROOT booleans; controlled code restart then dynamic rollback and same-owner live receipt.",
+      "verification_ids": [
+        "VER-008",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "RISK-007",
+      "source_id": "RISK-07",
+      "scenario": "Universal mode accidentally bypasses body/connection/admission safety.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Ingress auth/framing/model/effort/body limits run before media fallback unchanged; whole-request strip never means unlimited parsing/fetching.",
+      "verification_ids": [
+        "VER-003",
+        "VER-005",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "RISK-008",
+      "source_id": "RISK-08",
+      "scenario": "No measured quota/RPS/p99/memory/CPU/FD budget, plus reserve allows up to2N CLI executions.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Record all46 HL fields with UNKNOWN facts; no capacity PASS; require release resource measurement and owner quota/SLA before production acceptance. Do not claim generic retry bound for universal reserve.",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env uvx ruff@0.17.3 check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; no lint errors; never use --fix on frozen baseline",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env uvx ruff@0.17.3 format --check --no-cache bridges/agy-bridge/server.py tests/test_agy_bridge_resilience.py",
+      "expected": "exit 0; no formatting writes to original prefix",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import importlib.util, os, sys, unittest\nos.environ.pop(\"AGY_IMAGE_FALLBACK_ENABLED\", None)\nsys.path.insert(0, \"tests\"); sys.path.insert(0, \".\")\nspec=importlib.util.spec_from_file_location(\"agy_frozen_suite\", \"tests/test_agy_bridge_resilience.py\")\nm=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)\nclasses=[c for n,c in vars(m).items() if isinstance(c,type) and issubclass(c,unittest.TestCase) and (n.startswith(\"Image\") or n in {\"AcceptanceOracleTests\",\"UniversalImageFallbackTests\"})]\nassert any(c.__name__==\"UniversalImageFallbackTests\" for c in classes), \"Missing universal tests\"\nloader=unittest.TestLoader(); suite=unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)\nassert suite.countTestCases()>=56, suite.countTestCases()\nresult=unittest.TextTestRunner(verbosity=2).run(suite); assert result.wasSuccessful()\nprint(\"UNIVERSAL_AND_LEGACY_EXECUTION_PASS\")'",
+      "expected": ">=56 tests: all 46 legacy image-related methods plus UniversalImageFallbackTests uf01..uf10 execute and pass; not AST-only",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import collections, io, json, subprocess, tarfile, tempfile\nfrom pathlib import Path\nroot=Path.cwd(); temp_base_dir=Path.home()/\"work/tmp\"; temp_base_dir.mkdir(parents=True,exist_ok=True)\nargs=[\"uvx\",\"basedpyright@1.40.2\",\"--outputjson\",\"bridges/agy-bridge/server.py\",\"tests/test_agy_bridge_resilience.py\"]\ndef diagnostics(cwd):\n r=subprocess.run(args,cwd=cwd,capture_output=True,text=True)\n assert r.returncode in (0,1),(r.returncode,r.stderr)\n d=json.loads(r.stdout); assert \"generalDiagnostics\" in d,d\n c=collections.Counter()\n for x in d[\"generalDiagnostics\"]:\n  f=str(Path(x[\"file\"]).relative_to(cwd)); c[(f,x.get(\"severity\"),x.get(\"rule\"),x[\"message\"])]+=1\n return c\nwith tempfile.TemporaryDirectory(prefix=\"agy-type-baseline-\",dir=temp_base_dir) as tmp:\n old=Path(tmp); archive=subprocess.check_output([\"git\",\"archive\",'\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"'])\n with tarfile.open(fileobj=io.BytesIO(archive)) as tf: tf.extractall(old,filter=\"data\")\n before=diagnostics(old); after=diagnostics(root); delta=after-before\n assert not delta,dict(delta)\n print(\"TYPECHECK_NO_NEW_DIAGNOSTICS_PASS\",\"baseline\",sum(before.values()),\"candidate\",sum(after.values()))'",
+      "expected": "same pinned basedpyright executable checks archived BASE and candidate; exact multiset file/severity/rule/message delta is empty; inherited diagnostics recorded, no baseline suppression",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider",
+      "expected": "exit 0; full repository suite including all agy/strict tests. No pyproject.toml exists; use pinned uvx, do not invent uv run project config.",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": [
+        "REQ-04"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import hashlib, subprocess\nfrom pathlib import Path\np='\"'\"'tests/test_agy_bridge_resilience.py'\"'\"'; old=subprocess.check_output([\"git\",\"show\",'\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"'+\":\"+p]); new=Path(p).read_bytes()\nassert len(old)==249933 and hashlib.sha256(old).hexdigest()=='\"'\"'f318d60537ad862b11313d303644ace3ff5ae74e5d581ceeba86bcf7bddeeff5'\"'\"'\nassert new[:len(old)]==old, \"Baseline prefix changed\"\nfor b in ['\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"','\"'\"'5a19559426de7508d525e2bd465eff648665a6a7'\"'\"']:\n rows=subprocess.check_output([\"git\",\"diff\",\"--numstat\",b,\"--\",p],text=True).splitlines()\n assert all(row.split()[1]==\"0\" for row in rows), rows\nsubprocess.run([\"python3\",\"-B\",\"-m\",\"unittest\",\"discover\",\"-s\",\"tests\",\"-p\",\"test_images_strict.py\",\"-q\"],check=True)\nprint(\"APPEND_ONLY_STRICT_PASS\",len(old))'",
+      "expected": "whole baseline blob is exact prefix; 0 deleted lines against both baselines; test_images_strict.py executes successfully",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-007",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, re\nfrom pathlib import Path\nt=ast.parse(Path(\"tests/test_agy_bridge_resilience.py\").read_text())\nexpected={f\"{p}{i:02}\" for p,n in [(\"img\",10),(\"hist\",10),(\"life\",5),(\"log\",2),(\"res\",3),(\"ao\",10),(\"uf\",10)] for i in range(1,n+1)}\nfound=set(); uf=set()\nfor f in ast.walk(t):\n if isinstance(f,(ast.FunctionDef,ast.AsyncFunctionDef)) and f.name.startswith(\"test_\") and any(isinstance(a,ast.Assert) or isinstance(a,ast.Call) and isinstance(a.func,ast.Attribute) and isinstance(a.func.value,ast.Name) and a.func.value.id==\"self\" and a.func.attr.startswith(\"assert\") for a in ast.walk(f)):\n  ids={k for k in expected if re.search(r\"(?:^|_)\"+k+r\"(?:_|$)\",f.name)}; found.update(ids)\nfor c in t.body:\n if isinstance(c,ast.ClassDef) and c.name==\"UniversalImageFallbackTests\":\n  assert c.lineno>6008, c.lineno\n  uf={f\"uf{i:02}\" for f in c.body if isinstance(f,ast.FunctionDef) for i in range(1,11) if re.match(f\"test_uf{i:02}_\",f.name)}\nassert not expected-found, sorted(expected-found)\nassert uf=={f\"uf{i:02}\" for i in range(1,11)},uf\nprint(\"QA_ASSERT_COVERAGE_PASS\",len(expected))'",
+      "expected": "all 40 inherited QA IDs + uf01..uf10 have assertion-bearing test methods; appended UniversalImageFallbackTests exists; execution independently VER003/005",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-008",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import hashlib, subprocess\nfrom pathlib import Path\nbase='\"'\"'012da99905ec27a6133afb4f3e768ff9b4426a8f'\"'\"'; allowed={'\"'\"'bridges/agy-bridge/server.py'\"'\"','\"'\"'tests/test_agy_bridge_resilience.py'\"'\"'}\npaths=set(subprocess.check_output([\"git\",\"diff\",\"--name-only\",base,\"--\"],text=True).splitlines())|set(subprocess.check_output([\"git\",\"ls-files\",\"--others\",\"--exclude-standard\"],text=True).splitlines())\npaths={p for p in paths if not p.startswith(\".ai-team/runs/\") and p not in {'\"'\"'analysis/agy-universal-image-fallback/handoff-qa.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/research-plan.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/evidence-ledger.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/handoff-architect.md'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/open-questions.md'\"'\"'}}\nassert paths<=allowed,paths-allowed\nassert Path('\"'\"'bridges/agy-bridge/fleet.json'\"'\"').read_bytes()==subprocess.check_output([\"git\",\"show\",base+\":\"+'\"'\"'bridges/agy-bridge/fleet.json'\"'\"'])\nfrozen={'\"'\"'analysis/agy-universal-image-fallback/evidence-ledger.md'\"'\"': '\"'\"'ae5bc560087d180ce4f20333028c5ad472ea772dbccf6a7b82bcb6ce7d8db59f'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/handoff-architect.md'\"'\"': '\"'\"'7e5f684041b65986f4ff7c8f05f67e930f497165ce5c26fd74d8ee95df9f92f6'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/handoff-qa.md'\"'\"': '\"'\"'6a71c3352f56f012e6c3e406cabad0ebbf43aad5afc325399b767b2753877377'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/open-questions.md'\"'\"': '\"'\"'f4d2914546a192f16993873c1c2d91365a65e93d2dc611963fb5eeb0af2e740e'\"'\"', '\"'\"'analysis/agy-universal-image-fallback/research-plan.md'\"'\"': '\"'\"'e639555a5c7df5f6f4a9a7876e8902e0ee2989b410f8569e9d640ff3332cf898'\"'\"'}\nfor p,h in frozen.items(): assert hashlib.sha256(Path(p).read_bytes()).hexdigest()==h,p\ntracked=subprocess.check_output([\"git\",\"ls-files\"],text=True).splitlines(); assert not any(Path(p).name==\"dynamic_config.json\" for p in tracked)\nprint(\"SCOPE_FROZEN_PASS\")'",
+      "expected": "only two permitted product paths; fleet byte-identical; all five Stage1 hashes unchanged; production dynamic config not tracked",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    },
+    {
+      "id": "VER-009",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast,sys\nfrom pathlib import Path\nt=ast.parse(Path(\"bridges/agy-bridge/server.py\").read_text()); funcs={n.name:n for n in ast.walk(t) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}\nrequired={\"_read_image_fallback_flag\",\"_is_image_fallback_enabled\",\"_image_gate_universal\",\"_strip_media_from_messages\",\"_flatten_content_stripped\",\"_messages_to_stripped_prompt\",\"_log_token\"}\nassert required<=funcs.keys(),required-funcs.keys()\nr=funcs[\"_reset_sqlite_guards_for_tests\"]\nassert any(isinstance(n,ast.Assign) and any(isinstance(x,ast.Name) and x.id==\"_image_fallback_flag_cache\" for x in n.targets) and ast.literal_eval(n.value)==(0.0,False) for n in ast.walk(r)),\"cache reset\"\nimports={a.name.split(\".\")[0] for n in ast.walk(t) if isinstance(n,ast.Import) for a in n.names}|{n.module.split(\".\")[0] for n in ast.walk(t) if isinstance(n,ast.ImportFrom) and n.module}\nassert imports<=set(sys.stdlib_module_names)|{\"core\"},imports-set(sys.stdlib_module_names)-{\"core\"}\nseen=set(); todo=[n for n in funcs if \"image\" in n or \"media\" in n or \"stripped\" in n]\nwhile todo:\n n=todo.pop()\n if n in seen: continue\n seen.add(n)\n for c in ast.walk(funcs[n]):\n  if isinstance(c,ast.Call):\n   name=ast.unparse(c.func)\n   assert not any(x in name for x in [\"urlopen\",\"urlretrieve\",\"urllib.request\",\"HTTPConnection\",\"HTTPSConnection\"]),name\n   if isinstance(c.func,ast.Name) and c.func.id in funcs: todo.append(c.func.id)\nprint(\"STATIC_IMAGE_SECURITY_CONTRACT_PASS\")'",
+      "expected": "named helper/cache reset/static no-fetch boundary passes; actual guard ordering, prompts, delivery, CID and reserve behavior must also pass uf03..uf10 under VER003",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Verifier"
+    },
+    {
+      "id": "VER-010",
+      "requirement_ids": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-05",
+        "REQ-06"
+      ],
+      "kind": "command",
+      "command": "run-guarded -- env PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import hashlib,json\nfrom pathlib import Path\nroot=Path.home()/\".dsh/bridges/agy-bridge\"; cfg=json.loads((root/\"dynamic_config.json\").read_text())\nassert cfg.get(\"IMAGE_INPUT_ENABLED\") is True and cfg.get(\"IMAGE_FALLBACK_ENABLED\") is True\nassert hashlib.sha256((root/\"server.py\").read_bytes()).hexdigest()==hashlib.sha256(Path('\"'\"'bridges/agy-bridge/server.py'\"'\"').read_bytes()).hexdigest()\nassert (root/\"fleet.json\").read_bytes()==Path('\"'\"'bridges/agy-bridge/fleet.json'\"'\"').read_bytes()\nr=json.loads(Path(\".ai-team/runs/agy-universal-image-fallback-20261029/teamlead/live-acceptance.json\").read_text())\nassert r[\"status\"]==\"PASS\" and r[\"existing_owner_chat\"] is True\nassert r[\"candidate_server_sha256\"]==hashlib.sha256(Path('\"'\"'bridges/agy-bridge/server.py'\"'\"').read_bytes()).hexdigest()\nneeded={\"image_then_text_fallback_then_history\",\"previously_text_only_model\",\"cold_and_hot\",\"explicit_cid\",\"repeat_and_parallel\",\"sse_completion_no_error\",\"cleanup_before_retry\",\"flag_rollback_reload\",\"resource_profile\",\"side_effect_safe_failure\"}\nassert needed<=set(r[\"scenarios_passed\"]),needed-set(r[\"scenarios_passed\"])\nassert r[\"unverified\"]==[] and r[\"evidence_refs\"] and all(isinstance(x,str) and x for x in r[\"evidence_refs\"])\nprint(\"LIVE_RELEASE_RECEIPT_PRESENT_CONFIG_AND_HASH_PASS\")'",
+      "expected": "deployed server SHA/fleet pair and both strict JSON booleans true; independently collected same-owner-chat live receipt covers all listed scenarios and resource profile. Receipt presence is NOT itself proof: Teamlead must inspect referenced evidence.",
+      "environment": "cwd=repo_root; after Coder, independent clean-room worktree; unset AGY_IMAGE_FALLBACK_ENABLED except scoped tests; PYTHONDONTWRITEBYTECODE=1. Not executed during Stage2.",
+      "owner": "Teamlead"
+    }
+  ],
+  "protected_paths": [
+    "bridges/agy-bridge/fleet.json",
+    "analysis/agy-universal-image-fallback/",
+    ".ai-team/runs/agy-universal-image-fallback-20261029/architecture/",
+    ".ai-team/runs/agy-universal-image-fallback-20261029/teamlead/verification-surface.json",
+    ".ai-team/runs/agy-universal-image-fallback-20261029/task.json",
+    ".ai-team/runs/agy-universal-image-fallback-20261029/plans/architect-01.json"
+  ],
+  "materialization": [],
+  "approval": {
+    "status": "NOT_REQUIRED",
+    "decision_ids": [],
+    "approved_by": null,
+    "evidence_ref": null
+  },
+  "independent_review": {
+    "required": false,
+    "status": "PENDING",
+    "reviewer": null,
+    "evidence_ref": null,
+    "scope": "S2 schema does not require S3 review. teamlead-with-architect still REQUIRES independent external three-family ARCH_PANEL proof before Coder; none claimed here."
+  },
+  "open_questions": [],
+  "deferred": [
+    "Product implementation and append-only tests are Coder work after external ARCH_PANEL PASS.",
+    "Production deployment/config writes/restart and existing DSH chat live acceptance are release work.",
+    "Full pixel decoder and audio/video/document decoders are outside this change.",
+    "Unknown production SLA/RPS/quota/memory/CPU/FD numbers are NOT measured or fabricated; resource acceptance remains blocked."
+  ],
+  "source_contracts": [
+    {
+      "id": "CON-01",
+      "baseline": "ingress: `POST /v1/chat/completions`, HTTP JSON messages и JSON/SSE output; DSH → agy bridge, владелец локального моста. Auth/header/framing/model/effort/body/admission проверки самостоятельны (F-130). Нет доказанного Idempotency-Key/dedup контракта: повтор CLI не равен exactly-once. Test contour: localhost `_HttpBridge`, fake agy (F-216).",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "CON-02",
+      "baseline": "image input: только user `image_url` data/base64 raster; пределы 16, individual/total20971520 bytes, body33554432 bytes. External URLs не читаются; ссылки не должны попасть в CLI fallback. Rejection taxonomy сохранена в strict mode (F-105/F-106/F-206/F-310).",
+      "decision_ids": [
+        "AD-001",
+        "AD-002"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "CON-03",
+      "baseline": "egress CLI: argv `--add-dir <dir>` и prompt attachments, рабочий cwd отдельно; stdout JSON events, stderr diagnostics; lifecycle `Run.close` и controller. Состояния/error mapping F-114/F-120/F-123/F-125. Не меняется контракт CLI под универсальное inline media API.",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "CON-04",
+      "baseline": "local config: путь из resolved server ROOT, strict JSON flag read с TTL1s, env override только существующего input flag; production — отдельные files. `start.sh` config не устанавливает (F-101/F-303/F-306/F-307). Новый policy обязан иметь явные чтение, default, cache reset/reload и rollout/rollback; имя ключа решает архитектор.",
+      "decision_ids": [
+        "AD-001"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "CON-05",
+      "baseline": "discoverability: `/v1/models`, `/health` сейчас отражают доказанный допуск, не optimistic attempt (F-129). В strict режиме ответы неизменны. Universal effective capability нельзя выдавать за confirmed proof; модель остаётся под catalog validation. Требуются различимые policy/staging/optimistic-attempt поля либо согласованное расширение semantics без мутации static fleet (F-205).",
+      "decision_ids": [
+        "AD-004"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "CON-06",
+      "baseline": "fault boundary: ImageReject и ImageSpoolError fail-open к **санитизированному тексту** только при universal=true. Auth/admission/framing/unknown model/unsupported reasoning effort fail-closed по прежнему контракту. Конфиг/его неверный тип fail-closed к strict policy. CLI missing/offline, timeout текстового повтора и оборванный клиент не становятся фиктивным success (F-125/F-130).",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "id": "INV-01",
+      "statement": "bypass proof не bypass safety validation. Ни fetch/file://, ни MIME expansion, ни превышение resource limits. Strict path сохраняет прежний signature-only контракт. Valid decodable fixtures обязательны для universal positive tests; полноценное pixel decoding — отдельное решение с ограничениями памяти (F-107/F-217).",
+      "decision_ids": [
+        "AD-001"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-02",
+      "statement": "normalized media-free history имеет только разрешённые text parts; classification media выполняется раньше чтения `text`. `image_url`, `image`, `input_image` → `[image omitted]`; `input_audio`, `audio`, `video`, `file`, `document`, `inlineData`, `fileData` → `[media omitted]` либо удаление. Проверять и `type`, и соответствующие payload keys, в том числе dict-content; не использовать `str(media_dict)`. Неизвестный structured block не сериализовать целиком. Обычный текст пользователя с URL не цензурировать как вложение (REQ-06/F-112).",
+      "decision_ids": [
+        "AD-002"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-03",
+      "statement": "сбой любого изображения в universal admission убирает **все** media данного запроса/истории, без частичного spool/поднабора. Mixed valid raster + unsupported non-image media: raster допускается к optimistic send, прочее media не передаётся agy и не сериализуется. Если режим уже downgraded, никакие старые media не возвращаются через full_prompt (F-111/F-115).",
+      "decision_ids": [
+        "AD-002",
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-04",
+      "statement": "image fallback должен иметь очищенные prompt **и** full_prompt. Перед runtime retry необходим доступ к очищенной истории/предвычисленному full text prompt: в текущем ctx исходных messages нет (F-124). Простой вызов `_messages_to_prompt(original_messages, [])` оставляет image N (F-111). Media-only → placeholder или существующий непустой safe fallback, без attachments (F-113).",
+      "decision_ids": [
+        "AD-002",
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-05",
+      "statement": "runtime guard в точности: attempt1, фактически передан add_dir и непустые images, state не done/client_gone, delivered=false. Его нужно обработать до **обоих** legacy retry-переходов, включая ранний hot continue (F-121). Timeout/idle/first-token states подпадают под owner guard в universal mode, хотя legacy transient их не повторяет (F-122). Только одна text retry, никогда третья.",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-06",
+      "statement": "немедленно cleanup зарегистрированного img_dir, затем обнулить local и ctx img_dir/images; повтор с `add_dir=None`. Partial-stage failure также cleanup/registry removal. Сохранить slot на текущий ход, освободить ровно один раз; завершение каждого Run до cleanup (F-109/F-110/F-119).",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-07",
+      "statement": "использовать существующий CAS `_session_invalidate(sess_key,cid)` вместо несуществующего имени из брифа; снять собственный cid claim через `_cid_release`, сбросить hot_resumed/conversation_id и переключить на full **stripped** prompt. Text fallback не должен resume прежний explicit CID, который может сохранять attachment context. Plain turn не меняет чужой store; конкурентно обновлённый CID не инвалидировать (F-116/F-117/F-121).",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-08",
+      "statement": "delivered=text/tool_calls/stream reasoning; initial empty SSE delta и keepalive не означают delivery. После delivery или client_gone retry запрещён, файлы всё равно убрать. JSON reasoning ещё не доставлен и не блокирует downgrade (F-120/F-126).",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-09",
+      "statement": "legacy token budget остаётся strict. В universal mode owner требует attempt2 даже при generic retry budget0: архитектура должна предусмотреть одну ограниченную media-degradation попытку/резерв без возможности бесконечных повторов. Это отдельная ветвь, не глобальная отмена retry budget (F-213).",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-10",
+      "statement": "новый structured event `image_fallback` на каждый фактический downgrade с reason/stage/model/attempt/policy/count и bounded sanitized identifiers. Без auth, base64, media URLs, полного prompt, файловых путей/персональных данных. Старые strict logs и masking не менять (F-209). Причины: collect validation, flag/proof/recheck, spool, attached CLI state; log не заменяет успешную text completion.",
+      "decision_ids": [
+        "AD-004"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-11",
+      "statement": "не ловить произвольный Exception как media issue. Constructor LauncherUnavailable/OSError находятся до общей ветви и частично пишут response сами (F-123): не посылать вторые HTTP headers, не выполнять фиктивный успешный fallback. Проверить возможность bounded text retry при безопасном spawn failure отдельно от отсутствующего executable.",
+      "decision_ids": [
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "INV-12",
+      "statement": "после downgrade и успешного text ответа следующий cold/history turn вновь обрабатывает вход через policy; не оставлять навсегда пометку «model unsupported». Статическое доказательство capability не переписывается из единичного отказа. История с прежними media либо повторно optimistic принимается, либо безопасно stripping по той же политике.",
+      "decision_ids": [
+        "AD-001",
+        "AD-003"
+      ],
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-01",
+      "oracle": "REQ-04: полный исходный тестовый файл является неизменным prefix. Сравнить bytes от HEAD с prefix нового файла, а также `git diff --numstat 5a19559426de7508d525e2bd465eff648665a6a7 -- tests/test_agy_bridge_resilience.py`: deleted=0. Одного numstat недостаточно для гарантии «ни одна старая строка не менялась», нужны prefix check и отсутствие замен/переносов. Не удалять `unittest.main` в конце. Appended classes выполнять import discovery: unittest discover или pytest, а не прямым запуском файла (F-218).",
+      "verification_ids": [
+        "VER-006"
+      ]
+    },
+    {
+      "id": "AC-02",
+      "oracle": "REQ-04: все146 существующих методов по полному файлу и отдельно46 image methods должны проходить, включая два log01 и пять f-methods (F-214). Старый VER-007 проверяет40 IDs с asserts, не44 и не execution. VER-006 включает ещё `test_images_strict.py`; его не пропускать (F-314/F-315). `ao10` фиксирует static fleet/defaults и должен остаться зелёным. Полный project suite нужен перед downstream review/MR, Stage1 его не заменяет.",
+      "verification_ids": [
+        "VER-003",
+        "VER-005",
+        "VER-007"
+      ]
+    },
+    {
+      "id": "AC-03",
+      "oracle": "REQ-01: policy отсутствует/false/malformed → strict. Policy=true,input=true → любой catalog model и допустимый effort может выполнить real image-attached fake CLI attempt без proof/SHA/efforts_proven. Никакого fabricated confirmed proof. Policy=true,input=false → text-only200 при успешном backend. Unknown model или invalid reasoning effort остаются обычной validation error, это не media fallback (F-130).",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "AC-04",
+      "oracle": "REQ-02/06: любое media admission/spool failure universal превращается в корректный text-only attempt, с сохранённым текстом и marker/nonempty prompt. В снимке CLI argv/prompt нет add-dir, attachments header, img-N paths, media data/base64/URL/inline objects и `[image N]`. Проверять весь prompt/full_prompt и downstream cold retry, а не только images=[] (F-111/F-124).",
+      "verification_ids": [
+        "VER-003",
+        "VER-009"
+      ]
+    },
+    {
+      "id": "AC-05",
+      "oracle": "REQ-03: image-attached error без delivered → ровно две попытки; первая имеет files/attachments, вторая media-free/add_dir=None, clean old dir до запуска второй. JSON200 с реальным completion, SSE200 без error event и с нормальной terminal completion/[DONE]. No retry после delivered/client_gone. Нельзя принимать один SSE status200 за успех (F-126).",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "AC-06",
+      "oracle": "REQ-05: production deployment должен содержать candidate server/fleet и явный universal=true,input=true в config именно deployed ROOT. Затем живой существующий DSH Desktop чат: image→text fallback→следующий history turn, обе целевые модели и одна ранее text-only catalog запись, повтор и parallel scenario. Зафиксировать безопасный request/run id, model, timings, CLI attempts и response completion, log fallback и отсутствие каталога; не писать payload/auth в отчёт. Если upstream отклоняет даже text данной модели, честно зафиксировать backend limitation, а не назвать200 достигнутым.",
+      "verification_ids": [
+        "VER-010"
+      ]
+    },
+    {
+      "id": "AC-07",
+      "oracle": "REQ-06: stripping повторяемо и не мутирует исходный caller payload; после повторной нормализации rendered text и роли/порядок совпадают, placeholders не умножаются. Text-only запросы имеют прежние prompt/protocol и не порождают fallback logs/spool.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "AC-08",
+      "oracle": "REQ-02/03: media fallback структурно логируется ровно при downgrade, reason/stage/attempt безопасны, нет auth/base64/URL/path/prompt. Старый strict reject log contract остаётся прежним (F-209).",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    }
+  ],
+  "test_scenarios": [
+    {
+      "id": "SCN-uf01",
+      "oracle": "AC-03 / REQ-01: universal enabled и input enabled, прогнать все шесть FLEET_MODELS и допустимые efforts. Убрать/испортить runtime proof SHA, impl_version, formats, efforts_proven без нарушения startup schema; проверить не вызывается strict eligibility gate для universal admission, первый spawn с нужными files и attachments, response200. Отдельно stale binary SHA и catalog unsupported модель. Static FLEET не менять глобально и восстановить patches.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf02",
+      "oracle": "AC-03/04 / REQ-02: коллектор ImageReject taxonomy: image_url missing/неправильная структура, пустой URL, remote http/https/file/relative, SVG/BMP, corrupt/empty/padding base64, MIME mismatch, unknown magic, assistant/system/tool images,17 images, individual/total overflow. В universal media handling нет400, нет download/local-file read, нет partial image spawn: один stripped text run200 и image_fallback stage=collect. Это параметризованная новая ветка тех же данных `_taxonomy_cases`, старый strict outcome не менять.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf03",
+      "oracle": "AC-03/04 / REQ-02: policy=true,input=false; затем очередь и flip input true→false после acquire; затем старый proof SHA меняется во время очереди. При выключенном staging только text, без mkdir/add-dir400; proof mismatch при input=true не блокирует universal image send. Во всех cases все slot доступны в конце. Policy malformed/string/int/oversize config → strict по согласованному контракту; re-enable проверяется после TTL/cache reset без process restart.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf04",
+      "oracle": "AC-04/08 / REQ-02: ENOSPC/EACCES/O_EXCL collision/OSError во втором staged file и mkdir failure → ImageSpoolError. Text-only200, zero media CLI attempts, один text spawn, partial dir отсутствует, registry пуст, permissions не расширены, slots полностью возвращены, image_fallback stage=spool. Cleanup failure отдельно: bounded safe error log без повторного attachments; не утверждать физическое удаление файла без факта, фиксировать cleanup error.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf05",
+      "oracle": "AC-05 / REQ-03: первый `_execute` agy_error/pump_error/timeout/idle_timeout/first_token_timeout при images, text/tool_calls/stream reasoning пусты; вторая успешна. Exactly2 Run, разные attach modes, файлы удалены **до** второго constructor, оба ctx prompts очищены. Generic retry budget0 и budget30 в universal дают bounded одну text деградацию по owner constraint, strict res03 остаётся прежним. Первый state done — guard не включается, третий run невозможен. Второй failure — честный error, не fabricated200.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf06",
+      "oracle": "AC-04/05 / REQ-03/06: три хода с tools: cold image, hot new image с injected failure, успешный cold text fallback и следующий history text turn. Проверить ранний hot continue тоже downgrade; `_session_invalidate` вызывается с ожидаемым key/cid, собственный claim снят, hot_resumed=false и conversation_id пуст до text retry; новый CID commit только после success. В full prompt нет old/new attachments/media. Явный conversation_id тоже не должен resume загрязнённую сессию после downgrade.",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "SCN-uf07",
+      "oracle": "AC-04/07 / REQ-06: типы `image_url`, `image`, `input_image`, `input_audio`, `audio`, `video`, `file`, `document`, а также `inlineData`/`fileData` в type/key и dict-content. Media part с собственным `text` не проходит как текст. Unknown structured object не сериализуется. Mixed normal text/valid raster/audio: text сохранён, допустимое image отправляется на первой optimistic попытке, audio удалено; при последующем downgrade нет вообще медиа. Media-only сообщение остаётся безопасно непустым. Исходные messages равны deep copy после обработки.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf08",
+      "oracle": "AC-05 / REQ-03: первый error после delivered text, tool_calls или SSE reasoning — один run и cleanup, без второго ответа. JSON reasoning-only ещё не delivered: text fallback допустим. Client disconnect не запускает fallback, убирает текущий Run/каталог и возвращает slot. Initial empty assistant delta/keepalive не блокирует допустимый retry. State done + bad rc/empty output и missing launcher/constructor OSError проверить как отдельные исключения RISK-03: ни двойных headers, ни fake success.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf09",
+      "oracle": "AC-04/07 / REQ-02/06: повтор одинаковой mixed-media history и повторная normalization, роли system/user/assistant/tool и исходный Unicode/порядок/обычные текстовые URL сохраняются; placeholders стабильны. Hot→cold и cold→hot, images только в старой истории, отсутствующий assistant, latest image-only, empty content и все media rejected: ни новый attachments из full_prompt, ни зависание/empty output. После успешной деградации следующий request снова проходит policy, нет permanent model deny-cache.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-uf10",
+      "oracle": "AC-01/02/06/08 / REQ-04/05: strict→universal→strict cache/config isolation; static ao10; effective health/models optimistic policy без fake proof; two concurrent tools requests с разными model/cwd и одинаковым cwd/CID CAS race; один media-fallback не удаляет чужие dirs/не инвалидирует обновлённый CID. Sweep во время staging и cleanup, повторные requests на фоне, rollback universal flag без restart, production config read-back. Structured logs sanitized, FD/dirs/children/slots после серии возвращаются к baseline. Запись production config и реальные DSH ходы — release, не unit тест и не Stage1.",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "SCN-B01",
+      "oracle": "REQ-01/02:0/1/16/17 images; exactly byte cap и cap+1 для individual/total, base64 padding0/1/2, MIME case; invalid MIME → omission, не попытка decode произвольного формата. Global count учитывает всю историю. Count/encoded length rejection до expensive decode по прежнему контракту.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-B02",
+      "oracle": "REQ-02: HTTP body cap±1, inflight body budget и connections cap. Для body/admission overflow сохраняются413/503 (F-130/F-310); universal не должен читать бесконечный body ради удаления images. Auth failures401, invalid JSON/framing400, unknown model400 и invalid reasoning_effort400 не переклассифицируются в image fallback.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "SCN-R01",
+      "oracle": "REQ-03: две попытки ограничивают call amplification до2; при batch с проваленными images измерить длительность/CPU/RSS/FD и admission. Сравнить исходные/candidate значения, не обещать throughput по одному local fake run. Native tool side effects до failure не исключаются delivered guard; для неидемпотентного сценария необходим отдельный безопасный oracle, без внешней записи.",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "SCN-R02",
+      "oracle": "REQ-02/03: lifecycle permissions0700/0600, no symlink traversal, no overwrite O_EXCL, stale orphan cleanup, active protected, cancellation во время stage/run/fallback, cleanup errors. Проверять живое существование/отсутствие dir на каждой фазе, а не только возврат функции.",
+      "verification_ids": [
+        "VER-003",
+        "VER-010"
+      ]
+    },
+    {
+      "id": "SCN-I01",
+      "oracle": "REQ-06: normalize(normalize(messages)) эквивалентен normalize(messages), повтор клиентского запроса может сделать второй CLI turn — не заявлять exactly-once без dedup контракта. No duplicate chunks в пределах одного запроса после fallback; tool-call delivery блокирует replay.",
+      "verification_ids": [
+        "VER-003"
+      ]
+    }
+  ],
+  "frozen_inputs": {
+    "analysis/agy-universal-image-fallback/evidence-ledger.md": "ae5bc560087d180ce4f20333028c5ad472ea772dbccf6a7b82bcb6ce7d8db59f",
+    "analysis/agy-universal-image-fallback/handoff-architect.md": "7e5f684041b65986f4ff7c8f05f67e930f497165ce5c26fd74d8ee95df9f92f6",
+    "analysis/agy-universal-image-fallback/handoff-qa.md": "6a71c3352f56f012e6c3e406cabad0ebbf43aad5afc325399b767b2753877377",
+    "analysis/agy-universal-image-fallback/open-questions.md": "f4d2914546a192f16993873c1c2d91365a65e93d2dc611963fb5eeb0af2e740e",
+    "analysis/agy-universal-image-fallback/research-plan.md": "e639555a5c7df5f6f4a9a7876e8902e0ee2989b410f8569e9d640ff3332cf898"
+  },
+  "runtime_view": {
+    "flow": [
+      "HTTP validation -> capture universal/input -> full stripped prompt",
+      "collect: disabled/invalid -> media-free cold text; valid raster -> optimistic image metadata",
+      "slot acquired -> input recheck -> register/stage; flag/spool failure -> cleanup/CID reset -> text attempt1",
+      "Run(image attempt1) -> close -> done/client_gone/delivered stop",
+      "eligible undelivered failure -> runtime guard BEFORE hot/transient -> log/cleanup/CAS+claim release/prompts stripped",
+      "budget token OR one request reserve -> jitter -> Run(text attempt2,add_dir=None,no old --resume)",
+      "success new CID commit or truthful failure -> slot release exactly once -> JSON completion/SSE terminal"
+    ],
+    "no_transport_rewrite": true
+  },
+  "threat_model": {
+    "required": true,
+    "assets": [
+      "auth key",
+      "user text/media base64",
+      "private file paths",
+      "other requests CID/slot/spool",
+      "backend capacity"
+    ],
+    "trust_boundaries": [
+      "untrusted structured content -> validated local raster bytes",
+      "private spool -> CLI add-dir sandbox",
+      "one request/session owner -> shared registry/session map",
+      "private request -> structured stderr logs",
+      "checkout -> deployed runtime"
+    ],
+    "threats": [
+      {
+        "id": "THREAT-001",
+        "scenario": "SSRF/local file exfil via image URL, inline object or media.text",
+        "mitigation": "Never fetch URL; bounded dataURL raster validation; image/media classification before text; unknown structured payload never str(dict).",
+        "verification_ids": [
+          "VER-003",
+          "VER-009"
+        ]
+      },
+      {
+        "id": "THREAT-002",
+        "scenario": "Secret/base64/path disclosure through fallback log or full_prompt",
+        "mitigation": "Safe identifiers only, preserve masked native log sink; both prompts replaced with precomputed stripped full history.",
+        "verification_ids": [
+          "VER-003",
+          "VER-009"
+        ]
+      },
+      {
+        "id": "THREAT-003",
+        "scenario": "Cross-request CID/dir deletion or retained dirty resume",
+        "mitigation": "Private directory identity, owner-safe _cid_release(cid,turn_id), CAS matching invalidation; no plain store writes; concurrency/sweep interleaving tests.",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "THREAT-004",
+        "scenario": "Resource exhaustion through invalid images and unlimited fallbacks",
+        "mitigation": "Same max16/20MiB/body/admission caps, no pre-slot spool, two attempts maximum, reserve single-use; release profile cannot be waived by local suite.",
+        "verification_ids": [
+          "VER-003",
+          "VER-005",
+          "VER-010"
+        ]
+      }
+    ]
+  },
+  "pre_mortem": [
+    "If hot agy_error branch runs first, retry retains attachments: uf06 and runtime ordering evidence are mandatory.",
+    "If only ctx.prompt changed, full_prompt reintroduces old media: uf05/06/09 inspect BOTH prompts before next Run.",
+    "If generic bucket exhausted, fallback silently omitted: uf05 tests0tenths with one reserve and jitter.",
+    "If health.images becomes dict, strict ao01 identity breaks: keep boolean and add image_fallback object.",
+    "If normalization checks text first, media.text leaks: all media forms include tainted text in uf07.",
+    "If new config enabled globally in test environment, strict suite changes behavior: process runner unsets new env and every new fixture restores scoped state."
+  ],
+  "evolution": {
+    "compatibility": "No storage/schema migration. universal flag absent/false preserves strict gates, proofs, retries and error semantics; bool API images fields retained; no changes fleet/default constants. Explicitly requested behavior activates only when flagtrue.",
+    "migration": "No persisted data migration; runtime server is a separate regular file from checkout. Deployed JSON is untracked, update only specified booleans preserving unrelated keys. Existing dirty image CIDs are invalidated only on their own downgrade; no blanket store wipe.",
+    "rollout": "Stage2 author packet -> mechanical gate -> EXTERNAL3-family ARCH_PANEL proof -> Coder append regressions+server fix -> independent VER001..009/full suite -> external code council ACCEPT -> managed runtime server deployment/restart -> both flags true -> VER010 evidence in EXISTING owner DSH conversation. Stage2 does none of deployment/flags/live acceptance.",
+    "rollback": "Set IMAGE_FALLBACK_ENABLED=false in deployed JSON or immediate envfalse; TTL<=1s next evaluation; preserve IMAGE_INPUT_ENABLED as deliberate strict staging choice. Captured in-flight policy completes its bounded path, not retroactively mutated. If rollback code, restore backed-up server and verify fleet pair via managed restart. Config-only rollback needs no restart.",
+    "mixed_versions": "Old server ignores unknown fallback key and remains strict; new server missing key remains strict. Do not advertise activation solely from JSON or health; deployed hash + real request evidence required. Env override must be accounted for independently."
+  },
+  "reuse_brief": {
+    "reference": [
+      "analysis/agy-image-input-fix/",
+      "evidence-ledger F109/F117/F202/F313/F314/F315",
+      "existing _collect_images/_stage_images/_cleanup_img_dir/_session_invalidate/_cid_release and _ImgEnv fake HTTP corpus"
+    ],
+    "KEEP": [
+      "body and slot admission",
+      "size-before-decode",
+      "secure staging/active registry/sweep",
+      "cwd/argv",
+      "strict gate/proof and same-files retry",
+      "delivery guard",
+      "native JSON/SSE protocol",
+      "whole baseline tests"
+    ],
+    "CHANGE": [
+      "independent policy",
+      "safe normalization",
+      "three targeted downgrade transitions",
+      "one bounded media reserve",
+      "effective observability",
+      "explicit deployed activation"
+    ],
+    "BLOCKER": "Literal old flow requires400/spool500 and retains images on retry; sibling text-first placeholder renderer is unsafe for media.text/dict-content. Adapt existing machinery; do not build a new transport."
+  },
+  "resource_envelope": {
+    "schema": "HL-ENV/v1",
+    "fields": {
+      "P_steady": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "pod count не задан; локальный server entry F-303/F-307."
+      },
+      "P_hpa_max": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "HPA manifest не предоставлен; F-302."
+      },
+      "maxSurge_pct": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не задано в текущем entry; F-307."
+      },
+      "maxSurge_abs": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не задано; F-307."
+      },
+      "maxUnavailable_pct": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не задано; F-307."
+      },
+      "maxUnavailable_abs": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не задано; F-307."
+      },
+      "P_terminating_overlap": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не измерено; F-307."
+      },
+      "P_live": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "production process count не измерен; F-306 не является PID proof."
+      },
+      "P_avail_min": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не установлен контракт доступности; CON-01."
+      },
+      "W": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "UNKNOWN effective OS worker process count; Stage1 reports MAX_CONCURRENT=4 execution slots, which is NOT proc/pod W. Do not substitute slots for process multiplicity."
+      },
+      "N_proc": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "Python server + ограниченные CLI children, фактический count не измерен; F-119/F-307."
+      },
+      "N_proc_steady": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не измерено; CON-03."
+      },
+      "N_proc_avail_min": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не задано; CON-03."
+      },
+      "CPU_limit_per_pod": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "CPU quota не задана local entry; F-307."
+      },
+      "κ_skew": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "профиль перекоса запросов не измерен; CON-01."
+      },
+      "u_bg_worker": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "CPU background utilisation не измерена; F-132."
+      },
+      "U_pod_sidecars": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "sidecar topology не предоставлена; F-302/F-307."
+      },
+      "Mem_limit_per_pod": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "RSS hard quota не задана; F-307."
+      },
+      "Mem_rss_worker_max": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "high-water RSS не измерен; F-310 — лишь payload caps."
+      },
+      "Mem_shared_max": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "shared RSS не измерен; CON-03."
+      },
+      "RPS_peak": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "не измерен; CON-01."
+      },
+      "A_max": {
+        "value_status": "KNOWN_DEFAULT_OR_CAP",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "≤2 CLI attempts/request as-is; F-119. Universal не увеличивает выше2.",
+        "design_value": 2
+      },
+      "SLA_p99_s": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "контрактный SLA не предоставлен; CON-03."
+      },
+      "N_entities_max": {
+        "value_status": "KNOWN_DEFAULT_OR_CAP",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "≤16 images/request; F-310."
+      },
+      "Limit_dep_share[d]": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "upstream agy quota/share не предоставлена; CON-03."
+      },
+      "Limit_dep_rps[d]": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "upstream RPS quota не предоставлена; CON-03."
+      },
+      "W_fetchers[d]": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "remote media fetchers отсутствуют в текущем collector; F-106; agy internal upstream concurrency не исследована."
+      },
+      "J_init_s[d]": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "startup jitter не установлен входами; CON-03."
+      },
+      "J_pod_s[d]": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "pod jitter не установлен; F-307."
+      },
+      "T_poll_s[d]": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "image config TTL1 s и sweep600 s; F-101/F-132."
+      },
+      "K_calls[d]": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "≤2 CLI attempts/request, network calls внутри agy не измерены; F-119."
+      },
+      "T_base_s[d]": {
+        "value_status": "KNOWN_DEFAULT_OR_CAP",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "legacy full jitter U(0,2 s) на единственном retry; F-404."
+      },
+      "T_cap_s[d]": {
+        "value_status": "KNOWN_DEFAULT_OR_CAP",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "retry pause cap2 s; queue900 s / execution1800 s / first event120 s — repo ceilings, не SLA; F-404/F-405."
+      },
+      "Max_stale_age_s[c]": {
+        "value_status": "KNOWN_DEFAULT_OR_CAP",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "image flag cache TTL1 s, fallback policy ещё не существует; F-101/F-301.",
+        "design_value_s": {
+          "image_input": 1.0,
+          "image_fallback": 1.0
+        }
+      },
+      "Min_healthy_ratio": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "routing panic threshold здесь не найден; catalog predicate не health quorum; F-129."
+      },
+      "B_retry_max": {
+        "value_status": "KNOWN_DEFAULT_OR_CAP",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "generic capacity3 tokens, cost1, credit0.2/request; fixture0/30 задаётся в tenths, не quota RPS; F-404/F-213."
+      },
+      "min_reserve_retry_rps": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "No timed global replenishment introduced. New reserve is1 per eligible request, not a fabricated measured req/s. Distinguish generic strict .2/request budget from universal reserve amplification."
+      },
+      "FD_worker": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "FD high-water не измерен; F-109 описывает permissions, не FD budget."
+      },
+      "ulimit_n": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "лимит ОС production не снят; CON-03."
+      },
+      "λ_new_conn_per_pod(s)": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "new connections/s не измерено; F-310 задаёт admission count, не rate."
+      },
+      "C_active_in_scope(s)": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "admission≤32 HTTP connections, actual TCP/CLI upstream count не измерен; F-310."
+      },
+      "N_pods_in_scope(s)": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "pod/SNAT scope не предоставлен; F-307."
+      },
+      "Port_range_size(s)": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "ephemeral range production не снят; CON-03."
+      },
+      "T_hold_s(s)": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "TIME_WAIT/conntrack не измерен; CON-03."
+      },
+      "SNAT_ips_count(s)": {
+        "value_status": "UNKNOWN_OR_PARTIAL",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "NAT topology не исследована; CON-03."
+      },
+      "HOTPATH_MODULES": {
+        "value_status": "KNOWN_DEFAULT_OR_CAP",
+        "source": "analysis/agy-universal-image-fallback/handoff-architect.md#HL-ENV",
+        "statement": "do_POST→collect/gate→prompt/session→_run_once→stage→Run/_execute→retry→serve_json/serve_sse→cleanup; F-104..F-126."
+      }
+    },
+    "status": "BLOCKED_UNMEASURED_PRODUCTION",
+    "memory_closure": "W*Mem_rss_worker_max+Mem_shared_max<=0.80*Mem_limit_per_pod UNPROVEN: missing effective process and private/shared RSS/quota. Body caps are not RSS proof; include queued encoded copies and both original/stripped prompts.",
+    "no_na_claim": "No N/A waiver based on small diff or missing k8s. Local threaded HTTP+CLI topology is distinct; no pod/quota values invented. Future candidate transitive caller/callee graph and actual diff required before declaring N/A.",
+    "stop_codes": [
+      {
+        "id": "HL-ENV-01",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "C-MULT-I1",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "C-MULT-I2",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "C-MULT-I3",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "C-MULT-I4",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "C-MULT-I5",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "S-HERD-I1",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "S-HERD-I2",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "S-HERD-I3",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "S-HERD-I4",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "S-HERD-I5",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "H-CPU-I1",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "H-CPU-I2",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "H-CPU-I3",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "H-CPU-I4",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "H-CPU-I5",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "R-BULK-I1",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "R-BULK-I2",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "R-BULK-I3",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "R-BULK-I4",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      },
+      {
+        "id": "R-BULK-I5",
+        "status": "NOT_PROVEN",
+        "acceptance_ref": "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md#7.2",
+        "verification_ids": [
+          "VER-003",
+          "VER-010"
+        ]
+      }
+    ],
+    "additional_gates": {
+      "T-LIFE/v1": "own Run close, registry cleanup,slot/CID ownership tests and live scenario required",
+      "O-EXIT/v1": "keep one done/terminal response per request, new fallback event does not replace existing done",
+      "M-SEM/v1": "model/effort/cwd session isolation and never bypass ingress catalog/auth"
+    },
+    "explicit_owner_override": "Owner mandates one media degradation attempt despite empty generic bucket; genericR-BULK-I2 inequality NOT asserted for universal requests. All remaining capacity/latency/FD claims remain unproven; no council or author may label them measured PASS.",
+    "failure_matrix": [
+      {
+        "dependency": "local config read",
+        "path": "control/request TTL",
+        "timeout": "bounded file max existing DYNAMIC_CONFIG_MAX_BYTES; no network",
+        "bulkhead": "per-flag cache lock",
+        "failure": "fail-closed fallback flag ->strict; input flagoff in universal ->text-only"
+      },
+      {
+        "dependency": "spool FS",
+        "path": "hot/post-slot",
+        "timeout": "existing local FS behavior; no new unsupported hard deadline claim",
+        "bulkhead": "same execution slot, no new pool",
+        "failure": "typed ImageSpoolError->strip/CID reset/text; strict500 unchanged"
+      },
+      {
+        "dependency": "agy CLI/upstream",
+        "path": "hot",
+        "timeout": "existing queue900s/execution1800s/firstevent120s defaults; NOT SLA",
+        "bulkhead": "MAX_CONCURRENT default4, bounded body admission32; effective values release evidence required",
+        "failure": "eligible attempt1->1text retry; delivery/client_gone/done exclusions; second failure truthful; no new global breaker or routing architecture"
+      },
+      {
+        "dependency": "log sink",
+        "path": "hot transition",
+        "timeout": "existing synchronous stderr, not measured nonblocking latency",
+        "bulkhead": "existing _log",
+        "failure": "sanitize exact fields, no content; no fabricated dropped_total/async telemetry architecture"
+      }
+    ],
+    "production_acceptance_blockers": [
+      "Measured quota/RPS/p99 and parent+child RSS/CPU/FD/ports closure with preserved admitted-body bounds",
+      "Disposition of inherited queue-waiter/deadline constraints vs live SLA, without pretending local tests satisfy highload gates",
+      "Reserve worst-case2N amplification safe for actual owner workload",
+      "21 deterministic HL/C-MULT/S-HERD/H-CPU/R-BULK oracle evidence or validated transitive non-applicability; none issued Stage2"
+    ]
+  },
+  "handoff_state": {
+    "next_role": "Parent orchestrator: independent architecture panel, not Coder yet",
+    "architecture_authoring": "FINALIZED",
+    "external_arch_panel": "NOT_RUN",
+    "product_implementation": "NOT_STARTED",
+    "production_activation": "NOT_APPLIED",
+    "live_acceptance": "NOT_RUN",
+    "capacity_acceptance": "BLOCKED_UNMEASURED_PRODUCTION",
+    "warning": "Mechanical schema/fingerprint PASS is not council ACCEPT or proof that unresolved capacity gates pass. Do not start Coder without valid external architecture panel proof; do not promote to production without resource/live gates."
+  },
+  "owner_questions": [
+    "ASSUMP-01/02 are continuable explicit assumptions: real successful text200, no fabricated backend success; decodable positive corpus with signature-only validation. No answer required to finish this design.",
+    "For production capacity acceptance supply measured/contractual p99 SLA, peak workload and upstream quotas; missing facts remain blocking release evidence, not invented numbers."
+  ],
+  "tooling_deviations": [
+    "Requested skill and validator locations omit universal/; actual files found via skill INDEX and read from canonical universal paths.",
+    "Actual role validator uses positional PLAN --phase before|after; before-fingerprint argument unsupported. Supplied plans/architect-01.before.json is worktree schema2.0, not a role plan; retained immutable; separate initial role plan provided.",
+    "Actual arch validator needs --packet,--run-dir,--role-plan,--repo-root,--fingerprint-before,--fingerprint-after,--task,--receipt; prints PASS: ARCH_GATE rather than ARCH_GATE_VALID. No wrapper/verifier-output spoof created.",
+    "Supplied fingerprint includes .ai-team/runs artifacts and concurrent log writes. Original retained; derive product projection by excluding ONLY .ai-team/runs/** from ORIGINAL manifest, recomputing digest, comparing current identically scoped snapshot. No fresh/rebased baseline.",
+    "Existing health.images bool and _cid_release(cid,turn_id) override inaccurate proposed shapes/signature; all external behavior design remains as requested.",
+    "Actual test baseline is6008lines; entire blob is immutable, not guessed6009 line count."
+  ],
+  "role_plan": {
+    "path": "plans/architect-01.json",
+    "sha256": "4be065fb9f0cf884fbb8ee3f5c2810403d1f0b02cfa9e5d5e2791786741f1176"
+  }
+}

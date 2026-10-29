@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "task_id": "agy-universal-image-fallback",
+  "role": "coder",
+  "iteration": 3,
+  "plan_kind": "full",
+  "objective": "Реализовать AD-001..AD-004 в bridges/agy-bridge/server.py и append-only UniversalImageFallbackTests (AD-005, uf01..uf10) в tests/test_agy_bridge_resilience.py; прогнать VER-001..VER-010.",
+  "inputs_read": [
+    "task.json architecture_gate (allowed_files: server.py, tests/test_agy_bridge_resilience.py)",
+    "architecture/architecture-packet.json AD-001..AD-005, INV-01..12",
+    "teamlead/verification-surface.json VER-001..VER-010",
+    "analysis/agy-universal-image-fallback/handoff-architect.md и handoff-qa.md",
+    "~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/SKILL.md и references/steps.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/feature.md"
+  ],
+  "stop_conditions": [
+    "Любая правка вне двух allowed_files и вне .ai-team/runs/agy-universal-image-fallback-20261029/ — стоп.",
+    "Любое изменение хотя бы одного байта из 249933-байтового префикса тестового файла — стоп.",
+    "Не ослаблять существующие тесты и не менять fleet.json, не фабриковать live-приёмку VER-010."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Изучить server.py: флаги, _image_gate, _collect_images, _messages_to_prompt, _run_once, do_POST, do_GET",
+      "expected_evidence": "Карта функций и строк, на которые ложатся AD-001..AD-004",
+      "status": "DONE",
+      "actual_evidence": "Изучены server.py (флаги _read_image_flag/_image_gate, _collect_images, _flatten_content, _messages_to_prompt, _run_once, do_POST, do_GET) и тестовые хелперы _ImgEnv/_Fixture/_HttpBridge/_SnapRun; карта AD-001..AD-004 → функции составлена."
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Реализовать AD-001..AD-004 в bridges/agy-bridge/server.py (флаг, нормализация, три точки downgrade, observability)",
+      "expected_evidence": "git diff server.py содержит все функции из VER-009 и точки downgrade",
+      "status": "DONE",
+      "actual_evidence": "server.py: +_read_image_fallback_flag/_is_image_fallback_enabled/_image_gate_universal/_log_token/_log_image_fallback, нормализация media (_classify_part, _flatten_content_stripped, _strip_media_from_messages, _messages_to_stripped_prompt, _universal_render_messages), _collect_images(universal=True), _downgrade_to_text_in_run_once (3 точки: collect/post_slot+spool/runtime), _image_fallback_view для /health и /v1/models; сброс _image_fallback_flag_cache в _reset_sqlite_guards_for_tests. ruff check/format и basedpyright (0 новых) зелёные; 146 legacy-тестов OK. Iter2: _classify_part case-insensitive ключи и non-str text -> unknown; _media_part_counts считает unknown; stripped_full_prompt всегда при universal; media-degradation-reserve в _LOG_EVENT_NAMES. Iter3 (F-001 residual): _classify_part — text None/'' с посторонними ключами ({'type':'text','text':None,'payload':S}) -> unknown; do_POST: _universal_render_messages безусловно при universal; full_prompt = stripped при (force_cold or universal and not images)."
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Дописать UniversalImageFallbackTests uf01..uf10 строго после 249933-байтового префикса tests/test_agy_bridge_resilience.py",
+      "expected_evidence": "VER-006 prefix check и VER-007 AST coverage проходят",
+      "status": "DONE",
+      "actual_evidence": "Дописан UniversalImageFallbackTests (test_uf01..uf10 + uf03b, uf07b) строго после 249933-байтового префикса (VER-006 PASS: prefix sha256 f318d605…, 0 deleted). Красный прогон на BASE-server: 12/12 тестов падают; на кандидате 12/12 OK. Iter2: в test_uf07 добавлены HTTP/SSE подтесты A..E (unknown-only, без image). Iter3: test_uf07 расширен unit-проверками и HTTP JSON/SSE × cold/hot подтестами F/G/H/K/I(+J) — prompt в fake agy без PAYLOAD_SECRET_99999, без \"{'type'\"/\"{'text'\", H -> [media omitted] + один collect/unsupported_media; красный прогон на server без фикса — FAIL всех кейсов."
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Выполнить VER-001..VER-009 и legacy-регресс; исправлять lint/typecheck/test до exit 0",
+      "expected_evidence": "Exit-коды и вывод каждой VER-команды",
+      "status": "DONE",
+      "actual_evidence": "VER-001/002/003(58 тестов OK)/004/006/007/008/009 — exit 0. VER-005 как заморожен падает на сборе 3 нерелевантных модулей (test_cache_usage, test_fleet_v3, test_tool_parser) — идентично на BASE; pytest по tests/test_agy_bridge_resilience.py + tests/test_images_strict.py: 176 passed. VER-010 (live-приёмка/деплой) — вне scope Coder, exit 1 ожидаемо. Iter2: VER-001/002/003/004/006/007/008/009 exit 0 (VER-003: 58 tests OK). Iter3: VER-001/002/003(58 OK)/004(new 0)/006/007/008/009 exit 0; pytest agy+strict: 175 passed, 1 failed — L2HarnessTests::test_tc93 (порог cpu/wall<=0.01, 0.0107..0.0118) падает идентично на BASE 012da99 при load average ~18 — окружение, не регрессия."
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Закрыть план, снять fingerprint, записать handoffs/coder-01.json и coder/summary.md",
+      "expected_evidence": "validate_role_plan --phase after и validate_handoff exit 0, файлы на диске",
+      "status": "DONE",
+      "actual_evidence": "plans/coder-01.json закрыт, fingerprints/coder-after.json снят, handoffs/coder-01.json валидирован validate_handoff, coder/summary.md записан. Iter3: fingerprints/coder-after.json перснят (sha256 0efcb715f698e2d4ce3c6b08f6f4a48113e02e7790d16ac74575f82c24175ed5), handoff пересобран."
+    }
+  ],
+  "deviations": [
+    "Скилл ~/Мой диск/skils/ai-sdlc/universal/coder/SKILL.md отсутствует на диске; использованы orchestrate-coder-reviewer-summarizer/SKILL.md, references/steps.md и aisdlc-gcge/skills/feature.md.",
+    "VER-005 (полный pytest от корня) красный на BASE и на кандидате из-за 3 ошибок сбора несвязанных модулей; заменён эквивалентным прогоном agy+strict тестов под pytest (176 passed) и unittest-прогоном всего файла.",
+    "VER-010 не выполнен как PASS: требует деплоя server.py, IMAGE_FALLBACK_ENABLED=true в ~/.dsh/bridges/agy-bridge/dynamic_config.json и live-acceptance.json — это релиз/Teamlead, Coder в prod не пишет."
+  ]
+}

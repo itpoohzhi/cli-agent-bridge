@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "task_id": "agy-universal-image-fallback",
+  "role": "coder",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Реализовать AD-001..AD-004 в bridges/agy-bridge/server.py и append-only UniversalImageFallbackTests (AD-005, uf01..uf10) в tests/test_agy_bridge_resilience.py; прогнать VER-001..VER-010.",
+  "inputs_read": [
+    "task.json architecture_gate (allowed_files: server.py, tests/test_agy_bridge_resilience.py)",
+    "architecture/architecture-packet.json AD-001..AD-005, INV-01..12",
+    "teamlead/verification-surface.json VER-001..VER-010",
+    "analysis/agy-universal-image-fallback/handoff-architect.md и handoff-qa.md",
+    "~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/SKILL.md и references/steps.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/feature.md"
+  ],
+  "stop_conditions": [
+    "Любая правка вне двух allowed_files и вне .ai-team/runs/agy-universal-image-fallback-20261029/ — стоп.",
+    "Любое изменение хотя бы одного байта из 249933-байтового префикса тестового файла — стоп.",
+    "Не ослаблять существующие тесты и не менять fleet.json, не фабриковать live-приёмку VER-010."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Изучить server.py: флаги, _image_gate, _collect_images, _messages_to_prompt, _run_once, do_POST, do_GET",
+      "expected_evidence": "Карта функций и строк, на которые ложатся AD-001..AD-004",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-02",
+      "kind": "change",
+      "action": "Реализовать AD-001..AD-004 в bridges/agy-bridge/server.py (флаг, нормализация, три точки downgrade, observability)",
+      "expected_evidence": "git diff server.py содержит все функции из VER-009 и точки downgrade",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-03",
+      "kind": "change",
+      "action": "Дописать UniversalImageFallbackTests uf01..uf10 строго после 249933-байтового префикса tests/test_agy_bridge_resilience.py",
+      "expected_evidence": "VER-006 prefix check и VER-007 AST coverage проходят",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-04",
+      "kind": "verify",
+      "action": "Выполнить VER-001..VER-009 и legacy-регресс; исправлять lint/typecheck/test до exit 0",
+      "expected_evidence": "Exit-коды и вывод каждой VER-команды",
+      "status": "PENDING",
+      "actual_evidence": ""
+    },
+    {
+      "id": "RP-05",
+      "kind": "report",
+      "action": "Закрыть план, снять fingerprint, записать handoffs/coder-01.json и coder/summary.md",
+      "expected_evidence": "validate_role_plan --phase after и validate_handoff exit 0, файлы на диске",
+      "status": "PENDING",
+      "actual_evidence": ""
+    }
+  ],
+  "deviations": []
+}

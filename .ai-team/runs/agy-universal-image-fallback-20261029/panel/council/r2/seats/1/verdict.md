@@ -1,0 +1,28 @@
+PANEL-NONCE: 496c1266e7565ecf
+ARTIFACT-SHA256: baf9379d84ccc76fcd63830199dcac954170db64dedb95ec3c6fc24a8938eb41
+
+Подтверждаю: прочитал общий канон `~/Мой диск/Context/AGENTS.md` целиком (до маркера `<!-- КАНОН-КОНЕЦ -->`); проектные файлы правил (`AGENTS.md`, `.agents/AGENTS.md`, `CLAUDE.md`) в рабочей папке отсутствуют.
+
+# Teamlead Code Council Review (Round 2 / D1) — `agy-universal-image-fallback-20261029`
+
+## 1. Проверка закрытия замечаний Round 1 (`F-001`, `MINOR-2`, `F-002`)
+
+1. **`F-001` (`BLOCKER-SAFETY` — обход нормализации `do_POST` сообщениями только с `unknown` структурным контентом): ЗАКРЫТО.**
+   - В [`_lower_keys`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/bridges/agy-bridge/server.py#L868-L875) и [`_classify_part`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/bridges/agy-bridge/server.py#L878-L899) ключи словаря приводятся к нижнему регистру (`InlineData`, `FileData`, `Image_Url`, `Input_Audio` распознаются независимо от регистра), а поле `text` с нестроковым значением (`dict` / `list`) классифицируется как `"unknown"`, а не `"text"`.
+   - Хелпер [`_part_text`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/bridges/agy-bridge/server.py#L902-L905) возвращает только строковое значение `text` (или `""`) и исключает `KeyError` и сериализацию вложенных структур через `str(...)`.
+   - В [`_media_part_counts`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/bridges/agy-bridge/server.py#L931-L952) любая не-текстовая часть (`kind != "text"`, включая `"media"` и `"unknown"` как в `list`-, так и в `dict`-`content`) учитывается в `other_media`. Благодаря этому условие `if image_parts or other_media:` в [`Handler.do_POST`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/bridges/agy-bridge/server.py#L4128-L4167) гарантированно срабатывает для запросов, содержащих только `unknown` структуры, логирует `image_fallback stage=collect reason=unsupported_media`, выставляет `force_cold = True` и подставляет `stripped_full_prompt` (вычисляемый безусловно при `universal = True` через [`_messages_to_stripped_prompt`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/bridges/agy-bridge/server.py#L984-L988)).
+   - В [`UniversalImageFallbackTests.test_uf07_media_normalization_is_complete`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/tests/test_agy_bridge_resilience.py#L7128-L7172) добавлены интеграционные HTTP (`bridge_u.post`) и SSE (`_sse_post`) проверки для всех 5 вариантов `unknown_only` (`A_dict_input_video`, `B_list_input_video_text`, `C_text_with_struct`, `D_case_variant_key`, `E_foo_bar`) с маркером `PAYLOAD_SECRET_12345`: подтверждаются код `200`, отсутствие секрета в `prompt`/`argv`/логах, наличие `[media omitted]`, отсутствие `--add-dir` и ровно одно событие `stage=collect reason=unsupported_media`.
+
+2. **`MINOR-2` (маскирование `media-degradation-reserve` в `_mask_secrets`): ЗАКРЫТО.**
+   - Токен `"media-degradation-reserve"` добавлен в [`_LOG_EVENT_NAMES`](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/bridges/agy-bridge/server.py#L507-L528) и больше не маскируется как `"***"`.
+
+3. **`F-002` (`VER-005` Clean-Room L2 и статус `VER-010` `DEFERRED_L3`): ЗАКРЫТО.**
+   - По данным [execution-evidence.md](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/teamlead/execution-evidence.md#L1-L273) и [package.md](file:///Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback/.ai-team/runs/agy-universal-image-fallback-20261029/teamlead/package.md#L100-L373), проверки `VER-001`, `VER-002`, `VER-003` (`58/58` тестов), `VER-004` (`792` baseline -> `787` candidate, `0` новых диагностик), `VER-006` (побайтовое совпадение префикса `249933` байт + `18/18` в `test_images_strict.py`), `VER-007` (`50/50` AST ID), `VER-008` (scope frozen, неизменный `fleet.json` и 5 аналитических входов) и `VER-009` (static security contract) завершились с `exit 0`.
+   - При запуске полного набора `VER-005` с несекретным окружением clean-room `PYTEST_ADDOPTS="--ignore=bridges/opencode-zen-bridge/tests -o pythonpath=.:tests"` ошибки сбора устранены (`0` `exit 2`, собрано `1035` тестов на кандидате против `1023` на `BASE`), `33/35` тестовых модулей (`1032` теста, включая `158` в `test_agy_bridge_resilience.py` и `18` в `test_images_strict.py`) проходят с `exit 0`, а на `BASE` и `CANDIDATE` воспроизводятся идентичные 3 pre-existing падения (`pytest` `exit 1`, дельта мультимножеств `CANDIDATE - BASE = ∅`), что удовлетворяет критерию `PASS_WITH_PREEXISTING` (`verification-integrity.md` §8).
+   - `VER-010` корректно зафиксирован в статусе `DEFERRED_L3` (`verification-integrity.md` §6, §8) до пост-советного деплоя в `~/.dsh/bridges/agy-bridge/` и живой приёмки в DSH-чате владельца.
+
+## 2. Итог
+
+Все инварианты `INV-01..INV-12`, архитектурные решения `AD-001..AD-005` и замечания первого раунда (`F-001`, `MINOR-2`, `F-002`) полностью выполнены и подтверждены доказательствами Clean-Room L2. Открытых блокеров нет.
+
+VERDICT: ACCEPT

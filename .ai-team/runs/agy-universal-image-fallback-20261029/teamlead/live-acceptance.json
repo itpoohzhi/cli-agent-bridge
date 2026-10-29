@@ -1,0 +1,35 @@
+{
+  "schema": "live-acceptance/v1",
+  "status": "PASS",
+  "verified_at": "2026-10-29T18:49:32Z",
+  "existing_owner_chat": true,
+  "owner_conversation_ref": "cdcff52d-4e31-474d-ab11-612a67aa8949",
+  "explicit_cid_tested": "live-uf-cid-1793299298",
+  "candidate_server_sha256": "e6b30113bea2441e71fafb98d4b984b18d5f94a0f381deb2348ed31918fe55ed",
+  "deployed_server_path": "/Users/aazhiry1/.dsh/bridges/agy-bridge/server.py",
+  "dynamic_config_path": "/Users/aazhiry1/.dsh/bridges/agy-bridge/dynamic_config.json",
+  "scenarios_passed": [
+    "image_then_text_fallback_then_history",
+    "previously_text_only_model",
+    "cold_and_hot",
+    "explicit_cid",
+    "repeat_and_parallel",
+    "sse_completion_no_error",
+    "cleanup_before_retry",
+    "flag_rollback_reload",
+    "resource_profile",
+    "side_effect_safe_failure"
+  ],
+  "unverified": [],
+  "resource_profile": {
+    "pid": 59970,
+    "ps_snapshot": "59970  35936 488780880   0.0 /Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python server.py",
+    "health_active_after_suite": 0,
+    "workspace_leftover_staging_dirs": 0
+  },
+  "evidence_refs": [
+    ".ai-team/runs/agy-universal-image-fallback-20261029/teamlead/logs/ver-010-live-l3.log (sha256=2f878432afe89cdc28a473a4e88f73d4e585167708a63f4b48d703752fb10a0b)",
+    "/Users/aazhiry1/.dsh/bridges/agy-bridge/server.py (sha256=e6b30113bea2441e71fafb98d4b984b18d5f94a0f381deb2348ed31918fe55ed)",
+    "/Users/aazhiry1/.dsh/bridges/agy-bridge/dynamic_config.json"
+  ]
+}

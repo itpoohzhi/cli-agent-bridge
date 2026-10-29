@@ -1,0 +1,169 @@
+{
+  "schema_version": "1.1",
+  "role": "coder",
+  "task_id": "agy-universal-image-fallback",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "iteration": 3,
+  "role_plan": {
+    "path": ".ai-team/runs/agy-universal-image-fallback-20261029/plans/coder-01.json",
+    "sha256": "b8efa8208713c4f5bcbe3484257ece21741eb2cdf84b24cb64073580d9400e10"
+  },
+  "status": "DONE",
+  "summary": "Реализованы AD-001..AD-004 в bridges/agy-bridge/server.py (независимый флаг IMAGE_FALLBACK_ENABLED, полная нормализация/stripping media, три точки безопасного downgrade в text-only с одним повтором, наблюдаемость health/models) и дописан UniversalImageFallbackTests (AD-005, uf01..uf10 + uf03b/uf07b) строго после 249933-байтового префикса tests/test_agy_bridge_resilience.py. Strict-режим и fleet.json не изменены. VER-001/002/003/004/006/007/008/009 — exit 0; VER-005 (полный pytest) и VER-010 (live-деплой) не PASS по причинам вне scope Coder (см. risks). Iteration 2 (Code Council R1): F-001 закрыт — unknown-only структурный content больше не обходит нормализацию do_POST (case-insensitive ключи, text-не-str -> unknown, _media_part_counts считает unknown, stripped_full_prompt всегда при universal); MINOR-2: media-degradation-reserve добавлен в _LOG_EVENT_NAMES; test_uf07 дополнен HTTP/SSE кейсами A..E. Iteration 3 (Council D1, residual F-001): _classify_part больше не считает text None/'' с посторонними ключами (payload/data/source/attachment) текстом -> unknown ([media omitted], force_cold, collect/unsupported_media); do_POST при universal всегда строит _universal_render_messages (raw dict-content и неперечисленные ключи не доходят ни до cold, ни до hot-resume промпта) и берёт stripped промпт при universal без images; test_uf07 расширен кейсами F/G/H/K/I(+J) JSON/SSE cold/hot.",
+  "changed_files": [
+    "bridges/agy-bridge/server.py",
+    "tests/test_agy_bridge_resilience.py"
+  ],
+  "commands": [
+    {
+      "command": "VER-001 run-guarded -- env uvx ruff@0.17.3 check --no-cache server.py tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-002 run-guarded -- env uvx ruff@0.17.3 format --check --no-cache server.py tests/test_agy_bridge_resilience.py",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-003 run-guarded -- python3 -B (unittest: Image*, AcceptanceOracleTests, UniversalImageFallbackTests) Ran 58 OK",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-004 run-guarded -- basedpyright@1.40.2 delta vs BASE (baseline 792, candidate 787, new 0)",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-006 run-guarded -- append-only prefix 249933 bytes + test_images_strict.py",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-007 run-guarded -- AST assertion coverage 40+10 IDs",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-008 run-guarded -- scope frozen (2 allowed paths, fleet byte-identical, 5 Stage1 hashes)",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-009 run-guarded -- static image security contract / helpers / cache reset",
+      "exit_code": 0
+    },
+    {
+      "command": "VER-005 run-guarded -- env PYTHONPATH=. uvx --from pytest==9.0.3 pytest -q -p no:cacheprovider (3 collection errors, identical on BASE)",
+      "exit_code": 2
+    },
+    {
+      "command": "pytest==9.0.3 tests/test_agy_bridge_resilience.py tests/test_images_strict.py -> 176 passed, 273 subtests passed",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 -B -m unittest discover -s tests -p test_agy_bridge_resilience.py (146 legacy tests on candidate server.py)",
+      "exit_code": 0
+    },
+    {
+      "command": "uf tests against BASE server.py (red check): 12 tests, failures=36 errors=55",
+      "exit_code": 1
+    },
+    {
+      "command": "VER-010 run-guarded -- deployed config/hash + live-acceptance.json receipt (release scope, not applied)",
+      "exit_code": 1
+    },
+    {
+      "command": "iter2 VER-001/002/003/004/006/007/008/009 re-run",
+      "exit_code": 0
+    },
+    {
+      "command": "iter3 VER-001/002/003(58 OK)/004(new 0)/006/007/008/009 re-run",
+      "exit_code": 0
+    },
+    {
+      "command": "iter3 red check: test_uf07 on server without F-001 fix -> FAIL for all F/G/H/I/J subtests",
+      "exit_code": 1
+    },
+    {
+      "command": "pytest==9.0.3 tests/test_agy_bridge_resilience.py tests/test_images_strict.py -> 175 passed, 1 failed (L2HarnessTests::test_tc93 cpu threshold, identical on BASE 012da99 under load avg ~18)",
+      "exit_code": 1
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "requirement": "REQ-01 optimistic admission любой catalog model/effort без proof/SHA",
+      "verification": [
+        "VER-003",
+        "uf01",
+        "uf03b"
+      ]
+    },
+    {
+      "requirement": "REQ-02 ImageReject/ImageSpoolError/flag-off -> text-only turn, без media-derived 400/500",
+      "verification": [
+        "VER-003",
+        "uf02",
+        "uf03",
+        "uf04"
+      ]
+    },
+    {
+      "requirement": "REQ-03 runtime guard: ровно один text-only повтор до обеих legacy-веток, очистка dir/CID/hot",
+      "verification": [
+        "VER-003",
+        "uf05",
+        "uf06",
+        "uf08"
+      ]
+    },
+    {
+      "requirement": "REQ-04 append-only, strict и fleet не изменены",
+      "verification": [
+        "VER-001",
+        "VER-002",
+        "VER-004",
+        "VER-006",
+        "VER-007",
+        "VER-008",
+        "146 legacy tests"
+      ]
+    },
+    {
+      "requirement": "REQ-05 production activation",
+      "verification": [
+        "НЕ ВЫПОЛНЕНО: VER-010, release scope"
+      ]
+    },
+    {
+      "requirement": "REQ-06 полный stripping истории, dict-content, non-image media, идемпотентность",
+      "verification": [
+        "VER-003",
+        "VER-009",
+        "uf07",
+        "uf07b",
+        "uf09"
+      ]
+    }
+  ],
+  "assumptions": [
+    "Скилл universal/coder/SKILL.md отсутствует на диске; применены orchestrate-coder-reviewer-summarizer, references/steps.md и aisdlc-gcge/skills/feature.md.",
+    "Строковый image_url/image и type=input_image принимаются universal-канонизацией (AD-002 aliases), поэтому taxonomy-кейс string_image_url в universal не отклоняется, а отправляется оптимистично.",
+    "stripped_full_prompt вычисляется только если в истории есть структурное media (иначе равен full_prompt): downgrade возможен только при images, то есть при наличии media.",
+    "Reserve деградации реализован как однократный повтор после _retry_take(): токен списывается если есть, при нехватке глобальный бюджет не уменьшается и не пополняется."
+  ],
+  "risks": [
+    "VER-005 как заморожен красный на BASE и кандидате: сбор tests/test_cache_usage.py, test_fleet_v3.py, test_tool_parser.py падает (module 'server' коллизия, нет tests.bridge_testlib); эквивалентный прогон agy+strict под pytest: 176 passed.",
+    "VER-010 не PASS: нет деплоя server.py и IMAGE_FALLBACK_ENABLED=true в ~/.dsh/bridges/agy-bridge/dynamic_config.json, нет live-acceptance.json; нужны Teamlead/release и живой чат владельца.",
+    "До 2N запусков CLI в худшем батче image-failure (RISK-008): квоты/p99/CPU/RSS/FD не измерены.",
+    "Retry без доставки не даёт exactly-once: нативные побочные эффекты CLI до сбоя возможны (RISK-001).",
+    "Полноценного pixel-decode нет: валидация по сигнатуре сохранена (ASM-002).",
+    "L2HarnessTests::test_tc93 (cpu/wall<=0.01) нестабилен/красный и на BASE при высокой загрузке машины; к F-001 не относится."
+  ],
+  "open_questions": [
+    "Нужен ли Teamlead отдельный фикс сбора полного pytest-набора (3 несвязанных модуля) для VER-005, или принять эквивалентный прогон?",
+    "Когда и кем будет выполнен деплой server.py + запись IMAGE_INPUT_ENABLED/IMAGE_FALLBACK_ENABLED=true и live-приёмка VER-010?"
+  ],
+  "artifacts": {
+    "server_py_sha256": "ed0e0a1d8ac73b80efb1edb52b6f84e651823832ef9ec079c2c748ee385f2e7b",
+    "tests_sha256": "8c622b63a1985bce2e32858b7df3016914b5488412cb367049ee3f141e8c3564",
+    "fingerprint_after": ".ai-team/runs/agy-universal-image-fallback-20261029/fingerprints/coder-after.json",
+    "logs_dir": ".ai-team/runs/agy-universal-image-fallback-20261029/coder/logs/",
+    "summary": ".ai-team/runs/agy-universal-image-fallback-20261029/coder/summary.md"
+  },
+  "next_role": "reviewer"
+}

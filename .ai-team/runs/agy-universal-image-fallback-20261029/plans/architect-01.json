@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "task_id": "agy-universal-image-fallback",
+  "role": "architect",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Сформировать AP/v1, замороженные VER001..010 и task architecture_gate без изменения product/test worktree.",
+  "inputs_read": [
+    "Owner Stage2 brief",
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/teamlead-with-architect/SKILL.md",
+    "analysis/agy-universal-image-fallback/handoff-architect.md sha256=7e5f684041b65986f4ff7c8f05f67e930f497165ce5c26fd74d8ee95df9f92f6",
+    "analysis/agy-universal-image-fallback/handoff-qa.md sha256=6a71c3352f56f012e6c3e406cabad0ebbf43aad5afc325399b767b2753877377",
+    "analysis/agy-universal-image-fallback/open-questions.md sha256=f4d2914546a192f16993873c1c2d91365a65e93d2dc611963fb5eeb0af2e740e",
+    "analysis/agy-universal-image-fallback/research-plan.md sha256=e639555a5c7df5f6f4a9a7876e8902e0ee2989b410f8569e9d640ff3332cf898",
+    "analysis/agy-universal-image-fallback/evidence-ledger.md sha256=ae5bc560087d180ce4f20333028c5ad472ea772dbccf6a7b82bcb6ce7d8db59f"
+  ],
+  "stop_conditions": [
+    "Любая дельта вне .ai-team/runs/ относительно исходного fingerprint — стоп.",
+    "Не фабриковать panel approval, production activation, resource PASS или выполнение будущих uf-тестов.",
+    "Несоответствие schema/hash/role validator не позволяет объявлять механический gate PASS."
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Сверить пять Stage1 входов, legacy observability и фактические CLI-схемы валидаторов",
+      "expected_evidence": "F-* + hash всех пяти входов + факты health/CID/CLI",
+      "status": "DONE",
+      "actual_evidence": "Read all5 Stage1 inputs; retained F-* lineage and frozen SHA256; directly checked health bool/CID owner signature/Run fresh semantics/validator CLI; no broad re-discovery."
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Зафиксировать AD001..005, четыре состояния policy и три точки безопасного downgrade",
+      "expected_evidence": "Полная трассировка REQ/CON/INV/RISK/AC/SCN внутри AP/v1",
+      "status": "DONE",
+      "actual_evidence": "AP AD001..005 contains four-state matrix, complete type/key normalization, three ordered downgrade transitions, exact delivery predicate/reserve/CID cleanup and all REQ/CON/INV/RISK/ASSUMP/AC/SCN lineage."
+    },
+    {
+      "id": "RP-03",
+      "kind": "decide",
+      "action": "Заморозить десять исполняемых VER-команд с append-only и assertion coverage oracle",
+      "expected_evidence": "VER001..010, prefix6009, IDs40+10 и unittest execution",
+      "status": "DONE",
+      "actual_evidence": "Ten concrete VER001..010 frozen; VER006 both zero-deleted baselines+whole prefix+strict execution; VER00740+10 asserted IDs, VER003 full new+legacy execution and VER005 full repository suite; live gate evidence still required."
+    },
+    {
+      "id": "RP-04",
+      "kind": "report",
+      "action": "Собрать run JSONs, закрытый role plan и неизменный product fingerprint",
+      "expected_evidence": "Packet/plan/task hashes и фактические результаты валидаторов",
+      "status": "DONE",
+      "actual_evidence": "Only authorized run-artifacts generated with linked plan SHA; baseline projection verified unchanged before writing. External validator result receipts are produced after generation and are not preclaimed here."
+    }
+  ],
+  "deviations": [
+    "Requested skill and validator locations omit universal/; actual files found via skill INDEX and read from canonical universal paths.",
+    "Actual role validator uses positional PLAN --phase before|after; before-fingerprint argument unsupported. Supplied plans/architect-01.before.json is worktree schema2.0, not a role plan; retained immutable; separate initial role plan provided.",
+    "Actual arch validator needs --packet,--run-dir,--role-plan,--repo-root,--fingerprint-before,--fingerprint-after,--task,--receipt; prints PASS: ARCH_GATE rather than ARCH_GATE_VALID. No wrapper/verifier-output spoof created.",
+    "Supplied fingerprint includes .ai-team/runs artifacts and concurrent log writes. Original retained; derive product projection by excluding ONLY .ai-team/runs/** from ORIGINAL manifest, recomputing digest, comparing current identically scoped snapshot. No fresh/rebased baseline.",
+    "Existing health.images bool and _cid_release(cid,turn_id) override inaccurate proposed shapes/signature; all external behavior design remains as requested.",
+    "Actual test baseline is6008lines; entire blob is immutable, not guessed6009 line count.",
+    "All product/test execution is downstream; Stage2 runs validators/fingerprint only. Resource/live PASS and panel votes are not fabricated."
+  ]
+}

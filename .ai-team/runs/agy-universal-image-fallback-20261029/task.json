@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.2",
+  "task_id": "agy-universal-image-fallback",
+  "run_id": "agy-universal-image-fallback-20261029",
+  "criticality": "S2",
+  "repo_root": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-universal-image-fallback",
+  "branch": "feat/agy-universal-image-fallback",
+  "base_commit": "012da99905ec27a6133afb4f3e768ff9b4426a8f",
+  "entry": "full",
+  "scope": "Stage2 architecture only; no product/test/runtime writes",
+  "architecture_gate": {
+    "packet_sha256": "f6c7a59500b8ece3b756c115b82eea5fd6de42de2825a7ed93b34345b4c49e6b",
+    "verification_surface_sha256": "c4ad6c9f03d82ffb3758d9cdd0aec361357fcf578aed7f760586b2ab96496968",
+    "protected_paths_sha256": "d6ca7c8f71a7f49915175f41520c890ab8f0891ccdd9ed04fe2d5186f94accd4",
+    "allowed_files": [
+      "bridges/agy-bridge/server.py",
+      "tests/test_agy_bridge_resilience.py"
+    ],
+    "forbidden_paths": [
+      "bridges/agy-bridge/fleet.json",
+      "analysis/**",
+      "bridges/*/dynamic_config.json",
+      "bridges/agy-bridge/start.sh",
+      "core/**",
+      "server.py",
+      "tests/test_images_strict.py",
+      "pyproject.toml",
+      "uv.lock",
+      "requirements*.txt",
+      ".github/**"
+    ],
+    "contract_hash": "7b28fc98c0fb08836e50a3c4d4c3753c5795f8c9c2ea9cc03051ebb61afabf96",
+    "verification_surface_ref": "teamlead/verification-surface.json",
+    "contract_hash_algorithm": "sha256 canonical JSON UTF8 ensure_ascii=False sort_keys=True separators=(comma,colon) over packet keys requirements,source_contracts as contracts,invariants,decisions,acceptance_criteria,test_scenarios",
+    "panel_pass_required_before_coder": true,
+    "stage2_product_fingerprint_baseline_ref": "fingerprints/architect-before.product.json",
+    "original_fingerprint_ref": "fingerprints/architect-before.json"
+  }
+}
