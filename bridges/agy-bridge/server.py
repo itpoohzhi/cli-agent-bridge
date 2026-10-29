@@ -1091,20 +1091,37 @@ def _sqlite_ro_uri(path: Path) -> str:
 def _sqlite_open_ro(path: Path) -> sqlite3.Connection:
     """Открыть БД только на чтение; каждый connect обязан закрываться _sqlite_close."""
     global _sqlite_open_connections, _sqlite_max_open_connections
-    conn = sqlite3.connect(
-        _sqlite_ro_uri(path),
-        uri=True,
-        timeout=0.05,
-        isolation_level=None,
-        check_same_thread=False,
-    )
+
+    def connect(uri: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=0.05,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        try:
+            _ = conn.execute("PRAGMA query_only = ON")
+            _ = conn.execute("PRAGMA busy_timeout = 50")
+            _ = conn.execute("PRAGMA cache_size = -1024")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    uri = _sqlite_ro_uri(path)
     try:
-        _ = conn.execute("PRAGMA query_only = ON")
-        _ = conn.execute("PRAGMA busy_timeout = 50")
-        _ = conn.execute("PRAGMA cache_size = -1024")
-    except BaseException:
-        conn.close()
-        raise
+        conn = connect(uri)
+    except sqlite3.OperationalError as exc:
+        # В Python 3.9 нет sqlite_errorcode; immutable не должен обходить блокировки.
+        if str(exc).startswith(("database is locked", "database table is locked")):
+            raise
+        if (
+            path.with_name(path.name + "-wal").exists()
+            or path.with_name(path.name + "-shm").exists()
+        ):
+            raise
+        conn = connect(uri + "&immutable=1")
     with _sqlite_guard_lock:
         _sqlite_open_connections += 1
         _sqlite_max_open_connections = max(
