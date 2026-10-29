@@ -1,0 +1,11 @@
+fe2564ea0eb1f17d681f8ccfb7224b4b44eb4c999cb5ac1cad518736a92b5baf  bridges/agy-bridge/fleet.json
+3227e8ef769c5ebda5b4aa5647bbd651f4a9b28c784122c61c3e1f638be9e357  bridges/agy-bridge/server.py
+f318d60537ad862b11313d303644ace3ff5ae74e5d581ceeba86bcf7bddeeff5  tests/test_agy_bridge_resilience.py
+d6e653d781484f7cf2dfbb136ecb6ae3a70c2bdec7b82c9ef0dd46caac7a9826  .ai-team/runs/agy-image-input-fix-20261029/teamlead/candidate.diff
+f56a5b3340f7a78ace9f6330f862a4cf9879d560b8d65c7c977f24b89e85790f  .ai-team/runs/agy-image-input-fix-20261029/teamlead/candidate-manifest.json
+71ba04c4de89dc6d03c053813c11bef0071af2ee8e1e54775a4b96cc537d0c56  .ai-team/runs/agy-image-input-fix-20261029/teamlead/environment-manifest.json
+4f4d583b6f648feb38362ebed83a1faca19fc286aea099d5ead74b7583f48834  .ai-team/runs/agy-image-input-fix-20261029/teamlead/execution-evidence.md
+f96df3f3ac7e48a1482cc18afc462983825bba61f4be8ddf1057e1ee261abb8c  .ai-team/runs/agy-image-input-fix-20261029/teamlead/verification-traceability.md
+1492d2974e858bb7daa642d67aecc90c1c654ef542a456bc48bfefc1c9f7ad98  .ai-team/runs/agy-image-input-fix-20261029/teamlead/reverse-spec.md
+d24335c5652cc6b1e77709ef44e40cb0bb203555279d9e6d95286b5c56d16fde  .ai-team/runs/agy-image-input-fix-20261029/coder.json
+32d994eeab4f279d30a23f0f01f5c3d0422a93b5504deaf6724facfa143909ec  .ai-team/runs/agy-image-input-fix-20261029/verifier.json

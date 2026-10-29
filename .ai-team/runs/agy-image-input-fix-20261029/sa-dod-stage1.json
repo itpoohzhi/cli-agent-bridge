@@ -1,0 +1,47 @@
+{
+  "schema": "stage1-sa-dod/1",
+  "scope": "brief-specific artifact validation; NOT product, ARCH_GATE or HL-ENV numeric acceptance",
+  "results": [
+    {
+      "id": "SA-DOD-001",
+      "pass": true,
+      "detail": "34 unique facts, ISO dates and source fields"
+    },
+    {
+      "id": "SA-DOD-002",
+      "pass": true,
+      "detail": "11 questions closed as facts or explicit assumptions, no open blockers or hidden guesses"
+    },
+    {
+      "id": "SA-DOD-003",
+      "pass": true,
+      "detail": "INV-01..INV-05: 12 columns and closed status"
+    },
+    {
+      "id": "SA-DOD-004",
+      "pass": true,
+      "detail": "REQ-001..010 each has priority, facts and measurable AC on the same line"
+    },
+    {
+      "id": "SA-DOD-005",
+      "pass": true,
+      "detail": "all 34 architect fact references declared; dates ISO; missing=[]"
+    },
+    {
+      "id": "SA-DOD-006",
+      "pass": true,
+      "detail": "46 current SSoT rows + 46 literal brief rows; UNKNOWN explicitly qualified, no claim of resource-gate PASS"
+    },
+    {
+      "id": "SA-DOD-007",
+      "pass": true,
+      "detail": "QA covers all 10 AC, taxonomy, count/MIME boundaries, retry lifecycle and L3"
+    },
+    {
+      "id": "SA-DOD-008",
+      "pass": true,
+      "detail": "five artifacts only; git scope analysis/agy-image-input-fix + .ai-team; timeboxes accounted"
+    }
+  ],
+  "git_status": "?? .ai-team/runs/agy-image-input-fix-20261029/analyst-01.stderr.log\n?? .ai-team/runs/agy-image-input-fix-20261029/analyst-01.stdout.log\n?? .ai-team/runs/agy-image-input-fix-20261029/briefs/analyst-01.md\n?? .ai-team/runs/agy-image-input-fix-20261029/processes.tsv\n?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-reference.log\n?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-reference.sh\n?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-report.md\n?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-stage1.json\n?? .ai-team/runs/agy-image-input-fix-20261029/sa-dod-stage1.py\n?? .ai-team/runs/agy-image-input-fix-20261029/state.json\n?? analysis/agy-image-input-fix/evidence-ledger.md\n?? analysis/agy-image-input-fix/handoff-architect.md\n?? analysis/agy-image-input-fix/handoff-qa.md\n?? analysis/agy-image-input-fix/open-questions.md\n?? analysis/agy-image-input-fix/research-plan.md\n"
+}

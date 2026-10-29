@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.2",
+  "task_id": "agy-image-input-fix",
+  "run_id": "agy-image-input-fix-20261029",
+  "criticality": "S2",
+  "entry": "full",
+  "reviewer_skip": true,
+  "parent_skill": "analyst-teamlead",
+  "phase": "READY_FOR_PR",
+  "iteration": 1,
+  "status": "COMPLETE",
+  "budgets": {
+    "code_gate_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "reviewer_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "arch_panel_to_architect": {
+      "used": 0,
+      "max": 5
+    }
+  },
+  "last_transition": "FINAL_PASS",
+  "last_blocker_id": null,
+  "same_blocker_count": 0,
+  "updated_at": "2026-10-29T13:26:09.780461+00:00",
+  "panel_proofs": {
+    "arch": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/.ai-team/runs/agy-image-input-fix-20261029/panel/arch/r2",
+      "manifest_sha256": "97a1ee7e169529bdc2426185563d242f02b2bd185a266fbd5a7f3e2cbc7c9fdf",
+      "artifact_sha256": "ddcbc69fd277d74079d3868eb245a3c05c7d7ea00ddae6369fdc563982433466",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/.ai-team/runs/agy-image-input-fix-20261029/architecture/architecture-packet.json",
+      "receipt_sha256": "d78a25b33d6238c3caa0c694f36080f8681162761e78a7b517dfa567c7ab862a",
+      "verified_at": "2026-10-29T12:27:35.974667+00:00"
+    },
+    "council": {
+      "round_dir": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/.ai-team/runs/agy-image-input-fix-20261029/panel/council/r2",
+      "manifest_sha256": "41899a60c90936429d7778308009ed0cf576a43ee687335dc67764e6dbb56f0e",
+      "artifact_sha256": "8cc5276d7cbf0c55f1b3473b7e93a08a9248a577a41e96868d1cb6bb85aac689",
+      "artifact_path": "/Users/aazhiry1/tmp/cli-agent-bridge/agy-image-input-fix/.ai-team/runs/agy-image-input-fix-20261029/teamlead/package.md",
+      "receipt_sha256": "1940320e9c1aaea2865fe6ea38b8d65ea90c160e7dc842c1bba9f3e2aa941d86",
+      "verified_at": "2026-10-29T13:26:09.773231+00:00",
+      "debate": {
+        "round": 2,
+        "prior_ledger_sha256": "9ad7f7cade0079bbe1d64173b01239fdb463f5fe94c70c50d1230f3d0b5a6e69",
+        "reason": "2/3 positive verdicts"
+      }
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-image-input-fix-20261029",
+  "task_id": "agy-image-input-fix",
+  "role": "architect",
+  "iteration": 1,
+  "plan_kind": "full",
+  "objective": "Finalize auditable Stage2 image-input architecture candidate and three allowlisted JSONs; frozen inputs and product fingerprint unchanged.",
+  "inputs_read": [
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md",
+    "analysis/agy-image-input-fix/research-plan.md sha256=67f3bfffc4e9df6b95ee8571c34ded4a397ad164f86787b3b935fe51dcf1243a",
+    "analysis/agy-image-input-fix/evidence-ledger.md sha256=aba34816b5cf6425d4fbf19187a09edd5f7158797e442d488d68626576f887a9",
+    "analysis/agy-image-input-fix/open-questions.md sha256=63fe13ce25d80cb7bad68d25a57c8d1d6e58847b5b8be79dc395b555c55e5b76",
+    "analysis/agy-image-input-fix/handoff-architect.md sha256=6c22f4a0ab4fc71d2e7cd88e1fe7d2df8c327193eb75bfc9d922af68a4710a8f",
+    "analysis/agy-image-input-fix/handoff-qa.md sha256=007cdac728cdd6754c6617cd749ed3361f0d19c9e1adae16a3c31a90ee352cee",
+    "Owner Role Brief Stage2",
+    "Prior accepted packet JSON schema only"
+  ],
+  "scope_paths": [
+    ".ai-team/runs/agy-image-input-fix-20261029/plans/architect-01.before.json",
+    ".ai-team/runs/agy-image-input-fix-20261029/plans/architect-01.json",
+    ".ai-team/runs/agy-image-input-fix-20261029/architecture/architecture-packet.json"
+  ],
+  "stop_conditions": [
+    "No writes except3 JSONs; generator only /tmp/cel-runs/agy-image-input-fix-20261029",
+    "Frozen SHA mismatch, invalid role/packet schema or changed product fingerprint forbids handoff",
+    "No panel vote/runtime PASS or unmeasured resource bound may be fabricated"
+  ],
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Read frozen5 SystemAnalyst inputs and role architecture canon; verify supplied SHA256 list",
+      "expected_evidence": "All5 exact SHA256 values; trace REQ001..010 and supplied facts",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Define6 two-way image decisions plus quality/boundary/contracts/threats/resource obligations",
+      "expected_evidence": "AD001..006;46 canonical fields;21+3 stop codes;10 frozen Verifier/Teamlead gates",
+      "status": "PENDING",
+      "actual_evidence": null
+    },
+    {
+      "id": "RP-03",
+      "kind": "report",
+      "action": "Materialize only three authorized JSONs and link completed role plan SHA in packet",
+      "expected_evidence": "Deterministic valid JSON and plan-reference SHA; no product changes",
+      "status": "PENDING",
+      "actual_evidence": null
+    }
+  ],
+  "deviations": []
+}
