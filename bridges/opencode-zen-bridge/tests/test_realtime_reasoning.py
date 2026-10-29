@@ -4113,6 +4113,214 @@ class TestReworkUnits(unittest.TestCase):
                     expected is server.ServeSecurityError,
                 )
 
+    @staticmethod
+    def _permission_event(request_id: str, session_id: str = "s") -> dict[str, object]:
+        """Событие `permission.asked` для оракулов каскадного reject."""
+        return {
+            "type": "permission.asked",
+            "data": {"id": request_id, "sessionID": session_id},
+        }
+
+    @staticmethod
+    def _step_ended_event() -> dict[str, object]:
+        """Подтверждение конца шага для дренажа."""
+        return {
+            "type": "session.step.ended",
+            "data": {
+                "sessionID": "s",
+                "tokens": {
+                    "input": 1,
+                    "output": 1,
+                    "reasoning": 0,
+                    "cache": {"read": 0},
+                },
+            },
+        }
+
+    def _drain_permissions(
+        self,
+        events_in: list[dict[str, object]],
+        statuses: Mapping[str, int],
+        *,
+        replied: set[str] | None = None,
+        cascade: dict[str, bool] | None = None,
+    ) -> tuple[bool, list[str]]:
+        """Прогнать дренаж шага с заданными HTTP-статусами reply; вернуть итог и пути POST."""
+        drain = cast("Callable[..., bool]", getattr(server, "_drain_serve_step_usage"))
+        make_state = cast("Callable[[], object]", getattr(server, "_ServeToolState"))
+        events: queue.Queue[dict[str, object] | None] = queue.Queue()
+        for item in events_in:
+            events.put(item)
+        paths: list[str] = []
+
+        def control(
+            _method: str, path: str, _body: object
+        ) -> tuple[int, dict[str, object]]:
+            paths.append(path)
+            return statuses.get(path.rsplit("/", 2)[-2], 204), {}
+
+        extra: dict[str, object] = {}
+        if replied is not None:
+            extra["replied_permissions"] = replied
+        if cascade is not None:
+            extra["cascade_reject_state"] = cascade
+        confirmed = drain(
+            events,
+            "s",
+            None,
+            time.monotonic() + 1,
+            {},
+            make_state(),
+            _fake_result(),
+            self._c12_ignore,
+            self._c12_ignore,
+            ctrl_http=control,
+            **extra,
+        )
+        return confirmed, paths
+
+    def test_serve_cascaded_permission_asked_second_reply_404_succeeds(self) -> None:
+        """Каскадный reject: первый reply 200, второй 404 — шаг завершается без SecurityError."""
+        confirmed, paths = self._drain_permissions(
+            [
+                self._permission_event("perm_1"),
+                self._permission_event("perm_2"),
+                self._step_ended_event(),
+            ],
+            {"perm_1": 200, "perm_2": 404},
+        )
+        self.assertTrue(confirmed)
+        self.assertEqual(
+            paths,
+            [
+                "/api/session/s/permission/perm_1/reply",
+                "/api/session/s/permission/perm_2/reply",
+            ],
+        )
+
+    def test_serve_permission_replied_event_prevents_cascade_failure(self) -> None:
+        """permission.replied(reject) фиксирует requestID, в том числе без sessionID."""
+        map_event = cast(
+            "Callable[[dict[str, object]], tuple[str, dict[str, object]] | None]",
+            getattr(server, "_map_serve_event"),
+        )
+        for field in ("reply", "decision"):
+            mapped = map_event(
+                {
+                    "type": "permission.replied",
+                    "data": {"requestID": " perm_2 ", field: "reject"},
+                }
+            )
+            self.assertIsNotNone(mapped)
+            kind, payload = cast("tuple[str, dict[str, object]]", mapped)
+            self.assertEqual(kind, "permission_replied")
+            self.assertEqual(payload["id"], "perm_2")
+        for ignored in (
+            {"requestID": "perm_2", "reply": "once"},
+            {"requestID": "perm_2", "decision": "always"},
+            {"requestID": "  ", "reply": "reject"},
+            {"reply": "reject"},
+        ):
+            self.assertIsNone(
+                map_event({"type": "permission.replied", "data": ignored}), ignored
+            )
+        # replied без sessionID приходит раньше buffered asked: повторный POST не нужен.
+        replied: set[str] = set()
+        confirmed, paths = self._drain_permissions(
+            [
+                {
+                    "type": "permission.replied",
+                    "data": {"requestID": "perm_2", "reply": "reject"},
+                },
+                self._permission_event("perm_2"),
+                self._step_ended_event(),
+            ],
+            {"perm_2": 404},
+            replied=replied,
+        )
+        self.assertTrue(confirmed)
+        self.assertEqual(paths, [])
+        self.assertEqual(replied, {"perm_2"})
+        # Чужая сессия и не-reject события не создают доказательство каскада.
+        replied = set()
+        with self.assertRaises(server.ServeSecurityError):
+            _ = self._drain_permissions(
+                [
+                    {
+                        "type": "permission.replied",
+                        "data": {
+                            "requestID": "perm_3",
+                            "reply": "reject",
+                            "sessionID": "foreign",
+                        },
+                    },
+                    {
+                        "type": "permission.replied",
+                        "data": {"requestID": "perm_3", "reply": "once"},
+                    },
+                    self._permission_event("perm_3"),
+                    self._step_ended_event(),
+                ],
+                {"perm_3": 404},
+                replied=replied,
+            )
+        self.assertEqual(replied, set())
+
+    def test_serve_primary_permission_reject_404_fails_closed(self) -> None:
+        """Первичный 404 без каскадного доказательства, 5xx и пустой id — fail-closed."""
+        cases: list[tuple[str, list[dict[str, object]], dict[str, int]]] = [
+            ("primary_404", [self._permission_event("perm_1")], {"perm_1": 404}),
+            (
+                "second_500",
+                [self._permission_event("perm_1"), self._permission_event("perm_2")],
+                {"perm_1": 200, "perm_2": 500},
+            ),
+            (
+                "second_401",
+                [self._permission_event("perm_1"), self._permission_event("perm_2")],
+                {"perm_1": 204, "perm_2": 401},
+            ),
+            ("primary_500", [self._permission_event("perm_1")], {"perm_1": 500}),
+            ("empty_id", [self._permission_event("  ")], {}),
+        ]
+        for name, events_in, statuses in cases:
+            with self.subTest(case=name):
+                with self.assertRaisesRegex(
+                    server.ServeSecurityError, "permission reject failed"
+                ):
+                    _ = self._drain_permissions(
+                        [*events_in, self._step_ended_event()], statuses
+                    )
+        # Кроме 404-толерантности: interrupt всегда пробуется при отказе.
+        paths: list[str] = []
+
+        def control(
+            _method: str, path: str, _body: object
+        ) -> tuple[int, dict[str, object]]:
+            paths.append(path)
+            return 404, {}
+
+        drain = cast("Callable[..., bool]", getattr(server, "_drain_serve_step_usage"))
+        make_state = cast("Callable[[], object]", getattr(server, "_ServeToolState"))
+        events: queue.Queue[dict[str, object] | None] = queue.Queue()
+        events.put(self._permission_event("perm_1"))
+        with self.assertRaisesRegex(
+            server.ServeSecurityError, "permission reject failed"
+        ):
+            _ = drain(
+                events,
+                "s",
+                None,
+                time.monotonic() + 1,
+                {},
+                make_state(),
+                _fake_result(),
+                self._c12_ignore,
+                self._c12_ignore,
+                ctrl_http=control,
+            )
+        self.assertEqual(paths[-1], "/api/session/s/interrupt")
+
     """Группа C: детерминированные оракулы RW-001..RW-032 без живого FakeServe."""
 
     def test_c11_rw004_callback_error_logged_and_socket_aborted(self) -> None:
@@ -4607,6 +4815,7 @@ class _AttemptCase(unittest.TestCase):
         on_ready: Callable[[], None] | None = None,
         on_token: Callable[[], None] | None = None,
         emulate_tools: bool = False,
+        on_tool: Callable[[dict[str, object]], None] | None = None,
     ) -> Mapping[str, object]:
         """Одна реальная попытка serve против FakeServe (метки времени — монотонные)."""
         marks = reasoning if reasoning is not None else []
@@ -4630,7 +4839,7 @@ class _AttemptCase(unittest.TestCase):
             self.tmp,
             on_reasoning,
             ignore,
-            ignore_tool,
+            ignore_tool if on_tool is None else on_tool,
             t0,
             on_startup_ready=on_ready,
             emulate_tools=emulate_tools,
@@ -4695,6 +4904,161 @@ class TestServeAttemptOracles(_AttemptCase):
         self.assertEqual(result["terminal"], "tool_calls", result)
         self.assertEqual(len(cast("list[object]", result["native_calls"])), 2)
         self.assertEqual(result["texts"], ["хвост"] * 4)
+
+    def _attempt_with_permissions(
+        self,
+        events_code: str,
+        *,
+        emulate_tools: bool = False,
+        on_tool: Callable[[dict[str, object]], None] | None = None,
+    ) -> tuple[list[str], object]:
+        """Попытка против FakeServe с заданными permission-событиями; вернуть POST-пути и итог/ошибку."""
+        fragment = (
+            """
+            emit({"type":"session.execution.started","data":{"sessionID":sid}})
+"""
+            + events_code
+            + """
+            time.sleep(0.2)
+            emit({"type":"session.step.ended","data":{"sessionID":sid,"assistantMessageID":"m1","tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}})
+            emit({"type":"session.execution.succeeded","data":{"sessionID":sid}})
+            return
+"""
+        )
+        _ = Path(server.OPENCODE_BIN).write_text(
+            FAKE_SERVE.replace(
+                '            if "__native_pause__" in prompt:',
+                fragment + '            if "__native_pause__" in prompt:',
+            )
+        )
+        http_call = cast(
+            "Callable[..., tuple[int, dict[str, object]]]",
+            getattr(server, "_serve_http"),
+        )
+        posts: list[str] = []
+
+        def recording_http(
+            *args: object, **kwargs: object
+        ) -> tuple[int, dict[str, object]]:
+            path = str(args[3])
+            if path.endswith(("/reply", "/interrupt")):
+                posts.append(path)
+            return http_call(*args, **kwargs)
+
+        outcome: object
+        with mock.patch.object(server, "_serve_http", side_effect=recording_http):
+            try:
+                outcome = self.attempt(
+                    "x", emulate_tools=emulate_tools, on_tool=on_tool
+                )
+            except server.ServeSecurityError as exc:
+                outcome = exc
+        return posts, outcome
+
+    def test_serve_cascaded_permission_asked_second_reply_404_succeeds_main_loop(
+        self,
+    ) -> None:
+        """Основной цикл: reply per1=204, per2=404 (каскад) — без SecurityError, interrupt на каждый permission."""
+        posts, outcome = self._attempt_with_permissions(
+            """
+            emit({"type":"permission.asked","data":{"id":"per1","sessionID":sid,"action":"bash","resources":["*"]}})
+            emit({"type":"permission.asked","data":{"id":"per2","sessionID":sid,"action":"bash","resources":["*"]}})
+"""
+        )
+        self.assertNotIsInstance(outcome, BaseException, outcome)
+        # Хвостовой interrupt завершения попытки не входит в проверяемый префикс.
+        self.assertEqual(
+            posts[:4],
+            [
+                "/api/session/ses_test1/permission/per1/reply",
+                "/api/session/ses_test1/interrupt",
+                "/api/session/ses_test1/permission/per2/reply",
+                "/api/session/ses_test1/interrupt",
+            ],
+        )
+
+    def test_serve_permission_replied_event_skips_reply_post_main_loop(self) -> None:
+        """Основной цикл: permission.replied(reject) без sessionID пропускает POST reply, но не interrupt."""
+        posts, outcome = self._attempt_with_permissions(
+            """
+            emit({"type":"permission.replied","data":{"requestID":"per2","reply":"reject"}})
+            emit({"type":"permission.asked","data":{"id":"per2","sessionID":sid,"action":"bash","resources":["*"]}})
+"""
+        )
+        self.assertNotIsInstance(outcome, BaseException, outcome)
+        self.assertEqual(posts[:1], ["/api/session/ses_test1/interrupt"])
+        self.assertFalse([path for path in posts if path.endswith("/reply")], posts)
+
+    def test_serve_primary_permission_reject_404_fails_closed_main_loop(self) -> None:
+        """Основной цикл: первичный 404 без каскадного доказательства — SecurityError, interrupt выполнен."""
+        posts, outcome = self._attempt_with_permissions(
+            """
+            emit({"type":"permission.asked","data":{"id":"per9","sessionID":sid,"action":"bash","resources":["*"]}})
+"""
+        )
+        self.assertIsInstance(outcome, server.ServeSecurityError, outcome)
+        self.assertIn("permission reply HTTP 404", str(outcome))
+        self.assertEqual(
+            posts[:2],
+            [
+                "/api/session/ses_test1/permission/per9/reply",
+                "/api/session/ses_test1/interrupt",
+            ],
+        )
+
+    def test_serve_main_loop_to_drain_shared_cascade_state_404(self) -> None:
+        """Основной цикл -> дренаж шага: per1=204 в основном цикле, per2=404 в дренаже терпится общим состоянием."""
+        tool_calls: list[dict[str, object]] = []
+        posts, outcome = self._attempt_with_permissions(
+            """
+            emit({"type":"permission.asked","data":{"id":"per1","sessionID":sid,"action":"bash","resources":["*"]}})
+            emit({"type":"session.tool.called","data":{"id":"call_cascade_1","sessionID":sid,"assistantMessageID":"msg_c1","name":"read_file","input":{"path":"README.md"}}})
+            emit({"type":"permission.asked","data":{"id":"per2","sessionID":sid,"action":"bash","resources":["*"]}})
+            emit({"type":"session.step.ended","data":{"sessionID":sid,"assistantMessageID":"msg_c1","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}})
+""",
+            emulate_tools=True,
+            on_tool=tool_calls.append,
+        )
+        self.assertNotIsInstance(outcome, BaseException, outcome)
+        self.assertIn("call_cascade_1", repr(tool_calls))
+        self.assertIn("read_file", repr(tool_calls))
+        for expected in (
+            "/api/session/ses_test1/permission/per1/reply",
+            "/api/session/ses_test1/interrupt",
+            "/api/session/ses_test1/permission/per2/reply",
+        ):
+            self.assertIn(expected, posts)
+
+    def test_serve_permission_missing_id_fails_closed_main_loop(self) -> None:
+        """Основной цикл: permission.asked без id — SecurityError, reply не отправлен, interrupt выполнен."""
+        posts, outcome = self._attempt_with_permissions(
+            """
+            emit({"type":"permission.asked","data":{"id":"","sessionID":sid,"action":"bash","resources":["*"]}})
+"""
+        )
+        self.assertIsInstance(outcome, server.ServeSecurityError, outcome)
+        self.assertIn("missing id", str(outcome))
+        self.assertFalse([path for path in posts if path.endswith("/reply")], posts)
+        self.assertIn("/api/session/ses_test1/interrupt", posts)
+
+    def test_serve_foreign_session_permission_replied_ignored_main_loop(
+        self,
+    ) -> None:
+        """Основной цикл: permission.replied чужой сессии игнорируется — reply и interrupt по своему per1."""
+        posts, outcome = self._attempt_with_permissions(
+            """
+            emit({"type":"permission.replied","data":{"id":"per1","sessionID":"ses_foreign","reply":"reject"}})
+            emit({"type":"permission.asked","data":{"id":"per1","sessionID":sid,"action":"bash","resources":["*"]}})
+"""
+        )
+        self.assertNotIsInstance(outcome, BaseException, outcome)
+        self.assertEqual(
+            posts[:2],
+            [
+                "/api/session/ses_test1/permission/per1/reply",
+                "/api/session/ses_test1/interrupt",
+            ],
+        )
 
     def test_c9_fu001_serve_queue_and_accumulated_byte_budget_enforced(self) -> None:
         """Каждый байтовый бюджет останавливает реальную попытку и убирает lease."""
