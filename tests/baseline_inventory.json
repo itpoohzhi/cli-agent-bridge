@@ -105,7 +105,7 @@
    "test_bridge_strict.TestEffortAndModel.test_defaults_when_model_and_effort_absent"
   ],
   "test_bridge_strict.TestEffortAndModel.test_judge_levels_and_outside_rejected": [
-   "test_bridge_strict.TestEffortAndModel.test_judge_levels_and_outside_rejected"
+   "test_bridge_strict.TestEffortAndModel.test_outside_catalog_efforts_clamped"
   ],
   "test_bridge_strict.TestEffortAndModel.test_launcher_missing_gives_503_and_no_spawn": [
    "test_bridge_strict.TestEffortAndModel.test_launcher_missing_gives_503_and_no_spawn"
@@ -120,7 +120,7 @@
    "test_bridge_strict.TestEffortAndModel.test_reasoning_object_rejected"
   ],
   "test_bridge_strict.TestEffortAndModel.test_stream_with_bad_effort_is_plain_json_400": [
-   "test_bridge_strict.TestEffortAndModel.test_stream_with_bad_effort_is_plain_json_400"
+   "test_bridge_strict.TestEffortAndModel.test_stream_with_clamped_effort_succeeds"
   ],
   "test_bridge_strict.TestHealthAndModels.test_health_exactly_seven_keys": [
    "test_bridge_strict.TestHealthAndModels.test_health_exactly_seven_keys"
