@@ -20,7 +20,7 @@ Completions (stream и не-stream); thinking транслируется в `rea
 
 Каталог моделей — `fleet.json` (env `DROID_DSH_BRIDGE_FLEET`): читается один раз
 при старте, структурно проверяется (класс I — отказ старта), уровни reasoning
-строго берутся из каталога (никаких клампов и алиасов; `-r` передаётся всегда).
+берутся из каталога (запрошенный строковый уровень клампится к нему вниз).
 Изображения принимаются только по контракту: data-URL PNG, только роли user,
 только для моделей с применимым proof (метод workspace-read); файлы кладутся
 в per-run каталог `workspace/img-<uuid>` (0700/0600) и удаляются при любом исходе.
@@ -62,7 +62,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import asdict
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -114,6 +114,8 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     _tool_choice_none,
     _tools_section,
     finalize_turn,
+    sanitize_tool_call,
+    sanitize_tool_calls_list,
 )
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
@@ -146,6 +148,10 @@ FLEET_PATH = Path(
 )
 ENV_MODEL = os.environ.get("DROID_DSH_BRIDGE_MODEL", "").strip()
 IMAGE_PROBE = os.environ.get("DROID_DSH_BRIDGE_IMAGE_PROBE", "") == "1"
+# ADR 0010: санитизация аргументов tool_calls (пустые опциональные строки, распаковка `parallel`).
+BRIDGE_SANITIZE_TOOL_CALLS = os.getenv(
+    "BRIDGE_SANITIZE_TOOL_CALLS", "true"
+).lower() in ("true", "1", "yes")
 WORKSPACE = ROOT / "workspace"
 MAX_CONCURRENT = int(os.environ.get("DROID_DSH_BRIDGE_MAX_CONCURRENT", "4"))
 QUEUE_TIMEOUT_S = int(os.environ.get("DROID_DSH_BRIDGE_QUEUE_TIMEOUT", "900"))
@@ -170,6 +176,42 @@ PREFLIGHT_SKIP_WINDOW_S = 120.0
 
 # Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Полная шкала reasoning для клампа запрошенного effort к каталогу модели.
+EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def clamp_effort_downward(
+    candidate: str, allowed: Sequence[str], default: str
+) -> tuple[str, bool]:
+    """Кламп effort вниз по EFFORT_ORDER к ближайшему уровню из allowed.
+
+    Точное (case-insensitive) совпадение с allowed возвращает сам элемент
+    allowed и False. Иначе — supported с максимальным рангом строго ниже
+    candidate; если нижнего нет — с минимальным рангом выше. Неизвестный
+    шкале candidate или отсутствие ранжируемых allowed — (default, True).
+    """
+    key = candidate.lower()
+    for item in allowed:
+        if item.lower() == key:
+            return item, False
+    rank_of = {name: rank for rank, name in enumerate(EFFORT_ORDER)}
+    if key not in rank_of:
+        return default, True
+    candidate_rank = rank_of[key]
+    rankable = [
+        (rank_of[item.lower()], item) for item in allowed if item.lower() in rank_of
+    ]
+    if not rankable:
+        return default, True
+    lower = [pair for pair in rankable if pair[0] < candidate_rank]
+    if lower:
+        return max(lower, key=lambda pair: pair[0])[1], True
+    upper = [pair for pair in rankable if pair[0] > candidate_rank]
+    if upper:
+        return min(upper, key=lambda pair: pair[0])[1], True
+    return default, True
+
+
 # Уровни автономности даунстрим-исполнителя: передаются в `autonomyLevel` RPC
 # (`initialize_session`/`update_session_settings`) и сверяются read-back; дефолт high,
 # `off` — read-only режим droid (Reviewer-пути).
@@ -2175,10 +2217,15 @@ def _force_kill_all_on_drain() -> None:
         pass
 
 
+def _finalize_turn_sanitized(raw: Any, emulate_tools: bool) -> Any:
+    """finalize_turn с санитизацией tool_calls по флагу BRIDGE_SANITIZE_TOOL_CALLS (ADR 0010)."""
+    return finalize_turn(raw, emulate_tools, sanitize=BRIDGE_SANITIZE_TOOL_CALLS)
+
+
 TURN_MANAGER = TurnSessionManager(
     _state_dir,
     max_concurrent=max(MAX_CONCURRENT * 8, 32),
-    finalize_fn=finalize_turn,
+    finalize_fn=_finalize_turn_sanitized,
     log_fn=_log,
     persist_children_file=False,
 )
@@ -3965,10 +4012,14 @@ class Handler(BaseHTTPRequestHandler):
                     "arguments": json.dumps(call["arguments"], ensure_ascii=False),
                 },
             }
-            tool_calls.append(entry)
-            events.append(("tool_call", entry))
-            if managed_turn is not None:
-                managed_turn.buffer.append("tool_call", entry)
+            for item in (
+                sanitize_tool_call(entry) if BRIDGE_SANITIZE_TOOL_CALLS else [entry]
+            ):
+                item["index"] = len(tool_calls)
+                tool_calls.append(item)
+                events.append(("tool_call", item))
+                if managed_turn is not None:
+                    managed_turn.buffer.append("tool_call", item)
 
         parser = (
             ToolCallParser(add_content, add_call, strict_live=sse_writer is not None)
@@ -5159,7 +5210,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             model = FLEET["models"][model_id]
-            # (9) effort: строго из allowed модели, без клампов и алиасов.
+            # (9) effort: строковый вне каталога клампится вниз к allowed модели.
             raw_effort = req.get("reasoning_effort")
             if raw_effort is None:
                 effort = model["default_effort"]
@@ -5169,18 +5220,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not candidate:
                     effort = model["default_effort"]
                     effort_source = "default"
-                elif candidate in model["efforts"]:
-                    effort = candidate
-                    effort_source = "request"
                 else:
-                    self._reject(
-                        400,
-                        "unsupported_reasoning_effort",
-                        "reasoning_effort is not allowed for this model",
-                        model_id,
-                        model_len,
+                    effort, clamped = clamp_effort_downward(
+                        candidate, model["efforts"], model["default_effort"]
                     )
-                    return
+                    effort_source = "request"
+                    if clamped:
+                        _log(
+                            f"clamp reasoning_effort '{candidate}' -> '{effort}' for model {model_id}"
+                        )
             else:
                 self._reject(
                     400,
@@ -5585,7 +5633,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         t0 = time.monotonic()
         raw_turn_result = adapter.execute_turn(turn, sse_writer)
-        result = finalize_turn(raw_turn_result, turn.emulate_tools)
+        result = _finalize_turn_sanitized(raw_turn_result, turn.emulate_tools)
         if managed_turn is not None:
             TURN_MANAGER.complete_turn_from_result(
                 managed_turn, result, backend_kind=adapter.kind
@@ -5644,6 +5692,9 @@ class Handler(BaseHTTPRequestHandler):
         finish = "stop"
         arg_markers: list = []
         values = [out["text"]]
+        if out.get("tool_calls") and BRIDGE_SANITIZE_TOOL_CALLS:
+            # идемпотентный страховочный слой: вызовы уже санитизированы при сборке хода
+            out["tool_calls"] = sanitize_tool_calls_list(out["tool_calls"])
         if out.get("tool_calls"):
             calls = []
             for call in out["tool_calls"]:
