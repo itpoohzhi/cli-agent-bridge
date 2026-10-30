@@ -280,18 +280,48 @@ else:
     from typing import TypedDict
     from urllib.parse import quote, urlsplit
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import zen_catalog as zc
+_BRIDGE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _BRIDGE_DIR.parents[1]
+for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
+    if _p in sys.path:
+        sys.path.remove(_p)
+    sys.path.insert(0, _p)
+
+import zen_catalog as zc  # noqa: E402
+from core.tool_emulation import (  # noqa: E402
+    DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH,
+    build_tool_schemas, sanitize_tool_calls_list,
+)
+
+def _positive_int(raw: str | None, default: int) -> int:
+    """Положительное целое из env-строки; нечисловое/неположительное значение -> default."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+BRIDGE_SANITIZE_TOOL_CALLS = os.environ.get("BRIDGE_SANITIZE_TOOL_CALLS", "1").strip().lower() not in ("0", "false", "no", "off")
+_SANITIZE_LIMITS = {
+    "max_parallel_calls": _positive_int(os.environ.get("BRIDGE_MAX_PARALLEL_CALLS"), DEFAULT_MAX_PARALLEL_CALLS),
+    "max_parallel_depth": _positive_int(os.environ.get("BRIDGE_MAX_PARALLEL_DEPTH"), DEFAULT_MAX_PARALLEL_DEPTH),
+}
+
+def _normalize_tool_calls(calls: list[dict[str, Any]], schemas: dict[str, Any]) -> list[dict[str, Any]]:
+    """Применить общий санитизатор на единой границе всех маршрутов ответа."""
+    if not BRIDGE_SANITIZE_TOOL_CALLS:
+        return calls
+    return sanitize_tool_calls_list(calls, schemas, **_SANITIZE_LIMITS)
 
 HOST = os.environ.get("OPENCODE_ZEN_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
-PORT = int(os.environ.get("OPENCODE_ZEN_BRIDGE_PORT", "9883"))
+PORT = _positive_int(os.environ.get("OPENCODE_ZEN_BRIDGE_PORT"), 9883)
 AUTH_KEY = os.environ.get("OPENCODE_ZEN_BRIDGE_KEY", "").strip()
 
 TIMEOUT_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_TIMEOUT_S", "1800"))
 # Пауза stdout `opencode run` на большом промпте может быть долгой; пока она длится, в SSE уходит
 # пустая дельта раз в KEEPALIVE_INTERVAL_S (0 — выключено), иначе клиент рвёт «молчащий» стрим.
 KEEPALIVE_INTERVAL_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_KEEPALIVE_S", "15.0"))
-MAX_CONCURRENT = int(os.environ.get("OPENCODE_ZEN_BRIDGE_MAX_CONCURRENT", "2"))
+MAX_CONCURRENT = _positive_int(os.environ.get("OPENCODE_ZEN_BRIDGE_MAX_CONCURRENT"), 2)
 
 OPENCODE_BIN = os.environ.get(
     "OPENCODE_BIN", str(Path.home() / ".opencode" / "bin" / "opencode")
@@ -7025,7 +7055,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream_google_sse(self, model: str, prompt: str, effort: str,
                            emulate_tools: bool = False,
-                           google_input: GoogleInput | None = None) -> None:
+                           google_input: GoogleInput | None = None,
+                           tool_schemas: dict[str, Any] | None = None) -> None:
         """Перевести Google SSE в OpenAI SSE, сохранив эмуляцию инструментов."""
         res = self._res()
         if not self._acquire_slot(res):
@@ -7078,8 +7109,11 @@ class Handler(BaseHTTPRequestHandler):
                 tc = {"index": len(tool_calls), "id": "call_" + uuid.uuid4().hex[:24],
                       "type": "function", "function": {"name": call["name"],
                       "arguments": json.dumps(call["arguments"], ensure_ascii=False)}}
-                tool_calls.append(tc)
-                emit({"tool_calls": [tc]})
+                calls = _normalize_tool_calls([tc], tool_schemas)
+                for item in calls:
+                    item["index"] = len(tool_calls)
+                    tool_calls.append(item)
+                    emit({"tool_calls": [item]})
 
             parser = ToolCallParser(emit_content, emit_tool_call) if emulate_tools else None
             while True:
@@ -7169,8 +7203,9 @@ class Handler(BaseHTTPRequestHandler):
                     google_input: GoogleInput | None = None, reported_model: str | None = None,
                     tool_choice: Any = None) -> None:
         shown_model = reported_model or model
+        tool_schemas = build_tool_schemas(tools)
         if _is_google_direct_model(model):
-            self._stream_google_sse(model, prompt, effort, emulate_tools, google_input)
+            self._stream_google_sse(model, prompt, effort, emulate_tools, google_input, tool_schemas)
             return
         xs = self._exit()
         xs["transport"] = "run"
@@ -7367,13 +7402,16 @@ class Handler(BaseHTTPRequestHandler):
                         "arguments": json.dumps(call["arguments"], ensure_ascii=False),
                     },
                 }
-                tool_calls.append(tc)
-                chunk = format_sse_chunk(
-                    resp_id, created, shown_model, {"tool_calls": [tc]}
-                )
-                first_visible.set()
-                self.wfile.write(chunk.encode("utf-8"))
-                self.wfile.flush()
+                calls = _normalize_tool_calls([tc], tool_schemas)
+                for item in calls:
+                    item["index"] = len(tool_calls)
+                    tool_calls.append(item)
+                    chunk = format_sse_chunk(
+                        resp_id, created, shown_model, {"tool_calls": [item]}
+                    )
+                    first_visible.set()
+                    self.wfile.write(chunk.encode("utf-8"))
+                    self.wfile.flush()
 
             with _active_lock:
                 _active[run_id] = time.time()
@@ -8461,6 +8499,7 @@ class Handler(BaseHTTPRequestHandler):
             xs["exit_reason"] = "upstream_failed"
             self._send(502, _error_payload("serve produced no text"))
             return True
+        tool_calls_all = _normalize_tool_calls(tool_calls_all, build_tool_schemas(tools))
         for i, tc_item in enumerate(tool_calls_all):
             tc_item["index"] = i
         msg: dict[str, object] = {"role": "assistant", "content": content_final}
@@ -8785,7 +8824,7 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             seen_calls.add(key)
             unique_calls.append(tc)
-        tool_calls = unique_calls
+        tool_calls = _normalize_tool_calls(unique_calls, build_tool_schemas(tools))
         for i, tc in enumerate(tool_calls):
             tc["index"] = i
         content = "\n\n".join(c for c in contents if c)

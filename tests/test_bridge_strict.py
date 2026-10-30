@@ -78,7 +78,7 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "claude-sonnet-5-5")
-        self.assertEqual(len(catalog["order"]), 6)  # Muse остаётся dark до ASM-001
+        self.assertEqual(len(catalog["order"]), 7)  # Muse выключен; обе Codex-модели включены
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -265,7 +265,6 @@ class TestEffortAndModel(BridgeCase):
             "gemini-3.8-flash": ["high"],
             "grok-4.7": ["high"],
             "deepseek-v4.1-flash": ["high", "max"],
-            "gpt-6.1-sol": ["high"],
             "glm-5.3": ["max"],
         }
         for model, efforts in wanted.items():
@@ -292,7 +291,7 @@ class TestEffortAndModel(BridgeCase):
             ("claude-sonnet-5-5", "xhigh", "high"),  # nearest lower
             ("claude-sonnet-5-5", "max", "high"),  # AC1: max у high-only
             ("claude-sonnet-5-5", "max\n", "high"),  # strip до клампа
-            ("gpt-6.1-sol", "medium", "high"),  # нет нижнего -> upward fallback
+            ("gemini-3.8-flash", "medium", "high"),  # нет нижнего -> upward fallback
             ("glm-5.3", "high", "max"),  # нет нижнего -> upward fallback
             ("glm-5.3", " high ", "max"),  # strip, затем upward fallback
             ("claude-sonnet-5-5", "HIGH", "high"),  # case-insensitive exact
@@ -356,8 +355,8 @@ class TestEffortAndModel(BridgeCase):
         for model in cases:
             before = len(self.hub.spawns())
             status, body = self._post_json(chat_body(model=model))
-            self.assertEqual(status, 400, model[:20])
-            self.assertEqual(body["error"]["type"], "model_not_allowed")
+            self.assertEqual(status, 404, model[:20])
+            self.assertEqual(body["error"]["type"], "model_not_found")
             self.assertEqual(len(self.hub.spawns()), before)
         for bad in (5, ["claude-sonnet-5-5"], {"id": "claude-sonnet-5-5"}, True):
             status, body = self._post_json(chat_body(model=bad))
@@ -476,7 +475,8 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        self.assertEqual(len(body["data"]), 6)  # выключенный Muse не публикуется
+        self.assertEqual(len(body["data"]), 7)
+        self.assertTrue({"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]})
         self.assertFalse(any(e["id"].startswith("muse-") for e in body["data"]))
         self.assertEqual(body["data"][0]["id"], "claude-sonnet-5-5")
         for entry in body["data"]:
@@ -513,7 +513,7 @@ class TestJournal(BridgeCase):
         untrusted = "x\nexec model=claude-sonnet-5-5 effort=high effort_source=request"
         with self.capture_logs() as lines:
             status, _ = self._post(chat_body(model=untrusted))
-        self.assertEqual(status, 400)
+        self.assertEqual(status, 404)
         rejects = [ln for ln in lines if "reject reason=" in ln]
         self.assertEqual(len(rejects), 1)
         self.assertTrue(REJECT_STRICT.match(rejects[0]), rejects[0])

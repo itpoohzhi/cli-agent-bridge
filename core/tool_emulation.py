@@ -658,13 +658,17 @@ class ToolCallParser:
             self._emit(text)
 
 
-ROUTE_FIELDS = frozenset({"provider", "model", "reasoning_effort"})
-JUSTIFICATION_FALLBACK = "Выполнение запрошенной операции"
 _PARALLEL_NAME = "parallel"
 _PARALLEL_LIST_KEYS = ("tool_uses", "calls", "tools")
 _SUBCALL_NAME_KEYS = ("recipient_name", "name")
 _SUBCALL_ARGS_KEYS = ("parameters", "arguments")
-_MAX_PARALLEL_DEPTH = 8  # предел вложенности `parallel` в `parallel`
+# Умолчания лимитов распаковки `parallel`: не потолки, а значения по умолчанию параметров
+# `max_parallel_calls`/`max_parallel_depth`. Ядро окружение не читает (BND-001) — эффективные
+# значения (env `BRIDGE_MAX_PARALLEL_CALLS`/`BRIDGE_MAX_PARALLEL_DEPTH`) передаёт владелец маршрута.
+DEFAULT_MAX_PARALLEL_CALLS = 64
+DEFAULT_MAX_PARALLEL_DEPTH = 8
+# Семантические payload-поля: пустая строка там может быть осмысленной нагрузкой.
+PAYLOAD_FIELDS = frozenset({"prompt", "content", "command"})
 
 
 def _new_call_id() -> str:
@@ -698,7 +702,7 @@ def _make_call(template: Any, index: int, name: str, arguments: str) -> Any:
     """Новый вызов того же типа, что `template`, со свежим id `call_<hex>`."""
     if isinstance(template, ToolCall):
         return ToolCall(index, _new_call_id(), ToolFunction(name, arguments))
-    call = {
+    call: dict[str, Any] = {
         "id": _new_call_id(),
         "type": "function",
         "function": {"name": name, "arguments": arguments},
@@ -714,37 +718,102 @@ def _with_index(tool_call: Any, index: int) -> Any:
     return dict(tool_call, index=index) if "index" in tool_call else tool_call
 
 
-def _required_fields(tool_name: str, tool_schemas: dict[str, Any] | None) -> list | None:
-    """Список `required` схемы инструмента; None — схемы для имени нет."""
+def build_tool_schemas(tools: Any) -> dict[str, Any]:
+    """`request.tools` (OpenAI) -> {имя: описание инструмента} для санитизации; чужие формы пропускаются."""
+    schemas: dict[str, Any] = {}
+    for tool in tools if isinstance(tools, list) else ():
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        name = fn.get("name")
+        if isinstance(name, str) and name:
+            schemas[name] = tool
+    return schemas
+
+
+def _parameters_schema(tool_name: str, tool_schemas: dict[str, Any] | None) -> dict | None:
+    """Объект `parameters` схемы инструмента; None — схемы для имени нет."""
     schema = (tool_schemas or {}).get(tool_name)
     if not isinstance(schema, dict):
         return None
     fn = schema.get("function") if isinstance(schema.get("function"), dict) else schema
-    params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
-    required = params.get("required")
-    return list(required) if isinstance(required, list) else []
+    params = fn.get("parameters")
+    return (
+        params
+        if isinstance(params, dict)
+        and not any(
+            key in params
+            for key in (
+                "$ref",
+                "anyOf",
+                "oneOf",
+                "allOf",
+                "if",
+                "then",
+                "else",
+                "dependentRequired",
+                "dependentSchemas",
+            )
+        )
+        else None
+    )
 
 
 def _is_blank(value: Any) -> bool:
     return isinstance(value, str) and value.strip() == ""
 
 
-def _sanitize_arguments_dict(args: dict, required: list | None) -> dict:
+def _is_string_property(prop: Any) -> bool:
+    """Явно строковое свойство: `type == "string"` либо `"string"` в массиве `type`.
+
+    Составные схемы, `$ref` и `enum` без явного строкового `type` — неразрешимы (fail-conservative).
+    """
+    if not isinstance(prop, dict) or any(
+        key in prop for key in ("$ref", "anyOf", "oneOf", "allOf", "if", "then", "else")
+    ):
+        return False
+    declared = prop.get("type")
+    if isinstance(declared, list):
+        return "string" in declared
+    return declared == "string"
+
+
+def _allows_blank(prop: dict) -> bool:
+    """`const`/`enum` явно допускают пустую либо пробельную строку."""
+    if "const" in prop and _is_blank(prop["const"]):
+        return True
+    enum = prop.get("enum")
+    return isinstance(enum, list) and any(_is_blank(item) for item in enum)
+
+
+def _is_protected(key: str, params: dict | None) -> bool:
+    """Пустое значение нельзя считать отсутствием ключа (required, enum/const допускают '')."""
+    if params is None:
+        return False
+    required = params.get("required")
+    if isinstance(required, list) and key in required:
+        return True
+    properties = params.get("properties")
+    prop = properties.get(key) if isinstance(properties, dict) else None
+    return isinstance(prop, dict) and _allows_blank(prop)
+
+
+def _is_removable_by_schema(key: str, params: dict | None) -> bool:
+    """Пустое опциональное строковое поле, объявленное в `properties` схемы."""
+    if params is None or key in PAYLOAD_FIELDS or _is_protected(key, params):
+        return False
+    properties = params.get("properties")
+    return isinstance(properties, dict) and _is_string_property(properties.get(key))
+
+
+def _sanitize_arguments_dict(args: dict, params: dict | None) -> dict:
     """Очистка пустых строк в аргументах; исходный словарь не меняется."""
     cleaned = dict(args)
     for key in list(cleaned):
         value = cleaned[key]
         if not _is_blank(value):
             continue
-        if key in ROUTE_FIELDS:
-            del cleaned[key]  # пустой маршрут — потребитель берёт дефолтный
-        elif key == "justification":
-            permissions = args.get("sandbox_permissions")
-            if permissions is not None and not _is_blank(permissions):
-                cleaned[key] = JUSTIFICATION_FALLBACK
-            else:
-                del cleaned[key]
-        elif required is not None and key not in required:
+        if _is_removable_by_schema(key, params):
             del cleaned[key]
     return cleaned
 
@@ -757,14 +826,17 @@ def _sanitize_arguments(name: str, arguments: Any, tool_schemas: dict | None) ->
     parsed = _normalize_arguments(arguments)
     if parsed is None:
         return arguments
-    cleaned = _sanitize_arguments_dict(parsed, _required_fields(name, tool_schemas))
+    cleaned = _sanitize_arguments_dict(parsed, _parameters_schema(name, tool_schemas))
     if cleaned == parsed:
         return arguments
     return cleaned if isinstance(arguments, dict) else json.dumps(cleaned, ensure_ascii=False)
 
 
-def _unpack_parallel(tool_call: Any, arguments: Any) -> list[Any] | None:
-    """Вложенные вызовы `parallel` как вызовы верхнего уровня; None — распаковать нечего."""
+def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | None:
+    """Вложенные вызовы `parallel` как вызовы верхнего уровня; None — распаковать нечего.
+
+    Не более `limit` детей: превышение прекращает распаковку, накопленное сохраняется.
+    """
     parsed = _normalize_arguments(arguments)
     if parsed is None:
         return None
@@ -774,6 +846,8 @@ def _unpack_parallel(tool_call: Any, arguments: Any) -> list[Any] | None:
     )
     calls: list[Any] = []
     for item in items or ():
+        if len(calls) >= limit:
+            break
         if not isinstance(item, dict):
             continue
         name = next((str(item[k]) for k in _SUBCALL_NAME_KEYS if item.get(k)), "")
@@ -792,51 +866,83 @@ def _unpack_parallel(tool_call: Any, arguments: Any) -> list[Any] | None:
 
 
 def _sanitize_call(
-    tool_call: Any, tool_schemas: dict[str, Any] | None, depth: int
+    tool_call: Any,
+    tool_schemas: dict[str, Any] | None,
+    depth: int,
+    budget: list[int],
+    max_depth: int,
 ) -> list[Any]:
+    """`budget[0]` — сколько вызовов ещё можно опубликовать из текущего верхнего вызова."""
     name, arguments = _call_name_and_args(tool_call)
     if not name:
         return [tool_call]
-    if name.rsplit(".", 1)[-1] == _PARALLEL_NAME and depth < _MAX_PARALLEL_DEPTH:
-        unpacked = _unpack_parallel(tool_call, arguments)
+    if name.rsplit(".", 1)[-1] == _PARALLEL_NAME and depth < max_depth:
+        unpacked = _unpack_parallel(tool_call, arguments, max(budget[0], 0))
         if unpacked is not None:
-            return [
-                result
-                for sub in unpacked
-                for result in _sanitize_call(sub, tool_schemas, depth + 1)
-            ]
+            results: list[Any] = []
+            for sub in unpacked:
+                if budget[0] <= 0:
+                    break
+                results.extend(_sanitize_call(sub, tool_schemas, depth + 1, budget, max_depth))
+            return results
+    budget[0] -= 1
     cleaned = _sanitize_arguments(name, arguments, tool_schemas)
     return [tool_call if cleaned is arguments else _with_arguments(tool_call, cleaned)]
 
 
 def sanitize_tool_call(
-    tool_call: ToolCall | dict, tool_schemas: dict[str, Any] | None = None
+    tool_call: ToolCall | dict,
+    tool_schemas: dict[str, Any] | None = None,
+    *,
+    max_parallel_calls: int = DEFAULT_MAX_PARALLEL_CALLS,
+    max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
 ) -> list[Any]:
     """Один вызов -> список вызовов того же типа (ToolCall либо dict) с чистыми аргументами.
 
     Чистая функция: синтетический `parallel` разворачивается во вложенные вызовы с новыми
-    id; пустые строки в маршрутных полях (`provider`/`model`/`reasoning_effort`) удаляются;
-    пустой `justification` заменяется на fallback при заданном `sandbox_permissions`, иначе
-    удаляется; при известной схеме удаляются и прочие пустые необязательные строки.
+    id (не более `max_parallel_calls` опубликованных вызовов и глубины `max_parallel_depth`;
+    сверх лимита распаковка прекращается, накопленное возвращается). Пустые строки
+    удаляются по схеме инструмента: поле объявлено в `properties` как строковое
+    (`type == "string"` или `"string"` в массиве `type`), не входит в `required`, его
+    `enum`/`const` не допускают пустую строку, это не payload-поле (`prompt`/`content`/
+    `command`). Без схемы или при неразрешимой схеме (`anyOf`/`oneOf`/`$ref`) поля не трогаются
+    (fail-conservative). Значения, в том числе justification, никогда не подставляются.
     Невалидные аргументы остаются нетронутыми (fail-safe), повторный вызов идемпотентен.
     """
-    return _sanitize_call(tool_call, tool_schemas, 0)
+    return _sanitize_call(
+        tool_call, tool_schemas, 0, [max(int(max_parallel_calls), 1)], max_parallel_depth
+    )
 
 
 def sanitize_tool_calls_list(
-    tool_calls: list[Any], tool_schemas: dict[str, Any] | None = None
+    tool_calls: list[Any],
+    tool_schemas: dict[str, Any] | None = None,
+    *,
+    max_parallel_calls: int = DEFAULT_MAX_PARALLEL_CALLS,
+    max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
 ) -> list[Any]:
     """Санитизация списка вызовов в плоский список; `index` перенумеровывается подряд."""
     flat = [
         result
         for tool_call in tool_calls
-        for result in sanitize_tool_call(tool_call, tool_schemas)
+        for result in sanitize_tool_call(
+            tool_call,
+            tool_schemas,
+            max_parallel_calls=max_parallel_calls,
+            max_parallel_depth=max_parallel_depth,
+        )
     ]
     return [_with_index(call, index) for index, call in enumerate(flat)]
 
 
 def finalize_turn(
-    raw: TurnResult, emulate_tools: bool, sanitize: bool = False
+    raw: TurnResult,
+    emulate_tools: bool,
+    sanitize: bool = False,
+    *,
+    tool_schemas: dict[str, Any] | None = None,
+    max_parallel_calls: int = DEFAULT_MAX_PARALLEL_CALLS,
+    max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
 ) -> TurnResult:
     """Сырой итог адаптера -> `out` фасада с буфером `events` (content/reasoning/tool_call).
 
@@ -867,7 +973,16 @@ def finalize_turn(
                 call["name"], json.dumps(call["arguments"], ensure_ascii=False)
             ),
         )
-        for item in sanitize_tool_call(entry) if sanitize else [entry]:
+        for item in (
+            sanitize_tool_call(
+                entry,
+                tool_schemas,
+                max_parallel_calls=max_parallel_calls,
+                max_parallel_depth=max_parallel_depth,
+            )
+            if sanitize
+            else [entry]
+        ):
             item = replace(item, index=len(tool_calls))
             tool_calls.append(item)
             events.append(TurnEvent("tool_call", item))
