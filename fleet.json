@@ -69,6 +69,14 @@
         "binary_sha256": "c6db294799a190ca380da274beb3b9c0e160e0da9681a3d364ce8b0e5fa3a4bc",
         "binary_path": "~/.local/bin/muse"
       }
+    },
+    "codex": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "openai-codex",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:2455/v1"
     }
   },
   "models": [
@@ -178,8 +186,8 @@
     },
     {
       "id": "gpt-6.1-sol",
-      "backend": "droid",
-      "name": "GPT-6.1 Sol (Droid Meta bridge)",
+      "backend": "codex",
+      "name": "GPT-6.1 Sol (Codex passthrough)",
       "efforts": [
         "high"
       ],
@@ -318,6 +326,28 @@
       "policy_lines": [
         321
       ]
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "backend": "codex",
+      "name": "GPT-6.1 Terra (Codex passthrough)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 500000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
     }
   ]
 }

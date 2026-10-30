@@ -15,7 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from adapters import ADAPTER_KINDS, DroidAdapter, MuseAdapter  # noqa: E402
+from adapters import (  # noqa: E402
+    ADAPTER_KINDS,
+    DroidAdapter,
+    MuseAdapter,
+    PassthroughAdapter,
+)
 from core.backend_adapter import (  # noqa: E402
     AdapterRegistry,
     BackendAdapter,
@@ -106,9 +111,10 @@ class TestInterface(unittest.TestCase):
         self.assertEqual(set(BackendAdapter.__abstractmethods__), set(CONTRACT_METHODS))
 
     def test_adapter_kinds_are_hard_coded_in_code(self):
-        self.assertEqual(set(ADAPTER_KINDS), {"droid", "muse"})
+        self.assertEqual(set(ADAPTER_KINDS), {"droid", "muse", "passthrough"})
         self.assertIs(ADAPTER_KINDS["droid"], DroidAdapter)
         self.assertIs(ADAPTER_KINDS["muse"], MuseAdapter)
+        self.assertIs(ADAPTER_KINDS["passthrough"], PassthroughAdapter)
         for cls in ADAPTER_KINDS.values():
             self.assertTrue(issubclass(cls, BackendAdapter))
             self.assertFalse(getattr(cls, "__abstractmethods__", None))
@@ -187,7 +193,7 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_server_registry_has_both_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        self.assertEqual(set(ids), {"droid"})
+        self.assertEqual(set(ids), {"droid", "codex"})
         self.assertIsInstance(ids["droid"], DroidAdapter)
         self.assertTrue(ids["droid"].required)
         self.assertNotIn("muse", ids)
@@ -195,7 +201,7 @@ class TestRealAdapters(unittest.TestCase):
     def test_model_routing(self):
         reg = server.BACKENDS
         for mid in server.FLEET["order"]:
-            expected = "muse" if mid.startswith("muse-") else "droid"
+            expected = "codex" if mid.startswith("gpt-") else "muse" if mid.startswith("muse-") else "droid"
             self.assertEqual(reg.adapter_for_model(mid).id, expected, mid)
             self.assertEqual(server.FLEET["models"][mid]["backend"], expected)
 

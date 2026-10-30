@@ -61,8 +61,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from core.backend_adapter import ToolCall, TurnResult, Usage  # noqa: E402
+from core.backend_adapter import ToolCall, ToolFunction, TurnResult, Usage  # noqa: E402
 from core.lifecycle import HubLifecycleManager  # noqa: E402
+from core.tool_emulation import (  # noqa: E402
+    DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH,
+    build_tool_schemas, sanitize_tool_calls_list,
+)
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
     ManagedTurn,
@@ -72,13 +76,28 @@ from core.turn_session_manager import (  # noqa: E402
 
 logger = logging.getLogger("muse-bridge")
 
+def _positive_int(raw: str | None, default: int) -> int:
+    """Положительное целое из env-строки; нечисловое/неположительное значение -> default."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+BRIDGE_SANITIZE_TOOL_CALLS = os.environ.get("BRIDGE_SANITIZE_TOOL_CALLS", "1").strip().lower() not in ("0", "false", "no", "off")
+_SANITIZE_LIMITS = {
+    "max_parallel_calls": _positive_int(os.environ.get("BRIDGE_MAX_PARALLEL_CALLS"), DEFAULT_MAX_PARALLEL_CALLS),
+    "max_parallel_depth": _positive_int(os.environ.get("BRIDGE_MAX_PARALLEL_DEPTH"), DEFAULT_MAX_PARALLEL_DEPTH),
+}
+
 HOST = os.environ.get("MUSE_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
-PORT = int(os.environ.get("MUSE_BRIDGE_PORT", "9886"))
+PORT = _positive_int(os.environ.get("MUSE_BRIDGE_PORT"), 9886)
 AUTH_KEY = os.environ.get("MUSE_BRIDGE_KEY", "").strip()
 
 TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_TIMEOUT_S", "3600"))
 IDLE_TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_IDLE_TIMEOUT_S", "300"))
-MAX_CONCURRENT = int(os.environ.get("MUSE_BRIDGE_MAX_CONCURRENT", "2"))
+MAX_CONCURRENT = _positive_int(os.environ.get("MUSE_BRIDGE_MAX_CONCURRENT"), 2)
 
 MUSE_WRAPPER = os.environ.get(
     "MUSE_BRIDGE_CLI", str(Path.home() / ".config" / "muse-launch" / "muse-cli.sh")
@@ -1208,7 +1227,7 @@ class ToolCallParser:
             self._emit(text)
 
 
-def _split_tool_calls(chunks: list[str]) -> tuple[str, list[dict]]:
+def _split_tool_calls(chunks: list[str], tool_schemas: dict[str, Any] | None = None) -> tuple[str, list[dict]]:
     """Дельты текста ответа -> (content, tool_calls в формате OpenAI).
 
     Тот же ToolCallParser, что у droid-bridge; id вызовов — call_<hex24>.
@@ -1233,6 +1252,8 @@ def _split_tool_calls(chunks: list[str]) -> tuple[str, list[dict]]:
     for chunk in chunks:
         parser.feed(chunk)
     parser.finish()
+    if BRIDGE_SANITIZE_TOOL_CALLS:
+        calls = sanitize_tool_calls_list(calls, tool_schemas, **_SANITIZE_LIMITS)
     return "".join(pieces), calls
 
 
@@ -1676,7 +1697,7 @@ def _log_context_prune(
 
 # Эмуляция SSE (OpenAI chat.completion.chunk): результат генерации уже целиком —
 # «стрим» = нарезка готового текста на чанки с минимальной задержкой между ними.
-SSE_CHUNK_SIZE = int(os.environ.get("MUSE_BRIDGE_SSE_CHUNK_SIZE", "300"))
+SSE_CHUNK_SIZE = _positive_int(os.environ.get("MUSE_BRIDGE_SSE_CHUNK_SIZE"), 300)
 SSE_CHUNK_DELAY_S = float(os.environ.get("MUSE_BRIDGE_SSE_CHUNK_DELAY_S", "0.005"))
 # stream=true: заголовки и role-кадр уходят сразу, пока ход идёт — комментарии keepalive.
 # Без них клиент (OpenAI SDK в DeepSeek Harness) ждал заголовков до своего таймаута
@@ -3877,6 +3898,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         raw_tools = req.get("tools")
+        tool_schemas = build_tool_schemas(raw_tools)
         tools = (
             [t for t in raw_tools if isinstance(t, dict)]
             if isinstance(raw_tools, list)
@@ -4439,7 +4461,7 @@ class Handler(BaseHTTPRequestHandler):
             parsed_calls: list[dict] = []
             if emulate_tools and raw_content and out.get("state") == "ok" and out.get("rc") == 0:
                 parsed_content, parsed_calls = _split_tool_calls(
-                    out.get("chunks") or [raw_content]
+                    out.get("chunks") or [raw_content], tool_schemas
                 )
             p_tok = _estimate_usage_tokens(prompt)
             c_tok = _estimate_usage_tokens(raw_content)
@@ -4454,7 +4476,7 @@ class Handler(BaseHTTPRequestHandler):
                         index=int(tc.get("index", idx)),
                         id=str(tc.get("id", f"call_{idx}")),
                         type="function",
-                        function=dict(tc.get("function") or {}),
+                        function=ToolFunction(**tc["function"]),
                     )
                     for idx, tc in enumerate(parsed_calls)
                 ),
@@ -4505,8 +4527,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         content = out["text"]
         tool_calls: list[dict] = []
-        if emulate_tools and content:
-            content, tool_calls = _split_tool_calls(out.get("chunks") or [content])
+        if managed_turn is not None:
+            content, tool_calls = parsed_content, parsed_calls
+        elif emulate_tools and content:
+            content, tool_calls = _split_tool_calls(out.get("chunks") or [content], tool_schemas)
         if not content and not tool_calls:
             hint = " (proxy :10816 DOWN?)" if out.get("rc") == 42 else ""
             _log(
