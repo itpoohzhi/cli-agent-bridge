@@ -61,7 +61,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Sequence, cast
 
 ROOT = Path(__file__).resolve().parent
@@ -80,6 +80,12 @@ from receipt_schema import (  # noqa: E402
 )
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
+from adapters.passthrough_adapter import (  # noqa: E402
+    ClientGone,
+    PassthroughAdapter,
+    PassthroughLimits,
+    ResponseSink,
+)
 from core.backend_adapter import (  # noqa: E402
     AdapterRegistry,
     FleetViolation,
@@ -88,6 +94,7 @@ from core.backend_adapter import (  # noqa: E402
     Transcript,
     TranscriptItem,
     TurnContext,
+    ToolCall,
     build_catalog,
 )
 from core import context_resilience as ctxres  # noqa: E402
@@ -113,9 +120,9 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     _tool_choice_name,
     _tool_choice_none,
     _tools_section,
+    build_tool_schemas,
     finalize_turn,
     sanitize_tool_call,
-    sanitize_tool_calls_list,
 )
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
@@ -152,6 +159,13 @@ IMAGE_PROBE = os.environ.get("DROID_DSH_BRIDGE_IMAGE_PROBE", "") == "1"
 BRIDGE_SANITIZE_TOOL_CALLS = os.getenv(
     "BRIDGE_SANITIZE_TOOL_CALLS", "true"
 ).lower() in ("true", "1", "yes")
+# ADR 0011 AD-005: лимиты читаются здесь (не в ядре, BND-001) и передаются в ядро аргументами:
+# BRIDGE_MAX_PARALLEL_CALLS (по умолчанию 64), BRIDGE_MAX_PARALLEL_DEPTH, лимиты passthrough.
+BRIDGE_LIMITS = PassthroughLimits.from_env()
+_SANITIZE_LIMITS = {
+    "max_parallel_calls": BRIDGE_LIMITS.max_parallel_calls,
+    "max_parallel_depth": BRIDGE_LIMITS.max_parallel_depth,
+}
 WORKSPACE = ROOT / "workspace"
 MAX_CONCURRENT = int(os.environ.get("DROID_DSH_BRIDGE_MAX_CONCURRENT", "4"))
 QUEUE_TIMEOUT_S = int(os.environ.get("DROID_DSH_BRIDGE_QUEUE_TIMEOUT", "900"))
@@ -651,6 +665,49 @@ def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
         hdr.strip().encode("utf-8"),
         AUTH_KEY.encode("utf-8"),
     )
+
+
+_CHAT_PATHS = ("/v1/chat/completions", "/chat/completions")
+_LOOPBACK_PEERS = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+def _passthrough_open(handler: BaseHTTPRequestHandler) -> bool:
+    """AD-007: ключ хаба не сверяется до выбора маршрута, если есть passthrough и пир — loopback.
+
+    Окончательный допуск решает маршрут: passthrough-модель идёт к upstream (аутентификатор — он),
+    любой другой маршрут по-прежнему требует ключ хаба.
+    """
+    return str(handler.client_address[0]) in _LOOPBACK_PEERS and any(
+        isinstance(adapter, PassthroughAdapter) for adapter in BACKENDS.adapters()
+    )
+
+
+class _HandlerSink(ResponseSink):
+    """Запись ответа passthrough-шва в сокет клиента; сбой записи — ClientGone."""
+
+    _DROP = frozenset({"server", "date"})
+
+    def __init__(self, handler: BaseHTTPRequestHandler) -> None:
+        self._handler = handler
+
+    def start(self, status: int, headers: list[tuple[str, str]]) -> None:
+        try:
+            self._handler.send_response(int(status))
+            for key, value in headers:
+                if key.lower() not in self._DROP:
+                    self._handler.send_header(key, value)
+            if not any(key.lower() == "content-length" for key, _ in headers):
+                self._handler.close_connection = True  # тело без длины (SSE) — конец по закрытию
+            self._handler.end_headers()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            raise ClientGone() from exc
+
+    def write(self, data: bytes) -> None:
+        try:
+            self._handler.wfile.write(data)
+            self._handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            raise ClientGone() from exc
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
@@ -2217,15 +2274,10 @@ def _force_kill_all_on_drain() -> None:
         pass
 
 
-def _finalize_turn_sanitized(raw: Any, emulate_tools: bool) -> Any:
-    """finalize_turn с санитизацией tool_calls по флагу BRIDGE_SANITIZE_TOOL_CALLS (ADR 0010)."""
-    return finalize_turn(raw, emulate_tools, sanitize=BRIDGE_SANITIZE_TOOL_CALLS)
-
-
 TURN_MANAGER = TurnSessionManager(
     _state_dir,
     max_concurrent=max(MAX_CONCURRENT * 8, 32),
-    finalize_fn=_finalize_turn_sanitized,
+    finalize_fn=finalize_turn,
     log_fn=_log,
     persist_children_file=False,
 )
@@ -3863,7 +3915,7 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self._send(
             code,
-            {"error": {"message": message, "type": reason, "code": int(code)}},
+            {"error": {"message": message, "type": reason, "code": reason if reason == "model_not_found" else int(code)}},
             extra_headers=extra_headers,
         )
 
@@ -4012,14 +4064,9 @@ class Handler(BaseHTTPRequestHandler):
                     "arguments": json.dumps(call["arguments"], ensure_ascii=False),
                 },
             }
-            for item in (
-                sanitize_tool_call(entry) if BRIDGE_SANITIZE_TOOL_CALLS else [entry]
-            ):
-                item["index"] = len(tool_calls)
-                tool_calls.append(item)
-                events.append(("tool_call", item))
-                if managed_turn is not None:
-                    managed_turn.buffer.append("tool_call", item)
+            tool_calls.append(entry)
+            events.append(("tool_call", entry))
+            # Managed replay получает вызовы после единственной границы в _dispatch.
 
         parser = (
             ToolCallParser(add_content, add_call, strict_live=sse_writer is not None)
@@ -4534,7 +4581,10 @@ class Handler(BaseHTTPRequestHandler):
                 open_attempt = (plan, run)
                 try:
                     out = self._execute(
-                        run, keepalive, ctx["emulate_tools"], sse_writer
+                        run,
+                        keepalive,
+                        ctx["emulate_tools"],
+                        sse_writer,
                     )
                 finally:
                     try:
@@ -4889,17 +4939,19 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if not _auth_ok(self):
-            self._send(
-                401,
-                {
-                    "error": {
-                        "message": "unauthorized",
-                        "type": "auth_error",
-                        "code": 401,
-                    }
-                },
-            )
-            return
+            has_auth = bool(self.headers.get("Authorization") or self.headers.get("x-api-key"))
+            if not (path in ("/v1/models", "/models") and _passthrough_open(self) and has_auth):
+                self._send(
+                    401,
+                    {
+                        "error": {
+                            "message": "unauthorized",
+                            "type": "auth_error",
+                            "code": 401,
+                        }
+                    },
+                )
+                return
         if path in ("/v1/models", "/models"):
             # Объединение моделей всех активных адаптеров; порядок — как в fleet.json, модель по умолчанию первой.
             published = {m.id: (a, m) for a, m in BACKENDS.models()}
@@ -5073,20 +5125,25 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers={"Retry-After": "5", "X-Bridge-Draining": "1"},
             )
             return
+        # AD-007: при настроенном passthrough допуск chat-запроса решается по маршруту (после модели).
+        auth_deferred = False
         if not _auth_ok(self):
-            # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
-            self.close_connection = True
-            self._send(
-                401,
-                {
-                    "error": {
-                        "message": "unauthorized",
-                        "type": "auth_error",
-                        "code": 401,
-                    }
-                },
-            )
-            return
+            if path in _CHAT_PATHS and _passthrough_open(self):
+                auth_deferred = True
+            else:
+                # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
+                self.close_connection = True
+                self._send(
+                    401,
+                    {
+                        "error": {
+                            "message": "unauthorized",
+                            "type": "auth_error",
+                            "code": 401,
+                        }
+                    },
+                )
+                return
         # (1) framing: Transfer-Encoding не поддерживаем, Content-Length строго числовой.
         if self.headers.get_all("Transfer-Encoding") is not None:
             self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
@@ -5202,14 +5259,36 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if model_id not in FLEET["models"]:
                 self._reject(
-                    400,
-                    "model_not_allowed",
+                    404,
+                    "model_not_found",
                     "model is not in the catalogue",
                     "unknown",
                     model_len,
                 )
                 return
             model = FLEET["models"][model_id]
+            # (8a) passthrough (AD-003/AD-007): raw-шов ДО effort-клампа, транскрипции и контекста —
+            # model/reasoning_effort/tools/Authorization уходят upstream дословно.
+            passthrough = BACKENDS.get(model["backend"])
+            if isinstance(passthrough, PassthroughAdapter):
+                if raw_model != model_id:
+                    self._reject(400, "model_not_allowed", "passthrough requires an exact model id")
+                    return
+                self._serve_passthrough(passthrough, raw, req, model_id)
+                return
+            if auth_deferred:
+                self.close_connection = True
+                self._send(
+                    401,
+                    {
+                        "error": {
+                            "message": "unauthorized",
+                            "type": "auth_error",
+                            "code": 401,
+                        }
+                    },
+                )
+                return
             # (9) effort: строковый вне каталога клампится вниз к allowed модели.
             raw_effort = req.get("reasoning_effort")
             if raw_effort is None:
@@ -5448,6 +5527,7 @@ class Handler(BaseHTTPRequestHandler):
                 "images": images,
                 "cwd": cwd,
                 "emulate_tools": emulate_tools,
+                "tool_schemas": build_tool_schemas(raw_tools),
                 "tag": (
                     f"client={self._client_tag()} "
                     f"ua={(self.headers.get('User-Agent') or '-')[:60]}"
@@ -5633,7 +5713,33 @@ class Handler(BaseHTTPRequestHandler):
         )
         t0 = time.monotonic()
         raw_turn_result = adapter.execute_turn(turn, sse_writer)
-        result = _finalize_turn_sanitized(raw_turn_result, turn.emulate_tools)
+        result = finalize_turn(raw_turn_result, turn.emulate_tools)
+        if BRIDGE_SANITIZE_TOOL_CALLS:
+            calls: list[ToolCall] = []
+            by_id: dict[str, list[ToolCall]] = {}
+            for call in result.tool_calls:
+                cleaned = [
+                    replace(item, index=len(calls) + index)
+                    for index, item in enumerate(
+                        sanitize_tool_call(call, turn.tool_schemas, **_SANITIZE_LIMITS)
+                    )
+                ]
+                by_id[call.id] = cleaned
+                calls.extend(cleaned)
+            result = replace(
+                result,
+                tool_calls=tuple(calls),
+                events=tuple(
+                    item
+                    for event in result.events or ()
+                    for item in (
+                        [replace(event, value=call) for call in by_id[event.value.id]]
+                        if event.kind == "tool_call"
+                        and isinstance(event.value, ToolCall)
+                        else [event]
+                    )
+                ),
+            )
         if managed_turn is not None:
             TURN_MANAGER.complete_turn_from_result(
                 managed_turn, result, backend_kind=adapter.kind
@@ -5671,6 +5777,24 @@ class Handler(BaseHTTPRequestHandler):
             )
         return out
 
+    def _serve_passthrough(
+        self,
+        adapter: PassthroughAdapter,
+        raw: bytes,
+        req: dict,
+        model_id: str,
+    ) -> None:
+        """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
+        _log(f"passthrough route model={model_id} backend={adapter.id}")
+        headers = {key: value for key, value in self.headers.items()}
+        adapter.handle(
+            path=self.path,
+            raw_body=raw,
+            request=req,
+            headers=headers,
+            sink=_HandlerSink(self),
+        )
+
     def _serve_json(self, ctx: dict) -> None:
         out = self._dispatch(ctx, None)
         if out.get("state") == "client_gone":
@@ -5692,9 +5816,6 @@ class Handler(BaseHTTPRequestHandler):
         finish = "stop"
         arg_markers: list = []
         values = [out["text"]]
-        if out.get("tool_calls") and BRIDGE_SANITIZE_TOOL_CALLS:
-            # идемпотентный страховочный слой: вызовы уже санитизированы при сборке хода
-            out["tool_calls"] = sanitize_tool_calls_list(out["tool_calls"])
         if out.get("tool_calls"):
             calls = []
             for call in out["tool_calls"]:

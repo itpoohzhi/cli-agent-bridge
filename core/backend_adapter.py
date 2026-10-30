@@ -92,6 +92,7 @@ class TurnContext:
     images: tuple[ImageAttachment, ...] = ()
     cwd: str = ""
     emulate_tools: bool = False
+    tool_schemas: dict[str, Any] | None = None
     tag: str = ""
     stream: bool = False
     handler: object | None = None
@@ -182,6 +183,7 @@ BACKEND_KEYS = frozenset(
         "proxy_port",
         "idle_timeout_s",
         "safety_cap_s",
+        "base_url",
     }
 )
 TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
@@ -191,6 +193,9 @@ _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 # Виды, для которых pin технического образа обязателен (AD-007): без него `qualify()`
 # нечего сверять, и допуск вырождается в «любой файл, который найдёт обёртка».
 PIN_REQUIRED_KINDS = frozenset({"muse"})
+# Вид без собственного процесса: исполнение — raw HTTP-шов к upstream из `base_url` (ADR 0011).
+PASSTHROUGH_KIND = "passthrough"
+_LOOPBACK_BASE_URL = re.compile(r"http://127\.0\.0\.1:([0-9]{1,5})/v1")
 
 
 def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -> str:
@@ -217,6 +222,15 @@ def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -
         return "backend_max_concurrent_invalid"
     if kind == "muse" and cap != 1:
         return "backend_muse_max_concurrent_invalid"
+    if kind == PASSTHROUGH_KIND:
+        base_url = entry.get("base_url")
+        if base_url is None:
+            return "backend_base_url_missing"
+        match = _LOOPBACK_BASE_URL.fullmatch(base_url) if isinstance(base_url, str) else None
+        if match is None or not PROXY_PORT_MIN <= int(match.group(1)) <= PROXY_PORT_MAX:
+            return "backend_base_url_invalid"
+    elif "base_url" in entry:
+        return "backend_base_url_unexpected"
     owned_by = entry.get("owned_by", backend_id)
     if not isinstance(owned_by, str) or not owned_by:
         return "backend_invalid"

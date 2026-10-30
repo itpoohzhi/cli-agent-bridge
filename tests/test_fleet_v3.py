@@ -18,13 +18,12 @@ from adapters import ADAPTER_KINDS  # noqa: E402
 
 FLEET_FILE = Path(server.ROOT) / "fleet.json"
 
-# Неизменные поля шести droid-моделей (значения schema 2, снимок до хаба).
+# Неизменные поля оставшихся droid-моделей (значения schema 2, снимок до хаба).
 DROID_MODELS = {
     "claude-sonnet-5-5": (1000000, ["high"]),
     "gemini-3.8-flash": (1048576, ["high"]),
     "grok-4.7": (256000, ["high"]),
     "deepseek-v4.1-flash": (1000000, ["high", "max"]),
-    "gpt-6.1-sol": (272000, ["high"]),
     "glm-5.3": (1000000, ["max"]),
 }
 MUSE_MODELS = (
@@ -50,10 +49,10 @@ def to_schema_2(data):
 
 
 class TestLiveFleetV3(unittest.TestCase):
-    def test_live_catalogue_is_schema_3_with_two_backends(self):
+    def test_live_catalogue_is_schema_3_with_three_backends(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(catalog["backend_order"], ["droid", "muse"])
+        self.assertEqual(catalog["backend_order"], ["droid", "muse", "codex"])
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
         muse = catalog["backends"]["muse"]
@@ -61,12 +60,16 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertFalse(muse["enabled"])
         self.assertEqual(muse["wrapper"], "~/.config/muse-launch/muse-cli.sh")
         self.assertEqual(muse["max_concurrent"], 1)  # RW-001: ходы muse сериализованы
+        codex = catalog["backends"]["codex"]
+        self.assertEqual(codex["kind"], "passthrough")
+        self.assertTrue(codex["enabled"])
+        self.assertEqual(codex["base_url"], "http://127.0.0.1:2455/v1")
 
     def test_models_are_bound_to_backends(self):
         data = raw_v3()
         data["backends"]["muse"]["enabled"] = True
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 10)
+        self.assertEqual(len(catalog["order"]), len(DROID_MODELS) + len(MUSE_MODELS) + 2)
         for mid in DROID_MODELS:
             self.assertEqual(catalog["models"][mid]["backend"], "droid")
         for mid in MUSE_MODELS:
@@ -80,7 +83,7 @@ class TestLiveFleetV3(unittest.TestCase):
         for mid, (window, efforts) in DROID_MODELS.items():
             self.assertEqual(catalog["models"][mid]["context_window"], window, mid)
             self.assertEqual(catalog["models"][mid]["efforts"], efforts, mid)
-        self.assertEqual(catalog["order"][:6], list(DROID_MODELS))
+        self.assertEqual([mid for mid in catalog["order"] if catalog["models"][mid]["backend"] == "droid"], list(DROID_MODELS))
         self.assertEqual(catalog["default_model"], "claude-sonnet-5-5")
 
     def test_technical_ref_and_limits_preserved(self):
@@ -90,7 +93,7 @@ class TestLiveFleetV3(unittest.TestCase):
 
     def test_load_fleet_reads_schema_3_file(self):
         self.assertEqual(server.FLEET["schema_version"], 3)
-        self.assertEqual(len(server.FLEET["order"]), 6)
+        self.assertEqual(len(server.FLEET["order"]), len(DROID_MODELS) + 2)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -100,7 +103,7 @@ class TestSchema2Compat(unittest.TestCase):
         self.assertEqual(catalog["backend_order"], ["droid"])
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
         self.assertTrue(catalog["backends"]["droid"]["required"])
-        self.assertEqual(len(catalog["order"]), 6)
+        self.assertEqual(len(catalog["order"]), len(DROID_MODELS))
         for model in catalog["models"].values():
             self.assertEqual(model["backend"], "droid")
 
@@ -312,6 +315,7 @@ class TestSchema3Violations(unittest.TestCase):
     def test_disabled_backend_models_are_not_published(self):
         data = raw_v3()
         data["backends"]["muse"]["enabled"] = False
+        data["backends"]["codex"]["enabled"] = False
         catalog = server._build_catalog(data)
         self.assertEqual(catalog["order"], list(DROID_MODELS))
         self.assertFalse(catalog["backends"]["muse"]["enabled"])
@@ -496,7 +500,7 @@ class TestFleetCheckParity(unittest.TestCase):
     def test_mainline_muse_is_dark(self):
         data = raw_v3()
         self.assertFalse(data["backends"]["muse"]["enabled"])
-        self.assertEqual(server._build_catalog(data)["order"], list(DROID_MODELS))
+        self.assertEqual(set(server._build_catalog(data)["order"]), set(DROID_MODELS) | {"gpt-6.1-terra", "gpt-6.1-sol"})
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):
         data = raw_v3()

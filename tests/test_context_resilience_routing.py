@@ -248,13 +248,13 @@ class TestHubGate(HubContextCase):
         self.assertNotIn(status, (413, 503))
         self.assertNotIn(ctx.REASON_REQUIRED_EXCEEDS, text)
 
-    def test_unknown_model_error_is_unchanged(self):
+    def test_unknown_model_error_is_404(self):
         self.set_flags(True)
         status, _hdrs, text = self.post_full(
             {"model": "nope", "messages": [oa("user", "x")]}
         )
-        self.assertEqual(status, 400)
-        self.assertEqual(json.loads(text)["error"]["type"], "model_not_allowed")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(text)["error"]["type"], "model_not_found")
 
     def test_trusted_ids_route_to_epoch_and_no_id_does_not(self):
         self.set_flags(True)
@@ -278,10 +278,16 @@ class TestHubSwitching(HubContextCase):
         history = self.hist(
             30, 3000
         )  # ≈ 300 КБ: помещается в 1M, не помещается в 256k/272k-R
+        # Узкое CLI-окно — тестовая модель: реальные sol/terra принадлежат passthrough.
+        server.FLEET["models"]["test-narrow-window"] = dict(
+            server.FLEET["models"]["grok-4.7"], id="test-narrow-window",
+            context_window=272000, max_tokens=128000,
+        )
+        self.addCleanup(server.FLEET["models"].pop, "test-narrow-window")
         plan = [
             (MODEL, "false"),
             ("grok-4.7", "true"),
-            ("gpt-6.1-sol", "true"),
+            ("test-narrow-window", "true"),
             (MODEL, "false"),
         ]
         sent_sizes = []
