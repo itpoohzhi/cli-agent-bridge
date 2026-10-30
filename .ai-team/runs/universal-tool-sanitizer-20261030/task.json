@@ -1,0 +1,8 @@
+{
+  "run_id": "universal-tool-sanitizer-20261030",
+  "title": "Универсальная нормализация и санитизация аргументов tool_calls в cli-agent-bridge",
+  "description": "Реализация универсальной фильтрации пустых строк в аргументах tool_calls и распаковки галлюцинированных вызовов parallel на уровне фасада и ядра cli-agent-bridge без изменения внешнего клиентского ПО (DSH и др.)",
+  "component": "cli-agent-bridge-core",
+  "criticality": "S2",
+  "created_at": "2026-10-30T10:31:00Z"
+}

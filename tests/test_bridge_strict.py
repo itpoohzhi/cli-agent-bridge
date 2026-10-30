@@ -1,11 +1,11 @@
 """Строгие тесты моста: каталог (класс I), effort/model (C-02), журнал, admission.
 
-Заменяют кламп-тесты эталонного набора: уровни берутся строго из fleet.json,
-никаких алиасов, клампов и silent fallback; ошибки — до запуска droid.
+Уровни каталога берутся из fleet.json; строковый reasoning_effort вне каталога
+клампится вниз по шкале EFFORT_ORDER (clamp_effort_downward), нестроковые
+значения и reasoning-объект отклоняются до запуска droid.
 """
 
 import copy
-import json
 import re
 import sys
 import tempfile
@@ -170,8 +170,65 @@ class TestCatalogClassI(unittest.TestCase):
         self._expect("method_not_implemented", "gemini-3.8-flash")
 
 
+class TestClampEffortDownward(unittest.TestCase):
+    """Helper: downward-first кламп по EFFORT_ORDER, без зависимости от каталога."""
+
+    def test_exact_match_case_insensitive_preserves_allowed(self):
+        self.assertEqual(
+            server.clamp_effort_downward("HIGH", ["High"], "low"), ("High", False)
+        )
+        self.assertEqual(
+            server.clamp_effort_downward("high", ["max", "high"], "max"),
+            ("high", False),
+        )
+
+    def test_nearest_lower_wins_over_nearest_upper(self):
+        # xhigh: high ниже на 1, max выше на 1 — downward-first выбирает high.
+        self.assertEqual(
+            server.clamp_effort_downward("xhigh", ["max", "high"], "high"),
+            ("high", True),
+        )
+        self.assertEqual(
+            server.clamp_effort_downward("ultra", ["high", "max"], "high"),
+            ("max", True),
+        )
+        self.assertEqual(
+            server.clamp_effort_downward("medium", ["high"], "high"), ("high", True)
+        )
+
+    def test_upward_fallback_when_no_lower(self):
+        self.assertEqual(
+            server.clamp_effort_downward("low", ["max", "high"], "max"),
+            ("high", True),
+        )
+        self.assertEqual(
+            server.clamp_effort_downward("off", ["high"], "high"), ("high", True)
+        )
+
+    def test_unknown_candidate_falls_back_to_default(self):
+        self.assertEqual(
+            server.clamp_effort_downward("none", ["high"], "high"), ("high", True)
+        )
+        self.assertEqual(
+            server.clamp_effort_downward("bogus", ["low"], "medium"),
+            ("medium", True),
+        )
+
+    def test_no_rankable_allowed_returns_default(self):
+        self.assertEqual(
+            server.clamp_effort_downward("high", ["bogus"], "low"), ("low", True)
+        )
+        self.assertEqual(server.clamp_effort_downward("high", [], "low"), ("low", True))
+
+    def test_exact_match_of_unknown_scale_value(self):
+        self.assertEqual(
+            server.clamp_effort_downward("custom", ["Custom"], "low"),
+            ("Custom", False),
+        )
+
+
 class TestEffortAndModel(BridgeCase):
-    """C-02: строгая валидация model/effort до запуска, без клампов и алиасов.
+    """C-02: валидация model/effort до запуска; строковый effort клампится вниз.
 
     Проверяются фактические параметры RPC initialize_session и исходы в строке
     `exec`; форма конструктора процесса не тестируется (TM-016).
@@ -181,6 +238,7 @@ class TestEffortAndModel(BridgeCase):
         """POST и (параметры последней initialize_session, effort_source, autonomy_source)."""
         with self.capture_logs() as lines:
             status, _ = self._post(body)
+        self._last_lines = lines
         execs = [m for m in (EXEC_LINE.match(ln) for ln in lines) if m]
         init = self.hub.inits()[-1]["params"] if self.hub.inits() else None
         source = execs[-1].group("source") if execs else None
@@ -220,39 +278,71 @@ class TestEffortAndModel(BridgeCase):
                 self.assertEqual(init["modelId"], model)
                 self.assertEqual(init["reasoningEffort"], effort)
                 self.assertEqual(source, "request")
-        # За пределами каталога — отказ до spawn (xhigh для sonnet недопустим).
-        before = len(self.hub.spawns())
-        status, body = self._post_json(
+        # За пределами каталога строковый effort не отказ, а кламп вниз до high.
+        status, init, source, _ = self._post_logged(
             chat_body(model="claude-sonnet-5-5", effort="xhigh")
         )
-        self.assertEqual(status, 400)
-        self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
-        self.assertEqual(len(self.hub.spawns()), before)
+        self.assertEqual(status, 200)
+        self.assertEqual(init["reasoningEffort"], "high")
+        self.assertEqual(source, "request")
 
-    def test_judge_levels_and_outside_rejected(self):
+    def test_outside_catalog_efforts_clamped(self):
+        # (model, запрошенный effort, ожидаемый effective effort)
         cases = [
-            ("claude-sonnet-5-5", "max"),
-            ("gpt-6.1-sol", "medium"),
-            ("glm-5.3", "high"),
-            ("glm-5.3", " high "),
-            ("claude-sonnet-5-5", "HIGH"),
-            ("claude-sonnet-5-5", "off"),
-            ("claude-sonnet-5-5", "none"),
-            ("deepseek-v4.1-flash", "low"),
-            ("claude-sonnet-5-5", "max\n"),
+            ("claude-sonnet-5-5", "xhigh", "high"),  # nearest lower
+            ("claude-sonnet-5-5", "max", "high"),  # AC1: max у high-only
+            ("claude-sonnet-5-5", "max\n", "high"),  # strip до клампа
+            ("gpt-6.1-sol", "medium", "high"),  # нет нижнего -> upward fallback
+            ("glm-5.3", "high", "max"),  # нет нижнего -> upward fallback
+            ("glm-5.3", " high ", "max"),  # strip, затем upward fallback
+            ("claude-sonnet-5-5", "HIGH", "high"),  # case-insensitive exact
+            ("claude-sonnet-5-5", "off", "high"),  # нет нижнего -> upward
+            ("claude-sonnet-5-5", "none", "high"),  # unknown -> default (high)
+            ("deepseek-v4.1-flash", "low", "high"),  # нет нижнего -> upward
+            ("deepseek-v4.1-flash", "xhigh", "high"),  # lower high, не upper max
+            ("deepseek-v4.1-flash", "ultra", "max"),  # nearest lower
+            ("glm-5.3", "unknown-xyz", "max"),  # unknown -> default (max)
         ]
-        for model, effort in cases:
-            before = len(self.hub.spawns())
-            status, body = self._post_json(chat_body(model=model, effort=effort))
-            self.assertEqual(status, 400, (model, effort))
-            self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
-            self.assertEqual(len(self.hub.spawns()), before)
+        for model, effort, expected in cases:
+            before_inits = len(self.hub.inits())
+            status, init, source, _ = self._post_logged(
+                chat_body(model=model, effort=effort)
+            )
+            self.assertEqual(status, 200, (model, effort))
+            self.assertEqual(init["modelId"], model)
+            self.assertEqual(init["reasoningEffort"], expected, (model, effort))
+            self.assertEqual(source, "request", (model, effort))
+            self.assertGreater(len(self.hub.inits()), before_inits)
+        # Кламп пишется в лог только при фактическом клампе.
+        status, init, source, _ = self._post_logged(
+            chat_body(model="claude-sonnet-5-5", effort="max")
+        )
+        self.assertEqual(status, 200)
+        self.assertIn(
+            "clamp reasoning_effort 'max' -> 'high' for model claude-sonnet-5-5",
+            self._last_lines,
+        )
+        status, init, source, _ = self._post_logged(
+            chat_body(model="claude-sonnet-5-5", effort="HIGH")
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(init["reasoningEffort"], "high")
+        self.assertFalse(
+            any(ln.startswith("clamp reasoning_effort") for ln in self._last_lines)
+        )
+
+    def test_nonstring_effort_rejected(self):
         for bad in (5, ["high"], {"level": "high"}, True):
+            before = len(self.hub.spawns())
             status, body = self._post_json(
                 chat_body(model="claude-sonnet-5-5", effort=bad)
             )
-            self.assertEqual(status, 400)
+            self.assertEqual(status, 400, bad)
             self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
+            self.assertEqual(
+                body["error"]["message"], "reasoning_effort must be a string"
+            )
+            self.assertEqual(len(self.hub.spawns()), before)
 
     def test_models_outside_fleet_rejected(self):
         cases = [
@@ -332,15 +422,25 @@ class TestEffortAndModel(BridgeCase):
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "unsupported_parameter")
         self.assertEqual(len(self.hub.spawns()), before)
-
-    def test_stream_with_bad_effort_is_plain_json_400(self):
-        status, raw = self._post(
-            chat_body(model="claude-sonnet-5-5", effort="max", stream=True)
+        # reasoning-валидация независима от клампа строкового effort.
+        status, body = self._post_json(
+            chat_body(
+                model="claude-sonnet-5-5",
+                effort="max",
+                reasoning={"effort": "high"},
+            )
         )
         self.assertEqual(status, 400)
-        body = json.loads(raw)
-        self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
-        self.assertNotIn("data:", raw)
+        self.assertEqual(body["error"]["type"], "unsupported_parameter")
+        self.assertEqual(len(self.hub.spawns()), before)
+
+    def test_stream_with_clamped_effort_succeeds(self):
+        status, init, source, _ = self._post_logged(
+            chat_body(model="claude-sonnet-5-5", effort="max", stream=True)
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(init["reasoningEffort"], "high")
+        self.assertEqual(source, "request")
 
     def test_launcher_missing_gives_503_and_no_spawn(self):
         server.LAUNCHER = str(Path(self._tmp.name) / "no-such-launcher.sh")

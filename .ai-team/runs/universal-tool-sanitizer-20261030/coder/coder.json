@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "run_id": "universal-tool-sanitizer-20261030",
+  "role": "coder",
+  "status": "DONE",
+  "plan": ".ai-team/runs/universal-tool-sanitizer-20261030/coder/coder-brief.md",
+  "summary": "Реализована универсальная санитизация аргументов tool_calls и распаковка `parallel` по ADR 0010. Внесены изменения в core/tool_emulation.py, server.py и добавлены 18 unit-тестов в tests/test_tool_sanitizer.py. Профиль DSH и файлы вендорского ПО не затронуты.",
+  "changes": [
+    {
+      "file": "core/tool_emulation.py",
+      "what": "sanitize_tool_call, sanitize_tool_calls_list, распаковка `parallel`, удаление пустых строковых значений в ROUTE_FIELDS, justification fallback при sandbox_permissions, схемо-ориентированная очистка, интеграция в finalize_turn(sanitize=...)",
+      "sha256": "e0f0d7124b29b8fa7bff730e9bb8f49fe288829e242609c8f9710a75ba1d105d"
+    },
+    {
+      "file": "server.py",
+      "what": "feature flag BRIDGE_SANITIZE_TOOL_CALLS, _finalize_turn_sanitized для TurnSessionManager и _dispatch, санитизация в add_call (Droid) и страховочный вызов в _serve_json",
+      "sha256": "c0993f61ca1319a49ab6baee51496ff8502144def66281910fc5e886dfe7f07e"
+    },
+    {
+      "file": "tests/test_tool_sanitizer.py",
+      "what": "18 unit-тестов, проверяющих удаление пустых полей маршрутизации, сохранение непустых, fallback/удаление justification, распаковку parallel, соблюдение required в схемах, поддержку ToolCall и dict, идемпотентность",
+      "sha256": "7793cc515a07a87e1d775f1e59e3b6aa3c6ac8fe0f533bff49df7773c0f72aec"
+    }
+  ],
+  "untouched": [
+    "~/.dsh/**",
+    "app.asar",
+    "вендорские бинарники и профили"
+  ],
+  "verification": {
+    "test_tool_sanitizer": "18 tests, OK (exit 0)",
+    "test_bridge_strict": "41 tests, OK (exit 0)"
+  }
+}
