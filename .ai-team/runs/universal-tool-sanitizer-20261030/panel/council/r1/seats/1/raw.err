@@ -1,0 +1,3 @@
+muse: workspace root: /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/universal-tool-sanitizer-20261030/panel/council/r1 (explicit)
+muse: workspace trust: trusted source=run-flag
+muse: warning: rules file at /Users/aazhiry1/.config/muse/AGENTS.md produced 67646 bytes, over the 65536 byte subagent delegation startup context limit; it will be truncated for this session

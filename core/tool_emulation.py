@@ -658,12 +658,192 @@ class ToolCallParser:
             self._emit(text)
 
 
-def finalize_turn(raw: TurnResult, emulate_tools: bool) -> TurnResult:
+ROUTE_FIELDS = frozenset({"provider", "model", "reasoning_effort"})
+JUSTIFICATION_FALLBACK = "Выполнение запрошенной операции"
+_PARALLEL_NAME = "parallel"
+_PARALLEL_LIST_KEYS = ("tool_uses", "calls", "tools")
+_SUBCALL_NAME_KEYS = ("recipient_name", "name")
+_SUBCALL_ARGS_KEYS = ("parameters", "arguments")
+_MAX_PARALLEL_DEPTH = 8  # предел вложенности `parallel` в `parallel`
+
+
+def _new_call_id() -> str:
+    return "call_" + uuid.uuid4().hex[:24]
+
+
+def _call_name_and_args(tool_call: Any) -> tuple[str, Any]:
+    """(имя, arguments) вызова — ToolCall либо OpenAI-словаря; ("", None) для чужого типа."""
+    if isinstance(tool_call, ToolCall):
+        return tool_call.function.name, tool_call.function.arguments
+    if isinstance(tool_call, dict):
+        fn = tool_call.get("function")
+        if isinstance(fn, dict):
+            return str(fn.get("name") or ""), fn.get("arguments")
+        return str(tool_call.get("name") or ""), tool_call.get("arguments")
+    return "", None
+
+
+def _with_arguments(tool_call: Any, arguments: Any) -> Any:
+    """Копия вызова с новыми arguments (тип и остальные поля вызова сохраняются)."""
+    if isinstance(tool_call, ToolCall):
+        return replace(
+            tool_call, function=replace(tool_call.function, arguments=arguments)
+        )
+    if isinstance(tool_call.get("function"), dict):
+        return dict(tool_call, function=dict(tool_call["function"], arguments=arguments))
+    return dict(tool_call, arguments=arguments)
+
+
+def _make_call(template: Any, index: int, name: str, arguments: str) -> Any:
+    """Новый вызов того же типа, что `template`, со свежим id `call_<hex>`."""
+    if isinstance(template, ToolCall):
+        return ToolCall(index, _new_call_id(), ToolFunction(name, arguments))
+    call = {
+        "id": _new_call_id(),
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+    if "index" in template:
+        call["index"] = index
+    return call
+
+
+def _with_index(tool_call: Any, index: int) -> Any:
+    if isinstance(tool_call, ToolCall):
+        return replace(tool_call, index=index)
+    return dict(tool_call, index=index) if "index" in tool_call else tool_call
+
+
+def _required_fields(tool_name: str, tool_schemas: dict[str, Any] | None) -> list | None:
+    """Список `required` схемы инструмента; None — схемы для имени нет."""
+    schema = (tool_schemas or {}).get(tool_name)
+    if not isinstance(schema, dict):
+        return None
+    fn = schema.get("function") if isinstance(schema.get("function"), dict) else schema
+    params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
+    required = params.get("required")
+    return list(required) if isinstance(required, list) else []
+
+
+def _is_blank(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() == ""
+
+
+def _sanitize_arguments_dict(args: dict, required: list | None) -> dict:
+    """Очистка пустых строк в аргументах; исходный словарь не меняется."""
+    cleaned = dict(args)
+    for key in list(cleaned):
+        value = cleaned[key]
+        if not _is_blank(value):
+            continue
+        if key in ROUTE_FIELDS:
+            del cleaned[key]  # пустой маршрут — потребитель берёт дефолтный
+        elif key == "justification":
+            permissions = args.get("sandbox_permissions")
+            if permissions is not None and not _is_blank(permissions):
+                cleaned[key] = JUSTIFICATION_FALLBACK
+            else:
+                del cleaned[key]
+        elif required is not None and key not in required:
+            del cleaned[key]
+    return cleaned
+
+
+def _sanitize_arguments(name: str, arguments: Any, tool_schemas: dict | None) -> Any:
+    """arguments (JSON-строка либо dict) -> то же представление без пустых опциональных строк.
+
+    Невалидные/не-объектные аргументы и аргументы без изменений возвращаются как есть.
+    """
+    parsed = _normalize_arguments(arguments)
+    if parsed is None:
+        return arguments
+    cleaned = _sanitize_arguments_dict(parsed, _required_fields(name, tool_schemas))
+    if cleaned == parsed:
+        return arguments
+    return cleaned if isinstance(arguments, dict) else json.dumps(cleaned, ensure_ascii=False)
+
+
+def _unpack_parallel(tool_call: Any, arguments: Any) -> list[Any] | None:
+    """Вложенные вызовы `parallel` как вызовы верхнего уровня; None — распаковать нечего."""
+    parsed = _normalize_arguments(arguments)
+    if parsed is None:
+        return None
+    items = next(
+        (parsed[key] for key in _PARALLEL_LIST_KEYS if isinstance(parsed.get(key), list)),
+        None,
+    )
+    calls: list[Any] = []
+    for item in items or ():
+        if not isinstance(item, dict):
+            continue
+        name = next((str(item[k]) for k in _SUBCALL_NAME_KEYS if item.get(k)), "")
+        name = name.removeprefix("functions.").strip()
+        if not name:
+            continue
+        sub_args = next((item[k] for k in _SUBCALL_ARGS_KEYS if k in item), None)
+        if isinstance(sub_args, str):
+            serialized = sub_args
+        else:
+            serialized = json.dumps(
+                sub_args if sub_args is not None else {}, ensure_ascii=False
+            )
+        calls.append(_make_call(tool_call, len(calls), name, serialized))
+    return calls or None
+
+
+def _sanitize_call(
+    tool_call: Any, tool_schemas: dict[str, Any] | None, depth: int
+) -> list[Any]:
+    name, arguments = _call_name_and_args(tool_call)
+    if not name:
+        return [tool_call]
+    if name.rsplit(".", 1)[-1] == _PARALLEL_NAME and depth < _MAX_PARALLEL_DEPTH:
+        unpacked = _unpack_parallel(tool_call, arguments)
+        if unpacked is not None:
+            return [
+                result
+                for sub in unpacked
+                for result in _sanitize_call(sub, tool_schemas, depth + 1)
+            ]
+    cleaned = _sanitize_arguments(name, arguments, tool_schemas)
+    return [tool_call if cleaned is arguments else _with_arguments(tool_call, cleaned)]
+
+
+def sanitize_tool_call(
+    tool_call: ToolCall | dict, tool_schemas: dict[str, Any] | None = None
+) -> list[Any]:
+    """Один вызов -> список вызовов того же типа (ToolCall либо dict) с чистыми аргументами.
+
+    Чистая функция: синтетический `parallel` разворачивается во вложенные вызовы с новыми
+    id; пустые строки в маршрутных полях (`provider`/`model`/`reasoning_effort`) удаляются;
+    пустой `justification` заменяется на fallback при заданном `sandbox_permissions`, иначе
+    удаляется; при известной схеме удаляются и прочие пустые необязательные строки.
+    Невалидные аргументы остаются нетронутыми (fail-safe), повторный вызов идемпотентен.
+    """
+    return _sanitize_call(tool_call, tool_schemas, 0)
+
+
+def sanitize_tool_calls_list(
+    tool_calls: list[Any], tool_schemas: dict[str, Any] | None = None
+) -> list[Any]:
+    """Санитизация списка вызовов в плоский список; `index` перенумеровывается подряд."""
+    flat = [
+        result
+        for tool_call in tool_calls
+        for result in sanitize_tool_call(tool_call, tool_schemas)
+    ]
+    return [_with_index(call, index) for index, call in enumerate(flat)]
+
+
+def finalize_turn(
+    raw: TurnResult, emulate_tools: bool, sanitize: bool = False
+) -> TurnResult:
     """Сырой итог адаптера -> `out` фасада с буфером `events` (content/reasoning/tool_call).
 
     Готовый `out` (в нём уже есть `events`, как у droid-пути, где разбор идёт по потоку)
     возвращается без изменений. Для остальных: размышления идут мимо парсера, текст — через
     `ToolCallParser` при `emulate_tools`, вызовы получают `call_<hex>` как в droid-пути.
+    При `sanitize` каждый вызов проходит `sanitize_tool_call` (в т.ч. распаковка `parallel`).
     """
     if raw.events is not None:
         return raw
@@ -682,13 +862,15 @@ def finalize_turn(raw: TurnResult, emulate_tools: bool) -> TurnResult:
     def add_call(call: dict) -> None:
         entry = ToolCall(
             index=len(tool_calls),
-            id="call_" + uuid.uuid4().hex[:24],
+            id=_new_call_id(),
             function=ToolFunction(
                 call["name"], json.dumps(call["arguments"], ensure_ascii=False)
             ),
         )
-        tool_calls.append(entry)
-        events.append(TurnEvent("tool_call", entry))
+        for item in sanitize_tool_call(entry) if sanitize else [entry]:
+            item = replace(item, index=len(tool_calls))
+            tool_calls.append(item)
+            events.append(TurnEvent("tool_call", item))
 
     text = raw.text
     if emulate_tools:
