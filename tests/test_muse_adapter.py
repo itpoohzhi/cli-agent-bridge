@@ -11,6 +11,7 @@ prompt рядом с собой и по файлу `mode` выдаёт JSONL-с�
 """
 
 import hashlib
+import json
 from dataclasses import asdict
 import os
 import signal
@@ -35,6 +36,7 @@ from adapters.muse_adapter import (  # noqa: E402
     estimate_tokens,
 )
 from core.backend_adapter import BackendNotSupported, TurnContext  # noqa: E402
+from test_hub_integration import HubCase as _HubCase  # noqa: E402
 
 TOOL_JSON = (
     '{"payload_type":"run.output.delta","payload":{"text":"<tool_call>'
@@ -849,6 +851,667 @@ class TestPanelRework(MuseCase):
         self.assertEqual([r.state for r in results], ["done", "done"])
         seen = sorted(p.read_text() for p in self.fake.base.glob("seen.*"))
         self.assertEqual(seen, ["prompt-one", "prompt-two"])
+
+
+FAKE_MSP = r"""
+import json, os, re, signal, sys, time
+from pathlib import Path
+base = Path(@BASE@)
+n = int((base / "count").read_text()) + 1 if (base / "count").exists() else 1
+(base / "count").write_text(str(n))
+(base / f"argv.{n}").write_text("\n".join(sys.argv[1:]) + "\n")
+mode = (base / "mode").read_text()
+def emit(method, params):
+    print(json.dumps({"jsonrpc":"2.0", "method":method, "params":params}), flush=True)
+def reply(req, result):
+    print(json.dumps({"jsonrpc":"2.0", "id":req["id"], "result":result}), flush=True)
+if sys.argv[1] == "exec":
+    print('{"payload_type":"run.terminal.completed","payload":{"terminal":"completed","text":"EXEC"}}', flush=True)
+    sys.exit(0)
+if "--workspace" in sys.argv or "--yolo" in sys.argv:
+    print("unsupported serve flag", file=sys.stderr)
+    sys.exit(2)
+(base / "workspace").write_text(os.getcwd())
+(base / "permissions").write_text(str(os.stat(os.getcwd()).st_mode & 0o777))
+(base / "pid").write_text(str(os.getpid()))
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["method"]
+    if method == "initialize":
+        if not re.fullmatch(r"[a-z0-9_]+", req["params"]["clientInfo"]["name"]):
+            print(json.dumps({"jsonrpc":"2.0", "id":req["id"], "error":{"code":-32602}}), flush=True)
+            continue
+        if mode == "stderr":
+            os.write(2, b"E" * (512 << 10))
+        if mode == "bad_pre":
+            print("broken json", flush=True)
+            continue
+        reply(req, {"schema":{"version":2 if mode == "version" else 1}})
+    elif method == "session/start":
+        reply(req, {"session":{"sessionId":"session"}})
+        if mode == "stdin_block":
+            emit("item/started", {"item":{"itemId":"r", "kind":"reasoning"}})
+            for _ in range(2000):
+                emit("item/delta", {"itemId":"r", "field":"summary.0", "delta":"x"})
+            time.sleep(30)
+    elif method == "turn/start":
+        (base / f"prompt.{n}").write_text(req["params"]["input"][0]["text"])
+        reply(req, {"status":"accepted", "turnId":"turn"})
+        if mode == "hang":
+            time.sleep(30)
+        if mode == "bad_after":
+            emit("item/started", {"item":{"itemId":"tool", "kind":"toolCall", "toolName":"shell"}})
+            (base / "mutation").write_text("one mutation")
+        if mode in ("bad_after", "lost_tool"):
+            print("broken json", flush=True)
+            continue
+        if mode == "approval":
+            emit("approval/requested", {"approvalId":"a", "currentRequirementId":"r", "availableChoices":[{"choiceId":"yes", "decision":"approved"}]})
+            decision = json.loads(next(sys.stdin))
+            (base / "decision").write_text(json.dumps(decision))
+            reply(decision, {})
+        if mode == "oversize":
+            print("x" * 20000, flush=True)
+            continue
+        emit("item/started", {"item":{"itemId":"r", "kind":"reasoning"}})
+        parts = ["думаю🙂", " дальше", " end"] if mode != "flood" else ["x"] * 2000
+        for piece in parts:
+            emit("item/delta", {"itemId":"r", "field":"summary.0", "delta":piece})
+            if mode != "flood":
+                time.sleep(0.3 if mode == "detach" else 0.1)
+        summary = "".join(parts) + " tail"
+        emit("item/completed", {"item":{"itemId":"r", "kind":"reasoning", "summary":[summary]}})
+        emit("item/completed", {"item":{"itemId":"answer", "kind":"agentMessage", "text":"ANSWER"}})
+        if mode == "descendant":
+            ready_r, ready_w = os.pipe()
+            child = os.fork()
+            if child == 0:
+                os.close(ready_r)
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                os.write(ready_w, b"1")
+                os.close(ready_w)
+                time.sleep(30)
+                os._exit(0)
+            os.close(ready_w)
+            os.read(ready_r, 1)
+            os.close(ready_r)
+            (base / "child.pid").write_text(str(child))
+        # Процесс продолжает обслуживать RPC после terminal, как настоящий serve.
+        emit("turn/completed", {"turnId":"turn", "terminal":"completed"})
+"""
+
+
+class TestNativeServe(MuseCase):
+    def setUp(self):
+        super().setUp()
+        self.fake.binary.write_text(
+            "#!"
+            + sys.executable
+            + "\n"
+            + FAKE_MSP.replace("@BASE@", repr(str(self.fake.base)))
+        )
+
+    def native(self, **config):
+        return self.adapter(options={"streaming_mode": "serve"}, **config)
+
+    def test_ver_001_options_validation_and_capability(self):
+        from core.backend_adapter import BACKEND_KEYS, backend_entry_error
+
+        self.assertIn("options", BACKEND_KEYS)
+        for mode, expected in (("exec", "emulated"), ("serve", "native")):
+            config = self.fake.config(options={"streaming_mode": mode})
+            self.assertEqual(
+                backend_entry_error("muse", config, {"muse": MuseAdapter}), ""
+            )
+            self.assertEqual(
+                self.adapter(options=config["options"]).capabilities.streaming, expected
+            )
+        self.assertEqual(self.adapter().capabilities.streaming, "emulated")
+        for options in (
+            {"streaming_mode": "bad"},
+            {"streaming_mode": None},
+            {"unknown": 1},
+            [],
+            None,
+        ):
+            self.assertTrue(
+                backend_entry_error(
+                    "muse", self.fake.config(options=options), {"muse": MuseAdapter}
+                )
+            )
+
+    def test_ver_002_real_stdio_deltas_and_completed_tail(self):
+        live = []
+        result = self.native().execute_turn(
+            ctx_for(), lambda kind, piece: live.append((kind, piece)) or True
+        )
+        self.assertEqual((result.state, result.text), ("done", "ANSWER"))
+        self.assertEqual(result.reasoning, "думаю🙂 дальше end tail")
+        self.assertTrue(live)
+        self.assertTrue(
+            result.reasoning.startswith("".join(piece for _, piece in live))
+        )
+        self.assertTrue(all(kind == "reasoning" for kind, _ in live))
+
+    def test_ver_004_nonstream_accumulates_and_next_prompt_has_no_reasoning(self):
+        adapter = self.native()
+        first = adapter.execute_turn(ctx_for("first"), None)
+        second = adapter.execute_turn(ctx_for("second"), None)
+        self.assertEqual(first.reasoning, second.reasoning)
+        self.assertTrue(first.reasoning)
+        self.assertEqual((self.fake.base / "prompt.2").read_text(), "second")
+
+    def test_ver_005_slow_client_does_not_block_stdout_and_degrades(self):
+        import adapters.muse_adapter as module
+
+        observed = []
+        original = module._LiveSink
+
+        class Captured(original):
+            def __init__(self, writer):
+                super().__init__(writer)
+                observed.append(self)
+
+        calls = []
+
+        def slow(kind, text):
+            calls.append(text)
+            time.sleep(module.LIVE_WRITE_TIMEOUT_S + 0.1)
+            return True
+
+        self.fake.set_mode("flood")
+        with mock.patch.object(module, "_LiveSink", Captured):
+            result = self.native().execute_turn(ctx_for(), slow)
+        self.assertEqual((result.state, result.text), ("done", "ANSWER"))
+        self.assertEqual(result.reasoning, "x" * 2000 + " tail")
+        self.assertTrue(observed[0].live_degraded.is_set())
+        self.assertLessEqual(len(calls), 1)
+
+    def test_ver_006_private_workspace_group_registry_and_cleanup(self):
+        host = RegistryHost(self.tmp)
+        adapter = self.native(host=host)
+        with (
+            mock.patch(
+                "adapters.muse_adapter.subprocess.Popen",
+                wraps=__import__("subprocess").Popen,
+            ) as spawn,
+            mock.patch("adapters.muse_adapter.os.killpg", wraps=os.killpg) as killpg,
+        ):
+            result = adapter.execute_turn(ctx_for(), None)
+        self.assertEqual(result.state, "done")
+        self.assertTrue(
+            any(call.kwargs.get("start_new_session") for call in spawn.call_args_list)
+        )
+        workdir = Path((self.fake.base / "workspace").read_text())
+        self.assertEqual(workdir.parent.resolve(), adapter.workspace.resolve())
+        self.assertEqual((self.fake.base / "permissions").read_text(), str(0o700))
+        self.assertFalse(workdir.exists())
+        self.assertEqual(host.removed_alive, [])
+        self.assertFalse(
+            adapter._group_alive(int((self.fake.base / "pid").read_text()))
+        )
+        self.assertTrue(
+            any(call.args[1] == signal.SIGTERM for call in killpg.call_args_list)
+        )
+        self.assertEqual(adapter.active_count(), 0)
+
+    def test_ver_006_error_timeout_and_thread_start_failures_cleanup(self):
+        for mode in ("hang", "bad_after"):
+            with self.subTest(mode=mode):
+                self.fake.set_mode(mode)
+                adapter = self.native(host=host_stub(self.tmp, TIMEOUT_S=0.8))
+                result = adapter.execute_turn(ctx_for(), None)
+                self.assertEqual(
+                    result.state, "timeout" if mode == "hang" else "backend_error"
+                )
+                self.assertEqual(adapter.active_count(), 0)
+                self.assertFalse(list(adapter.workspace.glob("turn-*")))
+                self.assertFalse(
+                    adapter._group_alive(int((self.fake.base / "pid").read_text()))
+                )
+        self.fake.set_mode("ok")
+        for failing in (1, 2, 3, 4):
+            with self.subTest(thread=failing):
+                host = RegistryHost(self.tmp)
+                adapter = self.native(host=host)
+                original_start = threading.Thread.start
+                count = 0
+
+                def start(thread):
+                    nonlocal count
+                    count += 1
+                    if count == failing:
+                        raise RuntimeError("injected start failure")
+                    return original_start(thread)
+
+                with (
+                    mock.patch.object(threading.Thread, "start", start),
+                    mock.patch.object(
+                        adapter,
+                        "_run_exec",
+                        return_value=adapter._result("backend_error", 1),
+                    ),
+                ):
+                    adapter.execute_turn(ctx_for(), lambda *_: True)
+                self.assertEqual(adapter.active_count(), 0)
+                self.assertFalse(list(adapter.workspace.glob("turn-*")))
+                self.assertEqual(host.removed_alive, [])
+                for add, _ in host.calls:
+                    if add:
+                        self.assertFalse(adapter._group_alive(add["pgid"]))
+
+    def test_ver_006_sigterm_ignoring_descendant_is_killed_before_slot_release(self):
+        self.fake.set_mode("descendant")
+        host = RegistryHost(self.tmp)
+        with mock.patch("adapters.muse_adapter.os.killpg", wraps=os.killpg) as killpg:
+            result = self.native(host=host).execute_turn(ctx_for(), None)
+        self.assertEqual(result.state, "done")
+        self.assertTrue(
+            any(call.args[1] == signal.SIGKILL for call in killpg.call_args_list)
+        )
+        self.assertTrue(wait_pid_gone(int((self.fake.base / "child.pid").read_text())))
+        self.assertEqual(host.removed_alive, [])
+
+    def test_ver_008_disconnect_detaches_or_kills_by_context(self):
+        for detach in (True, False):
+            with self.subTest(detach=detach):
+                gone = threading.Event()
+                activity = []
+                timer = threading.Timer(0.15, gone.set)
+                timer.start()
+                try:
+                    result = self.native().execute_turn(
+                        ctx_for(
+                            client_gone=gone.is_set,
+                            detach_on_disconnect=detach,
+                            on_activity=activity.append,
+                        ),
+                        lambda *_: True,
+                    )
+                finally:
+                    timer.cancel()
+                if detach:
+                    self.assertEqual((result.state, result.text), ("done", "ANSWER"))
+                    self.assertEqual(activity.count("detached"), 1)
+                else:
+                    self.assertEqual(result.state, "client_gone")
+
+    def test_ver_009_oversize_ndjson_is_bounded_and_not_replayed(self):
+        self.fake.set_mode("oversize")
+        with mock.patch("adapters.muse_adapter.MAX_LINE_BYTES", 4096):
+            result = self.native().execute_turn(ctx_for(), None)
+        self.assertEqual(result.state, "backend_error")
+        self.assertEqual(self.fake.count(), 1)
+
+    def test_ver_010_handshake_fallback_is_safe_and_tool_failure_never_replays(self):
+        for mode in ("version", "bad_pre", "bad_after", "lost_tool"):
+            with self.subTest(mode=mode):
+                before = self.fake.count()
+                self.fake.set_mode(mode)
+                result = self.native().execute_turn(ctx_for(), None)
+                if mode in ("version", "bad_pre"):
+                    self.assertEqual((result.state, result.text), ("done", "EXEC"))
+                    self.assertEqual(self.fake.count() - before, 2)
+                else:
+                    self.assertEqual(result.state, "backend_error")
+                    self.assertEqual(self.fake.count() - before, 1)
+        self.assertEqual((self.fake.base / "mutation").read_text(), "one mutation")
+
+    def test_ver_010_stderr_flood_and_nonblocking_approval(self):
+        for mode in ("stderr", "approval"):
+            with self.subTest(mode=mode):
+                self.fake.set_mode(mode)
+                result = self.native().execute_turn(ctx_for(), None)
+                self.assertEqual((result.state, result.text), ("done", "ANSWER"))
+        decision = json.loads((self.fake.base / "decision").read_text())
+        self.assertEqual(decision["method"], "approval/decide")
+        self.assertEqual(decision["params"]["choiceId"], "yes")
+
+    def test_ver_010_blocked_stdin_does_not_block_stdout_or_cleanup(self):
+        self.fake.set_mode("stdin_block")
+        started = time.monotonic()
+        with mock.patch("adapters.muse_adapter.MSP_SETUP_TIMEOUT_S", 0.5):
+            result = self.native().execute_turn(ctx_for("p" * (2 << 20)), None)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(result.state, "backend_error")
+        self.assertEqual(result.reasoning, "x" * 2000)
+        self.assertEqual(self.fake.count(), 1)
+
+
+class TestLiveQueue(unittest.TestCase):
+    def test_ver_007_count_and_byte_limits_are_nonblocking(self):
+        from adapters.muse_adapter import _LiveSink, LIVE_QUEUE_MAX_BYTES
+
+        for text, number in (("x", 2000), ("я" * (1 << 19), 3)):
+            with self.subTest(bytes=len(text.encode())):
+                sink = _LiveSink(None)
+                # Остановленный потребитель, без доступа к настоящему сокету.
+                sink.writer = lambda *_: True
+                started = time.monotonic()
+                for _ in range(number):
+                    sink.offer(text)
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertTrue(sink.live_degraded.is_set())
+                self.assertLessEqual(sink.queue.qsize(), 1000)
+                self.assertLessEqual(sink.queued_bytes, LIVE_QUEUE_MAX_BYTES)
+                while not sink.queue.empty():
+                    self.assertLessEqual(len(sink.queue.get_nowait().encode()), 8192)
+
+
+class TestNativeHttp(_HubCase):
+    """Настоящий HTTP-фасад и subprocess MSP, без вызова вендорской модели."""
+
+    def setUp(self):
+        super().setUp()
+        from core.backend_adapter import AdapterRegistry
+        from adapters import ADAPTER_KINDS
+        import server
+
+        self.fake_muse.binary.write_text(
+            "#!"
+            + sys.executable
+            + "\n"
+            + FAKE_MSP.replace("@BASE@", repr(str(self.fake_muse.base)))
+        )
+        catalog = server.FLEET
+        catalog["backends"]["muse"].update(
+            options={"streaming_mode": "serve"}, technical_ref=self.fake_muse.pin()
+        )
+        self.registry = AdapterRegistry.from_fleet(
+            catalog, ADAPTER_KINDS, lambda: server.FLEET, server
+        )
+        server.BACKENDS = self.registry
+
+    def test_ver_011_http_sse_and_json_deliver_identical_reasoning_without_duplication(
+        self,
+    ):
+        body = {
+            "model": "muse-spark-1.3",
+            "messages": [{"role": "user", "content": "calculate"}],
+        }
+        status, stream = self._post(dict(body, stream=True))
+        self.assertEqual(status, 200)
+        chunks = [
+            json.loads(line[6:])
+            for line in stream.splitlines()
+            if line.startswith("data: {")
+        ]
+        self.assertFalse(any("error" in chunk for chunk in chunks), stream)
+        deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+        self.assertEqual(
+            "".join(d.get("reasoning_content", "") for d in deltas),
+            "думаю🙂 дальше end tail",
+        )
+        self.assertEqual("".join(d.get("content", "") for d in deltas), "ANSWER")
+        self.assertTrue(stream.rstrip().endswith("data: [DONE]"))
+        status, result = self._post_json(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            result["choices"][0]["message"]["reasoning_content"],
+            "думаю🙂 дальше end tail",
+        )
+
+    def test_ver_008_http_disconnect_runs_detached_and_commits_once(self):
+        import http.client
+        import server
+
+        self.fake_muse.set_mode("detach")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(
+            "POST",
+            "/v1/chat/completions",
+            json.dumps(
+                {
+                    "model": "muse-spark-1.3",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "detach"}],
+                }
+            ),
+            {"Authorization": "Bearer test-key", "Content-Type": "application/json"},
+        )
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        tid = response.getheader("X-Turn-Id")
+        self.assertTrue(tid)
+        response.close()
+        conn.close()
+        turn = server.TURN_MANAGER.get_turn(tid)
+        deadline = time.monotonic() + 3
+        detached_seen = False
+        while time.monotonic() < deadline:
+            detached_seen |= turn.status == "RUNNING_DETACHED"
+            if turn.done_event.wait(0.02):
+                break
+        self.assertTrue(detached_seen)
+        self.assertTrue(turn.done_event.is_set())
+        self.assertEqual(turn.status, "COMPLETED")
+        self.assertEqual(turn.buffer.get_content_text(), "ANSWER")
+        self.assertEqual(turn.buffer.get_reasoning_text(), "думаю🙂 дальше end tail")
+        count = self.fake_muse.count()
+        final_seq = turn.buffer.last_seq
+        server.TURN_MANAGER.complete_turn_from_result(
+            turn, turn.result, backend_kind="muse"
+        )
+        self.assertEqual(turn.buffer.last_seq, final_seq)
+        self.assertEqual(self.fake_muse.count(), count)
+
+
+class TestSseFacadeOracles(unittest.TestCase):
+    def handler(self):
+        import server
+
+        handler = server.Handler.__new__(server.Handler)
+        handler._context_pruned = False
+        handler.send_response = lambda *_: None
+        handler.send_header = lambda *_: None
+        handler.end_headers = lambda: None
+        handler._reserve_delivery = lambda _: None
+        handler.connection = mock.Mock()
+        handler.connection.gettimeout.return_value = 30.0
+        return handler
+
+    def out(self, reasoning):
+        return {
+            "state": "done",
+            "rc": 0,
+            "text": "ANSWER",
+            "reasoning": reasoning,
+            "backend_kind": "muse",
+            "err": "",
+            "usage": {},
+            "tool_calls": [],
+            "events": [("reasoning", reasoning), ("content", "ANSWER")],
+        }
+
+    def test_ver_011_sse_prefix_is_not_duplicated_in_final_tail(self):
+        for prefix in ("", "думаю🙂", "думаю🙂 хвост"):
+            with self.subTest(prefix=prefix):
+                h = self.handler()
+                frames = []
+                h._emit = lambda text: frames.append(text) or True
+
+                def dispatch(ctx, keepalive, writer):
+                    if prefix:
+                        self.assertTrue(writer("reasoning", prefix))
+                    return self.out("думаю🙂 хвост")
+
+                h._dispatch = dispatch
+                h._serve_sse({"model": "muse"})
+                deltas = [
+                    json.loads(f[6:])["choices"][0]["delta"]
+                    for f in frames
+                    if f.startswith("data: {")
+                ]
+                self.assertEqual(
+                    "".join(d.get("reasoning_content", "") for d in deltas),
+                    "думаю🙂 хвост",
+                )
+                self.assertEqual(
+                    "".join(d.get("content", "") for d in deltas), "ANSWER"
+                )
+                self.assertEqual(frames[-1], "data: [DONE]\n\n")
+
+    def test_ver_011_nonstream_json_returns_reasoning_content(self):
+        import io
+
+        h = self.handler()
+        h.wfile = io.BytesIO()
+        h._dispatch = lambda *_: self.out("мысли🙂")
+        h._serve_json({"model": "muse"})
+        message = json.loads(h.wfile.getvalue())["choices"][0]["message"]
+        self.assertEqual(message["reasoning_content"], "мысли🙂")
+        self.assertEqual(message["content"], "ANSWER")
+
+    def test_ver_012_socket_lock_serializes_keepalive_live_and_terminal_and_closes_sink(
+        self,
+    ):
+        h = self.handler()
+        frames = []
+        active = 0
+        maximum = 0
+        started = threading.Event()
+        workers = []
+        saved = []
+
+        def emit(text):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            if "reasoning_content" in text:
+                started.set()
+                time.sleep(0.08)
+            frames.append(text)
+            active -= 1
+            return True
+
+        def dispatch(ctx, keepalive, writer):
+            saved.append(writer)
+            consumer = threading.Thread(target=lambda: writer("reasoning", "live"))
+            workers.append(consumer)
+            consumer.start()
+            self.assertTrue(started.wait(2))
+            ka = threading.Thread(target=keepalive)
+            workers.append(ka)
+            ka.start()
+            # Эмулируем истекший consumer.join: фасад обязан дождаться общего lock.
+            return self.out("live tail")
+
+        h._emit, h._dispatch = emit, dispatch
+        h._serve_sse({"model": "muse"})
+        for worker in workers:
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+        before = len(frames)
+        self.assertFalse(saved[0]("reasoning", "late"))
+        self.assertEqual(len(frames), before)
+        self.assertEqual(maximum, 1)
+        self.assertEqual(frames[-1], "data: [DONE]\n\n")
+
+
+class TestMspOracles(unittest.TestCase):
+    """Оракулы чистого MSP-парсера из ADR 0012, без настоящего Muse."""
+
+    def parser(self, **limits):
+        from adapters.muse_msp import MspEvents
+
+        return MspEvents(
+            reasoning_cap=limits.get("reasoning_cap", 8 << 20), answer_cap=2 << 20
+        )
+
+    def started(self, parser, iid="r", kind="reasoning", **fields):
+        return parser.feed(
+            "item/started", {"item": {"itemId": iid, "kind": kind, **fields}}
+        )
+
+    def delta(self, parser, text, iid="r", index=0):
+        return parser.feed(
+            "item/delta", {"itemId": iid, "field": f"summary.{index}", "delta": text}
+        )
+
+    def completed(self, parser, summary, iid="r"):
+        return parser.feed(
+            "item/completed",
+            {"item": {"itemId": iid, "kind": "reasoning", "summary": summary}},
+        )
+
+    def test_ver_002_incremental_keys_and_completed_snapshots(self):
+        parser = self.parser()
+        self.started(parser)
+        self.assertEqual(self.delta(parser, "А"), "А")
+        self.assertEqual(self.delta(parser, "Б"), "Б")
+        self.assertEqual(self.delta(parser, "В", index=1), "В")
+        self.assertEqual(self.completed(parser, ["АБ", "ВГ"]), "Г")
+        self.assertEqual(self.completed(parser, ["АБ", "ВГ"]), "")
+        self.assertEqual(parser.reasoning, "АБВГ")
+        self.completed(parser, ["snapshot only"], iid="new")
+        self.assertEqual(parser.reasoning, "АБВГsnapshot only")
+
+    def test_ver_002_divergent_snapshot_preserves_prefix_and_tracking_is_bounded(self):
+        from adapters.muse_msp import MAX_TRACKED_ITEMS
+
+        parser = self.parser()
+        self.started(parser)
+        self.delta(parser, "sent prefix")
+        self.completed(parser, ["replacement"])
+        self.assertTrue(parser.live_degraded)
+        self.assertTrue(parser.reasoning.startswith("sent prefix"))
+        self.assertNotIn("replacement", parser.reasoning)
+        for index in range(MAX_TRACKED_ITEMS + 2):
+            self.started(parser, iid=str(index))
+            self.delta(parser, "x", iid=str(index))
+        self.assertLessEqual(parser.tracked_count, MAX_TRACKED_ITEMS)
+
+    def test_ver_003_tool_markers_are_sanitized_deduplicated_and_private(self):
+        for name, safe in (
+            ("shell.run", "shell.run"),
+            ("bad\nname", "unknown_tool"),
+            ("x" * 65, "unknown_tool"),
+        ):
+            with self.subTest(name=name):
+                parser = self.parser()
+                params = {
+                    "item": {
+                        "itemId": "t",
+                        "kind": "toolCall",
+                        "toolName": name,
+                        "arguments": "TOP_SECRET",
+                    }
+                }
+                parser.feed("item/started", params)
+                parser.feed("item/started", params)
+                parser.feed("item/completed", params)
+                parser.feed("item/completed", params)
+                self.assertEqual(
+                    parser.reasoning,
+                    f"[Вызов инструмента: {safe}]\n[Инструмент {safe} завершён]\n",
+                )
+                self.assertTrue(parser.has_executed_tool)
+                self.assertNotIn("TOP_SECRET", parser.reasoning)
+
+    def test_ver_004_reasoning_budget_includes_markers_and_truncates_once(self):
+        from adapters.muse_msp import REASONING_TRUNCATED
+
+        parser = self.parser(reasoning_cap=180)
+        self.started(parser, iid="t", kind="toolCall", toolName="shell")
+        self.started(parser)
+        self.delta(parser, "я" * 2000)
+        self.delta(parser, "more" * 2000)
+        self.assertLessEqual(len(parser.reasoning.encode()), 180)
+        self.assertEqual(parser.reasoning.count(REASONING_TRUNCATED), 1)
+        parser.feed(
+            "item/completed",
+            {"item": {"itemId": "a", "kind": "agentMessage", "text": "answer"}},
+        )
+        self.assertEqual(parser.text, "answer")
+
+    def test_ver_009_utf8_slices_reassemble_exactly(self):
+        from adapters.muse_msp import utf8_slices
+
+        text = ("привет🙂漢字abc" * 3000) + "🧠"
+        pieces = list(utf8_slices(text))
+        self.assertGreater(len(pieces), 1)
+        self.assertEqual("".join(pieces).encode(), text.encode())
+        self.assertTrue(all(0 < len(piece.encode()) <= 8192 for piece in pieces))
 
 
 if __name__ == "__main__":

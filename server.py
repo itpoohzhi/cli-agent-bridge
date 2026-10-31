@@ -697,7 +697,9 @@ class _HandlerSink(ResponseSink):
                 if key.lower() not in self._DROP:
                     self._handler.send_header(key, value)
             if not any(key.lower() == "content-length" for key, _ in headers):
-                self._handler.close_connection = True  # тело без длины (SSE) — конец по закрытию
+                self._handler.close_connection = (
+                    True  # тело без длины (SSE) — конец по закрытию
+                )
             self._handler.end_headers()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             raise ClientGone() from exc
@@ -2291,7 +2293,6 @@ LIFECYCLE = HubLifecycleManager(
 )
 
 
-
 def _reset_rpc_state() -> None:
     """Закрыть всех детей и сбросить реестр/пул (тесты; старт моста)."""
     global REGISTRY, POOL, _shutting_down
@@ -2931,7 +2932,9 @@ class Run:
         размера очереди не выставляется.
         """
         if self.sse_writer is None:
-            self.q.put(item)  # неограниченная очередь: put не блокирует и не теряет события
+            self.q.put(
+                item
+            )  # неограниченная очередь: put не блокирует и не теряет события
             return True
         try:
             self.q.put_nowait(item)
@@ -3915,7 +3918,13 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self._send(
             code,
-            {"error": {"message": message, "type": reason, "code": reason if reason == "model_not_found" else int(code)}},
+            {
+                "error": {
+                    "message": message,
+                    "type": reason,
+                    "code": reason if reason == "model_not_found" else int(code),
+                }
+            },
             extra_headers=extra_headers,
         )
 
@@ -4092,9 +4101,7 @@ class Handler(BaseHTTPRequestHandler):
                 if proc_watchdog is not None:
                     proc_watchdog.seed(rproc.pid)
                 if managed_turn is not None:
-                    managed_turn.bind_process(
-                        pgid=rproc.pid, terminate_fn=run.close
-                    )
+                    managed_turn.bind_process(pgid=rproc.pid, terminate_fn=run.close)
             if managed_turn is not None and managed_turn.cancel_event.is_set():
                 run.cancel.set()
                 return state("client_gone", 1, "turn cancelled")
@@ -4923,7 +4930,9 @@ class Handler(BaseHTTPRequestHandler):
             # бэкендам (droid: невалидный receipt = spawn невозможен -> ok=false, RW-015),
             # active и max_concurrent суммируются по включённым бэкендам.
             required = [a for a in BACKENDS.adapters() if a.required]
-            draining = _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
+            draining = _shutting_down or (
+                _is_drain_enabled() and LIFECYCLE.is_draining()
+            )
             self._send(
                 200,
                 {
@@ -4939,8 +4948,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if not _auth_ok(self):
-            has_auth = bool(self.headers.get("Authorization") or self.headers.get("x-api-key"))
-            if not (path in ("/v1/models", "/models") and _passthrough_open(self) and has_auth):
+            has_auth = bool(
+                self.headers.get("Authorization") or self.headers.get("x-api-key")
+            )
+            if not (
+                path in ("/v1/models", "/models")
+                and _passthrough_open(self)
+                and has_auth
+            ):
                 self._send(
                     401,
                     {
@@ -5048,7 +5063,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         path = self.path.split("?", 1)[0]
-        m_turn = re.fullmatch(r"/v1/turns/([^/]+)", path) if _is_detached_enabled() else None
+        m_turn = (
+            re.fullmatch(r"/v1/turns/([^/]+)", path) if _is_detached_enabled() else None
+        )
         if not m_turn:
             self._send(
                 404,
@@ -5272,7 +5289,11 @@ class Handler(BaseHTTPRequestHandler):
             passthrough = BACKENDS.get(model["backend"])
             if isinstance(passthrough, PassthroughAdapter):
                 if raw_model != model_id:
-                    self._reject(400, "model_not_allowed", "passthrough requires an exact model id")
+                    self._reject(
+                        400,
+                        "model_not_allowed",
+                        "passthrough requires an exact model id",
+                    )
                     return
                 self._serve_passthrough(passthrough, raw, req, model_id)
                 return
@@ -5504,9 +5525,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 except ValueError as exc:
-                    self._reject(
-                        400, "invalid_request", str(exc), model_id, model_len
-                    )
+                    self._reject(400, "invalid_request", str(exc), model_id, model_len)
                     return
             self._active_managed_turn = managed_turn
             ctx = {
@@ -5699,7 +5718,15 @@ class Handler(BaseHTTPRequestHandler):
             **{
                 key: value
                 for key, value in ctx.items()
-                if key not in ("rpc", "images", "attached_existing")
+                if key
+                not in (
+                    "rpc",
+                    "images",
+                    "attached_existing",
+                    "on_activity",
+                    "register_pgid",
+                    "cancel_event",
+                )
             },
             rpc=Transcript(
                 system=transcript["system"],
@@ -5710,6 +5737,31 @@ class Handler(BaseHTTPRequestHandler):
             handler=self,
             keepalive=keepalive,
             client_gone=lambda: _client_gone(self.connection),
+            on_activity=ctx.get("on_activity")
+            or (
+                getattr(managed_turn, "touch_activity", None)
+                if managed_turn is not None
+                else None
+            ),
+            register_pgid=ctx.get("register_pgid")
+            or (
+                (
+                    lambda pgid: TURN_MANAGER.register_child_pgid(
+                        pgid,
+                        backend=adapter.id,
+                        turn_id=getattr(managed_turn, "turn_id", ""),
+                    )
+                )
+                if managed_turn is not None
+                and getattr(managed_turn, "turn_id", None) is not None
+                else None
+            ),
+            cancel_event=ctx.get("cancel_event")
+            or (
+                getattr(managed_turn, "cancel_event", None)
+                if managed_turn is not None
+                else None
+            ),
         )
         t0 = time.monotonic()
         raw_turn_result = adapter.execute_turn(turn, sse_writer)
@@ -5749,6 +5801,7 @@ class Handler(BaseHTTPRequestHandler):
             "state": result.state,
             "rc": result.rc,
             "text": result.text,
+            "reasoning": result.reasoning,
             "err": result.err,
             "usage": asdict(result.usage),
             "result": {},
@@ -5816,6 +5869,11 @@ class Handler(BaseHTTPRequestHandler):
         finish = "stop"
         arg_markers: list = []
         values = [out["text"]]
+        reasoning_marker: list[str] = []
+        if out.get("reasoning"):
+            reasoning_marker = ["@@reasoning-" + uuid.uuid4().hex + "@@"]
+            message["reasoning_content"] = reasoning_marker[0]
+            values.append(out["reasoning"])
         if out.get("tool_calls"):
             calls = []
             for call in out["tool_calls"]:
@@ -5841,7 +5899,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         segments = []
         rest = shell
-        for mark in [marker] + arg_markers:
+        for mark in [marker] + reasoning_marker + arg_markers:
             head, rest = rest.split(json.dumps(mark), 1)
             segments.append(head.encode("utf-8"))
         segments.append(rest.encode("utf-8"))
@@ -5948,7 +6006,16 @@ class Handler(BaseHTTPRequestHandler):
                 + "\n\n"
             )
 
-        live_sent = [0]  # RW-211: байты content/reasoning, реально отданные этим запросом
+        live_sent = [
+            0
+        ]  # RW-211: байты content/reasoning, реально отданные этим запросом
+        reasoning_live_chars = 0
+        sse_lock = threading.RLock()
+        sink_closed = threading.Event()
+
+        def emit(frame: str) -> bool:
+            with sse_lock:
+                return self._emit(frame)
 
         def stream_error_frame(message: str) -> str:
             # RW-202/RW-211: fail-close кадр chat.completion.chunk, а не плоский
@@ -5976,17 +6043,30 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         def keepalive() -> bool:
+            with sse_lock:
+                if sink_closed.is_set():
+                    return False
+                return write_keepalive()
+
+        def write_keepalive() -> bool:
             # RW-201/RW-009: та же защита, что у sse_writer ниже — запись ограничена
             # LIVE_WRITE_TIMEOUT_S, а не таймаутом соединения (300с), иначе клиент,
             # который просто не читает, держит T/L все 300с на одном keepalive.
             prev_timeout = self.connection.gettimeout()
             try:
                 self.connection.settimeout(LIVE_WRITE_TIMEOUT_S)
-                return self._emit(": keepalive\n\n")
+                return emit(": keepalive\n\n")
             finally:
                 self.connection.settimeout(prev_timeout)
 
         def sse_writer(kind: str, text: str) -> bool:
+            with sse_lock:
+                if sink_closed.is_set() or self._client_write_dead:
+                    return False
+                return write_live(kind, text)
+
+        def write_live(kind: str, text: str) -> bool:
+            nonlocal reasoning_live_chars
             # AD-002/AD-003: честная живая доставка — content/reasoning_content уходят прямо
             # отсюда, по мере готовности (с коалесацией ~40мс на стороне _execute), а не одним
             # куском после полного хода. Разрыв соединения здесь — тот же сигнал, что у keepalive.
@@ -5999,10 +6079,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.connection.settimeout(LIVE_WRITE_TIMEOUT_S)
                 for piece in _text_slices(text) if text else [text]:
-                    if not self._emit(chunk({field: piece})):
+                    if not emit(chunk({field: piece})):
                         ok = False
                         break
                     live_sent[0] += len(piece.encode("utf-8"))
+                    if kind == "reasoning":
+                        reasoning_live_chars += len(piece)
             finally:
                 self.connection.settimeout(prev_timeout)
             if not ok:
@@ -6011,14 +6093,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._client_write_dead = True
             return ok
 
-        if not self._emit(chunk({"role": "assistant", "content": ""})):
+        if not emit(chunk({"role": "assistant", "content": ""})):
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 self._client_write_dead = True
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
             else:
                 return
         try:
-            out = self._dispatch(ctx, keepalive, sse_writer)
+            try:
+                out = self._dispatch(ctx, keepalive, sse_writer)
+            finally:
+                # Возврат адаптера закрывает sink под тем же lock, что и записи.
+                # Даже consumer, переживший join(5), больше не может дописать кадр.
+                with sse_lock:
+                    sink_closed.set()
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             if self._client_write_dead:
                 _log(
@@ -6029,8 +6117,8 @@ class Handler(BaseHTTPRequestHandler):
             if not live_sent[0]:
                 raise  # живых байт не было: прежнее поведение (сбой наружу)
             _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
-            self._emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__))
-            self._emit("data: [DONE]\n\n")
+            emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__))
+            emit("data: [DONE]\n\n")
             return
         if self._client_write_dead:
             # RW-203: сокет отверг живую запись — терминальные кадры (tool_call, stop,
@@ -6046,27 +6134,34 @@ class Handler(BaseHTTPRequestHandler):
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
             # живьём из _execute (sse_writer выше): здесь остаются только tool_call-кадры.
             live_backend = out.get("backend_kind") == "droid"
+            reasoning_to_skip = reasoning_live_chars
             for kind, value in out.get("events") or []:
                 if kind in ("content", "reasoning"):
                     if live_backend:
                         continue
+                    if kind == "reasoning" and reasoning_to_skip:
+                        skipped = min(reasoning_to_skip, len(value))
+                        value = value[skipped:]
+                        reasoning_to_skip -= skipped
+                        if not value:
+                            continue
                     field = "content" if kind == "content" else "reasoning_content"
                     # Большое событие выдаётся срезами: в памяти одновременно только один срез SSE-кадра.
                     delivered = (
                         all(
-                            self._emit(chunk({field: piece}))
-                            for piece in _text_slices(value)
+                            emit(chunk({field: piece})) for piece in _text_slices(value)
                         )
                         if value
-                        else self._emit(chunk({field: value}))
+                        else emit(chunk({field: value}))
                     )
                 else:
-                    delivered = self._emit_tool_call(chunk, value)
+                    with sse_lock:
+                        delivered = self._emit_tool_call(chunk, value)
                 if not delivered:
                     _log("client gone during delivery; turn already committed")
                     return
             finish = "tool_calls" if out.get("tool_calls") else "stop"
-            self._emit(chunk({}, finish))
+            emit(chunk({}, finish))
             # Harness считает tok/s и % контекста только из usage в потоке
             # (dsh-llm-pi-ai toStreamChunks: usage-chunk -> session usage ->
             # tokenUsage/contextPressure). Без этого чанка метрики пустые.
@@ -6076,7 +6171,7 @@ class Handler(BaseHTTPRequestHandler):
             prompt_toks = out_usage.get("input_tokens", 0)
             compl_toks = out_usage.get("output_tokens", 0)
             if prompt_toks or compl_toks:
-                self._emit(
+                emit(
                     "data: "
                     + json.dumps(
                         {
@@ -6113,12 +6208,10 @@ class Handler(BaseHTTPRequestHandler):
             # последний кадр перед [DONE]). Живой префикс уже отдан (live_sent > 0) — любой
             # терминальный сбой (state=error, ненулевой rc, исключение) тоже fail-close,
             # без повтора уже отданного префикса.
-            self._emit(stream_error_frame(str(err["message"])))
+            emit(stream_error_frame(str(err["message"])))
         else:
-            self._emit(
-                "data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n"
-            )
-        self._emit("data: [DONE]\n\n")
+            emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
+        emit("data: [DONE]\n\n")
 
 
 class Server(ThreadingHTTPServer):
@@ -6258,4 +6351,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
