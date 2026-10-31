@@ -11297,3 +11297,723 @@ class UniversalImageFallbackTests(unittest.TestCase):
             _ = _bfn("_sweep_workspace")(-1.0)
             self.assertFalse(live.exists())
             self.assertEqual(env.active_dirs(), set())
+
+
+def _post_with_headers(
+    http_bridge: _HttpBridge, body: dict[str, object], extra_headers: dict[str, str]
+) -> tuple[int, dict[str, object]]:
+    """POST /v1/chat/completions с дополнительными заголовками (x-dsh-chat-id)."""
+    conn = http.client.HTTPConnection("127.0.0.1", http_bridge.port, timeout=60)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + _str(_bval("AUTH_KEY")),
+    }
+    headers.update(extra_headers)
+    conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers=headers)
+    response = conn.getresponse()
+    raw = response.read()
+    conn.close()
+    return response.status, _dict(cast(object, json.loads(raw.decode("utf-8"))))
+
+
+def _ndjson_size(prompt: str) -> int:
+    return _int(_bfn("_ndjson_bytes")(prompt))
+
+
+class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
+    """ADR-0008: head-pruning NDJSON, изоляция и персистентность сессий, повтор на 502."""
+
+    def test_ndjson_head_pruning_under_budget(self) -> None:
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        self.assertEqual(limit, 98304)
+        env_int = _bfn("_env_int")
+        for raw, expected in (
+            ("1000", 16384),
+            ("200000", 98304),
+            ("abc", 98304),
+            ("", 98304),
+            ("50000", 50000),
+        ):
+            with mock.patch.dict(os.environ, {"AGY_BRIDGE_MAX_PROMPT_BYTES": raw}):
+                self.assertEqual(
+                    env_int("AGY_BRIDGE_MAX_PROMPT_BYTES", 98304, 16384, 98304),
+                    expected,
+                    raw,
+                )
+        system = "СИСТЕМНАЯ ИНСТРУКЦИЯ скилла AI Disrupt. " * 40
+        table = "\n".join(
+            f"| {n} | Статья №{n}: длинное название материала |" for n in range(1, 41)
+        )
+        messages: list[dict[str, object]] = [{"role": "system", "content": system}]
+        for turn in range(80):
+            messages.append(
+                {"role": "user", "content": f"старый-ход-{turn} " + "я" * 1000}
+            )
+            messages.append(
+                {"role": "assistant", "content": f"старый-ответ-{turn} " + "ж" * 1000}
+            )
+        messages.append(
+            {"role": "user", "content": "теперь запусти еще раз заново новый прогон"}
+        )
+        messages.append(
+            {"role": "assistant", "content": "Фаза 2 завершена. Выберите статьи:\n" + table}
+        )
+        messages.append({"role": "user", "content": "1,29"})
+        images: list[dict[str, object]] = [
+            {"index": 1, "path": "/tmp/img-x/1.png", "mime": "image/png", "size": 10}
+        ]
+        full = "\n\n".join(
+            [
+                _str(_bfn("_render_message")(m, [i], [0]))
+                for i, m in enumerate(messages)
+            ]
+        )
+        self.assertGreater(len(full.encode("utf-8")), 300_000)
+        logs: list[str] = []
+        with mock.patch.object(_bridge(), "_log", logs.append):
+            prompt = _str(_bfn("_messages_to_prompt")(messages, images))
+        size = _ndjson_size(prompt)
+        self.assertLessEqual(size, limit)
+        self.assertGreater(size, limit - 4096)  # отбрасывается минимум, а не всё
+        attachments = _str(_bfn("_attachments_block")(images))
+        self.assertTrue(prompt.endswith(attachments))
+        tail = prompt[: -len(attachments)].rstrip()
+        self.assertTrue(tail.endswith("user\n1,29"), tail[-80:])
+        self.assertIn("Фаза 2 завершена. Выберите статьи:\n" + table, prompt)
+        self.assertLess(prompt.index(table), prompt.rindex("1,29"))
+        self.assertTrue(prompt.startswith("### 1. system\n" + system.strip()))
+        self.assertIn(_str(_bval("HISTORY_PRUNED_MARKER")), prompt)
+        self.assertNotIn("старый-ход-0 ", prompt)
+        self.assertIn("старый-ответ-79 ", prompt)  # самые новые сохраняются
+        self.assertNotIn(_str(_bval("MIDDLE_PRUNED_MARKER")), prompt)
+        self.assertTrue(
+            any(line.startswith("history pruned: dropped ") for line in logs), logs
+        )
+        # Короткий диалог — без изменений (байт в байт прежняя склейка).
+        short = messages[:3] + messages[-2:]
+        expected = "\n\n".join(
+            [
+                "### 1. system\n" + system.strip(),
+                "### 2. user\n" + _str(messages[1]["content"]),
+                "### 3. assistant\n" + _str(messages[2]["content"]),
+                "### 4. assistant\n" + _str(messages[-2]["content"]),
+                "### 5. user\n1,29",
+            ]
+        )
+        self.assertEqual(_bfn("_messages_to_prompt")(short), expected)
+        # Kill-switch: выключенный флаг возвращает прежнее поведение (без прунинга).
+        with mock.patch.object(_bridge(), "AGY_BRIDGE_ENABLE_HEAD_PRUNING", False):
+            unpruned = _str(_bfn("_messages_to_prompt")(messages, images))
+        self.assertGreater(_ndjson_size(unpruned), 300_000)
+        self.assertNotIn(_str(_bval("HISTORY_PRUNED_MARKER")), unpruned)
+        # Последний user и ответ перед ним — якоря и за хвостом assistant(tool_calls)/tool.
+        tool_tail = messages[:-1] + [
+            {"role": "user", "content": "ПОСЛЕДНИЙ-ЗАПРОС: статьи 1,29"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {"name": "read", "arguments": '{"path": "a"}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "TOOL-HEAD " + "t" * 100_000 + " TOOL-TAIL",
+            },
+        ]
+        with_tools = _str(_bfn("_messages_to_prompt")(tool_tail))
+        self.assertLessEqual(_ndjson_size(with_tools), limit)
+        self.assertIn("ПОСЛЕДНИЙ-ЗАПРОС: статьи 1,29", with_tools)
+        self.assertIn("Фаза 2 завершена. Выберите статьи:", with_tools)
+        self.assertIn('[tool call call_1] read({"path": "a"})', with_tools)
+        self.assertIn("[tool result call_1] TOOL-HEAD", with_tools)
+        self.assertTrue(with_tools.endswith(" TOOL-TAIL"))
+        self.assertLess(
+            with_tools.index("ПОСЛЕДНИЙ-ЗАПРОС"), with_tools.index("TOOL-HEAD")
+        )
+
+    def test_ndjson_middle_prune_oversized_single_message(self) -> None:
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        marker = _str(_bval("MIDDLE_PRUNED_MARKER"))
+        head = "КОМАНДА: проанализируй документ целиком и верни выжимку.\n"
+        tail_args = "\nАРГУМЕНТЫ: --articles 1,29 --format table"
+        body = head + ('сер"ед\\ина ' * 12000) + tail_args
+        self.assertGreater(len(body.encode("utf-8")), 100_000)
+        prompt = _str(_bfn("_messages_to_prompt")([{"role": "user", "content": body}]))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertGreater(_ndjson_size(prompt), limit - 64)
+        self.assertIn(marker, prompt)
+        self.assertTrue(prompt.startswith("### 1. user\n" + head))
+        self.assertTrue(prompt.endswith(tail_args))
+        # Якоря целиком не влезают: system + ассистент + последний ход, все большие.
+        anchors = [
+            {"role": "system", "content": "SYS-HEAD " + "s" * 30000 + " SYS-TAIL"},
+            {"role": "user", "content": "старое " * 5000},
+            {"role": "assistant", "content": "ASST-HEAD " + "a" * 40000 + " ASST-TAIL"},
+            {"role": "user", "content": "USER-HEAD " + "u" * 60000 + " USER-TAIL"},
+        ]
+        pruned = _str(_bfn("_messages_to_prompt")(anchors))
+        self.assertLessEqual(_ndjson_size(pruned), limit)
+        for needle in ("SYS-HEAD", "SYS-TAIL", "ASST-HEAD", "ASST-TAIL"):
+            self.assertIn(needle, pruned)
+        self.assertIn(marker + "u", pruned)  # вырезана середина самого длинного
+        self.assertTrue(pruned.endswith("USER-TAIL"))
+        self.assertNotIn("старое старое", pruned)
+        # Излишек больше любого блока: сжатие пропорционально, ни один не зануляется.
+        edge = _int(_bval("PRUNE_EDGE_MIN_BYTES"))
+        self.assertEqual(edge, 512)
+        equal = [
+            {"role": "system", "content": "S-HEAD " + "s" * 50000 + " S-TAIL"},
+            {"role": "assistant", "content": "A-HEAD " + "a" * 50000 + " A-TAIL"},
+            {"role": "user", "content": "U-HEAD " + "u" * 50000 + " U-TAIL"},
+        ]
+        squeezed = _str(_bfn("_messages_to_prompt")(equal))
+        self.assertLessEqual(_ndjson_size(squeezed), limit)
+        self.assertEqual(squeezed.count(marker), 3)
+        for chunk in squeezed.split("\n\n### "):
+            head_part, _, tail_part = chunk.partition(marker)
+            self.assertGreaterEqual(len(head_part.encode("utf-8")), edge)
+            self.assertGreaterEqual(len(tail_part.encode("utf-8")), edge)
+        for needle in ("S-HEAD", "S-TAIL", "A-HEAD", "A-TAIL", "U-HEAD", "U-TAIL"):
+            self.assertIn(needle, squeezed)
+        # Защитный рубеж: прямой вызов и Run.__init__ на сыром промпте без messages.
+        raw = "RAW-HEAD " + "п" * 120000 + " RAW-TAIL"
+        guarded = _str(_bfn("_ensure_prompt_fits_ndjson")(raw))
+        self.assertLessEqual(_ndjson_size(guarded), limit)
+        self.assertTrue(guarded.startswith("RAW-HEAD") and guarded.endswith("RAW-TAIL"))
+        self.assertEqual(_bfn("_ensure_prompt_fits_ndjson")("короткий"), "короткий")
+        with _Fixture() as fx:
+            _ = fx.write_scenario([], spawns=[_quick(_CID)])
+            lines: list[str] = []
+            real_line = _bfn("_ndjson_user_line")
+
+            def spy(prompt: str) -> str:
+                line = _str(real_line(prompt))
+                lines.append(line)
+                return line
+
+            fx.patch("_ndjson_user_line", spy)
+            turn = _run_turn(_ctx(prompt=raw, full_prompt=raw))
+            self.assertEqual(turn.out["state"], "done")
+            # Последняя строка — та, что ушла в stdin (до неё — замеры рубежа).
+            sent = [line for line in lines if "RAW-HEAD" in line]
+            self.assertGreaterEqual(len(sent), 2)
+            self.assertGreater(len(sent[0].encode("utf-8")), limit)
+            self.assertLessEqual(len(sent[-1].encode("utf-8")), limit)
+            self.assertIn("RAW-TAIL", sent[-1])
+
+    def test_chat_id_isolation_different_conversations(self) -> None:
+        key_for = _bfn("_session_key_for")
+        token_a = hashlib.sha256("chat-A".encode("utf-8")).hexdigest()[:16]
+        token_b = hashlib.sha256("chat-B".encode("utf-8")).hexdigest()[:16]
+        self.assertEqual(key_for("m", "/w", "low", ""), ("m", "/w", "low"))
+        self.assertEqual(key_for("m", "/w", "low", "  "), ("m", "/w", "low"))
+        self.assertEqual(key_for("m", "/w", "low", "chat-A"), (token_a, "m", "/w", "low"))
+        with _Fixture() as fx:
+            _ = fx.write_scenario(
+                [],
+                spawns=[
+                    _quick(_CID),
+                    _quick(_CID_B),
+                    _quick(_CID),
+                    _quick(_CID_B),
+                    _quick(_CID_C),
+                ],
+            )
+            http_bridge = _HttpBridge()
+            try:
+                a1 = _post_with_headers(
+                    http_bridge, _agentic_body("чат А ход 1"), {"x-dsh-chat-id": "chat-A"}
+                )
+                b1 = _post_with_headers(
+                    http_bridge, _agentic_body("чат Б ход 1"), {"x-dsh-chat-id": "chat-B"}
+                )
+                a2 = _post_with_headers(
+                    http_bridge,
+                    _agentic_body("чат А ход 2", True),
+                    {"x-dsh-chat-id": "chat-A"},
+                )
+                b2 = _post_with_headers(
+                    http_bridge,
+                    _agentic_body("чат Б ход 2", True),
+                    {"x-dsh-chat-id": "chat-B"},
+                )
+                legacy = http_bridge.post(_agentic_body("без chat id"))
+            finally:
+                http_bridge.close()
+            self.assertEqual(
+                [r[0] for r in (a1, b1, a2, b2, legacy)], [200, 200, 200, 200, 200]
+            )
+            spawns = fx.spawns()
+            self.assertEqual(len(spawns), 5)
+            self.assertNotIn("--conversation", spawns[0])
+            self.assertNotIn("--conversation", spawns[1])  # Б не захватил разговор А
+            self.assertEqual(spawns[2][spawns[2].index("--conversation") + 1], _CID)
+            self.assertEqual(spawns[3][spawns[3].index("--conversation") + 1], _CID_B)
+            self.assertNotIn("--conversation", spawns[4])
+            self.assertEqual(a1[1]["conversation_id"], _CID)
+            self.assertEqual(b1[1]["conversation_id"], _CID_B)
+            self.assertNotEqual(a2[1]["conversation_id"], b2[1]["conversation_id"])
+            store = cast("dict[tuple[str, ...], dict[str, object]]", _bval("_session_store"))
+            by_cid = {entry["cid"]: key for key, entry in store.items()}
+            self.assertEqual(len(store), 3)
+            self.assertEqual(by_cid[_CID][0], token_a)
+            self.assertEqual(by_cid[_CID_B][0], token_b)
+            self.assertEqual(len(by_cid[_CID]), 4)
+            self.assertEqual(len(by_cid[_CID_C]), 3)  # legacy 3-кортеж
+            self.assertNotIn("chat-A", json.dumps([list(k) for k in store]))
+            self.assertEqual(len(cast("set[str]", _bval("_in_flight_cids"))), 0)
+
+    def test_session_store_disk_persistence_roundtrip(self) -> None:
+        with _Fixture() as fx:
+            fx.patch("_sessions_persist_ready", False)
+            fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
+            path = fx.tmp / "ws" / "state" / "sessions.json"
+            commit = _bfn("_session_commit")
+            # Без загрузки при старте запись выключена: импорт не трогает диск.
+            _ = commit(("m", "/w", "low"), _CID)
+            self.assertFalse(path.exists())
+            cast("dict[object, object]", _bval("_session_store")).clear()
+            self.assertEqual(_bfn("_load_persisted_sessions")(), 0)
+            self.assertIs(_bval("_sessions_persist_ready"), True)
+            key3 = ("m", "/w", "low")
+            key4 = ("0123456789abcdef", "m", "/w", "high")
+            _ = commit(key3, _CID)
+            _ = commit(key4, _CID_B)
+            _ = commit(key4, _CID_B)
+            self.assertTrue(path.exists())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(
+                [p.name for p in path.parent.iterdir()], ["sessions.json"]
+            )  # temp-файлы не остаются
+            doc = _dict(cast(object, json.loads(path.read_text(encoding="utf-8"))))
+            self.assertEqual(doc["version"], 1)
+            saved = {
+                tuple(cast("list[str]", item["key"])): item
+                for item in cast("list[dict[str, object]]", doc["sessions"])
+            }
+            self.assertEqual(set(saved), {("",) + key3, key4})
+            self.assertEqual(saved[key4]["turns"], 2)
+            # Протухшие и битые записи на диске отсекаются при загрузке.
+            now = time.time()
+            sessions = cast("list[object]", doc["sessions"])
+            sessions.extend(
+                [
+                    {"key": ["", "m", "/idle", "low"], "cid": _CID_C,
+                     "created": now - 100, "last_used": now - 46 * 60, "turns": 1},
+                    {"key": ["", "m", "/old", "low"], "cid": _CID_C,
+                     "created": now - 25 * 3600, "last_used": now - 10, "turns": 1},
+                    {"key": ["", "m", "/turns", "low"], "cid": _CID_C,
+                     "created": now - 100, "last_used": now - 10, "turns": 30},
+                    {"key": ["", "m", "/bad-cid", "low"], "cid": "../../etc",
+                     "created": now - 100, "last_used": now - 10, "turns": 1},
+                    {"key": ["m", "/short"], "cid": _CID_C,
+                     "created": now - 100, "last_used": now - 10, "turns": 1},
+                ]
+            )
+            _ = path.write_text(json.dumps(doc), encoding="utf-8")
+            # Новый экземпляр сервера (отдельный модуль) поднимает стор с диска.
+            name = "agy_bridge_server_restart_under_test"
+            spec = importlib.util.spec_from_file_location(name, _BRIDGE_PY)
+            assert spec is not None and spec.loader is not None
+            second = importlib.util.module_from_spec(spec)
+            sys.modules[name] = second
+            try:
+                spec.loader.exec_module(second)
+                with mock.patch.object(second, "WORKSPACE", fx.tmp / "ws"):
+                    restored = cast(Callable[[], int], second._load_persisted_sessions)()
+                    store = cast(
+                        "dict[tuple[str, ...], dict[str, object]]", second._session_store
+                    )
+                    self.assertEqual(restored, 2)
+                    self.assertEqual(set(store), {key3, key4})
+                    self.assertEqual(store[key3]["cid"], _CID)
+                    self.assertEqual(store[key4]["turns"], 2)
+                    claim = cast(Callable[[tuple, str], str], second._session_claim)
+                    self.assertEqual(claim(key4, "t-1"), _CID_B)
+                    self.assertEqual(claim(key3, "t-2"), _CID)
+                    # Загрузка переписала файл без протухших записей.
+                    cleaned = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(len(cleaned["sessions"]), 2)
+                    # Битый файл: fail-open, старт не падает.
+                    _ = path.write_text("{not json", encoding="utf-8")
+                    store.clear()
+                    self.assertEqual(second._load_persisted_sessions(), 0)
+                    self.assertEqual(store, {})
+            finally:
+                _ = sys.modules.pop(name, None)
+
+    def test_transient_502_error_preserves_session_cid(self) -> None:
+        transient = _bfn("_is_transient_upstream_error")
+        for err in (
+            "502 Server Error: Bad Gateway for url",
+            "HTTP 503",
+            "503 Service Unavailable",
+            "ConnectionResetError(54, 'Connection reset by peer')",
+            "HTTP 502 Bad Gateway",
+            "status=503",
+        ):
+            self.assertTrue(transient(err), err)
+        for err in (
+            "",
+            None,
+            "boom",
+            "invalid argument format",
+            "see line 502",
+            "model said: Bad Gateway is a term",
+            "upstream request timed out",
+            "Service Unavailable",
+        ):
+            self.assertFalse(transient(err), err)
+        with _Fixture() as fx:
+            key = ("m", "", "low")
+            _ = _bfn("_session_commit")(key, _CID)
+            self.assertEqual(_bfn("_session_claim")(key, "turn-1"), _CID)
+            failing = [
+                _init_ev(0.05),
+                _result_ev(
+                    0.2,
+                    status="ERROR",
+                    error="502 Server Error: Bad Gateway",
+                    response="",
+                ),
+                _exit_ev(0.25, code=1),
+            ]
+            _ = fx.write_scenario([], spawns=[failing, _quick(_CID)])
+            invalidations: list[object] = []
+            real_invalidate = _bfn("_session_invalidate")
+
+            def spy(*args: object) -> object:
+                invalidations.append(args)
+                return real_invalidate(*args)
+
+            fx.patch("_session_invalidate", spy)
+            ctx = _ctx(
+                hot_resumed=True,
+                sess_key=key,
+                conversation_id=_CID,
+                tools_count=1,
+                full_prompt="полная история",
+                prompt="новое",
+                turn_id="turn-1",
+            )
+            turn = _run_turn(ctx)
+            self.assertEqual(turn.out["state"], "done")
+            spawns = fx.spawns()
+            self.assertEqual(len(spawns), 2)
+            for argv in spawns:
+                self.assertEqual(argv[argv.index("--conversation") + 1], _CID)
+            self.assertEqual(invalidations, [])
+            self.assertEqual(ctx["conversation_id"], _CID)
+            self.assertIs(ctx["hot_resumed"], True)
+            store = cast("dict[object, dict[str, object]]", _bval("_session_store"))
+            self.assertEqual(store[key]["cid"], _CID)
+            self.assertEqual(store[key]["turns"], 2)
+            # Lease не снят до finally HTTP-хендлера: параллельный claim не проходит.
+            self.assertIn(_CID, cast("set[str]", _bval("_in_flight_cids")))
+            self.assertEqual(_bfn("_session_claim")(key, "turn-2"), "")
+        # 502 на обеих попытках: повторы исчерпаны — сессия инвалидируется.
+        with _Fixture() as fx:
+            key = ("m", "", "low")
+            _ = _bfn("_session_commit")(key, _CID)
+            self.assertEqual(_bfn("_session_claim")(key, "turn-3"), _CID)
+            _ = fx.write_scenario([], spawns=[failing, failing])
+            ctx = _ctx(
+                hot_resumed=True,
+                sess_key=key,
+                conversation_id=_CID,
+                tools_count=1,
+                full_prompt="полная история",
+                prompt="новое",
+                turn_id="turn-3",
+            )
+            turn = _run_turn(ctx)
+            self.assertNotEqual(turn.out["state"], "done")
+            self.assertEqual(len(fx.spawns()), 2)
+            store = cast("dict[object, dict[str, object]]", _bval("_session_store"))
+            self.assertNotIn(key, store)
+
+    def test_non_transient_error_invalidates_session(self) -> None:
+        with _Fixture() as fx:
+            fx.patch("_sessions_persist_ready", True)
+            fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
+            path = fx.tmp / "ws" / "state" / "sessions.json"
+            key = ("m", "", "low")
+            _ = _bfn("_session_commit")(key, _CID)
+            self.assertIn(_CID, path.read_text(encoding="utf-8"))
+            self.assertEqual(_bfn("_session_claim")(key, "turn-1"), _CID)
+            failing = [
+                _init_ev(0.05),
+                _result_ev(0.2, status="ERROR", error="boom", response=""),
+                _exit_ev(0.25, code=1),
+            ]
+            _ = fx.write_scenario([], spawns=[failing, _quick(_CID_B)])
+            ctx = _ctx(
+                hot_resumed=True,
+                sess_key=key,
+                conversation_id=_CID,
+                tools_count=1,
+                full_prompt="полная история",
+                prompt="новое",
+                turn_id="turn-1",
+            )
+            turn = _run_turn(ctx)
+            self.assertEqual(turn.out["state"], "done")
+            spawns = fx.spawns()
+            self.assertEqual(len(spawns), 2)
+            self.assertIn("--conversation", spawns[0])
+            self.assertNotIn("--conversation", spawns[1])  # холодный повтор
+            self.assertEqual(ctx["conversation_id"], "")
+            self.assertIs(ctx["hot_resumed"], False)
+            self.assertEqual(ctx["prompt"], "полная история")
+            # Сломанная сессия удалена из памяти и с диска; холодный ход записал новую.
+            store = cast("dict[object, dict[str, object]]", _bval("_session_store"))
+            self.assertEqual([entry["cid"] for entry in store.values()], [_CID_B])
+            on_disk = path.read_text(encoding="utf-8")
+            self.assertNotIn(_CID, on_disk)
+            self.assertIn(_CID_B, on_disk)
+            # Kill-switch транзиентного восстановления: 502 инвалидирует как раньше.
+            cast("set[str]", _bval("_in_flight_cids")).clear()  # finally хендлера
+            _ = _bfn("_session_commit")(key, _CID)
+            self.assertEqual(_bfn("_session_claim")(key, "turn-2"), _CID)
+            fx.tmp.joinpath("argv.log").unlink()
+            bad_gateway = [
+                _init_ev(0.05),
+                _result_ev(0.2, status="ERROR", error="HTTP 502", response=""),
+                _exit_ev(0.25, code=1),
+            ]
+            _ = fx.write_scenario([], spawns=[bad_gateway, _quick(_CID_C)])
+            fx.patch("AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY", False)
+            ctx2 = _ctx(
+                hot_resumed=True,
+                sess_key=key,
+                conversation_id=_CID,
+                tools_count=1,
+                full_prompt="полная история",
+                prompt="новое",
+                turn_id="turn-2",
+            )
+            _ = _run_turn(ctx2)
+            self.assertEqual(ctx2["conversation_id"], "")
+            self.assertNotIn(_CID, json.dumps([e["cid"] for e in store.values()]))
+
+
+class BridgeConfigurabilityTests(unittest.TestCase):
+    """ADR-0014: парсеры окружения, _BridgeConfig и охранный инвентарь."""
+
+    def tearDown(self) -> None:
+        srv.reload_bridge_config()
+
+    def test_env_int_bounds_and_fallbacks(self) -> None:
+        cases = (
+            ("10", 10),
+            ("100", 100),
+            ("5", 10),
+            ("999", 100),
+            ("-5", 10),
+            ("999999999999999999999999", 100),
+            ("abc", 50),
+            ("", 50),
+            ("1.5", 50),
+        )
+        for raw, expected in cases:
+            with (
+                self.subTest(raw=raw),
+                mock.patch.dict(os.environ, {"AGY_BRIDGE_TEST_INT": raw}),
+            ):
+                self.assertEqual(srv._env_int("AGY_BRIDGE_TEST_INT", 50, 10, 100), expected)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("AGY_BRIDGE_TEST_INT", None)
+            self.assertEqual(srv._env_int("AGY_BRIDGE_TEST_INT", 50, 10, 100), 50)
+
+    def test_env_int_with_zero_cap(self) -> None:
+        cases = (
+            ("0", 999999),
+            ("1024", 1024),
+            ("2048", 2048),
+            ("16777216", 16777216),
+            ("99999999", 262144),
+            ("512", 262144),
+            ("abc", 262144),
+            ("", 262144),
+        )
+        for raw, expected in cases:
+            with (
+                self.subTest(raw=raw),
+                mock.patch.dict(os.environ, {"AGY_BRIDGE_TEST_CAP": raw}),
+            ):
+                self.assertEqual(
+                    srv._env_int_with_zero_cap(
+                        "AGY_BRIDGE_TEST_CAP", 262144, 1024, 16777216, 999999
+                    ),
+                    expected,
+                )
+
+    def test_env_float_bounds_and_finite(self) -> None:
+        cases = (
+            ("2.5", 2.5),
+            ("0.5", 0.5),
+            ("10.0", 10.0),
+            ("nan", 1.5),
+            ("NaN", 1.5),
+            ("inf", 1.5),
+            ("-inf", 1.5),
+            ("999.0", 1.5),
+            ("0.1", 1.5),
+            ("abc", 1.5),
+            ("", 1.5),
+        )
+        for raw, expected in cases:
+            with (
+                self.subTest(raw=raw),
+                mock.patch.dict(os.environ, {"AGY_BRIDGE_TEST_FLOAT": raw}),
+            ):
+                self.assertEqual(
+                    srv._env_float("AGY_BRIDGE_TEST_FLOAT", 1.5, 0.5, 10.0), expected
+                )
+
+    def test_env_bool_parsing(self) -> None:
+        for raw in ("1", "true", "TRUE", "yes", "on"):
+            with (
+                self.subTest(raw=raw),
+                mock.patch.dict(os.environ, {"AGY_BRIDGE_TEST_BOOL": raw}),
+            ):
+                self.assertTrue(srv._env_bool("AGY_BRIDGE_TEST_BOOL", False))
+        for raw in ("0", "false", "FALSE", "no", "off"):
+            with (
+                self.subTest(raw=raw),
+                mock.patch.dict(os.environ, {"AGY_BRIDGE_TEST_BOOL": raw}),
+            ):
+                self.assertFalse(srv._env_bool("AGY_BRIDGE_TEST_BOOL", True))
+        with mock.patch.dict(os.environ, {"AGY_BRIDGE_TEST_BOOL": "maybe"}):
+            self.assertTrue(srv._env_bool("AGY_BRIDGE_TEST_BOOL", True))
+            self.assertFalse(srv._env_bool("AGY_BRIDGE_TEST_BOOL", False))
+
+    def test_bridge_config_defaults(self) -> None:
+        cfg = srv._BridgeConfig()
+        self.assertEqual(cfg.port, 9887)
+        self.assertEqual(cfg.max_concurrent, 4)
+        self.assertEqual(cfg.queue_timeout_s, 900)
+        self.assertEqual(cfg.timeout_s, 1800)
+        self.assertEqual(cfg.keepalive_s, 15.0)
+        self.assertEqual(cfg.first_token_timeout_s, 120.0)
+        self.assertEqual(cfg.transcript_poll_s, 0.05)
+        self.assertEqual(cfg.req_budget_s, 3600.0)
+        self.assertEqual(cfg.reserve_s, 5.5)
+        self.assertEqual(cfg.min_attempt_s, 1.0)
+        self.assertEqual(cfg.ext_max_timeout_s, 3600.0)
+        self.assertEqual(cfg.ext_idle_timeout_s, 1800.0)
+        self.assertEqual(cfg.idle_timeout_s, 300.0)
+        self.assertEqual(cfg.watchdog_interval_s, 5.0)
+        self.assertEqual(cfg.kill_term_grace_s, 2.0)
+        self.assertEqual(cfg.proc_exit_wait_s, 0.05)
+        self.assertEqual(cfg.drain_window_s, 0.35)
+        self.assertEqual(cfg.drain_poll_step_s, 0.05)
+        self.assertEqual(cfg.join_timeout_s, 0.15)
+        self.assertEqual(cfg.final_flush_s, 5.0)
+        self.assertEqual(cfg.session_max_ttl_s, 86400.0)
+        self.assertEqual(cfg.session_max_turns, 30)
+        self.assertEqual(cfg.sweep_cutoff_s, 3600.0)
+        self.assertEqual(cfg.max_content_bytes_per_turn, 8388608)
+        self.assertEqual(cfg.max_reasoning_bytes_per_turn, 2097152)
+        self.assertEqual(cfg.max_step_blob_bytes, 262144)
+        self.assertEqual(cfg.max_steps_tracked, 128)
+        self.assertEqual(cfg.max_tool_markers_per_turn, 32)
+        self.assertEqual(cfg.max_retained_divergent_bytes, 65536)
+        self.assertEqual(cfg.transcript_read_max, 4194304)
+        self.assertEqual(cfg.dynamic_config_max_bytes, 65536)
+        self.assertEqual(cfg.usage_step_cap, 16384)
+        self.assertEqual(cfg.sqlite_row_limit, 16)
+        self.assertEqual(cfg.breaker_failures, 3)
+        self.assertEqual(cfg.breaker_cooldown_s, 30.0)
+        self.assertEqual(cfg.breaker_probe_lease_s, 60.0)
+        self.assertEqual(cfg.retry_capacity_tenths, 30)
+        self.assertEqual(cfg.retry_cost_tenths, 10)
+        self.assertEqual(cfg.poll_bucket_capacity_tenths, 30)
+        self.assertEqual(cfg.poll_cost_tenths, 10)
+        self.assertTrue(cfg.liveness_gated_timeout_enabled)
+
+    def test_bridge_config_cross_field_invariants(self) -> None:
+        cfg = srv._BridgeConfig(
+            idle_timeout_s=9999.0,
+            req_budget_s=100.0,
+            reserve_s=5.5,
+            min_attempt_s=500.0,
+            retry_capacity_tenths=5,
+            retry_cost_tenths=10,
+            poll_bucket_capacity_tenths=5,
+            poll_cost_tenths=10,
+        )
+        self.assertEqual(cfg.idle_timeout_s, 94.5)
+        self.assertEqual(cfg.min_attempt_s, 94.5)
+        self.assertEqual(cfg.retry_capacity_tenths, 10)
+        self.assertEqual(cfg.poll_bucket_capacity_tenths, 10)
+
+    def test_reload_bridge_config_with_custom_env(self) -> None:
+        env = {
+            "AGY_BRIDGE_MAX_CONTENT_BYTES": "123456",
+            "AGY_BRIDGE_REQ_BUDGET_S": "7200",
+            "AGY_BRIDGE_SESSION_MAX_TURNS": "7",
+            "AGY_BRIDGE_LIVENESS_GATED_TIMEOUT_ENABLED": "0",
+        }
+        try:
+            with mock.patch.dict(os.environ, env):
+                cfg = srv.reload_bridge_config()
+                self.assertEqual(cfg.max_content_bytes_per_turn, 123456)
+                self.assertEqual(cfg.req_budget_s, 7200.0)
+                self.assertEqual(cfg.session_max_turns, 7)
+                self.assertFalse(cfg.liveness_gated_timeout_enabled)
+                self.assertEqual(srv.get_bridge_config(), cfg)
+                self.assertEqual(srv.MAX_CONTENT_BYTES_PER_TURN, 123456)
+                self.assertEqual(srv.T_REQ_BUDGET_S, 7200.0)
+                self.assertEqual(srv.SESSION_MAX_TURNS, 7)
+                self.assertFalse(srv.DEFAULT_LIVENESS_GATED_TIMEOUT_ENABLED)
+        finally:
+            restored = srv.reload_bridge_config()
+        self.assertEqual(restored.max_content_bytes_per_turn, 8388608)
+        self.assertTrue(restored.liveness_gated_timeout_enabled)
+
+    def test_operational_parameters_are_configurable(self) -> None:
+        env = {
+            "AGY_BRIDGE_MAX_STEPS": "42",
+            "AGY_BRIDGE_SQLITE_ROW_LIMIT": "7",
+            "AGY_BRIDGE_MAX_STEP_BLOB_BYTES": "4096",
+            "AGY_BRIDGE_BREAKER_FAILURES": "9",
+            "AGY_BRIDGE_WATCHDOG_INTERVAL_S": "9",
+            "AGY_BRIDGE_BASE_IDLE_TIMEOUT_S": "111",
+            "AGY_BRIDGE_MAX_CONTENT_BYTES": "0",
+        }
+        try:
+            with mock.patch.dict(os.environ, env):
+                cfg = srv.reload_bridge_config()
+                self.assertEqual(cfg.max_steps_tracked, 42)
+                self.assertEqual(cfg.sqlite_row_limit, 7)
+                self.assertEqual(cfg.max_step_blob_bytes, 4096)
+                self.assertEqual(cfg.breaker_failures, 9)
+                self.assertEqual(cfg.watchdog_interval_s, 9.0)
+                self.assertEqual(cfg.idle_timeout_s, 111.0)
+                self.assertEqual(cfg.max_content_bytes_per_turn, 268435456)
+                self.assertEqual(srv.MAX_STEPS_TRACKED, 42)
+                self.assertEqual(srv.SQLITE_ROW_LIMIT, 7)
+                self.assertEqual(srv.BREAKER_FAILURES_TO_OPEN, 9)
+                self.assertEqual(srv.WATCHDOG_INTERVAL_S, 9.0)
+                self.assertIn("LIMIT 7", srv._STEPS_SQL)
+                self.assertIn("<= 4096", srv._STEPS_SQL)
+        finally:
+            srv.reload_bridge_config()
+        # Легаси-алиас базового и расширенного idle.
+        try:
+            with mock.patch.dict(os.environ, {"AGY_BRIDGE_IDLE_TIMEOUT": "222"}):
+                os.environ.pop("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", None)
+                os.environ.pop("AGY_BRIDGE_IDLE_TIMEOUT_S", None)
+                os.environ.pop("AGY_IDLE_TIMEOUT_S", None)
+                cfg = srv.reload_bridge_config()
+                self.assertEqual(cfg.idle_timeout_s, 222.0)
+                self.assertEqual(cfg.ext_idle_timeout_s, 222.0)
+        finally:
+            srv.reload_bridge_config()

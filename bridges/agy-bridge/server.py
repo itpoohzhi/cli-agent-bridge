@@ -83,6 +83,7 @@ import bisect
 import base64
 import hashlib
 import json
+import math
 import os
 import queue
 import random
@@ -94,6 +95,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -110,7 +112,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from core.watchdog import (  # noqa: E402
     IDLE_TIMEOUT_S as _CORE_IDLE_TIMEOUT_S,
-    WATCHDOG_INTERVAL_S,
+    WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
     AdaptiveTimeoutController,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
@@ -118,7 +120,6 @@ from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
 HOST = os.environ.get("AGY_BRIDGE_HOST", "127.0.0.1")
-PORT = int(os.environ.get("AGY_BRIDGE_PORT", "9887"))
 AUTH_KEY = os.environ.get("AGY_BRIDGE_KEY", "").strip()
 LAUNCHER = os.environ.get(
     "AGY_LAUNCHER", str(HOME / ".config" / "agy-launch" / "agy-cli.sh")
@@ -126,26 +127,432 @@ LAUNCHER = os.environ.get(
 FLEET_PATH = Path(os.environ.get("AGY_BRIDGE_FLEET", "") or str(ROOT / "fleet.json"))
 ENV_MODEL = os.environ.get("AGY_BRIDGE_MODEL", "").strip()
 WORKSPACE = ROOT / "workspace"
-MAX_CONCURRENT = int(os.environ.get("AGY_BRIDGE_MAX_CONCURRENT", "4"))
-QUEUE_TIMEOUT_S = int(os.environ.get("AGY_BRIDGE_QUEUE_TIMEOUT", "900"))
-TIMEOUT_S = int(os.environ.get("AGY_BRIDGE_TIMEOUT", "1800"))
-KEEPALIVE_S = float(os.environ.get("AGY_BRIDGE_KEEPALIVE", "15"))
-# Первое событие agy приходит не мгновенно (инициализация CLI + MCP-серверов),
-# но и не через минуты; 120 с — с запасом на холодный egress.
-FIRST_TOKEN_TIMEOUT_S = float(os.environ.get("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT", "120"))
 PRINT_TIMEOUT = os.environ.get("AGY_BRIDGE_PRINT_TIMEOUT", "0")
 
 
 def _env_float(name: str, default: float, low: float, high: float) -> float:
-    """Число из окружения, зажатое в [low, high]; невалидное значение -> default."""
+    """Float из окружения; пустое/невалидное/неконечное/вне [low, high] -> default."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or not (low <= value <= high):
+        return default
+    return value
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Булев флаг окружения (1/true/yes/on, 0/false/no/off); иное значение -> default."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    """Целое из окружения, зажатое в [low, high]; невалидное значение -> default.
+
+    Семантика зажатия (clamp), а не fallback при выходе за границы, сохранена
+    как исторический контракт: существующий тест NDJSON-бюджета ожидает
+    ``1000 -> low`` и ``200000 -> high`` для ``AGY_BRIDGE_MAX_PROMPT_BYTES``.
+    """
     raw = os.environ.get(name, "").strip()
     try:
-        value = float(raw) if raw else default
+        value = int(raw) if raw else default
     except ValueError:
         value = default
-    if value != value:
-        value = default
     return min(high, max(low, value))
+
+
+def _env_int_with_zero_cap(
+    name: str, default: int, low: int, high: int, zero_cap: int
+) -> int:
+    """Целое из окружения; 0 -> zero_cap, вне [low, high]/невалидное -> default."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value == 0:
+        return zero_cap
+    if not (low <= value <= high):
+        return default
+    return value
+
+
+def _chain_float(names: tuple[str, ...], default: float, low: float, high: float) -> float:
+    """Первое заданное имя из цепочки (каноническое -> легаси); иначе default."""
+    for name in names:
+        if os.environ.get(name, "").strip():
+            return _env_float(name, default, low, high)
+    return default
+
+
+def _chain_int(names: tuple[str, ...], default: int, low: int, high: int) -> int:
+    """Первое заданное имя из цепочки (каноническое -> легаси); иначе default."""
+    for name in names:
+        if os.environ.get(name, "").strip():
+            return _env_int(name, default, low, high)
+    return default
+
+
+def _chain_bool(names: tuple[str, ...], default: bool) -> bool:
+    """Первое заданное имя из цепочки (каноническое -> легаси); иначе default."""
+    for name in names:
+        if os.environ.get(name, "").strip():
+            return _env_bool(name, default)
+    return default
+
+
+@dataclass(frozen=True)
+class _BridgeConfig:
+    """Единый снимок эксплуатационных параметров моста (ADR-0014).
+
+    Дефолты равны историческим константам; значения читаются из
+    ``AGY_BRIDGE_*`` с легаси-алиасами там, где они существовали.
+    """
+
+    port: int = 9887
+    max_concurrent: int = 4
+    queue_timeout_s: int = 900
+    timeout_s: int = 1800
+    keepalive_s: float = 15.0
+    first_token_timeout_s: float = 120.0
+    transcript_poll_s: float = 0.05
+    req_budget_s: float = 3600.0
+    reserve_s: float = 5.5
+    min_attempt_s: float = 1.0
+    ext_max_timeout_s: float = 3600.0
+    ext_idle_timeout_s: float = 1800.0
+    idle_timeout_s: float = 300.0
+    watchdog_interval_s: float = 5.0
+    kill_term_grace_s: float = 2.0
+    proc_exit_wait_s: float = 0.05
+    drain_window_s: float = 0.35
+    drain_poll_step_s: float = 0.05
+    join_timeout_s: float = 0.15
+    final_flush_s: float = 5.0
+    session_max_ttl_s: float = 86400.0
+    session_max_turns: int = 30
+    sweep_cutoff_s: float = 3600.0
+    max_content_bytes_per_turn: int = 8 * 1024 * 1024
+    max_reasoning_bytes_per_turn: int = 2 * 1024 * 1024
+    max_step_blob_bytes: int = 262144
+    max_steps_tracked: int = 128
+    max_tool_markers_per_turn: int = 32
+    max_retained_divergent_bytes: int = 65536
+    transcript_read_max: int = 4 * 1024 * 1024
+    dynamic_config_max_bytes: int = 65536
+    usage_step_cap: int = 16384
+    sqlite_row_limit: int = 16
+    breaker_failures: int = 3
+    breaker_cooldown_s: float = 30.0
+    breaker_probe_lease_s: float = 60.0
+    retry_capacity_tenths: int = 30
+    retry_credit_tenths: int = 2
+    retry_cost_tenths: int = 10
+    poll_bucket_capacity_tenths: int = 30
+    poll_bucket_refill_tenths_per_s: int = 20
+    poll_cost_tenths: int = 10
+    liveness_gated_timeout_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        cap = max(1.0, self.req_budget_s - self.reserve_s)
+        object.__setattr__(self, "idle_timeout_s", min(self.idle_timeout_s, cap))
+        object.__setattr__(self, "min_attempt_s", min(self.min_attempt_s, cap))
+        object.__setattr__(
+            self,
+            "retry_capacity_tenths",
+            max(self.retry_capacity_tenths, self.retry_cost_tenths),
+        )
+        object.__setattr__(
+            self,
+            "poll_bucket_capacity_tenths",
+            max(self.poll_bucket_capacity_tenths, self.poll_cost_tenths),
+        )
+
+    @property
+    def breaker_failures_to_open(self) -> int:
+        return self.breaker_failures
+
+    @property
+    def retry_refill_per_sec_tenths(self) -> int:
+        return self.retry_credit_tenths
+
+    @property
+    def poll_refill_per_sec_tenths(self) -> int:
+        return self.poll_bucket_refill_tenths_per_s
+
+
+def _build_bridge_config() -> _BridgeConfig:
+    """Собрать снимок конфигурации из текущего окружения."""
+    return _BridgeConfig(
+        port=_env_int("AGY_BRIDGE_PORT", 9887, 1, 65535),
+        max_concurrent=_env_int("AGY_BRIDGE_MAX_CONCURRENT", 4, 1, 128),
+        queue_timeout_s=_chain_int(
+            ("AGY_BRIDGE_QUEUE_TIMEOUT_S", "AGY_BRIDGE_QUEUE_TIMEOUT"), 900, 1, 86400
+        ),
+        timeout_s=_chain_int(
+            ("AGY_BRIDGE_TIMEOUT_S", "AGY_BRIDGE_TIMEOUT"), 1800, 1, 86400
+        ),
+        keepalive_s=_chain_float(
+            ("AGY_BRIDGE_KEEPALIVE_S", "AGY_BRIDGE_KEEPALIVE"), 15.0, 0.5, 300.0
+        ),
+        first_token_timeout_s=_chain_float(
+            ("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "AGY_BRIDGE_FIRST_TOKEN_TIMEOUT"),
+            120.0,
+            5.0,
+            3600.0,
+        ),
+        transcript_poll_s=_chain_float(
+            ("AGY_BRIDGE_TRANSCRIPT_POLL_S", "AGY_BRIDGE_TRANSCRIPT_POLL"),
+            0.05,
+            0.01,
+            10.0,
+        ),
+        req_budget_s=_env_float("AGY_BRIDGE_REQ_BUDGET_S", 3600.0, 10.0, 86400.0),
+        reserve_s=_chain_float(
+            ("AGY_BRIDGE_RESERVE_S", "AGY_BRIDGE_T_RESERVE_S"), 5.5, 0.5, 60.0
+        ),
+        min_attempt_s=_env_float("AGY_BRIDGE_MIN_ATTEMPT_S", 1.0, 0.1, 300.0),
+        ext_max_timeout_s=_chain_float(
+            ("AGY_BRIDGE_EXT_MAX_TIMEOUT_S", "AGY_TIMEOUT_S"), 3600.0, 10.0, 86400.0
+        ),
+        ext_idle_timeout_s=_chain_float(
+            ("AGY_BRIDGE_IDLE_TIMEOUT_S", "AGY_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"),
+            1800.0,
+            5.0,
+            86400.0,
+        ),
+        idle_timeout_s=_chain_float(
+            ("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"),
+            float(_CORE_IDLE_TIMEOUT_S),
+            5.0,
+            86400.0,
+        ),
+        watchdog_interval_s=_env_float(
+            "AGY_BRIDGE_WATCHDOG_INTERVAL_S",
+            float(_CORE_WATCHDOG_INTERVAL_S),
+            0.5,
+            60.0,
+        ),
+        kill_term_grace_s=_env_float("AGY_BRIDGE_KILL_TERM_GRACE_S", 2.0, 0.1, 30.0),
+        proc_exit_wait_s=_env_float("AGY_BRIDGE_PROC_EXIT_WAIT_S", 0.05, 0.01, 60.0),
+        drain_window_s=_chain_float(
+            ("AGY_BRIDGE_DRAIN_WINDOW_S", "AGY_BRIDGE_TRANSCRIPT_GRACE"),
+            0.35,
+            0.05,
+            120.0,
+        ),
+        drain_poll_step_s=_env_float("AGY_BRIDGE_DRAIN_POLL_STEP_S", 0.05, 0.01, 2.0),
+        join_timeout_s=_chain_float(
+            ("AGY_BRIDGE_JOIN_TIMEOUT_S", "AGY_BRIDGE_DRAIN_JOIN"), 0.15, 0.05, 10.0
+        ),
+        final_flush_s=_chain_float(
+            ("AGY_BRIDGE_FINAL_FLUSH_S", "AGY_BRIDGE_T_FINAL_FLUSH_S"), 5.0, 0.5, 60.0
+        ),
+        session_max_ttl_s=_env_float(
+            "AGY_BRIDGE_SESSION_MAX_TTL_S", 86400.0, 60.0, 604800.0
+        ),
+        session_max_turns=_env_int("AGY_BRIDGE_SESSION_MAX_TURNS", 30, 1, 1000),
+        sweep_cutoff_s=_env_float("AGY_BRIDGE_SWEEP_CUTOFF_S", 3600.0, 60.0, 86400.0),
+        max_content_bytes_per_turn=_env_int_with_zero_cap(
+            "AGY_BRIDGE_MAX_CONTENT_BYTES", 8388608, 1024, 268435456, 268435456
+        ),
+        max_reasoning_bytes_per_turn=_env_int_with_zero_cap(
+            "AGY_BRIDGE_MAX_REASONING_BYTES", 2097152, 1024, 67108864, 67108864
+        ),
+        max_step_blob_bytes=_env_int(
+            "AGY_BRIDGE_MAX_STEP_BLOB_BYTES", 262144, 1024, 16777216
+        ),
+        max_steps_tracked=_chain_int(
+            ("AGY_BRIDGE_MAX_STEPS", "AGY_BRIDGE_MAX_STEPS_TRACKED"), 128, 1, 4096
+        ),
+        max_tool_markers_per_turn=_env_int("AGY_BRIDGE_MAX_TOOL_MARKERS", 32, 1, 1024),
+        max_retained_divergent_bytes=_chain_int(
+            ("AGY_BRIDGE_MAX_DIVERGENT_BYTES", "AGY_BRIDGE_MAX_RETAINED_DIVERGENT_BYTES"),
+            65536,
+            1024,
+            1048576,
+        ),
+        transcript_read_max=_env_int(
+            "AGY_BRIDGE_TRANSCRIPT_READ_MAX", 4194304, 1024, 67108864
+        ),
+        dynamic_config_max_bytes=_env_int(
+            "AGY_BRIDGE_DYNAMIC_CONFIG_MAX_BYTES", 65536, 1024, 1048576
+        ),
+        usage_step_cap=_env_int("AGY_BRIDGE_USAGE_STEP_CAP", 16384, 128, 1048576),
+        sqlite_row_limit=_env_int("AGY_BRIDGE_SQLITE_ROW_LIMIT", 16, 1, 1024),
+        breaker_failures=_env_int("AGY_BRIDGE_BREAKER_FAILURES", 3, 1, 100),
+        breaker_cooldown_s=_env_float("AGY_BRIDGE_BREAKER_COOLDOWN_S", 30.0, 1.0, 3600.0),
+        breaker_probe_lease_s=_env_float(
+            "AGY_BRIDGE_BREAKER_PROBE_LEASE_S", 60.0, 1.0, 3600.0
+        ),
+        retry_capacity_tenths=_env_int("AGY_BRIDGE_RETRY_CAPACITY_TENTHS", 30, 10, 1000),
+        retry_credit_tenths=_chain_int(
+            ("AGY_BRIDGE_RETRY_REFILL_PER_SEC_TENTHS", "AGY_BRIDGE_RETRY_CREDIT_TENTHS"),
+            2,
+            1,
+            100,
+        ),
+        retry_cost_tenths=_env_int("AGY_BRIDGE_RETRY_COST_TENTHS", 10, 1, 100),
+        poll_bucket_capacity_tenths=_env_int(
+            "AGY_BRIDGE_POLL_BUCKET_CAPACITY_TENTHS", 30, 10, 1000
+        ),
+        poll_bucket_refill_tenths_per_s=_chain_int(
+            (
+                "AGY_BRIDGE_POLL_REFILL_PER_SEC_TENTHS",
+                "AGY_BRIDGE_POLL_BUCKET_REFILL_TENTHS_PER_S",
+            ),
+            20,
+            1,
+            100,
+        ),
+        poll_cost_tenths=_env_int("AGY_BRIDGE_POLL_COST_TENTHS", 10, 1, 100),
+        liveness_gated_timeout_enabled=_chain_bool(
+            ("AGY_BRIDGE_LIVENESS_GATED_TIMEOUT_ENABLED", "AGY_LIVENESS_GATED_TIMEOUT_ENABLED"),
+            True,
+        ),
+    )
+
+
+_config_lock = threading.Lock()
+_config: _BridgeConfig = _build_bridge_config()
+
+
+def get_bridge_config() -> _BridgeConfig:
+    """Текущий снимок конфигурации (неизменяемый)."""
+    with _config_lock:
+        return _config
+
+
+def _build_steps_sql(config: _BridgeConfig) -> str:
+    """SQL шагов транскрипта с лимитами из снимка конфигурации."""
+    return (
+        "SELECT idx, status, length(step_payload) AS blob_len, "
+        + "CASE WHEN length(step_payload) <= %d THEN step_payload ELSE NULL END AS step_payload "
+        + "FROM steps WHERE step_type = %d AND idx >= ? AND status IN (%d, %d) "
+        + "ORDER BY idx ASC LIMIT %d"
+    ) % (
+        config.max_step_blob_bytes,
+        STEP_TYPE_PLANNER,
+        STEP_STATUS_GENERATING,
+        STEP_STATUS_DONE,
+        config.sqlite_row_limit,
+    )
+
+
+def reload_bridge_config() -> _BridgeConfig:
+    """Перечитать окружение, обновить снимок и глобальные константы (для тестов)."""
+    global _config, _slots
+    config = _build_bridge_config()
+    with _config_lock:
+        _config = config
+    _apply_bridge_config(config)
+    return config
+
+
+def _apply_bridge_config(config: _BridgeConfig) -> None:
+    """Привязать глобальные константы модуля к снимку конфигурации."""
+    g = globals()
+    g["PORT"] = config.port
+    g["MAX_CONCURRENT"] = config.max_concurrent
+    g["QUEUE_TIMEOUT_S"] = config.queue_timeout_s
+    g["TIMEOUT_S"] = config.timeout_s
+    g["KEEPALIVE_S"] = config.keepalive_s
+    g["FIRST_TOKEN_TIMEOUT_S"] = config.first_token_timeout_s
+    g["TRANSCRIPT_POLL_S"] = config.transcript_poll_s
+    g["T_REQ_BUDGET_S"] = config.req_budget_s
+    g["T_RESERVE_S"] = config.reserve_s
+    g["T_MIN_ATTEMPT_S"] = config.min_attempt_s
+    g["EXT_MAX_TIMEOUT_S"] = config.ext_max_timeout_s
+    g["EXT_IDLE_TIMEOUT_S"] = config.ext_idle_timeout_s
+    g["IDLE_TIMEOUT_S"] = config.idle_timeout_s
+    g["WATCHDOG_INTERVAL_S"] = config.watchdog_interval_s
+    g["KILL_TERM_GRACE_S"] = config.kill_term_grace_s
+    g["PROC_EXIT_WAIT_S"] = config.proc_exit_wait_s
+    g["DRAIN_WINDOW_S"] = config.drain_window_s
+    g["DRAIN_POLL_STEP_S"] = config.drain_poll_step_s
+    g["JOIN_TIMEOUT_S"] = config.join_timeout_s
+    g["T_FINAL_FLUSH_S"] = config.final_flush_s
+    g["SESSION_MAX_TTL_S"] = config.session_max_ttl_s
+    g["SESSION_MAX_TURNS"] = config.session_max_turns
+    g["SWEEP_CUTOFF_S"] = config.sweep_cutoff_s
+    g["MAX_CONTENT_BYTES_PER_TURN"] = config.max_content_bytes_per_turn
+    g["MAX_CONTENT_STEPS"] = config.max_steps_tracked
+    g["MAX_REASONING_BYTES_PER_TURN"] = config.max_reasoning_bytes_per_turn
+    g["MAX_STEP_BLOB_BYTES"] = config.max_step_blob_bytes
+    g["MAX_STEPS_TRACKED"] = config.max_steps_tracked
+    g["MAX_TOOL_MARKERS_PER_TURN"] = config.max_tool_markers_per_turn
+    g["MAX_RETAINED_DIVERGENT_BYTES"] = config.max_retained_divergent_bytes
+    g["TRANSCRIPT_READ_MAX"] = config.transcript_read_max
+    g["DYNAMIC_CONFIG_MAX_BYTES"] = config.dynamic_config_max_bytes
+    g["USAGE_STEP_CAP"] = config.usage_step_cap
+    g["SQLITE_ROW_LIMIT"] = config.sqlite_row_limit
+    g["BREAKER_FAILURES_TO_OPEN"] = config.breaker_failures
+    g["BREAKER_COOLDOWN_S"] = config.breaker_cooldown_s
+    g["BREAKER_PROBE_LEASE_S"] = config.breaker_probe_lease_s
+    g["RETRY_CAPACITY_TENTHS"] = config.retry_capacity_tenths
+    g["RETRY_CREDIT_TENTHS"] = config.retry_credit_tenths
+    g["RETRY_REFILL_PER_SEC_TENTHS"] = config.retry_refill_per_sec_tenths
+    g["RETRY_COST_TENTHS"] = config.retry_cost_tenths
+    g["POLL_BUCKET_CAPACITY_TENTHS"] = config.poll_bucket_capacity_tenths
+    g["POLL_BUCKET_REFILL_TENTHS_PER_S"] = config.poll_bucket_refill_tenths_per_s
+    g["POLL_REFILL_PER_SEC_TENTHS"] = config.poll_refill_per_sec_tenths
+    g["POLL_BUCKET_COST_TENTHS"] = config.poll_cost_tenths
+    g["DEFAULT_LIVENESS_GATED_TIMEOUT_ENABLED"] = config.liveness_gated_timeout_enabled
+    # STEP_TYPE_*/STEP_STATUS_* определены ниже; SQL пересобирается, когда они есть.
+    if "STEP_TYPE_PLANNER" in g:
+        g["_STEPS_SQL"] = _build_steps_sql(config)
+    if "_slots" in g:
+        g["_slots"] = threading.BoundedSemaphore(config.max_concurrent)
+
+
+_apply_bridge_config(_config)
+
+# Явные привязки для статического анализа; reload обновляет их через globals().
+PORT = _config.port
+MAX_CONCURRENT = _config.max_concurrent
+QUEUE_TIMEOUT_S = _config.queue_timeout_s
+TIMEOUT_S = _config.timeout_s
+KEEPALIVE_S = _config.keepalive_s
+FIRST_TOKEN_TIMEOUT_S = _config.first_token_timeout_s
+
+
+# ADR-0008: kill-switch'и защиты истории, персистентности сессий и повтора на 502/503.
+AGY_BRIDGE_ENABLE_HEAD_PRUNING = _env_bool("AGY_BRIDGE_ENABLE_HEAD_PRUNING", True)
+AGY_BRIDGE_ENABLE_SESSION_PERSISTENCE = _env_bool(
+    "AGY_BRIDGE_ENABLE_SESSION_PERSISTENCE", True
+)
+AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY = _env_bool(
+    "AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY", True
+)
+# Потолок строки NDJSON на stdin agy (байты UTF-8). agy молча режет хвост входа
+# около 133 КБ, поэтому верхняя граница жёстко 96 КиБ; ниже 16 КиБ не опускаем.
+PROMPT_MAX_NDJSON_BYTES_LOW = 16384
+PROMPT_MAX_NDJSON_BYTES_HIGH = 98304
+PROMPT_MAX_NDJSON_BYTES = _env_int(
+    "AGY_BRIDGE_MAX_PROMPT_BYTES",
+    PROMPT_MAX_NDJSON_BYTES_HIGH,
+    PROMPT_MAX_NDJSON_BYTES_LOW,
+    PROMPT_MAX_NDJSON_BYTES_HIGH,
+)
+# Минимум головы и хвоста якорного блока при пропорциональном сжатии (байты).
+PRUNE_EDGE_MIN_BYTES = _env_int("AGY_BRIDGE_PRUNE_EDGE_MIN_BYTES", 512, 512, 8192)
+HISTORY_PRUNED_MARKER = (
+    "[ранняя история диалога опущена мостом для соблюдения лимита контекста]"
+)
+MIDDLE_PRUNED_MARKER = (
+    "\n[... часть содержимого сообщения опущена мостом для соблюдения лимита"
+    " контекста agy ...]\n"
+)
 
 
 # Мышление шагов agy: CLI кладёт его в транскрипт разговора пошагово, в середине
@@ -156,8 +563,8 @@ BRAIN_DIR = Path(
 )
 TRANSCRIPT_NAME = "transcript_full.jsonl"
 TRANSCRIPT_FALLBACK_NAME = "transcript.jsonl"
-TRANSCRIPT_POLL_S = float(os.environ.get("AGY_BRIDGE_TRANSCRIPT_POLL", "0.05"))
-TRANSCRIPT_READ_MAX = 4 * 1024 * 1024
+TRANSCRIPT_POLL_S = get_bridge_config().transcript_poll_s
+TRANSCRIPT_READ_MAX = get_bridge_config().transcript_read_max
 
 # Живой источник мышления: SQLite-база разговора agy (таблица `steps`, шаг
 # планировщика `step_type=15`, подполе 20.3 `step_payload` растёт в `status=8`).
@@ -178,16 +585,16 @@ FLAG_TTL_S = 1.0
 # Процесс вышел: окно финального дренирования источников мышления. Env
 # AGY_BRIDGE_TRANSCRIPT_GRACE задаёт само окно, граница DRAIN_MAX_S жёсткая.
 DRAIN_MAX_S = 0.50
-DRAIN_WINDOW_S = _env_float("AGY_BRIDGE_TRANSCRIPT_GRACE", 0.35, 0.20, DRAIN_MAX_S)
+DRAIN_WINDOW_S = get_bridge_config().drain_window_s
 DRAIN_MIN_S = min(_env_float("AGY_BRIDGE_DRAIN_MIN", 0.15, 0.05, 0.25), DRAIN_WINDOW_S)
-DRAIN_POLL_STEP_S = 0.05
-JOIN_TIMEOUT_S = _env_float("AGY_BRIDGE_DRAIN_JOIN", 0.15, 0.05, 0.20)
-PROC_EXIT_WAIT_S = 0.05
+DRAIN_POLL_STEP_S = get_bridge_config().drain_poll_step_s
+JOIN_TIMEOUT_S = get_bridge_config().join_timeout_s
+PROC_EXIT_WAIT_S = get_bridge_config().proc_exit_wait_s
 # Потолки памяти и работы одной итерации опроса.
-MAX_REASONING_BYTES_PER_TURN = 2 * 1024 * 1024
-MAX_STEP_BLOB_BYTES = 262144
-MAX_STEPS_TRACKED = 128
-SQLITE_ROW_LIMIT = 16
+MAX_REASONING_BYTES_PER_TURN = get_bridge_config().max_reasoning_bytes_per_turn
+MAX_STEP_BLOB_BYTES = get_bridge_config().max_step_blob_bytes
+MAX_STEPS_TRACKED = get_bridge_config().max_steps_tracked
+SQLITE_ROW_LIMIT = get_bridge_config().sqlite_row_limit
 # Константы схемы привязаны к agy 1.4.9 и подтверждаются canary.
 STEP_TYPE_PLANNER = 15
 STEP_STATUS_GENERATING = 8
@@ -196,31 +603,33 @@ STEP_STATUS_DONE = 3
 _CID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
 _STEP_INDEX_RE = re.compile(rb'"step_index"\s*:\s*(\d+)')
 # Процессные guardrails (AD-005): breaker, бюджеты, окно проб.
-BREAKER_FAILURES_TO_OPEN = 3
-BREAKER_COOLDOWN_S = 30.0
-BREAKER_PROBE_LEASE_S = 60.0
-RETRY_CAPACITY_TENTHS = 30
-RETRY_CREDIT_TENTHS = 2
-RETRY_COST_TENTHS = 10
-POLL_BUCKET_CAPACITY_TENTHS = 30
-POLL_BUCKET_REFILL_TENTHS_PER_S = 20
-POLL_BUCKET_COST_TENTHS = 10
+BREAKER_FAILURES_TO_OPEN = get_bridge_config().breaker_failures
+BREAKER_COOLDOWN_S = get_bridge_config().breaker_cooldown_s
+BREAKER_PROBE_LEASE_S = get_bridge_config().breaker_probe_lease_s
+RETRY_CAPACITY_TENTHS = get_bridge_config().retry_capacity_tenths
+RETRY_CREDIT_TENTHS = get_bridge_config().retry_credit_tenths
+RETRY_REFILL_PER_SEC_TENTHS = get_bridge_config().retry_refill_per_sec_tenths
+RETRY_COST_TENTHS = get_bridge_config().retry_cost_tenths
+POLL_BUCKET_CAPACITY_TENTHS = get_bridge_config().poll_bucket_capacity_tenths
+POLL_BUCKET_REFILL_TENTHS_PER_S = get_bridge_config().poll_bucket_refill_tenths_per_s
+POLL_REFILL_PER_SEC_TENTHS = get_bridge_config().poll_refill_per_sec_tenths
+POLL_BUCKET_COST_TENTHS = get_bridge_config().poll_cost_tenths
 RETRY_PAUSE_CAP_S = 2.0
 # Сквозные бюджеты запроса (AD-003/AD-004). Резерв 5.5 с = drain 0.5 + финальный flush 5.0.
-T_REQ_BUDGET_S = 3600.0
+T_REQ_BUDGET_S = get_bridge_config().req_budget_s
 T_DRAIN_MAX_S = 0.5
-T_FINAL_FLUSH_S = 5.0
-T_RESERVE_S = T_DRAIN_MAX_S + T_FINAL_FLUSH_S
-T_MIN_ATTEMPT_S = 1.0
+T_FINAL_FLUSH_S = get_bridge_config().final_flush_s
+T_RESERVE_S = get_bridge_config().reserve_s
+T_MIN_ATTEMPT_S = get_bridge_config().min_attempt_s
 # Настроенные idle/max при extended_timeout_enabled (AD-003): idle 1800 с, потолок 3600 с.
-EXT_IDLE_TIMEOUT_S = 1800.0
-EXT_MAX_TIMEOUT_S = 3600.0
+EXT_IDLE_TIMEOUT_S = get_bridge_config().ext_idle_timeout_s
+EXT_MAX_TIMEOUT_S = get_bridge_config().ext_max_timeout_s
 # Границы арбитра planner-контента одного хода (AD-001).
 MAX_CONTENT_STEPS = MAX_STEPS_TRACKED
-MAX_CONTENT_BYTES_PER_TURN = 8 * 1024 * 1024
-MAX_TOOL_MARKERS_PER_TURN = 32
+MAX_CONTENT_BYTES_PER_TURN = get_bridge_config().max_content_bytes_per_turn
+MAX_TOOL_MARKERS_PER_TURN = get_bridge_config().max_tool_markers_per_turn
 # Расходящийся (непрефиксный) planner-текст удерживается для graceful-хвоста до 64 КиБ.
-MAX_RETAINED_DIVERGENT_BYTES = 65536
+MAX_RETAINED_DIVERGENT_BYTES = get_bridge_config().max_retained_divergent_bytes
 # Закрытый список имён нативных инструментов для маркера прогресса (AD-002).
 TOOL_NAME_ALLOWLIST = frozenset(
     {
@@ -288,16 +697,17 @@ _EXT = {
     "image/webp": "webp",
 }
 SHA_CHUNK_BYTES = 1024 * 1024
-DYNAMIC_CONFIG_MAX_BYTES = 65536
+DYNAMIC_CONFIG_MAX_BYTES = get_bridge_config().dynamic_config_max_bytes
 SWEEP_INTERVAL_S = 600.0
+SWEEP_CUTOFF_S = get_bridge_config().sweep_cutoff_s
 
 CWD_MAX_LEN = 4096
 
 # Ленивые горячие сессии: следующий запрос с тем же (модель, cwd, effort) продолжает
 # разговор agy через --conversation и шлёт только новые сообщения, а не всю историю.
 SESSION_IDLE_TTL_S = 45 * 60.0
-SESSION_MAX_TTL_S = 24 * 3600.0
-SESSION_MAX_TURNS = 30
+SESSION_MAX_TTL_S = get_bridge_config().session_max_ttl_s
+SESSION_MAX_TURNS = get_bridge_config().session_max_turns
 
 _started = time.time()
 _active: dict = {}
@@ -306,8 +716,16 @@ _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 _budget = None
 _last_ok = [0.0]
 _session_store_lock = threading.Lock()
-_session_store: dict[tuple[str, str, str], dict[str, Any]] = {}
+# Ключ: (model, cwd, effort) либо (chat_token, model, cwd, effort) при x-dsh-chat-id.
+_session_store: dict[tuple[str, ...], dict[str, Any]] = {}
 _in_flight_cids: set[str] = set()
+# Персистентность стора (ADR-0008): порядок замков строго файл -> память; I/O
+# выполняется только под файловым замком. Запись включает загрузка в main():
+# импорт модуля (тесты, утилиты) не трогает sessions.json живого моста.
+_sessions_file_lock = threading.Lock()
+_sessions_persist_ready = False
+SESSIONS_FILE_ENV = "AGY_BRIDGE_SESSIONS_FILE"
+SESSIONS_FILE_VERSION = 1
 # Владение разговором: cid -> turn_id активного хода (под _session_store_lock).
 # Два живых хода никогда не читают один <cid>.db и не делят один cid.
 _active_cid_owners: dict[str, str] = {}
@@ -627,9 +1045,10 @@ def _err_summary(err: Any, limit: int = 200) -> str:
 
 
 # Порог неактивности хода (без протокольных событий и без прироста CPU/потомков группы).
-IDLE_TIMEOUT_S = _idle_timeout_from_env()
+IDLE_TIMEOUT_S = get_bridge_config().idle_timeout_s
+WATCHDOG_INTERVAL_S = get_bridge_config().watchdog_interval_s
 # Зачистка группы: сколько ждать после SIGTERM и сколько — reap лидера после SIGKILL.
-KILL_TERM_GRACE_S = 2.0
+KILL_TERM_GRACE_S = get_bridge_config().kill_term_grace_s
 KILL_WAIT_S = 5.0
 # После result ERROR процесс обязан выйти сам: сколько ждать done, прежде чем сдаться.
 RESULT_EXIT_GRACE_S = 5.0
@@ -1526,20 +1945,188 @@ def _messages_to_prompt(
     инструменты, а не инструменты DSH (см. README, раздел «Инструменты»).
     Image-части получают сквозные маркеры `[image N]` (нумерация с `img_start + 1`),
     а `images` описываются блоком `[attachments]` с абсолютными путями файлов.
+    Промпт сверх `PROMPT_MAX_NDJSON_BYTES` проходит head-pruning (ADR-0008).
     """
     counter = [0]
     img_counter = [img_start]
-    blocks: list[str] = []
-    for msg in messages:
+    blocks: list[tuple[int, str, str]] = []
+    for index, msg in enumerate(messages):
         rendered = _render_message(msg, counter, img_counter)
         if rendered:
-            blocks.append(rendered)
-    if images:
-        blocks.append(_attachments_block(images))
-    text = "\n\n".join(blocks).strip()
+            role = str(msg.get("role") or "user") if isinstance(msg, dict) else ""
+            blocks.append((index, role, rendered))
+    tail_block = _attachments_block(images) if images else ""
+    text = _join_prompt_parts([b[2] for b in blocks], tail_block)
     if not text:
-        text = "Reply with exactly: PONG"
+        return "Reply with exactly: PONG"
+    limit = PROMPT_MAX_NDJSON_BYTES
+    if not AGY_BRIDGE_ENABLE_HEAD_PRUNING or _ndjson_bytes(text) <= limit:
+        return text
+    return _prune_prompt_blocks(blocks, tail_block, limit)
+
+
+def _join_prompt_parts(parts: list[str], tail_block: str = "") -> str:
+    joined = list(parts)
+    if tail_block:
+        joined.append(tail_block)
+    return "\n\n".join(joined).strip()
+
+
+def _prune_prompt_blocks(
+    blocks: list[tuple[int, str, str]], tail_block: str, limit: int
+) -> str:
+    """Head-pruning структурированной истории под потолок NDJSON (ADR-0008, REQ-01).
+
+    Якоря не отбрасываются: системное `messages[0]`, последний блок истории
+    с предшествующим ответом ассистента, последний блок `user` с ответом
+    ассистента перед ним (даже за хвостом `assistant(tool_calls)`/`tool`) и
+    `[attachments]`. Промежуточные блоки уходят от старых к новым; на месте
+    каждого отброшенного отрезка — маркерное сообщение. Если не влезают даже
+    якоря, середины крупных блоков вырезаются пропорционально их излишку с
+    явным маркером; голова и хвост каждого — не короче PRUNE_EDGE_MIN_BYTES.
+    """
+    count = len(blocks)
+    anchors: set[int] = set()
+    if count and blocks[0][0] == 0 and blocks[0][1] == "system":
+        anchors.add(0)
+    if count:
+        last = count - 1
+        anchors.add(last)
+        for i in range(last - 1, -1, -1):
+            if i not in anchors and blocks[i][1] == "assistant":
+                anchors.add(i)
+                break
+        last_user_idx = next(
+            (i for i in range(last, -1, -1) if blocks[i][1] == "user"), -1
+        )
+        if last_user_idx >= 0:
+            anchors.add(last_user_idx)
+            preceding_assistant_idx = next(
+                (
+                    i
+                    for i in range(last_user_idx - 1, -1, -1)
+                    if blocks[i][1] == "assistant"
+                ),
+                -1,
+            )
+            if preceding_assistant_idx >= 0:
+                anchors.add(preceding_assistant_idx)
+    droppable = [i for i in range(count) if i not in anchors]
+    marker_block = "### user\n" + HISTORY_PRUNED_MARKER
+
+    def assemble(drop_count: int) -> list[str]:
+        dropped = set(droppable[:drop_count])
+        parts: list[str] = []
+        in_gap = False
+        for i, block in enumerate(blocks):
+            if i in dropped:
+                if not in_gap:
+                    parts.append(marker_block)
+                    in_gap = True
+                continue
+            in_gap = False
+            parts.append(block[2])
+        return parts
+
+    # Минимальное число отброшенных блоков: размер монотонно убывает с ростом числа.
+    low, high = 1, len(droppable)
+    if high and _ndjson_bytes(_join_prompt_parts(assemble(high), tail_block)) <= limit:
+        while low < high:
+            mid = (low + high) // 2
+            if _ndjson_bytes(_join_prompt_parts(assemble(mid), tail_block)) <= limit:
+                high = mid
+            else:
+                low = mid + 1
+        dropped_count = high
+        text = _join_prompt_parts(assemble(high), tail_block)
+    else:
+        dropped_count = len(droppable)
+        parts = assemble(dropped_count)
+        if tail_block:
+            parts.append(tail_block)
+        # Излишек делится между крупными блоками пропорционально их запасу
+        # сверх пола (голова + маркер + хвост): ни один блок не зануляется.
+        floor = 2 * PRUNE_EDGE_MIN_BYTES + _json_text_bytes(MIDDLE_PRUNED_MARKER)
+        for _round in range(len(parts) + 1):
+            excess = _ndjson_bytes(_join_prompt_parts(parts)) - limit
+            if excess <= 0:
+                break
+            sizes = [_json_text_bytes(part) for part in parts]
+            spare = [max(size - floor, 0) for size in sizes]
+            pool = sum(spare)
+            if not pool:
+                break
+            changed = False
+            for i, room in enumerate(spare):
+                if not room:
+                    continue
+                cut = min(room, -(-excess * room // pool))
+                pruned = _middle_prune_text(parts[i], sizes[i] - cut)
+                if pruned != parts[i]:
+                    parts[i] = pruned
+                    changed = True
+            if not changed:
+                break
+        text = _ensure_prompt_fits_ndjson(_join_prompt_parts(parts), limit)
+    final_bytes = _ndjson_bytes(text)
+    _log(
+        f"history pruned: dropped {dropped_count} messages, "
+        f"final ndjson bytes={final_bytes}"
+    )
     return text
+
+
+def _json_text_bytes(text: str) -> int:
+    """Байты UTF-8 строки после JSON-экранирования, без обрамляющих кавычек."""
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
+
+
+def _middle_prune_text(text: str, max_text_bytes: int) -> str:
+    """Вырезать середину `text` с MIDDLE_PRUNED_MARKER под экранированный бюджет.
+
+    Голова (командная директива) и хвост (аргументы) делятся поровну по символам;
+    результат — наибольший, чей JSON-экранированный размер <= `max_text_bytes`.
+    """
+    if _json_text_bytes(text) <= max_text_bytes:
+        return text
+    if _json_text_bytes(MIDDLE_PRUNED_MARKER) > max_text_bytes:
+        low, high = 0, len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if _json_text_bytes(text[:mid]) <= max_text_bytes:
+                low = mid
+            else:
+                high = mid - 1
+        return text[:low]
+
+    def build(keep: int) -> str:
+        head = (keep + 1) // 2
+        tail = keep // 2
+        return text[:head] + MIDDLE_PRUNED_MARKER + (text[-tail:] if tail else "")
+
+    low, high = 0, len(text) - 1
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _json_text_bytes(build(mid)) <= max_text_bytes:
+            low = mid
+        else:
+            high = mid - 1
+    return build(low)
+
+
+def _ensure_prompt_fits_ndjson(prompt: str, max_bytes: int | None = None) -> str:
+    """Защитный рубеж: строка NDJSON промпта не длиннее `max_bytes` байт UTF-8.
+
+    agy молча режет хвост длинного входа, поэтому при превышении вырезается
+    середина промпта (голова и хвост с последним вводом сохраняются).
+    """
+    limit = PROMPT_MAX_NDJSON_BYTES if max_bytes is None else max_bytes
+    size = _ndjson_bytes(prompt)
+    if size <= limit:
+        return prompt
+    pruned = _middle_prune_text(prompt, limit - _ndjson_bytes(""))
+    _log(f"prompt middle-pruned: ndjson bytes {size} -> {_ndjson_bytes(pruned)}")
+    return pruned
 
 
 def _get_resumed_turn_prompt(
@@ -1571,6 +2158,32 @@ def _get_resumed_turn_prompt(
     return _messages_to_prompt(messages, images)
 
 
+def _session_key_for(
+    model: str, cwd: str, effort: str, raw_chat_id: str = ""
+) -> tuple[str, ...]:
+    """Ключ горячей сессии: 4-кортеж с токеном чата при chat id, иначе 3-кортеж.
+
+    Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
+    """
+    chat = raw_chat_id.strip()
+    if not chat:
+        return (model, cwd, effort)
+    chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
+    return (chat_token, model, cwd, effort)
+
+
+def _request_chat_id(headers: Any, extra: dict) -> str:
+    """Идентификатор чата клиента: x-dsh-chat-id, x-session-id или extra_body.chat_id."""
+    for value in (
+        headers.get("x-dsh-chat-id"),
+        headers.get("x-session-id"),
+        extra.get("chat_id"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _session_claim(sess_key: tuple, turn_id: str = "") -> str:
     """Найти живую свободную сессию и занять её; '' — сессии нет.
 
@@ -1579,34 +2192,48 @@ def _session_claim(sess_key: tuple, turn_id: str = "") -> str:
     регистрируется в `_active_cid_owners` в той же критической секции.
     """
     now = time.time()
-    with _session_store_lock:
-        entry = _session_store.get(sess_key)
-        if entry is None:
-            return ""
-        if (
-            now - entry["last_used"] > SESSION_IDLE_TTL_S
-            or now - entry["created"] > SESSION_MAX_TTL_S
-            or entry["turns"] >= SESSION_MAX_TURNS
-        ):
-            _session_store.pop(sess_key, None)
-            return ""
-        cid = cast(str, entry["cid"])
-        if cid in _in_flight_cids:
-            return ""
-        owner = _active_cid_owners.get(cid)
-        if owner is not None and owner != turn_id:
-            return ""
-        _in_flight_cids.add(cid)
-        if turn_id:
-            _active_cid_owners[cid] = turn_id
-        return cid
+    evicted = False
+    try:
+        with _session_store_lock:
+            entry = _session_store.get(sess_key)
+            if entry is None:
+                return ""
+            if _session_expired(entry, now):
+                _session_store.pop(sess_key, None)
+                evicted = True
+                return ""
+            cid = cast(str, entry["cid"])
+            if cid in _in_flight_cids:
+                return ""
+            owner = _active_cid_owners.get(cid)
+            if owner is not None and owner != turn_id:
+                return ""
+            _in_flight_cids.add(cid)
+            if turn_id:
+                _active_cid_owners[cid] = turn_id
+            return cid
+    finally:
+        if evicted:
+            _persist_sessions()
+
+
+def _session_expired(entry: dict[str, Any], now: float) -> bool:
+    return (
+        now - entry["last_used"] > SESSION_IDLE_TTL_S
+        or now - entry["created"] > SESSION_MAX_TTL_S
+        or entry["turns"] >= SESSION_MAX_TURNS
+    )
 
 
 def _session_invalidate(sess_key: tuple, cid: str) -> None:
+    removed = False
     with _session_store_lock:
         entry = _session_store.get(sess_key)
         if entry is not None and entry["cid"] == cid:
             _session_store.pop(sess_key, None)
+            removed = True
+    if removed:
+        _persist_sessions()
 
 
 def _session_commit(sess_key: tuple, cid: str) -> None:
@@ -1623,6 +2250,179 @@ def _session_commit(sess_key: tuple, cid: str) -> None:
                 "created": now,
                 "turns": 1,
             }
+    _persist_sessions()
+
+
+def _sessions_file_path() -> Path:
+    override = os.environ.get(SESSIONS_FILE_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(WORKSPACE) / "state" / "sessions.json"
+
+
+def _session_key_to_json(key: tuple) -> list[str]:
+    parts = [str(part) for part in key]
+    return [""] + parts if len(parts) == 3 else parts
+
+
+def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
+    """Пустой chat_token -> 3-кортеж (model, cwd, effort), иначе 4-кортеж."""
+    if not isinstance(raw, list) or len(raw) != 4:
+        return None
+    items = cast("list[object]", raw)
+    if not all(isinstance(part, str) for part in items):
+        return None
+    parts = cast("list[str]", items)
+    return tuple(parts[1:]) if parts[0] == "" else tuple(parts)
+
+
+def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
+    """Проверенная живая запись стора из JSON; битая или протухшая -> None."""
+    if not isinstance(item, dict):
+        return None
+    data = cast("dict[str, object]", item)
+    cid = data.get("cid")
+    if not isinstance(cid, str) or _CID_RE.fullmatch(cid) is None:
+        return None
+    stamps: list[float] = []
+    for name in ("created", "last_used"):
+        value = data.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(value):
+            return None
+        stamps.append(float(value))
+    turns = data.get("turns")
+    if isinstance(turns, bool) or not isinstance(turns, int) or turns < 0:
+        return None
+    entry: dict[str, Any] = {
+        "cid": cid,
+        "created": stamps[0],
+        "last_used": stamps[1],
+        "turns": turns,
+    }
+    if _session_expired(entry, now):
+        return None
+    return entry
+
+
+def _atomic_write_sessions_json(snapshot: dict[tuple[str, ...], dict[str, Any]]) -> None:
+    """Атомарно записать снимок стора: temp в том же каталоге + fsync + os.replace.
+
+    Файл 0600, каталог 0700. Ошибка I/O только логируется (fail-open): горячие
+    сессии в памяти продолжают работать.
+    """
+    path = _sessions_file_path()
+    payload = {
+        "version": SESSIONS_FILE_VERSION,
+        "sessions": [
+            {
+                "key": _session_key_to_json(key),
+                "cid": entry["cid"],
+                "created": entry["created"],
+                "last_used": entry["last_used"],
+                "turns": entry["turns"],
+            }
+            for key, entry in snapshot.items()
+        ],
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    tmp_name = ""
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=str(path.parent), prefix=".sessions-", suffix=".tmp", delete=False
+        ) as fh:
+            tmp_name = fh.name
+            _ = fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, str(path))
+        tmp_name = ""
+    except OSError as exc:
+        _log(f"sessions-persist-error err={type(exc).__name__}")
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+
+def _persist_sessions() -> None:
+    """Снимок стора на диск: замок файла -> копия под замком памяти -> I/O без него."""
+    if not (AGY_BRIDGE_ENABLE_SESSION_PERSISTENCE and _sessions_persist_ready):
+        return
+    with _sessions_file_lock:
+        with _session_store_lock:
+            snapshot = {key: dict(entry) for key, entry in _session_store.items()}
+        _atomic_write_sessions_json(snapshot)
+
+
+def _load_persisted_sessions(now: float | None = None) -> int:
+    """Восстановить горячие сессии из sessions.json и включить запись на диск.
+
+    Битый файл не мешает старту (fail-open); протухшие по TTL/turns записи
+    отбрасываются, файл переписывается актуальным снимком. Возвращает число
+    восстановленных сессий.
+    """
+    global _sessions_persist_ready
+    if not AGY_BRIDGE_ENABLE_SESSION_PERSISTENCE:
+        return 0
+    moment = time.time() if now is None else now
+    path = _sessions_file_path()
+    restored: dict[tuple[str, ...], dict[str, Any]] = {}
+    with _sessions_file_lock:
+        data: object = None
+        try:
+            data = json.loads(path.read_bytes())
+        except FileNotFoundError:
+            data = None
+        except (OSError, ValueError) as exc:
+            _log(f"sessions-load-error err={type(exc).__name__} (fail-open)")
+        items: object = None
+        if isinstance(data, dict):
+            doc = cast("dict[str, object]", data)
+            if doc.get("version") == SESSIONS_FILE_VERSION:
+                items = doc.get("sessions")
+        if isinstance(items, list):
+            for item in cast("list[object]", items):
+                if not isinstance(item, dict):
+                    continue
+                key = _session_key_from_json(cast("dict[str, object]", item).get("key"))
+                entry = _session_entry_from_json(item, moment)
+                if key is not None and entry is not None:
+                    restored[key] = entry
+        with _session_store_lock:
+            for key, entry in restored.items():
+                _ = _session_store.setdefault(key, entry)
+        _sessions_persist_ready = True
+    _persist_sessions()
+    _log(f"sessions restored={len(restored)} path={path}")
+    return len(restored)
+
+
+# Только явные HTTP-статусы 502/503 и сетевой сброс: свободный текст модели
+# («Bad Gateway is a term», «timed out») транзиентным сбоем не считается.
+_TRANSIENT_UPSTREAM_RE = re.compile(
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?|status|code)\s*[:=]?\s*50[23]\b"
+    r"|\b502 Server Error\b|\b503 Service Unavailable\b|\bConnectionResetError\b",
+    re.IGNORECASE,
+)
+
+
+def _is_transient_upstream_error(err: object) -> bool:
+    """Внешний сбой upstream: явный HTTP 502/503 или ConnectionResetError."""
+    if not err:
+        return False
+    text = err if isinstance(err, str) else str(err)
+    return _TRANSIENT_UPSTREAM_RE.search(text) is not None
+
+
+def _ndjson_bytes(prompt: str) -> int:
+    """Размер строки NDJSON для stdin agy в байтах UTF-8 (с переводом строки)."""
+    return len(_ndjson_user_line(prompt).encode("utf-8"))
 
 
 def _ndjson_user_line(prompt: str) -> str:
@@ -2560,18 +3360,7 @@ class _StepState:
         self.canary_done: bool = False
 
 
-_STEPS_SQL = (
-    "SELECT idx, status, length(step_payload) AS blob_len, "
-    + "CASE WHEN length(step_payload) <= %d THEN step_payload ELSE NULL END AS step_payload "
-    + "FROM steps WHERE step_type = %d AND idx >= ? AND status IN (%d, %d) "
-    + "ORDER BY idx ASC LIMIT %d"
-) % (
-    MAX_STEP_BLOB_BYTES,
-    STEP_TYPE_PLANNER,
-    STEP_STATUS_GENERATING,
-    STEP_STATUS_DONE,
-    SQLITE_ROW_LIMIT,
-)
+_STEPS_SQL = _build_steps_sql(get_bridge_config())
 
 
 @final
@@ -2927,7 +3716,7 @@ class _ToolProgress:
 # ---- Step-scoped usage (step_scoped_usage_enabled): счётчики шагов хода из транскрипта --
 # Потолок числа различных step_index на попытку (N_entities_max): один словарь служит и
 # дедупликацией, и ledger; отдельный потолок мышления MAX_STEPS_TRACKED=128 не затронут.
-USAGE_STEP_CAP = 16384
+USAGE_STEP_CAP = get_bridge_config().usage_step_cap
 
 
 def _count_or_none(value: object) -> int | None:
@@ -3724,6 +4513,8 @@ class Run:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         work_dir = cwd if (cwd and os.path.isdir(cwd)) else str(WORKSPACE)
         self.work_dir = work_dir
+        if AGY_BRIDGE_ENABLE_HEAD_PRUNING:
+            prompt = _ensure_prompt_fits_ndjson(prompt)
         self.stdin_line = _ndjson_user_line(prompt)
         cmd = [
             launcher,
@@ -5126,6 +5917,28 @@ class Handler(BaseHTTPRequestHandler):
                         _log(f"media-degradation-reserve state={out['state']} {tag}")
                     time.sleep(_retry_pause_s(attempt))
                     continue
+                if (
+                    ctx.get("hot_resumed")
+                    and AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY
+                    and out["state"] in ("agy_error", "pump_error")
+                    and not delivered
+                    and _is_transient_upstream_error(out.get("err"))
+                ):
+                    # Сбой upstream (502/503/сеть), а не разговора: сессия не
+                    # инвалидируется, lease cid остаётся в _in_flight_cids до finally
+                    # HTTP-хендлера, повтор идёт в тот же conversation_id.
+                    if attempt == 2 or not _retry_take():
+                        if attempt != 2:
+                            _log(f"retry-budget-exhausted state={out['state']} {tag}")
+                        # Повторы исчерпаны: сломанная сессия не достаётся следующим ходам.
+                        _session_invalidate(ctx["sess_key"], ctx["conversation_id"])
+                        break
+                    _log(
+                        f"transient upstream err={_err_summary(out.get('err'), 120)!r}, "
+                        f"hot retry same cid={str(ctx['conversation_id'])[:8]} {tag}"
+                    )
+                    time.sleep(_retry_pause_s(attempt))
+                    continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
                     # Горячая сессия сломалась: больше её не используем, а повтор
                     # идёт холодным вызовом с полной историей.
@@ -5601,8 +6414,13 @@ class Handler(BaseHTTPRequestHandler):
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
             use_session_store = tools_count > 0
-            sess_key: tuple[str, str, str] | None = (
-                (cast(str, model_id), cwd, cast(str, effort))
+            sess_key: tuple[str, ...] | None = (
+                _session_key_for(
+                    cast(str, model_id),
+                    cwd,
+                    cast(str, effort),
+                    _request_chat_id(self.headers, cast(dict, extra)),
+                )
                 if use_session_store
                 else None
             )
@@ -6000,7 +6818,7 @@ class Server(ThreadingHTTPServer):
             self._conn_sem.release()
 
 
-def _sweep_workspace(cutoff_s: float = 3600.0) -> int:
+def _sweep_workspace(cutoff_s: float = SWEEP_CUTOFF_S) -> int:
     """Удалить каталоги ходов run-*/img-* старше cutoff_s (наследие упавших ходов).
 
     Симлинки не разыменовываются и не удаляются; каталоги из `_active_img_dirs`
@@ -6051,6 +6869,7 @@ def main() -> None:
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
     _reset_sqlite_guards_for_tests()  # чистое процессное состояние guardrails на старте
     WORKSPACE.mkdir(parents=True, exist_ok=True)
+    _ = _load_persisted_sessions()
     _ = _sweep_workspace()
     threading.Thread(target=_sweep_loop, daemon=True).start()
     # Хеш бинаря agy считается заранее, чтобы первый image-ход не платил за него.
