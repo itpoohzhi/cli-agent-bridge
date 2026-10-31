@@ -31,7 +31,7 @@
     "max_images": 16,
     "max_image_bytes": 20971520,
     "max_total_image_bytes": 20971520,
-    "max_body_bytes": 33554432,
+    "max_body_bytes": 8388608,
     "types": [
       "image/png"
     ]
@@ -52,7 +52,7 @@
   "backends": {
     "droid": {
       "kind": "droid",
-      "enabled": true,
+      "enabled": false,
       "required": false,
       "owned_by": "factory-droid",
       "max_concurrent": 4
@@ -83,7 +83,7 @@
     },
     "agy": {
       "kind": "passthrough",
-      "enabled": false,
+      "enabled": true,
       "required": false,
       "owned_by": "agy-bridge",
       "max_concurrent": 4,
@@ -91,7 +91,7 @@
     },
     "opencode-zen": {
       "kind": "passthrough",
-      "enabled": false,
+      "enabled": true,
       "required": false,
       "owned_by": "opencode-zen-bridge",
       "max_concurrent": 4,
@@ -99,7 +99,7 @@
     },
     "claude-p": {
       "kind": "passthrough",
-      "enabled": false,
+      "enabled": true,
       "required": false,
       "owned_by": "claude-p-bridge",
       "max_concurrent": 4,
@@ -109,8 +109,8 @@
   "models": [
     {
       "id": "claude-sonnet-5-5",
-      "backend": "droid",
-      "name": "Claude Sonnet 5.5 (Droid Meta bridge)",
+      "backend": "claude-p",
+      "name": "Claude Sonnet 5.5 (Claude-p bridge)",
       "efforts": [
         "high"
       ],
@@ -136,8 +136,8 @@
     },
     {
       "id": "gemini-3.8-flash",
-      "backend": "droid",
-      "name": "Gemini 3.8 Flash (Droid Meta bridge)",
+      "backend": "agy",
+      "name": "Gemini 3.8 Flash (AGY bridge)",
       "efforts": [
         "high"
       ],
@@ -161,34 +161,9 @@
       ]
     },
     {
-      "id": "grok-4.7",
-      "backend": "droid",
-      "name": "Grok 4.7 (Droid Meta bridge)",
-      "efforts": [
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 256000,
-      "max_tokens": 32768,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "explicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      },
-      "policy_lines": [
-        116,
-        396,
-        708
-      ]
-    },
-    {
       "id": "deepseek-v4.1-flash",
-      "backend": "droid",
-      "name": "DeepSeek V4.1 Flash (Droid Meta bridge)",
+      "backend": "opencode-zen",
+      "name": "DeepSeek V4.1 Flash (OpenCode Zen bridge)",
       "efforts": [
         "high",
         "max"
@@ -235,31 +210,6 @@
         398,
         406,
         436
-      ]
-    },
-    {
-      "id": "glm-5.3",
-      "backend": "droid",
-      "name": "GLM-5.3 (Droid Meta bridge)",
-      "efforts": [
-        "max"
-      ],
-      "default_effort": "max",
-      "context_window": 1000000,
-      "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "explicit_unsupported",
-        "status": "unsupported",
-        "method": null,
-        "proof": null
-      },
-      "policy_lines": [
-        397,
-        708,
-        784
       ]
     },
     {
@@ -374,6 +324,234 @@
       "default_effort": "high",
       "context_window": 500000,
       "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "claude-opus-5-5",
+      "backend": "claude-p",
+      "name": "Claude Opus 5.5 (Claude-p bridge)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "backend": "claude-p",
+      "name": "Claude Haiku 5.5 (Claude-p bridge)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "gemini-4-argon",
+      "backend": "agy",
+      "name": "Gemini 4 Argon (AGY bridge)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "deepseek-v4.1-flash-free",
+      "backend": "opencode-zen",
+      "name": "DeepSeek V4.1 Flash Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "glm-5.3-flash-free",
+      "backend": "opencode-zen",
+      "name": "GLM 5.3 Flash Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "flint-40b-free",
+      "backend": "opencode-zen",
+      "name": "Flint 40B Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "mimo-v2.6-flash-free",
+      "backend": "opencode-zen",
+      "name": "Mimo V2.6 Flash Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "nemotron-3.5-lightning-free",
+      "backend": "opencode-zen",
+      "name": "Nemotron 3.5 Lightning Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "nemotron-3.5-super-vl-free",
+      "backend": "opencode-zen",
+      "name": "Nemotron 3.5 Super VL Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "beam-free",
+      "backend": "opencode-zen",
+      "name": "Beam Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "big-pickle",
+      "backend": "opencode-zen",
+      "name": "Big Pickle (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
       "input": [
         "text"
       ],

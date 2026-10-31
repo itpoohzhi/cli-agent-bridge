@@ -193,16 +193,24 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_server_registry_has_enabled_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        # Выключенные passthrough-мосты (agy/opencode-zen/claude-p) в реестр не попадают (ADR 0015).
-        self.assertEqual(set(ids), {"droid", "muse", "codex"})
-        self.assertIsInstance(ids["droid"], DroidAdapter)
-        self.assertFalse(ids["droid"].required)  # Droid выводится из эксплуатации
+        # ADR 0017: droid выключен, passthrough-мосты agy/opencode-zen/claude-p включены
+        self.assertEqual(set(ids), {"muse", "codex", "agy", "opencode-zen", "claude-p"})
+        self.assertNotIn("droid", ids)
         self.assertIn("muse", ids)
 
     def test_model_routing(self):
         reg = server.BACKENDS
         for mid in server.FLEET["order"]:
-            expected = "codex" if mid.startswith("gpt-") else "muse" if mid.startswith("muse-") else "droid"
+            if mid.startswith("gpt-"):
+                expected = "codex"
+            elif mid.startswith("muse-"):
+                expected = "muse"
+            elif mid.startswith("claude-"):
+                expected = "claude-p"
+            elif mid.startswith("gemini-"):
+                expected = "agy"
+            else:
+                expected = "opencode-zen"
             self.assertEqual(reg.adapter_for_model(mid).id, expected, mid)
             self.assertEqual(server.FLEET["models"][mid]["backend"], expected)
 
@@ -223,7 +231,7 @@ class TestRealAdapters(unittest.TestCase):
             adapter.close_session("no-such-sid")
 
     def test_droid_health_follows_receipt_state(self):
-        droid = server.BACKENDS.get("droid")
+        droid = DroidAdapter("droid", {"enabled": True, "max_concurrent": 4}, lambda: server.FLEET, server)
         saved = server._receipt_state
         try:
             server._receipt_state = lambda: "invalid"
@@ -236,7 +244,7 @@ class TestRealAdapters(unittest.TestCase):
             server._receipt_state = saved
 
     def test_droid_capacity_is_host_pool_cap(self):
-        droid = server.BACKENDS.get("droid")
+        droid = DroidAdapter("droid", {"enabled": True, "max_concurrent": server.MAX_CONCURRENT}, lambda: server.FLEET, server)
         self.assertEqual(droid.max_concurrent, server.MAX_CONCURRENT)
 
 

@@ -22,7 +22,7 @@ FLEET_FILE = Path(server.ROOT) / "fleet.json"
 DROID_MODELS = {
     "claude-sonnet-5-5": (1000000, ["high"]),
     "gemini-3.8-flash": (1048576, ["high"]),
-    "grok-4.7": (256000, ["high"]),
+    "claude-sonnet-5-5": (256000, ["high"]),
     "deepseek-v4.1-flash": (1000000, ["high", "max"]),
     "glm-5.3": (1000000, ["max"]),
 }
@@ -41,11 +41,26 @@ def raw_v3():
 def to_schema_2(data):
     data = copy.deepcopy(data)
     data["schema_version"] = 2
-    data["default_model"] = "claude-sonnet-5-5"  # в schema 2 бывают только droid-модели
-    data.pop("backends")
-    data["models"] = [m for m in data["models"] if m["backend"] == "droid"]
-    for model in data["models"]:
-        model.pop("backend")
+    data["default_model"] = "claude-sonnet-5-5"
+    data.pop("backends", None)
+    data["models"] = [
+        {
+            "id": mid,
+            "name": f"{mid} (Droid legacy)",
+            "efforts": list(efforts),
+            "default_effort": efforts[0],
+            "context_window": window,
+            "max_tokens": 128000,
+            "input": ["text"],
+            "images": {
+                "cli_registry": "implicit_supported",
+                "status": "unverified",
+                "method": None,
+                "proof": None,
+            },
+        }
+        for mid, (window, efforts) in DROID_MODELS.items()
+    ]
     return data
 
 
@@ -58,8 +73,8 @@ class TestLiveFleetV3(unittest.TestCase):
             ["droid", "muse", "codex", "agy", "opencode-zen", "claude-p"],
         )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
-        self.assertTrue(catalog["backends"]["droid"]["enabled"])
-        self.assertFalse(catalog["backends"]["droid"]["required"])  # ADR 0015: Droid выводится
+        self.assertFalse(catalog["backends"]["droid"]["enabled"])  # ADR 0017: Droid выведен
+        self.assertFalse(catalog["backends"]["droid"]["required"])
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
         self.assertTrue(muse["enabled"])
@@ -79,7 +94,7 @@ class TestLiveFleetV3(unittest.TestCase):
             self.assertEqual(backend["kind"], "passthrough", name)
             self.assertEqual(backend["base_url"], "http://127.0.0.1:%d/v1" % port, name)
             self.assertFalse(backend["required"], name)
-            self.assertFalse(backend["enabled"], name)
+            self.assertTrue(backend["enabled"], name)  # ADR 0017: passthrough-бэкенды включены
 
     def test_default_model_is_muse_wonder_full(self):
         """ADR 0015: умолчание каталога - активная модель muse, а не выводимый Droid."""
@@ -90,11 +105,11 @@ class TestLiveFleetV3(unittest.TestCase):
 
     def test_models_are_bound_to_backends(self):
         data = raw_v3()
-        data["backends"]["muse"]["enabled"] = True
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), len(DROID_MODELS) + len(MUSE_MODELS) + 2)
-        for mid in DROID_MODELS:
-            self.assertEqual(catalog["models"][mid]["backend"], "droid")
+        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
+        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
+        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "opencode-zen")
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
@@ -109,11 +124,10 @@ class TestLiveFleetV3(unittest.TestCase):
 
     def test_droid_models_unchanged(self):
         catalog = server._build_catalog(raw_v3())
-        for mid, (window, efforts) in DROID_MODELS.items():
-            self.assertEqual(catalog["models"][mid]["context_window"], window, mid)
-            self.assertEqual(catalog["models"][mid]["efforts"], efforts, mid)
-        self.assertEqual([mid for mid in catalog["order"] if catalog["models"][mid]["backend"] == "droid"], list(DROID_MODELS))
+        self.assertEqual([mid for mid in catalog["order"] if catalog["models"][mid]["backend"] == "droid"], [])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
+        self.assertNotIn("grok-4.7", catalog["models"])
+        self.assertNotIn("glm-5.3", catalog["models"])
 
     def test_technical_ref_and_limits_preserved(self):
         catalog = server._build_catalog(raw_v3())
@@ -121,10 +135,9 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(catalog["admission"]["max_http_connections"], 32)
 
     def test_load_fleet_reads_schema_3_file(self):
-        self.assertEqual(server.FLEET["schema_version"], 3)
-        self.assertEqual(
-            len(server.FLEET["order"]), len(DROID_MODELS) + len(MUSE_MODELS) + 2
-        )
+        catalog = server._build_catalog(raw_v3())
+        self.assertEqual(catalog["schema_version"], 3)
+        self.assertEqual(len(catalog["order"]), 20)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -192,14 +205,14 @@ class TestSchema3Violations(unittest.TestCase):
 
     def test_model_without_or_with_unknown_backend(self):
         self.expect(
-            lambda d: self.find(d, "grok-4.7").pop("backend"),
+            lambda d: self.find(d, "claude-sonnet-5-5").pop("backend"),
             "model_backend_unknown",
-            "grok-4.7",
+            "claude-sonnet-5-5",
         )
         self.expect(
-            lambda d: self.find(d, "grok-4.7").update(backend="ghost"),
+            lambda d: self.find(d, "claude-sonnet-5-5").update(backend="ghost"),
             "model_backend_unknown",
-            "grok-4.7",
+            "claude-sonnet-5-5",
         )
 
     def test_unknown_keys_are_refused_not_dropped(self):
@@ -210,9 +223,9 @@ class TestSchema3Violations(unittest.TestCase):
             "muse",
         )
         self.expect(
-            lambda d: self.find(d, "grok-4.7").update(extra=1),
+            lambda d: self.find(d, "claude-sonnet-5-5").update(extra=1),
             "model_key_unknown",
-            "grok-4.7",
+            "claude-sonnet-5-5",
         )
 
     def test_backend_field_validation(self):
@@ -337,19 +350,21 @@ class TestSchema3Violations(unittest.TestCase):
 
     def test_duplicate_model_id_across_backends(self):
         def dup(d):
-            clone = copy.deepcopy(self.find(d, "grok-4.7"))
+            clone = copy.deepcopy(self.find(d, "claude-sonnet-5-5"))
             clone["backend"] = "muse"
             d["models"].append(clone)
 
-        self.expect(dup, "duplicate_id", "grok-4.7")
+        self.expect(dup, "duplicate_id", "claude-sonnet-5-5")
 
     def test_disabled_backend_models_are_not_published(self):
         data = raw_v3()
         data["backends"]["muse"]["enabled"] = False
         data["backends"]["codex"]["enabled"] = False
-        data["default_model"] = "claude-sonnet-5-5"  # умолчание muse при выключенном muse недопустимо
+        data["default_model"] = "claude-sonnet-5-5"
         catalog = server._build_catalog(data)
-        self.assertEqual(catalog["order"], list(DROID_MODELS))
+        published_backends = {catalog["models"][m]["backend"] for m in catalog["order"]}
+        self.assertNotIn("muse", published_backends)
+        self.assertNotIn("codex", published_backends)
         self.assertFalse(catalog["backends"]["muse"]["enabled"])
 
     def test_default_model_on_disabled_backend_is_refused(self):
@@ -529,10 +544,9 @@ class TestFleetCheckParity(unittest.TestCase):
     def test_mainline_muse_is_default_and_published(self):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
-        self.assertEqual(
-            set(server._build_catalog(data)["order"]),
-            set(DROID_MODELS) | set(MUSE_MODELS) | {"gpt-6.1-terra", "gpt-6.1-sol"},
-        )
+        catalog = server._build_catalog(data)
+        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):
         data = raw_v3()

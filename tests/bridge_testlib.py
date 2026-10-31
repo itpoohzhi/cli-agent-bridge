@@ -89,6 +89,85 @@ def load_raw_fleet():
     return json.loads(Path(server.FLEET_PATH).read_text(encoding="utf-8"))
 
 
+# Модели, которые стенд FakeDroid обслуживает через бэкенд droid (боевой fleet.json
+# переведён на единый мост :9882, Droid там выключен).
+_DROID_STAND_MODELS = ("claude-sonnet-5-5", "deepseek-v4.1-flash", "gemini-3.8-flash")
+_DROID_LEGACY_MODELS = (
+    {
+        "id": "grok-4.7",
+        "backend": "droid",
+        "name": "Grok 4.7 (Droid test stand)",
+        "efforts": ["high"],
+        "default_effort": "high",
+        "context_window": 256000,
+        "max_tokens": 32768,
+        "input": ["text"],
+        "images": {
+            "cli_registry": "explicit_supported",
+            "status": "unverified",
+            "method": None,
+            "proof": None,
+        },
+    },
+    {
+        "id": "glm-5.3",
+        "backend": "droid",
+        "name": "GLM-5.3 (Droid test stand)",
+        "efforts": ["max"],
+        "default_effort": "max",
+        "context_window": 1000000,
+        "max_tokens": 131072,
+        "input": ["text"],
+        "images": {
+            "cli_registry": "explicit_unsupported",
+            "status": "unsupported",
+            "method": None,
+            "proof": None,
+        },
+    },
+)
+
+
+_ORIG_CONTEXT_MAX_OUTPUT = server._context_max_output
+
+
+def _stand_context_max_output(model_id: str) -> int:
+    """max_tokens стендовых legacy-моделей (в боевом fleet.json их уже нет)."""
+    for legacy in _DROID_LEGACY_MODELS:
+        if legacy["id"] == model_id:
+            return legacy["max_tokens"]
+    return _ORIG_CONTEXT_MAX_OUTPUT(model_id)
+
+
+def droidify_raw_fleet(data):
+    """Сырой каталог -> стенд FakeDroid: droid включён, тестовые модели на droid."""
+    data["backends"]["droid"]["enabled"] = True
+    present = {m["id"] for m in data["models"]}
+    for m in data["models"]:
+        if m["id"] in _DROID_STAND_MODELS:
+            m["backend"] = "droid"
+    for legacy in _DROID_LEGACY_MODELS:
+        if legacy["id"] not in present:
+            data["models"].append(copy.deepcopy(legacy))
+    return data
+
+
+def install_droid_stand(data=None):
+    """Собрать стендовый каталог и пересоздать server.BACKENDS под него."""
+    if data is None:
+        data = droidify_raw_fleet(load_raw_fleet())
+    catalog = server._build_catalog(data)
+    for key in ("path", "sha256"):  # метаданные загрузки живого fleet.json
+        if key in server.FLEET:
+            catalog.setdefault(key, server.FLEET[key])
+    server.FLEET = catalog
+    server._context_max_output = _stand_context_max_output
+    server.BACKENDS = server.AdapterRegistry.from_fleet(
+        server.FLEET, server.ADAPTER_KINDS, lambda: server.FLEET, server
+    )
+    return server.FLEET
+
+
 def find_model(data, model_id):
     for item in data["models"]:
         if item["id"] == model_id:
@@ -323,6 +402,8 @@ class BridgeCase(unittest.TestCase):
                 "GUARD_CANON",
                 "INSTR_NONKB_MARGIN",
                 "MAX_JSON_STRUCT_TOKENS",
+                "BACKENDS",
+                "_context_max_output",
             )
         }
         server._canon_seen.clear()
@@ -355,6 +436,7 @@ class BridgeCase(unittest.TestCase):
         server._sleep = lambda _seconds: None  # ретраи 2/4 с — без реального ожидания
         server.INTERRUPT_GRACE_S = 1.0
         server._reset_rpc_state()
+        install_droid_stand()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
@@ -499,7 +581,6 @@ class BridgeCase(unittest.TestCase):
         data = copy.deepcopy(load_raw_fleet())
         if probe:
             server.IMAGE_PROBE = True
+        droidify_raw_fleet(data)
         mutate(data)
-        catalog = server._build_catalog(data)
-        server.FLEET = catalog
-        return catalog
+        return install_droid_stand(data)

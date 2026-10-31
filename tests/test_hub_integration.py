@@ -158,6 +158,8 @@ class HubCase(BridgeCase):
             muse["wrapper"] = str(self.fake_muse.wrapper)
             muse["proxy_port"] = self.fake_muse.proxy_port
             muse["technical_ref"] = self.fake_muse.pin()
+            # fake-wrapper эмулирует только exec-путь; serve без MSP-стенда уходит в fallback
+            muse["options"] = {"streaming_mode": "exec"}
 
         catalog = self.stand(mutate)
         self._saved_backends = server.BACKENDS

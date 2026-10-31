@@ -98,7 +98,7 @@ def test_unknown_and_invalid_models_fail_before_backend(route, model, status):
 
 
 def test_deferred_auth_cannot_execute_cli_backend(route):
-    handler, reserve = route({"model": "claude-sonnet-5-5"})
+    handler, reserve = route({"model": "muse-wonder-full-1.0"})
     assert handler._send.call_args.args[0] == 401
     reserve.assert_called_once()
     handler._serve_passthrough.assert_not_called()

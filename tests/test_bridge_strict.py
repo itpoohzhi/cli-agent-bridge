@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from bridge_testlib import (  # noqa: E402
+    _DROID_LEGACY_MODELS,
     BridgeCase,
     chat_body,
     find_model,
@@ -79,7 +80,7 @@ class TestCatalogClassI(unittest.TestCase):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
         # 5 droid + 4 muse + 2 codex; passthrough-мосты agy/opencode-zen/claude-p выключены (моделей нет)
-        self.assertEqual(len(catalog["order"]), 11)
+        self.assertEqual(len(catalog["order"]), 20)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -101,8 +102,8 @@ class TestCatalogClassI(unittest.TestCase):
         self._expect("efforts_invalid", "claude-sonnet-5-5")
 
     def test_default_effort_outside_efforts(self):
-        find_model(self.data, "grok-4.7")["default_effort"] = "low"
-        self._expect("default_effort_invalid", "grok-4.7")
+        find_model(self.data, "claude-sonnet-5-5")["default_effort"] = "low"
+        self._expect("default_effort_invalid", "claude-sonnet-5-5")
 
     def test_default_model_outside_roster(self):
         self.data["default_model"] = "no-such-model"
@@ -117,8 +118,10 @@ class TestCatalogClassI(unittest.TestCase):
         self._expect("status_inconsistent", "claude-sonnet-5-5")
 
     def test_explicit_unsupported_must_be_unsupported(self):
-        find_model(self.data, "glm-5.3")["images"]["status"] = "unverified"
-        self._expect("status_inconsistent", "glm-5.3")
+        m = find_model(self.data, "claude-sonnet-5-5")
+        m["images"]["cli_registry"] = "explicit_unsupported"
+        m["images"]["status"] = "unverified"
+        self._expect("status_inconsistent", "claude-sonnet-5-5")
 
     def test_confirmed_without_proof(self):
         item = find_model(self.data, "claude-sonnet-5-5")
@@ -266,9 +269,7 @@ class TestEffortAndModel(BridgeCase):
         wanted = {
             "claude-sonnet-5-5": ["high"],
             "gemini-3.8-flash": ["high"],
-            "grok-4.7": ["high"],
             "deepseek-v4.1-flash": ["high", "max"],
-            "glm-5.3": ["max"],
         }
         for model, efforts in wanted.items():
             self.assertEqual(server.FLEET["models"][model]["efforts"], efforts, model)
@@ -295,15 +296,12 @@ class TestEffortAndModel(BridgeCase):
             ("claude-sonnet-5-5", "max", "high"),  # AC1: max у high-only
             ("claude-sonnet-5-5", "max\n", "high"),  # strip до клампа
             ("gemini-3.8-flash", "medium", "high"),  # нет нижнего -> upward fallback
-            ("glm-5.3", "high", "max"),  # нет нижнего -> upward fallback
-            ("glm-5.3", " high ", "max"),  # strip, затем upward fallback
             ("claude-sonnet-5-5", "HIGH", "high"),  # case-insensitive exact
             ("claude-sonnet-5-5", "off", "high"),  # нет нижнего -> upward
             ("claude-sonnet-5-5", "none", "high"),  # unknown -> default (high)
             ("deepseek-v4.1-flash", "low", "high"),  # нет нижнего -> upward
             ("deepseek-v4.1-flash", "xhigh", "high"),  # lower high, не upper max
             ("deepseek-v4.1-flash", "ultra", "max"),  # nearest lower
-            ("glm-5.3", "unknown-xyz", "max"),  # unknown -> default (max)
         ]
         for model, effort, expected in cases:
             before_inits = len(self.hub.inits())
@@ -350,7 +348,7 @@ class TestEffortAndModel(BridgeCase):
         cases = [
             "Claude-Sonnet-5-5",
             "kimi-k3",
-            "claude-opus-5-5",
+            "nonexistent-model-xyz",
             "x\nexec model=claude-sonnet-5-5 effort=high effort_source=request",
             "sk-SECRET-0123456789abcdef",
             "A" * 5000,
@@ -478,7 +476,8 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        self.assertEqual(len(body["data"]), 11)
+        # 20 моделей боевого каталога + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
+        self.assertEqual(len(body["data"]), 20 + len(_DROID_LEGACY_MODELS))
         self.assertTrue({"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]})
         self.assertIn("muse-wonder-full-1.0", {e["id"] for e in body["data"]})
         self.assertEqual(body["data"][0]["id"], "muse-wonder-full-1.0")  # умолчание каталога первым
@@ -488,7 +487,7 @@ class TestHealthAndModels(BridgeCase):
                 sorted(entry),
                 sorted(["id", "object", "owned_by", "created", "context_length"]),
             )
-        self.assertNotIn("claude-opus-5-5", [e["id"] for e in body["data"]])
+        self.assertNotIn("nonexistent-model-xyz", [e["id"] for e in body["data"]])
         status, _ = self._get("/v1/models", auth=False)
         self.assertEqual(status, 401)
 
