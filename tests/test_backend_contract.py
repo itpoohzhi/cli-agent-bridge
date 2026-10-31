@@ -191,12 +191,13 @@ class TestRegistry(unittest.TestCase):
 class TestRealAdapters(unittest.TestCase):
     """Droid и Muse подчиняются одному контракту; поведение droid-моделей не меняется."""
 
-    def test_server_registry_has_both_backends_from_fleet(self):
+    def test_server_registry_has_enabled_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        self.assertEqual(set(ids), {"droid", "codex"})
+        # Выключенные passthrough-мосты (agy/opencode-zen/claude-p) в реестр не попадают (ADR 0015).
+        self.assertEqual(set(ids), {"droid", "muse", "codex"})
         self.assertIsInstance(ids["droid"], DroidAdapter)
-        self.assertTrue(ids["droid"].required)
-        self.assertNotIn("muse", ids)
+        self.assertFalse(ids["droid"].required)  # Droid выводится из эксплуатации
+        self.assertIn("muse", ids)
 
     def test_model_routing(self):
         reg = server.BACKENDS

@@ -346,6 +346,9 @@ class BridgeCase(unittest.TestCase):
             server.GUARD_PROFILES_DIR = str(Path(self._tmp.name) / "profiles-none")
             server.GUARD_CANON = str(Path(self._tmp.name) / "canon-none.md")
             server._canon_cache.update(key=None, digest="")
+        # Предел блока KB (ADR 0015: боевое умолчание 100 000 Б): сценарии отказа RW-009/RW-014
+        # проверяют границу 60 000 Б, поэтому предел фиксируется явно, а не берётся из окружения.
+        server.INSTR_BLOCK_LIMIT = 60000
         server.RECEIPT_REQUIRED = (
             False  # receipt квалификации образа: отдельные тесты RW-007 включают
         )

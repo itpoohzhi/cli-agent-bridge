@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "catalogue": "droid-bridge-fleet",
-  "default_model": "claude-sonnet-5-5",
+  "default_model": "muse-wonder-full-1.0",
   "policy_ref": {
     "path": "~/Мой диск/Context/models.md",
     "sha256": "35935ff43c0f17753f34ed3ded07f71be314c1ed265550ea07b3c4620d2fc674",
@@ -53,7 +53,7 @@
     "droid": {
       "kind": "droid",
       "enabled": true,
-      "required": true,
+      "required": false,
       "owned_by": "factory-droid",
       "max_concurrent": 4
     },
@@ -80,6 +80,30 @@
       "owned_by": "openai-codex",
       "max_concurrent": 4,
       "base_url": "http://127.0.0.1:2455/v1"
+    },
+    "agy": {
+      "kind": "passthrough",
+      "enabled": false,
+      "required": false,
+      "owned_by": "agy-bridge",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:9887/v1"
+    },
+    "opencode-zen": {
+      "kind": "passthrough",
+      "enabled": false,
+      "required": false,
+      "owned_by": "opencode-zen-bridge",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:9883/v1"
+    },
+    "claude-p": {
+      "kind": "passthrough",
+      "enabled": false,
+      "required": false,
+      "owned_by": "claude-p-bridge",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:9881/v1"
     }
   },
   "models": [

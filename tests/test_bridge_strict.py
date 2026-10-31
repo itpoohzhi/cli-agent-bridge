@@ -77,8 +77,9 @@ class TestCatalogClassI(unittest.TestCase):
 
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
-        self.assertEqual(catalog["default_model"], "claude-sonnet-5-5")
-        self.assertEqual(len(catalog["order"]), 7)  # Muse выключен; обе Codex-модели включены
+        self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
+        # 5 droid + 4 muse + 2 codex; passthrough-мосты agy/opencode-zen/claude-p выключены (моделей нет)
+        self.assertEqual(len(catalog["order"]), 11)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -246,6 +247,8 @@ class TestEffortAndModel(BridgeCase):
         return status, init, source, autonomy_source
 
     def test_defaults_when_model_and_effort_absent(self):
+        # Умолчание каталога - muse-wonder-full-1.0 (ADR 0015); сценарий droid-хода фиксирует droid-модель.
+        server.MODEL_ID = "claude-sonnet-5-5"  # восстанавливается в BridgeCase.tearDown
         for payload in (
             {},
             {"model": None, "reasoning_effort": None},
@@ -475,10 +478,11 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        self.assertEqual(len(body["data"]), 7)
+        self.assertEqual(len(body["data"]), 11)
         self.assertTrue({"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]})
-        self.assertFalse(any(e["id"].startswith("muse-") for e in body["data"]))
-        self.assertEqual(body["data"][0]["id"], "claude-sonnet-5-5")
+        self.assertIn("muse-wonder-full-1.0", {e["id"] for e in body["data"]})
+        self.assertEqual(body["data"][0]["id"], "muse-wonder-full-1.0")  # умолчание каталога первым
+        self.assertIn("claude-sonnet-5-5", {e["id"] for e in body["data"]})
         for entry in body["data"]:
             self.assertEqual(
                 sorted(entry),

@@ -484,8 +484,9 @@ All runtime tuning is environment variables; the model fleet is `fleet.json`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DROID_DSH_BRIDGE_KEY` | *(required)* | Bearer key for `/v1/*` |
-| `DROID_DSH_BRIDGE_HOST` / `_PORT` | `127.0.0.1` / `9882` | Listen address |
+| `BRIDGE_KEY` (fallback `DROID_DSH_BRIDGE_KEY`) | *(required)* | Bearer key for `/v1/*`; never passed to child processes |
+| `BRIDGE_HOST` / `BRIDGE_PORT` (fallback `DROID_DSH_BRIDGE_HOST` / `_PORT`) | `127.0.0.1` / `9882` | Listen address |
+| `BRIDGE_INSTR_LIMIT` (fallback `DROID_DSH_BRIDGE_INSTR_LIMIT`) | `100000` | agent-instructions block limit, bytes; integer in `[10000..500000]` (out of range is clamped, empty/non-numeric/non-positive falls back to default) |
 | `DROID_DSH_BRIDGE_FLEET` | `./fleet.json` | Model catalog path |
 | `DROID_DSH_BRIDGE_MODEL` | catalog default | Override default model |
 | `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | Global concurrency cap |

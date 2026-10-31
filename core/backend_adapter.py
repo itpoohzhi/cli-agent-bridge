@@ -28,6 +28,22 @@ STREAMING_EMULATED = "emulated"
 StreamSink = Callable[[str, str], bool]
 PollCallback = Callable[[], bool]
 
+# Секреты хаба в окружении потомков (ADR 0015, BLOCKER-SAFETY B1): `BRIDGE_KEY`, любое имя на
+# `_BRIDGE_KEY` и любое вида `BRIDGE_*KEY*` (в т.ч. `DROID_DSH_BRIDGE_KEY`); регистр не важен.
+_BRIDGE_SECRET_NAME = re.compile(r"(?:^|_)BRIDGE_[A-Z0-9_]*KEY", re.IGNORECASE)
+
+
+def is_bridge_secret_name(name: str) -> bool:
+    """Имя переменной окружения - авторизационный ключ моста (его нельзя отдавать потомку)."""
+    return _BRIDGE_SECRET_NAME.search(name) is not None
+
+
+def strip_bridge_secrets(env: dict) -> dict:
+    """Удаляет из `env` (на месте) все ключи моста; возвращает тот же словарь."""
+    for name in [n for n in env if is_bridge_secret_name(n)]:
+        del env[name]
+    return env
+
 
 class Qualification(NamedTuple):
     """Типизированный результат допуска без изменения пары ok/reason."""

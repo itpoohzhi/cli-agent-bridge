@@ -971,14 +971,22 @@ class TestPrivateDirs(RpcCase):
 
 class TestHealthReceipt(RpcCase):
     def test_rw015_health_keeps_seven_keys_and_reflects_receipt(self):
-        """RW-015: /health сохраняет 7 ключей; при обязательном, но отсутствующем receipt ok=false."""
-        self.assertTrue(self.health()["ok"])
-        keys = set(self.health())
-        server.RECEIPT_REQUIRED = True
-        health = self.health()
-        self.assertEqual(set(health), keys)
-        self.assertEqual(len(health), 7)
-        self.assertFalse(health["ok"])
+        """RW-015: /health сохраняет 7 ключей; при обязательном, но отсутствующем receipt ok=false.
+
+        ok = AND по обязательным бэкендам: после ADR 0015 droid в каталоге не обязателен
+        (`required: false`), поэтому сценарий явно делает его обязательным; без этого receipt
+        не влияет на ok (второй проход).
+        """
+        droid = server.BACKENDS.get("droid")
+        with mock.patch.dict(droid.config, {"required": True}):
+            self.assertTrue(self.health()["ok"])
+            keys = set(self.health())
+            server.RECEIPT_REQUIRED = True
+            health = self.health()
+            self.assertEqual(set(health), keys)
+            self.assertEqual(len(health), 7)
+            self.assertFalse(health["ok"])
+        self.assertTrue(self.health()["ok"])  # droid не обязателен - receipt не валит ok
 
     def test_rw015_receipt_state_values(self):
         """RW-015: _receipt_state: not_required / invalid / ok."""

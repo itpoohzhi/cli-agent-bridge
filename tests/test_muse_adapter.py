@@ -297,6 +297,7 @@ class TestArgv(MuseCase):
         secrets = {
             "META_API_KEY": "m" * 40,
             "DROID_DSH_BRIDGE_KEY": "k" * 40,
+            "BRIDGE_KEY": "k" * 40,
             "SOME_OTHER_SECRET": "s" * 40,
             "HOME": "/home/x",
         }
@@ -304,6 +305,7 @@ class TestArgv(MuseCase):
             env = self.adapter().child_env()
         self.assertNotIn("META_API_KEY", env)
         self.assertNotIn("DROID_DSH_BRIDGE_KEY", env)
+        self.assertNotIn("BRIDGE_KEY", env)
         self.assertNotIn("SOME_OTHER_SECRET", env)
         self.assertEqual(env["HOME"], "/home/x")
         self.assertIn("PATH", env)
@@ -441,6 +443,7 @@ class TestExecuteTurn(MuseCase):
             {
                 "META_API_KEY": "m" * 40,
                 "DROID_DSH_BRIDGE_KEY": "k" * 40,
+                "BRIDGE_KEY": "k" * 40,
                 "ZZ_LEAK": "z",
                 "MUSE_BIN": "/tmp/evil-muse",
             },
@@ -448,7 +451,13 @@ class TestExecuteTurn(MuseCase):
             out = self.adapter().execute_turn(ctx_for(), None)
         self.assertEqual(out.state, "done")
         env = self.fake.env()
-        for name in ("META_API_KEY", "DROID_DSH_BRIDGE_KEY", "ZZ_LEAK", "MUSE_BIN"):
+        for name in (
+            "META_API_KEY",
+            "DROID_DSH_BRIDGE_KEY",
+            "BRIDGE_KEY",
+            "ZZ_LEAK",
+            "MUSE_BIN",
+        ):
             self.assertNotIn(name, env)
 
     def test_configured_proxy_port_is_passed_to_wrapper(self):

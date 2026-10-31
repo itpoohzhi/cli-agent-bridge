@@ -60,11 +60,18 @@ journal_line_bytes - длина JSON-строки события в session.v4.j
 нет - берётся середина окна, округлённая вниз.
 
 Коды выхода `--check` и `--profiles`: 0 - оба запаса >= 4096 Б и запас строки журнала до
-60 000 Б в KB >= 2048 Б; 1 - запас меньше порога; 2 - канон теряется в каком-либо cwd
-(CANON_LOST), дубль возвращается (DUPLICATE_RETURNED) или блок/строка KB > 60 000 Б
+предела блока в KB >= 2048 Б; 1 - запас меньше порога; 2 - канон теряется в каком-либо cwd
+(CANON_LOST), дубль возвращается (DUPLICATE_RETURNED) или блок/строка KB > предела блока
 (REQ003_SIZE_EXCEEDED: в рабочем CLI `run_check` всегда вызывает evaluate со
 `strict_req003=True`, AD-006 дельта-4; чистая функция `evaluate` по умолчанию остаётся
-нестрогой и даёт 1). Граница 60 000 Б строгая: 60 000 проходит, 60 001 нет.
+нестрогой и даёт 1). Граница предела строгая: ровно предел проходит, предел + 1 нет.
+
+Предел блока (ADR 0015) не зашит: `resolve_block_limit` читает `BRIDGE_INSTR_LIMIT`, затем
+`DROID_DSH_BRIDGE_INSTR_LIMIT`; по умолчанию `BLOCK_LIMIT` = 100 000 Б. Значение - целое;
+пустое, нечисловое и неположительное игнорируется (берётся следующее имя, затем умолчание),
+положительное вне [INSTR_LIMIT_MIN..INSTR_LIMIT_MAX] зажимается в границы. Чистая `evaluate`
+берёт предел параметром `limit` (None - `BLOCK_LIMIT`) и от окружения не зависит; окружение
+читают `run_check`/`check_installed` (параметр `limit=None` - из окружения).
 
 Режим `--profiles [--profiles-dir PATH]` (по умолчанию `~/.dsh/profiles`): для каждого профиля
 с `cordis.patch.yml` (каталоги `*.bak*` пропускаются) читает maxBytes и прогоняет ту же проверку,
@@ -82,7 +89,7 @@ import os
 import posixpath
 import re
 import sys
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 CANON_PATH = os.path.expanduser("~/Мой диск/Context/AGENTS.md")
 KB_CWD = os.path.expanduser("~/Мой диск/Работа/Sber/knowledge-base")
@@ -109,8 +116,15 @@ FORMULA_BASE = (
 )
 FORMULA_PER_SECTION = 32
 
-BLOCK_LIMIT = 60000  # REQ-003, граница строгая: <= 60000 проходит
-DEFAULT_MAXBYTES = 106496
+BLOCK_LIMIT = 100000  # REQ-003, умолчание предела блока; граница строгая: <= предела проходит
+INSTR_LIMIT_ENV_NAMES: Tuple[str, ...] = (
+    "BRIDGE_INSTR_LIMIT",
+    "DROID_DSH_BRIDGE_INSTR_LIMIT",
+)  # порядок приоритета: новое имя, затем прежнее
+INSTR_LIMIT_MIN = 10000
+INSTR_LIMIT_MAX = 500000
+DEFAULT_MAXBYTES = 118784  # maxBytes установленных профилей DSH (116 КиБ) при каноне ~62,9 КБ
+SNAPSHOT_MAXBYTES = 106496  # maxBytes снимка zone-F (F-709): калибровка модели и self-test
 MARGIN_MIN = 4096
 LINE_MARGIN_MIN = 2048
 
@@ -317,9 +331,33 @@ def render_plan(entries: Sequence[FileEntry], maxbytes: int) -> RenderResult:
     )
 
 
-def block_within_limit(block_bytes: int) -> bool:
-    """Граница REQ-003 строгая: 60 000 Б проходит, 60 001 - нет."""
-    return block_bytes <= BLOCK_LIMIT
+def parse_block_limit(raw: Optional[str]) -> Optional[int]:
+    """Целое значение предела из строки; None - пусто, не число или неположительное.
+
+    Положительное вне [INSTR_LIMIT_MIN..INSTR_LIMIT_MAX] зажимается в границы диапазона.
+    """
+    text = (raw or "").strip()
+    if not (text.isascii() and text.isdigit()):
+        return None
+    value = int(text)
+    if value <= 0:
+        return None
+    return max(INSTR_LIMIT_MIN, min(INSTR_LIMIT_MAX, value))
+
+
+def resolve_block_limit(environ: Optional[Mapping[str, str]] = None) -> int:
+    """Предел блока agent-instructions: BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> BLOCK_LIMIT."""
+    env = os.environ if environ is None else environ
+    for name in INSTR_LIMIT_ENV_NAMES:
+        value = parse_block_limit(env.get(name))
+        if value is not None:
+            return value
+    return BLOCK_LIMIT
+
+
+def block_within_limit(block_bytes: int, limit: Optional[int] = None) -> bool:
+    """Граница REQ-003 строгая: ровно предел проходит, предел + 1 - нет (None - умолчание BLOCK_LIMIT)."""
+    return block_bytes <= (BLOCK_LIMIT if limit is None else limit)
 
 
 def journal_line_bytes_est(text: str) -> int:
@@ -452,16 +490,19 @@ def evaluate(
     strict_req003: bool = False,
     texts: Optional[Dict[str, Dict[str, str]]] = None,
     canon_text: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> Result:
     """Чистая оценка окна maxBytes без файловой системы.
 
     `cwd_files` - метка cwd -> проектные файлы в порядке рендера (user-global добавляется
-    здесь). `req003_cwds` - метки cwd, для которых действует ограничение 60 000 Б (по
-    решению владельца REQ-003 принимается только в KB: для WA/AB условие недостижимо, F-724).
+    здесь). `req003_cwds` - метки cwd, для которых действует предел блока `limit` (None -
+    `BLOCK_LIMIT`; по решению владельца REQ-003 принимается только в KB: для WA/AB условие
+    недостижимо, F-724).
     `texts` (метка cwd -> display -> текст файла) и `canon_text` включают точный расчёт строки
     журнала; нет текста хотя бы одной оставленной секции - запасная оценка по размерам.
     `strict_req003` поднимает REQ003_SIZE_EXCEEDED до exit 2 (рабочий CLI всегда включает его).
     """
+    limit = BLOCK_LIMIT if limit is None else limit
     reasons: List[str] = []
     renders: Dict[str, RenderResult] = {}
     line_estimates: Dict[str, Tuple[int, bool]] = {}
@@ -507,19 +548,19 @@ def evaluate(
         if rend is None:
             continue
         line_est = line_estimates[label][0]
-        margin = BLOCK_LIMIT - line_est
+        margin = limit - line_est
         line_margin = margin if line_margin is None else min(line_margin, margin)
-        if not block_within_limit(rend.block_bytes):
+        if not block_within_limit(rend.block_bytes, limit):
             reasons.append(
                 "REQ003_SIZE_EXCEEDED cwd=%s basis=block block=%d limit=%d"
-                % (label, rend.block_bytes, BLOCK_LIMIT)
+                % (label, rend.block_bytes, limit)
             )
             warn = True
             severe = severe or strict_req003
-        elif not block_within_limit(line_est):
+        elif not block_within_limit(line_est, limit):
             reasons.append(
                 "REQ003_SIZE_EXCEEDED cwd=%s basis=line_estimate line_est=%d limit=%d"
-                % (label, line_est, BLOCK_LIMIT)
+                % (label, line_est, limit)
             )
             warn = True
             severe = severe or strict_req003
@@ -705,10 +746,34 @@ def self_test() -> List[str]:
         model = _block(entries, "")
         if formula != model:
             fails.append("формула %s: %d != %d" % (name, formula, model))
-    # Граница REQ-003 строгая.
-    for value, ok in ((59999, True), (60000, True), (60001, False)):
-        if block_within_limit(value) != ok:
-            fails.append("граница 60000: %d -> %s" % (value, not ok))
+    # Граница REQ-003 строгая: умолчание BLOCK_LIMIT и явный предел.
+    for limit, value, ok in (
+        (None, BLOCK_LIMIT - 1, True),
+        (None, BLOCK_LIMIT, True),
+        (None, BLOCK_LIMIT + 1, False),
+        (60000, 60000, True),
+        (60000, 60001, False),
+    ):
+        if block_within_limit(value, limit) != ok:
+            fails.append(
+                "граница предела %d: %d -> %s"
+                % (BLOCK_LIMIT if limit is None else limit, value, not ok)
+            )
+    # Разбор предела: пустое/нечисловое/отрицательное -> умолчание, вне диапазона -> зажим.
+    for environ, expected in (
+        ({}, BLOCK_LIMIT),
+        ({"BRIDGE_INSTR_LIMIT": ""}, BLOCK_LIMIT),
+        ({"BRIDGE_INSTR_LIMIT": "abc"}, BLOCK_LIMIT),
+        ({"BRIDGE_INSTR_LIMIT": "-5"}, BLOCK_LIMIT),
+        ({"BRIDGE_INSTR_LIMIT": "120000"}, 120000),
+        ({"DROID_DSH_BRIDGE_INSTR_LIMIT": "70000"}, 70000),
+        ({"BRIDGE_INSTR_LIMIT": "80000", "DROID_DSH_BRIDGE_INSTR_LIMIT": "70000"}, 80000),
+        ({"BRIDGE_INSTR_LIMIT": "1"}, INSTR_LIMIT_MIN),
+        ({"BRIDGE_INSTR_LIMIT": "9999999"}, INSTR_LIMIT_MAX),
+    ):
+        got = resolve_block_limit(environ)
+        if got != expected:
+            fails.append("предел %r: %d != %d" % (environ, got, expected))
     # Golden: равная длина, разное экранирование -> разные оценки, равные json.dumps.
     plain = "a" * 100
     quotes = '"' * 100
@@ -724,7 +789,7 @@ def self_test() -> List[str]:
     res = evaluate(
         canon,
         {"KB": kb[1:], "WA": wa[1:], "AB": ab[1:], "DW": []},
-        DEFAULT_MAXBYTES,
+        SNAPSHOT_MAXBYTES,
         ("KB",),
     )
     if (res.lower_margin, res.upper_margin, res.exit_code) != (12736, 4680, 0):
@@ -732,10 +797,10 @@ def self_test() -> List[str]:
             "окно снимка: %r/%r/exit %d"
             % (res.lower_margin, res.upper_margin, res.exit_code)
         )
-    if res.recommended != DEFAULT_MAXBYTES:
+    if res.recommended != SNAPSHOT_MAXBYTES:
         fails.append(
             "рекомендуемый maxBytes на снимке %r != %d"
-            % (res.recommended, DEFAULT_MAXBYTES)
+            % (res.recommended, SNAPSHOT_MAXBYTES)
         )
     return fails
 
@@ -759,11 +824,18 @@ def _fmt_margin(value: Optional[int]) -> str:
     return "n/a" if value is None else "%d" % value
 
 
-def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -> int:
+def run_check(
+    maxbytes: int,
+    cwds: Sequence[Tuple[str, str]],
+    canon_path: str,
+    limit: Optional[int] = None,
+) -> int:
     """Читает файлы, печатает прогноз по каждому cwd, запасы и причины; возвращает код выхода.
 
-    REQ-003 строгий (strict_req003=True): превышение 60 000 Б блока/строки KB даёт exit 2.
+    REQ-003 строгий (strict_req003=True): превышение предела блока/строки KB даёт exit 2.
+    Предел `limit` - параметр, иначе из окружения (`resolve_block_limit`).
     """
+    limit = resolve_block_limit() if limit is None else limit
     try:
         canon_size = os.stat(canon_path).st_size
     except FileNotFoundError:
@@ -779,7 +851,8 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
     except OSError:
         pass
     _say(
-        "mode=PLANNED maxbytes=%d canon=%s size=%d" % (maxbytes, canon_path, canon_size)
+        "mode=PLANNED maxbytes=%d canon=%s size=%d block_limit=%d"
+        % (maxbytes, canon_path, canon_size, limit)
     )
     cwd_files: Dict[str, Sequence[FileEntry]] = {}
     texts: Dict[str, Dict[str, str]] = {}
@@ -800,6 +873,7 @@ def run_check(maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str) -
         strict_req003=True,
         texts=texts,
         canon_text=canon_text,
+        limit=limit,
     )
     for label, _path in cwds:
         rend = (res.renders or {})[label]
@@ -872,12 +946,16 @@ def _user_global_problem(canon_real: str, canon_bytes: bytes) -> Optional[str]:
 
 
 def check_installed(
-    maxbytes: int, cwds: Sequence[Tuple[str, str]], canon_path: str
+    maxbytes: int,
+    cwds: Sequence[Tuple[str, str]],
+    canon_path: str,
+    limit: Optional[int] = None,
 ) -> Optional[Result]:
     """Тот же прогноз, что `run_check`, но без печати (для автоматического контура моста).
 
     None - канон не найден (CANON_LOST). Результат с exit_code 2 и причиной CANON_LOST - настоящий
-    user-global `UG_PATH` удалён, изменён или указывает не на канон. REQ-003 строгий, как в рабочем CLI.
+    user-global `UG_PATH` удалён, изменён или указывает не на канон. REQ-003 строгий, как в рабочем CLI;
+    предел блока `limit` - параметр, None - из окружения (`resolve_block_limit`).
     Файлы читаются только для хеша и точной длины строки журнала; содержимое наружу не отдаётся.
     """
     try:
@@ -906,6 +984,7 @@ def check_installed(
         strict_req003=True,
         texts=texts,
         canon_text=canon_text,
+        limit=resolve_block_limit() if limit is None else limit,
     )
 
 

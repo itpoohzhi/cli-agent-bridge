@@ -1,0 +1,116 @@
+{
+  "schema_version": "1.0",
+  "task_id": "universal-bridge-modernization-20261031",
+  "run_id": "universal-bridge-modernization-20261031",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "PROPOSED",
+  "delta": "A2",
+  "title": "Модернизация cli-agent-bridge: динамический бюджет b_guard, консолидация моделей и вывод Factory Droid (Ревизия A2)",
+  "owner_decisions": [
+    {
+      "id": "OD-001",
+      "timestamp": "2026-10-31T06:06:57+03:00",
+      "text": "Дроид вообще выпиливаем, подписку не продлеваем, запускаем клиент Muse. Провести анализ по переключению моделей на новый универсальный мост, выпилу ненужных костылей и исправить ошибку 503.",
+      "disposition": "ACCEPTED",
+      "supersedes": []
+    },
+    {
+      "id": "OD-002",
+      "timestamp": "2026-10-31T06:21:40+03:00",
+      "text": "Формально заменить жесткий лимит 60 000 байт из REQ-003 ADR-0001 на параметризованный BRIDGE_INSTR_LIMIT с безопасным дефолтом 100 000 байт (укладывающимся в окно DSH DEFAULT_MAXBYTES = 106496 Б).",
+      "disposition": "ACCEPTED",
+      "supersedes": ["ADR-0001:REQ-003"]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-01",
+      "text": "Ликвидация жесткого лимита 60 000 байт (b_guard и замена REQ-003): размер блока инструкций полностью конфигурируется через переменную окружения BRIDGE_INSTR_LIMIT с безопасным значением по умолчанию 100 000 байт (покрывающим UTF-8 объем канона AGENTS.md в 62 889 байт и гарантированно укладывающимся в окно DSH DEFAULT_MAXBYTES = 106 496 Б с запасом MARGIN_MIN = 4096 Б). Поддерживается fallback на DROID_DSH_BRIDGE_INSTR_LIMIT. Реализована валидация диапазона [10000..500000] с fallback на 100 000 при нечисловом или пустом значении. Сохранены обе проверки: размер блока и сериализованная строка журнала session.v4.jsonl. b_guard.check_installed() возвращает exit_code <= 1, устраняя 503 launcher_unavailable.",
+      "source": "Handoff системных аналитиков REQ-001, блокер B2 панели R1",
+      "verification_ids": [
+        "VER-01",
+        "VER-02"
+      ]
+    },
+    {
+      "id": "REQ-02",
+      "text": "Консолидация моделей на порту :9882: хаб cli-agent-bridge предоставляет единый шлюз для всех поддерживаемых моделей. Для интеграции специализированных standalone-мостов (agy-bridge :9887, opencode-zen-bridge :9883, claude-p-bridge :9881) используется реализация PassthroughAdapter из adapters/passthrough_adapter.py (контракт core/backend_adapter.py). Автономные порты сохраняются для независимого резервного доступа. Каталог fleet.json расширяется соответствующими бэкендами и моделями.",
+      "source": "Handoff системных аналитиков REQ-002, замечания 1 и 3 панели R1",
+      "verification_ids": [
+        "VER-03",
+        "VER-04"
+      ]
+    },
+    {
+      "id": "REQ-03",
+      "text": "Полный вывод зависимостей от Factory Droid, перенаправление default_model и безопасность секретов (Safety Invariant): в fleet.json default_model переводится на muse-wonder-full-1.0 (бэкенд muse), а backends.droid.required переводится в false. Переменные окружения в start.sh и server.py переводятся на нейтральный префикс BRIDGE_* с каскадным fallback на DROID_DSH_BRIDGE_*. В server.py:478 (_launch_env) гарантированно удаляются как BRIDGE_KEY, так и DROID_DSH_BRIDGE_KEY (и любые *_BRIDGE_KEY) из окружения дочерних процессов (Droid, Muse), исключая утечку секрета моста. Скрипт start.sh не требует FACTORY_API_KEY.",
+      "source": "Handoff системных аналитиков REQ-003, блокеры B1 и B3 панели R1",
+      "verification_ids": [
+        "VER-05",
+        "VER-06",
+        "VER-07"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "DEC-01",
+      "title": "Параметризация лимитов b_guard и server.py через BRIDGE_INSTR_LIMIT (дефолт 100 000 Б)",
+      "statement": "В tools/b_guard.py и server.py заменить константы 60 000 Б на динамическое чтение BRIDGE_INSTR_LIMIT (fallback DROID_DSH_BRIDGE_INSTR_LIMIT, дефолт 100 000 Б с валидацией диапазона [10000..500000]). В check_installed поддержать аргумент limit. В self_test проверять границы динамически.",
+      "rationale": "Соответствие правилу 4 AGENTS.md (запрет хардкода), суперсессия REQ-003 ADR-0001, гарантия вместимости канона 62 889 Б и непревышения окна DSH 106 496 Б.",
+      "adr_link": "docs/adr/0015-universal-bridge-consolidation-and-dynamic-limits.md"
+    },
+    {
+      "id": "DEC-02",
+      "title": "Использование PassthroughAdapter для консолидации standalone-мостов",
+      "statement": "Подключение мостов :9887, :9883, :9881 в fleet.json через PassthroughAdapter (adapters/passthrough_adapter.py) при сохранении автономных портов как независимых резервных путей.",
+      "rationale": "Минимальный риск, проверенная абстракция loopback-проксирования, отсутствие единой точки отказа.",
+      "adr_link": "docs/adr/0015-universal-bridge-consolidation-and-dynamic-limits.md"
+    },
+    {
+      "id": "DEC-03",
+      "title": "Каскадный Fallback, переключение default_model на Muse и очистка секретов в _launch_env",
+      "statement": "Разрешение BRIDGE_<NAME> -> DROID_DSH_BRIDGE_<NAME> -> DEFAULT при импорте. Обязательная вычистка BRIDGE_KEY и DROID_DSH_BRIDGE_KEY в server.py:_launch_env() перед spawn дочерних процессов. Перевод fleet.json:default_model на muse-wonder-full-1.0.",
+      "rationale": "100% обратная совместимость, ликвидация утечки ключа (BLOCKER-SAFETY) и независимость маршрутизации от подписки Droid.",
+      "adr_link": "docs/adr/0015-universal-bridge-consolidation-and-dynamic-limits.md"
+    }
+  ],
+  "verification_plan": [
+    {
+      "id": "VER-01",
+      "description": "Запуск тестов tests/test_b_guard.py (все тесты PASS, граничные проверки 100 000 Б и обработка malformed env).",
+      "command": "python3 -m unittest discover -s tests -p 'test_b_guard.py'"
+    },
+    {
+      "id": "VER-02",
+      "description": "Проверка b_guard --check на реальном каноне AGENTS.md: код выхода <= 1 (OK), REQ003_SIZE_EXCEEDED отсутствует.",
+      "command": "python3 tools/b_guard.py --check"
+    },
+    {
+      "id": "VER-03",
+      "description": "Регрессионный прогон tests/test_muse_adapter.py (72/72 теста PASS).",
+      "command": "python3 -m unittest discover -s tests -p 'test_muse_adapter.py'"
+    },
+    {
+      "id": "VER-04",
+      "description": "Проверка валидации каталога fleet_check.py (валидный schema 3).",
+      "command": "python3 fleet_check.py"
+    },
+    {
+      "id": "VER-05",
+      "description": "Проверка вычистки BRIDGE_KEY и DROID_DSH_BRIDGE_KEY в server.py:_launch_env().",
+      "command": "python3 -m unittest discover -s tests -p 'test_server.py'"
+    },
+    {
+      "id": "VER-06",
+      "description": "HTTP GET /health на хабе :9882 возвращает ok: true при отключенном Droid.",
+      "command": "curl -s http://127.0.0.1:9882/health | jq .ok"
+    },
+    {
+      "id": "VER-07",
+      "description": "Проверка старта start.sh с очищенным FACTORY_API_KEY.",
+      "command": "env -u FACTORY_API_KEY bash -c 'source start.sh --check-env-only || true'"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "pol-manifest/1",
+  "seed_input": "8460b43a#universal-bridge-modernization-20261031#c1#R1",
+  "seed_hex": "7db81b5a",
+  "stage": "arch",
+  "round": 1,
+  "run_id": "universal-bridge-modernization-20261031",
+  "setup": "default",
+  "artifact_sha256": "8460b43a41f2260d5e84aa7734af9a4f106f0d1517eeaf7daaa09af6a9e56579",
+  "ranked_order": [
+    "gpt-6.1-sol-high",
+    "claude-sonnet-5-5-high",
+    "gemini-4-argon-high"
+  ],
+  "seats": [
+    {
+      "k": 1,
+      "slot_id": "gpt-6.1-sol-high",
+      "transport": "codex",
+      "family": "OpenAI"
+    },
+    {
+      "k": 2,
+      "slot_id": "claude-sonnet-5-5-high",
+      "transport": "claude-p",
+      "family": "Anthropic"
+    },
+    {
+      "k": 3,
+      "slot_id": "gemini-4-argon-high",
+      "transport": "agy",
+      "family": "Google"
+    }
+  ]
+}

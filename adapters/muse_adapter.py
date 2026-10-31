@@ -60,6 +60,7 @@ from core.backend_adapter import (
     TurnContext,
     TurnResult,
     Usage,
+    strip_bridge_secrets,
 )
 from core.watchdog import AdaptiveTimeoutController
 
@@ -508,7 +509,7 @@ class MuseAdapter(BackendAdapter):
         env = {k: os.environ[k] for k in ENV_ALLOWLIST if k in os.environ}
         env.setdefault("PATH", _DEFAULT_PATH)
         env.pop("META_API_KEY", None)
-        env.pop("DROID_DSH_BRIDGE_KEY", None)
+        strip_bridge_secrets(env)
         env.pop("MUSE_BIN", None)
         env["MUSE_PROXY_PORT"] = str(self.proxy_port)
         return env

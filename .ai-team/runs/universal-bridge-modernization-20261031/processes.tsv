@@ -1,0 +1,19 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+universal-bridge-modernization-20261031	gemini-4-argon-high	panel-judge-k3	65836	65836	2026-10-31T03:18:21.876389+00:00	Sat Oct 31 06:18:21 2026	running
+universal-bridge-modernization-20261031	gpt-6.1-sol-high	panel-judge-k1	65835	65835	2026-10-31T03:18:21.876427+00:00	Sat Oct 31 06:18:21 2026	running
+universal-bridge-modernization-20261031	claude-sonnet-5-5-high	panel-judge-k2	65867	65867	2026-10-31T03:18:21.967838+00:00	Sat Oct 31 06:18:21 2026	running
+universal-bridge-modernization-20261031	gemini-4-argon-high	panel-judge-k3	65836	65836	2026-10-31T03:18:21.876389+00:00	Sat Oct 31 06:18:21 2026	rc=0
+universal-bridge-modernization-20261031	claude-sonnet-5-5-high	panel-judge-k2	65867	65867	2026-10-31T03:18:21.967838+00:00	Sat Oct 31 06:18:21 2026	rc=0
+universal-bridge-modernization-20261031	gpt-6.1-sol-high	panel-judge-k1	65835	65835	2026-10-31T03:18:21.876427+00:00	Sat Oct 31 06:18:21 2026	rc=0
+universal-bridge-modernization-20261031	gemini-4-argon-high	panel-judge-k3	15212	15212	2026-10-31T03:22:52.890602+00:00	Sat Oct 31 06:22:52 2026	running
+universal-bridge-modernization-20261031	gpt-6.1-sol-high	panel-judge-k1	15211	15211	2026-10-31T03:22:52.890596+00:00	Sat Oct 31 06:22:52 2026	running
+universal-bridge-modernization-20261031	claude-sonnet-5-5-high	panel-judge-k2	15308	15308	2026-10-31T03:22:52.984989+00:00	Sat Oct 31 06:22:52 2026	running
+universal-bridge-modernization-20261031	claude-sonnet-5-5-high	panel-judge-k2	15308	15308	2026-10-31T03:22:52.984989+00:00	Sat Oct 31 06:22:52 2026	rc=0
+universal-bridge-modernization-20261031	gemini-4-argon-high	panel-judge-k3	15212	15212	2026-10-31T03:22:52.890602+00:00	Sat Oct 31 06:22:52 2026	rc=0
+universal-bridge-modernization-20261031	gpt-6.1-sol-high	panel-judge-k1	15211	15211	2026-10-31T03:22:52.890596+00:00	Sat Oct 31 06:22:52 2026	rc=0
+universal-bridge-modernization-20261031	gpt-6.1-sol-high	panel-judge-k1	42388	42388	2026-10-31T03:53:12.791142+00:00	Sat Oct 31 06:53:12 2026	running
+universal-bridge-modernization-20261031	gemini-4-argon-high	panel-judge-k3	42389	42389	2026-10-31T03:53:12.791181+00:00	Sat Oct 31 06:53:12 2026	running
+universal-bridge-modernization-20261031	claude-sonnet-5-5-high	panel-judge-k2	42461	42461	2026-10-31T03:53:12.880304+00:00	Sat Oct 31 06:53:12 2026	running
+universal-bridge-modernization-20261031	gemini-4-argon-high	panel-judge-k3	42389	42389	2026-10-31T03:53:12.791181+00:00	Sat Oct 31 06:53:12 2026	rc=0
+universal-bridge-modernization-20261031	claude-sonnet-5-5-high	panel-judge-k2	42461	42461	2026-10-31T03:53:12.880304+00:00	Sat Oct 31 06:53:12 2026	rc=0
+universal-bridge-modernization-20261031	gpt-6.1-sol-high	panel-judge-k1	42388	42388	2026-10-31T03:53:12.791142+00:00	Sat Oct 31 06:53:12 2026	rc=0

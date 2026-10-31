@@ -29,8 +29,9 @@ Completions (stream и не-stream); thinking транслируется в `rea
 содержит непустой `tools`, в промпт добавляется протокол и схемы инструментов.
 
 Секреты с диска не читаются: ключ авторизации берётся только из окружения
-DROID_DSH_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в окружение
-дочернего процесса ключ не передаётся. FACTORY_API_KEY (headless-вход Droid
+BRIDGE_KEY, затем DROID_DSH_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env);
+в окружение дочернего процесса ключи моста (любые `*_BRIDGE_KEY`, `BRIDGE_*KEY*`)
+не передаются. FACTORY_API_KEY (headless-вход Droid
 без интерактивного логина) наследуется потомком как есть — его подкладывает
 start.sh из ~/.zshenv; `droid exec` читает его из окружения сам.
 """
@@ -96,6 +97,7 @@ from core.backend_adapter import (  # noqa: E402
     TurnContext,
     ToolCall,
     build_catalog,
+    strip_bridge_secrets,
 )
 from core import context_resilience as ctxres  # noqa: E402
 from core.lifecycle import (  # noqa: E402
@@ -144,9 +146,20 @@ from core.watchdog import (  # noqa: E402,F401
 
 
 HOME = Path.home()
-HOST = os.environ.get("DROID_DSH_BRIDGE_HOST", "127.0.0.1")
-PORT = int(os.environ.get("DROID_DSH_BRIDGE_PORT", "9882"))
-AUTH_KEY = os.environ.get("DROID_DSH_BRIDGE_KEY", "").strip()
+
+
+def _bridge_env(name: str, default: str = "") -> str:
+    """Параметр хаба: `BRIDGE_<name>` -> `DROID_DSH_BRIDGE_<name>` -> умолчание (пустое значение = не задано)."""
+    for prefix in ("BRIDGE_", "DROID_DSH_BRIDGE_"):
+        value = os.environ.get(prefix + name, "").strip()
+        if value:
+            return value
+    return default
+
+
+HOST = _bridge_env("HOST", "127.0.0.1")
+PORT = int(_bridge_env("PORT", "9882"))
+AUTH_KEY = _bridge_env("KEY")
 LAUNCHER = os.environ.get(
     "DROID_LAUNCHER", str(HOME / ".config" / "factory-launch" / "droid-cli.sh")
 )
@@ -393,7 +406,8 @@ MAX_DELIVERY_BYTES = int(
 )
 MAX_CHATS = int(os.environ.get("DROID_BRIDGE_MAX_CHATS", "4096"))
 # Предел блока agent-instructions (REQ-003): больше — отказ до spawn/add (строгая граница).
-INSTR_BLOCK_LIMIT = int(os.environ.get("DROID_DSH_BRIDGE_INSTR_LIMIT", "60000"))
+# BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 100000, диапазон и валидация — в b_guard (ADR 0015).
+INSTR_BLOCK_LIMIT = b_guard.resolve_block_limit()
 # Не-KB формы cwd (WA/AB/DW): допустимый блок = maxBytes профиля минус запас (матрица b_guard);
 # жёсткие 60 000 Б относятся только к блокам, целиком состоящим из копий канона (KB, REQ-003).
 INSTR_NONKB_MARGIN = int(
@@ -472,10 +486,10 @@ def _launch_env() -> dict:
 
     DROID_SKIP_PREFLIGHT=1 — официальный переключатель droid-cli.sh (пропускает
     wait_api/wait_hy2/pick_pr_gateway). Первый запуск и запуск после ошибки идут
-    с полным префлайтом, как прежде. Ключ моста в потомка не передаётся (C-03).
+    с полным префлайтом, как прежде. Ключи моста (`BRIDGE_KEY`, `DROID_DSH_BRIDGE_KEY` и любые
+    `*_BRIDGE_KEY` / `BRIDGE_*KEY*`) в потомка не передаются (C-03, ADR 0015 B1).
     """
-    env = os.environ.copy()
-    env.pop("DROID_DSH_BRIDGE_KEY", None)
+    env = strip_bridge_secrets(os.environ.copy())
     last = _last_ok[0]
     if last and 0 <= time.monotonic() - last < PREFLIGHT_SKIP_WINDOW_S:
         env["DROID_SKIP_PREFLIGHT"] = "1"
@@ -2545,7 +2559,7 @@ def _canon_seen_load() -> None:
 
 
 class CanonPersistError(Exception):
-    """История канонов не записана на диск: без неё после рестарта старый KB-блок потерял бы предел 60000 (RW-011)."""
+    """История канонов не записана на диск: без неё после рестарта старый KB-блок потерял бы предел блока KB (RW-011)."""
 
 
 def _canon_seen_add(digest: str) -> None:
@@ -2750,7 +2764,10 @@ class InstructionGuard:
                 continue
             known.append(maxbytes)
             result = b_guard.check_installed(
-                maxbytes, b_guard.DEFAULT_CWDS, GUARD_CANON
+                maxbytes,
+                b_guard.DEFAULT_CWDS,
+                GUARD_CANON,
+                limit=INSTR_BLOCK_LIMIT,
             )
             if result is None:
                 reasons.append(f"CANON_LOST profile={name}: canon is missing")
@@ -6297,7 +6314,9 @@ def _sweep_workspace(cutoff_s: float = 3600.0) -> None:
 def main() -> None:
     global _budget
     if not AUTH_KEY:
-        sys.stderr.write("DROID_DSH_BRIDGE_KEY is required; refusing to start\n")
+        sys.stderr.write(
+            "BRIDGE_KEY (or DROID_DSH_BRIDGE_KEY) is required; refusing to start\n"
+        )
         raise SystemExit(1)
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
     try:
