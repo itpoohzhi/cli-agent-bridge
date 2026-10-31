@@ -1448,12 +1448,69 @@ class TestMspOracles(unittest.TestCase):
         self.started(parser)
         self.assertEqual(self.delta(parser, "А"), "А")
         self.assertEqual(self.delta(parser, "Б"), "Б")
-        self.assertEqual(self.delta(parser, "В", index=1), "В")
+        self.assertEqual(self.delta(parser, "В", index=1), "\n\nВ")
         self.assertEqual(self.completed(parser, ["АБ", "ВГ"]), "Г")
         self.assertEqual(self.completed(parser, ["АБ", "ВГ"]), "")
-        self.assertEqual(parser.reasoning, "АБВГ")
+        self.assertEqual(parser.reasoning, "АБ\n\nВГ")
         self.completed(parser, ["snapshot only"], iid="new")
-        self.assertEqual(parser.reasoning, "АБВГsnapshot only")
+        self.assertEqual(parser.reasoning, "АБ\n\nВГ\n\nsnapshot only")
+
+    def test_summary_sentences_are_separated_in_stream(self) -> None:
+        parser = self.parser()
+        self.started(parser)
+        first = self.delta(parser, "Gathering context.")
+        second = self.delta(parser, "Resolving", index=1)
+        tail = self.delta(parser, " dependencies.", index=1)
+        self.assertEqual(second, "\n\nResolving")
+        self.assertEqual(tail, " dependencies.")
+        expected = "Gathering context.\n\nResolving dependencies."
+        self.assertEqual(first + second + tail, expected)
+        self.assertEqual(parser.reasoning, expected)
+        self.assertEqual(
+            self.completed(parser, ["Gathering context.", "Resolving dependencies."]),
+            "",
+        )
+
+    def test_summary_separator_respects_existing_newlines(self) -> None:
+        for chunks, separator in (
+            (("First.",), "\n\n"),
+            (("First.\n",), "\n"),
+            (("First.\n\n",), ""),
+            (("First.", "\n", "\n"), ""),
+        ):
+            for new_item in (False, True):
+                with self.subTest(chunks=chunks, new_item=new_item):
+                    parser = self.parser()
+                    self.started(parser)
+                    for chunk in chunks:
+                        self.delta(parser, chunk)
+                    if new_item:
+                        emitted = self.completed(parser, ["Second."], iid="new")
+                    else:
+                        emitted = self.delta(parser, "Second.", index=1)
+                    self.assertEqual(emitted, separator + "Second.")
+                    self.assertEqual(parser.reasoning, "First.\n\nSecond.")
+
+    def test_empty_summary_does_not_emit_separator(self) -> None:
+        parser = self.parser()
+        self.started(parser)
+        self.delta(parser, "First.")
+        self.assertEqual(self.delta(parser, "", index=1), "")
+        self.assertEqual(self.completed(parser, [""], iid="empty"), "")
+        self.assertEqual(parser.reasoning, "First.")
+
+    def test_empty_first_summary_delta_preserves_later_separator(self) -> None:
+        parser = self.parser()
+        self.started(parser)
+        first = self.delta(parser, "First.")
+        empty = self.delta(parser, "", index=1)
+        self.assertEqual(empty, "")
+        self.assertEqual(parser.reasoning, "First.")
+        second = self.delta(parser, "Second.", index=1)
+        self.assertEqual(second, "\n\nSecond.")
+        self.assertEqual(first + empty + second, "First.\n\nSecond.")
+        self.assertEqual(parser.reasoning, "First.\n\nSecond.")
+        self.assertEqual(self.completed(parser, ["First.", "Second."]), "")
 
     def test_ver_002_divergent_snapshot_preserves_prefix_and_tracking_is_bounded(self):
         from adapters.muse_msp import MAX_TRACKED_ITEMS

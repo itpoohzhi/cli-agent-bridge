@@ -94,6 +94,7 @@ class MspEvents:
     def _summary(self, item: _Item, index: int, text: str, snapshot: bool) -> str:
         if self._truncated:
             return ""
+        separator = ""
         if index not in item.parts:
             if self._keys >= MAX_TRACKED_ITEMS:
                 self.live_degraded = True
@@ -101,6 +102,10 @@ class MspEvents:
             self._keys += 1
             item.parts[index] = []
         parts = item.parts[index]
+        if text and not parts and self._reasoning:
+            tail = "".join(piece[-2:] for piece in self._reasoning[-2:])
+            if not tail.endswith("\n\n"):
+                separator = self._append("\n" if tail.endswith("\n") else "\n\n")
         if snapshot:
             previous = "".join(parts)
             if not text.startswith(previous):
@@ -111,7 +116,7 @@ class MspEvents:
         # Храним только принятый бюджетом префикс; после truncation сверки прекращены.
         if added:
             parts.append(added)
-        return added
+        return separator + added
 
     def _answer(self, iid: str, text: str, snapshot: bool) -> None:
         previous_bytes = self._answer_sizes.get(iid, 0)

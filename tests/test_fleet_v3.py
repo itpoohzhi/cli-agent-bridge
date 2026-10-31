@@ -98,8 +98,14 @@ class TestLiveFleetV3(unittest.TestCase):
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
-            self.assertEqual(model["efforts"], ["max"])
-            self.assertEqual(model["default_effort"], "max")
+            if mid in ("muse-wonder-1.0", "muse-wonder-full-1.0"):
+                self.assertEqual(
+                    model["efforts"], ["minimal", "low", "medium", "high", "max"]
+                )
+                self.assertEqual(model["default_effort"], "high")
+            else:
+                self.assertEqual(model["efforts"], ["max"])
+                self.assertEqual(model["default_effort"], "max")
 
     def test_droid_models_unchanged(self):
         catalog = server._build_catalog(raw_v3())
