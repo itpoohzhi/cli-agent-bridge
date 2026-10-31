@@ -37,8 +37,8 @@
     ]
   },
   "admission": {
-    "max_http_connections": 32,
-    "max_inflight_body_bytes": 67108864,
+    "max_http_connections": 128,
+    "max_inflight_body_bytes": 268435456,
     "overload_error": {
       "http": 503,
       "type": "overloaded"
@@ -47,7 +47,7 @@
       "http": 413,
       "type": "payload_too_large"
     },
-    "note": "резерв байт по заявленному Content-Length ДО чтения тела; семафор исполнения (4) и TCP backlog лимитами HTTP-обработчиков и памяти не считаются"
+    "note": "резерв байт по заявленному Content-Length ДО чтения тела; семафор исполнения (128) и TCP backlog лимитами HTTP-обработчиков и памяти не считаются"
   },
   "backends": {
     "droid": {
@@ -78,7 +78,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "openai-codex",
-      "max_concurrent": 4,
+      "max_concurrent": 128,
       "base_url": "http://127.0.0.1:2455/v1"
     },
     "agy": {
@@ -86,7 +86,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "agy-bridge",
-      "max_concurrent": 4,
+      "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9887/v1"
     },
     "opencode-zen": {
@@ -94,7 +94,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "opencode-zen-bridge",
-      "max_concurrent": 4,
+      "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9883/v1"
     },
     "claude-p": {
@@ -102,7 +102,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "claude-p-bridge",
-      "max_concurrent": 4,
+      "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9881/v1"
     }
   },

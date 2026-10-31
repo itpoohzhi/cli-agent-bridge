@@ -185,13 +185,11 @@ _SANITIZE_LIMITS = {
     "max_parallel_depth": BRIDGE_LIMITS.max_parallel_depth,
 }
 WORKSPACE = ROOT / "workspace"
-MAX_CONCURRENT = int(os.environ.get("DROID_DSH_BRIDGE_MAX_CONCURRENT", "4"))
-QUEUE_TIMEOUT_S = int(os.environ.get("DROID_DSH_BRIDGE_QUEUE_TIMEOUT", "900"))
-TIMEOUT_S = int(os.environ.get("DROID_DSH_BRIDGE_TIMEOUT", "1800"))
-KEEPALIVE_S = min(10.0, float(os.environ.get("DROID_DSH_BRIDGE_KEEPALIVE", "10")))
-IDLE_TIMEOUT_S = float(
-    os.environ.get("DROID_DSH_BRIDGE_IDLE_TIMEOUT_S", str(int(DEFAULT_IDLE_TIMEOUT_S)))
-)
+MAX_CONCURRENT = int(_bridge_env("MAX_CONCURRENT", "128"))
+QUEUE_TIMEOUT_S = float(_bridge_env("QUEUE_TIMEOUT_S", "900.0"))
+TIMEOUT_S = float(_bridge_env("TIMEOUT_S", "1800.0"))
+KEEPALIVE_S = float(_bridge_env("KEEPALIVE_S", "10.0"))
+IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
 SAFETY_CAP_S = float(
     os.environ.get("DROID_DSH_BRIDGE_SAFETY_CAP_S", str(int(DEFAULT_SAFETY_CAP_S)))
 )
@@ -2595,7 +2593,7 @@ def _force_kill_all_on_drain() -> None:
 
 TURN_MANAGER = TurnSessionManager(
     _state_dir,
-    max_concurrent=max(MAX_CONCURRENT * 8, 32),
+    max_concurrent=max(MAX_CONCURRENT * 8, 256),
     finalize_fn=finalize_turn,
     log_fn=_log,
     persist_children_file=False,
