@@ -184,6 +184,7 @@ BACKEND_KEYS = frozenset(
         "idle_timeout_s",
         "safety_cap_s",
         "base_url",
+        "options",
     }
 )
 TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
@@ -222,11 +223,25 @@ def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -
         return "backend_max_concurrent_invalid"
     if kind == "muse" and cap != 1:
         return "backend_muse_max_concurrent_invalid"
+    if "options" in entry:
+        options = entry["options"]
+        if (
+            kind != "muse"
+            or not isinstance(options, dict)
+            or set(options) - {"streaming_mode"}
+        ):
+            return "backend_options_invalid"
+        if options.get("streaming_mode", "exec") not in ("exec", "serve"):
+            return "backend_streaming_mode_invalid"
     if kind == PASSTHROUGH_KIND:
         base_url = entry.get("base_url")
         if base_url is None:
             return "backend_base_url_missing"
-        match = _LOOPBACK_BASE_URL.fullmatch(base_url) if isinstance(base_url, str) else None
+        match = (
+            _LOOPBACK_BASE_URL.fullmatch(base_url)
+            if isinstance(base_url, str)
+            else None
+        )
         if match is None or not PROXY_PORT_MIN <= int(match.group(1)) <= PROXY_PORT_MAX:
             return "backend_base_url_invalid"
     elif "base_url" in entry:

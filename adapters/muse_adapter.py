@@ -1,4 +1,4 @@
-"""Адаптер Meta Muse Code CLI (`muse exec`) для мульти-бинарного хаба (ADR 0002).
+"""Адаптер Meta Muse Code CLI: exec (ADR 0002) и per-turn MSP serve (ADR 0012).
 
 Один ход = один headless-запуск `~/.config/muse-launch/muse-cli.sh exec … --json`
 (обёртка держит прокси-контур :10816, вычищает `META_API_KEY` и возвращает exit 42 при
@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import signal
@@ -44,9 +45,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, cast
 
+from adapters.muse_msp import LIVE_DELTA_MAX_BYTES, MspEvents, utf8_slices
+
 from core.backend_adapter import (
     SESSIONS_NONE,
     STREAMING_EMULATED,
+    STREAMING_NATIVE,
     BackendAdapter,
     BackendNotSupported,
     BackendModel,
@@ -94,6 +98,13 @@ MAX_JSON_STRUCT_TOKENS = 50_000
 MAX_JSON_DEPTH = 128
 MAX_EVENTS = 50_000
 READ_CHUNK_BYTES = 65536
+ANSWER_RESERVE_BYTES = 2 << 20
+LIVE_QUEUE_CAPACITY = 1000
+LIVE_QUEUE_MAX_BYTES = 1 << 20
+LIVE_WRITE_TIMEOUT_S = 3.0
+SINK_JOIN_TIMEOUT_S = 5.0
+STDERR_BUFFER_BYTES = 64 << 10
+MSP_SETUP_TIMEOUT_S = 30.0
 _MUSE_SLOTS = threading.BoundedSemaphore(1)  # один UID: общий слот всех Muse-адаптеров
 # Свидетель группы создаётся ДО exec и подписывается/пишется в реестр ДО открытия gate.
 # Он не держит stdout/stderr, но остаётся жив после выхода лидера и аварии хаба.
@@ -124,6 +135,32 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(len(_TOKEN_SPLIT.split(text.strip())) * 1.3))
 
 
+def _check_json_structure(raw: str) -> None:
+    """Ограничить вложенность и число структурных токенов до декодирования JSON."""
+    depth = tokens = 0
+    in_string = escaped = False
+    for char in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+            tokens += 1
+        elif char in "}]":
+            depth -= 1
+        elif char in ",:":
+            tokens += 1
+        if depth > MAX_JSON_DEPTH or tokens > MAX_JSON_STRUCT_TOKENS:
+            raise ValueError("json structure exceeds the limit")
+
+
 class ExecEvents:
     """Накопитель JSONL-конвертов `muse exec --json` (payload_type / payload).
 
@@ -152,28 +189,7 @@ class ExecEvents:
         self.event_count += 1
         if self.event_count > MAX_EVENTS:
             raise ValueError("event count exceeds the limit")
-        depth = tokens = 0
-        in_string = escaped = False
-        for char in raw:
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char in "{[":
-                depth += 1
-                tokens += 1
-            elif char in "}]":
-                depth -= 1
-            elif char in ",:":
-                tokens += 1
-            if depth > MAX_JSON_DEPTH or tokens > MAX_JSON_STRUCT_TOKENS:
-                raise ValueError("json structure exceeds the limit")
+        _check_json_structure(raw)
         try:
             event = json.loads(raw)
         except RecursionError as exc:
@@ -226,6 +242,85 @@ class ExecEvents:
         return self.final_text if self.final_text else "".join(self.deltas)
 
 
+class _LiveSink:
+    """Ограниченный, необратимо отключаемый live sink; stdout никогда не ждёт сокет."""
+
+    def __init__(self, writer: StreamSink | None) -> None:
+        self.writer = writer
+        self.queue: queue.Queue[str | None] = queue.Queue(maxsize=LIVE_QUEUE_CAPACITY)
+        self.live_degraded = threading.Event()
+        self.client_write_dead = threading.Event()
+        self.sink_closed = threading.Event()
+        self._lock = threading.Lock()
+        self.queued_bytes = 0
+        self.inflight_at: float | None = None
+        self.consumer: threading.Thread | None = None
+        if writer is not None:
+            self.consumer = threading.Thread(target=self._consume, daemon=True)
+            self.consumer.start()
+
+    def offer(self, text: str) -> None:
+        if (
+            self.writer is None
+            or self.live_degraded.is_set()
+            or self.sink_closed.is_set()
+        ):
+            return
+        for piece in utf8_slices(text, LIVE_DELTA_MAX_BYTES):
+            size = len(piece.encode())
+            with self._lock:
+                if self.queued_bytes + size > LIVE_QUEUE_MAX_BYTES:
+                    self.live_degraded.set()
+                    return
+                try:
+                    self.queue.put_nowait(piece)
+                except queue.Full:
+                    self.live_degraded.set()
+                    return
+                self.queued_bytes += size
+
+    def check_timeout(self) -> None:
+        started = self.inflight_at
+        if started is not None and time.monotonic() - started >= LIVE_WRITE_TIMEOUT_S:
+            self.live_degraded.set()
+
+    def _consume(self) -> None:
+        assert self.writer is not None
+        while not self.sink_closed.is_set():
+            try:
+                piece = self.queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if piece is None:
+                return
+            with self._lock:
+                self.queued_bytes -= len(piece.encode())
+            if self.live_degraded.is_set() or self.sink_closed.is_set():
+                continue
+            self.inflight_at = time.monotonic()
+            try:
+                if not self.writer("reasoning", piece):
+                    self.live_degraded.set()
+                    self.client_write_dead.set()
+            except Exception:  # noqa: BLE001 - отказ произвольного sink не останавливает pipe
+                self.live_degraded.set()
+                self.client_write_dead.set()
+            finally:
+                self.check_timeout()
+                self.inflight_at = None
+
+    def close(self) -> None:
+        self.sink_closed.set()
+        try:
+            self.queue.put_nowait(None)
+        except queue.Full:
+            self.live_degraded.set()
+        if self.consumer is not None:
+            self.consumer.join(timeout=SINK_JOIN_TIMEOUT_S)
+            if self.consumer.is_alive():
+                self.live_degraded.set()
+
+
 class MuseAdapter(BackendAdapter):
     kind = "muse"
     capabilities = Capabilities(SESSIONS_NONE, STREAMING_EMULATED, False, "estimated")
@@ -240,6 +335,18 @@ class MuseAdapter(BackendAdapter):
         workspace: "Path | None" = None,
     ):
         super().__init__(backend_id, config, catalog_source, host)
+        options = self.config.get("options", {})
+        if not isinstance(options, dict) or options.get(
+            "streaming_mode", "exec"
+        ) not in ("exec", "serve"):
+            raise ValueError("backend_streaming_mode_invalid")
+        self.streaming_mode = options.get("streaming_mode", "exec")
+        self.capabilities = Capabilities(
+            SESSIONS_NONE,
+            STREAMING_NATIVE if self.streaming_mode == "serve" else STREAMING_EMULATED,
+            False,
+            "estimated",
+        )
         self.wrapper = os.path.expanduser(
             str(self.config.get("wrapper") or DEFAULT_WRAPPER)
         )
@@ -537,12 +644,494 @@ class MuseAdapter(BackendAdapter):
                 managed_turn._slot_released = False
                 managed_turn._slot_release_fn = self._slots.release
         try:
+            if self.streaming_mode == "serve":
+                result, fallback = self._run_serve(ctx, sse_writer)
+                if not fallback:
+                    return result
+                self._log(
+                    f"muse serve setup failed; group exited; safe exec fallback reason={result.err}"
+                )
             return self._run_exec(ctx, prompt)
         finally:
             if managed_turn is not None:
                 managed_turn.release_slot_once()
             else:
                 self._slots.release()
+
+    def _run_serve(
+        self, ctx: TurnContext, writer: StreamSink | None
+    ) -> tuple[TurnResult, bool]:
+        """Per-turn MSP с независимыми stdio и ограниченным consumer.
+
+        Fallback возможен лишь до первого байта turn/start и после смерти всей группы.
+        Это закрывает также потерянное/битое уведомление о начавшемся инструменте.
+        """
+        if self._shutting_down:
+            return self._result(
+                "launcher_unavailable", 1, err="adapter_shutting_down"
+            ), False
+        events = MspEvents(
+            reasoning_cap=MAX_TURN_TEXT_BYTES - ANSWER_RESERVE_BYTES,
+            answer_cap=ANSWER_RESERVE_BYTES,
+        )
+        done = threading.Event()
+        reader_done = threading.Event()
+        writes: queue.Queue[bytes] = queue.Queue(maxsize=32)
+        flags: dict[str, bool] = {}
+        threads: list[threading.Thread] = []
+        pending_rpc: dict[int, str] = {}
+        rpc_id = 0
+        action_possible = False
+        session_id = ""
+        turn_id = ""
+        stderr_tail = bytearray()
+        proc: subprocess.Popen | None = None
+        turn_dir: Path | None = None
+        sink: _LiveSink | None = None
+        pipe_fds: list[int] = []
+        error = ""
+        group_gone = True
+        timeout_s = self._setting("TIMEOUT_S", 1800.0)
+        idle_s = float(
+            self.config.get("idle_timeout_s")
+            or self._setting("IDLE_TIMEOUT_S", min(300.0, timeout_s))
+        )
+        safety_s = float(
+            self.config.get("safety_cap_s") or self._setting("SAFETY_CAP_S", timeout_s)
+        )
+        controller = AdaptiveTimeoutController(
+            idle_timeout_s=min(idle_s, timeout_s),
+            safety_cap_s=safety_s,
+            finish_reserve_s=0.0 if safety_s <= 60.0 else 35.0,
+            watchdog_enabled=os.environ.get(
+                "BRIDGE_ADAPTIVE_WATCHDOG_ENABLED", "true"
+            ).lower()
+            in ("1", "true", "yes", "on"),
+            turn_id=ctx.turn_id,
+            log_fn=self._log,
+        )
+        setup_deadline = time.monotonic() + min(MSP_SETUP_TIMEOUT_S, timeout_s)
+        self._log(
+            f"muse serve model={ctx.model} effort={ctx.effort} prompt_chars={len(ctx.prompt)}"
+        )
+
+        def send(method: str, params: dict[str, Any], notify: bool = False) -> None:
+            nonlocal rpc_id, action_possible
+            if method in ("turn/start", "approval/decide"):
+                action_possible = True
+            message: dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }
+            if not notify:
+                rpc_id += 1
+                message["id"] = rpc_id
+                pending_rpc[rpc_id] = method
+            try:
+                writes.put_nowait(
+                    json.dumps(message, ensure_ascii=False).encode() + b"\n"
+                )
+            except queue.Full as exc:
+                raise ValueError("MSP stdin queue full") from exc
+
+        def handle(message: Any) -> None:
+            nonlocal session_id, turn_id, action_possible
+            if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                raise ValueError("invalid MSP envelope")
+            if "id" in message and "method" not in message:
+                rid = message["id"]
+                if (
+                    isinstance(rid, bool)
+                    or not isinstance(rid, int)
+                    or rid not in pending_rpc
+                ):
+                    raise ValueError("unexpected MSP response")
+                method = pending_rpc.pop(rid)
+                result = message.get("result")
+                if "error" in message or not isinstance(result, dict):
+                    raw_error = message.get("error")
+                    code = (
+                        raw_error.get("code") if isinstance(raw_error, dict) else None
+                    )
+                    safe_code = str(code) if type(code) is int else "unknown"
+                    raise ValueError(f"MSP {method} rejected code={safe_code}")
+                if method == "initialize":
+                    schema = result.get("schema")
+                    if (
+                        not isinstance(schema, dict)
+                        or type(schema.get("version")) is not int
+                        or schema["version"] != 1
+                    ):
+                        raise ValueError("unsupported MSP schema version")
+                    send("initialized", {}, notify=True)
+                    assert turn_dir is not None
+                    send(
+                        "session/start",
+                        {
+                            "commandId": str(uuid.uuid4()),
+                            "workspaceRoot": str(turn_dir),
+                            "providerId": "meta",
+                            "modelId": ctx.model,
+                            "approvalMode": "allowAll",
+                        },
+                    )
+                elif method == "session/start":
+                    session = result.get("session")
+                    session_id = (
+                        session.get("sessionId", "")
+                        if isinstance(session, dict)
+                        else ""
+                    )
+                    if not isinstance(session_id, str) or not session_id:
+                        raise ValueError("MSP session id missing")
+                    effort = "low" if ctx.effort == "minimal" else ctx.effort
+                    send(
+                        "turn/start",
+                        {
+                            "commandId": str(uuid.uuid4()),
+                            "sessionId": session_id,
+                            "reasoningEffort": effort,
+                            "input": [{"type": "text", "text": ctx.prompt}],
+                        },
+                    )
+                elif method == "turn/start":
+                    turn_id = result.get("turnId", "")
+                    if (
+                        result.get("status") != "accepted"
+                        or not isinstance(turn_id, str)
+                        or not turn_id
+                    ):
+                        raise ValueError("MSP turn not accepted")
+                return
+            method = message.get("method")
+            params = message.get("params", {})
+            if not isinstance(method, str) or not isinstance(params, dict):
+                raise ValueError("invalid MSP notification")
+            if method.startswith("item/") and not action_possible:
+                # Незапрошенная активность — не доказательство безопасного replay.
+                action_possible = True
+                raise ValueError("MSP activity before turn/start")
+            if method in ("approval/request", "approval/requested"):
+                choices = params.get("availableChoices", [])
+                choice = (
+                    next(
+                        (
+                            c
+                            for c in choices
+                            if isinstance(c, dict) and c.get("decision") == "approved"
+                        ),
+                        None,
+                    )
+                    if isinstance(choices, list)
+                    else None
+                )
+                if choice is None:
+                    raise ValueError("MSP approval choice unavailable")
+                send(
+                    "approval/decide",
+                    {
+                        "commandId": str(uuid.uuid4()),
+                        "sessionId": session_id,
+                        "approvalId": params.get("approvalId"),
+                        "requirementId": params.get("currentRequirementId"),
+                        "choiceId": choice.get("choiceId"),
+                    },
+                )
+                return
+            if turn_id and params.get("turnId", turn_id) != turn_id:
+                raise ValueError("MSP turn id mismatch")
+            piece = events.feed(method, params)
+            assert sink is not None
+            if events.live_degraded:
+                sink.live_degraded.set()
+            sink.offer(piece)
+
+        try:
+            turn_dir = self._make_turn_dir()
+            ok, reason = self.preflight()
+            if not ok:
+                return self._result("launcher_unavailable", 1, err=reason), False
+            ready_r, ready_w = os.pipe()
+            gate_r, gate_w = os.pipe()
+            pipe_fds = [ready_r, ready_w, gate_r, gate_w]
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    _GROUP_BOOTSTRAP,
+                    str(ready_w),
+                    str(gate_r),
+                    self.wrapper,
+                    "serve",
+                    "--provider",
+                    "meta",
+                    "--model",
+                    ctx.model,
+                    "--no-session-log",
+                    "--trust-workspace",
+                ],
+                cwd=str(turn_dir),
+                env=self.child_env(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                pass_fds=(ready_w, gate_r),
+                start_new_session=True,
+            )
+            with self._lock:
+                self._active[proc.pid] = proc
+            for fd in (ready_w, gate_r):
+                os.close(fd)
+                pipe_fds.remove(fd)
+            if not select.select([ready_r], [], [], 5.0)[0]:
+                raise OSError("group witness handshake timed out")
+            member = int(os.read(ready_r, 32).strip())
+            self._register_child(proc.pid, member)
+            if callable(ctx.register_pgid):
+                ctx.register_pgid(proc.pid)
+            os.write(gate_w, b"1")
+            for fd in (ready_r, gate_w):
+                os.close(fd)
+                pipe_fds.remove(fd)
+            controller.register_pgid(proc.pid)
+            assert (
+                proc.stdin is not None
+                and proc.stdout is not None
+                and proc.stderr is not None
+            )
+            stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
+            for stream in (stdin, stdout, stderr):
+                os.set_blocking(stream.fileno(), False)
+            sink = _LiveSink(writer)
+
+            def write_stdin() -> None:
+                try:
+                    while not done.is_set():
+                        try:
+                            raw = writes.get(timeout=0.05)
+                        except queue.Empty:
+                            continue
+                        view = memoryview(raw)
+                        deadline = time.monotonic() + min(
+                            MSP_SETUP_TIMEOUT_S, timeout_s
+                        )
+                        while view and not done.is_set():
+                            if time.monotonic() >= deadline:
+                                raise OSError("MSP stdin write timeout")
+                            if not select.select([], [stdin], [], 0.05)[1]:
+                                continue
+                            try:
+                                count = os.write(stdin.fileno(), view)
+                            except BlockingIOError:
+                                continue
+                            view = view[count:]
+                except (OSError, ValueError):
+                    if not done.is_set():
+                        flags["protocol"] = True
+
+            def drain_stderr() -> None:
+                try:
+                    while not done.is_set():
+                        if not select.select([stderr], [], [], 0.05)[0]:
+                            continue
+                        try:
+                            raw = os.read(stderr.fileno(), READ_CHUNK_BYTES)
+                        except BlockingIOError:
+                            continue
+                        if not raw:
+                            return
+                        stderr_tail.extend(raw)
+                        del stderr_tail[:-STDERR_BUFFER_BYTES]
+                except (OSError, ValueError):
+                    if not done.is_set():
+                        flags["protocol"] = True
+
+            def read_stdout() -> None:
+                nonlocal error
+                pending = bytearray()
+                dropping = False
+                count = 0
+                try:
+                    while not done.is_set() and events.terminal is None:
+                        if not select.select([stdout], [], [], 0.05)[0]:
+                            continue
+                        try:
+                            raw = os.read(stdout.fileno(), READ_CHUNK_BYTES)
+                        except BlockingIOError:
+                            continue
+                        if not raw:
+                            raise ValueError("MSP EOF before terminal")
+                        for part in raw.splitlines(keepends=True):
+                            pending.extend(part)
+                            if len(pending) > MAX_LINE_BYTES:
+                                dropping = True
+                                pending.clear()
+                                events.live_degraded = True
+                                sink.live_degraded.set()
+                            if not part.endswith(b"\n"):
+                                continue
+                            if dropping:
+                                # Потерянный кадр мог содержать toolCall/terminal: replay запрещён.
+                                raise ValueError("MSP line exceeds the limit")
+                            count += 1
+                            if count > MAX_EVENTS:
+                                raise ValueError("MSP event count exceeds the limit")
+                            line = pending.decode("utf-8", "strict")
+                            _check_json_structure(line)
+                            handle(json.loads(line))
+                            pending.clear()
+                            controller.record_activity("protocol")
+                            if callable(ctx.on_activity):
+                                ctx.on_activity("protocol")
+                            if events.terminal is not None:
+                                break
+                except (
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                    RecursionError,
+                    TypeError,
+                    KeyError,
+                ) as exc:
+                    # Только наши причины/класс парсера, без stderr и RPC error payload.
+                    error = f"MSP {type(exc).__name__}: {str(exc)[:160]}"
+                    flags["protocol"] = True
+                finally:
+                    reader_done.set()
+
+            send(
+                "initialize",
+                {"clientInfo": {"name": "cli_agent_bridge", "version": "1"}},
+            )
+            for target in (write_stdin, drain_stderr, read_stdout):
+                thread = threading.Thread(target=target, daemon=True)
+                thread.start()
+                threads.append(thread)
+            last_keepalive = time.monotonic()
+            detached = False
+            leader_exited_at: float | None = None
+            while not reader_done.wait(0.05):
+                now = time.monotonic()
+                sink.check_timeout()
+                if self._shutting_down:
+                    flags["cancelled"] = True
+                if ctx.cancel_event is not None and ctx.cancel_event.is_set():
+                    flags["cancelled"] = True
+                if not turn_id and now >= setup_deadline:
+                    flags["protocol"] = True
+                if proc.poll() is not None:
+                    if leader_exited_at is None:
+                        leader_exited_at = now
+                    if now - leader_exited_at >= STDERR_DRAIN_GRACE_S:
+                        flags["protocol"] = True
+                stop, why, _ = controller.check(proc.pid)
+                if stop and why in ("idle_timeout", "absolute_cap"):
+                    flags["timeout"] = True
+                gone = sink.client_write_dead.is_set() or (
+                    callable(ctx.client_gone) and ctx.client_gone()
+                )
+                if (
+                    not detached
+                    and sink.inflight_at is None
+                    and callable(ctx.keepalive)
+                    and now - last_keepalive
+                    >= min(10.0, self._setting("KEEPALIVE_S", 10.0))
+                ):
+                    last_keepalive = now
+                    gone = not ctx.keepalive() or gone
+                if gone:
+                    sink.live_degraded.set()
+                    if ctx.detach_on_disconnect:
+                        if not detached and callable(ctx.on_activity):
+                            ctx.on_activity("detached")
+                        detached = True
+                    else:
+                        flags["client_gone"] = True
+                if flags:
+                    break
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            flags["protocol"] = True
+        finally:
+            controller.close()
+            done.set()
+            if sink is not None:
+                sink.sink_closed.set()
+            if proc is not None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except OSError:
+                    pass  # группа могла уже завершиться
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    self._kill_group(proc)
+                    try:
+                        proc.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        flags["protocol"] = True
+                if not self._wait_group_exit(proc.pid, 0.5):
+                    self._kill_group(proc)
+                group_gone = self._wait_group_exit(proc.pid, 2.0)
+                for thread in threads:
+                    thread.join(timeout=1.0)
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        stream.close()
+                if group_gone:
+                    self._unregister_child(proc.pid)
+                else:
+                    self._shutting_down = True
+                    flags["protocol"] = True
+                with self._lock:
+                    self._active.pop(proc.pid, None)
+            for fd in pipe_fds:
+                os.close(fd)
+            if sink is not None:
+                sink.close()
+            if turn_dir is not None:
+                try:
+                    shutil.rmtree(turn_dir)
+                except FileNotFoundError:
+                    pass  # процесс уже удалил собственный scratch
+                except OSError:
+                    self._shutting_down = True
+                    flags["protocol"] = True
+                    error = "MSP workspace cleanup failed"
+        # stderr хранится только в bounded оперативном буфере; сырой вывод в лог не попадает.
+        stderr_tail.clear()
+        if flags.get("cancelled"):
+            state, rc, error = "cancelled", 1, "turn cancelled by user"
+        elif flags.get("client_gone"):
+            state, rc = "client_gone", 1
+        elif flags.get("timeout"):
+            state, rc, error = "timeout", 124, "MSP turn timeout"
+        elif flags.get("protocol") or events.terminal != "completed" or not turn_id:
+            state, rc, error = (
+                "backend_error",
+                1,
+                error or "MSP protocol or terminal failure",
+            )
+        else:
+            state, rc = "done", 0
+        fallback = bool(
+            set(flags) == {"protocol"}
+            and not action_possible
+            and not events.has_executed_tool
+            and group_gone
+            and not self._shutting_down
+        )
+        return TurnResult(
+            state=state,
+            rc=rc,
+            text=events.text,
+            reasoning=events.reasoning,
+            usage=Usage(estimate_tokens(ctx.prompt), estimate_tokens(events.text))
+            if state == "done"
+            else Usage(),
+            err=error,
+        ), fallback
 
     def _run_exec(self, ctx: TurnContext, prompt: str) -> TurnResult:
         model = ctx.model
@@ -855,7 +1444,6 @@ class MuseAdapter(BackendAdapter):
         if rc != 0:
             return self._result("backend_error", rc, err=err)
         return self._result("done", 0, text=events.text, err=err, prompt=prompt)
-
 
     def shutdown(self) -> None:
         """Убить группы процессов собственных детей (только свои PID из реестра адаптера)."""
