@@ -128,6 +128,18 @@ TURN_DIR_PREFIX = "turn-"
 _TOKEN_SPLIT = re.compile(r"\s+")
 
 
+def _uuid7() -> str:
+    millis = int(time.time() * 1000)
+    rand_bytes = os.urandom(10)
+    b = bytearray(16)
+    b[0:6] = millis.to_bytes(6, byteorder="big")
+    b[6:8] = rand_bytes[0:2]
+    b[6] = (b[6] & 0x0F) | 0x70
+    b[8:16] = rand_bytes[2:10]
+    b[8] = (b[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(b)))
+
+
 def estimate_tokens(text: str) -> int:
     """Оценка токенов по словам (×1.3), как в muse-bridge: exec точных токенов не отдаёт."""
     if not text:
@@ -769,7 +781,7 @@ class MuseAdapter(BackendAdapter):
                     send(
                         "session/start",
                         {
-                            "commandId": str(uuid.uuid4()),
+                            "commandId": _uuid7(),
                             "workspaceRoot": str(turn_dir),
                             "providerId": "meta",
                             "modelId": ctx.model,
@@ -789,7 +801,7 @@ class MuseAdapter(BackendAdapter):
                     send(
                         "turn/start",
                         {
-                            "commandId": str(uuid.uuid4()),
+                            "commandId": _uuid7(),
                             "sessionId": session_id,
                             "reasoningEffort": effort,
                             "input": [{"type": "text", "text": ctx.prompt}],
@@ -831,7 +843,7 @@ class MuseAdapter(BackendAdapter):
                 send(
                     "approval/decide",
                     {
-                        "commandId": str(uuid.uuid4()),
+                        "commandId": _uuid7(),
                         "sessionId": session_id,
                         "approvalId": params.get("approvalId"),
                         "requirementId": params.get("currentRequirementId"),

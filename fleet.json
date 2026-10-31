@@ -59,7 +59,7 @@
     },
     "muse": {
       "kind": "muse",
-      "enabled": false,
+      "enabled": true,
       "required": false,
       "owned_by": "meta-muse",
       "max_concurrent": 1,
