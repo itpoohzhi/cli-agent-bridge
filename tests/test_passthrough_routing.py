@@ -1,14 +1,19 @@
 """AD-007/008: настоящий do_POST без сети, с наблюдаемой границей raw-шва."""
 
 import json
+import sys
 from email.message import Message
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
-import server
-from adapters import ADAPTER_KINDS
-from core.backend_adapter import AdapterRegistry
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import server  # noqa: E402
+from adapters import ADAPTER_KINDS  # noqa: E402
+from core.backend_adapter import AdapterRegistry  # noqa: E402
 
 
 @pytest.fixture

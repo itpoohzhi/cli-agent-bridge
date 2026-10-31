@@ -112,7 +112,7 @@ class TestNoEarly413(HubContextCase):
         self.assertNotIn(ctx.MARKER_TEXT, self.sent_all())
 
     def test_body_cap_of_hub_is_preserved(self):
-        self.assertEqual(server.FLEET["image_limits"]["max_body_bytes"], 8388608)
+        self.assertEqual(server.FLEET["image_limits"]["max_body_bytes"], 33554432)
         raw = self._raw_request(b"", cl=33554433)
         buf, _closed = self._raw_exchange(raw)
         code, typ, _ = self._raw_parse(buf)

@@ -31,7 +31,7 @@
     "max_images": 16,
     "max_image_bytes": 20971520,
     "max_total_image_bytes": 20971520,
-    "max_body_bytes": 8388608,
+    "max_body_bytes": 33554432,
     "types": [
       "image/png"
     ]
@@ -162,8 +162,8 @@
     },
     {
       "id": "deepseek-v4.1-flash",
-      "backend": "opencode-zen",
-      "name": "DeepSeek V4.1 Flash (OpenCode Zen bridge)",
+      "backend": "droid",
+      "name": "DeepSeek V4.1 Flash (Droid legacy, неактивна)",
       "efforts": [
         "high",
         "max"
@@ -398,27 +398,6 @@
       "id": "deepseek-v4.1-flash-free",
       "backend": "opencode-zen",
       "name": "DeepSeek V4.1 Flash Free (Zen)",
-      "efforts": [
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 200000,
-      "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "glm-5.3-flash-free",
-      "backend": "opencode-zen",
-      "name": "GLM 5.3 Flash Free (Zen)",
       "efforts": [
         "high",
         "max"

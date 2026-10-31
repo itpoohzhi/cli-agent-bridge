@@ -80,7 +80,7 @@ class TestCatalogClassI(unittest.TestCase):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
         # 5 droid + 4 muse + 2 codex; passthrough-мосты agy/opencode-zen/claude-p выключены (моделей нет)
-        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(len(catalog["order"]), 18)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -147,11 +147,11 @@ class TestCatalogClassI(unittest.TestCase):
     def test_confirmed_partial_efforts_proven_starts(self):
         # Класс II: неполный proof — не отказ старта (деградируют только непокрытые effort).
         item = self._bind_confirmed(
-            model_id="deepseek-v4.1-flash", efforts_proven=["high"]
+            model_id="deepseek-v4.1-flash-free", efforts_proven=["high"]
         )
         catalog = server._build_catalog(self.data)
         self.assertEqual(
-            catalog["models"]["deepseek-v4.1-flash"]["images"]["proof"][
+            catalog["models"]["deepseek-v4.1-flash-free"]["images"]["proof"][
                 "efforts_proven"
             ],
             ["high"],
@@ -476,8 +476,8 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 20 моделей боевого каталога + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
-        self.assertEqual(len(body["data"]), 20 + len(_DROID_LEGACY_MODELS))
+        # 18 моделей боевого каталога + deepseek-v4.1-flash стенда FakeDroid + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
+        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS))
         self.assertTrue({"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]})
         self.assertIn("muse-wonder-full-1.0", {e["id"] for e in body["data"]})
         self.assertEqual(body["data"][0]["id"], "muse-wonder-full-1.0")  # умолчание каталога первым

@@ -22,7 +22,6 @@ FLEET_FILE = Path(server.ROOT) / "fleet.json"
 DROID_MODELS = {
     "claude-sonnet-5-5": (1000000, ["high"]),
     "gemini-3.8-flash": (1048576, ["high"]),
-    "claude-sonnet-5-5": (256000, ["high"]),
     "deepseek-v4.1-flash": (1000000, ["high", "max"]),
     "glm-5.3": (1000000, ["max"]),
 }
@@ -106,10 +105,10 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_models_are_bound_to_backends(self):
         data = raw_v3()
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(len(catalog["order"]), 18)
         self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
         self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
-        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "opencode-zen")
+        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
@@ -124,7 +123,10 @@ class TestLiveFleetV3(unittest.TestCase):
 
     def test_droid_models_unchanged(self):
         catalog = server._build_catalog(raw_v3())
+        # deepseek-v4.1-flash - неактивная историческая запись за выключенным Droid (ADR 0017)
         self.assertEqual([mid for mid in catalog["order"] if catalog["models"][mid]["backend"] == "droid"], [])
+        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
+        self.assertFalse(raw_v3()["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
         self.assertNotIn("grok-4.7", catalog["models"])
         self.assertNotIn("glm-5.3", catalog["models"])
@@ -137,7 +139,7 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(len(catalog["order"]), 18)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -545,7 +547,7 @@ class TestFleetCheckParity(unittest.TestCase):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(len(catalog["order"]), 18)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):

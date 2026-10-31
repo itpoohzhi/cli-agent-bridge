@@ -1702,9 +1702,8 @@ class AllowedModelsSyncTest(_BridgeScenario):
                         content,
                         flags=re.DOTALL,
                     )
-                    if m is None:
-                        # профиль владельца вне репозитория: модель может не декларироваться
-                        continue
+                    self.assertIsNotNone(m, f"{model} not found in {patch_path}")
+                    assert m is not None
                     self.assertEqual(
                         int(m.group(1)),
                         1048576,
