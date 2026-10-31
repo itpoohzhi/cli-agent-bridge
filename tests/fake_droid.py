@@ -86,6 +86,11 @@ class Fake:
             "droid_auto": os.environ.get("DROID_AUTO", ""),
             "droid_bin": os.environ.get("DROID_BIN", ""),
             "env_names": sorted(os.environ),
+            # Значения запрошенных конфигом переменных (`log_env`): проверка проброса окружения.
+            "probe_env": {
+                k: os.environ.get(k) for k in self.config().get("log_env", [])
+            },
+            "path_head": os.environ.get("PATH", "").split(os.pathsep)[0],
         }
 
     def log(self, record: dict) -> None:
@@ -518,6 +523,11 @@ class Fake:
                     time.sleep(0.05)
                 cancelled = True
                 break
+            elif op == "stderr_env":
+                # Эхо значений переменных окружения в stderr ребёнка (проверка вычистки секретов).
+                for name in step.get("names", []):
+                    sys.stderr.write(f"leak {name}={os.environ.get(name, '')}\n")
+                sys.stderr.flush()
             elif op == "exit":
                 if step.get("stderr"):
                     sys.stderr.write(step["stderr"] + "\n")

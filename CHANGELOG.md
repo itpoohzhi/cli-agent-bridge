@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### Added
+- **Проброс `extra_body.env` и CLI `agent-browser` (ADR-0016):** за флагом GigaRC
+  `BRIDGE_BROWSER_FORWARDING_ENABLED` (дефолт `false`, kill-switch без рестарта) мост передаёт санитизированное
+  окружение запроса в процесс droid (строгий денилист, loopback-only `AGENT_BROWSER_CDP`, перезапуск процесса при
+  смене env, env только в памяти, секреты и ws-адреса маскируются в логах); `tools/agent_browser.py` —
+  stdlib-утилита `eval|title|navigate|screenshot` поверх CDP, `tools/` добавляется в начало `PATH` потомка.
 - **Отказоустойчивость контекста (EYE-33873, ADR-0006 v3.0):** общее stdlib-ядро `core/context_resilience.py`
   (бюджет `C−R−H−S`, граф неделимых tool-компонент, прунинг до 78% `B_input` с маркером `[context pruned]`,
   эпохи с гистерезисом для чатов с доверенными `x-session-id`/`x-dsh-chat-id`, строгий admission 400

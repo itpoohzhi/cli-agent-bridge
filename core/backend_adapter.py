@@ -123,6 +123,9 @@ class TurnContext:
     managed_turn: Any = None
     detach_on_disconnect: bool = False
     cancel_event: Any = None
+    # Проброшенное окружение extra_body.env (ADR-0016): уже санитизировано мостом; адаптеры без
+    # поддержки поле игнорируют; repr скрыт, чтобы секреты не попадали в логи/трейсы.
+    fwd_env: dict[str, str] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

@@ -70,6 +70,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))  # пакеты core/ и adapters/ рядом с server.py
 import b_guard  # noqa: E402  - охранник B: автоматический контур профилей DSH (RW-003)
+from agent_browser import (  # noqa: E402,F401  - единый loopback-контур CDP (ADR-0016): мост и CLI
+    discover_local_cdp_url,
+    is_loopback_cdp_url,
+)
 from receipt_schema import (  # noqa: E402
     RECEIPT_PROBES,
     RECEIPT_SCHEMA,
@@ -97,6 +101,7 @@ from core.backend_adapter import (  # noqa: E402
     TurnContext,
     ToolCall,
     build_catalog,
+    is_bridge_secret_name,
     strip_bridge_secrets,
 )
 from core import context_resilience as ctxres  # noqa: E402
@@ -471,14 +476,218 @@ def _log(msg: str) -> None:
         pass
 
 
+_WS_URL = re.compile(r"\bwss?://\S+", re.IGNORECASE)
+
+
 def _mask_secrets(text: str) -> str:
-    """Длинные токеноподобные последовательности -> ***."""
-    return _SECRET.sub("***", text)
+    """Длинные токеноподобные последовательности и WebSocket URL -> ***."""
+    return _SECRET.sub("***", _WS_URL.sub("ws://***", text))
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
     """Усечённая причина ошибки для лога: маскирование секретов, затем обрезка."""
     return _mask_secrets(str(err or ""))[:limit]
+
+
+# ---- ПРОБРОС СЕССИОННОГО ОКРУЖЕНИЯ extra_body.env (ADR-0016) ------------------------------
+# Всё закрыто флагом GigaRC BRIDGE_BROWSER_FORWARDING_ENABLED (дефолт false = прежнее поведение
+# побайтово). Проброшенное окружение живёт только в памяти: в chat_state/record не пишется.
+FORWARD_FLAG = "BRIDGE_BROWSER_FORWARDING_ENABLED"
+
+
+def _env_limit(name: str, default: int) -> int:
+    """Положительный целочисленный лимит из окружения; нечисло/<=0 -> безопасный дефолт."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
+FORWARD_ENV_MAX_VALUE = _env_limit("BRIDGE_FORWARD_ENV_MAX_VALUE", 32768)
+_FORWARD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+# Имена, которые запрос подменять не вправе (регистр не важен: сравнение по upper()).
+DENIED_FORWARD_ENV = frozenset(
+    {
+        "BRIDGE_KEY",
+        "DROID_DSH_BRIDGE_KEY",
+        "DROID_BIN",
+        "FACTORY_HOME_OVERRIDE",
+        "DROID_AUTO",
+        "PATH",
+        "HOME",
+        "SHELL",
+        "USER",
+        "IFS",
+        "ENV",
+        "BASH_ENV",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "PWD",
+        "TMPDIR",
+        "ZDOTDIR",
+        "CDPATH",
+        "PS4",
+        "PROMPT_COMMAND",
+    }
+)
+DENIED_FORWARD_PREFIXES = (
+    "DYLD_",
+    "LD_",
+    "PYTHON",
+    "NODE_",
+    "BASH_",
+    "DROID_",
+    "FACTORY_",
+    "GIT_",
+    "PERL",
+    "RUBY",
+)
+_MASK_NAME = re.compile(r"TOKEN|KEY|SECRET|AUTH|PASS", re.IGNORECASE)
+
+
+class _ForwardFlagSource:
+    """Динамический флаг GigaRC: JSON-снимок с кэшем по (inode, size, mtime_ns), O(1) на вызов.
+
+    Файл — `BRIDGE_DYNAMIC_CONFIG_PATH` либо `~/.config/cli-agent-bridge/dynamic_config.json`.
+    Файла нет или в нём нет ключа — env `BRIDGE_BROWSER_FORWARDING_ENABLED` (дефолт false).
+    Файл нечитаем/повреждён — fail-closed (false): kill-switch не должен «залипать» во включённом.
+    Перечитывание — только при смене сигнатуры файла, рестарт моста не нужен.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._path = ""
+        self._sig: tuple | None = None
+        self._value: bool | None = None  # None = ключа нет в файле
+
+    @staticmethod
+    def _truthy(raw: Any) -> bool:
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+    def enabled(self) -> bool:
+        path = os.environ.get("BRIDGE_DYNAMIC_CONFIG_PATH") or os.path.expanduser(
+            "~/.config/cli-agent-bridge/dynamic_config.json"
+        )
+        try:
+            st = os.stat(path)
+            sig = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        except OSError:
+            sig = None
+        with self._lock:
+            if path != self._path or sig != self._sig:
+                self._path, self._sig = path, sig
+                self._value = self._load(path) if sig is not None else None
+            value = self._value
+        if value is None:
+            return self._truthy(os.environ.get(FORWARD_FLAG, "false"))
+        return value
+
+    def _load(self, path: str) -> bool | None:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.loads(handle.read(1 << 20))
+        except (OSError, ValueError):
+            return False  # повреждённый снимок: fail-closed
+        if not isinstance(data, dict):
+            return False
+        if FORWARD_FLAG not in data:
+            return None
+        return self._truthy(data[FORWARD_FLAG])
+
+
+_FORWARD_FLAG_SOURCE = _ForwardFlagSource()
+
+
+def is_browser_forwarding_enabled() -> bool:
+    """Включён ли проброс extra_body.env / tools в PATH (динамически, без рестарта)."""
+    return _FORWARD_FLAG_SOURCE.enabled()
+
+
+def _extra_denied_names() -> frozenset:
+    raw = os.environ.get("BRIDGE_BROWSER_FORWARD_DENYLIST", "")
+    return frozenset(n.strip().upper() for n in raw.split(",") if n.strip())
+
+
+def _forward_name_denied(name: str) -> bool:
+    upper = name.upper()
+    return (
+        upper in DENIED_FORWARD_ENV
+        or upper.startswith(DENIED_FORWARD_PREFIXES)
+        or upper.endswith("_BRIDGE_KEY")
+        or is_bridge_secret_name(name)
+        or upper in _extra_denied_names()
+    )
+
+
+def sanitize_forwarded_env(env_dict: Any) -> dict[str, str]:
+    """Допустимое подмножество запрошенного окружения; остальное молча отбрасывается.
+
+    Ключ — `^[A-Za-z_][A-Za-z0-9_]{0,127}$` вне денилиста; значение — строка без NUL длиной
+    <= FORWARD_ENV_MAX_VALUE (32768); `AGENT_BROWSER_CDP` — только loopback-адрес. Идемпотентна. Значения не логируются.
+    """
+    clean: dict[str, str] = {}
+    if not isinstance(env_dict, dict):
+        return clean
+    for name, value in env_dict.items():
+        if (
+            not isinstance(name, str)
+            or not isinstance(value, str)
+            or _FORWARD_KEY.fullmatch(name) is None
+            or "\0" in value
+            or len(value) > FORWARD_ENV_MAX_VALUE
+            or _forward_name_denied(name)
+        ):
+            continue
+        if name == "AGENT_BROWSER_CDP" and not is_loopback_cdp_url(value):
+            continue
+        clean[name] = value
+    return clean
+
+
+def mask_env_for_log(env_dict: dict) -> dict:
+    """Копия окружения для лога: значения секретных имён и любые ws-адреса -> ***."""
+    out = {}
+    for name, value in env_dict.items():
+        text = str(value)
+        if _MASK_NAME.search(str(name)) or _WS_URL.search(text):
+            out[name] = "***"
+        else:
+            out[name] = _mask_secrets(text)[:80]
+    return out
+
+
+def _secret_values(env_dict: dict) -> list:
+    """ВСЕ значения проброшенного окружения (для вычистки из stderr ребёнка): секретом может быть любое."""
+    return sorted((v for v in env_dict.values() if v), key=len, reverse=True)
+
+
+def _redact_values(text: str, values: list) -> str:
+    for value in values:
+        if value:
+            text = text.replace(value, "***")
+    return text
+
+
+def _strip_passthrough_env(raw: bytes, req: dict) -> "tuple[bytes, dict]":
+    """Вырезать `extra_body.env` из тела, уходящего внешнему upstream (токены/CDP не покидают хост).
+
+    Тело без `extra_body.env` возвращается дословно (побайтово), иначе пересериализуется.
+    """
+    extra = req.get("extra_body")
+    if not isinstance(extra, dict) or "env" not in extra:
+        return raw, req
+    clean_req = dict(req)
+    clean_req["extra_body"] = {k: v for k, v in extra.items() if k != "env"}
+    return json.dumps(clean_req, ensure_ascii=False).encode("utf-8"), clean_req
 
 
 def _launch_env() -> dict:
@@ -488,11 +697,18 @@ def _launch_env() -> dict:
     wait_api/wait_hy2/pick_pr_gateway). Первый запуск и запуск после ошибки идут
     с полным префлайтом, как прежде. Ключи моста (`BRIDGE_KEY`, `DROID_DSH_BRIDGE_KEY` и любые
     `*_BRIDGE_KEY` / `BRIDGE_*KEY*`) в потомка не передаются (C-03, ADR 0015 B1).
+    При включённом флаге пробросов `tools/` ставится в начало PATH (agent-browser, ADR-0016).
     """
     env = strip_bridge_secrets(os.environ.copy())
     last = _last_ok[0]
     if last and 0 <= time.monotonic() - last < PREFLIGHT_SKIP_WINDOW_S:
         env["DROID_SKIP_PREFLIGHT"] = "1"
+    if is_browser_forwarding_enabled():
+        tools_dir = str(ROOT / "tools")
+        parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+        env["PATH"] = os.pathsep.join(
+            [tools_dir] + [p for p in parts if p != tools_dir]
+        )
     return env
 
 
@@ -1224,9 +1440,22 @@ class RpcProcess:
     принадлежит процессу и возвращается в пул только после waitpid.
     """
 
-    def __init__(self, work_dir: str, pool: "ProcPool", holds_slot: bool):
+    def __init__(
+        self,
+        work_dir: str,
+        pool: "ProcPool",
+        holds_slot: bool,
+        fwd_env: dict | None = None,
+    ):
         self.pool = pool
         self.holds_slot = holds_slot
+        # Повторная проверка kill-switch в точке spawn: флаг выключили между приёмом запроса и запуском.
+        if fwd_env and not is_browser_forwarding_enabled():
+            fwd_env = None
+        # Проброшенное окружение (ADR-0016): только признак и значения секретов для вычистки stderr;
+        # сам словарь процесс не хранит и на диск не пишет.
+        self.has_fwd_env = bool(fwd_env)
+        self._redact = _secret_values(fwd_env) if fwd_env else []
         self.busy = False
         self.dead = False
         self.closed = False
@@ -1267,7 +1496,7 @@ class RpcProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
-                env=_child_env(),
+                env=_child_env(fwd_env),
             )
             # Запись в stdin идёт срезами с дедлайном/отменой (select): fd неблокирующий.
             os.set_blocking(self.proc.stdin.fileno(), False)
@@ -1346,6 +1575,8 @@ class RpcProcess:
             self.err_box.append(f"stderr unreadable: {exc!r}")
             return
         text = _clean_err(bytes(kept).decode("utf-8", "replace"))
+        if self._redact:
+            text = _redact_values(text, self._redact)
         if dropped:
             text += f"\n[stderr truncated: {dropped} bytes dropped]"
         self.err_box.append(text)
@@ -1854,7 +2085,7 @@ class RpcProcess:
                 self._write_lock.release()
 
 
-def _child_env() -> dict:
+def _child_env(fwd_env: dict | None = None) -> dict:
     """Окружение ребёнка: как _launch_env + чистый Factory home и образ из receipt (AD-010).
 
     Сбой подготовки home — исключение (spawn не выполняется), молчаливого продолжения нет.
@@ -1864,6 +2095,9 @@ def _child_env() -> dict:
     попасть в контекст чата; DROID_AUTO=off — вторичная защита (главная — RPC).
     """
     env = _launch_env()
+    if fwd_env and is_browser_forwarding_enabled():
+        # Повторная санитизация на границе spawn; системные имена ниже всё равно перезаписываются.
+        env.update(sanitize_forwarded_env(fwd_env))
     home = WORKSPACE / "runtime" / "factory-home"
     try:
         _mkdir_private(home)
@@ -1957,6 +2191,8 @@ class Chat:
         self.last_used = 0.0
         self.rec_rev = 0
         self.state = "NEW"  # NEW | READY | PERSISTED | DIRTY
+        # Проброшенное окружение процесса (ADR-0016): строго in-memory, в _write_record не попадает.
+        self.env: dict[str, str] | None = None
 
 
 def _record_path(key_hash: str) -> Path:
@@ -2069,6 +2305,7 @@ class _Victim:
         chat = self.chat
         try:
             proc, chat.proc = chat.proc, None
+            _set_chat_env(chat, None)
             if chat.state == "READY":
                 chat.state = "PERSISTED"
             if proc is not None:
@@ -2125,6 +2362,9 @@ class ChatRegistry:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.chats: dict = {}
+        self.env_keys: set = (
+            set()
+        )  # key_hash чатов с проброшенным env: kill-switch идёт по ним за O(k)
         self._reaper: threading.Thread | None = None
 
     def get(self, key_hash: str) -> Chat:
@@ -2223,6 +2463,7 @@ class ChatRegistry:
                     if proc is not seen or proc is None or proc.alive():
                         continue  # за время снимка процесс заменён или ожил: это уже не тот процесс
                     chat.proc = None
+                    _set_chat_env(chat, None)
                     proc.close(mode="term", term_wait=0.5, kill_wait=0.5)
                     if chat.state == "READY":
                         chat.state = "PERSISTED"
@@ -2244,6 +2485,7 @@ class ChatRegistry:
                 ):
                     continue  # состояние изменилось с момента снимка: процесс свежий или чужой
                 chat.proc = None
+                _set_chat_env(chat, None)
                 if chat.state == "READY":
                     chat.state = "PERSISTED"
                 _log(
@@ -2267,6 +2509,7 @@ class ChatRegistry:
         while not _shutting_down:
             time.sleep(REAPER_TICK_S)
             try:
+                _enforce_forward_kill_switch()
                 self.reap_once()
             except OSError as exc:
                 _log(f"session_rpc reaper_error err={_err_summary(exc, 120)!r}")
@@ -2274,6 +2517,66 @@ class ChatRegistry:
 
 REGISTRY = ChatRegistry()
 POOL = ProcPool()
+
+
+def _set_chat_env(chat: Chat, env: dict | None) -> None:
+    """Окружение чата (только память): учёт в env_keys для kill-switch."""
+    with REGISTRY.lock:
+        chat.env = env or None
+        if chat.env is not None:
+            REGISTRY.env_keys.add(chat.key_hash)
+        else:
+            REGISTRY.env_keys.discard(chat.key_hash)
+
+
+def _kill_proc_now(proc: RpcProcess) -> None:
+    """Немедленное завершение процесса: SIGTERM без ожидания, затем SIGKILL группы."""
+    proc.close(mode="kill", term_wait=0.0, kill_wait=TERM_WAIT_S)
+
+
+def _reconcile_chat_env(chat: Chat, fwd_env: dict | None) -> None:
+    """Под арендой чата: окружение процесса == окружение запроса, иначе процесс убивается (ADR-0016).
+
+    Смена env, запрос без env у чата с env и запрос с env у чата без env — во всех случаях живой
+    процесс завершается, `chat.proc = None`, дальше план поднимет новый процесс с нужным окружением
+    (`restore` того же SID). Без env с обеих сторон — no-op (поведение побайтово прежнее).
+    """
+    new = fwd_env or None
+    if chat.env == new:
+        return
+    proc, chat.proc = chat.proc, None
+    if proc is not None:
+        if chat.state == "READY":
+            chat.state = "PERSISTED"
+        _log(
+            f"session_rpc chat={chat.key_hash[:8]} env_changed pid={proc.pid} "
+            f"had_env={int(chat.env is not None)} has_env={int(new is not None)}"
+        )
+        _kill_proc_now(proc)
+    _set_chat_env(chat, new)
+
+
+def _enforce_forward_kill_switch() -> int:
+    """Флаг выключен -> завершить все процессы с проброшенным env (без рестарта моста). -> число убитых."""
+    if is_browser_forwarding_enabled():
+        return 0
+    with _active_lock:
+        procs = [p for p in _rpc_procs.values() if p.has_fwd_env]
+    with REGISTRY.lock:
+        keys = list(REGISTRY.env_keys)
+        chats = [REGISTRY.chats[k] for k in keys if k in REGISTRY.chats]
+        REGISTRY.env_keys.clear()
+    for chat in chats:
+        proc = chat.proc
+        if proc is not None and proc in procs:
+            chat.proc = None
+            if chat.state == "READY":
+                chat.state = "PERSISTED"
+        chat.env = None
+    for proc in procs:
+        _log(f"session_rpc kill_switch forward_env pid={proc.pid}")
+        _close_async(proc, "kill")
+    return len(procs)
 
 
 def _active_turn_count() -> int:
@@ -2967,7 +3270,7 @@ class Run:
     def _spawn(self) -> RpcProcess:
         holds = self.slot_held
         self.slot_held = False  # слот передан конструктору (при сбое он сам его вернёт)
-        proc = RpcProcess(self.plan["work_dir"], POOL, holds)
+        proc = RpcProcess(self.plan["work_dir"], POOL, holds, self.plan.get("fwd_env"))
         self.proc = proc
         self.err_box = proc.err_box
         return proc
@@ -3758,6 +4061,7 @@ def _finish_attempt(
         try:
             if chat is not None:
                 chat.proc = None
+                _set_chat_env(chat, None)
                 chat.state = "DIRTY"
                 _persist_chat(chat)
         finally:
@@ -3777,6 +4081,12 @@ def _finish_attempt(
     elif run.path == "restore":
         chat.restore_count += 1
     chat.proc = proc
+    # Повторная попытка (retry 2..3) поднимает процесс с plan["fwd_env"]: окружение чата обязано
+    # совпасть с окружением реального процесса, иначе следующий запрос без env переиспользует его (F-001).
+    spawned_env = getattr(proc, "has_fwd_env", None)
+    _set_chat_env(
+        chat, plan.get("fwd_env") if spawned_env is None or spawned_env else None
+    )
     chat.sid = run.sid
     chat.cfg = cfg
     chat.n = len(items) + 1
@@ -4417,6 +4727,7 @@ class Handler(BaseHTTPRequestHandler):
                 if reason:
                     return self._no_slot(ctx, reason)
                 chat_held = True
+                _reconcile_chat_env(chat, ctx.get("fwd_env"))
             images = ctx.get("images") or []
             if images:
                 img_dir = WORKSPACE / ("img-" + uuid.uuid4().hex)
@@ -4455,6 +4766,7 @@ class Handler(BaseHTTPRequestHandler):
             keep_tools = ["Read"] if images else []
             for attempt in (1, 2, 3):
                 plan = _make_plan(ctx, chat, cfg, work_dir, keep_tools)
+                plan["fwd_env"] = ctx.get("fwd_env")
                 holds_slot = False
                 dead = plan.pop("dead_proc")
                 if dead is not None:
@@ -5139,6 +5451,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
+        _enforce_forward_kill_switch()
         self._active_managed_turn = None
         self._context_pruned = None
         managed_turn: ManagedTurn | None = None
@@ -5445,6 +5758,9 @@ class Handler(BaseHTTPRequestHandler):
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
             cwd = str(extra.get("cwd") or "")
+            fwd_env = self._forwarded_env(extra, model_id, model_len)
+            if fwd_env is False:
+                return
             req_turn_id = (
                 self.headers.get("X-Turn-Id") or str(extra.get("turn_id") or "")
             ).strip()
@@ -5562,6 +5878,7 @@ class Handler(BaseHTTPRequestHandler):
                 "prompt": prompt,
                 "images": images,
                 "cwd": cwd,
+                "fwd_env": fwd_env,
                 "emulate_tools": emulate_tools,
                 "tool_schemas": build_tool_schemas(raw_tools),
                 "tag": (
@@ -5590,6 +5907,50 @@ class Handler(BaseHTTPRequestHandler):
                 budget.release(reserved)
             _DELIVERY_BUDGET.release(self._delivery_reserved)
             self._delivery_reserved = 0
+
+    def _forwarded_env(
+        self, extra: Any, model_id: str, model_len: int
+    ) -> "dict[str, str] | None | bool":
+        """`extra_body.env` под флагом GigaRC (ADR-0016): dict | None; False — 400 уже отправлен.
+
+        Флаг выключен — поле игнорируется целиком (поведение прежнее). Включён: запрещённые и
+        невалидные имена/значения отбрасываются, не-loopback `AGENT_BROWSER_CDP` — 400. Если клиент
+        прислал непустой env без `AGENT_BROWSER_CDP`, мост подставляет локально найденный loopback CDP.
+        """
+        if not is_browser_forwarding_enabled():
+            return None
+        raw_env = extra.get("env")
+        if not raw_env:
+            return None
+        if not isinstance(raw_env, dict) or len(raw_env) > FORWARD_ENV_MAX_KEYS:
+            self._reject(
+                400,
+                "invalid_request",
+                "extra_body.env must be an object with at most %d entries"
+                % FORWARD_ENV_MAX_KEYS,
+                model_id,
+                model_len,
+            )
+            return False
+        clean = sanitize_forwarded_env(raw_env)
+        if "AGENT_BROWSER_CDP" in raw_env and "AGENT_BROWSER_CDP" not in clean:
+            self._reject(
+                400,
+                "invalid_request",
+                "AGENT_BROWSER_CDP must be a loopback ws|wss|http address",
+                model_id,
+                model_len,
+            )
+            return False
+        if clean and "AGENT_BROWSER_CDP" not in raw_env:
+            found = discover_local_cdp_url()
+            if found:
+                clean["AGENT_BROWSER_CDP"] = found
+        dropped = sorted(str(k)[:40] for k in raw_env if k not in clean)
+        # Значения не логируются вообще (токены/CDP): только имена ключей и длины.
+        accepted = [(k, len(v)) for k, v in clean.items()]
+        _log(f"forward_env accepted={accepted!r} dropped={dropped[:16]!r}")
+        return clean or None
 
     def _context_gate(
         self, req: dict, model_id: str, model: dict, model_len: int
@@ -5856,6 +6217,7 @@ class Handler(BaseHTTPRequestHandler):
     ) -> None:
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
         _log(f"passthrough route model={model_id} backend={adapter.id}")
+        raw, req = _strip_passthrough_env(raw, req)
         headers = {key: value for key, value in self.headers.items()}
         adapter.handle(
             path=self.path,
