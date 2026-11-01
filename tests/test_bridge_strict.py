@@ -477,7 +477,7 @@ class TestHealthAndModels(BridgeCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
         # 18 моделей боевого каталога + deepseek-v4.1-flash стенда FakeDroid + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
-        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS))
+        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS) + 7)  # объявленные effort aliases
         self.assertTrue({"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]})
         self.assertIn("muse-wonder-full-1.0", {e["id"] for e in body["data"]})
         self.assertEqual(body["data"][0]["id"], "muse-wonder-full-1.0")  # умолчание каталога первым

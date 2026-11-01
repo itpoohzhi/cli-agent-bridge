@@ -85,12 +85,15 @@ class TestLaunchEnv(unittest.TestCase):
             "BRIDGE_INSTR_LIMIT": "100000",
             "DROID_DSH_BRIDGE_HOST": "127.0.0.1",
             "KEYCHAIN_NAME": "login",
-            "PATH": os.environ.get("PATH", "/usr/bin"),
+            "PATH": "/usr/bin",
         }
-        with mock.patch.dict(os.environ, {**secrets, **ordinary}):
+        with mock.patch.dict(os.environ, {**secrets, **ordinary}), mock.patch.object(
+            server, "is_browser_forwarding_enabled", return_value=True
+        ):
             env = server._launch_env()
         for name in secrets:
             self.assertNotIn(name, env, name)
+        ordinary["PATH"] = f"{server.ROOT / 'tools'}{os.pathsep}{ordinary['PATH']}"
         for name, value in ordinary.items():
             self.assertEqual(env.get(name), value, name)
 
