@@ -1,0 +1,26 @@
+{
+  "available": false,
+  "family": "Meta",
+  "ladder": [
+    {
+      "argv_sha256": "a23bf3278605f11b3e1fed45d42d5a74fc950b746403a4774a2d5e0d3cc11e5a",
+      "end_utc": "2026-11-01T22:00:44.846401+00:00",
+      "error": null,
+      "pgid": "18603",
+      "pid": 18603,
+      "raw_err_sha256": "78a2f1e603eadd6fe3166eed49b3658d8518b6d8723f048d584294e4fb404213",
+      "raw_out_sha256": "53f42bbb483a6689629bca199c1a73f35bdcf0275ebade5f16c707df76eccb2e",
+      "rc": 1,
+      "start_utc": "2026-11-01T22:00:38.968155+00:00",
+      "status": "failed",
+      "transport": "muse"
+    }
+  ],
+  "launcher_sha256": "73e17fa3b946eb5280bc731591a3becfe88eb5201f9ca174175cc01dd5955ca4",
+  "round": 1,
+  "run_id": "arch-panel",
+  "schema": "pol-probe/1",
+  "setup": "default",
+  "slot_id": "muse-wonder-full-1.0",
+  "stage": "arch"
+}

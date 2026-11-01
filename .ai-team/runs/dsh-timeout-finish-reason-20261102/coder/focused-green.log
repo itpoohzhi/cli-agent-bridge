@@ -1,0 +1,86 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.2.0, pluggy-1.7.0 -- /Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/python3.14
+cachedir: .pytest_cache
+rootdir: /Users/aazhiry1/tmp/cli-agent-bridge/bugfix-no-ticket-dsh-timeout-finish-reason--coder-20261102
+collecting ... collected 341 items / 283 deselected / 58 selected
+
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_bad_file_keeps_lastgood_or_false 
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_bad_file_keeps_lastgood_or_false PASSED [  1%]
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_defaults_false_without_file_or_keys PASSED [  3%]
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_env_override_beats_opposite_json 
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_env_override_beats_opposite_json PASSED [  5%]
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_json_true_enables_each_and_all_flags 
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_json_true_enables_each_and_all_flags PASSED [  6%]
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_sqlite_flag_keeps_own_fail_closed PASSED [  8%]
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_ttl_and_stat_key_reload PASSED [ 10%]
+tests/test_agy_bridge_resilience.py::RuntimeConfigSnapshotTests::test_runtime_config_snapshot_unchanged_stat_means_zero_json_loads PASSED [ 12%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse PASSED [ 13%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_dynamic_config_and_uppercase_alias_emit_length 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_dynamic_config_and_uppercase_alias_emit_length PASSED [ 15%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_empty_env_uses_dynamic_config 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_empty_env_uses_dynamic_config PASSED [ 17%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_env_length_and_max_tokens_override_config 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_env_length_and_max_tokens_override_config PASSED [ 18%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop PASSED [ 20%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags PASSED [ 22%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_reason_reloads_after_ttl_without_restart PASSED [ 24%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_end_to_end_real_run_both_states_sse 
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_end_to_end_real_run_both_states_sse PASSED [ 25%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_end_to_end_real_run_json_and_silent_504 PASSED [ 27%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_execute_drains_retained_text_before_returning 
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_execute_drains_retained_text_before_returning PASSED [ 29%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_final_flush_window_survives_expired_deadline PASSED [ 31%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_first_token_timeout_stays_504 PASSED [ 32%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_json_matrix 
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_json_matrix PASSED [ 34%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_one_shared_window_for_all_final_writes PASSED [ 36%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_post_hoc_path_when_run_once_skips_the_hook PASSED [ 37%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_run_once_finalizes_before_close_and_never_retries PASSED [ 39%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_sse_matrix 
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_sse_matrix PASSED [ 41%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_window_never_crosses_request_ceiling PASSED [ 43%]
+tests/test_agy_bridge_resilience.py::SilentGracefulTimeoutTests::test_silent_graceful_timeout_write_failure_stops_all_further_writes PASSED [ 44%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_f004_divergent_text_is_retained_and_capped PASSED [ 46%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_f004_execute_finish_exposes_retained_divergent_text PASSED [ 48%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_f004_reconcile_result_divergence_is_retained PASSED [ 50%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_f004_same_source_equal_steps_do_not_scan_quadratically PASSED [ 51%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_f005_done_drains_tail_before_reconcile PASSED [ 53%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_f007_stale_reader_does_not_overwrite_newer_snapshot PASSED [ 55%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw001_json_finalizes_before_run_close PASSED [ 56%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw001_json_window_reset_restores_timeout_hook_and_post_hoc 
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw001_json_window_reset_restores_timeout_hook_and_post_hoc PASSED [ 58%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw001_sse_exception_still_resets_and_next_request_is_clean PASSED [ 60%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw001_sse_window_reset_restores_timeout_and_deadline PASSED [ 62%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw002_call_id_dedups_regardless_of_ordinal PASSED [ 63%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw002_failed_sink_write_does_not_consume_marker PASSED [ 65%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw002_marker_cap_is_32_and_anonymous_events_are_capped PASSED [ 67%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw002_pump_ordinal_is_stable_for_replayed_call_id PASSED [ 68%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw002_two_phase_commit_spends_budget_only_after_commit PASSED [ 70%]
+tests/test_agy_bridge_resilience.py::SilentCouncilCycle2Tests::test_silent_rw003_extended_allowlist_and_mcp_names PASSED [ 72%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_commit_callback_blocks_actual_second_execution PASSED [ 74%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_config_reload_keeps_lastgood_and_accepts_uppercase_alias PASSED [ 75%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_delivered_blocks_retry_on_headers_or_tool_side_effects 
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_delivered_blocks_retry_on_headers_or_tool_side_effects PASSED [ 77%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_disabled_flag_preserves_legacy_payload_and_flat_error PASSED [ 79%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_enabled_graceful_timeout_retains_single_stop_final PASSED [ 81%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_failed_terminal_write_stops_without_done PASSED [ 82%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_first_payload_commits_before_cli_returns PASSED [ 84%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_flag_change_applies_to_next_request PASSED [ 86%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_flag_defaults_config_and_env_precedence 
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_flag_defaults_config_and_env_precedence PASSED [ 87%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_qs001_reasoning_only_is_success PASSED [ 89%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_qs002_tool_and_result_only_are_success 
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_qs002_tool_and_result_only_are_success PASSED [ 91%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_qs003_silence_and_precommit_errors_use_http502 
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_qs003_silence_and_precommit_errors_use_http502 PASSED [ 93%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_qs004_committed_error_has_terminal_choice_before_done PASSED [ 94%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_resilience_json_uses_request_flag_snapshot 
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_resilience_json_uses_request_flag_snapshot PASSED [ 96%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_terminal_error_closes_pending_calls_in_existing_relay PASSED [ 98%]
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_tool_trace_commits_only_visible_payload 
+tests/test_agy_bridge_resilience.py::DialogueStreamResilienceTests::test_tool_trace_commits_only_visible_payload PASSED [100%]
+
+=========== 58 passed, 283 deselected, 219 subtests passed in 11.28s ===========

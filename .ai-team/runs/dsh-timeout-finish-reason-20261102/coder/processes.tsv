@@ -1,0 +1,14 @@
+role	pid	pgid	command
+setup	79903	79903	git clone --no-hardlinks
+regression-red	95478	95478	pytest GracefulTimeoutFinishReasonTests
+focused-green	13896	13896	['/Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/pytest', 'tests/test_agy_bridge_resilience.py', '-v', '-k', 'GracefulTimeoutFinishReasonTests or DialogueStreamResilienceTests or SilentGracefulTimeoutTests or SilentCouncilCycle2Tests or RuntimeConfigSnapshotTests']
+ruff-check	13897	13897	['/Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/ruff', 'check', 'bridges/agy-bridge/server.py', 'tests/test_agy_bridge_resilience.py']
+basedpyright	13898	13898	['/Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/basedpyright', 'bridges/agy-bridge/server.py', 'tests/test_agy_bridge_resilience.py']
+resilience-suite	21243	21243	['/Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/pytest', 'tests/test_agy_bridge_resilience.py', '-v']
+basedpyright-baseline	21244	21244	['/Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/basedpyright', 'bridges/agy-bridge/server.py', 'tests/test_agy_bridge_resilience.py']
+remaining-tests	46856	46856	pytest tests/ --ignore=tests/test_agy_bridge_resilience.py -v
+remaining-tests-pythonpath	52604	52604	PYTHONPATH=WORK pytest tests/ --ignore=tests/test_agy_bridge_resilience.py -v
+basedpyright-exact-baseline	60270	60270	basedpyright exact captured baseline
+basedpyright-final	69153	69153	basedpyright --outputjson final candidate
+remaining-tests-module	82079	82079	python -m pytest tests/ --ignore=tests/test_agy_bridge_resilience.py -v
+remaining-failures-clean-env	93978	93978	python3.14 -m pytest two remaining failing selectors

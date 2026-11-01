@@ -1,0 +1,1 @@
+seat=3 slot=claude-sonnet-5-5-high transport=claude-p pid=33765 pgid=33765 rc=1 raw_out_bytes=5545 launch=/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/dsh-timeout-finish-reason-20261102/arch-panel/panel/arch/r1/seats/3/launch.json

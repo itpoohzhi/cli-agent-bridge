@@ -1,0 +1,20 @@
+{
+  "method": "Compare complete diagnostic message, rule, relative file, and exact source-line text; ignore moved line numbers.",
+  "baseline_summary": {
+    "filesAnalyzed": 2,
+    "errorCount": 38,
+    "warningCount": 1632,
+    "informationCount": 0,
+    "timeInSec": 2.743
+  },
+  "candidate_summary": {
+    "filesAnalyzed": 2,
+    "errorCount": 38,
+    "warningCount": 1653,
+    "informationCount": 0,
+    "timeInSec": 3.591
+  },
+  "added_errors": [],
+  "removed_errors": [],
+  "baseline_backup": "~/work/backups/cli-agent-bridge/dsh-timeout-coder-20261102/type-baseline/"
+}
