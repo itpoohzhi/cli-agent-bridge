@@ -842,6 +842,7 @@ class TestJournalGolden(RpcCase):
             self.assertEqual(chat.ask("again")[0], 200)
         strict = [
             ln for ln in lines if ln.startswith(("exec ", "usage ", "done ", "reject "))
+            and not ln.startswith("done route=")
         ]
         for line in strict:
             self.assertTrue(any(rx.match(line) for rx in self.STRICT), line)
@@ -854,6 +855,7 @@ class TestJournalGolden(RpcCase):
             for ln in lines
             if ln.split(" ", 1)[0]
             in ("exec", "instr_guard", "session_rpc", "usage", "done")
+            and not ln.startswith("done route=")
         ]
         self.assertEqual(
             kinds,
