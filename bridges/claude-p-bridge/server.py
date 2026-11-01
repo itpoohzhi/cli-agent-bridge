@@ -236,7 +236,7 @@ def _build_claude_cmd(model: str, effort: str, img_dir: Path | None = None) -> l
         "--mcp-config", str(MCP_CONFIG),
     ]
     if img_dir is not None:
-        cmd += ["--restricted", "--permission-mode", "dontAsk",
+        cmd += ["--permission-mode", "dontAsk",
                 "--tools", "Read", "--allowedTools", f"Read({img_dir}/**)",
                 "--add-dir", str(img_dir)]
     else:

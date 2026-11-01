@@ -413,7 +413,7 @@ def test_workspace_cmd_read_and_add_dir_only_with_images(bridge):
     )
     assert cmd[cmd.index("--allowedTools") + 1] == "Read(/tmp/claude-img-x/**)"
     assert "bypassPermissions" not in cmd
-    assert "--restricted" in cmd
+    assert "--restricted" not in cmd
     assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
     assert cmd[cmd.index("--add-dir") + 1] == "/tmp/claude-img-x"
     plain = bridge._build_claude_cmd("claude-sonnet-5-5", "high", None)
