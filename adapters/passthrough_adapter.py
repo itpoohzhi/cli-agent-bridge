@@ -572,6 +572,11 @@ class PassthroughAdapter(BackendAdapter):
         sanitize: Optional[bool] = None,
     ) -> None:
         super().__init__(backend_id, config, catalog_source, host)
+        api_key_env = self.config.get("api_key_env")
+        api_key = self.config.get("api_key")
+        self._upstream_key = (
+            os.environ.get(api_key_env) if isinstance(api_key_env, str) else ""
+        ) or (api_key if isinstance(api_key, str) else "")
         self.limits = limits or PassthroughLimits.from_env()
         self.process_budget = process_budget or ProcessBudget(
             self.limits.accumulator_max_process_bytes
@@ -671,7 +676,14 @@ class PassthroughAdapter(BackendAdapter):
         conn.connect()
         if conn.sock is not None:
             conn.sock.settimeout(self.limits.read_timeout_s)
-        forwarded = {k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP}
+        forwarded = {
+            k: v
+            for k, v in headers.items()
+            if k.lower() not in _REQUEST_DROP
+            and (not self._upstream_key or k.lower() != "authorization")
+        }
+        if self._upstream_key:
+            forwarded["Authorization"] = f"Bearer {self._upstream_key}"
         forwarded["Host"] = f"{self._host}:{self._port}"
         forwarded["Content-Length"] = str(len(raw_body))
         forwarded["Accept-Encoding"] = "identity"  # тело нужно разобрать, а не передать сжатым

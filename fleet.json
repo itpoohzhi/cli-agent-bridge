@@ -79,7 +79,8 @@
       "required": false,
       "owned_by": "openai-codex",
       "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:2455/v1"
+      "base_url": "http://127.0.0.1:2455/v1",
+      "api_key_env": "CODEX_LB_API_KEY"
     },
     "agy": {
       "kind": "passthrough",
@@ -87,7 +88,8 @@
       "required": false,
       "owned_by": "agy-bridge",
       "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9887/v1"
+      "base_url": "http://127.0.0.1:9887/v1",
+      "api_key_env": "AGY_BRIDGE_KEY"
     },
     "opencode-zen": {
       "kind": "passthrough",
@@ -95,7 +97,8 @@
       "required": false,
       "owned_by": "opencode-zen-bridge",
       "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9883/v1"
+      "base_url": "http://127.0.0.1:9883/v1",
+      "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
     },
     "claude-p": {
       "kind": "passthrough",
@@ -103,7 +106,8 @@
       "required": false,
       "owned_by": "claude-p-bridge",
       "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9881/v1"
+      "base_url": "http://127.0.0.1:9881/v1",
+      "api_key_env": "CLAUDE_P_BRIDGE_KEY"
     }
   },
   "models": [

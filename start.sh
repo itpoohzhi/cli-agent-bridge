@@ -45,6 +45,25 @@ export BRIDGE_KEY
 # Прежнее имя ключа в окружении сервера не нужно: канон — BRIDGE_KEY.
 unset DROID_DSH_BRIDGE_KEY _k _name 2>/dev/null || true
 
+# Родные ключи upstream: окружение имеет приоритет, .env читается без исполнения.
+if [[ -f "$HOME/.dsh/.env" ]]; then
+  for _name in CLAUDE_P_BRIDGE_KEY AGY_BRIDGE_KEY OPENCODE_ZEN_BRIDGE_KEY CODEX_LB_API_KEY; do
+    if [[ -n "${!_name+x}" ]]; then
+      continue
+    fi
+    _k="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${_name}=" "$HOME/.dsh/.env" \
+      | tail -n 1 | cut -d= -f2- || true)"
+    _k="${_k%$'\r'}"
+    if [[ "$_k" == \"*\" || "$_k" == \'*\' ]]; then
+      _k="${_k:1:${#_k}-2}"
+    fi
+    if [[ -n "$_k" ]]; then
+      export "$_name=$_k"
+    fi
+  done
+fi
+unset _k _name 2>/dev/null || true
+
 # Необязательно: Factory-ключ для потомка `droid exec`. Источник — только ~/.zshenv
 # (в ~/.dsh/.env секрет не дублируем: один секрет — один файл).
 if [[ -z "${FACTORY_API_KEY:-}" && -f "$HOME/.zshenv" ]]; then

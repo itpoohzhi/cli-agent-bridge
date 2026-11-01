@@ -4,6 +4,7 @@ import copy
 import http.client
 import io
 import json
+import os
 import socket
 import sys
 import threading
@@ -31,7 +32,13 @@ from adapters.passthrough_adapter import (  # noqa: E402
     sanitize_completion_body,
 )
 from bridge_testlib import BridgeCase, load_raw_fleet  # noqa: E402
-from core.backend_adapter import AdapterRegistry, FleetViolation, build_catalog  # noqa: E402
+from core.backend_adapter import (
+    AdapterRegistry,
+    FleetViolation,
+    backend_entry_error,
+    build_catalog,
+    strip_bridge_secrets,
+)  # noqa: E402
 
 STR = {"type": "string"}
 SCHEMAS = {
@@ -667,6 +674,109 @@ class TestSeamNonStream(SeamCase):
         self.assertEqual(headers["x-custom"], "1")
         self.assertEqual(headers["accept-encoding"], "identity")
 
+    def test_upstream_auth_override(self) -> None:
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+        cases = (
+            (
+                {"api_key_env": "TEST_UPSTREAM_KEY"},
+                {"TEST_UPSTREAM_KEY": "env-key"},
+                "env-key",
+            ),
+            ({"api_key": "config-key"}, {}, "config-key"),
+            (
+                {"api_key_env": "TEST_UPSTREAM_KEY", "api_key": "config-key"},
+                {"TEST_UPSTREAM_KEY": "env-key"},
+                "env-key",
+            ),
+            (
+                {"api_key_env": "TEST_UPSTREAM_KEY", "api_key": "config-key"},
+                {},
+                "config-key",
+            ),
+        )
+        for config, environ, expected in cases:
+            for header in ("Authorization", "authorization", "AUTHORIZATION"):
+                with (
+                    self.subTest(config=config, header=header),
+                    unittest.mock.patch.dict(os.environ, environ, clear=True),
+                ):
+                    adapter = PassthroughAdapter(
+                        "test",
+                        {
+                            "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
+                            **config,
+                        },
+                        dict,
+                    )
+                    headers = {header: "Bearer client-key", "X-Custom": "keep"}
+                    sink = self.call({"model": "m"}, adapter=adapter, headers=headers)
+                    sent = self.upstream.requests[-1]["headers"]
+                    self.assertEqual(sink.status, 200)
+                    self.assertEqual(
+                        [v for k, v in sent.items() if k.lower() == "authorization"],
+                        [f"Bearer {expected}"],
+                    )
+                    self.assertEqual(sent["X-Custom"], "keep")
+                    self.assertEqual(headers[header], "Bearer client-key")
+
+    def test_upstream_auth_override_without_client_authorization_and_with_streaming(
+        self,
+    ) -> None:
+        events = content("hello") + finish(0, "stop") + DONE
+        self.upstream.respond = lambda handler, body: FakeUpstream.sse(handler, events)
+        adapter = PassthroughAdapter(
+            "test",
+            {
+                "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
+                "api_key": "config-key",
+            },
+            dict,
+        )
+        sink = self.call(
+            {"model": "m", "stream": True},
+            adapter=adapter,
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual((sink.status, sink.body), (200, events))
+        self.assertEqual(
+            self.upstream.requests[-1]["headers"]["Authorization"], "Bearer config-key"
+        )
+
+    def test_upstream_auth_unconfigured_or_empty_keeps_client_authorization(
+        self,
+    ) -> None:
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+        cases = (
+            ({}, {}),
+            ({"api_key_env": "TEST_UPSTREAM_KEY"}, {}),
+            ({"api_key_env": "TEST_UPSTREAM_KEY"}, {"TEST_UPSTREAM_KEY": ""}),
+            ({"api_key": ""}, {}),
+        )
+        for config, environ in cases:
+            with (
+                self.subTest(config=config),
+                unittest.mock.patch.dict(os.environ, environ, clear=True),
+            ):
+                adapter = PassthroughAdapter(
+                    "test",
+                    {
+                        "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
+                        **config,
+                    },
+                    dict,
+                )
+                sink = self.call(
+                    {"model": "m"},
+                    adapter=adapter,
+                    headers={"authorization": "Bearer client-key"},
+                )
+                self.assertEqual(sink.status, 200)
+                sent = self.upstream.requests[-1]["headers"]
+                self.assertEqual(
+                    [v for k, v in sent.items() if k.lower() == "authorization"],
+                    ["Bearer client-key"],
+                )
+
     def test_non_200_status_and_body_verbatim(self):
         error = b'{"error": {"message": "rate limited", "type": "rate"}}'
         self.upstream.respond = lambda h, b: FakeUpstream.json(h, error, status=429, extra=[("Retry-After", "7")])
@@ -832,9 +942,47 @@ class TestFleetPassthroughKind(unittest.TestCase):
         self.assertEqual(codex["base_url"], "http://127.0.0.1:2455/v1")
         self.assertTrue(codex["enabled"])
 
+    def test_live_fleet_declares_upstream_auth_environment_names(self) -> None:
+        backends = self.raw()["backends"]
+        for backend, env_name in (
+            ("claude-p", "CLAUDE_P_BRIDGE_KEY"),
+            ("agy", "AGY_BRIDGE_KEY"),
+            ("opencode-zen", "OPENCODE_ZEN_BRIDGE_KEY"),
+            ("codex", "CODEX_LB_API_KEY"),
+        ):
+            self.assertEqual(backends[backend]["api_key_env"], env_name)
+            self.assertNotIn("api_key", backends[backend])
+
     def test_valid_entry_accepted(self):
         self.assertEqual(self.entry_error(), "")
         self.assertEqual(self.entry_error(enabled=True), "")
+
+    def test_upstream_auth_config_validation(self) -> None:
+        for config in (
+            {"api_key_env": "TEST_UPSTREAM_KEY"},
+            {"api_key": "config-key"},
+            {"api_key_env": "TEST_UPSTREAM_KEY", "api_key": "config-key"},
+        ):
+            with self.subTest(config=config):
+                self.assertEqual(self.entry_error(**config), "")
+        for name in ("api_key_env", "api_key"):
+            for invalid in (None, False, 123, [], {}):
+                with self.subTest(name=name, invalid=invalid):
+                    entry = {
+                        "kind": "passthrough",
+                        "base_url": "http://127.0.0.1:2455/v1",
+                        name: invalid,
+                    }
+                    self.assertEqual(
+                        backend_entry_error("test", entry, ADAPTER_KINDS),
+                        f"backend_{name}_invalid",
+                    )
+            self.assertEqual(
+                backend_entry_error(
+                    "test", {"kind": "droid", name: "value"}, ADAPTER_KINDS
+                ),
+                "backend_key_unknown",
+            )
 
     def test_base_url_validation_slugs(self):
         self.assertEqual(self.entry_error(base_url=None), "backend_base_url_missing")
@@ -863,6 +1011,32 @@ class TestFleetPassthroughKind(unittest.TestCase):
 
 
 # ---- маршрут хаба: допуск, /v1/models, дословность ------------------------------------
+class TestBridgeSecrets(unittest.TestCase):
+    def test_strip_bridge_secrets_drops_upstream_keys(self) -> None:
+        env = {
+            "CODEX_LB_API_KEY": "codex-secret",
+            "CLAUDE_P_BRIDGE_KEY": "claude-secret",
+            "AGY_BRIDGE_KEY": "agy-secret",
+            "OPENCODE_ZEN_BRIDGE_KEY": "zen-secret",
+            "BRIDGE_KEY": "hub-secret",
+            "CUSTOM_BRIDGE_AUTH_KEY": "bridge-secret",
+            "FACTORY_API_KEY": "fk-secret",
+            "PATH": "/usr/bin",
+            "HOME": "/tmp/home",
+            "PORT": "9882",
+        }
+        self.assertIs(strip_bridge_secrets(env), env)
+        self.assertEqual(
+            env,
+            {
+                "FACTORY_API_KEY": "fk-secret",
+                "PATH": "/usr/bin",
+                "HOME": "/tmp/home",
+                "PORT": "9882",
+            },
+        )
+
+
 class TestHubRoute(BridgeCase):
     HUB_KEY = "test-key"  # BridgeCase.AUTH_KEY
 
@@ -873,6 +1047,8 @@ class TestHubRoute(BridgeCase):
         data = load_raw_fleet()
         data["backends"]["codex"]["enabled"] = True
         data["backends"]["codex"]["base_url"] = "http://127.0.0.1:%d/v1" % self.upstream.port
+        # Эти сценарии проверяют прежний контракт без настроенного upstream-ключа.
+        data["backends"]["codex"].pop("api_key_env", None)
         server.FLEET = server._build_catalog(data)
         saved = server.BACKENDS
         self.addCleanup(setattr, server, "BACKENDS", saved)
@@ -943,6 +1119,37 @@ class TestHubRoute(BridgeCase):
     def test_hub_key_still_works_for_passthrough_model(self):
         status, _ = self.post(self.request_body(), auth="Bearer " + self.HUB_KEY)
         self.assertEqual(status, 200)
+
+    def test_upstream_auth_override_through_hub(self) -> None:
+        server.FLEET["backends"]["codex"]["api_key"] = "config-key"
+        server.BACKENDS = AdapterRegistry.from_fleet(
+            server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
+        )
+        status, raw = self.post(self.request_body(), auth="Bearer " + self.HUB_KEY)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.upstream.requests[-1]["headers"]["Authorization"], "Bearer config-key"
+        )
+        self.assertEqual(
+            args_of(json.loads(raw)["choices"][0]["message"]["tool_calls"][0]),
+            {"prompt": "p"},
+        )
+
+    def test_unauthorized_deferred_with_upstream_key_is_401(self) -> None:
+        server.FLEET["backends"]["codex"]["api_key"] = "config-key"
+        server.BACKENDS = AdapterRegistry.from_fleet(
+            server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
+        )
+        for auth in (None, "Bearer wrong-key"):
+            for stream in (False, True):
+                with self.subTest(auth=auth, stream=stream):
+                    status, raw = self.post(self.request_body(stream=stream), auth=auth)
+                    self.assertEqual(status, 401)
+                    self.assertEqual(
+                        json.loads(raw),
+                        {"error": {"message": "unauthorized", "type": "auth_error"}},
+                    )
+                    self.assertEqual(self.upstream.requests, [])
 
     def test_other_routes_still_require_hub_key(self):
         status, raw = self.post({"model": server.MODEL_ID, "messages": [{"role": "user", "content": "x"}]},

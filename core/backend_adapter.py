@@ -29,17 +29,21 @@ StreamSink = Callable[[str, str], bool]
 PollCallback = Callable[[], bool]
 
 # Секреты хаба в окружении потомков (ADR 0015, BLOCKER-SAFETY B1): `BRIDGE_KEY`, любое имя на
-# `_BRIDGE_KEY` и любое вида `BRIDGE_*KEY*` (в т.ч. `DROID_DSH_BRIDGE_KEY`); регистр не важен.
-_BRIDGE_SECRET_NAME = re.compile(r"(?:^|_)BRIDGE_[A-Z0-9_]*KEY", re.IGNORECASE)
+# `_BRIDGE_KEY`, `CODEX_LB_API_KEY` и любое вида `BRIDGE_*KEY`; регистр не важен.
+_BRIDGE_SECRET_NAME = re.compile(
+    r"(?:^|_)BRIDGE_[A-Z0-9_]*KEY|.*_BRIDGE_KEY$|CODEX_LB_API_KEY$", re.IGNORECASE
+)
 
 
 def is_bridge_secret_name(name: str) -> bool:
-    """Имя переменной окружения - авторизационный ключ моста (его нельзя отдавать потомку)."""
+    """Имя переменной — ключ моста или upstream (его нельзя отдавать потомку)."""
+    if name.upper() == "FACTORY_API_KEY":
+        return False
     return _BRIDGE_SECRET_NAME.search(name) is not None
 
 
 def strip_bridge_secrets(env: dict) -> dict:
-    """Удаляет из `env` (на месте) все ключи моста; возвращает тот же словарь."""
+    """Удаляет из `env` (на месте) ключи мостов и upstream; возвращает тот же словарь."""
     for name in [n for n in env if is_bridge_secret_name(n)]:
         del env[name]
     return env
@@ -203,6 +207,8 @@ BACKEND_KEYS = frozenset(
         "idle_timeout_s",
         "safety_cap_s",
         "base_url",
+        "api_key_env",
+        "api_key",
         "options",
     }
 )
@@ -234,6 +240,12 @@ def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -
     kind = entry.get("kind")
     if not isinstance(kind, str) or kind not in kinds:
         return "backend_kind_unknown"
+    for key in ("api_key_env", "api_key"):
+        if key in entry:
+            if kind != PASSTHROUGH_KIND:
+                return "backend_key_unknown"
+            if not isinstance(entry[key], str):
+                return f"backend_{key}_invalid"
     for flag, default in (("enabled", True), ("required", False)):
         if not isinstance(entry.get(flag, default), bool):
             return "backend_invalid"

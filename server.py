@@ -694,7 +694,7 @@ def _launch_env() -> dict:
     DROID_SKIP_PREFLIGHT=1 — официальный переключатель droid-cli.sh (пропускает
     wait_api/wait_hy2/pick_pr_gateway). Первый запуск и запуск после ошибки идут
     с полным префлайтом, как прежде. Ключи моста (`BRIDGE_KEY`, `DROID_DSH_BRIDGE_KEY` и любые
-    `*_BRIDGE_KEY` / `BRIDGE_*KEY*`) в потомка не передаются (C-03, ADR 0015 B1).
+    `*_BRIDGE_KEY`, `BRIDGE_*KEY*` и `CODEX_LB_API_KEY`; `FACTORY_API_KEY` сохраняется) в потомка не передаются (C-03, ADR 0015 B1).
     При включённом флаге пробросов `tools/` ставится в начало PATH (agent-browser, ADR-0016).
     """
     env = strip_bridge_secrets(os.environ.copy())
@@ -2088,8 +2088,8 @@ def _child_env(fwd_env: dict | None = None) -> dict:
 
     Сбой подготовки home — исключение (spawn не выполняется), молчаливого продолжения нет.
 
-    Ключ моста вырезан в _launch_env; FACTORY_API_KEY наследуется (в лог и state
-    не попадает). Чистый home не даёт хукам/персональным skills владельца
+    Ключи мостов и upstream вырезаны в _launch_env. Чистый home не даёт
+    хукам/персональным skills владельца
     попасть в контекст чата; DROID_AUTO=off — вторичная защита (главная — RPC).
     """
     env = _launch_env()
@@ -5621,6 +5621,12 @@ class Handler(BaseHTTPRequestHandler):
                         400,
                         "model_not_allowed",
                         "passthrough requires an exact model id",
+                    )
+                    return
+                if auth_deferred and getattr(passthrough, "_upstream_key", None):
+                    self.close_connection = True
+                    self._send(
+                        401, {"error": {"message": "unauthorized", "type": "auth_error"}}
                     )
                     return
                 self._serve_passthrough(passthrough, raw, req, model_id)
