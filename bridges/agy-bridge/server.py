@@ -58,7 +58,9 @@ env приоритетнее файла (0/false/no/off — hard-off, 1/true/yes
   * `extended_timeout_enabled` / `AGY_EXTENDED_TIMEOUT_ENABLED` — idle 1800 с по активности
     stdout/transcript и потолок 3600 с (`AGY_IDLE_TIMEOUT_S`, `AGY_TIMEOUT_S`);
   * `graceful_timeout_on_partial` / `AGY_GRACEFUL_TIMEOUT_ON_PARTIAL` — timeout и
-    idle_timeout после частичной выдачи завершаются `finish_reason="length"` вместо 504;
+    idle_timeout после частичной выдачи завершаются настраиваемым `finish_reason`
+    (по умолчанию "stop") вместо 504: `AGY_GRACEFUL_TIMEOUT_FINISH_REASON` или
+    `graceful_timeout_finish_reason` в dynamic_config.json;
   * `step_scoped_usage_enabled` / `AGY_STEP_SCOPED_USAGE_ENABLED` — `usage` по окну
     последнего шага (prompt = input + cache последнего `PLANNER_RESPONSE`, completion =
     сумма output шагов хода) вместо накопительного `result.usage`; без валидного шага —
@@ -2918,7 +2920,7 @@ def _is_sqlite_reasoning_enabled() -> bool:
 # ---- Флаги новой политики (AD-005): локальный GigaRC-совместимый снимок -------------
 # Stdlib-only LaunchAgent: ни SDK, ни удалённого транспорта. Старые флаги имеют
 # кодовый False; stream resilience — True по брифу. Приоритет:
-# env override > JSON bool из dynamic_config.json > кодовый default.
+# env override > JSON из dynamic_config.json > кодовый default.
 
 
 class _RuntimeFlags(NamedTuple):
@@ -2930,6 +2932,7 @@ class _RuntimeFlags(NamedTuple):
     graceful_timeout_on_partial: bool = False
     step_scoped_usage_enabled: bool = False
     stream_resilience_enabled: bool = True
+    graceful_timeout_finish_reason: str = "stop"
 
 
 _NEW_FLAG_ENV = {
@@ -2951,29 +2954,37 @@ _cfg_generation: int = 0
 
 
 def _parse_runtime_flags(text: str) -> _RuntimeFlags:
-    """Разобрать dynamic_config.json; ValueError — файл отвергается целиком."""
+    """Разобрать флаги; нестроковый finish_reason заменяется дефолтом 'stop'.
+
+    ValueError для не-bool флагов отвергает файл целиком.
+    """
     data = cast(object, json.loads(text))
     if not isinstance(data, dict):
         raise ValueError("dynamic_config: not an object")
     raw = cast("dict[str, object]", data)
     values: dict[str, bool] = {}
+    finish_reason = _COLD_FLAGS.graceful_timeout_finish_reason
     for name in _RuntimeFlags._fields:
         default = getattr(_COLD_FLAGS, name)
         if name == "stream_resilience_enabled":
             default = raw.get(_NEW_FLAG_ENV[name], default)
         value = raw.get(name, default)
+        if name == "graceful_timeout_finish_reason":
+            finish_reason = value if isinstance(value, str) else "stop"
+            continue
         if not isinstance(value, bool):
             raise ValueError("dynamic_config: %s is not boolean" % name)
         values[name] = value
-    return _RuntimeFlags(**values)
+    return _RuntimeFlags(**values, graceful_timeout_finish_reason=finish_reason)
 
 
 def _runtime_snapshot() -> _RuntimeFlags:
     """Снимок флагов из dynamic_config.json: TTL 1.0 с, ключ версии (mtime_ns, size).
 
     Пока stat не изменился, JSON не разбирается (identity снимка сохраняется). Битый
-    JSON или не-bool значение отвергают файл целиком: действует last-known-good,
-    на холодном старте — False. Отсутствие файла — валидное состояние «все False».
+    JSON или не-bool флаг отвергают файл целиком: действует last-known-good,
+    на холодном старте — кодовые дефолты. Нестроковый finish_reason заменяется
+    на 'stop'. При отсутствии файла используются кодовые дефолты.
     """
     global _cfg_snapshot, _cfg_key, _cfg_checked_at, _cfg_generation
     now = time.monotonic()
@@ -3026,6 +3037,25 @@ def _new_flag(name: str, default: bool = False) -> bool:
     if env in _ENV_FALSE:
         return False
     return bool(getattr(_runtime_snapshot(), name, default))
+
+
+def _graceful_finish_reason() -> str:
+    """Возвращает finish_reason graceful-таймаута: 'stop' или 'length'.
+
+    Приоритет: валидный AGY_GRACEFUL_TIMEOUT_FINISH_REASON, затем
+    graceful_timeout_finish_reason из dynamic_config.json, затем 'stop'.
+    Значение 'max_tokens' нормализуется в 'length'.
+    """
+    raw_env = os.getenv("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "").strip().lower()
+    if raw_env in ("length", "max_tokens"):
+        return "length"
+    if raw_env == "stop":
+        return "stop"
+    snap = _runtime_snapshot()
+    val = snap.graceful_timeout_finish_reason.strip().lower()
+    if val in ("length", "max_tokens"):
+        return "length"
+    return "stop"
 
 
 AGY_BRIDGE_STREAM_RESILIENCE_ENABLED = _new_flag(
@@ -6906,13 +6936,16 @@ class Handler(BaseHTTPRequestHandler):
             return payload
 
         def finalize_timeout(out: dict) -> None:
-            """Graceful-финал timeout/idle_timeout: 200/length (идемпотентно, до run.close())."""
+            """Graceful-финал: HTTP 200, настраиваемый finish_reason (дефолт stop).
+
+            Идемпотентно, до run.close().
+            """
             state = out.get("state")
             if out.get("graceful_done") or state not in ("timeout", "idle_timeout"):
                 return
             if not _new_flag("graceful_timeout_on_partial"):
                 return
-            # Остаток источников из terminal drain + полезный partial -> 200/length.
+            # Остаток terminal drain + partial -> HTTP 200, finish_reason из настроек.
             retained_text, retained_reasoning = consume_retained(out)
             content = str(out.get("text") or "")
             base_reasoning = str(out.get("reasoning") or "")
@@ -6926,7 +6959,9 @@ class Handler(BaseHTTPRequestHandler):
             _log(f"graceful-timeout state={state} mode=json")
             if not self._prepare_flush_write():
                 return
-            self._send(200, build_payload(out, content, reasoning, "length"))
+            self._send(
+                200, build_payload(out, content, reasoning, _graceful_finish_reason())
+            )
 
         ctx["finalize_timeout"] = finalize_timeout
         out = self._run_once(ctx, lambda _v: True, on_tool_trace, lambda _r: True, None)
@@ -7065,7 +7100,8 @@ class Handler(BaseHTTPRequestHandler):
         def finalize_timeout(out: dict) -> None:
             """Graceful-финал timeout/idle_timeout после полезной выдачи (идемпотентно).
 
-            Один общий arbiter-досыл, один notice, один `finish_reason="length"`, один
+            Один arbiter-досыл, один notice, один настраиваемый finish_reason
+            (по умолчанию "stop"), один
             [DONE] — всё в одном окне T_FINAL_FLUSH_S; ошибка записи прекращает записи.
             """
             if out.get("graceful_done") or out.get("state") not in (
@@ -7107,7 +7143,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
             if ok:
-                ok = emit(chunk({}, "length", conversation_id=conv_id))
+                ok = emit(chunk({}, _graceful_finish_reason(), conversation_id=conv_id))
             if ok:
                 _ = emit("data: [DONE]\n\n")
             out["graceful_done"] = True
