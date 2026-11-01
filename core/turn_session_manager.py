@@ -84,7 +84,7 @@ TERMINAL_TURN_STATES = frozenset(
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}"),
     re.compile(
-        r"(?i)((?:DROID_DSH_BRIDGE_KEY|FACTORY_API_KEY|META_API_KEY|API_KEY|TOKEN|SECRET)\s*[=:]\s*)([^\s\"',;]+)"
+        r"(?i)((?:BRIDGE_KEY|DROID_DSH_BRIDGE_KEY|FACTORY_API_KEY|META_API_KEY|API_KEY|TOKEN|SECRET)\s*[=:]\s*)([^\s\"',;]+)"
     ),
     re.compile(r"\b(?:fk|sk)-[A-Za-z0-9_-]{10,}\b"),
 )
@@ -160,7 +160,7 @@ def mask_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
             masked = pat.sub(r"\1[REDACTED]", masked)
         else:
             masked = pat.sub("[REDACTED]", masked)
-    for env_key in ("DROID_DSH_BRIDGE_KEY", "FACTORY_API_KEY", "META_API_KEY"):
+    for env_key in ("BRIDGE_KEY", "DROID_DSH_BRIDGE_KEY", "FACTORY_API_KEY", "META_API_KEY"):
         env_val = os.environ.get(env_key)
         if env_val and len(env_val) >= 6 and env_val in masked:
             masked = masked.replace(env_val, "[REDACTED]")

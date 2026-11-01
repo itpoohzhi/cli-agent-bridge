@@ -154,7 +154,13 @@ HOME = Path.home()
 
 
 def _bridge_env(name: str, default: str = "") -> str:
-    """Параметр хаба: `BRIDGE_<name>` -> `DROID_DSH_BRIDGE_<name>` -> умолчание (пустое значение = не задано)."""
+    """Читает параметр хаба с legacy fallback; принимает суффикс или полное имя.
+
+    Пустое canonical-значение уступает legacy-параметру.
+    """
+    if name.startswith("BRIDGE_"):
+        value = os.environ.get(name) or os.environ.get("DROID_DSH_" + name)
+        return value if value is not None else default
     for prefix in ("BRIDGE_", "DROID_DSH_BRIDGE_"):
         value = os.environ.get(prefix + name, "").strip()
         if value:
@@ -650,6 +656,7 @@ def _err_summary(err: Any, limit: int = 200) -> str:
 # Всё закрыто флагом GigaRC BRIDGE_BROWSER_FORWARDING_ENABLED (дефолт false = прежнее поведение
 # побайтово). Проброшенное окружение живёт только в памяти: в chat_state/record не пишется.
 FORWARD_FLAG = "BRIDGE_BROWSER_FORWARDING_ENABLED"
+PASSTHROUGH_AUTH_FLAG = "BRIDGE_PASSTHROUGH_UPSTREAM_KEY_AUTH_ENABLED"
 
 
 def _env_limit(name: str, default: int) -> int:
@@ -718,6 +725,8 @@ class _ForwardFlagSource:
     Перечитывание — только при смене сигнатуры файла, рестарт моста не нужен.
     """
 
+    _flag_name = FORWARD_FLAG
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._path = ""
@@ -745,7 +754,7 @@ class _ForwardFlagSource:
                 self._value = self._load(path) if sig is not None else None
             value = self._value
         if value is None:
-            return self._truthy(os.environ.get(FORWARD_FLAG, "false"))
+            return self._truthy(os.environ.get(self._flag_name, "false"))
         return value
 
     def _load(self, path: str) -> bool | None:
@@ -756,12 +765,21 @@ class _ForwardFlagSource:
             return False  # повреждённый снимок: fail-closed
         if not isinstance(data, dict):
             return False
-        if FORWARD_FLAG not in data:
+        if self._flag_name not in data:
             return None
-        return self._truthy(data[FORWARD_FLAG])
+        return self._truthy(data[self._flag_name])
 
 
 _FORWARD_FLAG_SOURCE = _ForwardFlagSource()
+
+
+class _PassthroughAuthFlagSource(_ForwardFlagSource):
+    """Тот же fail-closed снимок GigaRC для допуска upstream-ключа клиента."""
+
+    _flag_name = PASSTHROUGH_AUTH_FLAG
+
+
+PASSTHROUGH_AUTH_FLAG_SOURCE = _PassthroughAuthFlagSource()
 
 
 def is_browser_forwarding_enabled() -> bool:
@@ -5841,12 +5859,30 @@ class Handler(BaseHTTPRequestHandler):
                         "passthrough requires an exact model id",
                     )
                     return
-                if auth_deferred and getattr(passthrough, "_upstream_key", None):
-                    self.close_connection = True
-                    self._send(
-                        401, {"error": {"message": "unauthorized", "type": "auth_error"}}
+                if auth_deferred:
+                    hdr = self.headers.get("Authorization", "")
+                    client_token = (
+                        hdr[7:].strip()
+                        if hdr.startswith("Bearer ")
+                        else (self.headers.get("x-api-key", "").strip() or hdr.strip())
                     )
-                    return
+                    if (
+                        PASSTHROUGH_AUTH_FLAG_SOURCE.enabled()
+                        and passthrough.validate_client_token(client_token)
+                    ):
+                        auth_deferred = False
+                    elif getattr(passthrough, "_upstream_key", None):
+                        self.close_connection = True
+                        self._send(
+                            401,
+                            {
+                                "error": {
+                                    "message": "unauthorized",
+                                    "type": "auth_error",
+                                }
+                            },
+                        )
+                        return
                 if alias is not None:
                     req = {**req, "model": model_id}
                     if req.get("reasoning_effort") is None:
