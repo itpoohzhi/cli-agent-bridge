@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hmac
 import http.client
 import json
 import os
@@ -598,6 +599,14 @@ class PassthroughAdapter(BackendAdapter):
         self._base_path = parts.path.rstrip("/")
 
     # -- контракт BackendAdapter ---------------------------------------------------------
+    def validate_client_token(self, token: str) -> bool:
+        """Проверяет клиентский токен по собственному настроенному ключу upstream."""
+        if not self._upstream_key or not token:
+            return False
+        return hmac.compare_digest(
+            token.encode("utf-8"), self._upstream_key.encode("utf-8")
+        )
+
     def get_models(self) -> list[BackendModel]:
         return self._catalog_models()
 

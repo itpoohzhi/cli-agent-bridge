@@ -680,6 +680,10 @@ class BackendAdapter(ABC):
         """Число ходов в работе (для /health); по умолчанию 0."""
         return 0
 
+    def validate_client_token(self, token: str) -> bool:
+        """Проверяет, авторизует ли клиентский токен напрямую на этом бэкенде."""
+        return False
+
     def preflight(self) -> Qualification:
         """Дешёвая проверка перед ходом: (ok, reason). По умолчанию — is_healthy()."""
         return (

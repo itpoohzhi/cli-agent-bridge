@@ -1,14 +1,19 @@
 """Passthrough-шов (ADR 0011 AD-003/AD-005/AD-007): стриминг, составной ключ, EOF, лимиты, маршрут."""
 
+from __future__ import annotations
+
 import copy
 import http.client
 import io
 import json
 import os
 import socket
+from socketserver import BaseServer
 import sys
+import tempfile
 import threading
 from types import SimpleNamespace
+from typing import cast
 import unittest
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1037,6 +1042,170 @@ class TestBridgeSecrets(unittest.TestCase):
         )
 
 
+class TestPassthroughAuthFlagSource(unittest.TestCase):
+    def test_default_false_and_env_fallback(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            unittest.mock.patch.dict(
+                os.environ,
+                {"BRIDGE_DYNAMIC_CONFIG_PATH": str(Path(directory) / "missing.json")},
+                clear=True,
+            ),
+        ):
+            source = server._PassthroughAuthFlagSource()
+            self.assertFalse(source.enabled())
+            for value, expected in (
+                ("true", True),
+                ("false", False),
+                ("invalid", False),
+            ):
+                with self.subTest(value=value):
+                    os.environ[server.PASSTHROUGH_AUTH_FLAG] = value
+                    self.assertEqual(source.enabled(), expected)
+
+    def test_snapshot_override_kill_switch_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            with unittest.mock.patch.dict(
+                os.environ,
+                {
+                    "BRIDGE_DYNAMIC_CONFIG_PATH": str(path),
+                    server.PASSTHROUGH_AUTH_FLAG: "true",
+                },
+                clear=True,
+            ):
+                source = server._PassthroughAuthFlagSource()
+                for payload, expected in (
+                    ({server.PASSTHROUGH_AUTH_FLAG: True}, True),
+                    ({server.PASSTHROUGH_AUTH_FLAG: False}, False),
+                    ({}, True),
+                    ([], False),
+                ):
+                    with self.subTest(payload=payload):
+                        path.write_text(json.dumps(payload))
+                        self.assertEqual(source.enabled(), expected)
+                path.write_text("{broken")
+                self.assertFalse(source.enabled())
+
+    def test_handler_rechecks_flag_for_each_request(self) -> None:
+        """Реальный Handler проверяет kill-switch без рестарта и без socket.bind()."""
+        data = load_raw_fleet()
+        data["backends"]["codex"].update(enabled=True, api_key="own-test-key")
+        data["backends"]["codex"].pop("api_key_env", None)
+        catalog = server._build_catalog(data)
+        registry = AdapterRegistry.from_fleet(
+            catalog, ADAPTER_KINDS, lambda: catalog, server
+        )
+
+        class Connection:
+            def __init__(self, request: bytes) -> None:
+                self.input = io.BytesIO(request)
+                self.output = bytearray()
+
+            def makefile(self, *args: object) -> io.BytesIO:
+                return self.input
+
+            def settimeout(self, timeout: float) -> None:
+                pass
+
+            def sendall(self, chunk: bytes) -> None:
+                self.output.extend(chunk)
+
+        def serve(
+            handler: server.Handler,
+            adapter: PassthroughAdapter,
+            raw: bytes,
+            request: dict,
+            model: str,
+        ) -> None:
+            handler._send(200, {"accepted": True})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            with (
+                unittest.mock.patch.dict(
+                    os.environ, {"BRIDGE_DYNAMIC_CONFIG_PATH": str(path)}, clear=True
+                ),
+                unittest.mock.patch.object(
+                    server,
+                    "PASSTHROUGH_AUTH_FLAG_SOURCE",
+                    server._PassthroughAuthFlagSource(),
+                ),
+                unittest.mock.patch.object(server, "FLEET", catalog),
+                unittest.mock.patch.object(server, "BACKENDS", registry),
+                unittest.mock.patch.object(server, "AUTH_KEY", "hub-test-key"),
+                unittest.mock.patch.object(server, "_budget", None),
+                unittest.mock.patch.object(server.Handler, "_serve_passthrough", serve),
+            ):
+                for enabled in (False, True, False):
+                    path.write_text(json.dumps({server.PASSTHROUGH_AUTH_FLAG: enabled}))
+                    for token, expected in (
+                        ("own-test-key", 200 if enabled else 401),
+                        ("hub-test-key", 200),
+                        ("wrong-key", 401),
+                    ):
+                        for stream in (False, True):
+                            with self.subTest(
+                                enabled=enabled, token=token, stream=stream
+                            ):
+                                body = json.dumps(
+                                    {
+                                        "model": "gpt-6.1-terra",
+                                        "messages": [{"role": "user", "content": "hi"}],
+                                        "stream": stream,
+                                    }
+                                ).encode()
+                                headers = [
+                                    "POST /v1/chat/completions HTTP/1.1",
+                                    "Host: localhost",
+                                    "Connection: close",
+                                    f"Content-Length: {len(body)}",
+                                    f"Authorization: Bearer {token}",
+                                ]
+                                conn = Connection(
+                                    ("\r\n".join(headers) + "\r\n\r\n").encode() + body
+                                )
+                                # Фейки реализуют используемый Handler протокол без ОС-сокета.
+                                server.Handler(
+                                    cast(socket.socket, cast(object, conn)),
+                                    ("127.0.0.1", 1),
+                                    cast(BaseServer, cast(object, SimpleNamespace())),
+                                )
+                                self.assertEqual(
+                                    int(bytes(conn.output).split(b" ", 2)[1]), expected
+                                )
+                                if expected == 401:
+                                    self.assertEqual(
+                                        json.loads(
+                                            bytes(conn.output).split(b"\r\n\r\n", 1)[1]
+                                        ),
+                                        {
+                                            "error": {
+                                                "message": "unauthorized",
+                                                "type": "auth_error",
+                                            }
+                                        },
+                                    )
+
+
+class TestClientTokenValidation(unittest.TestCase):
+    def test_only_own_nonempty_upstream_token_is_accepted(self) -> None:
+        adapter = PassthroughAdapter(
+            "test", {"base_url": "http://127.0.0.1:2455/v1", "api_key": "ключ"}, dict
+        )
+        self.assertTrue(adapter.validate_client_token("ключ"))
+        for token in ("", "other-backend-key", "клюЧ"):
+            with self.subTest(token=token):
+                self.assertFalse(adapter.validate_client_token(token))
+
+    def test_unconfigured_upstream_does_not_authenticate_client_token(self) -> None:
+        adapter = PassthroughAdapter(
+            "test", {"base_url": "http://127.0.0.1:2455/v1"}, dict
+        )
+        self.assertFalse(adapter.validate_client_token(""))
+        self.assertFalse(adapter.validate_client_token("client-key"))
+
+
 class TestHubRoute(BridgeCase):
     HUB_KEY = "test-key"  # BridgeCase.AUTH_KEY
 
@@ -1059,13 +1228,21 @@ class TestHubRoute(BridgeCase):
                 {"id": "c1", "type": "function",
                  "function": {"name": "subagent", "arguments": '{"prompt":"p","provider":""}'}}]}}]})
 
-    def post(self, body: dict, auth="Bearer upstream-key"):
+    def post(
+        self,
+        body: dict,
+        auth: str | None = "Bearer upstream-key",
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
             headers = {"Content-Type": "application/json"}
             if auth is not None:
                 headers["Authorization"] = auth
-            conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers=headers)
+            headers.update(extra_headers or {})
+            conn.request(
+                "POST", "/v1/chat/completions", body=json.dumps(body), headers=headers
+            )
             resp = conn.getresponse()
             return resp.status, resp.read()
         finally:
@@ -1119,6 +1296,114 @@ class TestHubRoute(BridgeCase):
     def test_hub_key_still_works_for_passthrough_model(self):
         status, _ = self.post(self.request_body(), auth="Bearer " + self.HUB_KEY)
         self.assertEqual(status, 200)
+
+    def configure_upstream_key(self) -> None:
+        """Настраивает фиктивный ключ выбранного passthrough-маршрута."""
+        server.FLEET["backends"]["codex"]["api_key"] = "config-key"
+        server.BACKENDS = AdapterRegistry.from_fleet(
+            server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
+        )
+
+    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True)
+    def test_dual_tolerance_upstream_key_accepted_when_auth_deferred(
+        self, flag: unittest.mock.Mock
+    ) -> None:
+        self.configure_upstream_key()
+        events = content("ok") + finish(0, "stop") + DONE
+        for auth, extra_headers in (
+            ("Bearer config-key", {}),
+            ("config-key", {}),
+            (None, {"x-api-key": "config-key"}),
+        ):
+            for stream in (False, True):
+                with self.subTest(auth=auth, stream=stream):
+                    if stream:
+                        self.upstream.respond = lambda handler, body: FakeUpstream.sse(
+                            handler, events
+                        )
+                    else:
+                        self.upstream.respond = lambda handler, body: FakeUpstream.json(
+                            handler, {"ok": True}
+                        )
+                    status, raw = self.post(
+                        self.request_body(stream=stream),
+                        auth=auth,
+                        extra_headers=extra_headers,
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(
+                        self.upstream.requests[-1]["headers"]["Authorization"],
+                        "Bearer config-key",
+                    )
+                    if stream:
+                        self.assertEqual(raw, events)
+
+    def test_dual_tolerance_bridge_key_accepted(self) -> None:
+        self.configure_upstream_key()
+        status, _ = self.post(self.request_body(), auth="Bearer " + self.HUB_KEY)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.upstream.requests[-1]["headers"]["Authorization"], "Bearer config-key"
+        )
+
+    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=False)
+    def test_disabled_flag_rejects_configured_upstream_key(
+        self, flag: unittest.mock.Mock
+    ) -> None:
+        self.configure_upstream_key()
+        for auth, extra_headers in (
+            ("Bearer config-key", {}),
+            ("config-key", {}),
+            (None, {"x-api-key": "config-key"}),
+        ):
+            for stream in (False, True):
+                with self.subTest(auth=auth, stream=stream):
+                    status, raw = self.post(
+                        self.request_body(stream=stream),
+                        auth=auth,
+                        extra_headers=extra_headers,
+                    )
+                    self.assertEqual(status, 401)
+                    self.assertEqual(
+                        json.loads(raw),
+                        {"error": {"message": "unauthorized", "type": "auth_error"}},
+                    )
+        self.assertEqual(self.upstream.requests, [])
+
+    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True)
+    def test_dual_tolerance_invalid_key_rejected_401(
+        self, flag: unittest.mock.Mock
+    ) -> None:
+        self.configure_upstream_key()
+        for auth in (None, "Bearer wrong-key", "Bearer ", "wrong-key"):
+            for stream in (False, True):
+                with self.subTest(auth=auth, stream=stream):
+                    status, raw = self.post(self.request_body(stream=stream), auth=auth)
+                    self.assertEqual(status, 401)
+                    self.assertEqual(
+                        json.loads(raw),
+                        {"error": {"message": "unauthorized", "type": "auth_error"}},
+                    )
+        self.assertEqual(self.upstream.requests, [])
+
+    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True)
+    def test_dual_tolerance_wrong_backend_key_rejected_401(
+        self, flag: unittest.mock.Mock
+    ) -> None:
+        self.configure_upstream_key()
+        other_config = {
+            "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
+            "api_key": "other-backend-key",
+        }
+        server.BACKENDS.register(PassthroughAdapter("other", other_config, dict))
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                status, raw = self.post(
+                    self.request_body(stream=stream), auth="Bearer other-backend-key"
+                )
+                self.assertEqual(status, 401)
+                self.assertEqual(json.loads(raw)["error"]["type"], "auth_error")
+        self.assertEqual(self.upstream.requests, [])
 
     def test_upstream_auth_override_through_hub(self) -> None:
         server.FLEET["backends"]["codex"]["api_key"] = "config-key"
