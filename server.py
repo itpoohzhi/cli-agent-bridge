@@ -62,8 +62,8 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from dataclasses import asdict, replace
-from typing import Any, Sequence, cast
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Mapping, Sequence, cast
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -162,6 +162,17 @@ def _bridge_env(name: str, default: str = "") -> str:
     return default
 
 
+def _log(msg: str) -> None:
+    """Диагностика в stderr (файлы вне каталога моста не создаём)."""
+    try:
+        sys.stderr.write(
+            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
+        )
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
 HOST = _bridge_env("HOST", "127.0.0.1")
 PORT = int(_bridge_env("PORT", "9882"))
 AUTH_KEY = _bridge_env("KEY")
@@ -179,7 +190,170 @@ BRIDGE_SANITIZE_TOOL_CALLS = os.getenv(
 ).lower() in ("true", "1", "yes")
 # ADR 0011 AD-005: лимиты читаются здесь (не в ядре, BND-001) и передаются в ядро аргументами:
 # BRIDGE_MAX_PARALLEL_CALLS (по умолчанию 64), BRIDGE_MAX_PARALLEL_DEPTH, лимиты passthrough.
+# Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Полная шкала reasoning для клампа запрошенного effort к каталогу модели.
+EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
 BRIDGE_LIMITS = PassthroughLimits.from_env()
+
+
+def _load_request_config() -> dict[str, Any]:
+    """Прочитать и проверить настройки атрибуции и псевдонимов без вывода значений."""
+
+    def warning(name: str) -> None:
+        _log(f"bridge_config_invalid name={name} fallback=default")
+
+    def boolean(name: str) -> bool:
+        value = _bridge_env(name, "1").lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        warning(name)
+        return True
+
+    def token(name: str, default: str, pattern: str) -> str:
+        value = _bridge_env(name, default)
+        if re.fullmatch(pattern, value):
+            return value
+        warning(name)
+        return default
+
+    try:
+        max_len = int(_bridge_env("TRACE_ID_MAX_LEN", "64"))
+        if not 8 <= max_len <= 256:
+            raise ValueError("trace length")
+    except ValueError:
+        warning("TRACE_ID_MAX_LEN")
+        max_len = 64
+    request_header = token("REQUEST_ID_HEADER", "X-Request-Id", r"[A-Za-z0-9-]{1,64}")
+    subagent_header = token(
+        "SUBAGENT_ID_HEADER", "X-Subagent-Id", r"[A-Za-z0-9-]{1,64}"
+    )
+    if request_header.lower() == subagent_header.lower():
+        warning("SUBAGENT_ID_HEADER")
+        subagent_header = "X-Subagent-Id"
+        if request_header.lower() == subagent_header.lower():
+            warning("REQUEST_ID_HEADER")
+            request_header = "X-Request-Id"
+    default_suffixes = "minimal,low,medium,high,xhigh,max"
+    values = tuple(
+        v.strip() for v in _bridge_env("EFFORT_SUFFIXES", default_suffixes).split(",")
+    )
+    suffixes = tuple(dict.fromkeys(v for v in values if v in EFFORT_ORDER))
+    if len(suffixes) != len(set(values)) or not suffixes:
+        warning("EFFORT_SUFFIXES")
+    if not suffixes:
+        suffixes = tuple(default_suffixes.split(","))
+    advertised = _bridge_env(
+        "ADVERTISE_EFFORT_ALIASES",
+        "gemini-4-argon-high,gemini-4-argon-medium,gemini-3.8-flash-high,gemini-3.8-flash-medium,gemini-3.8-flash-low,claude-opus-5-5-high,claude-sonnet-5-5-xhigh",
+    )
+    return {
+        "REQUEST_ATTRIBUTION_ENABLED": boolean("REQUEST_ATTRIBUTION_ENABLED"),
+        "TRACE_ID_MAX_LEN": max_len,
+        "REQUEST_ID_HEADER": request_header,
+        "SUBAGENT_ID_HEADER": subagent_header,
+        "REQUEST_ID_PREFIX": token(
+            "REQUEST_ID_PREFIX", "req_", r"[A-Za-z0-9_.:@-]{0,16}"
+        ),
+        "EFFORT_ALIAS_ENABLED": boolean("EFFORT_ALIAS_ENABLED"),
+        "EFFORT_SUFFIXES": suffixes,
+        "ADVERTISED_EFFORT_ALIASES": ()
+        if advertised.lower() == "off"
+        else tuple(
+            dict.fromkeys(v.strip() for v in advertised.split(",") if v.strip())
+        ),
+    }
+
+
+_REQUEST_CONFIG = _load_request_config()
+REQUEST_ATTRIBUTION_ENABLED = bool(_REQUEST_CONFIG["REQUEST_ATTRIBUTION_ENABLED"])
+TRACE_ID_MAX_LEN = int(_REQUEST_CONFIG["TRACE_ID_MAX_LEN"])
+REQUEST_ID_HEADER = str(_REQUEST_CONFIG["REQUEST_ID_HEADER"])
+SUBAGENT_ID_HEADER = str(_REQUEST_CONFIG["SUBAGENT_ID_HEADER"])
+REQUEST_ID_PREFIX = str(_REQUEST_CONFIG["REQUEST_ID_PREFIX"])
+EFFORT_ALIAS_ENABLED = bool(_REQUEST_CONFIG["EFFORT_ALIAS_ENABLED"])
+EFFORT_SUFFIXES = cast(tuple[str, ...], _REQUEST_CONFIG["EFFORT_SUFFIXES"])
+ADVERTISED_EFFORT_ALIASES = cast(
+    tuple[str, ...], _REQUEST_CONFIG["ADVERTISED_EFFORT_ALIASES"]
+)
+
+
+@dataclass(frozen=True)
+class RequestTrace:
+    """Проверенные идентификаторы одного HTTP-запроса."""
+
+    request_id: str
+    subagent_id: str | None
+    request_id_source: str
+
+
+@functools.cache
+def _trace_pattern(max_len: int) -> re.Pattern[str]:
+    return re.compile(r"[A-Za-z0-9_.:@-]{1,%d}" % max_len)
+
+
+def _sanitize_trace_id(value: object, max_len: int) -> str | None:
+    """Пропустить только короткий ASCII-идентификатор без разделителей заголовков."""
+    if isinstance(value, str) and _trace_pattern(max_len).fullmatch(value):
+        return value
+    return None
+
+
+def _resolve_trace(headers: Mapping[str, str], req: Mapping[str, Any]) -> RequestTrace:
+    """Выбрать идентификаторы по приоритету header → extra_body → body."""
+    lowered = {key.lower(): value for key, value in headers.items()}
+    extra = req.get("extra_body")
+    extra = extra if isinstance(extra, Mapping) else {}
+
+    def resolve(field: str, header: str) -> tuple[str | None, str]:
+        for source, values, name in (
+            ("header", lowered, header.lower()),
+            ("extra_body", extra, field),
+            ("body", req, field),
+        ):
+            if name not in values:
+                continue
+            value = values[name]
+            clean = _sanitize_trace_id(value, TRACE_ID_MAX_LEN)
+            if clean is not None:
+                return clean, source
+            size = len(value) if isinstance(value, (str, list, dict)) else 0
+            _log(f"trace_id_rejected field={field} source={source} len={size}")
+        return None, "generated"
+
+    rid, source = resolve("request_id", REQUEST_ID_HEADER)
+    sid, _ = resolve("subagent_id", SUBAGENT_ID_HEADER)
+    if rid is None:
+        random_id = uuid.uuid4().hex[: min(12, TRACE_ID_MAX_LEN)]
+        rid = REQUEST_ID_PREFIX[: max(0, TRACE_ID_MAX_LEN - len(random_id))] + random_id
+    return RequestTrace(rid, sid, source)
+
+
+def _resolve_model_alias(
+    raw_id: str, catalogue: Mapping[str, Any]
+) -> tuple[str, str] | None:
+    """Разрешить суффикс effort, оставляя точные записи каталога приоритетными."""
+    if not EFFORT_ALIAS_ENABLED or raw_id in catalogue:
+        return None
+    base, _, suffix = raw_id.rpartition("-")
+    if suffix in EFFORT_SUFFIXES and base in catalogue:
+        return base, suffix
+    return None
+
+
+def _trace_headers(trace: RequestTrace | None) -> list[tuple[str, str]]:
+    """Сформировать заголовки только из проверенного состояния запроса."""
+    if not REQUEST_ATTRIBUTION_ENABLED or trace is None:
+        return []
+    headers = [(REQUEST_ID_HEADER, trace.request_id)]
+    if trace.subagent_id is not None:
+        headers.append((SUBAGENT_ID_HEADER, trace.subagent_id))
+    return headers
+
+
 _SANITIZE_LIMITS = {
     "max_parallel_calls": BRIDGE_LIMITS.max_parallel_calls,
     "max_parallel_depth": BRIDGE_LIMITS.max_parallel_depth,
@@ -204,10 +378,6 @@ FIRST_TOKEN_TIMEOUT_S = float(
 # Окно после успешного хода, в котором лончеру передаётся DROID_SKIP_PREFLIGHT=1.
 PREFLIGHT_SKIP_WINDOW_S = 120.0
 
-# Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
-# Полная шкала reasoning для клампа запрошенного effort к каталогу модели.
-EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def clamp_effort_downward(
@@ -461,17 +631,6 @@ def _chain(head: str, digest: str) -> str:
 def _key_hash(key: str) -> str:
     """Идентичность чата: sha256(namespace + ключ); сам ключ нигде не хранится."""
     return hashlib.sha256((RPC_NAMESPACE + "\0" + key).encode("utf-8")).hexdigest()
-
-
-def _log(msg: str) -> None:
-    """Диагностика в stderr (файлы вне каталога моста не создаём)."""
-    try:
-        sys.stderr.write(
-            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
-        )
-        sys.stderr.flush()
-    except OSError:
-        pass
 
 
 _WS_URL = re.compile(r"\bwss?://\S+", re.IGNORECASE)
@@ -915,15 +1074,30 @@ class _HandlerSink(ResponseSink):
 
     _DROP = frozenset({"server", "date"})
 
-    def __init__(self, handler: BaseHTTPRequestHandler) -> None:
+    def __init__(
+        self,
+        handler: BaseHTTPRequestHandler,
+        extra_headers: list[tuple[str, str]] | None = None,
+    ) -> None:
         self._handler = handler
+        self._extra_headers = list(extra_headers or ())
+        self._extra_names = {key.lower() for key, _ in self._extra_headers}
+        if extra_headers is not None and REQUEST_ATTRIBUTION_ENABLED:
+            # Upstream не должен приписывать отсутствующий у клиента subagent_id.
+            self._extra_names.update(
+                {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
+            )
+        self.status = 0
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
+        self.status = int(status)
         try:
             self._handler.send_response(int(status))
             for key, value in headers:
-                if key.lower() not in self._DROP:
+                if key.lower() not in self._DROP | self._extra_names:
                     self._handler.send_header(key, value)
+            for key, value in self._extra_headers:
+                self._handler.send_header(key, value)
             if not any(key.lower() == "content-length" for key, _ in headers):
                 self._handler.close_connection = (
                     True  # тело без длины (SSE) — конец по закрытию
@@ -4183,6 +4357,13 @@ class Handler(BaseHTTPRequestHandler):
     _active_managed_turn: ManagedTurn | None = None
     _detach_on_disconnect = False
     _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
+    _trace: RequestTrace | None = None
+    _response_status = 0
+
+    def _trace_log_fields(self) -> str:
+        """Безопасные поля корреляции для журнала маршрута."""
+        trace = self._trace if REQUEST_ATTRIBUTION_ENABLED else None
+        return f"request_id={trace.request_id if trace else '-'} subagent_id={trace.subagent_id if trace and trace.subagent_id else '-'}"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
@@ -4200,12 +4381,17 @@ class Handler(BaseHTTPRequestHandler):
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._response_status = int(code)
         try:
             self.send_response(int(code))
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             for hdr_k, hdr_v in (extra_headers or {}).items():
                 self.send_header(str(hdr_k), str(hdr_v))
+            supplied = {key.lower() for key in (extra_headers or {})}
+            for key, value in _trace_headers(self._trace):
+                if key.lower() not in supplied:
+                    self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -4686,6 +4872,12 @@ class Handler(BaseHTTPRequestHandler):
         content/reasoning_content уходят клиенту ПРЯМО во время _execute (AD-001..AD-003);
         T/L всё равно освобождаются сразу по возврату _execute, независимо от скорости клиента.
         """
+        # Адаптер возвращает legacy-контекст без фасадных полей корреляции.
+        ctx = {
+            **ctx,
+            "request_id": self._trace.request_id if self._trace else None,
+            "subagent_id": self._trace.subagent_id if self._trace else None,
+        }
         model = ctx["model"]
         effort = ctx["effort"]
         autonomy = ctx["autonomy"]
@@ -4817,7 +5009,8 @@ class Handler(BaseHTTPRequestHandler):
                     _log(
                         f"exec model={model} effort={effort} effort_source={ctx['effort_source']} "
                         f"autonomy={autonomy} autonomy_source={ctx['autonomy_source']} "
-                        f"prompt_bytes={len(ctx['prompt'].encode())}{image_part} {tag}"
+                        f"prompt_bytes={len(ctx['prompt'].encode())}{image_part} {tag} "
+                        f"request_id={ctx.get('request_id') or '-'} subagent_id={ctx.get('subagent_id') or '-'}"
                     )
                     if (
                         plan["path"] in ("cold", "rebase", "ephemeral")
@@ -5251,6 +5444,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- HTTP --------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
+        self._trace = None
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
             # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
@@ -5312,6 +5506,22 @@ class Handler(BaseHTTPRequestHandler):
                         "context_length": model.context_window,
                     }
                 )
+            listed = {item["id"] for item in data}
+            for alias_id in ADVERTISED_EFFORT_ALIASES:
+                alias = _resolve_model_alias(alias_id, FLEET["models"])
+                if alias is None or alias_id in listed or alias[0] not in published:
+                    continue
+                adapter, model = published[alias[0]]
+                data.append(
+                    {
+                        "id": alias_id,
+                        "object": "model",
+                        "owned_by": adapter.owned_by,
+                        "created": 0,
+                        "context_length": model.context_window,
+                    }
+                )
+                listed.add(alias_id)
             self._send(200, {"object": "list", "data": data})
             return
         if _is_detached_enabled() and path.startswith("/v1/turns/"):
@@ -5449,6 +5659,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._trace = None
+        self._response_status = 0
         _enforce_forward_kill_switch()
         self._active_managed_turn = None
         self._context_pruned = None
@@ -5571,6 +5783,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(req, dict):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
+            if REQUEST_ATTRIBUTION_ENABLED:
+                self._trace = _resolve_trace(dict(self.headers.items()), req)
             # (7) путь.
             if path not in ("/v1/chat/completions", "/chat/completions"):
                 self.close_connection = True
@@ -5602,6 +5816,10 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
+            alias = _resolve_model_alias(model_id, FLEET["models"])
+            alias_effort = None
+            if alias is not None:
+                model_id, alias_effort = alias
             if model_id not in FLEET["models"]:
                 self._reject(
                     404,
@@ -5616,7 +5834,7 @@ class Handler(BaseHTTPRequestHandler):
             # model/reasoning_effort/tools/Authorization уходят upstream дословно.
             passthrough = BACKENDS.get(model["backend"])
             if isinstance(passthrough, PassthroughAdapter):
-                if raw_model != model_id:
+                if raw_model != model_id and alias is None:
                     self._reject(
                         400,
                         "model_not_allowed",
@@ -5629,6 +5847,14 @@ class Handler(BaseHTTPRequestHandler):
                         401, {"error": {"message": "unauthorized", "type": "auth_error"}}
                     )
                     return
+                if alias is not None:
+                    req = {**req, "model": model_id}
+                    if req.get("reasoning_effort") is None:
+                        req["reasoning_effort"] = alias_effort
+                    raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
+                _log(
+                    f"chat route=passthrough model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
+                )
                 self._serve_passthrough(passthrough, raw, req, model_id)
                 return
             if auth_deferred:
@@ -5646,6 +5872,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # (9) effort: строковый вне каталога клампится вниз к allowed модели.
             raw_effort = req.get("reasoning_effort")
+            effort_from_alias = raw_effort is None and alias_effort is not None
+            if effort_from_alias:
+                raw_effort = alias_effort
             if raw_effort is None:
                 effort = model["default_effort"]
                 effort_source = "default"
@@ -5658,7 +5887,7 @@ class Handler(BaseHTTPRequestHandler):
                     effort, clamped = clamp_effort_downward(
                         candidate, model["efforts"], model["default_effort"]
                     )
-                    effort_source = "request"
+                    effort_source = "alias" if effort_from_alias else "request"
                     if clamped:
                         _log(
                             f"clamp reasoning_effort '{candidate}' -> '{effort}' for model {model_id}"
@@ -5866,6 +6095,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
             self._active_managed_turn = managed_turn
             ctx = {
+                "request_id": self._trace.request_id if self._trace else None,
+                "subagent_id": self._trace.subagent_id if self._trace else None,
                 "route": route,
                 "key_hash": _key_hash(raw_key)
                 if (route == "keyed" and isinstance(raw_key, str))
@@ -5895,6 +6126,9 @@ class Handler(BaseHTTPRequestHandler):
                 "detach_on_disconnect": detach_on_disconnect,
                 "attached_existing": attached_existing,
             }
+            _log(
+                f"chat route=cli model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
+            )
             if ctx["stream"]:
                 self._serve_sse(ctx)
             else:
@@ -6103,6 +6337,8 @@ class Handler(BaseHTTPRequestHandler):
                 if key
                 not in (
                     "rpc",
+                    "request_id",
+                    "subagent_id",
                     "images",
                     "attached_existing",
                     "on_activity",
@@ -6220,18 +6456,40 @@ class Handler(BaseHTTPRequestHandler):
         model_id: str,
     ) -> None:
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
-        _log(f"passthrough route model={model_id} backend={adapter.id}")
+        started = time.monotonic()
+        _log(
+            f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}"
+        )
         raw, req = _strip_passthrough_env(raw, req)
         headers = {key: value for key, value in self.headers.items()}
-        adapter.handle(
-            path=self.path,
-            raw_body=raw,
-            request=req,
-            headers=headers,
-            sink=_HandlerSink(self),
-        )
+        trace_headers = _trace_headers(self._trace)
+        if REQUEST_ATTRIBUTION_ENABLED:
+            names = {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
+            headers = {
+                key: value for key, value in headers.items() if key.lower() not in names
+            }
+            headers.update(trace_headers)
+        sink = _HandlerSink(self, extra_headers=trace_headers)
+        try:
+            adapter.handle(
+                path=self.path, raw_body=raw, request=req, headers=headers, sink=sink
+            )
+        finally:
+            _log(
+                f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
+            )
 
     def _serve_json(self, ctx: dict) -> None:
+        started = time.monotonic()
+        self._response_status = 0
+        try:
+            self._serve_json_body(ctx)
+        finally:
+            _log(
+                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
+            )
+
+    def _serve_json_body(self, ctx: dict[str, Any]) -> None:
         out = self._dispatch(ctx, None)
         if out.get("state") == "client_gone":
             return
@@ -6292,12 +6550,15 @@ class Handler(BaseHTTPRequestHandler):
         for value in values:
             for piece in _text_slices(value):
                 total += len(_escape_json_piece(piece))
+        self._response_status = 200
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(total))
         active_turn = getattr(self, "_active_managed_turn", None)
         if active_turn is not None:
             self.send_header("X-Turn-Id", active_turn.turn_id)
+        for key, value in _trace_headers(self._trace):
+            self.send_header(key, value)
         if self._context_pruned:
             self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
         self.end_headers()
@@ -6332,6 +6593,16 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _serve_sse(self, ctx: dict) -> None:
+        started = time.monotonic()
+        self._response_status = 0
+        try:
+            self._serve_sse_body(ctx)
+        finally:
+            _log(
+                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
+            )
+
+    def _serve_sse_body(self, ctx: dict[str, Any]) -> None:
         # RW-203: состояние отказа живой записи не наследуется следующим запросом.
         self._client_write_dead = False
         completion_id = f"chatcmpl-droid-{uuid.uuid4().hex[:12]}"
@@ -6341,12 +6612,15 @@ class Handler(BaseHTTPRequestHandler):
             self, "_active_managed_turn", None
         )
         try:
+            self._response_status = 200
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Accel-Buffering", "no")
             if managed_turn is not None:
                 self.send_header("X-Turn-Id", managed_turn.turn_id)
+            for key, value in _trace_headers(self._trace):
+                self.send_header(key, value)
             if self._context_pruned:
                 # CD-003: сигнал до первого SSE-байта, после старта потока не меняется.
                 self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
