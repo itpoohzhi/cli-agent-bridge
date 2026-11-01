@@ -18,6 +18,13 @@ from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
 
+# ADR-0020 (BND-001): ядро окружение не читает — здесь только умолчания
+# RepetitionGuard; эффективные значения передаёт владелец маршрута аргументами.
+DEFAULT_MAX_REPETITION_REPEATS = 20
+DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
+REPETITION_MIN_REPEATS = 3
+REPETITION_MAX_REPEATS_CAP = 1000
+
 
 def _flatten_content(content: Any) -> str:
     if content is None:
@@ -547,6 +554,289 @@ def _code_context(
 _BACKTICK_RUN_RE = re.compile(r"`+")
 
 
+class RepetitionLoopDetected(LiveParserError):
+    """RepetitionGuard обнаружил авторегрессионный цикл повторений (ADR-0020)."""
+
+    code = "upstream_repetition_loop"
+
+
+_SEPARATOR_LINE_RE = re.compile(r"^[-=*_]{3,}$")
+
+
+def _unpack_guard_state(
+    state: tuple[Any, ...] | None,
+) -> tuple[str, int, int]:
+    if not state:
+        return "", 0, 0
+    if len(state) == 2:
+        return str(state[0] or ""), int(state[1] or 0), 0
+    return str(state[0] or ""), int(state[1] or 0), int(state[2] or 0)
+
+
+def _pack_guard_state(
+    fence_char: str, fence_len: int, inline_ticks: int
+) -> tuple[str, int, int] | None:
+    if fence_len or inline_ticks:
+        return (fence_char, fence_len, inline_ticks)
+    return None
+
+
+def _strip_inline_code_line(raw_line: str, inline_ticks: int) -> tuple[str, int]:
+    """Вырезать inline-код из строки с переносом незакрытого состояния `inline_ticks`."""
+    out: list[str] = []
+    idx = 0
+    length = len(raw_line)
+    while idx < length:
+        ch = raw_line[idx]
+        if ch == "`":
+            end = idx
+            while end < length and raw_line[end] == "`":
+                end += 1
+            run = end - idx
+            if inline_ticks == 0:
+                inline_ticks = run
+                out.append(" ")
+            elif run == inline_ticks:
+                inline_ticks = 0
+                out.append(" ")
+            idx = end
+            continue
+        if inline_ticks == 0 or ch in ("\n", "\r"):
+            out.append(ch)
+        idx += 1
+    return "".join(out), inline_ticks
+
+
+def _fence_state_after(
+    text: str, state: tuple[Any, ...] | None
+) -> tuple[str, int, int] | None:
+    """Состояние fenced/inline-кода после `text` при входном состоянии `state`."""
+    return _strip_code_for_guard(text, state)[1]
+
+
+def _strip_code_for_guard(
+    text: str, state: tuple[Any, ...] | None = None
+) -> tuple[str, tuple[str, int, int] | None]:
+    """Текст без fenced/inline-кода и строк-разделителей Markdown (защита от FP)."""
+    out: list[str] = []
+    fence_char, fence_len, inline_ticks = _unpack_guard_state(state)
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        char, run, rest = _fence_run(line)
+        if fence_len:
+            if char == fence_char and run >= fence_len and not rest.strip(" \t\r"):
+                fence_char, fence_len = "", 0
+            continue
+        if _is_fence_open(char, run, rest):
+            fence_char, fence_len = char, run
+            inline_ticks = 0
+            continue
+        if not inline_ticks and _SEPARATOR_LINE_RE.match(line.strip()):
+            continue
+        stripped_line, inline_ticks = _strip_inline_code_line(raw_line, inline_ticks)
+        out.append(stripped_line)
+    return "".join(out), _pack_guard_state(fence_char, fence_len, inline_ticks)
+
+
+def _is_separator_token(token: str) -> bool:
+    """Токен только из символов Markdown-разделителей (`---`, `===`, `***`)."""
+    return bool(token) and all(char in "-=*_" for char in token)
+
+
+class RepetitionGuard:
+    """Детектор циклов повторений в потоке текста (ADR-0020 AD-001).
+
+    `feed(chunk)` накапливает текст и возвращает `(chunk, detected)`: `detected`
+    взводится, когда один непробельный токен длиной до `max_token_len` или
+    периодический паттерн такой длины (например `\\n\\n_placeholder`)
+    повторяется подряд не менее `max_repeats` раз. Fenced/inline-код, чистый
+    whitespace и строки-разделители Markdown из детекции исключены.
+    """
+
+    _MAX_BUFFER = 32768
+    _KEEP_BUFFER = 16384
+
+    def __init__(
+        self,
+        max_repeats: int = DEFAULT_MAX_REPETITION_REPEATS,
+        max_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
+        enabled: bool = True,
+    ) -> None:
+        self.max_repeats = (
+            min(int(max_repeats), REPETITION_MAX_REPEATS_CAP)
+            if int(max_repeats) >= 1
+            else DEFAULT_MAX_REPETITION_REPEATS
+        )
+        self.max_token_len = (
+            int(max_token_len)
+            if int(max_token_len) >= 1
+            else DEFAULT_MAX_REPETITION_TOKEN_LEN
+        )
+        self.enabled = bool(enabled)
+        self._max_buffer = max(
+            self._MAX_BUFFER, (self.max_repeats + 10) * (self.max_token_len + 4)
+        )
+        self._keep_buffer = self._max_buffer // 2
+        self._buffer = ""
+        self._buffer_fence: tuple[Any, ...] | None = None
+        self._detected = False
+
+    @property
+    def detected(self) -> bool:
+        return self._detected
+
+    @property
+    def loop_detected(self) -> bool:
+        return self._detected
+
+    @property
+    def triggered(self) -> bool:
+        return self._detected
+
+    def reset(self) -> None:
+        self._buffer = ""
+        self._buffer_fence = None
+        self._detected = False
+
+    def feed(self, chunk: str) -> tuple[str, bool]:
+        """Принять очередной кусок текста; `(chunk, loop_detected)`."""
+        if not self.enabled or not chunk:
+            return chunk, False
+        self._buffer += chunk
+        if len(self._buffer) > self._max_buffer:
+            cut = len(self._buffer) - self._keep_buffer
+            newline = self._buffer.find("\n", cut)
+            if newline != -1 and newline + 1 < len(self._buffer):
+                cut = newline + 1
+            self._buffer_fence = _fence_state_after(
+                self._buffer[:cut], self._buffer_fence
+            )
+            self._buffer = self._buffer[cut:]
+        if not self._detected:
+            cleaned, _ = _strip_code_for_guard(self._buffer, self._buffer_fence)
+            self._detected = self._scan_cleaned(cleaned)
+        return chunk, self._detected
+
+    def check(self, chunk: str | None = None) -> bool:
+        """Скормить `chunk` (если дан) и вернуть флаг детекции."""
+        if chunk:
+            return self.feed(chunk)[1]
+        return self._detected
+
+    def detect(self, text: str) -> bool:
+        """Разовая проверка целого текста без изменения состояния guard."""
+        if not self.enabled or not text:
+            return False
+        cleaned, _ = _strip_code_for_guard(text, None)
+        return self._scan_cleaned(cleaned)
+
+    def _scan_cleaned(self, cleaned: str) -> bool:
+        if not cleaned.strip():
+            return False
+        prev: str | None = None
+        run = 0
+        for token in cleaned.split():
+            if len(token) > self.max_token_len or _is_separator_token(token):
+                prev, run = None, 0
+                continue
+            if token == prev:
+                run += 1
+            else:
+                prev, run = token, 1
+            if run >= self.max_repeats:
+                return True
+        tail = cleaned[-(self.max_token_len * self.max_repeats + self.max_token_len) :]
+        max_pat = min(self.max_token_len, len(tail) // self.max_repeats)
+        for pat_len in range(1, max_pat + 1):
+            pattern = tail[-pat_len:]
+            core = pattern.strip()
+            if not core or set(core) <= set("-=*_"):
+                continue
+            if len(set(core)) == 1 and not core.isalnum():
+                continue
+            count = 0
+            index = len(tail)
+            while index - pat_len >= 0 and tail[index - pat_len : index] == pattern:
+                count += 1
+                index -= pat_len
+                if count >= self.max_repeats:
+                    return True
+        return False
+
+
+_INVOKE_CANDIDATE_RE = re.compile(
+    r"</invoke(?=[\s>:/])|</parameter(?=[\s>])"
+    r"|<invoke(?=[\s>:/])|<parameter(?=[\s>:/])"
+)
+_INVOKE_CLOSE_RE = re.compile(r"</invoke(?::[A-Za-z0-9_.\-]+)?\s*>")
+_PARAMETER_CLOSE_RE = re.compile(r"</parameter\s*>")
+_PARAMETER_RE = re.compile(
+    r"<parameter\s+name\s*=\s*(?:\"([^\"]+)\"|'([^']+)')\s*>(.*?)</parameter\s*>",
+    re.DOTALL,
+)
+_PARAMETER_SELF_RE = re.compile(
+    r"<parameter\s+name\s*=\s*(?:\"([^\"]+)\"|'([^']+)')\s*/>"
+)
+_ATTR_NAME_RE = re.compile(r"\bname\s*=\s*(?:\"([^\"]+)\"|'([^']+)')")
+_INVOKE_PREFIX_RE = re.compile(r"^<invoke:([A-Za-z0-9_.\-]+)")
+_INVOKE_OPEN_INNER_RE = re.compile(r"<invoke(?::([A-Za-z0-9_.\-]+)|\s[^>]*)>")
+
+
+def _coerce_parameter_value(raw: str) -> Any:
+    """Значение `<parameter>`: строка; JSON — только если начинается с `{` или `[`."""
+    value = raw.strip()
+    if value[:1] in ("{", "["):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _invoke_tag_name(tag: str) -> str:
+    """Имя инструмента из открывающего тега `<invoke name=...>` / `<invoke:NAME>`."""
+    prefix = _INVOKE_PREFIX_RE.match(tag)
+    if prefix:
+        return prefix.group(1).strip()
+    attr = _ATTR_NAME_RE.search(tag)
+    if attr:
+        return (attr.group(1) or attr.group(2) or "").strip()
+    return ""
+
+
+def _nested_invoke_name(inner: str) -> str:
+    """Имя из вложенного `<invoke ...>` (инцидент `<invoke:bash><invoke name=...>`)."""
+    match = _INVOKE_OPEN_INNER_RE.search(inner)
+    if not match:
+        return ""
+    if match.group(1):
+        return match.group(1).strip()
+    return _invoke_tag_name(match.group(0))
+
+
+def _parse_invoke_arguments(inner: str) -> dict:
+    """Содержимое блока `<invoke>` -> словарь аргументов из тегов `<parameter>`."""
+    arguments: dict[str, Any] = {}
+    for match in _PARAMETER_RE.finditer(inner):
+        name = (match.group(1) or match.group(2) or "").strip()
+        if name:
+            arguments[name] = _coerce_parameter_value(match.group(3))
+    for match in _PARAMETER_SELF_RE.finditer(inner):
+        name = (match.group(1) or match.group(2) or "").strip()
+        if name and name not in arguments:
+            arguments[name] = ""
+    if not arguments:
+        body = inner.strip()
+        if body[:1] == "{":
+            try:
+                parsed = json.loads(body)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+    return arguments
+
+
 class ToolCallParser:
     """Поток текстовых дельт -> content и завершённые вызовы инструментов.
 
@@ -570,6 +860,12 @@ class ToolCallParser:
             [str], list[dict[str, Any]] | None
         ] = _parse_tool_call_blocks,
         suppress_after_tool: bool = False,
+        allowed_tools=None,
+        tool_schemas=None,
+        invoke_normalization_enabled: bool = True,
+        repetition_guard_enabled: bool = True,
+        max_repetition_repeats: int = DEFAULT_MAX_REPETITION_REPEATS,
+        max_repetition_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
     ) -> None:
         self._buf = ""
         self._on_content = on_content
@@ -596,6 +892,64 @@ class ToolCallParser:
         self.trailing_chars_after_tool = 0
         self._trailing_started = False
         self._trailing_pending = 0
+        self._allowed_tools = (
+            {str(name) for name in allowed_tools} if allowed_tools is not None else None
+        )
+        self._tool_schemas = tool_schemas
+        self._invoke_enabled = bool(invoke_normalization_enabled)
+        self._guard = (
+            RepetitionGuard(
+                max_repeats=max_repetition_repeats,
+                max_token_len=max_repetition_token_len,
+                enabled=True,
+            )
+            if repetition_guard_enabled
+            else None
+        )
+
+    @property
+    def repetition_detected(self) -> bool:
+        """Guard зафиксировал цикл повторений в уже отданном content."""
+        return bool(self._guard is not None and self._guard.detected)
+
+    def _check_allowed(self, name: str) -> bool:
+        """Whitelist `allowed_tools`: strict — ошибка, иначе вызов отбрасывается."""
+        if self._allowed_tools is None or name in self._allowed_tools:
+            return True
+        if self.strict_live:
+            raise LiveParserError(f"unauthorized tool: {name}")
+        return False
+
+    def _emit_invoke_call(self, name: str, arguments: dict) -> None:
+        """Invoke-вызов -> плоский `{"id", "name", "arguments"}` в `on_tool_call`."""
+        calls: list[dict] = [
+            {"id": _new_call_id(), "name": name, "arguments": arguments}
+        ]
+        if self._tool_schemas is not None:
+            calls = []
+            for item in sanitize_tool_call(
+                {"id": _new_call_id(), "name": name, "arguments": arguments},
+                self._tool_schemas,
+            ):
+                item_name, item_args = _call_name_and_args(item)
+                normalized = _normalize_arguments(item_args)
+                calls.append(
+                    {
+                        "id": str(item.get("id") or _new_call_id())
+                        if isinstance(item, dict)
+                        else _new_call_id(),
+                        "name": item_name,
+                        "arguments": normalized if normalized is not None else {},
+                    }
+                )
+        for call in calls:
+            if call["name"] and self._check_allowed(call["name"]):
+                self._remember(_OPAQUE_BLOCK)
+                self.tool_calls_count += 1
+                self.trailing_chars_after_tool = 0
+                self._trailing_started = False
+                self._trailing_pending = 0
+                self._on_tool_call(call)
 
     def feed(self, text: str) -> None:
         if not text:
@@ -670,6 +1024,73 @@ class ToolCallParser:
             return "wait"
         return "quoted"
 
+    def _drain_invoke(self, final: bool, start: int) -> bool:
+        """Разобрать invoke-тег в начале буфера; True — продолжить `_drain`."""
+        if start > 0:
+            self._emit(self._buf[:start])
+            self._buf = self._buf[start:]
+        verdict = self._classify_open(0, final)
+        if verdict == "quoted":
+            self._emit(self._buf[:1])
+            self._buf = self._buf[1:]
+            return True
+        if verdict == "wait":
+            return False
+        gt = self._buf.find(">")
+        if gt == -1:
+            if not final:
+                return False
+            if self.strict_live:
+                raise LiveParserError("unclosed invoke tag")
+            self._buf = ""
+            return False
+        tag = self._buf[: gt + 1]
+        if tag.startswith("</"):
+            self._buf = self._buf[gt + 1 :]
+            self._remember(_OPAQUE_BLOCK)
+            return True
+        if tag.startswith("<parameter"):
+            if self.strict_live:
+                raise LiveParserError("parameter outside invoke")
+            if tag[:-1].rstrip().endswith("/"):
+                self._buf = self._buf[gt + 1 :]
+                return True
+            close = _PARAMETER_CLOSE_RE.search(self._buf, gt + 1)
+            if close is None:
+                if not final:
+                    return False
+                self._buf = ""
+                return False
+            self._buf = self._buf[close.end() :]
+            return True
+        name = _invoke_tag_name(tag)
+        if tag[:-1].rstrip().endswith("/"):
+            self._buf = self._buf[gt + 1 :]
+            if not name:
+                if self.strict_live:
+                    raise LiveParserError("invoke without tool name")
+                return True
+            self._emit_invoke_call(name, {})
+            return True
+        close = _INVOKE_CLOSE_RE.search(self._buf, gt + 1)
+        if close is None:
+            if not final:
+                return False
+            if self.strict_live:
+                raise LiveParserError("unclosed invoke block")
+            self._buf = ""
+            return False
+        inner = self._buf[gt + 1 : close.start()]
+        self._buf = self._buf[close.end() :]
+        if not name:
+            name = _nested_invoke_name(inner)
+        if not name:
+            if self.strict_live:
+                raise LiveParserError("invoke without tool name")
+            return True
+        self._emit_invoke_call(name, _parse_invoke_arguments(inner))
+        return True
+
     def _drain(self, final: bool) -> None:
         while True:
             if len(self._tag_pairs) == 1:
@@ -683,6 +1104,13 @@ class ToolCallParser:
                     (candidate for candidate in candidates if candidate[0] >= 0),
                     default=(-1, "", ""),
                 )
+            invoke = (
+                _INVOKE_CANDIDATE_RE.search(self._buf) if self._invoke_enabled else None
+            )
+            if invoke is not None and (start == -1 or invoke.start() < start):
+                if self._drain_invoke(final, invoke.start()):
+                    continue
+                return
             if start == -1:
                 if final:
                     if (
@@ -776,8 +1204,13 @@ class ToolCallParser:
                             raise LiveParserError("malformed tool_call block")
                         self._emit(open_tag + inner + close_tag)
                     else:
+                        if self._allowed_tools is not None and self.strict_live:
+                            for call in calls:
+                                self._check_allowed(str(call.get("name") or ""))
                         self._remember(_OPAQUE_BLOCK)
                         for call in calls:
+                            if not self._check_allowed(str(call.get("name") or "")):
+                                continue
                             self.tool_calls_count += 1
                             self.trailing_chars_after_tool = 0
                             self._trailing_started = False
@@ -791,12 +1224,20 @@ class ToolCallParser:
 
     def _pending_prefix(self) -> int:
         """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
-        longest = 0
-        for open_tag, _ in self._tag_pairs:
-            start = self._buf.rfind("<", max(0, len(self._buf) - len(open_tag) + 1))
-            if start >= 0 and open_tag.startswith(self._buf[start:]):
-                longest = max(longest, len(self._buf) - start)
-        return longest
+        tags = [open_tag for open_tag, _ in self._tag_pairs]
+        if self._invoke_enabled:
+            tags += ["<invoke", "</invoke", "<parameter", "</parameter>"]
+        best = 0
+        for tag in tags:
+            if self._buf.endswith(tag):
+                best = max(best, len(tag))
+                continue
+            limit = min(len(tag) - 1, len(self._buf))
+            for length in range(limit, 0, -1):
+                if self._buf[-length:] == tag[:length]:
+                    best = max(best, length)
+                    break
+        return best
 
     def _tail_in_code(self) -> bool:
         """Хвост-префикс тега в буфере лежит внутри markdown-кода."""
@@ -808,6 +1249,12 @@ class ToolCallParser:
     def _emit(self, text: str) -> None:
         if text:
             self._remember(text)
+            if self._guard is not None:
+                _, detected = self._guard.feed(text)
+                if detected and self.strict_live:
+                    raise RepetitionLoopDetected(
+                        "upstream_repetition_loop: excessive token repetitions"
+                    )
             if self._suppress_after_tool and self.tool_calls_count:
                 stripped = text.strip()
                 if stripped:
@@ -1168,6 +1615,11 @@ def finalize_turn(
     tool_schemas: dict[str, Any] | None = None,
     max_parallel_calls: int = DEFAULT_MAX_PARALLEL_CALLS,
     max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
+    allowed_tools=None,
+    invoke_normalization_enabled: bool = True,
+    repetition_guard_enabled: bool = True,
+    max_repetition_repeats: int = DEFAULT_MAX_REPETITION_REPEATS,
+    max_repetition_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
 ) -> TurnResult:
     """Сырой итог адаптера -> `out` фасада с буфером `events` (content/reasoning/tool_call).
 
@@ -1214,7 +1666,16 @@ def finalize_turn(
 
     text = raw.text
     if emulate_tools:
-        parser = ToolCallParser(add_content, add_call)
+        parser = ToolCallParser(
+            add_content,
+            add_call,
+            allowed_tools=allowed_tools,
+            tool_schemas=tool_schemas if sanitize else None,
+            invoke_normalization_enabled=invoke_normalization_enabled,
+            repetition_guard_enabled=repetition_guard_enabled,
+            max_repetition_repeats=max_repetition_repeats,
+            max_repetition_token_len=max_repetition_token_len,
+        )
         parser.feed(text)
         parser.finish()
     else:

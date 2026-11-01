@@ -45,6 +45,10 @@ from core.backend_adapter import (
 from core.tool_emulation import (
     DEFAULT_MAX_PARALLEL_CALLS,
     DEFAULT_MAX_PARALLEL_DEPTH,
+    DEFAULT_MAX_REPETITION_REPEATS,
+    DEFAULT_MAX_REPETITION_TOKEN_LEN,
+    RepetitionGuard,
+    ToolCallParser,
     build_tool_schemas,
     sanitize_tool_call,
 )
@@ -58,6 +62,11 @@ ENV_ACC_MAX_KEYS = "BRIDGE_ACCUMULATOR_MAX_KEYS"
 ENV_ACC_MAX_PROCESS_BYTES = "BRIDGE_ACCUMULATOR_MAX_PROCESS_BYTES"
 ENV_CONNECT_TIMEOUT_S = "BRIDGE_PASSTHROUGH_CONNECT_TIMEOUT_S"
 ENV_READ_TIMEOUT_S = "BRIDGE_PASSTHROUGH_READ_TIMEOUT_S"
+# ADR-0020: env читает адаптер (не ядро, BND-001) и передаёт значения аргументами.
+ENV_REPETITION_MAX_REPEATS = "BRIDGE_REPETITION_MAX_REPEATS"
+ENV_REPETITION_MAX_TOKEN_LEN = "BRIDGE_REPETITION_MAX_TOKEN_LEN"
+ENV_REPETITION_GUARD_ENABLED = "BRIDGE_REPETITION_GUARD_ENABLED"
+ENV_INVOKE_NORMALIZATION_ENABLED = "BRIDGE_INVOKE_NORMALIZATION_ENABLED"
 
 DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 DEFAULT_ACC_MAX_BYTES = 8 * 1024 * 1024
@@ -112,6 +121,25 @@ def _positive_float(environ: Mapping[str, str], name: str, default: float) -> fl
     return value if value > 0 else default
 
 
+def _bounded_int(
+    environ: Mapping[str, str], name: str, default: int, low: int, high: int
+) -> int:
+    try:
+        value = int(str(environ.get(name, "")).strip())
+    except ValueError:
+        return default
+    return value if low <= value <= high else default
+
+
+def _env_bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = str(environ.get(name, "")).strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class PassthroughLimits:
     """Эффективные лимиты шва; ядру `max_parallel_*` передаются параметрами."""
@@ -124,6 +152,10 @@ class PassthroughLimits:
     accumulator_max_process_bytes: int = DEFAULT_ACC_MAX_PROCESS_BYTES
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S
+    repetition_max_repeats: int = DEFAULT_MAX_REPETITION_REPEATS
+    repetition_max_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN
+    repetition_guard_enabled: bool = False
+    invoke_normalization_enabled: bool = False
 
     @classmethod
     def from_env(
@@ -155,6 +187,22 @@ class PassthroughLimits:
             ),
             read_timeout_s=_positive_float(
                 env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S
+            ),
+            repetition_max_repeats=_bounded_int(
+                env, ENV_REPETITION_MAX_REPEATS, DEFAULT_MAX_REPETITION_REPEATS, 3, 1000
+            ),
+            repetition_max_token_len=_bounded_int(
+                env,
+                ENV_REPETITION_MAX_TOKEN_LEN,
+                DEFAULT_MAX_REPETITION_TOKEN_LEN,
+                8,
+                512,
+            ),
+            repetition_guard_enabled=_env_bool(
+                env, ENV_REPETITION_GUARD_ENABLED, False
+            ),
+            invoke_normalization_enabled=_env_bool(
+                env, ENV_INVOKE_NORMALIZATION_ENABLED, False
             ),
         )
 
@@ -235,6 +283,7 @@ class ToolCallAccumulator:
         self._entries: dict[tuple[int, int], _PartialCall] = {}
         self._bytes = 0
         self._last_index: dict[int, int] = {}
+        self._remap: dict[tuple[int, int], int] = {}
 
     @property
     def size_bytes(self) -> int:
@@ -249,12 +298,29 @@ class ToolCallAccumulator:
             raise AccumulatorOverflow("accumulator_process_bytes")
         self._bytes += size
 
+    def next_tool_index(self, choice: int) -> int:
+        """Следующий свободный индекс `tool_call` внутри `choice` (без коллизий с нативными)."""
+        indices = [key[1] for key in self._entries if key[0] == choice]
+        if choice in self._last_index:
+            indices.append(self._last_index[choice])
+        return (max(indices) + 1) if indices else 0
+
     def _tool_index(self, choice: int, delta: Mapping[str, Any]) -> int:
         raw = delta.get("index")
         if isinstance(raw, int) and not isinstance(raw, bool):
-            idx = raw
+            call_id = delta.get("id")
+            if isinstance(call_id, str) and call_id:
+                existing = self._entries.get((choice, raw))
+                if existing is not None and existing.id and existing.id != call_id:
+                    idx = self.next_tool_index(choice)
+                    self._remap[(choice, raw)] = idx
+                else:
+                    self._remap.pop((choice, raw), None)
+                    idx = raw
+            else:
+                idx = self._remap.get((choice, raw), raw)
         elif delta.get("id") and choice in self._last_index:
-            idx = self._last_index[choice] + 1  # без index: новый id — новый вызов
+            idx = self.next_tool_index(choice)  # без index: новый id — новый вызов
         else:
             idx = self._last_index.get(choice, 0)
         self._last_index[choice] = idx
@@ -324,6 +390,8 @@ class ToolCallAccumulator:
                 }
             )
         self._last_index.pop(choice, None)
+        for remap_key in [k for k in self._remap if k[0] == choice]:
+            self._remap.pop(remap_key, None)
         return calls
 
     def drop_choice(self, choice: int) -> None:
@@ -366,7 +434,8 @@ def sanitize_completion_body(
     tool_schemas: Optional[dict[str, Any]],
     limits: PassthroughLimits,
 ) -> bytes:
-    """Тело non-stream `chat.completion`: санитизируются только `choices[].message.tool_calls`.
+    """Тело non-stream `chat.completion`: санитизируются `choices[].message.tool_calls`
+    и (при `limits.invoke_normalization_enabled`) извлекаются `<invoke>` из `message.content`.
 
     Невалидный JSON, форма без `choices` и ответ без изменений возвращаются байт-в-байт.
     """
@@ -382,15 +451,66 @@ def sanitize_completion_body(
         message = choice.get("message") if isinstance(choice, dict) else None
         if not isinstance(message, dict):
             continue
-        calls = message.get("tool_calls")
-        if (
-            not isinstance(calls, list)
-            or not calls
-            or not all(isinstance(c, dict) for c in calls)
-        ):
+        raw_calls = message.get("tool_calls")
+        has_valid_native = (
+            isinstance(raw_calls, list)
+            and bool(raw_calls)
+            and all(isinstance(c, dict) for c in raw_calls)
+        )
+        merged_calls: list[dict[str, Any]] = list(raw_calls) if has_valid_native else []
+        extracted_calls: list[dict[str, Any]] = []
+        if limits.invoke_normalization_enabled:
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                content_parts: list[str] = []
+                parsed_calls: list[dict[str, Any]] = []
+                parser = ToolCallParser(
+                    content_parts.append,
+                    parsed_calls.append,
+                    invoke_normalization_enabled=True,
+                    repetition_guard_enabled=False,
+                )
+                parser.feed(content)
+                parser.finish()
+                new_content = "".join(content_parts)
+                if parsed_calls or new_content != content:
+                    message["content"] = new_content
+                    changed = True
+                has_index = any("index" in c for c in merged_calls)
+                next_idx = (
+                    max(
+                        (
+                            c["index"]
+                            for c in merged_calls
+                            if isinstance(c.get("index"), int)
+                            and not isinstance(c.get("index"), bool)
+                        ),
+                        default=len(merged_calls) - 1,
+                    )
+                    + 1
+                )
+                for call in parsed_calls:
+                    arguments = call.get("arguments")
+                    entry: dict[str, Any] = {
+                        "id": str(call.get("id") or new_call_id()),
+                        "type": "function",
+                        "function": {
+                            "name": str(call.get("name") or ""),
+                            "arguments": arguments
+                            if isinstance(arguments, str)
+                            else json.dumps(arguments or {}, ensure_ascii=False),
+                        },
+                    }
+                    if has_index:
+                        entry["index"] = next_idx
+                        next_idx += 1
+                    extracted_calls.append(entry)
+                if extracted_calls:
+                    merged_calls.extend(extracted_calls)
+        if not merged_calls:
             continue
-        cleaned = sanitize_choice_calls(calls, tool_schemas, limits)
-        if cleaned != calls:
+        cleaned = sanitize_choice_calls(merged_calls, tool_schemas, limits)
+        if extracted_calls or cleaned != raw_calls:
             message["tool_calls"] = cleaned
             changed = True
     return json.dumps(data, ensure_ascii=False).encode("utf-8") if changed else body
@@ -456,6 +576,7 @@ class StreamOutcome:
     overflow: bool = False
     tool_calls_published: int = 0
     committed: bool = False
+    repetition_loop: bool = False
 
 
 def relay_sse(
@@ -486,12 +607,111 @@ def relay_sse(
     seen: set[int] = set()
     finished: set[int] = set()
     last_chunk: dict[str, Any] = {}
+    guards: dict[int, RepetitionGuard] = {}
+    parsers: dict[int, ToolCallParser] = {}
+    parser_content: dict[int, list[str]] = {}
+    parser_calls: dict[int, list[dict]] = {}
+
+    def guard_for(index: int) -> RepetitionGuard:
+        if index not in guards:
+            guards[index] = RepetitionGuard(
+                max_repeats=limits.repetition_max_repeats,
+                max_token_len=limits.repetition_max_token_len,
+                enabled=limits.repetition_guard_enabled,
+            )
+        return guards[index]
+
+    def repetition_error() -> StreamOutcome:
+        acc.close()
+        outcome.repetition_loop = True
+        write(
+            _error_frame(
+                last_chunk,
+                "upstream_repetition_loop",
+                "upstream repetition loop detected",
+            )
+        )
+        return outcome
+
+    def check_repetition(index: int, text: str) -> bool:
+        if not limits.repetition_guard_enabled or not text:
+            return False
+        return guard_for(index).feed(text)[1]
+
+    def parser_for(index: int) -> ToolCallParser:
+        if index not in parsers:
+            parser_content[index] = []
+            parser_calls[index] = []
+            parsers[index] = ToolCallParser(
+                parser_content[index].append,
+                parser_calls[index].append,
+                tool_schemas=tool_schemas,
+                repetition_guard_enabled=False,
+            )
+        return parsers[index]
+
+    def add_invoke_calls(index: int) -> None:
+        for call in parser_calls.get(index, ()):
+            arguments = call.get("arguments")
+            acc.add(
+                index,
+                [
+                    {
+                        "index": acc.next_tool_index(index),
+                        "id": str(call.get("id") or new_call_id()),
+                        "type": "function",
+                        "function": {
+                            "name": str(call.get("name") or ""),
+                            "arguments": arguments
+                            if isinstance(arguments, str)
+                            else json.dumps(arguments or {}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            )
+        if index in parser_calls:
+            parser_calls[index].clear()
+
+    def content_frame(base: Mapping[str, Any], index: int, text: str) -> bytes:
+        payload: dict[str, Any] = {
+            k: base[k] for k in base if k not in ("choices", "usage", "error")
+        }
+        payload.setdefault("id", last_chunk.get("id") or "chatcmpl-passthrough")
+        payload.setdefault("object", "chat.completion.chunk")
+        payload.setdefault("created", last_chunk.get("created") or int(time.time()))
+        payload.setdefault("model", last_chunk.get("model") or "")
+        payload["choices"] = [
+            {"index": index, "delta": {"content": text}, "finish_reason": None}
+        ]
+        return _data_frame(payload)
+
+    def flush_parser(index: int, base: Mapping[str, Any]) -> Optional[StreamOutcome]:
+        """`finish()` парсера choice: удержанный content уходит перед терминалом."""
+        if index not in parsers:
+            return None
+        parser_content[index].clear()
+        add_invoke_calls(index)
+        parsers[index].finish()
+        flushed = "".join(parser_content[index])
+        parser_content[index].clear()
+        if flushed:
+            if check_repetition(index, flushed):
+                return repetition_error()
+            write(content_frame(base, index, flushed))
+        add_invoke_calls(index)
+        del parsers[index]
+        return None
+
     try:
         for raw, data in iter_sse_events(readline, limits.max_body_bytes):
             if data is None:
                 write(raw)  # комментарий/keepalive/event без data — дословно
                 continue
             if data.strip() == "[DONE]":
+                for pending_index in sorted(list(parsers)):
+                    flushed_outcome = flush_parser(pending_index, last_chunk)
+                    if flushed_outcome is not None:
+                        return flushed_outcome
                 if acc.pending_choices() or (trusted_tools and seen - finished):
                     acc.close()  # [DONE] без finish_reason у choice с вызовами: успеха нет
                     outcome.incomplete = True
@@ -512,12 +732,36 @@ def relay_sse(
                 write(raw)
                 continue
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
-            if not isinstance(choices, list) or not sanitize:
+            if not isinstance(choices, list):
+                write(raw)
+                continue
+            if not sanitize:
+                if limits.repetition_guard_enabled:
+                    last_chunk = {k: chunk.get(k) for k in ("id", "created", "model")}
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        raw_index = choice.get("index")
+                        index = (
+                            raw_index
+                            if isinstance(raw_index, int)
+                            and not isinstance(raw_index, bool)
+                            else 0
+                        )
+                        delta = choice.get("delta")
+                        text_value = (
+                            delta.get("content") if isinstance(delta, dict) else None
+                        )
+                        if isinstance(text_value, str) and check_repetition(
+                            index, text_value
+                        ):
+                            return repetition_error()
                 write(raw)
                 continue
             last_chunk = {k: chunk.get(k) for k in ("id", "created", "model")}
             modified = False
             terminal: list[int] = []
+            terminal_content: dict[int, str] = {}
             for choice in choices:
                 if not isinstance(choice, dict):
                     continue
@@ -542,10 +786,47 @@ def relay_sse(
                         delta = {k: v for k, v in delta.items() if k != "tool_calls"}
                         choice["delta"] = delta
                         modified = True
+                if isinstance(delta, dict):
+                    content_value = delta.get("content")
+                    if isinstance(content_value, str) and content_value:
+                        text_out = content_value
+                        if limits.invoke_normalization_enabled:
+                            parser_content[index] = parser_content.get(index, [])
+                            parser = parser_for(index)
+                            parser_content[index].clear()
+                            parser.feed(content_value)
+                            text_out = "".join(parser_content[index])
+                            parser_content[index].clear()
+                            had_calls = bool(parser_calls.get(index))
+                            add_invoke_calls(index)
+                            if text_out != content_value or had_calls:
+                                delta = dict(delta)
+                                if text_out:
+                                    delta["content"] = text_out
+                                else:
+                                    delta.pop("content", None)
+                                choice["delta"] = delta
+                                modified = True
+                        if check_repetition(index, text_out):
+                            return repetition_error()
                 if choice.get("finish_reason"):
                     finished.add(index)
                     terminal.append(index)
+                    if (
+                        isinstance(delta, dict)
+                        and isinstance(delta.get("content"), str)
+                        and delta["content"]
+                    ):
+                        terminal_content[index] = delta["content"]
+                        delta = {k: v for k, v in delta.items() if k != "content"}
+                        choice["delta"] = delta
+                        modified = True
             for index in sorted(terminal):
+                if index in terminal_content:
+                    write(content_frame(chunk, index, terminal_content[index]))
+                flushed_outcome = flush_parser(index, chunk)
+                if flushed_outcome is not None:
+                    return flushed_outcome
                 if not acc.has_choice(index):
                     continue
                 calls = sanitize_choice_calls(
@@ -583,6 +864,10 @@ def relay_sse(
                 continue  # чанк состоял только из дельт tool_calls
             write(_data_frame(chunk))
         # EOF без [DONE]: недособранное сбрасывается, незавершённые choices — ошибка.
+        for pending_index in sorted(list(parsers)):
+            flushed_outcome = flush_parser(pending_index, last_chunk)
+            if flushed_outcome is not None:
+                return flushed_outcome
         unfinished = seen - finished
         if acc.pending_choices() or unfinished:
             acc.close()
@@ -676,9 +961,10 @@ class PassthroughAdapter(BackendAdapter):
         self._upstream_key = (
             os.environ.get(api_key_env) if isinstance(api_key_env, str) else ""
         ) or (api_key if isinstance(api_key, str) else "")
-        self.limits = limits or PassthroughLimits.from_env()
+        self._limits = limits
+        initial_limits = self.limits
         self.process_budget = process_budget or ProcessBudget(
-            self.limits.accumulator_max_process_bytes
+            initial_limits.accumulator_max_process_bytes
         )
         self._sanitize = sanitize
         self._active = 0
@@ -695,6 +981,16 @@ class PassthroughAdapter(BackendAdapter):
         self._host = parts.hostname
         self._port = parts.port
         self._base_path = parts.path.rstrip("/")
+
+    @property
+    def limits(self) -> PassthroughLimits:
+        return (
+            self._limits if self._limits is not None else PassthroughLimits.from_env()
+        )
+
+    @limits.setter
+    def limits(self, value: Optional[PassthroughLimits]) -> None:
+        self._limits = value
 
     # -- контракт BackendAdapter ---------------------------------------------------------
     def validate_client_token(self, token: str) -> bool:

@@ -112,9 +112,13 @@ from core.lifecycle import (  # noqa: E402
     HubLifecycleManager,
 )
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
+    DEFAULT_MAX_REPETITION_REPEATS,
+    DEFAULT_MAX_REPETITION_TOKEN_LEN,
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
     LiveParserError,
+    RepetitionGuard,
+    RepetitionLoopDetected,
     ToolCallParser,
     _attachments_section,
     _flatten_content,
@@ -208,6 +212,13 @@ EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
 EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 BRIDGE_LIMITS = PassthroughLimits.from_env()
+# ADR-0020: env BRIDGE_REPETITION_* / BRIDGE_INVOKE_NORMALIZATION_ENABLED читает
+# PassthroughLimits.from_env() (адаптерный слой, BND-001); сервер только пробрасывает
+# эффективные значения в core-компоненты аргументами.
+BRIDGE_REPETITION_MAX_REPEATS = BRIDGE_LIMITS.repetition_max_repeats
+BRIDGE_REPETITION_MAX_TOKEN_LEN = BRIDGE_LIMITS.repetition_max_token_len
+BRIDGE_REPETITION_GUARD_ENABLED = BRIDGE_LIMITS.repetition_guard_enabled
+BRIDGE_INVOKE_NORMALIZATION_ENABLED = BRIDGE_LIMITS.invoke_normalization_enabled
 
 
 def _load_request_config() -> dict[str, Any]:
@@ -4969,8 +4980,17 @@ class Handler(BaseHTTPRequestHandler):
             events.append(("tool_call", entry))
             # Managed replay получает вызовы после единственной границы в _dispatch.
 
+        req_limits = PassthroughLimits.from_env()
         parser = (
-            ToolCallParser(add_content, add_call, strict_live=sse_writer is not None)
+            ToolCallParser(
+                add_content,
+                add_call,
+                strict_live=sse_writer is not None,
+                invoke_normalization_enabled=req_limits.invoke_normalization_enabled,
+                repetition_guard_enabled=req_limits.repetition_guard_enabled,
+                max_repetition_repeats=req_limits.repetition_max_repeats,
+                max_repetition_token_len=req_limits.repetition_max_token_len,
+            )
             if emulate_tools
             else None
         )
@@ -6842,7 +6862,15 @@ class Handler(BaseHTTPRequestHandler):
         )
         t0 = time.monotonic()
         raw_turn_result = adapter.execute_turn(turn, sse_writer)
-        result = finalize_turn(raw_turn_result, turn.emulate_tools)
+        req_limits = PassthroughLimits.from_env()
+        result = finalize_turn(
+            raw_turn_result,
+            turn.emulate_tools,
+            invoke_normalization_enabled=req_limits.invoke_normalization_enabled,
+            repetition_guard_enabled=req_limits.repetition_guard_enabled,
+            max_repetition_repeats=req_limits.repetition_max_repeats,
+            max_repetition_token_len=req_limits.repetition_max_token_len,
+        )
         if BRIDGE_SANITIZE_TOOL_CALLS:
             calls: list[ToolCall] = []
             by_id: dict[str, list[ToolCall]] = {}
