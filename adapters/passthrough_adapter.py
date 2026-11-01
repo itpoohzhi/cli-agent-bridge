@@ -65,7 +65,9 @@ DEFAULT_ACC_MAX_KEYS = 64
 DEFAULT_ACC_MAX_PROCESS_BYTES = 32 * 1024 * 1024
 DEFAULT_CONNECT_TIMEOUT_S = 10.0
 DEFAULT_READ_TIMEOUT_S = 1800.0
-DEFAULT_QUEUE_TIMEOUT_S = 900.0  # ожидание слота `max_concurrent`, если хост своего не задал
+DEFAULT_QUEUE_TIMEOUT_S = (
+    900.0  # ожидание слота `max_concurrent`, если хост своего не задал
+)
 
 KIND = "passthrough"
 
@@ -84,8 +86,14 @@ _HOP_BY_HOP = frozenset(
         "upgrade",
     }
 )
-_REQUEST_DROP = _HOP_BY_HOP | {"host", "content-length", "accept-encoding"}
-_RESPONSE_DROP = _HOP_BY_HOP | {"content-length"}
+_TOOL_SANITIZED_HEADER = "x-bridge-tool-sanitized"
+_REQUEST_DROP = _HOP_BY_HOP | {
+    "host",
+    "content-length",
+    "accept-encoding",
+    _TOOL_SANITIZED_HEADER,
+}
+_RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
 
 
 def _positive_int(environ: Mapping[str, str], name: str, default: int) -> int:
@@ -118,7 +126,9 @@ class PassthroughLimits:
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S
 
     @classmethod
-    def from_env(cls, environ: Optional[Mapping[str, str]] = None) -> "PassthroughLimits":
+    def from_env(
+        cls, environ: Optional[Mapping[str, str]] = None
+    ) -> "PassthroughLimits":
         """Лимиты из окружения; нечисловое и неположительное значение -> default."""
         env = os.environ if environ is None else environ
         return cls(
@@ -128,18 +138,24 @@ class PassthroughLimits:
             max_parallel_depth=_positive_int(
                 env, ENV_MAX_PARALLEL_DEPTH, DEFAULT_MAX_PARALLEL_DEPTH
             ),
-            max_body_bytes=_positive_int(env, ENV_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES),
+            max_body_bytes=_positive_int(
+                env, ENV_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES
+            ),
             accumulator_max_bytes=_positive_int(
                 env, ENV_ACC_MAX_BYTES, DEFAULT_ACC_MAX_BYTES
             ),
-            accumulator_max_keys=_positive_int(env, ENV_ACC_MAX_KEYS, DEFAULT_ACC_MAX_KEYS),
+            accumulator_max_keys=_positive_int(
+                env, ENV_ACC_MAX_KEYS, DEFAULT_ACC_MAX_KEYS
+            ),
             accumulator_max_process_bytes=_positive_int(
                 env, ENV_ACC_MAX_PROCESS_BYTES, DEFAULT_ACC_MAX_PROCESS_BYTES
             ),
             connect_timeout_s=_positive_float(
                 env, ENV_CONNECT_TIMEOUT_S, DEFAULT_CONNECT_TIMEOUT_S
             ),
-            read_timeout_s=_positive_float(env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S),
+            read_timeout_s=_positive_float(
+                env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S
+            ),
         )
 
 
@@ -211,7 +227,9 @@ class ToolCallAccumulator:
     освобождение бюджета — `pop_choice`/`drop_choice`/`close` (идемпотентно).
     """
 
-    def __init__(self, limits: PassthroughLimits, process: Optional[ProcessBudget] = None) -> None:
+    def __init__(
+        self, limits: PassthroughLimits, process: Optional[ProcessBudget] = None
+    ) -> None:
         self._limits = limits
         self._process = process
         self._entries: dict[tuple[int, int], _PartialCall] = {}
@@ -253,7 +271,9 @@ class ToolCallAccumulator:
                     raise AccumulatorOverflow("accumulator_keys")
                 entry = _PartialCall()
                 self._entries[key] = entry
-            fn = delta.get("function") if isinstance(delta.get("function"), dict) else {}
+            fn = (
+                delta.get("function") if isinstance(delta.get("function"), dict) else {}
+            )
             call_id = delta.get("id")
             if isinstance(call_id, str) and call_id and not entry.id:
                 self._grow(len(call_id.encode("utf-8")))
@@ -297,7 +317,10 @@ class ToolCallAccumulator:
                     "index": key[1],
                     "id": entry.id or new_call_id(),
                     "type": entry.type,
-                    "function": {"name": entry.name, "arguments": "".join(entry.arguments)},
+                    "function": {
+                        "name": entry.name,
+                        "arguments": "".join(entry.arguments),
+                    },
                 }
             )
         self._last_index.pop(choice, None)
@@ -333,7 +356,9 @@ def sanitize_choice_calls(
     )
     if not unpacked:
         return flat
-    return [dict(item, index=i) if "index" in item else item for i, item in enumerate(flat)]
+    return [
+        dict(item, index=i) if "index" in item else item for i, item in enumerate(flat)
+    ]
 
 
 def sanitize_completion_body(
@@ -358,7 +383,11 @@ def sanitize_completion_body(
         if not isinstance(message, dict):
             continue
         calls = message.get("tool_calls")
-        if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) for c in calls):
+        if (
+            not isinstance(calls, list)
+            or not calls
+            or not all(isinstance(c, dict) for c in calls)
+        ):
             continue
         cleaned = sanitize_choice_calls(calls, tool_schemas, limits)
         if cleaned != calls:
@@ -380,12 +409,19 @@ def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
             "created": chunk.get("created") or int(time.time()),
             "model": chunk.get("model") or "",
             "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-            "error": {"message": message, "type": "stream_error", "code": code, "param": None},
+            "error": {
+                "message": message,
+                "type": "stream_error",
+                "code": code,
+                "param": None,
+            },
         }
     )
 
 
-def iter_sse_events(readline: Callable[[int], bytes], max_line_bytes: int) -> Iterator[tuple[bytes, Optional[str]]]:
+def iter_sse_events(
+    readline: Callable[[int], bytes], max_line_bytes: int
+) -> Iterator[tuple[bytes, Optional[str]]]:
     """SSE-события upstream: (сырые байты события, склеенный `data:` либо None)."""
     raw = bytearray()
     data: list[str] = []
@@ -419,6 +455,7 @@ class StreamOutcome:
     incomplete: bool = False
     overflow: bool = False
     tool_calls_published: int = 0
+    committed: bool = False
 
 
 def relay_sse(
@@ -429,13 +466,22 @@ def relay_sse(
     limits: PassthroughLimits,
     process: Optional[ProcessBudget] = None,
     sanitize: bool = True,
+    trusted_tools: bool = False,
+    state: StreamOutcome | None = None,
 ) -> StreamOutcome:
     """Пробросить SSE-поток upstream клиенту с санитизацией `tool_calls` (AD-005).
 
     Исходный порядок событий сохраняется; единственное изменение — вызовы choice выходят
     одним кадром прямо перед терминальным чанком своей choice, после санитизации.
     """
-    outcome = StreamOutcome()
+    outcome = state if state is not None else StreamOutcome()
+    client_write = write
+
+    def write(frame: bytes) -> None:
+        """До вызова sink: даже частичная запись запрещает повтор запроса."""
+        outcome.committed = True
+        client_write(frame)
+
     acc = ToolCallAccumulator(limits, process)
     seen: set[int] = set()
     finished: set[int] = set()
@@ -446,11 +492,16 @@ def relay_sse(
                 write(raw)  # комментарий/keepalive/event без data — дословно
                 continue
             if data.strip() == "[DONE]":
-                if acc.pending_choices():
+                if acc.pending_choices() or (trusted_tools and seen - finished):
                     acc.close()  # [DONE] без finish_reason у choice с вызовами: успеха нет
                     outcome.incomplete = True
-                    write(_error_frame(last_chunk, "upstream_incomplete_stream",
-                                       "upstream stream ended before finish_reason"))
+                    write(
+                        _error_frame(
+                            last_chunk,
+                            "upstream_incomplete_stream",
+                            "upstream stream ended before finish_reason",
+                        )
+                    )
                     return outcome
                 outcome.done = True
                 write(raw)
@@ -471,28 +522,50 @@ def relay_sse(
                 if not isinstance(choice, dict):
                     continue
                 raw_index = choice.get("index")
-                index = raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else 0
+                index = (
+                    raw_index
+                    if isinstance(raw_index, int) and not isinstance(raw_index, bool)
+                    else 0
+                )
                 seen.add(index)
                 delta = choice.get("delta")
                 if isinstance(delta, dict) and "tool_calls" in delta:
-                    acc.add(index, delta["tool_calls"])
-                    delta = {k: v for k, v in delta.items() if k != "tool_calls"}
-                    choice["delta"] = delta
-                    modified = True
+                    if trusted_tools:
+                        calls = delta["tool_calls"]
+                        if isinstance(calls, list):
+                            outcome.tool_calls_published += sum(
+                                isinstance(call, dict) and bool(call.get("id"))
+                                for call in calls
+                            )
+                    else:
+                        acc.add(index, delta["tool_calls"])
+                        delta = {k: v for k, v in delta.items() if k != "tool_calls"}
+                        choice["delta"] = delta
+                        modified = True
                 if choice.get("finish_reason"):
                     finished.add(index)
                     terminal.append(index)
             for index in sorted(terminal):
                 if not acc.has_choice(index):
                     continue
-                calls = sanitize_choice_calls(acc.pop_choice(index), tool_schemas, limits)
+                calls = sanitize_choice_calls(
+                    acc.pop_choice(index), tool_schemas, limits
+                )
                 outcome.tool_calls_published += len(calls)
                 write(
                     _data_frame(
                         {
-                            **{k: chunk[k] for k in chunk if k not in ("choices", "usage", "error")},
+                            **{
+                                k: chunk[k]
+                                for k in chunk
+                                if k not in ("choices", "usage", "error")
+                            },
                             "choices": [
-                                {"index": index, "delta": {"tool_calls": calls}, "finish_reason": None}
+                                {
+                                    "index": index,
+                                    "delta": {"tool_calls": calls},
+                                    "finish_reason": None,
+                                }
                             ],
                         }
                     )
@@ -501,7 +574,9 @@ def relay_sse(
                 write(raw)
                 continue
             only_empty = all(
-                isinstance(c, dict) and not c.get("delta") and not c.get("finish_reason")
+                isinstance(c, dict)
+                and not c.get("delta")
+                and not c.get("finish_reason")
                 for c in choices
             )
             if choices and only_empty and "usage" not in chunk and "error" not in chunk:
@@ -512,30 +587,51 @@ def relay_sse(
         if acc.pending_choices() or unfinished:
             acc.close()
             outcome.incomplete = True
-            write(_error_frame(last_chunk, "upstream_incomplete_stream",
-                               "upstream stream ended before finish_reason"))
+            write(
+                _error_frame(
+                    last_chunk,
+                    "upstream_incomplete_stream",
+                    "upstream stream ended before finish_reason",
+                )
+            )
         return outcome
     except AccumulatorOverflow:
         acc.close()
         outcome.overflow = True
-        write(_error_frame(last_chunk, "upstream_response_too_large",
-                           "upstream tool_calls exceed the bridge limit"))
+        write(
+            _error_frame(
+                last_chunk,
+                "upstream_response_too_large",
+                "upstream tool_calls exceed the bridge limit",
+            )
+        )
         return outcome
     except UpstreamBodyTooLarge:
         acc.close()
         outcome.overflow = True
-        write(_error_frame(last_chunk, "upstream_response_too_large",
-                           "upstream event exceeds the bridge limit"))
+        write(
+            _error_frame(
+                last_chunk,
+                "upstream_response_too_large",
+                "upstream event exceeds the bridge limit",
+            )
+        )
         return outcome
     finally:
         acc.close()
 
 
-def _json_error(status: int, error_type: str, message: str) -> tuple[list[tuple[str, str]], bytes]:
+def _json_error(
+    status: int, error_type: str, message: str
+) -> tuple[list[tuple[str, str]], bytes]:
     body = json.dumps(
-        {"error": {"message": message, "type": error_type, "code": status}}, ensure_ascii=False
+        {"error": {"message": message, "type": error_type, "code": status}},
+        ensure_ascii=False,
     ).encode("utf-8")
-    return [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(body)))], body
+    return [
+        ("Content-Type", "application/json; charset=utf-8"),
+        ("Content-Length", str(len(body))),
+    ], body
 
 
 def _read_bounded(resp: http.client.HTTPResponse, limit: int) -> bytes:
@@ -559,7 +655,9 @@ class PassthroughAdapter(BackendAdapter):
     """Бэкенд `kind=passthrough`: модели каталога, раw-шов исполнения вместо `execute_turn`."""
 
     kind = KIND
-    capabilities = Capabilities(sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact")
+    capabilities = Capabilities(
+        sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact"
+    )
 
     def __init__(
         self,
@@ -623,7 +721,9 @@ class PassthroughAdapter(BackendAdapter):
     def spawn_session(self, ctx: TurnContext) -> object:
         raise BackendNotSupported("passthrough_no_sessions")
 
-    def execute_turn(self, ctx: TurnContext, sse_writer: Optional[StreamSink]) -> TurnResult:
+    def execute_turn(
+        self, ctx: TurnContext, sse_writer: Optional[StreamSink]
+    ) -> TurnResult:
         raise BackendNotSupported("passthrough_raw_seam")
 
     def close_session(self, sid: str) -> None:
@@ -653,7 +753,9 @@ class PassthroughAdapter(BackendAdapter):
         sink: ResponseSink,
     ) -> None:
         """Один запрос: байты тела уходят upstream без мутаций, ответ пишется в `sink`."""
-        queue_timeout = float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S))
+        queue_timeout = float(
+            getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)
+        )
         if not self._slots.acquire(timeout=queue_timeout):
             self._fail(sink, 503, "overloaded", "passthrough backend is saturated")
             return
@@ -665,7 +767,9 @@ class PassthroughAdapter(BackendAdapter):
                 conn = self._open(path, raw_body, headers)
                 resp = conn.getresponse()
             except socket.timeout:
-                self._fail(sink, 504, "upstream_timeout", "upstream did not respond in time")
+                self._fail(
+                    sink, 504, "upstream_timeout", "upstream did not respond in time"
+                )
                 return
             except (OSError, http.client.HTTPException):
                 self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
@@ -680,8 +784,12 @@ class PassthroughAdapter(BackendAdapter):
                 self._active -= 1
             self._slots.release()
 
-    def _open(self, path: str, raw_body: bytes, headers: Mapping[str, str]) -> http.client.HTTPConnection:
-        conn = http.client.HTTPConnection(self._host, self._port, timeout=self.limits.connect_timeout_s)
+    def _open(
+        self, path: str, raw_body: bytes, headers: Mapping[str, str]
+    ) -> http.client.HTTPConnection:
+        conn = http.client.HTTPConnection(
+            self._host, self._port, timeout=self.limits.connect_timeout_s
+        )
         conn.connect()
         if conn.sock is not None:
             conn.sock.settimeout(self.limits.read_timeout_s)
@@ -695,21 +803,27 @@ class PassthroughAdapter(BackendAdapter):
             forwarded["Authorization"] = f"Bearer {self._upstream_key}"
         forwarded["Host"] = f"{self._host}:{self._port}"
         forwarded["Content-Length"] = str(len(raw_body))
-        forwarded["Accept-Encoding"] = "identity"  # тело нужно разобрать, а не передать сжатым
+        forwarded["Accept-Encoding"] = (
+            "identity"  # тело нужно разобрать, а не передать сжатым
+        )
         forwarded["Connection"] = "close"
         route, _, query = path.partition("?")
-        suffix = route[len("/v1"):] if route.startswith("/v1/") else route
+        suffix = route[len("/v1") :] if route.startswith("/v1/") else route
         target = self._base_path + suffix + ("?" + query if query else "")
         conn.request("POST", target, body=raw_body, headers=forwarded)
         return conn
 
-    def _fail(self, sink: ResponseSink, status: int, error_type: str, message: str) -> None:
+    def _fail(
+        self, sink: ResponseSink, status: int, error_type: str, message: str
+    ) -> None:
         self._log(f"passthrough fail status={status} type={error_type}")
         headers, body = _json_error(status, error_type, message)
         sink.start(status, headers)
         sink.write(body)
 
-    def _response_headers(self, resp: http.client.HTTPResponse) -> list[tuple[str, str]]:
+    def _response_headers(
+        self, resp: http.client.HTTPResponse
+    ) -> list[tuple[str, str]]:
         return [(k, v) for k, v in resp.getheaders() if k.lower() not in _RESPONSE_DROP]
 
     def _respond(
@@ -719,7 +833,9 @@ class PassthroughAdapter(BackendAdapter):
         sink: ResponseSink,
     ) -> None:
         content_type = (resp.getheader("Content-Type") or "").lower()
-        encoded = (resp.getheader("Content-Encoding") or "identity").lower() != "identity"
+        encoded = (
+            resp.getheader("Content-Encoding") or "identity"
+        ).lower() != "identity"
         sanitize = self._sanitize_enabled()
         schemas = build_tool_schemas(request.get("tools")) if sanitize else None
         if resp.status == 200 and "text/event-stream" in content_type:
@@ -728,10 +844,17 @@ class PassthroughAdapter(BackendAdapter):
         try:
             body = _read_bounded(resp, self.limits.max_body_bytes)
         except UpstreamBodyTooLarge:
-            self._fail(sink, 502, "upstream_response_too_large", "upstream response exceeds the bridge limit")
+            self._fail(
+                sink,
+                502,
+                "upstream_response_too_large",
+                "upstream response exceeds the bridge limit",
+            )
             return
         except socket.timeout:
-            self._fail(sink, 504, "upstream_timeout", "upstream did not respond in time")
+            self._fail(
+                sink, 504, "upstream_timeout", "upstream did not respond in time"
+            )
             return
         except (OSError, http.client.HTTPException):
             self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
@@ -749,13 +872,30 @@ class PassthroughAdapter(BackendAdapter):
         sink: ResponseSink,
         sanitize: bool,
     ) -> None:
-        headers = [(k, v) for k, v in self._response_headers(resp) if k.lower() != "content-type"]
+        # Выбор доверия фиксируется до sink.start (первой записи клиенту).
+        # Маркер допустим только от настроенного аутентифицированного loopback peer.
+        flag = getattr(self.host, "is_trusted_tool_streaming_enabled", None)
+        trusted = (
+            sanitize
+            and self.config.get("trusted_tool_sanitizer") is True
+            and bool(self._upstream_key)
+            and self._host == "127.0.0.1"
+            and callable(flag)
+            and flag() is True
+            and resp.getheader("X-Bridge-Tool-Sanitized") == "1"
+        )
+        headers = [
+            (k, v)
+            for k, v in self._response_headers(resp)
+            if k.lower() != "content-type"
+        ]
         headers += [
             ("Content-Type", "text/event-stream"),
             ("Cache-Control", "no-cache"),
             ("X-Accel-Buffering", "no"),
         ]
-        sink.start(200, headers)
+        outcome = StreamOutcome(committed=True)
+        sink.start(200, headers)  # Заголовки тоже фиксируют ответ; повтор уже запрещён.
         try:
             outcome = relay_sse(
                 resp.readline,
@@ -764,9 +904,13 @@ class PassthroughAdapter(BackendAdapter):
                 limits=self.limits,
                 process=self.process_budget,
                 sanitize=sanitize,
+                trusted_tools=trusted,
+                state=outcome,
             )
         except (socket.timeout, OSError, http.client.HTTPException):
-            sink.write(_error_frame({}, "upstream_stream_error", "upstream stream failed"))
+            sink.write(
+                _error_frame({}, "upstream_stream_error", "upstream stream failed")
+            )
             return
         if outcome.incomplete or outcome.overflow:
             self._log(

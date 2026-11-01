@@ -45,7 +45,6 @@ import fcntl
 import functools
 import hashlib
 import hmac
-import io
 import itertools
 import json
 import math
@@ -136,12 +135,15 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
 )
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
+    HistoryPrefixGuard,
     ManagedTurn,
     TurnSessionManager,
     _is_detached_enabled,
     _is_drain_enabled,
     _is_watchdog_enabled,
+    chain_history_digest,
     hash_token,
+    history_chain_head,
     validate_turn_id,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
@@ -389,7 +391,6 @@ FIRST_TOKEN_TIMEOUT_S = float(
 PREFLIGHT_SKIP_WINDOW_S = 120.0
 
 
-
 def clamp_effort_downward(
     candidate: str, allowed: Sequence[str], default: str
 ) -> tuple[str, bool]:
@@ -541,16 +542,20 @@ MULTIMODAL_MODELS = ("gpt-6.1-sol", "gemini-4-argon")
 _PROVIDER_MODELS_RE = re.compile(r"^/v1/providers/([^/]+)/v1/models$")
 _PROVIDER_CHAT_RE = re.compile(r"^/v1/providers/([^/]+)/v1/chat/completions$")
 
-_REFRESH_MIN_INTERVAL = float(os.environ.get("BRIDGE_MODELS_REFRESH_MIN_INTERVAL_S", "10.0"))
+_REFRESH_MIN_INTERVAL = float(
+    os.environ.get("BRIDGE_MODELS_REFRESH_MIN_INTERVAL_S", "10.0")
+)
 _REFRESH_MAX_ENTRIES = int(os.environ.get("BRIDGE_MODELS_REFRESH_MAX_ENTRIES", "1000"))
-_REFRESH_LOCK = threading.Lock()        # single-flight
+_REFRESH_LOCK = threading.Lock()  # single-flight
 _REFRESH_LAST: dict[str, float] = {}
 _MODELS_CACHE: dict[str, dict[str, Any]] = {}
 _MODELS_CACHE_LOCK = threading.Lock()
 
 
 def _refresh_client_key(handler: BaseHTTPRequestHandler) -> str:
-    raw = handler.headers.get("Authorization", "") or handler.headers.get("X-Api-Key", "")
+    raw = handler.headers.get("Authorization", "") or handler.headers.get(
+        "X-Api-Key", ""
+    )
     token = raw.strip()
     if token[:7].lower() == "bearer ":
         token = token[7:].strip()
@@ -590,7 +595,9 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
     return published
 
 
-def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+def _build_models_list(
+    owner_tuple: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
     published = _get_published_models()
     order = []
     if MODEL_ID in published:
@@ -603,7 +610,9 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
         if mid not in order:
             order.append(mid)
 
-    internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+    internal_key = getattr(
+        sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
+    ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
     hide_internal = bool(internal_key) or (owner_tuple is not None)
 
     data = []
@@ -615,11 +624,18 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
         owned_by = (
             getattr(a, "owned_by", "")
             if a is not None
-            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+            else (
+                getattr(m, "owned_by", "")
+                or (m.get("owned_by", "") if isinstance(m, dict) else "")
+            )
         )
         if owner_tuple is not None and owned_by not in owner_tuple:
             continue
-        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
+        context_window = (
+            getattr(m, "context_window", 200000)
+            if not isinstance(m, dict)
+            else m.get("context_window", 200000)
+        )
         card = {
             "id": mid,
             "object": "model",
@@ -643,17 +659,28 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
             continue
         alias = _resolve_model_alias(alias_id, fleet_models)
         base_id = alias[0] if (alias and isinstance(alias, (tuple, list))) else alias
-        if not base_id or base_id not in published or (hide_internal and base_id in INTERNAL_MODEL_IDS):
+        if (
+            not base_id
+            or base_id not in published
+            or (hide_internal and base_id in INTERNAL_MODEL_IDS)
+        ):
             continue
         a, m = published[base_id]
         owned_by = (
             getattr(a, "owned_by", "")
             if a is not None
-            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+            else (
+                getattr(m, "owned_by", "")
+                or (m.get("owned_by", "") if isinstance(m, dict) else "")
+            )
         )
         if owner_tuple is not None and owned_by not in owner_tuple:
             continue
-        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
+        context_window = (
+            getattr(m, "context_window", 200000)
+            if not isinstance(m, dict)
+            else m.get("context_window", 200000)
+        )
         card = {
             "id": alias_id,
             "object": "model",
@@ -662,7 +689,9 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
             "context_window": context_window,
             "context_length": context_window,
             "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "modalities": ["text", "image"] if base_id in MULTIMODAL_MODELS else ["text"],
+            "modalities": ["text", "image"]
+            if base_id in MULTIMODAL_MODELS
+            else ["text"],
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
@@ -800,7 +829,7 @@ def _digest(text: str) -> str:
 
 def _chain(head: str, digest: str) -> str:
     """Следующая голова хеш-цепочки потреблённой истории."""
-    return hashlib.sha256((head + "|" + digest).encode("utf-8")).hexdigest()
+    return chain_history_digest(head, digest)
 
 
 def _key_hash(key: str) -> str:
@@ -895,6 +924,7 @@ class _ForwardFlagSource:
     """
 
     _flag_name = FORWARD_FLAG
+    _allow_env_fallback = True
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -923,6 +953,8 @@ class _ForwardFlagSource:
                 self._value = self._load(path) if sig is not None else None
             value = self._value
         if value is None:
+            if not self._allow_env_fallback:
+                return False
             return self._truthy(os.environ.get(self._flag_name, "false"))
         return value
 
@@ -949,6 +981,21 @@ class _PassthroughAuthFlagSource(_ForwardFlagSource):
 
 
 PASSTHROUGH_AUTH_FLAG_SOURCE = _PassthroughAuthFlagSource()
+
+
+class _TrustedToolStreamingFlagSource(_ForwardFlagSource):
+    """Оптимизация доверенного SSE: только снимок GigaRC, default=false."""
+
+    _flag_name = "BRIDGE_TRUSTED_TOOL_STREAMING_ENABLED"
+    _allow_env_fallback = False
+
+
+_TRUSTED_TOOL_STREAMING_FLAG_SOURCE = _TrustedToolStreamingFlagSource()
+
+
+def is_trusted_tool_streaming_enabled() -> bool:
+    """Kill-switch доверенного транзита перечитывается до начала каждого ответа."""
+    return _TRUSTED_TOOL_STREAMING_FLAG_SOURCE.enabled()
 
 
 def is_browser_forwarding_enabled() -> bool:
@@ -3154,10 +3201,7 @@ def _transcribe(messages: list, tools: list, tool_choice: Any, images: list) -> 
 
 def _chain_head(items: list, count: int) -> str:
     """Голова хеш-цепочки по первым count входам."""
-    head = ""
-    for item in items[:count]:
-        head = _chain(head, item["digest"])
-    return head
+    return history_chain_head((item["digest"] for item in items), count)
 
 
 def _config_digest(system: str | None, work_dir: str) -> str:
@@ -4391,8 +4435,9 @@ def _make_plan(
         chat.state in ("READY", "PERSISTED")
         and bool(chat.sid)
         and chat.cfg == cfg
-        and 0 < count < len(items)
-        and _chain_head(items, count) == chat.head
+        and HistoryPrefixGuard(count, chat.head).matches(
+            (item["digest"] for item in items), len(items)
+        )
     )
     if prefix_ok and proc is not None:
         plan.update(
@@ -4653,7 +4698,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("ETag", etag)
             self.end_headers()
             return True
-        self._send(200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"})
+        self._send(
+            200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"}
+        )
         return True
 
     def _handle_models_refresh(self) -> None:
@@ -4721,7 +4768,9 @@ class Handler(BaseHTTPRequestHandler):
             with _MODELS_CACHE_LOCK:
                 cached = _MODELS_CACHE.get(cache_key)
             if cached is None:
-                self._reply_error(502, "Refresh failed and no cached payload", "refresh_failed")
+                self._reply_error(
+                    502, "Refresh failed and no cached payload", "refresh_failed"
+                )
                 return
             status = "stale"
             failed_upstreams = ["*"]
@@ -5949,7 +5998,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
-        if urlparse(self.path).path in ("/v1/models/refresh", "/models/refresh") or re.match(r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path):
+        # Внутреннее подтверждение санитизации не принимается с клиентского ingress.
+        if "X-Bridge-Tool-Sanitized" in self.headers:
+            del self.headers["X-Bridge-Tool-Sanitized"]
+        if urlparse(self.path).path in (
+            "/v1/models/refresh",
+            "/models/refresh",
+        ) or re.match(
+            r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path
+        ):
             self._handle_models_refresh()
             return
         self._trace = None
@@ -6083,10 +6140,22 @@ class Handler(BaseHTTPRequestHandler):
             provider_id = m_provider_chat.group(1) if m_provider_chat else None
             if m_provider_chat is not None:
                 if not _auth_ok(self):
-                    has_auth = bool(self.headers.get("Authorization") or self.headers.get("x-api-key"))
+                    has_auth = bool(
+                        self.headers.get("Authorization")
+                        or self.headers.get("x-api-key")
+                    )
                     if not (_passthrough_open(self) and has_auth):
                         self.close_connection = True
-                        self._send(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}})
+                        self._send(
+                            401,
+                            {
+                                "error": {
+                                    "message": "unauthorized",
+                                    "type": "auth_error",
+                                    "code": 401,
+                                }
+                            },
+                        )
                         return
                 if provider_id not in PROVIDER_SCOPES:
                     self._reply_error(404, "Unknown provider", "invalid_request_error")
@@ -6130,16 +6199,34 @@ class Handler(BaseHTTPRequestHandler):
             alias_effort = None
             if alias is not None:
                 resolved_id = alias[0] if isinstance(alias, (tuple, list)) else alias
-                alias_effort = alias[1] if isinstance(alias, (tuple, list)) and len(alias) > 1 else None
+                alias_effort = (
+                    alias[1]
+                    if isinstance(alias, (tuple, list)) and len(alias) > 1
+                    else None
+                )
             else:
                 resolved_id = model_id
 
             # Изоляция внутренних моделей (Auth-First / Secret Isolation)
-            internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
-            if bool(internal_key) and (raw_model in INTERNAL_MODEL_IDS or model_id in INTERNAL_MODEL_IDS or resolved_id in INTERNAL_MODEL_IDS):
+            internal_key = getattr(
+                sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
+            ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+            if bool(internal_key) and (
+                raw_model in INTERNAL_MODEL_IDS
+                or model_id in INTERNAL_MODEL_IDS
+                or resolved_id in INTERNAL_MODEL_IDS
+            ):
                 supplied = self.headers.get("X-Internal-Service-Key", "")
-                if not hmac.compare_digest(supplied.encode("utf-8"), internal_key.encode("utf-8")):
-                    self._reject(403, "internal_model_forbidden", "Model reserved for internal review", "unknown", model_len)
+                if not hmac.compare_digest(
+                    supplied.encode("utf-8"), internal_key.encode("utf-8")
+                ):
+                    self._reject(
+                        403,
+                        "internal_model_forbidden",
+                        "Model reserved for internal review",
+                        "unknown",
+                        model_len,
+                    )
                     return
 
             # Проверка скоупа провайдера для чата
@@ -6148,13 +6235,22 @@ class Handler(BaseHTTPRequestHandler):
                 owner_tuple = (owner,) if isinstance(owner, str) else owner
                 published = _get_published_models()
                 if resolved_id not in published:
-                    self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
+                    self._reject(
+                        404,
+                        "model_not_found",
+                        "model is not in the catalogue",
+                        "unknown",
+                        model_len,
+                    )
                     return
                 a, m = published[resolved_id]
                 owned_by = (
                     getattr(a, "owned_by", "")
                     if a is not None
-                    else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+                    else (
+                        getattr(m, "owned_by", "")
+                        or (m.get("owned_by", "") if isinstance(m, dict) else "")
+                    )
                 )
                 if owned_by not in owner_tuple:
                     self._reply_error(
@@ -6824,7 +6920,11 @@ class Handler(BaseHTTPRequestHandler):
             f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}"
         )
         raw, req = _strip_passthrough_env(raw, req)
-        headers = {key: value for key, value in self.headers.items()}
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() != "x-bridge-tool-sanitized"
+        }
         trace_headers = _trace_headers(self._trace)
         if REQUEST_ATTRIBUTION_ENABLED:
             names = {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
