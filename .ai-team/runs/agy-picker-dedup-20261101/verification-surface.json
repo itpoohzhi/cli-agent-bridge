@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-picker-dedup-20261101",
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": ["REQ-001", "REQ-002", "AD-001", "AD-002", "QA-001", "BND-001", "CD-001", "RISK-001"],
+      "kind": "command",
+      "command": "/usr/local/bin/python3 -m pytest tests/test_dsh_profile_config.py -v",
+      "expected": "exit 0; all profile tests pass: no effort-suffixed clones in desktop/web cordis.patch.yml (llm-pi-ai and allowedModels) and reasoningEfforts maps medium: medium on gemini-4-argon and gemini-3.8-flash",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": ["REQ-003", "AD-003", "QA-002", "BND-002", "CD-002", "RISK-002"],
+      "kind": "command",
+      "command": "/usr/local/bin/python3 -m pytest tests/test_request_attribution.py -v",
+      "expected": "exit 0; default ADVERTISED_EFFORT_ALIASES is empty tuple () while _resolve_model_alias resolves <base>-<effort> on POST /v1/chat/completions",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": ["REQ-004", "AD-004", "QA-003", "BND-003", "CD-003", "RISK-003"],
+      "kind": "command",
+      "command": "/usr/local/bin/python3 -m pytest tests/test_fleet_v3.py tests/test_provider_scoping.py -v",
+      "expected": "exit 0; fleet.json catalog validation passes with efforts ['low', 'medium', 'high'] for gemini-4-argon and gemini-3.8-flash",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": ["REQ-001", "REQ-002", "QA-001", "RISK-001"],
+      "kind": "command",
+      "command": "dsh --profile desktop --dump-config >/dev/null && dsh --profile web --dump-config >/dev/null",
+      "expected": "exit 0; both DSH profiles parse and merge cleanly without schema errors",
+      "environment": "local",
+      "owner": "verifier"
+    }
+  ]
+}

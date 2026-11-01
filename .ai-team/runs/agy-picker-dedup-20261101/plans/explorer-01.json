@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-picker-dedup-20261101",
+  "role": "explorer",
+  "iteration": 1,
+  "objective": "Собрать факты о дубликатах моделей в пикере DSH (cordis.patch.yml), fleet.json и server.py",
+  "inputs_read": [
+    "/Users/aazhiry1/.dsh/profiles/desktop/cordis.patch.yml",
+    "/Users/aazhiry1/.dsh/profiles/web/cordis.patch.yml",
+    "/Users/aazhiry1/work/src/cli-agent-bridge/fleet.json",
+    "/Users/aazhiry1/work/src/cli-agent-bridge/bridges/agy-bridge/fleet.json",
+    "/Users/aazhiry1/work/src/cli-agent-bridge/server.py"
+  ],
+  "stop_conditions": [
+    "Не модифицировать файлы репозитория или профили DSH"
+  ],
+  "plan_kind": "full",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Проверить ~/.dsh/profiles/{desktop,web}/cordis.patch.yml и fleet.json на наличие effort-суффиксных клонов",
+      "expected_evidence": "Точные строки cordis.patch.yml и fleet.json с клонами моделей",
+      "status": "DONE",
+      "actual_evidence": "Найдены 5 клонов в agy-bridge (desktop lines 461-490, web lines 529-558) и 2 клона в claude-p-bridge (desktop lines 399-410, web lines 467-478), плюс баг medium: high в reasoningEfforts."
+    },
+    {
+      "id": "RP-02",
+      "kind": "report",
+      "action": "Зафиксировать отчёт разведки в /tmp/cel-runs/agy-picker-dedup/facts.md и handoff/explorer.md",
+      "expected_evidence": "Сформированный отчёт фактов с путями и номерами строк",
+      "status": "DONE",
+      "actual_evidence": "Записан /tmp/cel-runs/agy-picker-dedup/facts.md и .ai-team/runs/agy-picker-dedup-20261101/handoff/explorer.md."
+    }
+  ],
+  "deviations": []
+}

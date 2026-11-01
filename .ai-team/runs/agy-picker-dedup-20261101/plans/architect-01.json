@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "run_id": "agy-picker-dedup-20261101",
+  "role": "architect",
+  "iteration": 1,
+  "objective": "Спроектировать Architecture Packet (OPT-2) для удаления effort-клонов из пикера DSH (desktop и web cordis.patch.yml), исправления reasoningEfforts medium: medium, синхронизации fleet.json и отключения дефолтной рекламы алиасов в server.py при сохранении резолва POST",
+  "inputs_read": [
+    "/tmp/cel-runs/agy-picker-dedup/analysis/handoff-architect.md",
+    "/tmp/cel-runs/agy-picker-dedup/analysis/consolidated-rca-decision.md",
+    "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md",
+    "~/Мой диск/Context/AGENTS.md",
+    "~/Мой диск/skils/cel/SKILL.md",
+    "~/work/src/cli-agent-bridge/AGENTS.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/SKILL.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/protocol.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/references/light-review-loop.md",
+    "~/Мой диск/skils/ai-sdlc/python/aisdlc-gcge/skills/architecture.md",
+    "~/Мой диск/skils/ai-sdlc/references/remote-mr-workflow.md",
+    "~/Мой диск/skils/ai-sdlc/universal/architect-software-product/scripts/validate_architecture_packet.py",
+    "~/Мой диск/skils/ai-sdlc/universal/orchestrate-coder-reviewer-summarizer/scripts/validate_role_plan.py",
+    "~/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/plans/architect-01.json",
+    "~/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/verification-surface.json",
+    "~/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/route-manifest.json",
+    "~/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/state.json"
+  ],
+  "stop_conditions": [
+    "Не модифицировать файлы рабочего дерева репозитория и ~/.dsh (разрешена запись только в .ai-team/runs/agy-picker-dedup-20261101/)",
+    "Не отключать _resolve_model_alias и EFFORT_ALIAS_ENABLED в server.py"
+  ],
+  "plan_kind": "full",
+  "steps": [
+    {
+      "id": "RP-01",
+      "kind": "inspect",
+      "action": "Изучить handoff-architect.md, evidence-ledger.md и текущие контракты cordis.patch.yml, fleet.json и server.py",
+      "expected_evidence": "Проверенные ссылки EVD-001..EVD-014 и границы компонентов",
+      "status": "DONE",
+      "actual_evidence": "Прочитаны свежие handoff-architect.md, consolidated-rca-decision.md и evidence-ledger.md от 2026-11-01; EVD-001..EVD-015 приняты как подтверждённые источники аналитика, без повторного исследования продукта. Проверены protocol.md, оба валидатора и verification-surface.json (VER-001..004)."
+    },
+    {
+      "id": "RP-02",
+      "kind": "decide",
+      "action": "Зафиксировать архитектурные решения AD-001..AD-004, сценарии качества QA-001..QA-003, границы BND-001..BND-003 и поверхность верификации VER-001..VER-004",
+      "expected_evidence": "Сформированные секции decisions, quality_scenarios, boundaries, contract_deltas, risks в architecture-packet.json",
+      "status": "DONE",
+      "actual_evidence": "architecture/architecture-packet.json: AD-001..004 (two-way/APPROVED с альтернативами и confirmation), QA-001..003, BND-001..003, CD-001..003, VIEW-001..002 и RISK-001..003; EVD-001..015; ASM-001..002 VALIDATED; verification_surface == исходным VER-001..004. Зафиксированы CAS/backup, совместимость POST, rollout/rollback и границы protected paths."
+    },
+    {
+      "id": "RP-03",
+      "kind": "report",
+      "action": "Записать .ai-team/runs/agy-picker-dedup-20261101/architecture/architecture-packet.json и обновить plans/architect-01.json до статуса DONE",
+      "expected_evidence": "Валидный architecture-packet.json, проходящий validate_architecture_packet.py",
+      "status": "DONE",
+      "actual_evidence": "Записан architecture/architecture-packet.json в статусе DRAFT; предварительный validate_architecture_packet.py --phase draft завершился exit 0 / PASS (sha256 до role_plan binding: 51c146b810bff7de43d4708c6aa87e410a7882bd11b05ddf235cdb9c193c658a). Финальная ссылка role_plan получает SHA-256 точных байтов этого DONE-плана; финальные after/draft проверки выполняются после связывания. Продукт и пользовательские профили не изменялись."
+    }
+  ],
+  "deviations": [
+    "По явному брифу этой роли результат ограничен DRAFT с independent_review.required=true/status=PENDING; APPROVED, ACCEPT и ARCH_GATE_PASS не выдаются. Лёгкий луп текущего пакета и независимое architecture review не выполнены и остаются перед approved-gate в родительском контуре; маркер успешного ревью не заявляется.",
+    "inputs_read исправлен на фактически прочитанные документы: свежий evidence ledger переиспользован без повторного чтения продуктовых конфигов и кода, как требует Architect workflow §2. Записи вне назначенного run-dir не выполнялись."
+  ],
+  "status": "DONE"
+}
