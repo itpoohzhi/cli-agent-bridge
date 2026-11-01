@@ -45,8 +45,10 @@ import fcntl
 import functools
 import hashlib
 import hmac
+import io
 import itertools
 import json
+import math
 import os
 import queue
 import re
@@ -60,6 +62,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import asdict, dataclass, replace
@@ -182,6 +185,7 @@ def _log(msg: str) -> None:
 HOST = _bridge_env("HOST", "127.0.0.1")
 PORT = int(_bridge_env("PORT", "9882"))
 AUTH_KEY = _bridge_env("KEY")
+BRIDGE_KEY = AUTH_KEY
 LAUNCHER = os.environ.get(
     "DROID_LAUNCHER", str(HOME / ".config" / "factory-launch" / "droid-cli.sh")
 )
@@ -518,6 +522,171 @@ CONTEXT_DEFAULT_MAX_OUTPUT = 65536
 _CONTEXT_OWNER_SECRET = os.urandom(32)
 _sha_cache = {}
 _sha_cache_lock = threading.Lock()
+
+# ---- SCOPING И КАТАЛОГИЗАЦИЯ МОДЕЛЕЙ (ADR-0017) -----------------------------------
+PROVIDER_SCOPES: dict[str, tuple[str, ...]] = {
+    "claude-code": ("claude-p-bridge",),
+    "codex": ("openai-codex",),
+    "agy": ("agy-bridge",),
+    "muse": ("muse-bridge", "meta-muse"),
+    "opencode": ("opencode-zen-bridge",),
+}
+
+INTERNAL_MODEL_IDS = ("deepseek-v4.1-flash", "deepseek-v4.1-flash-free")
+_INTERNAL_KEY_HEADER = "X-Internal-Service-Key"
+_INTERNAL_SERVICE_KEY = os.environ.get("INTERNAL_SERVICE_KEY", "")
+MAX_OUTPUT_TOKENS = int(os.environ.get("BRIDGE_MAX_OUTPUT_TOKENS", "64000"))
+MULTIMODAL_MODELS = ("gpt-6.1-sol", "gemini-4-argon")
+
+_PROVIDER_MODELS_RE = re.compile(r"^/v1/providers/([^/]+)/v1/models$")
+_PROVIDER_CHAT_RE = re.compile(r"^/v1/providers/([^/]+)/v1/chat/completions$")
+
+_REFRESH_MIN_INTERVAL = float(os.environ.get("BRIDGE_MODELS_REFRESH_MIN_INTERVAL_S", "10.0"))
+_REFRESH_MAX_ENTRIES = int(os.environ.get("BRIDGE_MODELS_REFRESH_MAX_ENTRIES", "1000"))
+_REFRESH_LOCK = threading.Lock()        # single-flight
+_REFRESH_LAST: dict[str, float] = {}
+_MODELS_CACHE: dict[str, dict[str, Any]] = {}
+_MODELS_CACHE_LOCK = threading.Lock()
+
+
+def _refresh_client_key(handler: BaseHTTPRequestHandler) -> str:
+    raw = handler.headers.get("Authorization", "") or handler.headers.get("X-Api-Key", "")
+    token = raw.strip()
+    if token[:7].lower() == "bearer ":
+        token = token[7:].strip()
+    if token:
+        return "t:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+    client_ip = getattr(handler, "client_address", ("unknown",))[0]
+    return "ip:" + str(client_ip)
+
+
+def _refresh_acquire(key: str, now: float | None = None) -> int | None:
+    now = time.monotonic() if now is None else now
+    with _REFRESH_LOCK:
+        horizon = 2 * _REFRESH_MIN_INTERVAL
+        for stale_key in [k for k, ts in _REFRESH_LAST.items() if now - ts > horizon]:
+            del _REFRESH_LAST[stale_key]
+        last = _REFRESH_LAST.get(key)
+        if last is not None and now - last < _REFRESH_MIN_INTERVAL:
+            return max(1, int(math.ceil(_REFRESH_MIN_INTERVAL - (now - last))))
+        if key not in _REFRESH_LAST and len(_REFRESH_LAST) >= _REFRESH_MAX_ENTRIES:
+            del _REFRESH_LAST[min(_REFRESH_LAST, key=_REFRESH_LAST.get)]
+        _REFRESH_LAST[key] = now
+    return None
+
+
+def _get_published_models() -> dict[str, tuple[Any, Any]]:
+    published = {}
+    models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
+    for item in models_source:
+        if isinstance(item, tuple) and len(item) == 2:
+            a, m = item
+        else:
+            m = item
+            a = getattr(m, "adapter", None)
+        mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
+        if mid:
+            published[mid] = (a, m)
+    return published
+
+
+def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+    published = _get_published_models()
+    order = []
+    if MODEL_ID in published:
+        order.append(MODEL_ID)
+    fleet_order = FLEET.get("order", []) if isinstance(FLEET, dict) else []
+    for mid in fleet_order:
+        if mid != MODEL_ID and mid in published and mid not in order:
+            order.append(mid)
+    for mid in published:
+        if mid not in order:
+            order.append(mid)
+
+    internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+    hide_internal = bool(internal_key) or (owner_tuple is not None)
+
+    data = []
+    listed = set()
+    for mid in order:
+        if hide_internal and mid in INTERNAL_MODEL_IDS:
+            continue
+        a, m = published[mid]
+        owned_by = (
+            getattr(a, "owned_by", "")
+            if a is not None
+            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+        )
+        if owner_tuple is not None and owned_by not in owner_tuple:
+            continue
+        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
+        card = {
+            "id": mid,
+            "object": "model",
+            "owned_by": owned_by,
+            "created": 0,
+            "context_window": context_window,
+            "context_length": context_window,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "modalities": ["text", "image"] if mid in MULTIMODAL_MODELS else ["text"],
+            "supports_thinking": True,
+            "supported_reasoning_efforts": ["low", "medium", "high"],
+            "default_reasoning_effort": "high",
+            "available": True,
+        }
+        data.append(card)
+        listed.add(mid)
+
+    fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+    for alias_id in ADVERTISED_EFFORT_ALIASES:
+        if alias_id in listed or (hide_internal and alias_id in INTERNAL_MODEL_IDS):
+            continue
+        alias = _resolve_model_alias(alias_id, fleet_models)
+        base_id = alias[0] if (alias and isinstance(alias, (tuple, list))) else alias
+        if not base_id or base_id not in published or (hide_internal and base_id in INTERNAL_MODEL_IDS):
+            continue
+        a, m = published[base_id]
+        owned_by = (
+            getattr(a, "owned_by", "")
+            if a is not None
+            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+        )
+        if owner_tuple is not None and owned_by not in owner_tuple:
+            continue
+        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
+        card = {
+            "id": alias_id,
+            "object": "model",
+            "owned_by": owned_by,
+            "created": 0,
+            "context_window": context_window,
+            "context_length": context_window,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "modalities": ["text", "image"] if base_id in MULTIMODAL_MODELS else ["text"],
+            "supports_thinking": True,
+            "supported_reasoning_efforts": ["low", "medium", "high"],
+            "default_reasoning_effort": "high",
+            "available": True,
+        }
+        data.append(card)
+        listed.add(alias_id)
+
+    return data
+
+
+def _etag(payload: Any) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return '"%s"' % hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _etag_matches(header: str | None, etag: str) -> bool:
+    if not header:
+        return False
+    if header.strip() == "*":
+        return True
+    candidates = (tag.strip() for tag in header.split(","))
+    return any(tag.removeprefix("W/") == etag for tag in candidates)
+
 
 # ---- RPC-СОСТОЯНИЕ: долгоживущий `droid exec --input-format stream-jsonrpc` на чат.
 # Ключ чата — prompt_cache_key запроса (никогда не путь/argv: только sha256).
@@ -1058,17 +1227,20 @@ def _extract_auth_token(handler: BaseHTTPRequestHandler) -> str:
 
 
 def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
+    expected = getattr(sys.modules[__name__], "BRIDGE_KEY", None) or AUTH_KEY
+    if not expected:
+        return False
     hdr = handler.headers.get("Authorization", "")
     if hdr.startswith("Bearer "):
         return hmac.compare_digest(
-            hdr[7:].strip().encode("utf-8"), AUTH_KEY.encode("utf-8")
+            hdr[7:].strip().encode("utf-8"), expected.encode("utf-8")
         )
     return hmac.compare_digest(
         handler.headers.get("x-api-key", "").encode("utf-8"),
-        AUTH_KEY.encode("utf-8"),
+        expected.encode("utf-8"),
     ) or hmac.compare_digest(
         hdr.strip().encode("utf-8"),
-        AUTH_KEY.encode("utf-8"),
+        expected.encode("utf-8"),
     )
 
 
@@ -1082,6 +1254,8 @@ def _passthrough_open(handler: BaseHTTPRequestHandler) -> bool:
     Окончательный допуск решает маршрут: passthrough-модель идёт к upstream (аутентификатор — он),
     любой другой маршрут по-прежнему требует ключ хаба.
     """
+    if not hasattr(BACKENDS, "adapters"):
+        return False
     return str(handler.client_address[0]) in _LOOPBACK_PEERS and any(
         isinstance(adapter, PassthroughAdapter) for adapter in BACKENDS.adapters()
     )
@@ -4424,6 +4598,146 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return False
 
+    def _reply_error(
+        self,
+        status: int,
+        message: str,
+        err_type: str = "invalid_request_error",
+        code: str | int | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.close_connection = True
+        error: dict[str, Any] = {"message": message, "type": err_type}
+        if code is not None:
+            error["code"] = code
+        self._send(status, {"error": error}, extra_headers=headers)
+
+    def _handle_models_get(self) -> bool:
+        """GET /v1/models[?provider=] и /v1/providers/{id}/v1/models."""
+        url = urlparse(self.path)
+        match = _PROVIDER_MODELS_RE.match(url.path)
+        if match:
+            provider_id = match.group(1)
+        elif url.path in ("/v1/models", "/models"):
+            query = parse_qs(url.query, keep_blank_values=True)
+            provider_id = (query.get("provider") or [None])[0]
+        else:
+            return False
+
+        # Auth-First: 401 до 404
+        if not _auth_ok(self):
+            has_auth = bool(
+                self.headers.get("Authorization") or self.headers.get("x-api-key")
+            )
+            if not (_passthrough_open(self) and has_auth):
+                self._reply_error(
+                    401,
+                    "Unauthorized",
+                    "authentication_error",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                return True
+
+        owner_tuple = None
+        if provider_id is not None:
+            if provider_id not in PROVIDER_SCOPES:
+                self._reply_error(404, "Unknown provider", "invalid_request_error")
+                return True
+            owner = PROVIDER_SCOPES[provider_id]
+            owner_tuple = (owner,) if isinstance(owner, str) else owner
+
+        payload = {"object": "list", "data": _build_models_list(owner_tuple)}
+        etag = _etag(payload)
+        if _etag_matches(self.headers.get("If-None-Match"), etag):
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return True
+        self._send(200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"})
+        return True
+
+    def _handle_models_refresh(self) -> None:
+        """POST /v1/models/refresh: Auth-First, rate-limit, single-flight, stale-while-revalidate."""
+        if not _auth_ok(self):
+            self._reply_error(
+                401,
+                "Unauthorized",
+                "authentication_error",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            return
+
+        key = _refresh_client_key(self)
+        retry_after = _refresh_acquire(key)
+        if retry_after is not None:
+            self._reply_error(
+                429,
+                "Refresh rate limit exceeded",
+                "rate_limit_error",
+                headers={"Retry-After": str(retry_after)},
+            )
+            return
+
+        url = urlparse(self.path)
+        match = re.match(r"^/v1/providers/([^/]+)/v1/models/refresh$", url.path)
+        provider_id = match.group(1) if match else None
+        if provider_id is None:
+            query = parse_qs(url.query, keep_blank_values=True)
+            provider_id = (query.get("provider") or [None])[0]
+
+        owner_tuple = None
+        if provider_id is not None:
+            if provider_id not in PROVIDER_SCOPES:
+                self._reply_error(404, "Unknown provider", "invalid_request_error")
+                return
+            owner = PROVIDER_SCOPES[provider_id]
+            owner_tuple = (owner,) if isinstance(owner, str) else owner
+
+        cache_key = provider_id or "*"
+        failed_upstreams: list[str] = []
+        status = "complete"
+
+        refresh_fn = getattr(sys.modules[__name__], "_refresh_fleet", None)
+        try:
+            if _REFRESH_LOCK.acquire(blocking=False):
+                try:
+                    if callable(refresh_fn):
+                        failed_upstreams = list(refresh_fn() or [])
+                    data = _build_models_list(owner_tuple)
+                    with _MODELS_CACHE_LOCK:
+                        _MODELS_CACHE[cache_key] = {"data": data, "ts": time.time()}
+                finally:
+                    _REFRESH_LOCK.release()
+            else:
+                with _REFRESH_LOCK:
+                    pass
+                with _MODELS_CACHE_LOCK:
+                    cached = _MODELS_CACHE.get(cache_key)
+                if cached is not None:
+                    data = cached["data"]
+                else:
+                    data = _build_models_list(owner_tuple)
+        except Exception:
+            with _MODELS_CACHE_LOCK:
+                cached = _MODELS_CACHE.get(cache_key)
+            if cached is None:
+                self._reply_error(502, "Refresh failed and no cached payload", "refresh_failed")
+                return
+            status = "stale"
+            failed_upstreams = ["*"]
+            data = cached["data"]
+
+        if failed_upstreams and status != "stale":
+            status = "partial"
+
+        payload = {
+            "object": "list",
+            "status": status,
+            "failed_upstreams": failed_upstreams,
+            "data": data,
+        }
+        self._send(200, payload, extra_headers={"ETag": _etag(payload)})
+
     def _log_reject(
         self, reason: str, model: str = "unknown", model_len: int = 0
     ) -> None:
@@ -5486,61 +5800,19 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers={"X-Bridge-Draining": "1"} if draining else None,
             )
             return
+        if self._handle_models_get():
+            return
         if not _auth_ok(self):
-            has_auth = bool(
-                self.headers.get("Authorization") or self.headers.get("x-api-key")
+            self._send(
+                401,
+                {
+                    "error": {
+                        "message": "unauthorized",
+                        "type": "auth_error",
+                        "code": 401,
+                    }
+                },
             )
-            if not (
-                path in ("/v1/models", "/models")
-                and _passthrough_open(self)
-                and has_auth
-            ):
-                self._send(
-                    401,
-                    {
-                        "error": {
-                            "message": "unauthorized",
-                            "type": "auth_error",
-                            "code": 401,
-                        }
-                    },
-                )
-                return
-        if path in ("/v1/models", "/models"):
-            # Объединение моделей всех активных адаптеров; порядок — как в fleet.json, модель по умолчанию первой.
-            published = {m.id: (a, m) for a, m in BACKENDS.models()}
-            order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
-            data = []
-            for mid in order:
-                if mid not in published:
-                    continue
-                adapter, model = published[mid]
-                data.append(
-                    {
-                        "id": mid,
-                        "object": "model",
-                        "owned_by": adapter.owned_by,
-                        "created": 0,
-                        "context_length": model.context_window,
-                    }
-                )
-            listed = {item["id"] for item in data}
-            for alias_id in ADVERTISED_EFFORT_ALIASES:
-                alias = _resolve_model_alias(alias_id, FLEET["models"])
-                if alias is None or alias_id in listed or alias[0] not in published:
-                    continue
-                adapter, model = published[alias[0]]
-                data.append(
-                    {
-                        "id": alias_id,
-                        "object": "model",
-                        "owned_by": adapter.owned_by,
-                        "created": 0,
-                        "context_length": model.context_window,
-                    }
-                )
-                listed.add(alias_id)
-            self._send(200, {"object": "list", "data": data})
             return
         if _is_detached_enabled() and path.startswith("/v1/turns/"):
             m_stream = re.fullmatch(r"/v1/turns/([^/]+)/stream", path)
@@ -5677,6 +5949,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
+        if urlparse(self.path).path in ("/v1/models/refresh", "/models/refresh") or re.match(r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path):
+            self._handle_models_refresh()
+            return
         self._trace = None
         self._response_status = 0
         _enforce_forward_kill_switch()
@@ -5804,6 +6079,21 @@ class Handler(BaseHTTPRequestHandler):
             if REQUEST_ATTRIBUTION_ENABLED:
                 self._trace = _resolve_trace(dict(self.headers.items()), req)
             # (7) путь.
+            m_provider_chat = _PROVIDER_CHAT_RE.match(path)
+            provider_id = m_provider_chat.group(1) if m_provider_chat else None
+            if m_provider_chat is not None:
+                if not _auth_ok(self):
+                    has_auth = bool(self.headers.get("Authorization") or self.headers.get("x-api-key"))
+                    if not (_passthrough_open(self) and has_auth):
+                        self.close_connection = True
+                        self._send(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}})
+                        return
+                if provider_id not in PROVIDER_SCOPES:
+                    self._reply_error(404, "Unknown provider", "invalid_request_error")
+                    return
+                path = "/v1/chat/completions"
+                self.path = "/v1/chat/completions"
+
             if path not in ("/v1/chat/completions", "/chat/completions"):
                 self.close_connection = True
                 self._send(
@@ -5834,11 +6124,48 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
-            alias = _resolve_model_alias(model_id, FLEET["models"])
+
+            fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+            alias = _resolve_model_alias(model_id, fleet_models)
             alias_effort = None
             if alias is not None:
-                model_id, alias_effort = alias
-            if model_id not in FLEET["models"]:
+                resolved_id = alias[0] if isinstance(alias, (tuple, list)) else alias
+                alias_effort = alias[1] if isinstance(alias, (tuple, list)) and len(alias) > 1 else None
+            else:
+                resolved_id = model_id
+
+            # Изоляция внутренних моделей (Auth-First / Secret Isolation)
+            internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+            if bool(internal_key) and (raw_model in INTERNAL_MODEL_IDS or model_id in INTERNAL_MODEL_IDS or resolved_id in INTERNAL_MODEL_IDS):
+                supplied = self.headers.get("X-Internal-Service-Key", "")
+                if not hmac.compare_digest(supplied.encode("utf-8"), internal_key.encode("utf-8")):
+                    self._reject(403, "internal_model_forbidden", "Model reserved for internal review", "unknown", model_len)
+                    return
+
+            # Проверка скоупа провайдера для чата
+            if provider_id is not None:
+                owner = PROVIDER_SCOPES[provider_id]
+                owner_tuple = (owner,) if isinstance(owner, str) else owner
+                published = _get_published_models()
+                if resolved_id not in published:
+                    self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
+                    return
+                a, m = published[resolved_id]
+                owned_by = (
+                    getattr(a, "owned_by", "")
+                    if a is not None
+                    else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+                )
+                if owned_by not in owner_tuple:
+                    self._reply_error(
+                        400,
+                        f"Model '{raw_model}' is not available for provider '{provider_id}'",
+                        code="model_not_in_provider_scope",
+                    )
+                    return
+
+            model_id = resolved_id
+            if model_id not in fleet_models:
                 self._reject(
                     404,
                     "model_not_found",
@@ -5847,7 +6174,7 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
-            model = FLEET["models"][model_id]
+            model = fleet_models[model_id]
             # (8a) passthrough (AD-003/AD-007): raw-шов ДО effort-клампа, транскрипции и контекста —
             # model/reasoning_effort/tools/Authorization уходят upstream дословно.
             passthrough = BACKENDS.get(model["backend"])
@@ -6905,6 +7232,9 @@ class Handler(BaseHTTPRequestHandler):
         else:
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")
+
+
+BridgeHandler = Handler
 
 
 class Server(ThreadingHTTPServer):
