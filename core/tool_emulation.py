@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import uuid
 from dataclasses import replace
@@ -515,6 +517,34 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
     return "text"
 
 
+def _find_tool_close_outside_string(text: str, start: int) -> int:
+    """Позиция `</tool_call>` вне строковых литералов JSON в `text[start:]`, или -1.
+
+    Закрывающий тег внутри JSON-строки (например значение аргумента содержит
+    `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
+    строку не закрывают.
+    """
+    index = start
+    length = len(text)
+    in_string = False
+    escaped = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif text.startswith(TOOL_CALL_CLOSE, index):
+            return index
+        index += 1
+    return -1
+
+
 class ToolCallParser:
     """Поток текстовых дельт -> content и завершённые вызовы инструментов.
 
@@ -608,31 +638,8 @@ class ToolCallParser:
                     self._on_tool_call(call)
 
     def _find_close_outside_string(self, start: int) -> int:
-        """Позиция `</tool_call>` вне строковых литералов JSON, или -1.
-
-        Закрывающий тег внутри JSON-строки (например значение аргумента содержит
-        `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
-        строку не закрывают.
-        """
-        index = start
-        length = len(self._buf)
-        in_string = False
-        escaped = False
-        while index < length:
-            char = self._buf[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-            elif char == '"':
-                in_string = True
-            elif self._buf.startswith(TOOL_CALL_CLOSE, index):
-                return index
-            index += 1
-        return -1
+        """Позиция `</tool_call>` вне строковых литералов JSON, или -1."""
+        return _find_tool_close_outside_string(self._buf, start)
 
     def _pending_prefix(self) -> int:
         """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
@@ -656,6 +663,370 @@ class ToolCallParser:
         if self._buf:
             text, self._buf = self._buf, ""
             self._emit(text)
+
+
+# --- Универсальный live reasoning и вложения (ADR 0014 AD-003/AD-005) -----------
+# Ядро окружение не читает: эффективные лимиты (env/конфиг) передаёт владелец
+# маршрута параметрами; здесь только безопасные значения по умолчанию.
+REASONING_TAGS = ("think", "thought", "thinking", "analysis")
+DEFAULT_MAX_REASONING_DEPTH = 8
+DEFAULT_MAX_IMAGES = 10
+DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024
+# Служебные теги протокола <tool_call>, не имеющие смысла вне настоящего блока.
+_ORPHAN_SERVICE_TAGS = (
+    TOOL_CALL_CLOSE,
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
+)
+# (MIME, магические байты, расширение файла) — принимаемые форматы вложений.
+_IMAGE_FORMATS = (
+    ("image/png", b"\x89PNG\r\n\x1a\n", "png"),
+    ("image/jpeg", b"\xff\xd8\xff", "jpg"),
+)
+
+
+class ImageInputError(ValueError):
+    """Отказ валидации изображения запроса; `code` — машинный код причины."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    """MIME по магическим байтам ('' — сигнатура неизвестна)."""
+    for mime, magic, _ext in _IMAGE_FORMATS:
+        if data.startswith(magic):
+            return mime
+    return ""
+
+
+def extract_data_url_images(
+    messages: Any,
+    *,
+    max_images: int = DEFAULT_MAX_IMAGES,
+    max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+) -> list[dict]:
+    """Все `image_url`-части истории -> [{"name", "mime", "data"}] в порядке появления.
+
+    Принимаются только data URI с base64 PNG/JPEG: строгая проверка кодировки и
+    соответствия MIME сигнатуре; URL не скачиваются, `file://` не читается,
+    пользовательские пути не используются (имена генерируются: `image_N.<ext>`).
+    Любое нарушение — `ImageInputError` до запуска CLI (fail-closed).
+    """
+    images: list[dict] = []
+    total = 0
+    if not isinstance(messages, list):
+        return images
+    for msg in messages:
+        if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
+            continue
+        for item in msg["content"]:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                continue
+            image_url = item.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else None
+            if not isinstance(url, str):
+                raise ImageInputError("invalid_image_content")
+            if not url.startswith("data:"):
+                raise ImageInputError("image_url_not_allowed")
+            comma = url.find(",")
+            if comma == -1:
+                raise ImageInputError("invalid_image_content")
+            fields = [f.strip().lower() for f in url[5:comma].split(";")]
+            mime = fields[0] if fields else ""
+            if not mime or "base64" not in fields[1:]:
+                raise ImageInputError("invalid_image_content")
+            ext = next((e for m, _magic, e in _IMAGE_FORMATS if m == mime), "")
+            if not ext:
+                raise ImageInputError("unsupported_image_type")
+            if len(images) >= max_images:
+                raise ImageInputError("too_many_images")
+            approx_bytes = (len(url) - comma - 1) * 3 // 4
+            if approx_bytes > max_image_bytes:
+                raise ImageInputError("image_too_large")
+            if total + approx_bytes > max_total_bytes:
+                raise ImageInputError("images_too_large")
+            payload = url[comma + 1 :]
+            if not payload:
+                raise ImageInputError("invalid_image_base64")
+            try:
+                data = base64.b64decode(payload, validate=True)
+            except (binascii.Error, ValueError):
+                raise ImageInputError("invalid_image_base64") from None
+            sniffed = _sniff_image_mime(data)
+            if not sniffed:
+                raise ImageInputError("unsupported_image_type")
+            if sniffed != mime:
+                raise ImageInputError("image_type_mismatch")
+            if len(data) > max_image_bytes:
+                raise ImageInputError("image_too_large")
+            total += len(data)
+            if total > max_total_bytes:
+                raise ImageInputError("images_too_large")
+            images.append(
+                {"name": f"image_{len(images) + 1}.{ext}", "mime": mime, "data": data}
+            )
+    return images
+
+
+def extract_thinking_delta(delta: Any) -> str:
+    """Текст нативной дельты размышления (`thinking_delta`) -> строка; иначе ''.
+
+    Транспортные адаптеры переводят свои события в общий словарь дельты; текст
+    берётся из `thinking` (форма Claude stream-json) либо `thinking_delta`.
+    """
+    if not isinstance(delta, dict) or delta.get("type") != "thinking_delta":
+        return ""
+    value = delta.get("thinking")
+    if value is None:
+        value = delta.get("thinking_delta")
+    return value if isinstance(value, str) else ""
+
+
+class StreamNormalizer:
+    """Единый нормализатор живого потока: content / reasoning / tool_calls (AD-005).
+
+    Один лексический автомат на все выходы транспорта. В обычном тексте первая
+    встреченная конструкция определяет контекст до своего закрытия: теги
+    размышлений (`REASONING_TAGS`) уводят дельты в reasoning, блок `<tool_call>`
+    непрозрачен и целиком уходит в `ToolCallParser` (тег размышления внутри
+    JSON-строки аргумента канал не переключает; `<tool_call>` внутри размышления
+    вызовом не становится). Теги в Markdown-коде каналом не являются (контекст —
+    `_code_context`). Нативное thinking (`feed_thinking`) уже типизировано: в
+    парсер не подаётся и не исполняется.
+
+    Каждое событие сначала добавляется в аккумуляторы (`content`,
+    `reasoning_content`, `tool_calls`), затем синхронно уведомляется sink:
+    SSE-сериализатор публикует `delta.reasoning_content` сразу, до терминального
+    события, JSON берёт тот же итог в `message.reasoning_content`; сумма
+    SSE-дельт равна JSON-итогу при одинаковом входном потоке.
+
+    При `strict_live=True` повреждённый/незакрытый блок, orphan служебный тег и
+    EOF внутри размышления поднимают `LiveParserError` — сырой XML в content не
+    попадает (fail-closed). Мысли не генерируются: upstream не дал — пусто.
+    """
+
+    def __init__(
+        self,
+        on_content=None,
+        on_reasoning=None,
+        on_tool_call=None,
+        *,
+        strict_live: bool = True,
+        reasoning_tags=REASONING_TAGS,
+        max_reasoning_depth: int = DEFAULT_MAX_REASONING_DEPTH,
+    ):
+        self._on_content = on_content or (lambda _text: None)
+        self._on_reasoning = on_reasoning or (lambda _text: None)
+        self._on_tool_call = on_tool_call or (lambda _call: None)
+        self.strict_live = strict_live
+        self._tags = tuple(reasoning_tags)
+        self._max_depth = max(int(max_reasoning_depth), 1)
+        self._parser = ToolCallParser(
+            self._emit_content, self._emit_call, strict_live=strict_live
+        )
+        self._buf = ""
+        self._state = "text"  # text | reasoning | tool
+        self._tag = ""
+        self._depth = 0
+        self._doc = ""  # текст, уже ушедший в ToolCallParser (для _code_context)
+        self._content_pieces: list[str] = []
+        self._reasoning_pieces: list[str] = []
+        self._calls: list[dict] = []
+        candidates: list[tuple[str, str, str]] = []
+        for tag in self._tags:
+            candidates.append((f"<{tag}>", "reasoning_open", tag))
+            candidates.append((f"</{tag}>", "orphan", tag))
+        candidates.append((TOOL_CALL_OPEN, "tool_open", ""))
+        candidates.extend((lit, "orphan", "") for lit in _ORPHAN_SERVICE_TAGS)
+        self._candidates = candidates
+
+    @property
+    def content(self) -> str:
+        return "".join(self._content_pieces)
+
+    @property
+    def reasoning_content(self) -> str:
+        return "".join(self._reasoning_pieces)
+
+    @property
+    def tool_calls(self) -> list[dict]:
+        return list(self._calls)
+
+    def feed(self, text: str) -> None:
+        self.feed_text(text)
+
+    def feed_text(self, text: str) -> None:
+        if text:
+            self._buf += text
+            self._drain(final=False)
+
+    def feed_thinking(self, text: str) -> None:
+        """Нативная дельта размышления транспорта (мимо парсера инструментов)."""
+        if text:
+            self._emit_reasoning(text)
+
+    def feed_event_delta(self, delta: Any) -> None:
+        """Словарь дельты транспорта: `thinking_delta` -> reasoning, `text_delta` -> текст."""
+        thinking = extract_thinking_delta(delta)
+        if thinking:
+            self.feed_thinking(thinking)
+        elif isinstance(delta, dict) and delta.get("type") == "text_delta":
+            text = delta.get("text")
+            if isinstance(text, str):
+                self.feed_text(text)
+
+    def finish(self) -> None:
+        self._drain(final=True)
+        self._parser.finish()
+
+    # -- sink-и нормализатора: аккумулятор сначала, уведомление следом ----------
+    def _emit_content(self, text: str) -> None:
+        if text:
+            self._content_pieces.append(text)
+            self._on_content(text)
+
+    def _emit_reasoning(self, text: str) -> None:
+        if text:
+            self._reasoning_pieces.append(text)
+            self._on_reasoning(text)
+
+    def _emit_call(self, call: dict) -> None:
+        self._calls.append(call)
+        self._on_tool_call(call)
+
+    def _feed_parser(self, text: str) -> None:
+        if text:
+            # JSON вызова не участвует в Markdown-контексте последующего текста.
+            self._doc += _OPAQUE_BLOCK if self._state == "tool" else text
+            self._parser.feed(text)
+
+    def _partial_prefix_len(self, literals) -> int:
+        """Длина хвоста буфера — собственного префикса одного из литералов."""
+        best = 0
+        for literal in literals:
+            limit = min(len(literal) - 1, len(self._buf))
+            for length in range(limit, best, -1):
+                if self._buf[-length:] == literal[:length]:
+                    best = length
+                    break
+        return best
+
+    def _drain(self, final: bool) -> None:
+        while True:
+            if self._state == "reasoning":
+                if not self._drain_reasoning(final):
+                    return
+            elif self._state == "tool":
+                if not self._drain_tool(final):
+                    return
+            elif not self._drain_text(final):
+                return
+
+    def _drain_text(self, final: bool) -> bool:
+        """Шаг в обычном тексте; False — нужно ещё данных (или буфер пуст в финале)."""
+        best_idx = -1
+        best = None
+        for literal, kind, tag in self._candidates:
+            idx = self._buf.find(literal)
+            if idx != -1 and (best_idx == -1 or idx < best_idx):
+                best_idx, best = idx, (literal, kind, tag)
+        if best is None:
+            if final:
+                literals = [
+                    lit for lit, kind, _t in self._candidates if kind != "tool_open"
+                ]
+                if self.strict_live and self._partial_prefix_len(literals):
+                    raise LiveParserError("unresolved reasoning tag prefix at finish")
+                self._feed_parser(self._buf)
+                self._buf = ""
+                return False
+            keep = self._partial_prefix_len([lit for lit, _k, _t in self._candidates])
+            if keep:
+                self._feed_parser(self._buf[:-keep])
+                self._buf = self._buf[-keep:]
+            else:
+                self._feed_parser(self._buf)
+                self._buf = ""
+            return False
+        if best_idx > 0:
+            self._feed_parser(self._buf[:best_idx])
+            self._buf = self._buf[best_idx:]
+            return True
+        literal, kind, tag = best
+        context = _code_context(self._doc + self._buf, len(self._doc), final)
+        if context == "wait":
+            return False
+        if context == "code":
+            self._feed_parser(literal)
+            self._buf = self._buf[len(literal) :]
+            return True
+        if kind == "reasoning_open":
+            self._state, self._tag, self._depth = "reasoning", tag, 1
+            self._buf = self._buf[len(literal) :]
+            return True
+        if kind == "tool_open":
+            self._state = "tool"
+            return True
+        if self.strict_live:
+            raise LiveParserError(f"orphan service tag: {literal.strip('<>/')}")
+        self._feed_parser(literal)
+        self._buf = self._buf[len(literal) :]
+        return True
+
+    def _drain_reasoning(self, final: bool) -> bool:
+        """Шаг внутри размышления; тело выпускается инкрементально, держится только префикс тега."""
+        open_lit, close_lit = f"<{self._tag}>", f"</{self._tag}>"
+        idx_open, idx_close = self._buf.find(open_lit), self._buf.find(close_lit)
+        found = [i for i in (idx_open, idx_close) if i != -1]
+        if not found:
+            if final:
+                raise LiveParserError("unclosed reasoning tag")
+            keep = self._partial_prefix_len((open_lit, close_lit))
+            if keep:
+                self._emit_reasoning(self._buf[:-keep])
+                self._buf = self._buf[-keep:]
+            else:
+                self._emit_reasoning(self._buf)
+                self._buf = ""
+            return False
+        idx = min(found)
+        if idx > 0:
+            self._emit_reasoning(self._buf[:idx])
+            self._buf = self._buf[idx:]
+            return True
+        if self._buf.startswith(close_lit):
+            self._depth -= 1
+            self._buf = self._buf[len(close_lit) :]
+            if self._depth == 0:
+                self._state, self._tag = "text", ""
+            return True
+        self._depth += 1
+        if self._depth > self._max_depth:
+            raise LiveParserError("reasoning tags nested too deeply")
+        self._buf = self._buf[len(open_lit) :]
+        return True
+
+    def _drain_tool(self, final: bool) -> bool:
+        """Шаг внутри `<tool_call>`: блок непрозрачен, целиком уходит в ToolCallParser."""
+        end = _find_tool_close_outside_string(self._buf, len(TOOL_CALL_OPEN))
+        if end == -1:
+            if final:
+                # Финал решает сам парсер: настоящий незакрытый блок — LiveParserError,
+                # процитированный в Markdown-коде — обычный текст.
+                self._feed_parser(self._buf)
+                self._buf = ""
+                self._state = "text"
+            return False
+        self._feed_parser(self._buf[: end + len(TOOL_CALL_CLOSE)])
+        self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
+        self._state = "text"
+        return True
 
 
 _PARALLEL_NAME = "parallel"
@@ -694,7 +1065,9 @@ def _with_arguments(tool_call: Any, arguments: Any) -> Any:
             tool_call, function=replace(tool_call.function, arguments=arguments)
         )
     if isinstance(tool_call.get("function"), dict):
-        return dict(tool_call, function=dict(tool_call["function"], arguments=arguments))
+        return dict(
+            tool_call, function=dict(tool_call["function"], arguments=arguments)
+        )
     return dict(tool_call, arguments=arguments)
 
 
@@ -731,7 +1104,9 @@ def build_tool_schemas(tools: Any) -> dict[str, Any]:
     return schemas
 
 
-def _parameters_schema(tool_name: str, tool_schemas: dict[str, Any] | None) -> dict | None:
+def _parameters_schema(
+    tool_name: str, tool_schemas: dict[str, Any] | None
+) -> dict | None:
     """Объект `parameters` схемы инструмента; None — схемы для имени нет."""
     schema = (tool_schemas or {}).get(tool_name)
     if not isinstance(schema, dict):
@@ -829,7 +1204,11 @@ def _sanitize_arguments(name: str, arguments: Any, tool_schemas: dict | None) ->
     cleaned = _sanitize_arguments_dict(parsed, _parameters_schema(name, tool_schemas))
     if cleaned == parsed:
         return arguments
-    return cleaned if isinstance(arguments, dict) else json.dumps(cleaned, ensure_ascii=False)
+    return (
+        cleaned
+        if isinstance(arguments, dict)
+        else json.dumps(cleaned, ensure_ascii=False)
+    )
 
 
 def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | None:
@@ -841,7 +1220,11 @@ def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | 
     if parsed is None:
         return None
     items = next(
-        (parsed[key] for key in _PARALLEL_LIST_KEYS if isinstance(parsed.get(key), list)),
+        (
+            parsed[key]
+            for key in _PARALLEL_LIST_KEYS
+            if isinstance(parsed.get(key), list)
+        ),
         None,
     )
     calls: list[Any] = []
@@ -883,7 +1266,9 @@ def _sanitize_call(
             for sub in unpacked:
                 if budget[0] <= 0:
                     break
-                results.extend(_sanitize_call(sub, tool_schemas, depth + 1, budget, max_depth))
+                results.extend(
+                    _sanitize_call(sub, tool_schemas, depth + 1, budget, max_depth)
+                )
             return results
     budget[0] -= 1
     cleaned = _sanitize_arguments(name, arguments, tool_schemas)
@@ -910,7 +1295,11 @@ def sanitize_tool_call(
     Невалидные аргументы остаются нетронутыми (fail-safe), повторный вызов идемпотентен.
     """
     return _sanitize_call(
-        tool_call, tool_schemas, 0, [max(int(max_parallel_calls), 1)], max_parallel_depth
+        tool_call,
+        tool_schemas,
+        0,
+        [max(int(max_parallel_calls), 1)],
+        max_parallel_depth,
     )
 
 
