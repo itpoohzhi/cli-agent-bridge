@@ -14,7 +14,7 @@ import json
 import re
 import uuid
 from dataclasses import replace
-from typing import Any
+from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
 
 TOOL_CALL_OPEN = "<tool_call>"
@@ -450,7 +450,9 @@ def _is_atx_heading(line: str) -> bool:
     )
 
 
-def _code_context(doc: str, pos: int, final: bool) -> str:
+def _code_context(
+    doc: str, pos: int, final: bool, *, code_end: list[int] | None = None
+) -> str:
     """Положение `pos` в `doc` относительно markdown-кода: "code" | "text" | "wait".
 
     "code" — внутри fenced-блока (CommonMark: забор с отступом до 3 пробелов, закрывает
@@ -479,6 +481,8 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
     eol = doc.find("\n", pos)
     char, run, rest = _fence_run(doc[line_start : len(doc) if eol == -1 else eol])
     if _is_fence_open(char, run, rest):  # тег в info-строке забора
+        if code_end is not None:
+            code_end[:] = [len(doc) if eol == -1 else eol + 1]
         return "code" if eol != -1 or final else "wait"
     para_end, decided = len(doc), final
     index = len(doc) if eol == -1 else eol + 1
@@ -503,6 +507,28 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
         if nxt == -1:
             break
         index = nxt + 1
+    # Частый случай обычного inline-кода: одинаковые одиночные разделители
+    # образуют последовательные пары. C count/find избегают Python-индекса
+    # и обхода каждого символа длинного уже опубликованного абзаца.
+    if doc.find("\\", para, pos) == -1 and doc.find("``", para, para_end) == -1:
+        if doc.count("`", para, pos) % 2 == 0:
+            return "text"
+        close = doc.find("`", pos, para_end)
+        if close == -1:
+            return "text" if decided else "wait"
+        close_end = close + 1
+        if code_end is not None:
+            code_end[:] = [close_end]
+        return "wait" if close_end == len(doc) and not final else "code"
+
+    # Индекс следующей серии той же длины строится один раз на абзац.
+    # Поиск закрытия для каждой непарной серии через скан всего хвоста был O(N²).
+    next_run: dict[int, int] = {}
+    last_by_length: dict[int, int] = {}
+    for match in reversed(list(_BACKTICK_RUN_RE.finditer(doc, para, para_end))):
+        run_length = match.end() - match.start()
+        next_run[match.start()] = last_by_length.get(run_length, -1)
+        last_by_length[run_length] = match.end()
     index = para
     while index < pos:
         char = doc[index]
@@ -514,15 +540,20 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
             open_start = index
             while index < para_end and doc[index] == "`":
                 index += 1
-            close_end = _find_closing_run(doc, index, para_end, index - open_start)
+            close_end = next_run.get(open_start, -1)
             if close_end == -1:
                 if not decided:  # пара может прийти позже
                     return "wait"
             elif close_end > pos:
+                if code_end is not None:
+                    code_end[:] = [close_end]
                 return "wait" if close_end == len(doc) and not final else "code"
             else:
                 index = close_end
     return "text"
+
+
+_BACKTICK_RUN_RE = re.compile(r"`+")
 
 
 class RepetitionLoopDetected(LiveParserError):
@@ -850,22 +881,47 @@ class ToolCallParser:
 
     def __init__(
         self,
-        on_content,
-        on_tool_call,
+        on_content: Callable[[str], None],
+        on_tool_call: Callable[[dict[str, Any]], None],
         strict_live: bool = False,
         *,
+        tag_pairs: tuple[tuple[str, str], ...] = ((TOOL_CALL_OPEN, TOOL_CALL_CLOSE),),
+        parse_blocks: Callable[
+            [str], list[dict[str, Any]] | None
+        ] = _parse_tool_call_blocks,
+        suppress_after_tool: bool = False,
         allowed_tools=None,
         tool_schemas=None,
         invoke_normalization_enabled: bool = True,
         repetition_guard_enabled: bool = True,
         max_repetition_repeats: int = DEFAULT_MAX_REPETITION_REPEATS,
         max_repetition_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
-    ):
+    ) -> None:
         self._buf = ""
         self._on_content = on_content
         self._on_tool_call = on_tool_call
         self.strict_live = strict_live
-        self._history = ""  # весь текст, ушедший в content
+        self._history: list[str] = []
+        self._history_chars = 0
+        self._line_parts: list[str] = []
+        self._quoted_until = 0
+        self._tag_pairs = tag_pairs
+        self._parse_blocks = parse_blocks
+        self._suppress_after_tool = suppress_after_tool
+        self._active: tuple[str, str] | None = None
+        self._parts: list[str] = []
+        self._scan_pos = 0
+        self._in_string = False
+        self._escaped = False
+        self._close_tail = ""
+        self._wait_at = 0
+        self._deferred_parts: list[str] = []
+        self._deferred_chars = 0
+        self._fence_state = ("", 0)
+        self.tool_calls_count = 0
+        self.trailing_chars_after_tool = 0
+        self._trailing_started = False
+        self._trailing_pending = 0
         self._allowed_tools = (
             {str(name) for name in allowed_tools} if allowed_tools is not None else None
         )
@@ -918,20 +974,75 @@ class ToolCallParser:
                 )
         for call in calls:
             if call["name"] and self._check_allowed(call["name"]):
-                self._history += _OPAQUE_BLOCK
+                self._remember(_OPAQUE_BLOCK)
+                self.tool_calls_count += 1
+                self.trailing_chars_after_tool = 0
+                self._trailing_started = False
+                self._trailing_pending = 0
                 self._on_tool_call(call)
 
     def feed(self, text: str) -> None:
+        if not text:
+            return
+        if self._active is not None:
+            self._feed_active(text)
+            if self._active is None:
+                self._drain(final=False)
+            return
+        if self._wait_at:
+            self._deferred_parts.append(text)
+            self._deferred_chars += len(text)
+            if len(self._buf) + self._deferred_chars < self._wait_at:
+                return
+            text = "".join(self._deferred_parts)
+            self._deferred_parts.clear()
+            self._deferred_chars = 0
+        if not self._buf and (
+            "<" not in text
+            or self._quoted_until - self._history_chars >= len(text)
+            or (self._fence_state[1] and "\n" not in text)
+        ):
+            self._emit(text)
+            return
         self._buf += text
         self._drain(final=False)
 
     def finish(self) -> None:
+        if self._deferred_parts:
+            self._buf += "".join(self._deferred_parts)
+            self._deferred_parts.clear()
+            self._deferred_chars = 0
+        if self._active is not None:
+            if self.strict_live:
+                raise LiveParserError("unclosed tool_call block")
+            self._emit(self._active[0] + "".join(self._parts) + self._close_tail)
+            self._active = None
+            self._parts.clear()
+            self._close_tail = ""
         self._drain(final=True)
+
+    def has_open_tool_call(self) -> bool:
+        """Незавершённый вызов или префикс его тега, без сканирования тела JSON."""
+        return self._active is not None or bool(self._buf)
 
     def _classify_open(self, after: int, final: bool) -> str:
         """`<tool_call>` в буфере: "real" | "quoted" (inline-код markdown) | "wait" (нужен следующий символ)."""
-        context = _code_context(self._history + self._buf, len(self._history), final)
+        if self._fence_state[1] or self._history_chars < self._quoted_until:
+            return "quoted"
+        # После wait следующий полный просмотр только на геометрической границе:
+        # незавершённый markdown не пересканируется на каждом 4-байтном чанке.
+        if not final and self._wait_at and len(self._buf) < self._wait_at:
+            return "wait"
+        history = "".join(self._history)
+        code_end: list[int] = []
+        context = _code_context(
+            history + self._buf, len(history), final, code_end=code_end
+        )
         if context != "text":
+            if context == "wait":
+                self._wait_at = max(len(self._buf) * 2, len(self._buf) + 1)
+            elif code_end:
+                self._quoted_until = self._history_chars + code_end[0] - len(history)
             return "quoted" if context == "code" else "wait"
         tail = self._buf[after : after + 3]
         if not tail:
@@ -948,12 +1059,12 @@ class ToolCallParser:
         if start > 0:
             self._emit(self._buf[:start])
             self._buf = self._buf[start:]
-        context = _code_context(self._history + self._buf, len(self._history), final)
-        if context == "code":
+        verdict = self._classify_open(0, final)
+        if verdict == "quoted":
             self._emit(self._buf[:1])
             self._buf = self._buf[1:]
             return True
-        if context == "wait":
+        if verdict == "wait":
             return False
         gt = self._buf.find(">")
         if gt == -1:
@@ -966,7 +1077,7 @@ class ToolCallParser:
         tag = self._buf[: gt + 1]
         if tag.startswith("</"):
             self._buf = self._buf[gt + 1 :]
-            self._history += _OPAQUE_BLOCK
+            self._remember(_OPAQUE_BLOCK)
             return True
         if tag.startswith("<parameter"):
             if self.strict_live:
@@ -1012,15 +1123,24 @@ class ToolCallParser:
 
     def _drain(self, final: bool) -> None:
         while True:
+            if len(self._tag_pairs) == 1:
+                open_tag, close_tag = self._tag_pairs[0]
+                start = self._buf.find(open_tag)
+            else:
+                candidates = [
+                    (self._buf.find(op), op, cl) for op, cl in self._tag_pairs
+                ]
+                start, open_tag, close_tag = min(
+                    (candidate for candidate in candidates if candidate[0] >= 0),
+                    default=(-1, "", ""),
+                )
             invoke = (
                 _INVOKE_CANDIDATE_RE.search(self._buf) if self._invoke_enabled else None
             )
-            tc_start = self._buf.find(TOOL_CALL_OPEN)
-            if invoke is not None and (tc_start == -1 or invoke.start() < tc_start):
+            if invoke is not None and (start == -1 or invoke.start() < start):
                 if self._drain_invoke(final, invoke.start()):
                     continue
                 return
-            start = tc_start
             if start == -1:
                 if final:
                     if (
@@ -1042,47 +1162,103 @@ class ToolCallParser:
                 # всё до тега завершено: текст уходит в content и в `_history`
                 self._emit(self._buf[:start])
                 self._buf = self._buf[start:]
-            after = len(TOOL_CALL_OPEN)
+            after = len(open_tag)
             verdict = self._classify_open(after, final)
             if verdict == "quoted":
                 self._emit(self._buf[:after])
                 self._buf = self._buf[after:]
+                self._wait_at = 0
                 continue
             if verdict == "wait":
                 return
-            end = self._find_close_outside_string(len(TOOL_CALL_OPEN))
-            if end == -1:
+            # Весь markdown до реального тега уже разрешён. Для будущего разбора
+            # достаточно типа текущей строки; JSON не добавляет markdown-разметку.
+            line = "".join(self._line_parts)
+            marker = "# x" if _is_atx_heading(line) else "x"
+            self._history[:] = [marker]
+            self._line_parts[:] = [marker]
+            self._active = (open_tag, close_tag)
+            self._scan_pos = 0
+            self._in_string = self._escaped = False
+            text, self._buf = self._buf[after:], ""
+            self._wait_at = 0
+            self._feed_active(text)
+            if self._active is not None:
                 if final:
-                    if self.strict_live:
-                        raise LiveParserError("unclosed tool_call block")
-                    self._flush_all()  # незакрытый/невалидный блок отдаём текстом
+                    self.finish()
                 return
-            inner = self._buf[len(TOOL_CALL_OPEN) : end]
-            self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
-            calls = _parse_tool_call_blocks(inner)
-            if calls is None:
-                if self.strict_live:
-                    raise LiveParserError("malformed tool_call block")
-                self._emit(TOOL_CALL_OPEN + inner + TOOL_CALL_CLOSE)
-            else:
-                if self._allowed_tools is not None and self.strict_live:
-                    for call in calls:
-                        self._check_allowed(str(call.get("name") or ""))
-                self._history += _OPAQUE_BLOCK
-                for call in calls:
-                    if self._allowed_tools is not None and not self._check_allowed(
-                        str(call.get("name") or "")
-                    ):
-                        continue
-                    self._on_tool_call(call)
 
     def _find_close_outside_string(self, start: int) -> int:
         """Позиция `</tool_call>` вне строковых литералов JSON, или -1."""
         return _find_tool_close_outside_string(self._buf, start)
 
+    _JSON_MARKERS = re.compile(r'["\\<]')
+
+    def _feed_active(self, text: str) -> None:
+        """Каждый символ JSON просматривается один раз; тело собирается одним join."""
+        assert self._active is not None
+        open_tag, close_tag = self._active
+        if self._close_tail:
+            text = self._close_tail + text
+            self._close_tail = ""
+        index = 0
+        if self._escaped and text:
+            index = 1
+            self._escaped = False
+        while True:
+            match = self._JSON_MARKERS.search(text, index)
+            if match is None:
+                self._parts.append(text)
+                self._scan_pos += len(text)
+                return
+            index = match.start()
+            char = text[index]
+            if char == "\\" and self._in_string:
+                index += 2
+                if index > len(text):
+                    self._escaped = True
+            elif char == '"':
+                self._in_string = not self._in_string
+                index += 1
+            elif char == "<" and not self._in_string:
+                tail = text[index:]
+                if len(tail) < len(close_tag) and close_tag.startswith(tail):
+                    self._parts.append(text[:index])
+                    self._scan_pos += index
+                    self._close_tail = tail
+                    return
+                if tail.startswith(close_tag):
+                    self._parts.append(text[:index])
+                    inner = "".join(self._parts)
+                    self._parts.clear()
+                    self._active = None
+                    calls = self._parse_blocks(inner)
+                    if calls is None:
+                        if self.strict_live:
+                            raise LiveParserError("malformed tool_call block")
+                        self._emit(open_tag + inner + close_tag)
+                    else:
+                        if self._allowed_tools is not None and self.strict_live:
+                            for call in calls:
+                                self._check_allowed(str(call.get("name") or ""))
+                        self._remember(_OPAQUE_BLOCK)
+                        for call in calls:
+                            if not self._check_allowed(str(call.get("name") or "")):
+                                continue
+                            self.tool_calls_count += 1
+                            self.trailing_chars_after_tool = 0
+                            self._trailing_started = False
+                            self._trailing_pending = 0
+                            self._on_tool_call(call)
+                    self._buf = text[index + len(close_tag) :]
+                    return
+                index += 1
+            else:
+                index += 1
+
     def _pending_prefix(self) -> int:
         """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
-        tags = [TOOL_CALL_OPEN]
+        tags = [open_tag for open_tag, _ in self._tag_pairs]
         if self._invoke_enabled:
             tags += ["<invoke", "</invoke", "<parameter", "</parameter>"]
         best = 0
@@ -1099,19 +1275,70 @@ class ToolCallParser:
 
     def _tail_in_code(self) -> bool:
         """Хвост-префикс тега в буфере лежит внутри markdown-кода."""
-        doc = self._history + self._buf
+        if self._fence_state[1]:
+            return True
+        doc = "".join(self._history) + self._buf
         return _code_context(doc, len(doc) - self._pending_prefix(), True) == "code"
 
     def _emit(self, text: str) -> None:
         if text:
-            self._history += text
+            self._remember(text)
             if self._guard is not None:
                 _, detected = self._guard.feed(text)
                 if detected and self.strict_live:
                     raise RepetitionLoopDetected(
                         "upstream_repetition_loop: excessive token repetitions"
                     )
+            if self._suppress_after_tool and self.tool_calls_count:
+                stripped = text.strip()
+                if stripped:
+                    leading = len(text) - len(text.lstrip())
+                    if self._trailing_started:
+                        self.trailing_chars_after_tool += (
+                            self._trailing_pending + leading
+                        )
+                    self.trailing_chars_after_tool += len(stripped)
+                    self._trailing_started = True
+                    self._trailing_pending = len(text) - len(text.rstrip())
+                elif self._trailing_started:
+                    self._trailing_pending += len(text)
+                return
             self._on_content(text)
+
+    def _remember(self, text: str) -> None:
+        """Курсор markdown: завершённые блоки больше не участвуют в поиске."""
+        boundary = self._quoted_until - self._history_chars
+        if 0 < boundary <= len(text):
+            # Закрытый inline-span больше не влияет на следующие теги.
+            # Хвост после него обрабатывается отдельно, чтобы не потерять новый opener.
+            self._quoted_until = 0
+            self._remember(text[:boundary])
+            line = "".join(self._line_parts)
+            marker = ("# x" if _is_atx_heading(line) else "x") if line else ""
+            self._history[:] = [marker] if marker else []
+            self._line_parts[:] = [marker] if marker else []
+            if boundary < len(text):
+                self._remember(text[boundary:])
+            return
+        self._history_chars += len(text)
+        for part in text.splitlines(keepends=True):
+            self._history.append(part)
+            self._line_parts.append(part)
+            if not part.endswith("\n"):
+                continue
+            line = "".join(self._line_parts).rstrip("\n")
+            self._line_parts.clear()
+            char, run, rest = _fence_run(line)
+            fence_char, fence_len = self._fence_state
+            if fence_len:
+                if char == fence_char and run >= fence_len and not rest.strip(" \t\r"):
+                    self._fence_state = ("", 0)
+                self._history.clear()
+            elif _is_fence_open(char, run, rest):
+                self._fence_state = (char, run)
+                self._history.clear()
+            elif not line.strip() or _is_atx_heading(line):
+                self._history.clear()
 
     def _flush_all(self) -> None:
         if self._buf:

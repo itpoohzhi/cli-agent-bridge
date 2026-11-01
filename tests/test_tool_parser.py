@@ -1,10 +1,17 @@
 """Unit-тесты ToolCallParser и _tools_section моста droid-bridge (импорт из server.py)."""
 
 import importlib.util
+import http.client
+import io
 import json
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -47,6 +54,25 @@ class Collector:
 
 
 class TestToolCallParser(unittest.TestCase):
+    def test_tool_call_parser_quadratic_latency_hotpath(self) -> None:
+        """32 КиБ настоящего вызова по 4 байта: бюджет чистого CPU — 5 мс."""
+        payload = {"name": "write", "arguments": {"content": "x" * 32700}}
+        raw = TOOL_CALL_OPEN + json.dumps(payload) + TOOL_CALL_CLOSE
+        raw = raw.replace("x" * 32700, "x" * (32768 - len(raw) + 32700))
+        self.assertEqual(len(raw), 32768)
+        chunks = [raw[index : index + 4] for index in range(0, len(raw), 4)]
+        c = Collector()
+        parser = ToolCallParser(c.on_content, c.on_call)
+        started = time.process_time_ns()
+        for chunk in chunks:
+            parser.feed(chunk)
+        parser.finish()
+        elapsed_ms = (time.process_time_ns() - started) / 1_000_000
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["arguments"], json.loads(raw[11:-12])["arguments"])
+        self.assertEqual(c.content, [])
+        self.assertLessEqual(elapsed_ms, 5.0, f"parsing CPU: {elapsed_ms:.3f} ms")
+
     def test_plain_text_passthrough(self):
         c = Collector()
         p = ToolCallParser(c.on_content, c.on_call)
@@ -1060,6 +1086,405 @@ class TestToolsSection(unittest.TestCase):
                 TOOLS, {"type": "function", "function": {"name": "get_weather"}}
             ),
         )
+
+
+class TestOptimizationContracts(unittest.TestCase):
+    """Проверки общих границ оптимизаций без сетевого/провайдерного окружения."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "bridges/opencode-zen-bridge/server.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "zen_optimization_contracts", path
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        previous_path = sys.path[:]
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.path[:] = previous_path
+        cls.zen = module
+
+    def test_shared_parser_preserves_bridge_tags_counters_and_trailing_policy(
+        self,
+    ) -> None:
+        content, calls = [], []
+        parser = self.zen._new_tool_call_parser(content.append, calls.append)
+        raw = 'before <tool_invoke>{"name":"a"}</tool_invoke>  tail  '
+        for char in raw:
+            parser.feed(char)
+        parser.finish()
+        self.assertEqual(content, list("before "))
+        self.assertEqual(calls, [{"name": "a", "arguments": {}}])
+        self.assertEqual(parser.tool_calls_count, 1)
+        self.assertEqual(parser.trailing_chars_after_tool, 4)
+        self.assertFalse(parser.has_open_tool_call())
+
+    def test_markdown_history_is_not_rescanned_per_delta(self) -> None:
+        call = '<tool_call>{"name":"a"}</tool_call>'
+        cases = [
+            "plain text " * 3000 + call,
+            "```text\n" + (call + "\n") * 1000 + "```\n" + call,
+            ("`" + call + "` text ") * 700,
+            "literal ` " + "x" * 32768 + call + "\n\n",
+        ]
+        original = core_emulation._code_context
+        for raw in cases:
+            inspected = [0]
+
+            def inspect(doc: str, pos: int, final: bool, **kwargs: Any) -> str:
+                inspected[0] += len(doc)
+                return original(doc, pos, final, **kwargs)
+
+            with (
+                self.subTest(prefix=raw[:20]),
+                patch.object(core_emulation, "_code_context", inspect),
+            ):
+                parser = ToolCallParser(lambda _: None, lambda _: None)
+                for index in range(0, len(raw), 4):
+                    parser.feed(raw[index : index + 4])
+                parser.finish()
+            self.assertLessEqual(inspected[0], 20 * len(raw))
+
+    def test_completion_fallback_counts_arguments_and_reasoning(self) -> None:
+        calls = [{"function": {"name": "write", "arguments": "x" * 12000}}]
+        self.assertEqual(self.zen._estimate_completion_tokens("code", calls, 400), 3101)
+        self.assertEqual(self.zen._estimate_completion_tokens("", [], 0), 1)
+        self.assertEqual(self.zen._estimate_completion_tokens("x" * 32000, [], 0), 8000)
+
+    def test_spawn_reasons_only_append_when_spawn_is_noted(self) -> None:
+        zen = self.zen
+        res = zen._Resilience()
+        res.retry_budget.try_acquire_retry = Mock(return_value=True)
+        attempts = zen._RequestAttempts(
+            res, time.monotonic() + 60, sleep_fn=lambda _: None
+        )
+        attempts.note_spawn()
+        self.assertEqual(attempts.spawn_reasons, ["initial"])
+        self.assertTrue(attempts.allow_retry("incomplete_step"))
+        self.assertEqual(attempts.spawn_reasons, ["initial"])
+        attempts.note_spawn()
+        self.assertEqual(attempts.spawn_reasons, ["initial", "incomplete_step"])
+        self.assertEqual(len(attempts.spawn_reasons), attempts.total_spawns)
+
+    def test_gigarc_emulation_config_default_off_and_hot_reload(self) -> None:
+        zen = self.zen
+        source = {"OPENCODE_CONFIG_CONTENT": '{"permission":{"*":"ask"}}'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dynamic_config.json"
+            with patch.object(zen, "DYNAMIC_CONFIG_PATH", path):
+                self.assertIs(zen._emulation_env(source, True), source)
+                path.write_text('{"OPENCODE_EMULATION_ONLY_TOOLS_ENABLED": true}')
+                env = zen._emulation_env(source, True)
+                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                self.assertEqual(config["tools"], {"*": False})
+                self.assertEqual(config["permission"], {"*": "ask"})
+                self.assertNotIn("tools", json.loads(source["OPENCODE_CONFIG_CONTENT"]))
+                self.assertIs(zen._emulation_env(source, False), source)
+                path.write_text("invalid config")
+                self.assertIs(zen._emulation_env(source, True), source)
+
+    def test_strict_signal_keeps_interruption_drops_intent_only(self) -> None:
+        zen = self.zen
+        with (
+            patch.object(zen, "_is_incomplete_tool_step", return_value=True),
+            patch.object(zen, "_optimization_flag", return_value=True),
+            patch.object(zen, "_detect_incomplete_tool_step_signal", return_value=4),
+        ):
+            self.assertEqual(zen._incomplete_step_signal("", "", []), 0)
+        with (
+            patch.object(zen, "_is_incomplete_tool_step", return_value=True),
+            patch.object(zen, "_optimization_flag", return_value=True),
+            patch.object(zen, "_detect_incomplete_tool_step_signal", return_value=2),
+        ):
+            self.assertEqual(zen._incomplete_step_signal("", "", []), 2)
+
+    def test_readiness_uses_http_and_process_poll_without_lsof_loop(self) -> None:
+        zen = self.zen
+        helper = Mock()
+        helper.poll.return_value = None
+        with (
+            patch.object(
+                zen,
+                "_serve_http",
+                side_effect=[OSError("not ready"), (200, {"data": {}})],
+            ) as http,
+            patch.object(zen, "_lsof_listener_pid") as lsof,
+            patch.object(zen.time, "sleep"),
+        ):
+            zen._wait_for_serve_readiness(
+                helper, 12345, "test-password", time.monotonic() + 2, None
+            )
+            self.assertEqual(http.call_count, 2)
+            self.assertEqual(
+                http.call_args.args[:4],
+                (12345, "test-password", "GET", "/api/session/active"),
+            )
+            self.assertGreaterEqual(helper.poll.call_count, 2)
+            lsof.assert_not_called()
+        helper.poll.return_value = 1
+        with patch.object(zen, "_serve_http") as http:
+            with self.assertRaises(zen.ServeUnavailable):
+                zen._wait_for_serve_readiness(
+                    helper, 12345, "test-password", time.monotonic() + 2, None
+                )
+            http.assert_not_called()
+
+    def test_trusted_tool_stream_commits_first_fragment(self) -> None:
+        from adapters.passthrough_adapter import PassthroughLimits, relay_sse
+
+        frames = [
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "a",
+                                    "function": {"name": "write", "arguments": '{"x":'},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": "1}"}}
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+        raw = b"".join(
+            b"data: " + json.dumps(frame).encode() + b"\n\n" for frame in frames
+        )
+        raw += b"data: [DONE]\n\n"
+        source = io.BytesIO(raw)
+        writes = []
+
+        def write(frame: bytes) -> None:
+            writes.append((source.tell(), frame))
+
+        outcome = relay_sse(
+            source.readline,
+            write,
+            tool_schemas={},
+            limits=PassthroughLimits(),
+            trusted_tools=True,
+        )
+        self.assertTrue(outcome.committed)
+        self.assertTrue(outcome.done)
+        self.assertEqual(writes[0][1], raw[: writes[0][0]])
+        self.assertEqual(b"".join(frame for _, frame in writes), raw)
+
+    def test_history_prefix_guard_detects_edited_middle(self) -> None:
+        from core.turn_session_manager import HistoryPrefixGuard, history_chain_head
+
+        digests = ["one", "two", "three"]
+        guard = HistoryPrefixGuard(2, history_chain_head(digests, 2))
+        self.assertTrue(guard.matches(digests, len(digests)))
+        self.assertFalse(guard.matches(["one", "edited", "three"], 3))
+        self.assertFalse(guard.matches(digests[:2], 2))
+        self.assertFalse(guard.matches(digests[:1], 3))
+
+    def test_prefix_mismatch_selects_clean_replay_in_existing_session(self) -> None:
+        import server
+
+        items = [{"digest": "a"}, {"digest": "b"}, {"digest": "c"}]
+        proc = SimpleNamespace(alive=lambda: True)
+        chat = SimpleNamespace(
+            proc=proc,
+            state="READY",
+            sid="sid",
+            cfg="cfg",
+            n=2,
+            head=server._chain_head(items, 2),
+            key_hash="abcd1234",
+            restore_count=0,
+            settings=("m", "high", "auto"),
+            droid_real=2,
+        )
+        ctx = {
+            "rpc": {"items": items, "system": None},
+            "model": "m",
+            "effort": "high",
+            "autonomy": "auto",
+            "route": "chat",
+        }
+        self.assertEqual(
+            server._make_plan(
+                ctx, cast(server.Chat, cast(object, chat)), "cfg", "/tmp", []
+            )["path"],
+            "hot",
+        )
+        items[1] = {"digest": "edited"}
+        plan = server._make_plan(
+            ctx, cast(server.Chat, cast(object, chat)), "cfg", "/tmp", []
+        )
+        self.assertEqual(plan["path"], "rebase")
+        self.assertEqual(plan["send"], items)
+        self.assertEqual(plan["sid"], "")
+        self.assertIs(plan["handoff"], proc)
+
+    def test_adapter_trust_is_selected_before_headers_and_marker_never_escapes(
+        self,
+    ) -> None:
+        from adapters.passthrough_adapter import PassthroughAdapter, ResponseSink
+
+        raw = (
+            b'data: {"choices":[{"index":0,"delta":{"tool_calls":'
+            b'[{"index":0,"id":"a","function":{"name":"write","arguments":"{}"}}]},'
+            b'"finish_reason":null}]}\n\n'
+            b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        enabled = [True]
+        adapter = PassthroughAdapter(
+            "test",
+            {
+                "base_url": "http://127.0.0.1:9883/v1",
+                "api_key": "test-key",
+                "trusted_tool_sanitizer": True,
+            },
+            dict,
+            SimpleNamespace(is_trusted_tool_streaming_enabled=lambda: enabled[0]),
+        )
+
+        for marker in (None, "1"):
+            with self.subTest(marker=marker):
+                enabled[0] = True
+                source = io.BytesIO(raw)
+                headers = [("Content-Type", "text/event-stream")]
+                if marker:
+                    headers.append(("X-Bridge-Tool-Sanitized", marker))
+                resp = SimpleNamespace(
+                    readline=source.readline,
+                    getheaders=lambda: headers,
+                    getheader=lambda name: (
+                        marker if name.lower() == "x-bridge-tool-sanitized" else None
+                    ),
+                )
+                received = []
+
+                def start(status: int, outgoing: list[tuple[str, str]]) -> None:
+                    self.assertFalse(
+                        any(k.lower() == "x-bridge-tool-sanitized" for k, _ in outgoing)
+                    )
+                    enabled[0] = (
+                        False  # Kill-switch после headers не меняет выбранный режим.
+                    )
+
+                sink = SimpleNamespace(start=start, write=received.append)
+                with patch(
+                    "adapters.passthrough_adapter.sanitize_choice_calls",
+                    wraps=__import__(
+                        "adapters.passthrough_adapter",
+                        fromlist=["sanitize_choice_calls"],
+                    ).sanitize_choice_calls,
+                ) as sanitizer:
+                    adapter._relay_stream(
+                        cast(http.client.HTTPResponse, cast(object, resp)),
+                        {},
+                        cast(ResponseSink, cast(object, sink)),
+                        True,
+                    )
+                self.assertEqual(sanitizer.call_count, 0 if marker else 1)
+                if marker:
+                    self.assertEqual(b"".join(received), raw)
+
+    def test_adapter_clears_spoofed_ingress_marker(self) -> None:
+        from adapters.passthrough_adapter import PassthroughAdapter
+
+        adapter = PassthroughAdapter(
+            "test", {"base_url": "http://127.0.0.1:9883/v1"}, dict
+        )
+        with patch(
+            "adapters.passthrough_adapter.http.client.HTTPConnection"
+        ) as factory:
+            adapter._open(
+                "/v1/chat/completions", b"{}", {"X-Bridge-Tool-Sanitized": "1"}
+            )
+        outgoing = factory.return_value.request.call_args.kwargs["headers"]
+        self.assertFalse(any(k.lower() == "x-bridge-tool-sanitized" for k in outgoing))
+
+    def test_adapter_does_not_retry_after_committed_headers(self) -> None:
+        from adapters.passthrough_adapter import PassthroughAdapter, ResponseSink
+
+        adapter = PassthroughAdapter(
+            "test", {"base_url": "http://127.0.0.1:9883/v1"}, dict
+        )
+        response = Mock(status=200)
+        response.getheader.side_effect = lambda name: (
+            "text/event-stream" if name == "Content-Type" else None
+        )
+        response.getheaders.return_value = [("Content-Type", "text/event-stream")]
+        response.readline.side_effect = OSError("upstream disconnected after headers")
+        connection = Mock()
+        connection.getresponse.return_value = response
+        sink = SimpleNamespace(start=Mock(), write=Mock())
+        with patch.object(adapter, "_open", return_value=connection) as opened:
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers={},
+                sink=cast(ResponseSink, cast(object, sink)),
+            )
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(sink.start.call_count, 1)
+        self.assertEqual(connection.close.call_count, 1)
+        self.assertEqual(sink.write.call_count, 1)
+        self.assertNotIn(b"[DONE]", sink.write.call_args.args[0])
+
+    def test_trusted_stream_incomplete_call_fails_without_done(self) -> None:
+        from adapters.passthrough_adapter import PassthroughLimits, relay_sse
+
+        raw = (
+            b'data: {"choices":[{"index":0,"delta":{"tool_calls":'
+            b'[{"index":0,"id":"a","function":{"name":"write","arguments":"{"}}]},'
+            b'"finish_reason":null}]}\n\ndata: [DONE]\n\n'
+        )
+        writes = []
+        outcome = relay_sse(
+            io.BytesIO(raw).readline,
+            writes.append,
+            tool_schemas={},
+            limits=PassthroughLimits(),
+            trusted_tools=True,
+        )
+        self.assertTrue(outcome.incomplete)
+        self.assertTrue(outcome.committed)
+        self.assertNotIn(b"[DONE]", b"".join(writes))
+
+    def test_producer_marker_requires_enabled_sanitizer(self) -> None:
+        zen = self.zen
+        handler = object.__new__(zen.Handler)
+        handler.send_header = Mock()
+        with patch.object(zen, "_optimization_flag", return_value=True):
+            with patch.object(zen, "BRIDGE_SANITIZE_TOOL_CALLS", False):
+                handler._send_sanitizer_marker()
+                handler.send_header.assert_not_called()
+            with patch.object(zen, "BRIDGE_SANITIZE_TOOL_CALLS", True):
+                handler._send_sanitizer_marker()
+                handler.send_header.assert_called_once_with(
+                    "X-Bridge-Tool-Sanitized", "1"
+                )
 
 
 class TestPromptRendering(unittest.TestCase):
