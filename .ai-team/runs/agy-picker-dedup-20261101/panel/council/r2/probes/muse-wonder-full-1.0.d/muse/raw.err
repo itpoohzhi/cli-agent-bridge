@@ -1,0 +1,4 @@
+muse: workspace root: /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/panel/council/r2 (explicit)
+muse: workspace trust: trusted source=run-flag
+muse: warning: rules file at /Users/aazhiry1/.config/muse/AGENTS.md produced 72442 bytes, over the 65536 byte subagent delegation startup context limit; it will be truncated for this session
+run ended with Failed: API error 429 [request_id=40a9da77-cb10-49d1-84d5-b0c31bddf644]: Subscription quota exhausted. Your usage window resets at 2026-11-02T00:00:00Z. (rate_limit_error)

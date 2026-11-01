@@ -1,0 +1,14 @@
+{
+  "gate": "CODE_GATE",
+  "status": "PASS",
+  "run_id": "agy-picker-dedup-20261101",
+  "coder_plan_sha256": "b3d71c1b8288a45efb3f3f12ee8f7f4a33a256c01dac1d0c64bb97955bce2ae5",
+  "coder_handoff_sha256": "c327a2975e4b52fd253cc374ffd911c37faa72a512e76272bb1bf29c86611fa0",
+  "changed_files": [
+    "fleet.json",
+    "server.py",
+    "tests/test_bridge_strict.py",
+    "tests/test_dsh_profile_config.py",
+    "tests/test_request_attribution.py"
+  ]
+}
