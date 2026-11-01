@@ -1,0 +1,451 @@
+diff --git a/bridges/agy-bridge/server.py b/bridges/agy-bridge/server.py
+index c354c6b..2901a80 100644
+--- a/bridges/agy-bridge/server.py
++++ b/bridges/agy-bridge/server.py
+@@ -58,7 +58,10 @@ env приоритетнее файла (0/false/no/off — hard-off, 1/true/yes
+   * `extended_timeout_enabled` / `AGY_EXTENDED_TIMEOUT_ENABLED` — idle 1800 с по активности
+     stdout/transcript и потолок 3600 с (`AGY_IDLE_TIMEOUT_S`, `AGY_TIMEOUT_S`);
+   * `graceful_timeout_on_partial` / `AGY_GRACEFUL_TIMEOUT_ON_PARTIAL` — timeout и
+-    idle_timeout после частичной выдачи завершаются `finish_reason="length"` вместо 504;
++    idle_timeout после частичной выдачи завершаются настраиваемым `finish_reason`
++    (по умолчанию `stop`) вместо 504;
++  * `graceful_timeout_finish_reason` / `AGY_GRACEFUL_TIMEOUT_FINISH_REASON` — `stop`
++    по умолчанию; `length` или `max_tokens` возвращают прежний финал `length`;
+   * `step_scoped_usage_enabled` / `AGY_STEP_SCOPED_USAGE_ENABLED` — `usage` по окну
+     последнего шага (prompt = input + cache последнего `PLANNER_RESPONSE`, completion =
+     сумма output шагов хода) вместо накопительного `result.usage`; без валидного шага —
+@@ -2930,6 +2933,7 @@ class _RuntimeFlags(NamedTuple):
+     graceful_timeout_on_partial: bool = False
+     step_scoped_usage_enabled: bool = False
+     stream_resilience_enabled: bool = True
++    graceful_timeout_finish_reason: str = "stop"
+ 
+ 
+ _NEW_FLAG_ENV = {
+@@ -2951,13 +2955,15 @@ _cfg_generation: int = 0
+ 
+ 
+ def _parse_runtime_flags(text: str) -> _RuntimeFlags:
+-    """Разобрать dynamic_config.json; ValueError — файл отвергается целиком."""
++    """Разобрать флаги: не-bool отвергает файл, некорректная причина даёт stop."""
+     data = cast(object, json.loads(text))
+     if not isinstance(data, dict):
+         raise ValueError("dynamic_config: not an object")
+     raw = cast("dict[str, object]", data)
+-    values: dict[str, bool] = {}
++    values: dict[str, Any] = {}
+     for name in _RuntimeFlags._fields:
++        if name == "graceful_timeout_finish_reason":
++            continue
+         default = getattr(_COLD_FLAGS, name)
+         if name == "stream_resilience_enabled":
+             default = raw.get(_NEW_FLAG_ENV[name], default)
+@@ -2965,6 +2971,16 @@ def _parse_runtime_flags(text: str) -> _RuntimeFlags:
+         if not isinstance(value, bool):
+             raise ValueError("dynamic_config: %s is not boolean" % name)
+         values[name] = value
++    reason = raw.get(
++        "graceful_timeout_finish_reason",
++        raw.get("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "stop"),
++    )
++    values["graceful_timeout_finish_reason"] = (
++        "length"
++        if isinstance(reason, str)
++        and reason.strip().lower() in ("length", "max_tokens")
++        else "stop"
++    )
+     return _RuntimeFlags(**values)
+ 
+ 
+@@ -3028,6 +3044,16 @@ def _new_flag(name: str, default: bool = False) -> bool:
+     return bool(getattr(_runtime_snapshot(), name, default))
+ 
+ 
++def _graceful_finish_reason(default: str = "stop") -> str:
++    """Причина мягкого финала: env > динамический снимок > безопасный stop."""
++    reason = os.environ.get("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "").strip()
++    if not reason:
++        reason = getattr(_runtime_snapshot(), "graceful_timeout_finish_reason", default)
++    if isinstance(reason, str) and reason.strip().lower() in ("length", "max_tokens"):
++        return "length"
++    return "stop"
++
++
+ AGY_BRIDGE_STREAM_RESILIENCE_ENABLED = _new_flag(
+     "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True
+ )
+@@ -6906,13 +6932,13 @@ class Handler(BaseHTTPRequestHandler):
+             return payload
+ 
+         def finalize_timeout(out: dict) -> None:
+-            """Graceful-финал timeout/idle_timeout: 200/length (идемпотентно, до run.close())."""
++            """Graceful-финал timeout/idle_timeout: HTTP 200, до run.close(), идемпотентно."""
+             state = out.get("state")
+             if out.get("graceful_done") or state not in ("timeout", "idle_timeout"):
+                 return
+             if not _new_flag("graceful_timeout_on_partial"):
+                 return
+-            # Остаток источников из terminal drain + полезный partial -> 200/length.
++            # Остаток источников из terminal drain + полезный partial -> HTTP 200.
+             retained_text, retained_reasoning = consume_retained(out)
+             content = str(out.get("text") or "")
+             base_reasoning = str(out.get("reasoning") or "")
+@@ -6926,7 +6952,9 @@ class Handler(BaseHTTPRequestHandler):
+             _log(f"graceful-timeout state={state} mode=json")
+             if not self._prepare_flush_write():
+                 return
+-            self._send(200, build_payload(out, content, reasoning, "length"))
++            self._send(
++                200, build_payload(out, content, reasoning, _graceful_finish_reason())
++            )
+ 
+         ctx["finalize_timeout"] = finalize_timeout
+         out = self._run_once(ctx, lambda _v: True, on_tool_trace, lambda _r: True, None)
+@@ -7065,7 +7093,7 @@ class Handler(BaseHTTPRequestHandler):
+         def finalize_timeout(out: dict) -> None:
+             """Graceful-финал timeout/idle_timeout после полезной выдачи (идемпотентно).
+ 
+-            Один общий arbiter-досыл, один notice, один `finish_reason="length"`, один
++            Один общий arbiter-досыл, один notice, один настраиваемый finish_reason, один
+             [DONE] — всё в одном окне T_FINAL_FLUSH_S; ошибка записи прекращает записи.
+             """
+             if out.get("graceful_done") or out.get("state") not in (
+@@ -7107,7 +7135,7 @@ class Handler(BaseHTTPRequestHandler):
+                     )
+                 )
+             if ok:
+-                ok = emit(chunk({}, "length", conversation_id=conv_id))
++                ok = emit(chunk({}, _graceful_finish_reason(), conversation_id=conv_id))
+             if ok:
+                 _ = emit("data: [DONE]\n\n")
+             out["graceful_done"] = True
+diff --git a/tests/test_agy_bridge_resilience.py b/tests/test_agy_bridge_resilience.py
+index d36a2c0..d83d485 100644
+--- a/tests/test_agy_bridge_resilience.py
++++ b/tests/test_agy_bridge_resilience.py
+@@ -3826,6 +3826,7 @@ _NOTICE_MARK = "Превышен лимит времени хода agy"
+ def _clean_flags(fx: _Fixture) -> None:
+     """Старые флаги берутся из файла; legacy-оракулы выполняются без новой SSE-политики."""
+     fx.set_env("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", "false")
++    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", None)
+     for env in _FLAG_ENV.values():
+         fx.set_env(env, None)
+     for env in ("AGY_IDLE_TIMEOUT_S", "AGY_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"):
+@@ -4614,7 +4615,7 @@ class SilentToolProgressTests(unittest.TestCase):
+             _h, _s, wfile, _c = _sse_with(run_once, fail_on=2)
+             self.assertEqual(outcomes, [False])
+             frames = _frames_json(wfile.writes)
+-            self.assertFalse(any(_is_length(f) for f in frames))
++            self.assertFalse(any(_has_finish_reason(f, "length") for f in frames))
+             self.assertTrue(any(isinstance(f, dict) and "error" in f for f in frames))
+ 
+     def test_silent_tool_progress_json_mode_collects_markers(self) -> None:
+@@ -5325,12 +5326,11 @@ def _frames_json(frames: list[str]) -> list[object]:
+     return parsed
+ 
+ 
+-def _is_length(frame: object) -> bool:
++def _has_finish_reason(frame: object, reason: str = "stop") -> bool:
+     if not isinstance(frame, dict) or "choices" not in frame:
+         return False
+     return (
+-        _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason")
+-        == "length"
++        _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason") == reason
+     )
+ 
+ 
+@@ -5378,6 +5378,140 @@ def _timeout_out(state: str) -> dict[str, object]:
+     }
+ 
+ 
++class GracefulTimeoutFinishReasonTests(unittest.TestCase):
++    """Таймаут времени не выдаётся за исчерпание токенов; откат настраивается."""
++
++    def _assert_wire_reason(
++        self, expected: str, env: str | None = None, config: object = None
++    ) -> None:
++        for state in ("timeout", "idle_timeout"):
++            for stream in (False, True):
++                with self.subTest(state=state, stream=stream), _Fixture() as fx:
++                    _clean_flags(fx)
++                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
++                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
++                    if config is not None:
++                        _write_cfg(fx, config)
++
++                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
++                        out = _timeout_out(state)
++                        out["text"] = "частичный ответ"
++                        out["timeout_limit_s"] = 3600.0
++                        if stream:
++                            on_text(out["text"])
++                        ctx["finalize_timeout"](out)
++                        return out
++
++                    if stream:
++                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
++                        frames = _frames_json(wfile.writes)
++                        choices = [
++                            choice
++                            for frame in frames
++                            if isinstance(frame, dict) and "choices" in frame
++                            for choice in frame["choices"]
++                        ]
++                        self.assertEqual(frames.count("[DONE]"), 1)
++                        self.assertFalse(
++                            any(isinstance(f, dict) and "error" in f for f in frames)
++                        )
++                        notice = "".join(_content_of(f) for f in frames)
++                    else:
++                        sent: list[tuple[int, dict[str, Any]]] = []
++                        with _Sock() as sock:
++                            handler = _make_handler(sock)
++                            handler._run_once = run_once
++                            handler._send = lambda code, p: sent.append((code, p))
++                            handler._serve_json({"model": "m"})
++                        self.assertEqual(len(sent), 1)
++                        self.assertEqual(sent[0][0], 200)
++                        choices = sent[0][1]["choices"]
++                        notice = choices[0]["message"]["content"]
++                    self.assertEqual(
++                        [c["finish_reason"] for c in choices if c["finish_reason"]],
++                        [expected],
++                    )
++                    self.assertIn("частичный ответ", notice)
++                    self.assertIn(_NOTICE_MARK, notice)
++                    self.assertIn("3600s", notice)
++                    self.assertIn(state, notice)
++                    self.assertNotIn("токен", notice.lower())
++
++    def test_default_emits_stop_in_json_and_sse(self) -> None:
++        self._assert_wire_reason("stop")
++
++    def test_env_length_and_max_tokens_override_config(self) -> None:
++        for value in ("length", " MAX_TOKENS "):
++            with self.subTest(value=value):
++                self._assert_wire_reason(
++                    "length", value, {"graceful_timeout_finish_reason": "stop"}
++                )
++
++    def test_dynamic_config_and_uppercase_alias_emit_length(self) -> None:
++        for key in (
++            "graceful_timeout_finish_reason",
++            "AGY_GRACEFUL_TIMEOUT_FINISH_REASON",
++        ):
++            for value in ("length", " MAX_TOKENS "):
++                with self.subTest(key=key, value=value):
++                    self._assert_wire_reason("length", config={key: value})
++
++    def test_invalid_or_empty_values_fall_back_to_stop(self) -> None:
++        for value in ("", "  ", "invalid", None, True, 1, [], {}):
++            with self.subTest(config=value):
++                self._assert_wire_reason(
++                    "stop", config={"graceful_timeout_finish_reason": value}
++                )
++        self._assert_wire_reason(
++            "stop", "invalid", {"graceful_timeout_finish_reason": "length"}
++        )
++
++    def test_empty_env_uses_dynamic_config(self) -> None:
++        for value in ("", "   "):
++            with self.subTest(value=value):
++                self._assert_wire_reason(
++                    "length", value, {"graceful_timeout_finish_reason": "length"}
++                )
++
++    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
++        parse = _bfn("_parse_runtime_flags")
++        for value in ("invalid", None, True, 1, [], {}):
++            with self.subTest(value=value):
++                flags = parse(
++                    json.dumps(
++                        {
++                            "emit_tool_trace": True,
++                            "graceful_timeout_finish_reason": value,
++                        }
++                    )
++                )
++                self.assertTrue(getattr(flags, "emit_tool_trace"))
++                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
++                self.assertEqual(
++                    getattr(flags, "graceful_timeout_finish_reason"), "stop"
++                )
++        with self.assertRaises(ValueError):
++            parse(
++                '{"emit_tool_trace": "true", "graceful_timeout_finish_reason": "length"}'
++            )
++
++    def test_reason_reloads_after_ttl_without_restart(self) -> None:
++        with _Fixture() as fx:
++            _clean_flags(fx)
++            clock = _clocked(fx)
++            reason = _bfn("_graceful_finish_reason")
++            _write_cfg(fx, {"graceful_timeout_finish_reason": "length"}, 1_000)
++            self.assertEqual(reason(), "length")
++            _write_cfg(fx, {"graceful_timeout_finish_reason": "stop"}, 2_000)
++            self.assertEqual(reason(), "length")
++            clock.advance(1.1)
++            self.assertEqual(reason(), "stop")
++            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "length")
++            self.assertEqual(reason(), "length")
++            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "invalid")
++            self.assertEqual(reason(), "stop")
++
++
+ class SilentGracefulTimeoutTests(unittest.TestCase):
+     def _flags(self, fx: _Fixture, graceful: bool) -> None:
+         _clean_flags(fx)
+@@ -5418,11 +5552,11 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+                         errors = [
+                             f for f in frames if isinstance(f, dict) and "error" in f
+                         ]
+-                        lengths = [f for f in frames if _is_length(f)]
++                        finals = [f for f in frames if _has_finish_reason(f)]
+                         notices = [f for f in frames if _NOTICE_MARK in _content_of(f)]
+                         if graceful and kind != "silent":
+                             self.assertEqual(errors, [])
+-                            self.assertEqual(len(lengths), 1)
++                            self.assertEqual(len(finals), 1)
+                             self.assertEqual(len(notices), 1)
+                             notice = _content_of(notices[0])
+                             self.assertIn(state, notice)
+@@ -5440,12 +5574,13 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+                                 sum(
+                                     1
+                                     for f in frames
+-                                    if _is_length(f) or "error" in _dict_or_empty(f)
++                                    if _has_finish_reason(f)
++                                    or "error" in _dict_or_empty(f)
+                                 ),
+                                 1,
+                             )
+                         else:
+-                            self.assertEqual(lengths, [])
++                            self.assertEqual(finals, [])
+                             self.assertEqual(notices, [])
+                             self.assertEqual(len(errors), 1)
+                             err = _dict(_dict(errors[0])["error"])
+@@ -5465,7 +5600,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+ 
+             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
+             frames = _frames_json(wfile.writes)
+-            self.assertFalse(any(_is_length(f) for f in frames))
++            self.assertFalse(any(_has_finish_reason(f) for f in frames))
+             errors = [f for f in frames if isinstance(f, dict) and "error" in f]
+             self.assertEqual(
+                 _dict(_dict(errors[0])["error"])["type"], "first_token_timeout"
+@@ -5503,7 +5638,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+                         if graceful and kind != "silent":
+                             self.assertEqual(code, 200)
+                             choice = _dict(cast("list[object]", payload["choices"])[0])
+-                            self.assertEqual(choice["finish_reason"], "length")
++                            self.assertEqual(choice["finish_reason"], "stop")
+                             message = _dict(choice["message"])
+                             content = _str(message["content"])
+                             self.assertEqual(content.count(_NOTICE_MARK), 1)
+@@ -5542,11 +5677,11 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+             ctx = {"model": "m", "t_req_start": 9000.0 - 3000.0}
+             _h, sock, wfile, _c = _sse_with(run_once, ctx, clock=clock, cost=0.0)
+             frames = _frames_json(wfile.writes)
+-            self.assertTrue(any(_is_length(f) for f in frames))
++            self.assertTrue(any(_has_finish_reason(f) for f in frames))
+             self.assertEqual(frames[-1], "[DONE]")
+             self.assertEqual(
+                 sock.timeouts, [5.0, 5.0, 5.0, 5.0]
+-            )  # суффикс+notice+length+DONE
++            )  # суффикс+notice+stop+DONE
+ 
+     def test_silent_graceful_timeout_one_shared_window_for_all_final_writes(
+         self,
+@@ -5573,9 +5708,9 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+                 sum(1 for f in frames if _NOTICE_MARK in _content_of(f)), 1
+             )
+             self.assertEqual(
+-                sum(1 for f in frames if _is_length(f)), 1
++                sum(1 for f in frames if _has_finish_reason(f)), 1
+             )  # третья запись
+-            self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + length
++            self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + stop
+             self.assertLessEqual(max(sock.timeouts), 5.0)
+ 
+     def test_silent_graceful_timeout_window_never_crosses_request_ceiling(self) -> None:
+@@ -5612,14 +5747,14 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+                 return out
+ 
+             holder: list[dict[str, object]] = []
+-            # вызовы: 1 role, 2 суффикс, 3 notice (падает) -> length/DONE не пишутся
++            # вызовы: 1 role, 2 суффикс, 3 notice (падает) -> stop/DONE не пишутся
+             _h, sock, wfile, _c = _sse_with(
+                 run_once, {"model": "m", "t_req_start": 5000.0}, fail_on=3
+             )
+             self.assertEqual(wfile.calls, 3)
+             frames = _frames_json(wfile.writes)
+             self.assertNotIn("[DONE]", frames)
+-            self.assertFalse(any(_is_length(f) for f in frames))
++            self.assertFalse(any(_has_finish_reason(f) for f in frames))
+             self.assertFalse(any(isinstance(f, dict) and "error" in f for f in frames))
+             self.assertIs(
+                 holder[0].get("graceful_done"), True
+@@ -5640,7 +5775,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+ 
+             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
+             frames = _frames_json(wfile.writes)
+-            self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
++            self.assertEqual(sum(1 for f in frames if _has_finish_reason(f)), 1)
+             self.assertEqual(frames[-1], "[DONE]")
+ 
+     def test_silent_graceful_timeout_run_once_finalizes_before_close_and_never_retries(
+@@ -5786,7 +5921,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+                 self.assertEqual(len(texts), 3)
+                 self.assertIn(_NOTICE_MARK, texts[2])
+                 self.assertIn(state, texts[2])
+-                self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
++                self.assertEqual(sum(1 for f in frames if _has_finish_reason(f)), 1)
+                 self.assertEqual(list(cast("list[float]", _bval("_last_ok"))), [0.0])
+                 self.assertEqual(len(cast("dict[int, object]", _bval("_active"))), 0)
+ 
+@@ -5803,7 +5938,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
+             code, payload = sent[0]
+             self.assertEqual(code, 200)
+             choice = _dict(cast("list[object]", payload["choices"])[0])
+-            self.assertEqual(choice["finish_reason"], "length")
++            self.assertEqual(choice["finish_reason"], "stop")
+             content = _str(_dict(choice["message"])["content"])
+             self.assertTrue(content.startswith("Hello world"))
+             self.assertEqual(content.count(_NOTICE_MARK), 1)
+@@ -5947,7 +6082,7 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
+                 self.assertEqual(len(sent), 1)
+                 self.assertEqual(sent[0][0], 200)
+                 choice = _dict(cast("list[object]", sent[0][1]["choices"])[0])
+-                self.assertEqual(choice["finish_reason"], "length")
++                self.assertEqual(choice["finish_reason"], "stop")
+ 
+     def test_silent_rw001_json_finalizes_before_run_close(self) -> None:
+         order: list[str] = []
+@@ -12982,6 +13117,7 @@ class DialogueStreamResilienceTests(unittest.TestCase):
+                 "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": "true",
+                 "AGY_BRIDGE_EMIT_TOOL_TRACE": "false",
+                 "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL": "false",
++                "AGY_GRACEFUL_TIMEOUT_FINISH_REASON": "stop",
+             },
+         )
+         flags.start()
+@@ -13315,7 +13451,7 @@ class DialogueStreamResilienceTests(unittest.TestCase):
+         )
+         self.assertIn(b'"error"', b"".join(downstream))
+ 
+-    def test_enabled_graceful_timeout_retains_single_length_final(self) -> None:
++    def test_enabled_graceful_timeout_retains_single_stop_final(self) -> None:
+         with mock.patch.dict(os.environ, {"AGY_GRACEFUL_TIMEOUT_ON_PARTIAL": "true"}):
+             _, body, frames, _ = self._stream(
+                 self._out(state="idle_timeout", rc=124), (("text", "часть ответа"),)
+@@ -13326,7 +13462,7 @@ class DialogueStreamResilienceTests(unittest.TestCase):
+             for choice in frame["choices"]
+             if choice["finish_reason"]
+         ]
+-        self.assertEqual(terminals, ["length"])
++        self.assertEqual(terminals, ["stop"])
+         self.assertEqual(body.count("data: [DONE]"), 1)
+         self.assertFalse(any("error" in frame for frame in frames))
+ 

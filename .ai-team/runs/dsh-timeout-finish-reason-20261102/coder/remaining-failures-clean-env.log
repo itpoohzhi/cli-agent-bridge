@@ -1,0 +1,212 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.2.0, pluggy-1.7.0 -- /Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/python3.14
+cachedir: .pytest_cache
+rootdir: /Users/aazhiry1/tmp/cli-agent-bridge/bugfix-no-ticket-dsh-timeout-finish-reason--coder-20261102
+collecting ... collected 2 items
+
+tests/test_claude_bridge.py::test_config_bridge_import_fails_without_core FAILED [ 50%]
+tests/test_dsh_env_forwarding.py::TestForwardingOracles::test_o3_denylist_not_overridable_by_request PASSED [100%]
+
+=================================== FAILURES ===================================
+_________________ test_config_bridge_import_fails_without_core _________________
+
+    #!/usr/bin/env python3
+    """OpenAI-совместимый мост к CLI `claude -p` (Claude Code).
+    
+    Один запрос /v1/chat/completions = один headless-ход
+    `claude -p --output-format stream-json --verbose --include-partial-messages`.
+    Поток stream-json переводится в OpenAI Chat Completions (stream и не-stream).
+    
+    Мост эмулирует OpenAI function calling: если запрос содержит непустой `tools`,
+    в промпт добавляется протокол и схемы инструментов, а встроенные инструменты
+    Claude Code отключаются (`--tools ""`). Модель просят отвечать блоками
+    `<tool_call>{"name":…,"arguments":{…}}</tool_call>`; потоковые блоки переводятся
+    в OpenAI-чанки `delta.tool_calls`, история с `tool_calls`/`role:"tool"`
+    рендерится обратно в те же блоки.
+    
+    Общая протокольная логика живёт только в универсальном ядре `core/` (ADR 0014,
+    AD-002: этот файл в репозитории — SSOT, локальных копий парсера нет; без core
+    мост не стартует). Весь поток Claude всегда проходит через
+    `core.tool_emulation.StreamNormalizer` поверх
+    `ToolCallParser(strict_live=True)` (AD-004, ALWAYS-ON): повреждённый XML не
+    попадает в `content`, fallback на терминальный `result` исключён, ошибка
+    потока — корректный `502 proxy_error`.
+    
+    Изображения (`image_url` data URI PNG/JPEG) мост материализует в изолированный
+    сессионный каталог `/tmp/claude-img-<uuid>/` (0700, файлы 0600) и запускает
+    Claude с `--allowedTools "Read(<каталог>/**)"`, `--restricted` и
+    `--add-dir <каталог>` (AD-003, workspace-read);
+    каталог удаляется в `finally` после подтверждённого завершения ребёнка. Без
+    картинок сохраняется прежний режим `--tools ""`.
+    
+    Reasoning публикуется в реальном времени (AD-005): нативные `thinking_delta` и
+    теги размышлений в тексте уходят в SSE как `choices[0].delta.reasoning_content`
+    до терминального события; в JSON тот же накопленный итог отдаётся как
+    `message.reasoning_content`.
+    
+    Секреты с диска не читаются: ключ авторизации берётся только из окружения
+    CLAUDE_P_BRIDGE_KEY, переменные окружения ребёнка не трогаются.
+    """
+    
+    from __future__ import annotations
+    
+    import hmac
+    import json
+    import os
+    import queue
+    import select
+    import shutil
+    import signal
+    import socket
+    import subprocess
+    import sys
+    import threading
+    import time
+    import uuid
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    from typing import Any
+    
+    for _p in (Path(__file__).resolve().parents[2], Path(__file__).resolve().parents[1]):
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+    
+    try:
+>       from core.tool_emulation import (  # noqa: E402
+            DEFAULT_MAX_IMAGE_BYTES,
+            DEFAULT_MAX_IMAGES,
+            DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+            ImageInputError,
+            LiveParserError,
+            StreamNormalizer,
+            _messages_to_prompt,
+            _tool_choice_none,
+            build_tool_schemas,
+            extract_data_url_images,
+            extract_thinking_delta,
+            sanitize_tool_call,
+        )
+E       ModuleNotFoundError: No module named 'core'
+
+/private/var/folders/2f/c42p3_k11d9252tg83blw_mc0000gn/T/pytest-of-aazhiry1/pytest-2261/test_config_bridge_import_fail0/server.py:63: ModuleNotFoundError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = PosixPath('/private/var/folders/2f/c42p3_k11d9252tg83blw_mc0000gn/T/pytest-of-aazhiry1/pytest-2261/test_config_bridge_import_fail0')
+
+    def test_config_bridge_import_fails_without_core(tmp_path):
+        """Fail-closed: без доступного core мост не импортируется молча с fallback-парсером."""
+        isolated = tmp_path / "server.py"
+        isolated.write_text(BRIDGE_SERVER.read_text())
+        spec = importlib.util.spec_from_file_location("claude_p_bridge_isolated", isolated)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        saved = sys.path[:]
+        sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != REPO]
+        saved_core = {
+            k: sys.modules.pop(k)
+            for k in list(sys.modules)
+            if k == "core" or k.startswith("core.")
+        }
+        try:
+            with pytest.raises((SystemExit, ImportError)):
+>               spec.loader.exec_module(mod)
+
+tests/test_claude_bridge.py:201: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+<frozen importlib._bootstrap_external>:759: in exec_module
+    ???
+<frozen importlib._bootstrap>:491: in _call_with_frames_removed
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    #!/usr/bin/env python3
+    """OpenAI-совместимый мост к CLI `claude -p` (Claude Code).
+    
+    Один запрос /v1/chat/completions = один headless-ход
+    `claude -p --output-format stream-json --verbose --include-partial-messages`.
+    Поток stream-json переводится в OpenAI Chat Completions (stream и не-stream).
+    
+    Мост эмулирует OpenAI function calling: если запрос содержит непустой `tools`,
+    в промпт добавляется протокол и схемы инструментов, а встроенные инструменты
+    Claude Code отключаются (`--tools ""`). Модель просят отвечать блоками
+    `<tool_call>{"name":…,"arguments":{…}}</tool_call>`; потоковые блоки переводятся
+    в OpenAI-чанки `delta.tool_calls`, история с `tool_calls`/`role:"tool"`
+    рендерится обратно в те же блоки.
+    
+    Общая протокольная логика живёт только в универсальном ядре `core/` (ADR 0014,
+    AD-002: этот файл в репозитории — SSOT, локальных копий парсера нет; без core
+    мост не стартует). Весь поток Claude всегда проходит через
+    `core.tool_emulation.StreamNormalizer` поверх
+    `ToolCallParser(strict_live=True)` (AD-004, ALWAYS-ON): повреждённый XML не
+    попадает в `content`, fallback на терминальный `result` исключён, ошибка
+    потока — корректный `502 proxy_error`.
+    
+    Изображения (`image_url` data URI PNG/JPEG) мост материализует в изолированный
+    сессионный каталог `/tmp/claude-img-<uuid>/` (0700, файлы 0600) и запускает
+    Claude с `--allowedTools "Read(<каталог>/**)"`, `--restricted` и
+    `--add-dir <каталог>` (AD-003, workspace-read);
+    каталог удаляется в `finally` после подтверждённого завершения ребёнка. Без
+    картинок сохраняется прежний режим `--tools ""`.
+    
+    Reasoning публикуется в реальном времени (AD-005): нативные `thinking_delta` и
+    теги размышлений в тексте уходят в SSE как `choices[0].delta.reasoning_content`
+    до терминального события; в JSON тот же накопленный итог отдаётся как
+    `message.reasoning_content`.
+    
+    Секреты с диска не читаются: ключ авторизации берётся только из окружения
+    CLAUDE_P_BRIDGE_KEY, переменные окружения ребёнка не трогаются.
+    """
+    
+    from __future__ import annotations
+    
+    import hmac
+    import json
+    import os
+    import queue
+    import select
+    import shutil
+    import signal
+    import socket
+    import subprocess
+    import sys
+    import threading
+    import time
+    import uuid
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    from typing import Any
+    
+    for _p in (Path(__file__).resolve().parents[2], Path(__file__).resolve().parents[1]):
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+    
+    try:
+        from core.tool_emulation import (  # noqa: E402
+            DEFAULT_MAX_IMAGE_BYTES,
+            DEFAULT_MAX_IMAGES,
+            DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+            ImageInputError,
+            LiveParserError,
+            StreamNormalizer,
+            _messages_to_prompt,
+            _tool_choice_none,
+            build_tool_schemas,
+            extract_data_url_images,
+            extract_thinking_delta,
+            sanitize_tool_call,
+        )
+    except ImportError as exc:
+        # Fail-closed (AD-002): без согласованного core мост не запускается;
+        # встроенной запасной копии парсера не существует.
+        sys.stderr.write(
+            "claude-p-bridge: core.tool_emulation is required "
+>           f"(repo root {_REPO_ROOT}): {exc}\n"
+                          ^^^^^^^^^^
+        )
+E       NameError: name '_REPO_ROOT' is not defined
+
+/private/var/folders/2f/c42p3_k11d9252tg83blw_mc0000gn/T/pytest-of-aazhiry1/pytest-2261/test_config_bridge_import_fail0/server.py:82: NameError
+=========================== short test summary info ============================
+FAILED tests/test_claude_bridge.py::test_config_bridge_import_fails_without_core
+========================= 1 failed, 1 passed in 0.66s ==========================

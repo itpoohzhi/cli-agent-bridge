@@ -1,0 +1,26 @@
+{
+  "available": true,
+  "family": "OpenAI",
+  "ladder": [
+    {
+      "argv_sha256": "adaac3b419ef9d575cd761c79b589e969a5729b11576778d94eced05c5146796",
+      "end_utc": "2026-11-01T22:03:08.391913+00:00",
+      "error": null,
+      "pgid": "44936",
+      "pid": 44936,
+      "raw_err_sha256": "3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+      "raw_out_sha256": "86f36526e13805e392ad0ea4c5d885af80f9a71505c07439a5306b7b018574b4",
+      "rc": 0,
+      "start_utc": "2026-11-01T22:03:01.370821+00:00",
+      "status": "ok",
+      "transport": "codex"
+    }
+  ],
+  "launcher_sha256": "73e17fa3b946eb5280bc731591a3becfe88eb5201f9ca174175cc01dd5955ca4",
+  "round": 1,
+  "run_id": "arch-panel",
+  "schema": "pol-probe/1",
+  "setup": "fast",
+  "slot_id": "gpt-6.1-sol-medium",
+  "stage": "arch"
+}

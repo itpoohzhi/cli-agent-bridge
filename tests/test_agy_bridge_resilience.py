@@ -3826,6 +3826,7 @@ _NOTICE_MARK = "Превышен лимит времени хода agy"
 def _clean_flags(fx: _Fixture) -> None:
     """Старые флаги берутся из файла; legacy-оракулы выполняются без новой SSE-политики."""
     fx.set_env("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", "false")
+    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", None)
     for env in _FLAG_ENV.values():
         fx.set_env(env, None)
     for env in ("AGY_IDLE_TIMEOUT_S", "AGY_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"):
@@ -4614,7 +4615,7 @@ class SilentToolProgressTests(unittest.TestCase):
             _h, _s, wfile, _c = _sse_with(run_once, fail_on=2)
             self.assertEqual(outcomes, [False])
             frames = _frames_json(wfile.writes)
-            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertFalse(any(_is_stop(f) for f in frames))
             self.assertTrue(any(isinstance(f, dict) and "error" in f for f in frames))
 
     def test_silent_tool_progress_json_mode_collects_markers(self) -> None:
@@ -5325,12 +5326,12 @@ def _frames_json(frames: list[str]) -> list[object]:
     return parsed
 
 
-def _is_length(frame: object) -> bool:
+def _is_stop(frame: object) -> bool:
     if not isinstance(frame, dict) or "choices" not in frame:
         return False
     return (
         _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason")
-        == "length"
+        == "stop"
     )
 
 
@@ -5385,10 +5386,19 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
         fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
 
     def _sse_case(
-        self, state: str, kind: str, graceful: bool
+        self,
+        state: str,
+        kind: str,
+        graceful: bool,
+        *,
+        finish_reason_env: str | None = None,
+        config: dict[str, object] | None = None,
     ) -> tuple[list[object], dict[str, object]]:
         with _Fixture() as fx:
             self._flags(fx, graceful)
+            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", finish_reason_env)
+            if config is not None:
+                _write_cfg(fx, config)
             holder: dict[str, object] = {}
 
             def run_once(
@@ -5407,6 +5417,75 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             )
             return _frames_json(wfile.writes), _dict(holder["out"])
 
+    def _assert_custom_finish_reason(
+        self,
+        expected: str,
+        env: str | None,
+        config_value: object,
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            with self.subTest(state=state):
+                frames, out = self._sse_case(
+                    state,
+                    "content",
+                    True,
+                    finish_reason_env=env,
+                    config={"graceful_timeout_finish_reason": config_value},
+                )
+                terminals = [
+                    _dict(choice)["finish_reason"]
+                    for frame in frames
+                    if isinstance(frame, dict)
+                    for choice in cast("list[object]", frame.get("choices", []))
+                    if _dict(choice).get("finish_reason") is not None
+                ]
+                self.assertEqual(terminals, [expected])
+                self.assertEqual(frames[-1], "[DONE]")
+                self.assertEqual(frames.count("[DONE]"), 1)
+                self.assertTrue(out.get("graceful_done"))
+                content = "".join(_content_of(frame) for frame in frames)
+                self.assertIn("часть ответа", content)
+                self.assertEqual(content.count(_NOTICE_MARK), 1)
+            with self.subTest(state=state, mode="json"), _Fixture() as fx:
+                self._flags(fx, True)
+                fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                _write_cfg(fx, {"graceful_timeout_finish_reason": config_value})
+                sent: list[tuple[int, dict[str, object]]] = []
+                with _Sock() as sock:
+                    handler = _make_handler(sock)
+                    handler._run_once = lambda *_a: {
+                        **_timeout_out(state),
+                        "text": "часть ответа",
+                    }
+                    handler._send = lambda code, payload: sent.append((code, payload))
+                    handler._serve_json({"model": "m"})
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0][0], 200)
+                choice = _dict(cast("list[object]", sent[0][1]["choices"])[0])
+                self.assertEqual(choice["finish_reason"], expected)
+                content = _str(_dict(choice["message"])["content"])
+                self.assertIn("часть ответа", content)
+                self.assertEqual(content.count(_NOTICE_MARK), 1)
+
+    def test_silent_graceful_timeout_custom_finish_reason_env_length(self) -> None:
+        for env in ("length", "max_tokens", " LENGTH "):
+            with self.subTest(env=env):
+                self._assert_custom_finish_reason("length", env, "stop")
+        self._assert_custom_finish_reason("stop", " STOP ", "length")
+
+    def test_silent_graceful_timeout_custom_finish_reason_dynamic_config(self) -> None:
+        for value in ("length", "max_tokens", " LENGTH "):
+            with self.subTest(value=value):
+                self._assert_custom_finish_reason("length", None, value)
+
+    def test_silent_graceful_timeout_invalid_env_falls_back_to_config_or_default(
+        self,
+    ) -> None:
+        self._assert_custom_finish_reason("length", "invalid_foo", "length")
+        for value in ("stop", "invalid_foo", True, 42, None, [], {}):
+            with self.subTest(value=value):
+                self._assert_custom_finish_reason("stop", "invalid_foo", value)
+
     def test_silent_graceful_timeout_sse_matrix(self) -> None:
         for state in ("timeout", "idle_timeout"):
             for kind in ("content", "reasoning", "tool", "retained", "silent"):
@@ -5418,11 +5497,11 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                         errors = [
                             f for f in frames if isinstance(f, dict) and "error" in f
                         ]
-                        lengths = [f for f in frames if _is_length(f)]
+                        stops = [f for f in frames if _is_stop(f)]
                         notices = [f for f in frames if _NOTICE_MARK in _content_of(f)]
                         if graceful and kind != "silent":
                             self.assertEqual(errors, [])
-                            self.assertEqual(len(lengths), 1)
+                            self.assertEqual(len(stops), 1)
                             self.assertEqual(len(notices), 1)
                             notice = _content_of(notices[0])
                             self.assertIn(state, notice)
@@ -5440,12 +5519,12 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                                 sum(
                                     1
                                     for f in frames
-                                    if _is_length(f) or "error" in _dict_or_empty(f)
+                                    if _is_stop(f) or "error" in _dict_or_empty(f)
                                 ),
                                 1,
                             )
                         else:
-                            self.assertEqual(lengths, [])
+                            self.assertEqual(stops, [])
                             self.assertEqual(notices, [])
                             self.assertEqual(len(errors), 1)
                             err = _dict(_dict(errors[0])["error"])
@@ -5465,7 +5544,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
 
             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
             frames = _frames_json(wfile.writes)
-            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertFalse(any(_is_stop(f) for f in frames))
             errors = [f for f in frames if isinstance(f, dict) and "error" in f]
             self.assertEqual(
                 _dict(_dict(errors[0])["error"])["type"], "first_token_timeout"
@@ -5503,7 +5582,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                         if graceful and kind != "silent":
                             self.assertEqual(code, 200)
                             choice = _dict(cast("list[object]", payload["choices"])[0])
-                            self.assertEqual(choice["finish_reason"], "length")
+                            self.assertEqual(choice["finish_reason"], "stop")
                             message = _dict(choice["message"])
                             content = _str(message["content"])
                             self.assertEqual(content.count(_NOTICE_MARK), 1)
@@ -5542,11 +5621,11 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             ctx = {"model": "m", "t_req_start": 9000.0 - 3000.0}
             _h, sock, wfile, _c = _sse_with(run_once, ctx, clock=clock, cost=0.0)
             frames = _frames_json(wfile.writes)
-            self.assertTrue(any(_is_length(f) for f in frames))
+            self.assertTrue(any(_is_stop(f) for f in frames))
             self.assertEqual(frames[-1], "[DONE]")
             self.assertEqual(
                 sock.timeouts, [5.0, 5.0, 5.0, 5.0]
-            )  # суффикс+notice+length+DONE
+            )  # суффикс+notice+stop+DONE
 
     def test_silent_graceful_timeout_one_shared_window_for_all_final_writes(
         self,
@@ -5573,9 +5652,9 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 sum(1 for f in frames if _NOTICE_MARK in _content_of(f)), 1
             )
             self.assertEqual(
-                sum(1 for f in frames if _is_length(f)), 1
+                sum(1 for f in frames if _is_stop(f)), 1
             )  # третья запись
-            self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + length
+            self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + stop
             self.assertLessEqual(max(sock.timeouts), 5.0)
 
     def test_silent_graceful_timeout_window_never_crosses_request_ceiling(self) -> None:
@@ -5612,14 +5691,14 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 return out
 
             holder: list[dict[str, object]] = []
-            # вызовы: 1 role, 2 суффикс, 3 notice (падает) -> length/DONE не пишутся
+            # вызовы: 1 role, 2 суффикс, 3 notice (падает) -> stop/DONE не пишутся
             _h, sock, wfile, _c = _sse_with(
                 run_once, {"model": "m", "t_req_start": 5000.0}, fail_on=3
             )
             self.assertEqual(wfile.calls, 3)
             frames = _frames_json(wfile.writes)
             self.assertNotIn("[DONE]", frames)
-            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertFalse(any(_is_stop(f) for f in frames))
             self.assertFalse(any(isinstance(f, dict) and "error" in f for f in frames))
             self.assertIs(
                 holder[0].get("graceful_done"), True
@@ -5640,7 +5719,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
 
             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
             frames = _frames_json(wfile.writes)
-            self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
+            self.assertEqual(sum(1 for f in frames if _is_stop(f)), 1)
             self.assertEqual(frames[-1], "[DONE]")
 
     def test_silent_graceful_timeout_run_once_finalizes_before_close_and_never_retries(
@@ -5786,7 +5865,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 self.assertEqual(len(texts), 3)
                 self.assertIn(_NOTICE_MARK, texts[2])
                 self.assertIn(state, texts[2])
-                self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
+                self.assertEqual(sum(1 for f in frames if _is_stop(f)), 1)
                 self.assertEqual(list(cast("list[float]", _bval("_last_ok"))), [0.0])
                 self.assertEqual(len(cast("dict[int, object]", _bval("_active"))), 0)
 
@@ -5803,7 +5882,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             code, payload = sent[0]
             self.assertEqual(code, 200)
             choice = _dict(cast("list[object]", payload["choices"])[0])
-            self.assertEqual(choice["finish_reason"], "length")
+            self.assertEqual(choice["finish_reason"], "stop")
             content = _str(_dict(choice["message"])["content"])
             self.assertTrue(content.startswith("Hello world"))
             self.assertEqual(content.count(_NOTICE_MARK), 1)
@@ -5947,7 +6026,7 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
                 self.assertEqual(len(sent), 1)
                 self.assertEqual(sent[0][0], 200)
                 choice = _dict(cast("list[object]", sent[0][1]["choices"])[0])
-                self.assertEqual(choice["finish_reason"], "length")
+                self.assertEqual(choice["finish_reason"], "stop")
 
     def test_silent_rw001_json_finalizes_before_run_close(self) -> None:
         order: list[str] = []
@@ -13315,7 +13394,7 @@ class DialogueStreamResilienceTests(unittest.TestCase):
         )
         self.assertIn(b'"error"', b"".join(downstream))
 
-    def test_enabled_graceful_timeout_retains_single_length_final(self) -> None:
+    def test_enabled_graceful_timeout_retains_single_stop_final(self) -> None:
         with mock.patch.dict(os.environ, {"AGY_GRACEFUL_TIMEOUT_ON_PARTIAL": "true"}):
             _, body, frames, _ = self._stream(
                 self._out(state="idle_timeout", rc=124), (("text", "часть ответа"),)
@@ -13326,7 +13405,7 @@ class DialogueStreamResilienceTests(unittest.TestCase):
             for choice in frame["choices"]
             if choice["finish_reason"]
         ]
-        self.assertEqual(terminals, ["length"])
+        self.assertEqual(terminals, ["stop"])
         self.assertEqual(body.count("data: [DONE]"), 1)
         self.assertFalse(any("error" in frame for frame in frames))
 

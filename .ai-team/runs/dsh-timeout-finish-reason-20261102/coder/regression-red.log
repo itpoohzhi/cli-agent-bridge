@@ -1,0 +1,2814 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.2.0, pluggy-1.7.0 -- /Users/aazhiry1/work/src/cli-agent-bridge/.venv/bin/python3.14
+cachedir: .pytest_cache
+rootdir: /Users/aazhiry1/tmp/cli-agent-bridge/bugfix-no-ticket-dsh-timeout-finish-reason--coder-20261102
+collecting ... collected 7 items
+
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse PASSED [ 14%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_dynamic_config_and_uppercase_alias_emit_length 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_dynamic_config_and_uppercase_alias_emit_length PASSED [ 28%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_empty_env_uses_dynamic_config 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_empty_env_uses_dynamic_config PASSED [ 42%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_env_length_and_max_tokens_override_config 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_env_length_and_max_tokens_override_config PASSED [ 57%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop PASSED [ 71%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags 
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags PASSED [ 85%]
+tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_reason_reloads_after_ttl_without_restart FAILED [100%]
+
+=================================== FAILURES ===================================
+_ GracefulTimeoutFinishReasonTests.test_default_emits_stop_in_json_and_sse (state='timeout', stream=False) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_default_emits_stop_in_json_and_sse>
+expected = 'stop', env = None, config = None
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_default_emits_stop_in_json_and_sse (state='timeout', stream=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_default_emits_stop_in_json_and_sse>
+expected = 'stop', env = None, config = None
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_default_emits_stop_in_json_and_sse (state='idle_timeout', stream=False) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_default_emits_stop_in_json_and_sse>
+expected = 'stop', env = None, config = None
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_default_emits_stop_in_json_and_sse (state='idle_timeout', stream=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_default_emits_stop_in_json_and_sse>
+expected = 'stop', env = None, config = None
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config='') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': ''}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config='') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': ''}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config='') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': ''}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config='') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': ''}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config='  ') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': '  '}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config='  ') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': '  '}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config='  ') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': '  '}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config='  ') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': '  '}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config='invalid') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None
+config = {'graceful_timeout_finish_reason': 'invalid'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config='invalid') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None
+config = {'graceful_timeout_finish_reason': 'invalid'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config='invalid') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None
+config = {'graceful_timeout_finish_reason': 'invalid'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config='invalid') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None
+config = {'graceful_timeout_finish_reason': 'invalid'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config=None) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': None}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config=None) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': None}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config=None) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': None}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config=None) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': None}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': True}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': True}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': True}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': True}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config=1) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': 1}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config=1) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': 1}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config=1) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': 1}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config=1) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': 1}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config=[]) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': []}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config=[]) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': []}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config=[]) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': []}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config=[]) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': []}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False, config={}) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': {}}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True, config={}) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': {}}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False, config={}) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': {}}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True, config={}) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = None, config = {'graceful_timeout_finish_reason': {}}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=False) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = 'invalid'
+config = {'graceful_timeout_finish_reason': 'length'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='timeout', stream=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = 'invalid'
+config = {'graceful_timeout_finish_reason': 'length'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=False) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = 'invalid'
+config = {'graceful_timeout_finish_reason': 'length'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_or_empty_values_fall_back_to_stop (state='idle_timeout', stream=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_or_empty_values_fall_back_to_stop>
+expected = 'stop', env = 'invalid'
+config = {'graceful_timeout_finish_reason': 'length'}
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+    
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+    
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+>                   self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+E                   AssertionError: Lists differ: ['length'] != ['stop']
+E                   
+E                   First differing element 0:
+E                   'length'
+E                   'stop'
+E                   
+E                   - ['length']
+E                   + ['stop']
+
+tests/test_agy_bridge_resilience.py:5431: AssertionError
+_ GracefulTimeoutFinishReasonTests.test_invalid_reason_keeps_other_valid_flags (value='invalid') _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_reason_keeps_other_valid_flags>
+
+    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
+        parse = _bfn("_parse_runtime_flags")
+        for value in ("invalid", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                flags = parse(json.dumps({
+                    "emit_tool_trace": True,
+                    "graceful_timeout_finish_reason": value,
+                }))
+                self.assertTrue(getattr(flags, "emit_tool_trace"))
+                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
+>               self.assertEqual(getattr(flags, "graceful_timeout_finish_reason"), "stop")
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AttributeError: '_RuntimeFlags' object has no attribute 'graceful_timeout_finish_reason'
+
+tests/test_agy_bridge_resilience.py:5486: AttributeError
+_ GracefulTimeoutFinishReasonTests.test_invalid_reason_keeps_other_valid_flags (value=None) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_reason_keeps_other_valid_flags>
+
+    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
+        parse = _bfn("_parse_runtime_flags")
+        for value in ("invalid", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                flags = parse(json.dumps({
+                    "emit_tool_trace": True,
+                    "graceful_timeout_finish_reason": value,
+                }))
+                self.assertTrue(getattr(flags, "emit_tool_trace"))
+                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
+>               self.assertEqual(getattr(flags, "graceful_timeout_finish_reason"), "stop")
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AttributeError: '_RuntimeFlags' object has no attribute 'graceful_timeout_finish_reason'
+
+tests/test_agy_bridge_resilience.py:5486: AttributeError
+_ GracefulTimeoutFinishReasonTests.test_invalid_reason_keeps_other_valid_flags (value=True) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_reason_keeps_other_valid_flags>
+
+    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
+        parse = _bfn("_parse_runtime_flags")
+        for value in ("invalid", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                flags = parse(json.dumps({
+                    "emit_tool_trace": True,
+                    "graceful_timeout_finish_reason": value,
+                }))
+                self.assertTrue(getattr(flags, "emit_tool_trace"))
+                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
+>               self.assertEqual(getattr(flags, "graceful_timeout_finish_reason"), "stop")
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AttributeError: '_RuntimeFlags' object has no attribute 'graceful_timeout_finish_reason'
+
+tests/test_agy_bridge_resilience.py:5486: AttributeError
+_ GracefulTimeoutFinishReasonTests.test_invalid_reason_keeps_other_valid_flags (value=1) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_reason_keeps_other_valid_flags>
+
+    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
+        parse = _bfn("_parse_runtime_flags")
+        for value in ("invalid", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                flags = parse(json.dumps({
+                    "emit_tool_trace": True,
+                    "graceful_timeout_finish_reason": value,
+                }))
+                self.assertTrue(getattr(flags, "emit_tool_trace"))
+                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
+>               self.assertEqual(getattr(flags, "graceful_timeout_finish_reason"), "stop")
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AttributeError: '_RuntimeFlags' object has no attribute 'graceful_timeout_finish_reason'
+
+tests/test_agy_bridge_resilience.py:5486: AttributeError
+_ GracefulTimeoutFinishReasonTests.test_invalid_reason_keeps_other_valid_flags (value=[]) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_reason_keeps_other_valid_flags>
+
+    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
+        parse = _bfn("_parse_runtime_flags")
+        for value in ("invalid", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                flags = parse(json.dumps({
+                    "emit_tool_trace": True,
+                    "graceful_timeout_finish_reason": value,
+                }))
+                self.assertTrue(getattr(flags, "emit_tool_trace"))
+                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
+>               self.assertEqual(getattr(flags, "graceful_timeout_finish_reason"), "stop")
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AttributeError: '_RuntimeFlags' object has no attribute 'graceful_timeout_finish_reason'
+
+tests/test_agy_bridge_resilience.py:5486: AttributeError
+_ GracefulTimeoutFinishReasonTests.test_invalid_reason_keeps_other_valid_flags (value={}) _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_invalid_reason_keeps_other_valid_flags>
+
+    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
+        parse = _bfn("_parse_runtime_flags")
+        for value in ("invalid", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                flags = parse(json.dumps({
+                    "emit_tool_trace": True,
+                    "graceful_timeout_finish_reason": value,
+                }))
+                self.assertTrue(getattr(flags, "emit_tool_trace"))
+                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
+>               self.assertEqual(getattr(flags, "graceful_timeout_finish_reason"), "stop")
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AttributeError: '_RuntimeFlags' object has no attribute 'graceful_timeout_finish_reason'
+
+tests/test_agy_bridge_resilience.py:5486: AttributeError
+_ GracefulTimeoutFinishReasonTests.test_reason_reloads_after_ttl_without_restart _
+
+self = <test_agy_bridge_resilience.GracefulTimeoutFinishReasonTests testMethod=test_reason_reloads_after_ttl_without_restart>
+
+    def test_reason_reloads_after_ttl_without_restart(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+>           reason = _bfn("_graceful_finish_reason")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_agy_bridge_resilience.py:5494: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = '_graceful_finish_reason'
+
+    def _bfn(name: str) -> Callable[..., object]:
+>       return cast(Callable[..., object], getattr(_bridge(), name))
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'agy_bridge_server_under_test' has no attribute '_graceful_finish_reason'
+
+tests/test_agy_bridge_resilience.py:852: AttributeError
+=========================== short test summary info ============================
+SUBFAILED(state='timeout', stream=False) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse
+SUBFAILED(state='timeout', stream=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse
+SUBFAILED(state='idle_timeout', stream=False) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse
+SUBFAILED(state='idle_timeout', stream=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_default_emits_stop_in_json_and_sse
+SUBFAILED(state='timeout', stream=False, config='') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config='') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config='') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config='') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False, config='  ') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config='  ') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config='  ') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config='  ') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False, config='invalid') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config='invalid') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config='invalid') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config='invalid') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False, config=None) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config=None) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config=None) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config=None) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False, config=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False, config=1) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config=1) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config=1) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config=1) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False, config=[]) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config=[]) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config=[]) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config=[]) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False, config={}) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True, config={}) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False, config={}) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True, config={}) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=False) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='timeout', stream=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=False) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(state='idle_timeout', stream=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_or_empty_values_fall_back_to_stop
+SUBFAILED(value='invalid') tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags
+SUBFAILED(value=None) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags
+SUBFAILED(value=True) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags
+SUBFAILED(value=1) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags
+SUBFAILED(value=[]) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags
+SUBFAILED(value={}) tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_invalid_reason_keeps_other_valid_flags
+FAILED tests/test_agy_bridge_resilience.py::GracefulTimeoutFinishReasonTests::test_reason_reloads_after_ttl_without_restart
+=============== 47 failed, 6 passed, 40 subtests passed in 5.37s ===============

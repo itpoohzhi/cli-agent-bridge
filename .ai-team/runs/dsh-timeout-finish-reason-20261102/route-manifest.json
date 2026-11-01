@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-timeout-finish-reason-20261102",
+  "preset": "analyst-teamlead",
+  "child_preset": "teamlead-with-architect",
+  "analyst_required": true,
+  "architect_required": true,
+  "downstream_panel": true,
+  "reviewer_skip": true,
+  "criticality": "S2",
+  "setup": "default",
+  "arch_panel_verdict": "ACCEPT",
+  "arch_panel_proof_sha256": "234e2d3902003de67d97aae423ae2017f95921656e62d0a0fb4ae25e57f8dd2e",
+  "arch_panel_receipt": ".ai-team/runs/dsh-timeout-finish-reason-20261102/receipts/arch-panel.json",
+  "arch_panel_status": "PASS",
+  "council_verdict": "ACCEPT",
+  "council_proof_sha256": "79785efb4c23952dd6b29f7b3703028801aa40b985f7e9a2297ba45b9984631b",
+  "council_receipt": ".ai-team/runs/dsh-timeout-finish-reason-20261102/receipts/code-panel.json",
+  "council_status": "PASS",
+  "created_at": "2026-11-02T00:51:00+03:00",
+  "analyst_mode": "development",
+  "roles": {
+    "analyst": {
+      "slot": "gpt-6.1-sol",
+      "family": "OpenAI",
+      "transport": "codex"
+    },
+    "architect": {
+      "slot": "gpt-6.1-sol",
+      "family": "OpenAI",
+      "transport": "codex"
+    },
+    "coder": {
+      "slot": "gpt-6.1-sol",
+      "family": "OpenAI",
+      "transport": "codex"
+    }
+  }
+}
