@@ -482,11 +482,24 @@ class TestHealthAndModels(BridgeCase):
         self.assertIn("muse-wonder-full-1.0", {e["id"] for e in body["data"]})
         self.assertEqual(body["data"][0]["id"], "muse-wonder-full-1.0")  # умолчание каталога первым
         self.assertIn("claude-sonnet-5-5", {e["id"] for e in body["data"]})
+        expected_keys = sorted(
+            [
+                "available",
+                "context_length",
+                "context_window",
+                "created",
+                "default_reasoning_effort",
+                "id",
+                "max_output_tokens",
+                "modalities",
+                "object",
+                "owned_by",
+                "supported_reasoning_efforts",
+                "supports_thinking",
+            ]
+        )
         for entry in body["data"]:
-            self.assertEqual(
-                sorted(entry),
-                sorted(["id", "object", "owned_by", "created", "context_length"]),
-            )
+            self.assertEqual(sorted(entry), expected_keys)
         self.assertNotIn("nonexistent-model-xyz", [e["id"] for e in body["data"]])
         status, _ = self._get("/v1/models", auth=False)
         self.assertEqual(status, 401)

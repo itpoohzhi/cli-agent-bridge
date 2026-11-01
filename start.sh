@@ -30,7 +30,7 @@ export BRIDGE_MAX_HTTP_CONNECTIONS="${BRIDGE_MAX_HTTP_CONNECTIONS:-128}"
 BRIDGE_INSTR_LIMIT="$(_first '' BRIDGE_INSTR_LIMIT DROID_DSH_BRIDGE_INSTR_LIMIT)"
 # Предел блока валидирует сервер (b_guard.resolve_block_limit): пусто — умолчание 100000.
 [[ -n "$BRIDGE_INSTR_LIMIT" ]] && export BRIDGE_INSTR_LIMIT
-BRIDGE_KEY="$(_first '' BRIDGE_KEY DROID_DSH_BRIDGE_KEY)"
+BRIDGE_KEY="${BRIDGE_KEY:-${DROID_DSH_BRIDGE_KEY:-}}"
 if [[ -z "$BRIDGE_KEY" && -f "$HOME/.dsh/.env" ]]; then
   for _name in BRIDGE_KEY DROID_DSH_BRIDGE_KEY; do
     _k="$(grep -E "^${_name}=" "$HOME/.dsh/.env" | tail -n 1 | cut -d= -f2- || true)"

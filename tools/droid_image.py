@@ -131,7 +131,11 @@ class _Rpc:
     """Минимальный клиент stream-jsonrpc одного процесса образа (только для проб)."""
 
     def __init__(self, image: Path, cwd: Path, home: Path):
-        env = {k: v for k, v in os.environ.items() if k != "DROID_DSH_BRIDGE_KEY"}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("BRIDGE_KEY", "DROID_DSH_BRIDGE_KEY")
+        }
         env["FACTORY_HOME_OVERRIDE"] = str(home)
         env["DROID_AUTO"] = "off"
         self.proc = subprocess.Popen(

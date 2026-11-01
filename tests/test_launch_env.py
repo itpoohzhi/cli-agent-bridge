@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from core.backend_adapter import is_bridge_secret_name, strip_bridge_secrets  # noqa: E402
+from core.turn_session_manager import mask_secrets  # noqa: E402
+from tools import droid_image  # noqa: E402
 
 FAKE_FACTORY_KEY = "fk-TEST-NOT-REAL"
 FAKE_BRIDGE_KEY = "bridge-test-key-not-real"
@@ -135,6 +137,61 @@ class TestLaunchEnv(unittest.TestCase):
             self.assertEqual(server._bridge_env("HOST", "127.0.0.1"), "10.0.0.3")
             os.environ["BRIDGE_HOST"] = "  "
             self.assertEqual(server._bridge_env("HOST", "127.0.0.1"), "10.0.0.2")
+
+    def test_bridge_env_accepts_full_canonical_name(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(server._bridge_env("BRIDGE_KEY", "default"), "default")
+            os.environ["DROID_DSH_BRIDGE_KEY"] = "legacy-key"
+            self.assertEqual(server._bridge_env("BRIDGE_KEY"), "legacy-key")
+            os.environ["BRIDGE_KEY"] = "canonical-key"
+            self.assertEqual(server._bridge_env("BRIDGE_KEY"), "canonical-key")
+
+    def test_bridge_env_full_name_empty_value_falls_back_to_legacy(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"BRIDGE_KEY": "", "DROID_DSH_BRIDGE_KEY": "legacy-key"},
+            clear=True,
+        ):
+            self.assertEqual(server._bridge_env("BRIDGE_KEY", "default"), "legacy-key")
+            os.environ.pop("DROID_DSH_BRIDGE_KEY")
+            self.assertEqual(server._bridge_env("BRIDGE_KEY", "default"), "default")
+
+    def test_snapshot_masking_covers_bridge_key_assignment_without_env(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for name in ("BRIDGE_KEY", "DROID_DSH_BRIDGE_KEY", "bridge_key"):
+                for separator in ("=", ": "):
+                    with self.subTest(name=name, separator=separator):
+                        self.assertEqual(
+                            mask_secrets(f"{name}{separator}{FAKE_BRIDGE_KEY}"),
+                            f"{name}{separator}[REDACTED]",
+                        )
+
+    def test_snapshot_masking_covers_bridge_key_value_from_env(self) -> None:
+        with mock.patch.dict(os.environ, {"BRIDGE_KEY": FAKE_BRIDGE_KEY}, clear=True):
+            self.assertEqual(
+                mask_secrets("diagnostic: " + FAKE_BRIDGE_KEY),
+                "diagnostic: [REDACTED]",
+            )
+
+    def test_image_probe_child_env_drops_both_bridge_keys(self) -> None:
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "BRIDGE_KEY": FAKE_BRIDGE_KEY,
+                    "DROID_DSH_BRIDGE_KEY": "legacy-test-key",
+                    "FACTORY_API_KEY": FAKE_FACTORY_KEY,
+                },
+                clear=True,
+            ),
+            mock.patch.object(droid_image.subprocess, "Popen") as popen,
+            mock.patch.object(droid_image.threading.Thread, "start"),
+        ):
+            droid_image._Rpc(Path("/fake/image"), Path("/fake/cwd"), Path("/fake/home"))
+        child_env = popen.call_args.kwargs["env"]
+        self.assertNotIn("BRIDGE_KEY", child_env)
+        self.assertNotIn("DROID_DSH_BRIDGE_KEY", child_env)
+        self.assertEqual(child_env["FACTORY_API_KEY"], FAKE_FACTORY_KEY)
 
     def test_masking_covers_short_factory_key(self):
         masked = server._mask_secrets("auth: " + FAKE_FACTORY_KEY)
