@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.2",
+  "task_id": "agy-picker-dedup-20261101",
+  "run_id": "agy-picker-dedup-20261101",
+  "criticality": "S2",
+  "entry": "full",
+  "reviewer_skip": true,
+  "parent_skill": "analyst-teamlead",
+  "phase": "READY_FOR_PR",
+  "iteration": 1,
+  "status": "COMPLETE",
+  "budgets": {
+    "code_gate_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "reviewer_to_coder": {
+      "used": 0,
+      "max": 5
+    },
+    "arch_panel_to_architect": {
+      "used": 0,
+      "max": 5
+    }
+  },
+  "last_transition": "FINAL_PASS",
+  "last_blocker_id": null,
+  "same_blocker_count": 0,
+  "updated_at": "2026-11-01T22:43:56.965370+00:00",
+  "panel_proofs": {
+    "arch": {
+      "round_dir": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/panel/arch/r3",
+      "manifest_sha256": "7dbca3ba3792e167f3f70215b100e75b83c7a7f9bc7985c39be1a1097c1c0a28",
+      "artifact_sha256": "e70bb0e02e90cca13b6977392566add9e9a34df58dc91e254b66e3fd50ca157f",
+      "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/architecture/architecture-packet.json",
+      "receipt_sha256": "f16a14c060015667cad94d77e6aa609043974a315984c1203c4854e67ab78730",
+      "verified_at": "2026-11-01T20:31:00.631899+00:00"
+    },
+    "council": {
+      "round_dir": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/panel/council/r3",
+      "manifest_sha256": "5bab5e8d8783c7e7ef73e4b4ae676e3654db9247f16a831ab2066599c82d3443",
+      "artifact_sha256": "171a1875f650cdc593ecdba1f3a5b3fc015691f7010673e5f3b0b7e34649c9ab",
+      "artifact_path": "/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/agy-picker-dedup-20261101/teamlead/package.md",
+      "receipt_sha256": "69a8eb811d2a05013a0ef1836c201bbda0b2e16da9ae4f81979bdd389c4d849c",
+      "verified_at": "2026-11-01T22:43:56.955149+00:00"
+    }
+  }
+}

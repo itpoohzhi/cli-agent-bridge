@@ -27,6 +27,7 @@ from core.backend_adapter import AdapterRegistry  # noqa: E402
 ALIASES = (
     "gemini-4-argon-high",
     "gemini-4-argon-medium",
+    "gemini-4-argon-low",
     "gemini-3.8-flash-high",
     "gemini-3.8-flash-medium",
     "gemini-3.8-flash-low",
@@ -382,7 +383,7 @@ def test_log_lines_contain_ids(wire, monkeypatch, tmp_path):
         assert status == 200, body
         assert any(
             line.startswith(
-                "exec model=gemini-3.8-flash effort=high effort_source=alias"
+                "exec model=gemini-3.8-flash effort=low effort_source=alias"
             )
             and "request_id=req_cli_alias" in line
             for line in wire.logs
@@ -459,6 +460,42 @@ def test_models_lists_advertised_aliases(wire, monkeypatch):
         m["id"]
         for m in json.loads(wire.call(path="/v1/models", method="GET")[2])["data"]
     }
+
+
+def test_models_default_does_not_advertise_aliases(wire, monkeypatch):
+    for prefix in ("BRIDGE_", "DROID_DSH_BRIDGE_"):
+        monkeypatch.delenv(prefix + "ADVERTISE_EFFORT_ALIASES", raising=False)
+    cfg = server._load_request_config()
+    assert cfg["ADVERTISED_EFFORT_ALIASES"] == ()
+    assert server.ADVERTISED_EFFORT_ALIASES == ()
+    monkeypatch.setattr(
+        server, "ADVERTISED_EFFORT_ALIASES", cfg["ADVERTISED_EFFORT_ALIASES"]
+    )
+    status, _, body = wire.call(path="/v1/models", method="GET")
+    assert status == 200
+    assert not set(ALIASES) & {model["id"] for model in json.loads(body)["data"]}
+
+
+def test_models_env_enables_only_requested_aliases(wire, monkeypatch):
+    requested = ("gemini-4-argon-high", "claude-sonnet-5-5-xhigh")
+    monkeypatch.setenv("BRIDGE_ADVERTISE_EFFORT_ALIASES", ",".join(requested))
+    cfg = server._load_request_config()
+    assert cfg["ADVERTISED_EFFORT_ALIASES"] == requested
+    monkeypatch.setattr(
+        server, "ADVERTISED_EFFORT_ALIASES", cfg["ADVERTISED_EFFORT_ALIASES"]
+    )
+    status, _, body = wire.call(path="/v1/models", method="GET")
+    assert status == 200
+    assert set(ALIASES) & {model["id"] for model in json.loads(body)["data"]} == set(
+        requested
+    )
+
+
+@pytest.mark.parametrize("alias", ALIASES)
+def test_all_ecosystem_effort_aliases_keep_resolving(alias):
+    base, _, effort = alias.rpartition("-")
+    assert server.EFFORT_ALIAS_ENABLED is True
+    assert server._resolve_model_alias(alias, server.FLEET["models"]) == (base, effort)
 
 
 def test_trace_resolution_overhead():

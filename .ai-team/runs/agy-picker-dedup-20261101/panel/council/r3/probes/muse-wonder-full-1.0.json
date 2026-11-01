@@ -1,0 +1,26 @@
+{
+  "available": false,
+  "family": "Meta",
+  "ladder": [
+    {
+      "argv_sha256": "464a08d7e6cd1b8b241ff440371acc57873cc86ac65d3f8615d487832488dca7",
+      "end_utc": "2026-11-01T22:41:56.488443+00:00",
+      "error": null,
+      "pgid": "96427",
+      "pid": 96427,
+      "raw_err_sha256": "581faa80c8ef2c436a3ded2d3ecb9f46a7d8bff9a0f06326bf4d234b374b8c23",
+      "raw_out_sha256": "778c71be819487ba7b0aeefc0bee9686d2427d829184648fca982ab52d8ac82a",
+      "rc": 1,
+      "start_utc": "2026-11-01T22:41:52.306644+00:00",
+      "status": "failed",
+      "transport": "muse"
+    }
+  ],
+  "launcher_sha256": "53a949ad4200afbf9eea0f3e394dd3fc341f95b5d1c573b106ef5f864c455366",
+  "round": 3,
+  "run_id": "agy-picker-dedup-20261101",
+  "schema": "pol-probe/1",
+  "setup": "default",
+  "slot_id": "muse-wonder-full-1.0",
+  "stage": "council"
+}

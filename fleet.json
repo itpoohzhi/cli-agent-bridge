@@ -143,6 +143,8 @@
       "backend": "agy",
       "name": "Gemini 3.8 Flash (AGY bridge)",
       "efforts": [
+        "low",
+        "medium",
         "high"
       ],
       "default_effort": "high",
@@ -383,6 +385,8 @@
       "backend": "agy",
       "name": "Gemini 4 Argon (AGY bridge)",
       "efforts": [
+        "low",
+        "medium",
         "high"
       ],
       "default_effort": "high",

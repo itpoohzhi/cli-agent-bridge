@@ -269,7 +269,7 @@ def _load_request_config() -> dict[str, Any]:
         suffixes = tuple(default_suffixes.split(","))
     advertised = _bridge_env(
         "ADVERTISE_EFFORT_ALIASES",
-        "gemini-4-argon-high,gemini-4-argon-medium,gemini-3.8-flash-high,gemini-3.8-flash-medium,gemini-3.8-flash-low,claude-opus-5-5-high,claude-sonnet-5-5-xhigh",
+        "off",
     )
     return {
         "REQUEST_ATTRIBUTION_ENABLED": boolean("REQUEST_ATTRIBUTION_ENABLED"),

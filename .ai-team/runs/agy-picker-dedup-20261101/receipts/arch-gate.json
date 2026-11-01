@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "gate": "ARCH_GATE",
+  "status": "PASS",
+  "run_id": "agy-picker-dedup-20261101",
+  "criticality": "S2",
+  "packet_sha256": "e70bb0e02e90cca13b6977392566add9e9a34df58dc91e254b66e3fd50ca157f",
+  "verification_surface_sha256": "ccacfa3b66ccb3852f02fbc78c64422347bd90f484694087b18563091a627325",
+  "protected_paths_sha256": "4c89fde3ee3c0d7a64dd4ab2948e86e12ef246bd1d86aebc486d32e1805b3da8",
+  "architect_worktree_sha256": "09d5f6032eedcd56632fc2dc6d3e1b21d329419d4cd6b549598fbfbc01b86d43",
+  "materialized_targets": 0
+}

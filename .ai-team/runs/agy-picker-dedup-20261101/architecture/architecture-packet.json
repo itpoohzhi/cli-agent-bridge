@@ -1,0 +1,818 @@
+{
+  "schema_version": "1.0",
+  "task_id": "agy-picker-dedup-20261101",
+  "run_id": "agy-picker-dedup-20261101",
+  "criticality": "S2",
+  "profile": "default",
+  "status": "APPROVED",
+  "role_plan": {
+    "path": "plans/architect-01.json",
+    "sha256": "f0516734963e405a9421a9b86528297d72c1fc0ad6cbfbc588c2b1278184cf4e"
+  },
+  "requirement_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004"
+  ],
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "statement": "В desktop и web ~/.dsh/profiles/<profile>/cordis.patch.yml удалить только 5 effort-клонов agy-bridge (gemini-4-argon-high, gemini-4-argon-medium, gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low) и 2 effort-клона claude-p-bridge (claude-opus-5-5-high, claude-sonnet-5-5-xhigh) из llm-pi-ai.config.providers.<provider>.models и соответствующие 7 пар из allowedModels каждого профиля. Сохранить базовые модели Claude и их лестницы. До записи — бэкап в ~/work/backups/ и атомарный CAS каждого файла.",
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002",
+        "EVD-003",
+        "EVD-004",
+        "EVD-005",
+        "EVD-015"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "REQ-002",
+      "statement": "У gemini-4-argon и gemini-3.8-flash в обоих профилях установить reasoningEfforts {off: null, low: low, medium: medium, high: high, xhigh: high, max: high}; сохранить остальные поля моделей.",
+      "evidence_ids": [
+        "EVD-006",
+        "EVD-008",
+        "EVD-009"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ]
+    },
+    {
+      "id": "REQ-003",
+      "statement": "В корневом server.py изменить только дефолт ADVERTISE_EFFORT_ALIASES на off (итог ADVERTISED_EFFORT_ALIASES == ()); сохранить BRIDGE_ADVERTISE_EFFORT_ALIASES и поведение явного списка. Полностью сохранить _resolve_model_alias и EFFORT_ALIAS_ENABLED=True на POST /v1/chat/completions.",
+      "evidence_ids": [
+        "EVD-011",
+        "EVD-012",
+        "EVD-014"
+      ],
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "REQ-004",
+      "statement": "В корневом fleet.json установить efforts [low, medium, high] для gemini-4-argon и gemini-3.8-flash. Покрыть изменения регрессиями в tests/test_dsh_profile_config.py и tests/test_request_attribution.py; сохранить существующие проверки каталога и scoping.",
+      "evidence_ids": [
+        "EVD-008",
+        "EVD-010",
+        "EVD-013",
+        "EVD-014"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-003"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/desktop/cordis.patch.yml:448-490",
+      "claim": "В секции `llm-pi-ai.config.providers.agy-bridge.models` объявлены 7 моделей: 2 базовые (`gemini-4-argon`, `gemini-3.8-flash`) и 5 effort-суффиксных клонов (`gemini-4-argon-high`, `gemini-4-argon-medium`, `gemini-3.8-flash-high`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-low`).",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-001",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/web/cordis.patch.yml:516-558",
+      "claim": "В секции `llm-pi-ai.config.providers.agy-bridge.models` объявлены те же 7 моделей (2 базовые + 5 effort-клонов).",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-002",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/desktop/cordis.patch.yml:64-77",
+      "claim": "В `subagent-model-selection-settings.config.allowedModels` перечислены все 7 записей `agy-bridge` (включая 5 клонов на строках 68-77) и 2 клона `claude-p-bridge` на строках 54-57.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-003",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/web/cordis.patch.yml:651-664",
+      "claim": "В `subagent-model-selection-settings.config.allowedModels` перечислены все 7 записей `agy-bridge` (включая 5 клонов на строках 655-664) и 2 клона `claude-p-bridge` на строках 641-644.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-004",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-005",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/desktop/cordis.patch.yml:399-410",
+      "claim": "В `llm-pi-ai.config.providers.claude-p-bridge.models` (и аналогично в `~/.dsh/profiles/web/cordis.patch.yml:467-478`) объявлены 2 effort-клона (`claude-opus-5-5-high`, `claude-sonnet-5-5-xhigh`) поверх базовых `claude-opus-5-5` и `claude-sonnet-5-5`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-005",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-006",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/desktop/cordis.patch.yml:454",
+      "claim": "У базовых моделей `gemini-4-argon` (стр. 454, web стр. 522) и `gemini-3.8-flash` (стр. 460, web стр. 528) задано `reasoningEfforts: { off: null, low: low, medium: high, high: high, xhigh: high, max: high }` — уровень `medium` ошибочно мапится в `high`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-006",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-007",
+      "kind": "document",
+      "ref": "~/Мой диск/skils/dsh-model-onboarding/SKILL.md:48",
+      "claim": "Канон прямо запрещает плодить модели-дубликаты под каждый reasoning-effort (`Нельзя: Плодить модели-дубликаты под каждый reasoning-effort -> Вместо: Единая базовая модель в cordis.patch.yml + полная лестница reasoningEfforts`, стр. 48 и 117) и хардкодить ID моделей в `server.py` (стр. 116).",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-007",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-008",
+      "kind": "code",
+      "ref": "~/work/src/cli-agent-bridge/bridges/agy-bridge/fleet.json:49-54",
+      "claim": "В каталоге `agy-bridge` для `gemini-4-argon` (стр. 49-54) и `gemini-3.8-flash` (стр. 87-92) доказаны и разрешены 3 уровня: `\"efforts\": [\"low\", \"medium\", \"high\"]`, `\"default_effort\": \"high\"`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-008",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-009",
+      "kind": "code",
+      "ref": "~/work/src/cli-agent-bridge/bridges/agy-bridge/server.py:6413-6431",
+      "claim": "`agy-bridge` (`:9887`) проверяет `candidate in model[\"efforts\"]` (`[\"low\", \"medium\", \"high\"]`) и возвращает HTTP 400 `unsupported_reasoning_effort` для `xhigh`/`max`; поэтому в `cordis.patch.yml` маппинг `xhigh: high, max: high` защищает от 400, а `medium: medium` передаётся штатно.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-009",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-010",
+      "kind": "code",
+      "ref": "~/work/src/cli-agent-bridge/fleet.json:145-148",
+      "claim": "В корневом `fleet.json` хаба (`:9882`) для `gemini-3.8-flash` (стр. 145-148) и `gemini-4-argon` (стр. 385-388) указано `\"efforts\": [\"high\"]` вместо `[\"low\", \"medium\", \"high\"]`, хотя `server.py:633` уже публикует `supported_reasoning_efforts: [\"low\", \"medium\", \"high\"]`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-010",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-011",
+      "kind": "code",
+      "ref": "~/work/src/cli-agent-bridge/server.py:259-278",
+      "claim": "`ADVERTISE_EFFORT_ALIASES` (стр. 259-262) управляет только публикацией effort-клонов в `GET /v1/models` (стр. 641-674), тогда как `_resolve_model_alias` (стр. 345-354, 6129, 6213-6222) резолвит `<base>-<effort>` на `POST /v1/chat/completions` при `EFFORT_ALIAS_ENABLED=True` независимо от `ADVERTISE_EFFORT_ALIASES`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-011",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-012",
+      "kind": "document",
+      "ref": "~/Мой диск/Context/models.md:105",
+      "claim": "Pinned slot ID с effort-суффиксами (`gemini-3.8-flash-medium` в `answer-review-loop`, `gemini-3.8-flash-high`, `gemini-4-argon-high`) и `~/.hermes/config.yaml:549-566` используют резолв `_resolve_model_alias` при вызовах `POST :9882/v1/chat/completions`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-012",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-013",
+      "kind": "code",
+      "ref": "~/work/src/cli-agent-bridge/fleet_check.py:118-120",
+      "claim": "В `fleet_check.py` функция `droid_scope` фильтрует модели по `backend == \"droid\"` для `check_efforts`, а `check_catalogue` (стр. 124-140) проверяет `build_catalog` по всему `fleet.json` (инвариант `efforts_proven <= efforts`, `default_effort in efforts`).",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-013",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-014",
+      "kind": "code",
+      "ref": "~/work/src/cli-agent-bridge/tests/test_dsh_profile_config.py:1-19",
+      "claim": "`tests/test_dsh_profile_config.py` проверяет `desktop` и `web` `cordis.patch.yml`, а `tests/test_request_attribution.py:450-518` тестирует `ADVERTISED_EFFORT_ALIASES` через `monkeypatch` и парсинг `\"off\" -> ()`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-014",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    },
+    {
+      "id": "EVD-015",
+      "kind": "code",
+      "ref": "~/.dsh/profiles/desktop/cordis.patch.yml:381-398",
+      "claim": "Базовые модели `claude-sonnet-5-5` (desktop стр. 386, web стр. 454: `{ off: null, low: low, medium: medium, high: high, xhigh: xhigh, max: max }`) и `claude-opus-5-5` (desktop стр. 392, web стр. 460: `{ off: null, low: low, medium: medium, high: high, xhigh: max, max: max }`) уже содержат полную лестницу уровней мышления, поэтому удаление клонов `claude-opus-5-5-high` и `claude-sonnet-5-5-xhigh` не лишает пользователя выбора `high`/`xhigh`.",
+      "source_ref": "/tmp/cel-runs/agy-picker-dedup/analysis/evidence-ledger.md#EVD-015",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-01"
+    }
+  ],
+  "risk_triggers": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "Модель и reasoning effort являются независимыми осями DSH; единая базовая модель с полной лестницей сохраняет выбор усилия после удаления клонов. Подтверждено каноном onboarding и текущими лестницами базовых Claude.",
+      "class": "continuable",
+      "status": "VALIDATED",
+      "evidence_ids": [
+        "EVD-007",
+        "EVD-015"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "statement": "Дефолтная реклама алиасов в GET независима от их резолва в POST; отключение рекламы не требует отключать pinned alias ID внешних контуров.",
+      "class": "continuable",
+      "status": "VALIDATED",
+      "evidence_ids": [
+        "EVD-011",
+        "EVD-012",
+        "EVD-014"
+      ]
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "AD-001",
+        "AD-002",
+        "QA-001",
+        "BND-001",
+        "CD-001",
+        "RISK-001"
+      ],
+      "kind": "command",
+      "command": "/usr/local/bin/python3 -m pytest tests/test_dsh_profile_config.py -v",
+      "expected": "exit 0; all profile tests pass: no effort-suffixed clones in desktop/web cordis.patch.yml (llm-pi-ai and allowedModels) and reasoningEfforts maps medium: medium on gemini-4-argon and gemini-3.8-flash",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-003",
+        "AD-003",
+        "QA-002",
+        "BND-002",
+        "CD-002",
+        "RISK-002"
+      ],
+      "kind": "command",
+      "command": "/usr/local/bin/python3 -m pytest tests/test_request_attribution.py -v",
+      "expected": "exit 0; default ADVERTISED_EFFORT_ALIASES is empty tuple () while _resolve_model_alias resolves <base>-<effort> on POST /v1/chat/completions",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-004",
+        "AD-004",
+        "QA-003",
+        "BND-003",
+        "CD-003",
+        "RISK-003"
+      ],
+      "kind": "command",
+      "command": "/usr/local/bin/python3 -m pytest tests/test_fleet_v3.py tests/test_provider_scoping.py -v",
+      "expected": "exit 0; fleet.json catalog validation passes with efforts ['low', 'medium', 'high'] for gemini-4-argon and gemini-3.8-flash",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "QA-001",
+        "RISK-001"
+      ],
+      "kind": "command",
+      "command": "dsh --profile desktop --dump-config >/dev/null && dsh --profile web --dump-config >/dev/null",
+      "expected": "exit 0; both DSH profiles parse and merge cleanly without schema errors",
+      "environment": "local",
+      "owner": "verifier"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "kind": "two-way",
+      "status": "APPROVED",
+      "approval_required": false,
+      "question": "Как убрать дубли в пикере, сохранив выбор усилия?",
+      "choice": "Удалить ровно 5 AGY и 2 Claude клона из models и соответствующие пары allowedModels обоих пользовательских профилей; сохранить базовые модели и лестницы. Для каждого файла — проверенный бэкап, блокировка конкурирующих писателей, сверка исходного SHA-256 и атомарная замена.",
+      "alternatives": [
+        "Сохранить отдельные карточки effort-клонов: оставляет исходный дефект.",
+        "Фильтровать дубли в вендорском UI: нарушает запрет правки вендора и не исправляет allowedModels."
+      ],
+      "drivers": [
+        "REQ-001: дедупликация обеих поверхностей",
+        "Пользовательская конфигурация разрешена; исходники DSH неприкосновенны",
+        "Сохранение посторонних моделей и настроек"
+      ],
+      "consequences": [
+        "Пикер AGY содержит только две заданные базовые модели; из Claude удалены только два заданных клона.",
+        "Профили — два независимых файла: os.replace атомарен на файл, общей транзакции нет. При конфликте CAS остановить операцию, не затирать чужие правки; частичное применение отдельно диагностировать и компенсировать под CAS."
+      ],
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002",
+        "EVD-003",
+        "EVD-004",
+        "EVD-005",
+        "EVD-007",
+        "EVD-015"
+      ],
+      "requirement_ids": [
+        "REQ-001"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ],
+      "confirmation": {
+        "kind": "test",
+        "command": "/usr/local/bin/python3 -m pytest tests/test_dsh_profile_config.py -v",
+        "expected": "exit 0; оба профиля без семи заданных клонов в models и allowedModels, базовые Claude и их reasoningEfforts сохранены."
+      },
+      "approval_basis": "Явно заданное владельцем решение OPT-2 в текущем брифе; APPROVED относится к обратимому решению, пакет остаётся DRAFT."
+    },
+    {
+      "id": "AD-002",
+      "kind": "two-way",
+      "status": "APPROVED",
+      "approval_required": false,
+      "question": "Как передавать medium без запроса неподдерживаемых уровней?",
+      "choice": "В обоих профилях у двух базовых AGY установить {off: null, low: low, medium: medium, high: high, xhigh: high, max: high}.",
+      "alternatives": [
+        "Оставить medium: high: выбор medium продолжит теряться.",
+        "Передавать xhigh/max напрямую и расширять agy-bridge: противоречит подтверждённой поддержке low/medium/high и выходит из scope."
+      ],
+      "drivers": [
+        "REQ-002: medium должен дойти как medium",
+        "Контракт agy-bridge допускает только low, medium, high"
+      ],
+      "consequences": [
+        "Меняется только ошибочный medium mapping четырёх объявлений моделей.",
+        "xhigh/max по-прежнему отображаются в high; это действующая защита от unsupported_reasoning_effort, а не новые backend levels."
+      ],
+      "evidence_ids": [
+        "EVD-006",
+        "EVD-008",
+        "EVD-009"
+      ],
+      "requirement_ids": [
+        "REQ-002"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ],
+      "confirmation": {
+        "kind": "test",
+        "command": "/usr/local/bin/python3 -m pytest tests/test_dsh_profile_config.py -v",
+        "expected": "exit 0; четыре AGY объявления содержат точную шестиступенчатую лестницу, medium == medium, xhigh/max == high."
+      },
+      "approval_basis": "Явно заданное владельцем решение OPT-2 в текущем брифе; APPROVED относится к обратимому решению, пакет остаётся DRAFT."
+    },
+    {
+      "id": "AD-003",
+      "kind": "two-way",
+      "status": "APPROVED",
+      "approval_required": false,
+      "question": "Как отключить рекламу клонов без потери legacy POST?",
+      "choice": "В универсальном HTTP-фасаде сменить дефолт ADVERTISE_EFFORT_ALIASES на off; сохранить BRIDGE_ADVERTISE_EFFORT_ALIASES, парсинг и _resolve_model_alias при EFFORT_ALIAS_ENABLED=True без изменения.",
+      "alternatives": [
+        "Удалить и рекламу, и резолв: ломает pinned alias ID models.md/Hermes.",
+        "Оставить дефолтный список и фильтровать его только для DSH: сохраняет хардкод моделей и вводит ветвление по потребителю."
+      ],
+      "drivers": [
+        "REQ-003: пустая реклама по умолчанию",
+        "Совместимость существующих POST-клиентов",
+        "Агент-агностический системный слой"
+      ],
+      "consequences": [
+        "GET /v1/models по умолчанию больше не добавляет семь effort-алиасов из прежнего дефолтного списка.",
+        "Оператор может вернуть рекламу явным BRIDGE_ADVERTISE_EFFORT_ALIASES; дефолт разрешения POST-алиасов остаётся включённым."
+      ],
+      "evidence_ids": [
+        "EVD-011",
+        "EVD-012",
+        "EVD-014"
+      ],
+      "requirement_ids": [
+        "REQ-003"
+      ],
+      "verification_ids": [
+        "VER-002"
+      ],
+      "confirmation": {
+        "kind": "test",
+        "command": "/usr/local/bin/python3 -m pytest tests/test_request_attribution.py -v",
+        "expected": "exit 0; изолированный env даёт (), явный список рекламируется, все семь прежних alias ID резолвятся на POST с сохранением атрибуции."
+      },
+      "approval_basis": "Явно заданное владельцем решение OPT-2 в текущем брифе; APPROVED относится к обратимому решению, пакет остаётся DRAFT."
+    },
+    {
+      "id": "AD-004",
+      "kind": "two-way",
+      "status": "APPROVED",
+      "approval_required": false,
+      "question": "Где устранить рассинхрон метаданных effort?",
+      "choice": "В корневом fleet.json синхронизировать efforts двух базовых AGY с подтверждённым downstream каталогом: [low, medium, high]; прочие поля и downstream файлы не менять.",
+      "alternatives": [
+        "Оставить efforts [high]: сохраняет рассинхрон возможностей.",
+        "Добавить исключения по ID/агенту в server.py или адаптере: дублирует конфигурацию и нарушает универсальность."
+      ],
+      "drivers": [
+        "REQ-004: каталог отражает доказанные возможности",
+        "Единое конфигурационное описание вместо ветвлений",
+        "Сохранение default_effort и инвариантов каталога"
+      ],
+      "consequences": [
+        "Корневой каталог описывает три подтверждённых уровня; downstream не меняется.",
+        "Регрессии проверяют профили, дефолт рекламы, opt-in и POST; существующие fleet/provider-scoping проверки остаются обязательными.",
+        "Расширение fleet_check.py для не-droid секций отложено явно."
+      ],
+      "evidence_ids": [
+        "EVD-008",
+        "EVD-010",
+        "EVD-013",
+        "EVD-014"
+      ],
+      "requirement_ids": [
+        "REQ-004"
+      ],
+      "verification_ids": [
+        "VER-003"
+      ],
+      "confirmation": {
+        "kind": "test",
+        "command": "/usr/local/bin/python3 -m pytest tests/test_fleet_v3.py tests/test_provider_scoping.py -v",
+        "expected": "exit 0; у обеих базовых AGY efforts точно [low, medium, high], efforts_proven <= efforts и default_effort in efforts, provider scoping сохранён."
+      },
+      "approval_basis": "Явно заданное владельцем решение OPT-2 в текущем брифе; APPROVED относится к обратимому решению, пакет остаётся DRAFT."
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "usability",
+      "source": "Владелец DSH desktop/web",
+      "stimulus": "Открыть пикер и выбрать базовую модель AGY с medium.",
+      "environment": "Оба профиля после применения и штатного перечитывания конфигурации.",
+      "artifact": "models, allowedModels и reasoningEfforts в пользовательских cordis.patch.yml",
+      "response": "Пикер AGY показывает gemini-4-argon и gemini-3.8-flash; effort выбирается отдельно и medium передаётся как medium.",
+      "response_measure": "В каждом профиле ровно 2 заданные базовые AGY модели, 0 из 7 заданных клонов в models/allowedModels; 4 из 4 AGY лестниц имеют medium: medium. Обе dump-config команды exit 0.",
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ],
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002"
+      ],
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002",
+        "EVD-006",
+        "EVD-007"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "compatibility",
+      "source": "Существующий клиент с pinned effort alias ID",
+      "stimulus": "POST /v1/chat/completions с одним из 7 прежних alias ID после отключения дефолтной рекламы.",
+      "environment": "Изолированное окружение без BRIDGE_ADVERTISE_EFFORT_ALIASES; также отдельный случай явного opt-in.",
+      "artifact": "Корневой server.py: реклама GET и резолв POST",
+      "response": "Дефолтная реклама пуста; alias ID по-прежнему преобразуется в базовую модель и прежний effort, с сохранением правил разрешения и атрибуции.",
+      "response_measure": "ADVERTISED_EFFORT_ALIASES == (); 7 из 7 прежних ID резолвятся; тест явной рекламы и существующая request-attribution suite проходят.",
+      "verification_ids": [
+        "VER-002"
+      ],
+      "requirement_ids": [
+        "REQ-003"
+      ],
+      "evidence_ids": [
+        "EVD-011",
+        "EVD-012",
+        "EVD-014"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "quality": "maintainability",
+      "source": "Сопровождающий каталог шлюза",
+      "stimulus": "Проверить согласованность efforts после изменения корневого каталога.",
+      "environment": "Репозиторий с неизменным downstream bridges/agy-bridge/fleet.json.",
+      "artifact": "Корневой fleet.json и существующие fleet/provider-scoping проверки",
+      "response": "Возможности двух базовых AGY описаны конфигурацией без частных условий в адаптерах.",
+      "response_measure": "2 из 2 моделей имеют efforts [low, medium, high]; проходят catalogue validation и provider-scoping suite; три protected paths не изменены.",
+      "verification_ids": [
+        "VER-003"
+      ],
+      "requirement_ids": [
+        "REQ-004"
+      ],
+      "evidence_ids": [
+        "EVD-008",
+        "EVD-010",
+        "EVD-013"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "Пользовательские профили DSH desktop и web",
+      "responsibility": "Объявление базовых моделей и независимой лестницы effort; согласованность models/allowedModels; безопасное применение локальной конфигурации.",
+      "allowed_dependencies": [
+        "Документированная конфигурация llm-pi-ai и subagent-model-selection-settings",
+        "Подтверждённые возможности agy-bridge и текущие Claude лестницы"
+      ],
+      "forbidden_dependencies": [
+        "Патчи исходников, бинарников, asar и overlay вендорского DSH",
+        "Изменение любых чужих provider/model entries или секретов"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ],
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002",
+        "EVD-003",
+        "EVD-004",
+        "EVD-005",
+        "EVD-015"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "Универсальный HTTP-фасад: корневой server.py",
+      "responsibility": "Независимое управление рекламой GET и совместимым резолвом POST через существующие конфигурационные переключатели.",
+      "allowed_dependencies": [
+        "Существующий парсер BRIDGE_ADVERTISE_EFFORT_ALIASES",
+        "Существующий _resolve_model_alias и EFFORT_ALIAS_ENABLED",
+        "Общий каталог хаба"
+      ],
+      "forbidden_dependencies": [
+        "Новые ветвления по DSH/имени агента/вендору",
+        "Изменение core/backend_adapter.py или downstream bridges/agy-bridge/server.py",
+        "Новые списки model ID в server.py"
+      ],
+      "verification_ids": [
+        "VER-002"
+      ],
+      "evidence_ids": [
+        "EVD-011",
+        "EVD-012",
+        "EVD-014"
+      ]
+    },
+    {
+      "id": "BND-003",
+      "component": "Корневой fleet.json и проверки каталога",
+      "responsibility": "Декларативное описание поддерживаемых efforts и существующие инварианты provider scoping.",
+      "allowed_dependencies": [
+        "Доказанные уровни из bridges/agy-bridge/fleet.json (read-only)",
+        "Существующие tests/test_fleet_v3.py, tests/test_provider_scoping.py"
+      ],
+      "forbidden_dependencies": [
+        "Запись в bridges/agy-bridge/fleet.json",
+        "Расширение fleet_check.py на не-droid профили в этом изменении",
+        "Новые runtime heuristics или зависимости"
+      ],
+      "verification_ids": [
+        "VER-003"
+      ],
+      "evidence_ids": [
+        "EVD-008",
+        "EVD-010",
+        "EVD-013"
+      ]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "behavior",
+      "producer": "Пользовательские cordis.patch.yml desktop и web",
+      "consumer": "DSH model/effort picker и выбор субагентов",
+      "change": "Убрать 7 заданных effort-клонов на профиль из двух секций; medium базовых AGY передаётся как medium, xhigh/max остаются high.",
+      "compatibility": "Схема YAML не меняется; базовые AGY/Claude и лестницы Claude сохраняются. Явные ссылки на удалённые карточки DSH проверяются при live gate; совместимость alias ID хаба обеспечивается отдельно CD-002.",
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ],
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002"
+      ]
+    },
+    {
+      "id": "CD-002",
+      "type": "api",
+      "producer": "GET /v1/models корневого хаба",
+      "consumer": "Клиенты обнаружения моделей и существующие POST-клиенты",
+      "change": "Дефолтная дополнительная реклама effort-алиасов выключена (off -> ()); явный BRIDGE_ADVERTISE_EFFORT_ALIASES сохраняет opt-in.",
+      "compatibility": "Ответ сохраняет схему; существующие POST /v1/chat/completions с прежними alias ID и _resolve_model_alias не меняются. Клиентам, которым нужны рекламируемые alias-карточки, требуется прежняя явная настройка списка.",
+      "verification_ids": [
+        "VER-002"
+      ],
+      "requirement_ids": [
+        "REQ-003"
+      ]
+    },
+    {
+      "id": "CD-003",
+      "type": "data",
+      "producer": "Корневой fleet.json",
+      "consumer": "Каталог хаба и его валидаторы",
+      "change": "efforts gemini-4-argon и gemini-3.8-flash расширены с [high] до [low, medium, high].",
+      "compatibility": "Схема каталога, default_effort и downstream контракт неизменны; метаданные синхронизированы с доказанной поддержкой backend.",
+      "verification_ids": [
+        "VER-003"
+      ],
+      "requirement_ids": [
+        "REQ-004"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "context",
+      "question": "Кто выбирает базовую модель и effort, и какие потребители зависят от alias ID?",
+      "artifact_ref": "architecture/architecture-packet.json#/views/0/model",
+      "model": {
+        "actors": [
+          "Владелец DSH desktop/web",
+          "Существующие pinned alias POST-клиенты (models.md/Hermes)"
+        ],
+        "systems": [
+          "DSH + пользовательские профили",
+          "Универсальный хаб :9882",
+          "AGY bridge :9887"
+        ],
+        "relationships": [
+          "Пользовательские профили -> DSH: отдельные model и effort настройки",
+          "DSH -> AGY bridge: базовая AGY модель и effort low/medium/high",
+          "Pinned клиенты -> хаб POST: base-effort ID -> существующий резолв",
+          "Клиенты discovery -> хаб GET /v1/models: реклама управляется отдельно"
+        ]
+      },
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002",
+        "EVD-008",
+        "EVD-009",
+        "EVD-011",
+        "EVD-012"
+      ]
+    },
+    {
+      "id": "VIEW-002",
+      "type": "component",
+      "question": "Какие компоненты меняются, какие границы остаются защищёнными?",
+      "artifact_ref": "architecture/architecture-packet.json#/views/1/model",
+      "model": {
+        "change_set": [
+          "desktop/web cordis.patch.yml: models + allowedModels + medium mapping",
+          "server.py: только дефолт рекламы",
+          "корневой fleet.json: efforts двух моделей",
+          "test_dsh_profile_config.py + test_request_attribution.py: регрессии"
+        ],
+        "preserved": [
+          "server.py: _resolve_model_alias + EFFORT_ALIAS_ENABLED + env override",
+          "core/backend_adapter.py",
+          "bridges/agy-bridge/server.py",
+          "bridges/agy-bridge/fleet.json"
+        ],
+        "relationships": [
+          "Профили -> VER-001 и VER-004",
+          "Дефолт рекламы и резолв POST -> VER-002",
+          "Корневой каталог -> VER-003"
+        ]
+      },
+      "evidence_ids": [
+        "EVD-008",
+        "EVD-010",
+        "EVD-011",
+        "EVD-013",
+        "EVD-014"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Конкурирующая запись профиля, частичное обновление пары desktop/web, потеря посторонних настроек или stale DSH picker.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "До записи обоих файлов сохранить исходные SHA-256 и проверенные резервные копии в ~/work/backups/. Использовать согласованную блокировку писателей; повторно сверить expected SHA-256 непосредственно перед атомарной заменой каждого файла (temp в той же директории, сохранение прав, os.replace). CAS mismatch — стоп без перезаписи; один os.replace не является межпроцессным CAS. После каждого файла сверить новый hash, ограниченный diff и parse/dump-config. При частичном применении восстановить уже изменённый файл только если его hash совпадает с нашим post-hash; иначе эскалация. До сдачи проверить оба живых UI и существующий чат.",
+      "verification_ids": [
+        "VER-001",
+        "VER-004"
+      ],
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002",
+        "EVD-003",
+        "EVD-004",
+        "EVD-006",
+        "EVD-015"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Отключение рекламы случайно отключает alias POST или меняет правила effort/атрибуции; перезапуск обрывает активные сессии.",
+      "probability": "medium",
+      "impact": "high",
+      "mitigation": "Ограничить runtime diff дефолтом рекламы, полностью сохранить _resolve_model_alias и EFFORT_ALIAS_ENABLED. В регрессиях изолировать env через monkeypatch; проверить отсутствие env, off, явный список и все 7 alias ID через POST вместе с существующими attribution проверками. Хаб перечитывать только в согласованное безопасное окно без активных запросов; не перезапускать downstream. Затем выполнить существующий живой alias-сценарий и повторные/параллельные обращения.",
+      "verification_ids": [
+        "VER-002"
+      ],
+      "evidence_ids": [
+        "EVD-011",
+        "EVD-012",
+        "EVD-014"
+      ]
+    },
+    {
+      "id": "RISK-003",
+      "scenario": "Корневой каталог и downstream расходятся или droid-only checker создаёт ложное ощущение полного покрытия AGY профилей.",
+      "probability": "medium",
+      "impact": "medium",
+      "mitigation": "Установить точно [low, medium, high] только двум моделям корневого fleet.json и проверить обе записи, default_effort и efforts_proven существующими fleet/provider-scoping тестами. Не менять downstream. VER-001/004 отдельно проверяют AGY профили, поскольку droid_scope не покрывает их; расширение checker явно deferred.",
+      "verification_ids": [
+        "VER-003"
+      ],
+      "evidence_ids": [
+        "EVD-008",
+        "EVD-010",
+        "EVD-013"
+      ]
+    }
+  ],
+  "evolution": {
+    "compatibility": "Сохраняются схема API, _resolve_model_alias, EFFORT_ALIAS_ENABLED=True и BRIDGE_ADVERTISE_EFFORT_ALIASES. GET теряет только дефолтную дополнительную рекламу клонов; её можно явно включить старой настройкой. Базовые модели DSH и лестницы Claude сохранены. Смешанный период старого хаба/новых профилей допустим по независимости GET/POST; прямые DSH ссылки на удалённые карточки и кэш проверяются живым сценарием, без обещания автоматической миграции.",
+    "migration": "Миграция БД и persisted chat data не требуется: меняются только объявленные конфигурационные записи и дефолт рекламы. Профили: бэкап каждого файла в ~/work/backups/, pre-hash, согласованная блокировка, валидация candidate, CAS и атомарная замена по одному файлу, post-hash/read-back. Это не атомарная транзакция двух файлов; конфликт или parse failure останавливает следующий шаг и требует компенсирующего CAS либо эскалации. Посторонние поля и формат по возможности сохраняются.",
+    "rollout": "После независимого architecture gate: Coder сначала пишет чувствительные регрессии (red до fix), затем минимальные изменения server.py/fleet.json и профилей. Выполнить замороженные VER-001..004, полную pytest tests/ -v и обязательные repo quality gates; не трактовать droid_scope как покрытие AGY. Перед безопасным перечитыванием хаба убедиться в отсутствии активных запросов/согласовать окно, не обрывать чужие процессы. Проверить обе живые DSH поверхности, фактическую передачу medium, существующий рабочий чат с alias POST, повторные и параллельные вызовы. При отсутствии живого evidence не считать runtime изменение сданным. Этот DRAFT не разрешает запуск Coder сам по себе.",
+    "rollback": "При дефекте сначала остановить дальнейшее применение. Рекламу можно вернуть явным BRIDGE_ADVERTISE_EFFORT_ALIASES с прежним списком и безопасным перечитыванием. Код и каталог откатывать только своим точечным diff после проверки текущего baseline. Профили восстанавливать из проверенных бэкапов атомарно под CAS против наших post-hash; чужие более свежие изменения не затирать. После восстановления повторить VER-001..004 в соответствии с ожидаемым rollback baseline и живой рабочий alias/DSH сценарий. Данные сессий не конвертируются и не удаляются."
+  },
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "approval": {
+    "status": "NOT_REQUIRED",
+    "decision_ids": []
+  },
+  "independent_review": {
+    "required": true,
+    "status": "PASS",
+    "reviewer": "answer-review-loop (gemini-3.8-flash-medium, deepseek-v4.1-flash-free/claude-haiku-5-5, gpt-6.1-terra)",
+    "evidence_ref": "/tmp/cel-runs/agy-picker-dedup/arl/arch-packet/D1-S1.md"
+  },
+  "open_questions": [],
+  "protected_paths": [
+    "core/backend_adapter.py",
+    "bridges/agy-bridge/server.py",
+    "bridges/agy-bridge/fleet.json"
+  ],
+  "materialization": [],
+  "deferred": [
+    "Расширение fleet_check.py на не-droid секции cordis.patch.yml"
+  ],
+  "verification_notes": {
+    "surface_policy": "VER-001..VER-004 скопированы дословно из verification-surface.json; команды — будущие проверки реализации, Architect их не запускал.",
+    "coverage_limits": [
+      "Замороженные unit/config команды сами по себе не доказывают конкурентный CAS, безопасный reload, визуальный picker или живой alias-сценарий.",
+      "Дополнительные операционные gates из RISK-001/002 и evolution.rollout должен выполнить Orchestrator/Verifier с фактическими pre/post hashes, backup receipts и live evidence; их нельзя считать пройденными по одному PASS валидатора пакета."
+    ],
+    "draft_only": "Независимое architecture review и approved-gate ожидаются в родительском контуре; этот пакет не является ACCEPT или ARCH_GATE_PASS.",
+    "review_remainder": "ОСТАТОК РЕВЬЮ: лёгкий луп текущего архитектурного пакета не запускался; независимое architecture review PENDING. До approved-gate необходимы фактическое ревью текущего bundle и его журнал; наличие PASS draft-validator не заменяет ревью."
+  },
+  "hot_path_impact": {
+    "classification": "cold-path configuration/catalog delta по handoff аналитика",
+    "evidence_ids": [
+      "EVD-008",
+      "EVD-009",
+      "EVD-010",
+      "EVD-011"
+    ],
+    "statement": "Новая I/O, retry, polling, buffers и concurrency не вводятся. POST resolver и его алгоритм должны остаться неизменными.",
+    "approval_gate": "HL-ENV и транзитивное доказательство N/A не выдаются за пройденные: окончательный diff реализации и runtime evidence ещё отсутствуют; проверка применимости обязательна до approved."
+  }
+}

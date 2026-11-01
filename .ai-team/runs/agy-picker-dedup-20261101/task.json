@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "task_id": "agy-picker-dedup-20261101",
+  "run_id": "agy-picker-dedup-20261101",
+  "criticality": "S2",
+  "architecture_gate": {
+    "packet_sha256": "e70bb0e02e90cca13b6977392566add9e9a34df58dc91e254b66e3fd50ca157f",
+    "verification_surface_sha256": "ccacfa3b66ccb3852f02fbc78c64422347bd90f484694087b18563091a627325",
+    "protected_paths_sha256": "4c89fde3ee3c0d7a64dd4ab2948e86e12ef246bd1d86aebc486d32e1805b3da8"
+  }
+}
