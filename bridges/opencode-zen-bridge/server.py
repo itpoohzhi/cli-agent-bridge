@@ -1415,6 +1415,38 @@ _proxy_pool_lock = threading.Lock()
 _proxy_pool_key: tuple[Any, ...] | None = None
 _proxy_pool_entries: list[str] = []
 _proxy_pool_idx = 0
+PROXY_QUOTA_COOLDOWN_S = float(
+    os.environ.get("OPENCODE_ZEN_PROXY_QUOTA_COOLDOWN_S", "3600.0")
+)
+QUOTA_ROTATION_LIMIT = int(os.environ.get("OPENCODE_ZEN_QUOTA_ROTATION_LIMIT", "3"))
+_proxy_quarantine_until: dict[str, float] = {}
+
+
+def _is_free_quota_error(err: object) -> bool:
+    """Распознать исчерпанную квоту по типу или тексту ошибки провайдера."""
+    if isinstance(err, dict):
+        if err.get("type") == "provider.free-limit":
+            return True
+        message = str(err.get("message") or err).lower()
+    elif isinstance(err, str):
+        message = err.lower()
+    else:
+        return False
+    return any(marker in message for marker in (
+        "free usage limit reached", "usage limit reached", "provider.free-limit",
+    ))
+
+
+def _quarantine_proxy(proxy_url: str | None, cooldown_s: float | None = None) -> None:
+    """Временно исключить порт с исчерпанной квотой из ротации."""
+    if not proxy_url or not str(proxy_url).strip():
+        return
+    proxy_url = str(proxy_url).strip()
+    with _proxy_pool_lock:
+        _proxy_quarantine_until[proxy_url] = time.monotonic() + (
+            PROXY_QUOTA_COOLDOWN_S if cooldown_s is None else cooldown_s
+        )
+        _log(f"proxy quarantined for quota limit: {_mask_secrets(proxy_url)}")
 
 
 def _resolve_proxyrack_gateway() -> str:
@@ -1503,9 +1535,22 @@ def _next_standalone_proxy() -> str | None:
             except ValueError:
                 start = int(time.time() * 1000)
             _proxy_pool_idx = start % len(entries)
-        entry = _proxy_pool_entries[_proxy_pool_idx % len(_proxy_pool_entries)]
-        _proxy_pool_idx += 1
-        return entry
+        now = time.monotonic()
+        for entry, expiry in list(_proxy_quarantine_until.items()):
+            if expiry <= now:
+                del _proxy_quarantine_until[entry]
+        for _ in range(len(_proxy_pool_entries)):
+            entry = _proxy_pool_entries[_proxy_pool_idx % len(_proxy_pool_entries)]
+            _proxy_pool_idx += 1
+            if entry not in _proxy_quarantine_until:
+                return entry
+        best_proxy = min(
+            _proxy_pool_entries, key=lambda entry: _proxy_quarantine_until.get(entry, 0.0)
+        )
+        _log(
+            f"all {len(_proxy_pool_entries)} proxies quarantined, reusing earliest expiring: {_mask_secrets(best_proxy)}"
+        )
+        return best_proxy
 
 
 def _reset_proxy_pool_for_tests() -> None:
@@ -1515,6 +1560,7 @@ def _reset_proxy_pool_for_tests() -> None:
         _proxy_pool_key = None
         _proxy_pool_entries = []
         _proxy_pool_idx = 0
+        _proxy_quarantine_until.clear()
 
 
 def _run_env(model_id: str = "") -> dict[str, str]:
@@ -1805,6 +1851,7 @@ class _ServeResult(TypedDict):
     ttft_ms: int | None
     prompt_status: int | None
     transient_error: bool
+    proxy_url: str | None
 
 
 def _as_dict(value: object) -> dict[str, object]:
@@ -2043,6 +2090,9 @@ def _map_serve_event(
             err_type = err_type_obj if isinstance(err_type_obj, str) else ""
             status = {"provider.free-limit": 429, "provider.auth": 401}.get(err_type)
         err_out: dict[str, object] = {"statusCode": status, "message": message}
+        err_type_obj = err.get("type")
+        if isinstance(err_type_obj, str) and err_type_obj:
+            err_out["type"] = err_type_obj
         sid_err = data.get("sessionID")
         if isinstance(sid_err, str):
             err_out["sessionID"] = sid_err
@@ -2575,6 +2625,7 @@ class _RequestAttempts:
         sleep_fn: Callable[[float], None] = time.sleep,
         rng_fn: Callable[[float, float], float] = random.uniform,
         use_breaker: bool = True,
+        max_quota_rotations: int | None = None,
     ) -> None:
         self.res = res
         self.deadline = deadline
@@ -2582,6 +2633,10 @@ class _RequestAttempts:
             use_breaker  # False: прямой Google-маршрут без `opencode run`
         )
         self.max_total = MAX_TOTAL_SPAWNS if max_total is None else max_total
+        self.max_quota_rotations = (
+            QUOTA_ROTATION_LIMIT if max_quota_rotations is None else max_quota_rotations
+        )
+        self.quota_rotations = 0
         self.total_spawns = 0
         self.retries = 0
         self.signal = 0
@@ -2597,9 +2652,8 @@ class _RequestAttempts:
 
     def can_spawn(self) -> bool:
         """Можно ли ещё запускать: суммарный потолок спавнов на запрос."""
-        return (
-            self.total_spawns < MAX_TOTAL_SPAWNS and self.total_spawns < self.max_total
-        )
+        limit = min(MAX_TOTAL_SPAWNS, self.max_total) + self.quota_rotations
+        return self.total_spawns < limit
 
     def remaining_s(self) -> float:
         return max(0.0, self.deadline - time.monotonic())
@@ -2607,10 +2661,25 @@ class _RequestAttempts:
     def begin_attempt(self) -> bool:
         """Первичный запуск: потолок, deadline и Circuit Breaker (в HALF_OPEN резервирует единственную пробу)."""
         return (
-            self.total_spawns < self.max_total
+            self.can_spawn()
             and time.monotonic() < self.deadline
             and (not self.use_breaker or self.res.breaker.allow())
         )
+
+    def allow_quota_rotation(self, reason: str = "free_quota_proxy_rotate") -> bool:
+        """Разрешить смену прокси без списания бюджета деградации апстрима."""
+        if self.quota_rotations >= self.max_quota_rotations:
+            return False
+        if self.total_spawns >= min(MAX_TOTAL_SPAWNS, self.max_total) + self.quota_rotations:
+            return False
+        if time.monotonic() >= self.deadline or self.aux_budget.exhausted():
+            return False
+        if self.use_breaker and self.res.breaker.is_blocking():
+            return False
+        if self.use_breaker and not self.res.breaker.allow():
+            return False
+        self.quota_rotations += 1
+        return True
 
     def allow_retry(self, reason: str, charge_budget: bool = True) -> bool:
         """Можно ли сделать повторный запуск: потолок, deadline, breaker, Retry Budget; затем Full Jitter пауза.
@@ -3943,6 +4012,7 @@ def _serve_one_attempt(
         "ttft_ms": None,
         "prompt_status": None,
         "transient_error": False,
+        "proxy_url": None,
     }
     attempt_deadline = min(
         deadline if deadline is not None else t0 + TIMEOUT_S, t0 + TIMEOUT_S
@@ -3961,8 +4031,12 @@ def _serve_one_attempt(
     except OSError as exc:
         raise ServeUnavailable(f"serve env failed: {exc}") from exc
     if proxy_url:
-        serve_env["HTTP_PROXY"] = proxy_url
-        serve_env["HTTPS_PROXY"] = proxy_url
+        for name in _PROXY_VARS:
+            serve_env[name] = proxy_url
+    result["proxy_url"] = (
+        serve_env.get("HTTPS_PROXY") or serve_env.get("HTTP_PROXY")
+        or serve_env.get("https_proxy") or serve_env.get("http_proxy")
+    )
     password = serve_env.get("OPENCODE_SERVER_PASSWORD", "")
     attempt_id = uuid.uuid4().hex
     _aux_started = aux.now_s()
@@ -6760,7 +6834,7 @@ class Handler(BaseHTTPRequestHandler):
                 xs["exit_reason"] = "timeout"
                 self._sse_error(_error_payload("opencode timeout"))
                 return True
-            if attempts.total_spawns >= MAX_TOTAL_SPAWNS or not attempts.can_spawn():
+            if not attempts.can_spawn():
                 xs["exit_reason"] = "upstream_failed"
                 self._sse_error(_error_payload("serve spawn limit reached"))
                 return True
@@ -6948,17 +7022,34 @@ class Handler(BaseHTTPRequestHandler):
             if result["error"] is not None:
                 err = result["error"]
                 if result.get("transient_error"):
-                    attempts.attempt_done(True, False)
-                    _has_model_output = bool(
-                        collected_texts
-                        or collected_reasonings
+                    _has_attempt_output = bool(
+                        result["texts"]
+                        or result["reasonings"]
                         or result.get("native_calls")
+                        or emitted_tools_in_attempt[0]
                     )
-                    _delivered_err = _delivered_now or _has_model_output
-                    if not _has_model_output and attempts.allow_retry(
-                        "serve_transient_error"
-                    ):
-                        continue
+                    _has_any_output = bool(
+                        collected_texts or collected_reasonings or _has_attempt_output
+                    )
+                    _delivered_err = _delivered_now or _has_any_output
+                    if _is_free_quota_error(err):
+                        _quarantine_proxy(result.get("proxy_url"))
+                        if not _has_attempt_output:
+                            attempts.attempt_done(False, False)
+                            if attempts.allow_quota_rotation(
+                                "serve_free_quota_proxy_rotate"
+                            ) or attempts.allow_retry(
+                                "serve_free_quota_retry", charge_budget=False
+                            ):
+                                continue
+                        else:
+                            attempts.attempt_done(True, False)
+                    else:
+                        attempts.attempt_done(True, False)
+                        if not _has_attempt_output and attempts.allow_retry(
+                            "serve_transient_error"
+                        ):
+                            continue
                     if not _delivered_err and not force_serve:
                         xs["transport"] = "run"
                         xs["transport_history"] = ["serve", "run"]
@@ -8201,7 +8292,7 @@ class Handler(BaseHTTPRequestHandler):
                 xs["exit_reason"] = "timeout"
                 self._send(502, _error_payload("opencode timeout"))
                 return True
-            if attempts.total_spawns >= MAX_TOTAL_SPAWNS or not attempts.can_spawn():
+            if not attempts.can_spawn():
                 xs["exit_reason"] = "upstream_failed"
                 self._send(502, _error_payload("serve spawn limit reached"))
                 return True
@@ -8368,16 +8459,25 @@ class Handler(BaseHTTPRequestHandler):
             if result["error"] is not None:
                 err = result["error"]
                 if result.get("transient_error"):
+                    is_free_quota = _is_free_quota_error(err)
+                    if is_free_quota:
+                        _quarantine_proxy(result.get("proxy_url"))
+                    if not texts and not result.get("native_calls"):
+                        if is_free_quota:
+                            attempts.attempt_done(False, False)
+                            retry_allowed = attempts.allow_quota_rotation(
+                                "json_serve_free_quota_proxy_rotate"
+                            ) or attempts.allow_retry(
+                                "json_serve_free_quota_retry", charge_budget=False
+                            )
+                        else:
+                            attempts.attempt_done(True, False)
+                            retry_allowed = attempts.allow_retry("serve_transient_error")
+                        if retry_allowed:
+                            _prior_content = "\n\n".join(c for c in contents if c)
+                            continue
                     attempts.attempt_done(True, False)
                     _save_partial_output(texts, reasonings)
-                    if (
-                        not texts
-                        and not reasonings
-                        and not result.get("native_calls")
-                        and attempts.allow_retry("serve_transient_error")
-                    ):
-                        _prior_content = "\n\n".join(c for c in contents if c)
-                        continue
                     if not _delivered_j and not force_serve:
                         return False
                     _sig_j = _incomplete_step_signal(
@@ -8444,12 +8544,12 @@ class Handler(BaseHTTPRequestHandler):
             for native in natives:
                 part = _as_dict(native.get("part"))
                 mapped = _native_call_as_dsh(native, tools) if emulate_tools else []
-                if not mapped and emulate_tools and part.get("tool"):
+                if not mapped and part.get("tool") and (emulate_tools or not content.strip()):
                     unmapped.append(str(part.get("tool")))
                 for call in mapped:
                     _add_call(call)
             usage = result["usage"]
-            if not emulate_tools or tool_calls_all:
+            if tool_calls_all or (not emulate_tools and not unmapped):
                 break
             if unmapped:
                 if unmapped_retries >= NATIVE_RETRY_LIMIT or not attempts.allow_retry(
