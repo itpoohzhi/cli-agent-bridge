@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1277,12 +1278,21 @@ class TestOptimizationContracts(unittest.TestCase):
         raw += b"data: [DONE]\n\n"
         source = io.BytesIO(raw)
         writes = []
+        first_frame = b"data: " + json.dumps(frames[0]).encode() + b"\n\n"
+        first_written = threading.Event()
+
+        def readline(limit: int) -> bytes:
+            # Reader может читать наперёд; первый чанк обязан уйти до следующего.
+            if source.tell() >= len(first_frame) and not first_written.wait(2.0):
+                raise ValueError("первый фрагмент не опубликован до продолжения потока")
+            return source.readline(limit)
 
         def write(frame: bytes) -> None:
             writes.append((source.tell(), frame))
+            first_written.set()
 
         outcome = relay_sse(
-            source.readline,
+            readline,
             write,
             tool_schemas={},
             limits=PassthroughLimits(),
@@ -1290,7 +1300,7 @@ class TestOptimizationContracts(unittest.TestCase):
         )
         self.assertTrue(outcome.committed)
         self.assertTrue(outcome.done)
-        self.assertEqual(writes[0][1], raw[: writes[0][0]])
+        self.assertEqual(writes[0][1], first_frame)
         self.assertEqual(b"".join(frame for _, frame in writes), raw)
 
     def test_history_prefix_guard_detects_edited_middle(self) -> None:
@@ -1437,7 +1447,7 @@ class TestOptimizationContracts(unittest.TestCase):
         response.readline.side_effect = OSError("upstream disconnected after headers")
         connection = Mock()
         connection.getresponse.return_value = response
-        sink = SimpleNamespace(start=Mock(), write=Mock())
+        sink = SimpleNamespace(start=Mock(), write=Mock(), client_gone=Mock(return_value=False))
         with patch.object(adapter, "_open", return_value=connection) as opened:
             adapter.handle(
                 path="/v1/chat/completions",
@@ -1450,7 +1460,8 @@ class TestOptimizationContracts(unittest.TestCase):
         self.assertEqual(sink.start.call_count, 1)
         self.assertEqual(connection.close.call_count, 1)
         self.assertEqual(sink.write.call_count, 1)
-        self.assertNotIn(b"[DONE]", sink.write.call_args.args[0])
+        self.assertTrue(sink.write.call_args.args[0].endswith(b"data: [DONE]\n\n"))
+        self.assertEqual(sink.write.call_args.args[0].count(b"data: [DONE]\n\n"), 1)
 
     def test_trusted_stream_incomplete_call_fails_without_done(self) -> None:
         from adapters.passthrough_adapter import PassthroughLimits, relay_sse
@@ -1470,7 +1481,7 @@ class TestOptimizationContracts(unittest.TestCase):
         )
         self.assertTrue(outcome.incomplete)
         self.assertTrue(outcome.committed)
-        self.assertNotIn(b"[DONE]", b"".join(writes))
+        self.assertIn(b"[DONE]", b"".join(writes))
 
     def test_producer_marker_requires_enabled_sanitizer(self) -> None:
         zen = self.zen

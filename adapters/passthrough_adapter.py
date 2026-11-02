@@ -40,6 +40,7 @@ from core.backend_adapter import (
     BackendNotSupported,
     Capabilities,
     Qualification,
+    PreSendTransientError,
     StreamSink,
     TurnContext,
     TurnResult,
@@ -66,7 +67,12 @@ except ImportError:
     DEFAULT_MAX_REPETITION_REPEATS = 20
     DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
     RepetitionGuard = None  # type: ignore[assignment,misc]
-from core.stream_framing import build_stream_error_chunk, format_stream_error_sse
+from core.stream_framing import (
+    build_stream_error_chunk,
+    format_sse_event,
+    format_stream_error_sse,
+    is_graceful_error_framing_enabled,
+)
 
 # Имена env (таблица AD-005) и значения по умолчанию: defaults — не потолки, переопределяются.
 ENV_MAX_PARALLEL_CALLS = "BRIDGE_MAX_PARALLEL_CALLS"
@@ -289,6 +295,8 @@ class ProcessBudget:
 
 class ResponseSink:
     """Куда шов пишет ответ клиенту; реализует хаб (`server.py`). Любая ошибка записи -> ClientGone."""
+
+    accepts_presend_errors = False
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         raise NotImplementedError
@@ -569,15 +577,18 @@ def _data_frame(payload: Mapping[str, Any]) -> bytes:
 
 def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
     """Терминальный error-chunk в форме `chat.completion.chunk` (как fail-close кадр фасада)."""
-    return _data_frame(
-        build_stream_error_chunk(
-            message=message,
-            model=str(chunk.get("model") or ""),
-            code=code,
-            finish_reason=None,
-            completion_id=str(chunk.get("id") or "chatcmpl-passthrough"),
-            created=chunk.get("created"),
-        )
+    return (
+        format_sse_event(
+            build_stream_error_chunk(
+                message=message,
+                model=str(chunk.get("model") or ""),
+                code=code,
+                finish_reason="stop" if is_graceful_error_framing_enabled() else None,
+                completion_id=str(chunk.get("id") or "chatcmpl-passthrough"),
+                created=chunk.get("created"),
+            )
+        ).encode("utf-8")
+        + b"data: [DONE]\n\n"
     )
 
 
@@ -1253,6 +1264,7 @@ class PassthroughAdapter(BackendAdapter):
                     headers,
                     deadline=deadline,
                     on_socket=transport.append,
+                    presend_deadline=getattr(sink, "presend_deadline", None),
                 )
                 if sink.client_gone():
                     raise ClientGone()
@@ -1261,12 +1273,55 @@ class PassthroughAdapter(BackendAdapter):
                 resp = conn.getresponse()
                 if time.monotonic() >= deadline:
                     raise TimeoutError()
+                if resp.status in (502, 503) and getattr(
+                    sink, "accepts_presend_errors", False
+                ):
+                    try:
+                        body = _read_bounded(resp, self.limits.max_body_bytes)
+                    except UpstreamBodyTooLarge:
+                        self._fail(
+                            sink,
+                            502,
+                            "upstream_response_too_large",
+                            "upstream response exceeds the bridge limit",
+                        )
+                        return
+                    raise PreSendTransientError(
+                        "transient upstream HTTP status",
+                        status_code=resp.status,
+                        response_headers=tuple(
+                            self._response_headers(resp)
+                            + [("Content-Length", str(len(body)))]
+                        ),
+                        response_body=body,
+                    )
+            except PreSendTransientError as exc:
+                if getattr(sink, "accepts_presend_errors", False):
+                    raise
+                if exc.status_code == 504 or isinstance(exc.__cause__, TimeoutError):
+                    self._fail(
+                        sink,
+                        504,
+                        "upstream_timeout",
+                        "upstream did not respond in time",
+                    )
+                else:
+                    self._fail(
+                        sink, 502, "upstream_unavailable", "upstream is unavailable"
+                    )
+                return
             except socket.timeout:
                 self._fail(
                     sink, 504, "upstream_timeout", "upstream did not respond in time"
                 )
                 return
-            except (OSError, http.client.HTTPException):
+            except (OSError, http.client.HTTPException) as exc:
+                if isinstance(
+                    exc, (ConnectionError, http.client.IncompleteRead)
+                ) and getattr(sink, "accepts_presend_errors", False):
+                    raise PreSendTransientError(
+                        "upstream reset before downstream response"
+                    ) from exc
                 if time.monotonic() >= deadline:
                     self._fail(
                         sink,
@@ -1300,6 +1355,7 @@ class PassthroughAdapter(BackendAdapter):
         *,
         deadline: float | None = None,
         on_socket: Callable[[socket.socket], None] | None = None,
+        presend_deadline: float | None = None,
     ) -> http.client.HTTPConnection:
         remaining = (
             self.limits.total_timeout_s
@@ -1308,13 +1364,24 @@ class PassthroughAdapter(BackendAdapter):
         )
         if remaining <= 0:
             raise TimeoutError("upstream total deadline exceeded")
+        connect_remaining = remaining
+        if presend_deadline is not None:
+            connect_remaining = min(remaining, presend_deadline - time.monotonic())
+            if connect_remaining <= 0:
+                raise PreSendTransientError(
+                    "upstream connect budget exhausted", status_code=504
+                )
         conn = http.client.HTTPConnection(
             self._host,
             self._port,
-            timeout=min(self.limits.connect_timeout_s, remaining),
+            timeout=min(self.limits.connect_timeout_s, connect_remaining),
         )
         try:
             conn.connect()
+        except (ConnectionError, socket.gaierror, TimeoutError) as exc:
+            # Запрос ещё не посылался: это транспортный отказ, безопасный для общего retry.
+            conn.close()
+            raise PreSendTransientError("upstream connect failed") from exc
         except BaseException:
             conn.close()
             raise
@@ -1400,7 +1467,13 @@ class PassthroughAdapter(BackendAdapter):
                 sink, 504, "upstream_timeout", "upstream did not respond in time"
             )
             return
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException) as exc:
+            if isinstance(
+                exc, (ConnectionError, http.client.IncompleteRead)
+            ) and getattr(sink, "accepts_presend_errors", False):
+                raise PreSendTransientError(
+                    "upstream reset before downstream body"
+                ) from exc
             if deadline is not None and time.monotonic() >= deadline:
                 self._fail(
                     sink, 504, "upstream_timeout", "upstream did not respond in time"

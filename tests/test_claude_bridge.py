@@ -287,7 +287,6 @@ def test_reasoning_after_tool_json_backticks(arg, chunk_size):
     assert norm.content == "ответ`"
     assert norm.tool_calls == [{"name": "f", "arguments": {"arg": arg}}]
 
-
 def test_reasoning_markdown_fence_preserves_literal_tags():
     norm = core_te.StreamNormalizer()
     norm.feed_text("```\n<tool_call>example</tool_call>\n```")
@@ -403,7 +402,6 @@ def test_image_limits_reject_before_decode(monkeypatch, limits, code, decoded):
     assert exc.value.code == code
     assert decoder.call_count == decoded
 
-
 # ---- AD-003/REQ-03: argv и workspace-read -----------------------------------------
 
 
@@ -414,7 +412,7 @@ def test_workspace_cmd_read_and_add_dir_only_with_images(bridge):
     assert cmd[cmd.index("--allowedTools") + 1] == "Read(/tmp/claude-img-x/**)"
     assert "bypassPermissions" not in cmd
     assert "--restricted" not in cmd
-    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk" 
     assert cmd[cmd.index("--add-dir") + 1] == "/tmp/claude-img-x"
     plain = bridge._build_claude_cmd("claude-sonnet-5-5", "high", None)
     assert plain[plain.index("--tools") + 1] == ""
@@ -570,6 +568,7 @@ def test_auth_uses_constant_time_comparison(bridge, monkeypatch, headers, allowe
     monkeypatch.setattr(bridge.hmac, "compare_digest", compare)
     assert bridge._auth_ok(SimpleNamespace(headers=headers)) is allowed
     assert compare.called
+
 
 
 def test_workspace_image_staging_permissions_and_cleanup(http_bridge):
@@ -728,13 +727,32 @@ def test_strict_junk_sse_error_chunk_no_xml_leak(http_bridge):
     assert status == 200, body  # SSE-заголовки уже ушли; ошибка — data-кадром
     assert "<tool_call>" not in body
     errors = [p["error"] for p in _sse_payloads(body) if "error" in p]
-    assert errors and errors[0]["type"] == "proxy_error" and errors[0]["code"] == 502
+    assert errors and errors[0]["type"] == "stream_error" 
     finishes = [
         c.get("finish_reason")
         for p in _sse_payloads(body)
         for c in p.get("choices") or []
     ]
-    assert "stop" not in finishes and "tool_calls" not in finishes
+    assert finishes[-1] == "stop" and "tool_calls" not in finishes
+
+
+def test_error_stream_has_finish_reason_stop_and_done(http_bridge: tuple[object, int]) -> None:
+    _bridge, port = http_bridge
+    FakeRun.script = [("done", -15)]
+    status, body = _post(
+        port,
+        {
+            "model": "claude-sonnet-5-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert status == 200, body
+    terminal = _sse_payloads(body)[-1]
+    assert terminal["error"]["message"]
+    assert terminal["choices"][0]["finish_reason"] == "stop"
+    assert body.endswith("data: [DONE]\n\n")
+    assert body.count("data: [DONE]\n\n") == 1
 
 
 def test_strict_sigterm_cut_tool_call_no_xml_leak(http_bridge):
@@ -755,7 +773,7 @@ def test_strict_sigterm_cut_tool_call_no_xml_leak(http_bridge):
     assert status == 200, body
     assert "<tool_call>" not in body
     errors = [p["error"] for p in _sse_payloads(body) if "error" in p]
-    assert errors and errors[0]["code"] == 502
+    assert errors and errors[0]["type"] == "stream_error" 
 
 
 def test_strict_no_result_fallback_junk(http_bridge):

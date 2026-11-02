@@ -61,6 +61,7 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
         sys.path.insert(0, str(_p))
 
 try:
+    from core.stream_framing import format_stream_error_sse
     from core.tool_emulation import (  # noqa: E402
         DEFAULT_MAX_IMAGE_BYTES,
         DEFAULT_MAX_IMAGES,
@@ -862,7 +863,10 @@ class Handler(BaseHTTPRequestHandler):
             finish = "tool_calls" if out.get("tool_calls") else "stop"
             self._emit(chunk({}, finish))
         else:
-            self._emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
+            error_msg = str(err.get("message") or "") if isinstance(err, dict) else str(err)
+            error_chunk = format_stream_error_sse(str(error_msg), finish_reason="stop")
+            self._emit(error_chunk)
+            return
         self._emit("data: [DONE]\n\n")
 
 
