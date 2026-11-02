@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 import hashlib
 import hmac
@@ -42,9 +42,49 @@ from core.watchdog import (
     WATCHDOG_INTERVAL_S,
     AdaptiveTimeoutController,
     ProcessWatchdog,
+    positive_env,
 )
 
 SNAPSHOT_SCHEMA_VERSION = "1.0"
+
+
+def chain_history_digest(head: str, digest: str) -> str:
+    """Следующее звено SHA-256; формат совместим с сохранёнными сессиями фасада."""
+    return hashlib.sha256((head + "|" + digest).encode("utf-8")).hexdigest()
+
+
+def history_chain_head(digests: Iterable[str], count: int) -> str:
+    """Хеш ровно count сообщений, без копии префикса истории."""
+    head = ""
+    for index, digest in enumerate(digests):
+        if index >= count:
+            break
+        head = chain_history_digest(head, digest)
+    return head
+
+
+@dataclass(frozen=True)
+class HistoryPrefixGuard:
+    """Неизменяемый префикс подтверждённой истории backend-сессии."""
+
+    count: int
+    head: str
+
+    def matches(self, digests: Iterable[str], total_items: int) -> bool:
+        """Hot разрешён только для строгого расширения того же префикса."""
+        if not 0 < self.count < total_items or not re.fullmatch(
+            r"[0-9a-f]{64}", self.head
+        ):
+            return False
+        head, consumed = "", 0
+        for digest in digests:
+            head = chain_history_digest(head, digest)
+            consumed += 1
+            if consumed == self.count:
+                break
+        return consumed == self.count and hmac.compare_digest(head, self.head)
+
+
 TURN_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 KNOWN_EVENT_KINDS = frozenset(
@@ -140,7 +180,6 @@ def _is_drain_enabled() -> bool:
     return str(val).strip().lower() not in ("0", "false", "no", "off")
 
 
-
 def verify_bearer_token(provided: str | None, expected: str | None) -> bool:
     """Константная по времени сверка Bearer-токена (`hmac.compare_digest`)."""
     if not expected:
@@ -160,7 +199,12 @@ def mask_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
             masked = pat.sub(r"\1[REDACTED]", masked)
         else:
             masked = pat.sub("[REDACTED]", masked)
-    for env_key in ("BRIDGE_KEY", "DROID_DSH_BRIDGE_KEY", "FACTORY_API_KEY", "META_API_KEY"):
+    for env_key in (
+        "BRIDGE_KEY",
+        "DROID_DSH_BRIDGE_KEY",
+        "FACTORY_API_KEY",
+        "META_API_KEY",
+    ):
         env_val = os.environ.get(env_key)
         if env_val and len(env_val) >= 6 and env_val in masked:
             masked = masked.replace(env_val, "[REDACTED]")
@@ -526,14 +570,10 @@ class TurnBuffer:
                 cache_tok = usage.cache_read_tokens
             elif isinstance(usage, dict):
                 in_tok = int(
-                    usage.get("prompt_tokens")
-                    or usage.get("input_tokens")
-                    or 0
+                    usage.get("prompt_tokens") or usage.get("input_tokens") or 0
                 )
                 out_tok = int(
-                    usage.get("completion_tokens")
-                    or usage.get("output_tokens")
-                    or 0
+                    usage.get("completion_tokens") or usage.get("output_tokens") or 0
                 )
                 cache_tok = usage.get("cache_read_tokens")
             else:
@@ -583,7 +623,10 @@ class TurnBuffer:
         """Проверяет, не вытеснено ли событие `from_seq + 1` из кольцевого буфера."""
         with self._lock:
             req_seq = max(0, int(from_seq))
-            if self.oldest_available_seq > 1 and req_seq < self.oldest_available_seq - 1:
+            if (
+                self.oldest_available_seq > 1
+                and req_seq < self.oldest_available_seq - 1
+            ):
                 raise GapDetectedError(
                     turn_id=turn_id,
                     requested_from_seq=req_seq,
@@ -603,9 +646,7 @@ class TurnBuffer:
     ) -> list[BufferedTurnEvent]:
         """Возвращает события с `seq > from_seq` или выбрасывает `GapDetectedError` (410)."""
         with self._lock:
-            self.check_gap(
-                from_seq, turn_id=turn_id, state_dump_path=state_dump_path
-            )
+            self.check_gap(from_seq, turn_id=turn_id, state_dump_path=state_dump_path)
             req_seq = max(0, int(from_seq))
             return [ev for ev in self._events if ev.seq > req_seq]
 
@@ -620,9 +661,7 @@ class TurnBuffer:
     ) -> tuple[list[BufferedTurnEvent], StreamSubscriber | None]:
         """Атомарно проверяет gap, возвращает backlog `seq > from_seq` и регистрирует подписчика."""
         with self._lock:
-            self.check_gap(
-                from_seq, turn_id=turn_id, state_dump_path=state_dump_path
-            )
+            self.check_gap(from_seq, turn_id=turn_id, state_dump_path=state_dump_path)
             req_seq = max(0, int(from_seq))
             backlog = [ev for ev in self._events if ev.seq > req_seq]
             if self.sealed:
@@ -825,9 +864,9 @@ class TurnSessionManager:
         max_total_buffer_bytes: int = MAX_TURN_BUFFER_TOTAL_BYTES,
         turn_retention_s: float = TURN_RETENTION_S,
         idle_timeout_s: float = IDLE_TIMEOUT_S,
-        safety_cap_s: float = SAFETY_CAP_S,
+        safety_cap_s: float | None = None,
         finish_reserve_s: float = FINISH_RESERVE_S,
-        watchdog_interval_s: float = WATCHDOG_INTERVAL_S,
+        watchdog_interval_s: float | None = None,
         cancel_grace_s: float = CANCEL_SIGTERM_GRACE_S,
         detached_enabled_fn: Callable[[], bool] | None = None,
         watchdog_enabled_fn: Callable[[], bool] | None = None,
@@ -857,9 +896,20 @@ class TurnSessionManager:
         self.max_total_buffer_bytes = int(max_total_buffer_bytes)
         self.turn_retention_s = float(turn_retention_s)
         self.idle_timeout_s = float(idle_timeout_s)
-        self.safety_cap_s = float(safety_cap_s)
+        self.safety_cap_s = (
+            positive_env(
+                "BRIDGE_SAFETY_CAP_S",
+                positive_env("DROID_DSH_BRIDGE_SAFETY_CAP_S", SAFETY_CAP_S),
+            )
+            if safety_cap_s is None
+            else float(safety_cap_s)
+        )
         self.finish_reserve_s = float(finish_reserve_s)
-        self.watchdog_interval_s = float(watchdog_interval_s)
+        self.watchdog_interval_s = (
+            positive_env("BRIDGE_WATCHDOG_INTERVAL_S", WATCHDOG_INTERVAL_S)
+            if watchdog_interval_s is None
+            else float(watchdog_interval_s)
+        )
         self.cancel_grace_s = float(cancel_grace_s)
         self.persist_children_file = bool(persist_children_file)
         self._detached_enabled_fn = detached_enabled_fn or _is_detached_enabled
@@ -1166,7 +1216,9 @@ class TurnSessionManager:
         """
         if resume_turn_id is not None and resume_turn_id != "":
             if not validate_turn_id(resume_turn_id):
-                raise InvalidTurnIdError(f"Invalid X-Turn-Resume-Id: {resume_turn_id!r}")
+                raise InvalidTurnIdError(
+                    f"Invalid X-Turn-Resume-Id: {resume_turn_id!r}"
+                )
             existing = self.get_turn(
                 resume_turn_id, owner_token_hash=owner_token_hash or None
             )
@@ -1207,13 +1259,10 @@ class TurnSessionManager:
             if active_tid:
                 active_turn = self._turns_by_id.get(active_tid)
                 if active_turn is not None and active_turn.is_active:
-                    if (
-                        active_turn.status == STATE_RUNNING_DETACHED
-                        and (
-                            not owner_token_hash
-                            or not active_turn.owner_token_hash
-                            or active_turn.owner_token_hash == owner_token_hash
-                        )
+                    if active_turn.status == STATE_RUNNING_DETACHED and (
+                        not owner_token_hash
+                        or not active_turn.owner_token_hash
+                        or active_turn.owner_token_hash == owner_token_hash
                     ):
                         active_turn.status = STATE_RUNNING_ATTACHED
                         active_turn.updated_at = time.time()
@@ -1227,10 +1276,7 @@ class TurnSessionManager:
 
             turn_id = (
                 requested_turn_id
-                if (
-                    requested_turn_id
-                    and requested_turn_id not in self._turns_by_id
-                )
+                if (requested_turn_id and requested_turn_id not in self._turns_by_id)
                 else f"turn_{uuid.uuid4().hex[:16]}"
             )
             eff_rid = rid or f"r-{uuid.uuid4().hex[:8]}"
@@ -1240,9 +1286,7 @@ class TurnSessionManager:
                 else self.idle_timeout_s
             )
             eff_cap = (
-                float(safety_cap_s)
-                if safety_cap_s is not None
-                else self.safety_cap_s
+                float(safety_cap_s) if safety_cap_s is not None else self.safety_cap_s
             )
             controller = AdaptiveTimeoutController(
                 idle_timeout_s=eff_idle,
@@ -1253,6 +1297,7 @@ class TurnSessionManager:
                 rid=eff_rid,
                 turn_id=turn_id,
                 log_fn=self._log_fn,
+                watchdog_interval_s=self.watchdog_interval_s,
             )
             dump_path = str(self.turns_dir / f"{turn_id}.json")
             turn = ManagedTurn(
@@ -1377,7 +1422,9 @@ class TurnSessionManager:
             turn.done_event.set()
             self.persist_turn_snapshot(turn)
             self._cond.notify_all()
-        self._log(f"turn_cancelled rid={turn.rid} turn_id={turn.turn_id} reason={reason}")
+        self._log(
+            f"turn_cancelled rid={turn.rid} turn_id={turn.turn_id} reason={reason}"
+        )
         return turn
 
     def interrupt_for_drain(
@@ -1506,9 +1553,7 @@ class TurnSessionManager:
 
             if not turn.buffer.sealed:
                 if turn.status == STATE_COMPLETED:
-                    finish_reason = (
-                        "tool_calls" if final_res.tool_calls else "stop"
-                    )
+                    finish_reason = "tool_calls" if final_res.tool_calls else "stop"
                     turn.buffer.append(
                         "done",
                         {
@@ -1621,9 +1666,7 @@ class TurnSessionManager:
                     reason = turn.timeout_controller.terminated_reason
                     raw_res = TurnResult(
                         state=(
-                            "idle_timeout"
-                            if reason == "idle_timeout"
-                            else "timeout"
+                            "idle_timeout" if reason == "idle_timeout" else "timeout"
                         ),
                         rc=124,
                         text=raw_res.text,
@@ -1633,18 +1676,14 @@ class TurnSessionManager:
                         events=raw_res.events,
                         tool_calls=raw_res.tool_calls,
                     )
-                self.complete_turn_from_result(
-                    turn, raw_res, backend_kind=backend_kind
-                )
+                self.complete_turn_from_result(turn, raw_res, backend_kind=backend_kind)
             except Exception as exc:  # noqa: BLE001
                 err_res = TurnResult(
                     state="backend_error",
                     rc=1,
                     err=f"{exc.__class__.__name__}: {exc}",
                 )
-                self.complete_turn_from_result(
-                    turn, err_res, backend_kind=backend_kind
-                )
+                self.complete_turn_from_result(turn, err_res, backend_kind=backend_kind)
             finally:
                 watchdog_stop.set()
 
@@ -1664,9 +1703,7 @@ class TurnSessionManager:
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._cond:
             while True:
-                remaining_turns = [
-                    t for t in self._turns_by_id.values() if t.is_active
-                ]
+                remaining_turns = [t for t in self._turns_by_id.values() if t.is_active]
                 if not remaining_turns:
                     return []
                 wait_s = deadline - time.monotonic()
@@ -1679,10 +1716,15 @@ class TurnSessionManager:
         turn: ManagedTurn,
         *,
         from_seq: int = 0,
-        keepalive_interval_s: float = 10.0,
+        keepalive_interval_s: float | None = None,
         client_gone_fn: Callable[[], bool] | None = None,
     ) -> Iterator[str]:
         """Генерирует SSE-поток событий хода (`id: <seq>\\ndata: ...\\n\\n`) с поддержкой дочитки."""
+        # Локальный импорт разрывает существующий lifecycle -> manager цикл.
+        from core.lifecycle import KeepaliveController
+
+        keepalive = KeepaliveController()
+        interval = keepalive.effective_interval(keepalive_interval_s)
         backlog, subscriber = turn.buffer.subscribe(
             from_seq=from_seq,
             turn_id=turn.turn_id,
@@ -1704,16 +1746,18 @@ class TurnSessionManager:
                     self.mark_detached(turn.turn_id)
                     return
                 try:
-                    ev = subscriber.queue.get(
-                        timeout=max(0.05, float(keepalive_interval_s))
-                    )
+                    ev = subscriber.queue.get(timeout=interval)
                 except queue.Empty:
                     if client_gone_fn is not None and client_gone_fn():
                         self.mark_detached(turn.turn_id)
                         return
                     if turn.is_terminal:
                         return
-                    yield ": keepalive\n\n"
+                    yield keepalive.sse_comment() + keepalive.sse_data_chunk(
+                        model=turn.model,
+                        completion_id=completion_id,
+                        created=created,
+                    )
                     continue
                 if ev is None:
                     return
@@ -1751,4 +1795,3 @@ class TurnSessionManager:
             self._cond.notify_all()
 
     reset_state = reset
-

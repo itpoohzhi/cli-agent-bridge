@@ -8,14 +8,24 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import re
 import uuid
 from dataclasses import replace
-from typing import Any
+from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
 
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
+
+# ADR-0020 (BND-001): ядро окружение не читает — здесь только умолчания
+# RepetitionGuard; эффективные значения передаёт владелец маршрута аргументами.
+DEFAULT_MAX_REPETITION_REPEATS = 20
+DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
+REPETITION_MIN_REPEATS = 3
+REPETITION_MAX_REPEATS_CAP = 1000
 
 
 def _flatten_content(content: Any) -> str:
@@ -440,7 +450,9 @@ def _is_atx_heading(line: str) -> bool:
     )
 
 
-def _code_context(doc: str, pos: int, final: bool) -> str:
+def _code_context(
+    doc: str, pos: int, final: bool, *, code_end: list[int] | None = None
+) -> str:
     """Положение `pos` в `doc` относительно markdown-кода: "code" | "text" | "wait".
 
     "code" — внутри fenced-блока (CommonMark: забор с отступом до 3 пробелов, закрывает
@@ -469,6 +481,8 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
     eol = doc.find("\n", pos)
     char, run, rest = _fence_run(doc[line_start : len(doc) if eol == -1 else eol])
     if _is_fence_open(char, run, rest):  # тег в info-строке забора
+        if code_end is not None:
+            code_end[:] = [len(doc) if eol == -1 else eol + 1]
         return "code" if eol != -1 or final else "wait"
     para_end, decided = len(doc), final
     index = len(doc) if eol == -1 else eol + 1
@@ -493,6 +507,28 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
         if nxt == -1:
             break
         index = nxt + 1
+    # Частый случай обычного inline-кода: одинаковые одиночные разделители
+    # образуют последовательные пары. C count/find избегают Python-индекса
+    # и обхода каждого символа длинного уже опубликованного абзаца.
+    if doc.find("\\", para, pos) == -1 and doc.find("``", para, para_end) == -1:
+        if doc.count("`", para, pos) % 2 == 0:
+            return "text"
+        close = doc.find("`", pos, para_end)
+        if close == -1:
+            return "text" if decided else "wait"
+        close_end = close + 1
+        if code_end is not None:
+            code_end[:] = [close_end]
+        return "wait" if close_end == len(doc) and not final else "code"
+
+    # Индекс следующей серии той же длины строится один раз на абзац.
+    # Поиск закрытия для каждой непарной серии через скан всего хвоста был O(N²).
+    next_run: dict[int, int] = {}
+    last_by_length: dict[int, int] = {}
+    for match in reversed(list(_BACKTICK_RUN_RE.finditer(doc, para, para_end))):
+        run_length = match.end() - match.start()
+        next_run[match.start()] = last_by_length.get(run_length, -1)
+        last_by_length[run_length] = match.end()
     index = para
     while index < pos:
         char = doc[index]
@@ -504,15 +540,331 @@ def _code_context(doc: str, pos: int, final: bool) -> str:
             open_start = index
             while index < para_end and doc[index] == "`":
                 index += 1
-            close_end = _find_closing_run(doc, index, para_end, index - open_start)
+            close_end = next_run.get(open_start, -1)
             if close_end == -1:
                 if not decided:  # пара может прийти позже
                     return "wait"
             elif close_end > pos:
+                if code_end is not None:
+                    code_end[:] = [close_end]
                 return "wait" if close_end == len(doc) and not final else "code"
             else:
                 index = close_end
     return "text"
+
+
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+class RepetitionLoopDetected(LiveParserError):
+    """RepetitionGuard обнаружил авторегрессионный цикл повторений (ADR-0020)."""
+
+    code = "upstream_repetition_loop"
+
+
+_SEPARATOR_LINE_RE = re.compile(r"^[-=*_]{3,}$")
+
+
+def _unpack_guard_state(
+    state: tuple[Any, ...] | None,
+) -> tuple[str, int, int]:
+    if not state:
+        return "", 0, 0
+    if len(state) == 2:
+        return str(state[0] or ""), int(state[1] or 0), 0
+    return str(state[0] or ""), int(state[1] or 0), int(state[2] or 0)
+
+
+def _pack_guard_state(
+    fence_char: str, fence_len: int, inline_ticks: int
+) -> tuple[str, int, int] | None:
+    if fence_len or inline_ticks:
+        return (fence_char, fence_len, inline_ticks)
+    return None
+
+
+def _strip_inline_code_line(raw_line: str, inline_ticks: int) -> tuple[str, int]:
+    """Вырезать inline-код из строки с переносом незакрытого состояния `inline_ticks`."""
+    out: list[str] = []
+    idx = 0
+    length = len(raw_line)
+    while idx < length:
+        ch = raw_line[idx]
+        if ch == "`":
+            end = idx
+            while end < length and raw_line[end] == "`":
+                end += 1
+            run = end - idx
+            if inline_ticks == 0:
+                inline_ticks = run
+                out.append(" ")
+            elif run == inline_ticks:
+                inline_ticks = 0
+                out.append(" ")
+            idx = end
+            continue
+        if inline_ticks == 0 or ch in ("\n", "\r"):
+            out.append(ch)
+        idx += 1
+    return "".join(out), inline_ticks
+
+
+def _fence_state_after(
+    text: str, state: tuple[Any, ...] | None
+) -> tuple[str, int, int] | None:
+    """Состояние fenced/inline-кода после `text` при входном состоянии `state`."""
+    return _strip_code_for_guard(text, state)[1]
+
+
+def _strip_code_for_guard(
+    text: str, state: tuple[Any, ...] | None = None
+) -> tuple[str, tuple[str, int, int] | None]:
+    """Текст без fenced/inline-кода и строк-разделителей Markdown (защита от FP)."""
+    out: list[str] = []
+    fence_char, fence_len, inline_ticks = _unpack_guard_state(state)
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        char, run, rest = _fence_run(line)
+        if fence_len:
+            if char == fence_char and run >= fence_len and not rest.strip(" \t\r"):
+                fence_char, fence_len = "", 0
+            continue
+        if _is_fence_open(char, run, rest):
+            fence_char, fence_len = char, run
+            inline_ticks = 0
+            continue
+        if not inline_ticks and _SEPARATOR_LINE_RE.match(line.strip()):
+            continue
+        stripped_line, inline_ticks = _strip_inline_code_line(raw_line, inline_ticks)
+        out.append(stripped_line)
+    return "".join(out), _pack_guard_state(fence_char, fence_len, inline_ticks)
+
+
+def _is_separator_token(token: str) -> bool:
+    """Токен только из символов Markdown-разделителей (`---`, `===`, `***`)."""
+    return bool(token) and all(char in "-=*_" for char in token)
+
+
+class RepetitionGuard:
+    """Детектор циклов повторений в потоке текста (ADR-0020 AD-001).
+
+    `feed(chunk)` накапливает текст и возвращает `(chunk, detected)`: `detected`
+    взводится, когда один непробельный токен длиной до `max_token_len` или
+    периодический паттерн такой длины (например `\\n\\n_placeholder`)
+    повторяется подряд не менее `max_repeats` раз. Fenced/inline-код, чистый
+    whitespace и строки-разделители Markdown из детекции исключены.
+    """
+
+    _MAX_BUFFER = 32768
+    _KEEP_BUFFER = 16384
+
+    def __init__(
+        self,
+        max_repeats: int = DEFAULT_MAX_REPETITION_REPEATS,
+        max_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
+        enabled: bool = True,
+    ) -> None:
+        self.max_repeats = (
+            min(int(max_repeats), REPETITION_MAX_REPEATS_CAP)
+            if int(max_repeats) >= 1
+            else DEFAULT_MAX_REPETITION_REPEATS
+        )
+        self.max_token_len = (
+            int(max_token_len)
+            if int(max_token_len) >= 1
+            else DEFAULT_MAX_REPETITION_TOKEN_LEN
+        )
+        self.enabled = bool(enabled)
+        self._max_buffer = max(
+            self._MAX_BUFFER, (self.max_repeats + 10) * (self.max_token_len + 4)
+        )
+        self._keep_buffer = self._max_buffer // 2
+        self._buffer = ""
+        self._buffer_fence: tuple[Any, ...] | None = None
+        self._detected = False
+
+    @property
+    def detected(self) -> bool:
+        return self._detected
+
+    @property
+    def loop_detected(self) -> bool:
+        return self._detected
+
+    @property
+    def triggered(self) -> bool:
+        return self._detected
+
+    def reset(self) -> None:
+        self._buffer = ""
+        self._buffer_fence = None
+        self._detected = False
+
+    def feed(self, chunk: str) -> tuple[str, bool]:
+        """Принять очередной кусок текста; `(chunk, loop_detected)`."""
+        if not self.enabled or not chunk:
+            return chunk, False
+        self._buffer += chunk
+        if len(self._buffer) > self._max_buffer:
+            cut = len(self._buffer) - self._keep_buffer
+            newline = self._buffer.find("\n", cut)
+            if newline != -1 and newline + 1 < len(self._buffer):
+                cut = newline + 1
+            self._buffer_fence = _fence_state_after(
+                self._buffer[:cut], self._buffer_fence
+            )
+            self._buffer = self._buffer[cut:]
+        if not self._detected:
+            cleaned, _ = _strip_code_for_guard(self._buffer, self._buffer_fence)
+            self._detected = self._scan_cleaned(cleaned)
+        return chunk, self._detected
+
+    def check(self, chunk: str | None = None) -> bool:
+        """Скормить `chunk` (если дан) и вернуть флаг детекции."""
+        if chunk:
+            return self.feed(chunk)[1]
+        return self._detected
+
+    def detect(self, text: str) -> bool:
+        """Разовая проверка целого текста без изменения состояния guard."""
+        if not self.enabled or not text:
+            return False
+        cleaned, _ = _strip_code_for_guard(text, None)
+        return self._scan_cleaned(cleaned)
+
+    def _scan_cleaned(self, cleaned: str) -> bool:
+        if not cleaned.strip():
+            return False
+        prev: str | None = None
+        run = 0
+        for token in cleaned.split():
+            if len(token) > self.max_token_len or _is_separator_token(token):
+                prev, run = None, 0
+                continue
+            if token == prev:
+                run += 1
+            else:
+                prev, run = token, 1
+            if run >= self.max_repeats:
+                return True
+        tail = cleaned[-(self.max_token_len * self.max_repeats + self.max_token_len) :]
+        max_pat = min(self.max_token_len, len(tail) // self.max_repeats)
+        for pat_len in range(1, max_pat + 1):
+            pattern = tail[-pat_len:]
+            core = pattern.strip()
+            if not core or set(core) <= set("-=*_"):
+                continue
+            if len(set(core)) == 1 and not core.isalnum():
+                continue
+            count = 0
+            index = len(tail)
+            while index - pat_len >= 0 and tail[index - pat_len : index] == pattern:
+                count += 1
+                index -= pat_len
+                if count >= self.max_repeats:
+                    return True
+        return False
+
+
+_INVOKE_CANDIDATE_RE = re.compile(
+    r"</invoke(?=[\s>:/])|</parameter(?=[\s>])"
+    r"|<invoke(?=[\s>:/])|<parameter(?=[\s>:/])"
+)
+_INVOKE_CLOSE_RE = re.compile(r"</invoke(?::[A-Za-z0-9_.\-]+)?\s*>")
+_PARAMETER_CLOSE_RE = re.compile(r"</parameter\s*>")
+_PARAMETER_RE = re.compile(
+    r"<parameter\s+name\s*=\s*(?:\"([^\"]+)\"|'([^']+)')\s*>(.*?)</parameter\s*>",
+    re.DOTALL,
+)
+_PARAMETER_SELF_RE = re.compile(
+    r"<parameter\s+name\s*=\s*(?:\"([^\"]+)\"|'([^']+)')\s*/>"
+)
+_ATTR_NAME_RE = re.compile(r"\bname\s*=\s*(?:\"([^\"]+)\"|'([^']+)')")
+_INVOKE_PREFIX_RE = re.compile(r"^<invoke:([A-Za-z0-9_.\-]+)")
+_INVOKE_OPEN_INNER_RE = re.compile(r"<invoke(?::([A-Za-z0-9_.\-]+)|\s[^>]*)>")
+
+
+def _coerce_parameter_value(raw: str) -> Any:
+    """Значение `<parameter>`: строка; JSON — только если начинается с `{` или `[`."""
+    value = raw.strip()
+    if value[:1] in ("{", "["):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _invoke_tag_name(tag: str) -> str:
+    """Имя инструмента из открывающего тега `<invoke name=...>` / `<invoke:NAME>`."""
+    prefix = _INVOKE_PREFIX_RE.match(tag)
+    if prefix:
+        return prefix.group(1).strip()
+    attr = _ATTR_NAME_RE.search(tag)
+    if attr:
+        return (attr.group(1) or attr.group(2) or "").strip()
+    return ""
+
+
+def _nested_invoke_name(inner: str) -> str:
+    """Имя из вложенного `<invoke ...>` (инцидент `<invoke:bash><invoke name=...>`)."""
+    match = _INVOKE_OPEN_INNER_RE.search(inner)
+    if not match:
+        return ""
+    if match.group(1):
+        return match.group(1).strip()
+    return _invoke_tag_name(match.group(0))
+
+
+def _parse_invoke_arguments(inner: str) -> dict:
+    """Содержимое блока `<invoke>` -> словарь аргументов из тегов `<parameter>`."""
+    arguments: dict[str, Any] = {}
+    for match in _PARAMETER_RE.finditer(inner):
+        name = (match.group(1) or match.group(2) or "").strip()
+        if name:
+            arguments[name] = _coerce_parameter_value(match.group(3))
+    for match in _PARAMETER_SELF_RE.finditer(inner):
+        name = (match.group(1) or match.group(2) or "").strip()
+        if name and name not in arguments:
+            arguments[name] = ""
+    if not arguments:
+        body = inner.strip()
+        if body[:1] == "{":
+            try:
+                parsed = json.loads(body)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+    return arguments
+
+
+def _find_tool_close_outside_string(text: str, start: int) -> int:
+    """Позиция `</tool_call>` вне строковых литералов JSON в `text[start:]`, или -1.
+
+    Закрывающий тег внутри JSON-строки (например значение аргумента содержит
+    `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
+    строку не закрывают.
+    """
+    index = start
+    length = len(text)
+    in_string = False
+    escaped = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif text.startswith(TOOL_CALL_CLOSE, index):
+            return index
+        index += 1
+    return -1
 
 
 class ToolCallParser:
@@ -527,24 +879,170 @@ class ToolCallParser:
     (умолчание, legacy nonstream/без sink) ведёт себя абсолютно без изменений.
     """
 
-    def __init__(self, on_content, on_tool_call, strict_live: bool = False):
+    def __init__(
+        self,
+        on_content: Callable[[str], None],
+        on_tool_call: Callable[[dict[str, Any]], None],
+        strict_live: bool = False,
+        *,
+        tag_pairs: tuple[tuple[str, str], ...] = ((TOOL_CALL_OPEN, TOOL_CALL_CLOSE),),
+        parse_blocks: Callable[
+            [str], list[dict[str, Any]] | None
+        ] = _parse_tool_call_blocks,
+        suppress_after_tool: bool = False,
+        allowed_tools=None,
+        tool_schemas=None,
+        invoke_normalization_enabled: bool = True,
+        repetition_guard_enabled: bool = True,
+        max_repetition_repeats: int = DEFAULT_MAX_REPETITION_REPEATS,
+        max_repetition_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
+    ) -> None:
         self._buf = ""
         self._on_content = on_content
         self._on_tool_call = on_tool_call
         self.strict_live = strict_live
-        self._history = ""  # весь текст, ушедший в content
+        self._history: list[str] = []
+        self._history_chars = 0
+        self._line_parts: list[str] = []
+        self._quoted_until = 0
+        self._tag_pairs = tag_pairs
+        self._parse_blocks = parse_blocks
+        self._suppress_after_tool = suppress_after_tool
+        self._active: tuple[str, str] | None = None
+        self._parts: list[str] = []
+        self._scan_pos = 0
+        self._in_string = False
+        self._escaped = False
+        self._close_tail = ""
+        self._wait_at = 0
+        self._deferred_parts: list[str] = []
+        self._deferred_chars = 0
+        self._fence_state = ("", 0)
+        self.tool_calls_count = 0
+        self.trailing_chars_after_tool = 0
+        self._trailing_started = False
+        self._trailing_pending = 0
+        self._allowed_tools = (
+            {str(name) for name in allowed_tools} if allowed_tools is not None else None
+        )
+        self._tool_schemas = tool_schemas
+        self._invoke_enabled = bool(invoke_normalization_enabled)
+        self._guard = (
+            RepetitionGuard(
+                max_repeats=max_repetition_repeats,
+                max_token_len=max_repetition_token_len,
+                enabled=True,
+            )
+            if repetition_guard_enabled
+            else None
+        )
+
+    @property
+    def repetition_detected(self) -> bool:
+        """Guard зафиксировал цикл повторений в уже отданном content."""
+        return bool(self._guard is not None and self._guard.detected)
+
+    def _check_allowed(self, name: str) -> bool:
+        """Whitelist `allowed_tools`: strict — ошибка, иначе вызов отбрасывается."""
+        if self._allowed_tools is None or name in self._allowed_tools:
+            return True
+        if self.strict_live:
+            raise LiveParserError(f"unauthorized tool: {name}")
+        return False
+
+    def _emit_invoke_call(self, name: str, arguments: dict) -> None:
+        """Invoke-вызов -> плоский `{"id", "name", "arguments"}` в `on_tool_call`."""
+        calls: list[dict] = [
+            {"id": _new_call_id(), "name": name, "arguments": arguments}
+        ]
+        if self._tool_schemas is not None:
+            calls = []
+            for item in sanitize_tool_call(
+                {"id": _new_call_id(), "name": name, "arguments": arguments},
+                self._tool_schemas,
+            ):
+                item_name, item_args = _call_name_and_args(item)
+                normalized = _normalize_arguments(item_args)
+                calls.append(
+                    {
+                        "id": str(item.get("id") or _new_call_id())
+                        if isinstance(item, dict)
+                        else _new_call_id(),
+                        "name": item_name,
+                        "arguments": normalized if normalized is not None else {},
+                    }
+                )
+        for call in calls:
+            if call["name"] and self._check_allowed(call["name"]):
+                self._remember(_OPAQUE_BLOCK)
+                self.tool_calls_count += 1
+                self.trailing_chars_after_tool = 0
+                self._trailing_started = False
+                self._trailing_pending = 0
+                self._on_tool_call(call)
 
     def feed(self, text: str) -> None:
+        if not text:
+            return
+        if self._active is not None:
+            self._feed_active(text)
+            if self._active is None:
+                self._drain(final=False)
+            return
+        if self._wait_at:
+            self._deferred_parts.append(text)
+            self._deferred_chars += len(text)
+            if len(self._buf) + self._deferred_chars < self._wait_at:
+                return
+            text = "".join(self._deferred_parts)
+            self._deferred_parts.clear()
+            self._deferred_chars = 0
+        if not self._buf and (
+            "<" not in text
+            or self._quoted_until - self._history_chars >= len(text)
+            or (self._fence_state[1] and "\n" not in text)
+        ):
+            self._emit(text)
+            return
         self._buf += text
         self._drain(final=False)
 
     def finish(self) -> None:
+        if self._deferred_parts:
+            self._buf += "".join(self._deferred_parts)
+            self._deferred_parts.clear()
+            self._deferred_chars = 0
+        if self._active is not None:
+            if self.strict_live:
+                raise LiveParserError("unclosed tool_call block")
+            self._emit(self._active[0] + "".join(self._parts) + self._close_tail)
+            self._active = None
+            self._parts.clear()
+            self._close_tail = ""
         self._drain(final=True)
+
+    def has_open_tool_call(self) -> bool:
+        """Незавершённый вызов или префикс его тега, без сканирования тела JSON."""
+        return self._active is not None or bool(self._buf)
 
     def _classify_open(self, after: int, final: bool) -> str:
         """`<tool_call>` в буфере: "real" | "quoted" (inline-код markdown) | "wait" (нужен следующий символ)."""
-        context = _code_context(self._history + self._buf, len(self._history), final)
+        if self._fence_state[1] or self._history_chars < self._quoted_until:
+            return "quoted"
+        # После wait следующий полный просмотр только на геометрической границе:
+        # незавершённый markdown не пересканируется на каждом 4-байтном чанке.
+        if not final and self._wait_at and len(self._buf) < self._wait_at:
+            return "wait"
+        history = "".join(self._history)
+        code_end: list[int] = []
+        context = _code_context(
+            history + self._buf, len(history), final, code_end=code_end
+        )
         if context != "text":
+            if context == "wait":
+                self._wait_at = max(len(self._buf) * 2, len(self._buf) + 1)
+            elif code_end:
+                self._quoted_until = self._history_chars + code_end[0] - len(history)
             return "quoted" if context == "code" else "wait"
         tail = self._buf[after : after + 3]
         if not tail:
@@ -556,9 +1054,93 @@ class ToolCallParser:
             return "wait"
         return "quoted"
 
+    def _drain_invoke(self, final: bool, start: int) -> bool:
+        """Разобрать invoke-тег в начале буфера; True — продолжить `_drain`."""
+        if start > 0:
+            self._emit(self._buf[:start])
+            self._buf = self._buf[start:]
+        verdict = self._classify_open(0, final)
+        if verdict == "quoted":
+            self._emit(self._buf[:1])
+            self._buf = self._buf[1:]
+            return True
+        if verdict == "wait":
+            return False
+        gt = self._buf.find(">")
+        if gt == -1:
+            if not final:
+                return False
+            if self.strict_live:
+                raise LiveParserError("unclosed invoke tag")
+            self._buf = ""
+            return False
+        tag = self._buf[: gt + 1]
+        if tag.startswith("</"):
+            self._buf = self._buf[gt + 1 :]
+            self._remember(_OPAQUE_BLOCK)
+            return True
+        if tag.startswith("<parameter"):
+            if self.strict_live:
+                raise LiveParserError("parameter outside invoke")
+            if tag[:-1].rstrip().endswith("/"):
+                self._buf = self._buf[gt + 1 :]
+                return True
+            close = _PARAMETER_CLOSE_RE.search(self._buf, gt + 1)
+            if close is None:
+                if not final:
+                    return False
+                self._buf = ""
+                return False
+            self._buf = self._buf[close.end() :]
+            return True
+        name = _invoke_tag_name(tag)
+        if tag[:-1].rstrip().endswith("/"):
+            self._buf = self._buf[gt + 1 :]
+            if not name:
+                if self.strict_live:
+                    raise LiveParserError("invoke without tool name")
+                return True
+            self._emit_invoke_call(name, {})
+            return True
+        close = _INVOKE_CLOSE_RE.search(self._buf, gt + 1)
+        if close is None:
+            if not final:
+                return False
+            if self.strict_live:
+                raise LiveParserError("unclosed invoke block")
+            self._buf = ""
+            return False
+        inner = self._buf[gt + 1 : close.start()]
+        self._buf = self._buf[close.end() :]
+        if not name:
+            name = _nested_invoke_name(inner)
+        if not name:
+            if self.strict_live:
+                raise LiveParserError("invoke without tool name")
+            return True
+        self._emit_invoke_call(name, _parse_invoke_arguments(inner))
+        return True
+
     def _drain(self, final: bool) -> None:
         while True:
-            start = self._buf.find(TOOL_CALL_OPEN)
+            if len(self._tag_pairs) == 1:
+                open_tag, close_tag = self._tag_pairs[0]
+                start = self._buf.find(open_tag)
+            else:
+                candidates = [
+                    (self._buf.find(op), op, cl) for op, cl in self._tag_pairs
+                ]
+                start, open_tag, close_tag = min(
+                    (candidate for candidate in candidates if candidate[0] >= 0),
+                    default=(-1, "", ""),
+                )
+            invoke = (
+                _INVOKE_CANDIDATE_RE.search(self._buf) if self._invoke_enabled else None
+            )
+            if invoke is not None and (start == -1 or invoke.start() < start):
+                if self._drain_invoke(final, invoke.start()):
+                    continue
+                return
             if start == -1:
                 if final:
                     if (
@@ -580,82 +1162,552 @@ class ToolCallParser:
                 # всё до тега завершено: текст уходит в content и в `_history`
                 self._emit(self._buf[:start])
                 self._buf = self._buf[start:]
-            after = len(TOOL_CALL_OPEN)
+            after = len(open_tag)
             verdict = self._classify_open(after, final)
             if verdict == "quoted":
                 self._emit(self._buf[:after])
                 self._buf = self._buf[after:]
+                self._wait_at = 0
                 continue
             if verdict == "wait":
                 return
-            end = self._find_close_outside_string(len(TOOL_CALL_OPEN))
-            if end == -1:
+            # Весь markdown до реального тега уже разрешён. Для будущего разбора
+            # достаточно типа текущей строки; JSON не добавляет markdown-разметку.
+            line = "".join(self._line_parts)
+            marker = "# x" if _is_atx_heading(line) else "x"
+            self._history[:] = [marker]
+            self._line_parts[:] = [marker]
+            self._active = (open_tag, close_tag)
+            self._scan_pos = 0
+            self._in_string = self._escaped = False
+            text, self._buf = self._buf[after:], ""
+            self._wait_at = 0
+            self._feed_active(text)
+            if self._active is not None:
                 if final:
-                    if self.strict_live:
-                        raise LiveParserError("unclosed tool_call block")
-                    self._flush_all()  # незакрытый/невалидный блок отдаём текстом
+                    self.finish()
                 return
-            inner = self._buf[len(TOOL_CALL_OPEN) : end]
-            self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
-            calls = _parse_tool_call_blocks(inner)
-            if calls is None:
-                if self.strict_live:
-                    raise LiveParserError("malformed tool_call block")
-                self._emit(TOOL_CALL_OPEN + inner + TOOL_CALL_CLOSE)
-            else:
-                self._history += _OPAQUE_BLOCK
-                for call in calls:
-                    self._on_tool_call(call)
 
     def _find_close_outside_string(self, start: int) -> int:
-        """Позиция `</tool_call>` вне строковых литералов JSON, или -1.
+        """Позиция `</tool_call>` вне строковых литералов JSON, или -1."""
+        return _find_tool_close_outside_string(self._buf, start)
 
-        Закрывающий тег внутри JSON-строки (например значение аргумента содержит
-        `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
-        строку не закрывают.
-        """
-        index = start
-        length = len(self._buf)
-        in_string = False
-        escaped = False
-        while index < length:
-            char = self._buf[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
+    _JSON_MARKERS = re.compile(r'["\\<]')
+
+    def _feed_active(self, text: str) -> None:
+        """Каждый символ JSON просматривается один раз; тело собирается одним join."""
+        assert self._active is not None
+        open_tag, close_tag = self._active
+        if self._close_tail:
+            text = self._close_tail + text
+            self._close_tail = ""
+        index = 0
+        if self._escaped and text:
+            index = 1
+            self._escaped = False
+        while True:
+            match = self._JSON_MARKERS.search(text, index)
+            if match is None:
+                self._parts.append(text)
+                self._scan_pos += len(text)
+                return
+            index = match.start()
+            char = text[index]
+            if char == "\\" and self._in_string:
+                index += 2
+                if index > len(text):
+                    self._escaped = True
             elif char == '"':
-                in_string = True
-            elif self._buf.startswith(TOOL_CALL_CLOSE, index):
-                return index
-            index += 1
-        return -1
+                self._in_string = not self._in_string
+                index += 1
+            elif char == "<" and not self._in_string:
+                tail = text[index:]
+                if len(tail) < len(close_tag) and close_tag.startswith(tail):
+                    self._parts.append(text[:index])
+                    self._scan_pos += index
+                    self._close_tail = tail
+                    return
+                if tail.startswith(close_tag):
+                    self._parts.append(text[:index])
+                    inner = "".join(self._parts)
+                    self._parts.clear()
+                    self._active = None
+                    calls = self._parse_blocks(inner)
+                    if calls is None:
+                        if self.strict_live:
+                            raise LiveParserError("malformed tool_call block")
+                        self._emit(open_tag + inner + close_tag)
+                    else:
+                        if self._allowed_tools is not None and self.strict_live:
+                            for call in calls:
+                                self._check_allowed(str(call.get("name") or ""))
+                        self._remember(_OPAQUE_BLOCK)
+                        for call in calls:
+                            if not self._check_allowed(str(call.get("name") or "")):
+                                continue
+                            self.tool_calls_count += 1
+                            self.trailing_chars_after_tool = 0
+                            self._trailing_started = False
+                            self._trailing_pending = 0
+                            self._on_tool_call(call)
+                    self._buf = text[index + len(close_tag) :]
+                    return
+                index += 1
+            else:
+                index += 1
 
     def _pending_prefix(self) -> int:
         """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
-        limit = min(len(TOOL_CALL_OPEN) - 1, len(self._buf))
-        for length in range(limit, 0, -1):
-            if self._buf[-length:] == TOOL_CALL_OPEN[:length]:
-                return length
-        return 0
+        tags = [open_tag for open_tag, _ in self._tag_pairs]
+        if self._invoke_enabled:
+            tags += ["<invoke", "</invoke", "<parameter", "</parameter>"]
+        best = 0
+        for tag in tags:
+            if self._buf.endswith(tag):
+                best = max(best, len(tag))
+                continue
+            limit = min(len(tag) - 1, len(self._buf))
+            for length in range(limit, 0, -1):
+                if self._buf[-length:] == tag[:length]:
+                    best = max(best, length)
+                    break
+        return best
 
     def _tail_in_code(self) -> bool:
         """Хвост-префикс тега в буфере лежит внутри markdown-кода."""
-        doc = self._history + self._buf
+        if self._fence_state[1]:
+            return True
+        doc = "".join(self._history) + self._buf
         return _code_context(doc, len(doc) - self._pending_prefix(), True) == "code"
 
     def _emit(self, text: str) -> None:
         if text:
-            self._history += text
+            self._remember(text)
+            if self._guard is not None:
+                _, detected = self._guard.feed(text)
+                if detected and self.strict_live:
+                    raise RepetitionLoopDetected(
+                        "upstream_repetition_loop: excessive token repetitions"
+                    )
+            if self._suppress_after_tool and self.tool_calls_count:
+                stripped = text.strip()
+                if stripped:
+                    leading = len(text) - len(text.lstrip())
+                    if self._trailing_started:
+                        self.trailing_chars_after_tool += (
+                            self._trailing_pending + leading
+                        )
+                    self.trailing_chars_after_tool += len(stripped)
+                    self._trailing_started = True
+                    self._trailing_pending = len(text) - len(text.rstrip())
+                elif self._trailing_started:
+                    self._trailing_pending += len(text)
+                return
             self._on_content(text)
+
+    def _remember(self, text: str) -> None:
+        """Курсор markdown: завершённые блоки больше не участвуют в поиске."""
+        boundary = self._quoted_until - self._history_chars
+        if 0 < boundary <= len(text):
+            # Закрытый inline-span больше не влияет на следующие теги.
+            # Хвост после него обрабатывается отдельно, чтобы не потерять новый opener.
+            self._quoted_until = 0
+            self._remember(text[:boundary])
+            line = "".join(self._line_parts)
+            marker = ("# x" if _is_atx_heading(line) else "x") if line else ""
+            self._history[:] = [marker] if marker else []
+            self._line_parts[:] = [marker] if marker else []
+            if boundary < len(text):
+                self._remember(text[boundary:])
+            return
+        self._history_chars += len(text)
+        for part in text.splitlines(keepends=True):
+            self._history.append(part)
+            self._line_parts.append(part)
+            if not part.endswith("\n"):
+                continue
+            line = "".join(self._line_parts).rstrip("\n")
+            self._line_parts.clear()
+            char, run, rest = _fence_run(line)
+            fence_char, fence_len = self._fence_state
+            if fence_len:
+                if char == fence_char and run >= fence_len and not rest.strip(" \t\r"):
+                    self._fence_state = ("", 0)
+                self._history.clear()
+            elif _is_fence_open(char, run, rest):
+                self._fence_state = (char, run)
+                self._history.clear()
+            elif not line.strip() or _is_atx_heading(line):
+                self._history.clear()
 
     def _flush_all(self) -> None:
         if self._buf:
             text, self._buf = self._buf, ""
             self._emit(text)
+
+
+# --- Универсальный live reasoning и вложения (ADR 0014 AD-003/AD-005) -----------
+# Ядро окружение не читает: эффективные лимиты (env/конфиг) передаёт владелец
+# маршрута параметрами; здесь только безопасные значения по умолчанию.
+REASONING_TAGS = ("think", "thought", "thinking", "analysis")
+DEFAULT_MAX_REASONING_DEPTH = 8
+DEFAULT_MAX_IMAGES = 10
+DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024
+# Служебные теги протокола <tool_call>, не имеющие смысла вне настоящего блока.
+_ORPHAN_SERVICE_TAGS = (
+    TOOL_CALL_CLOSE,
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
+)
+# (MIME, магические байты, расширение файла) — принимаемые форматы вложений.
+_IMAGE_FORMATS = (
+    ("image/png", b"\x89PNG\r\n\x1a\n", "png"),
+    ("image/jpeg", b"\xff\xd8\xff", "jpg"),
+)
+
+
+class ImageInputError(ValueError):
+    """Отказ валидации изображения запроса; `code` — машинный код причины."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    """MIME по магическим байтам ('' — сигнатура неизвестна)."""
+    for mime, magic, _ext in _IMAGE_FORMATS:
+        if data.startswith(magic):
+            return mime
+    return ""
+
+
+def extract_data_url_images(
+    messages: Any,
+    *,
+    max_images: int = DEFAULT_MAX_IMAGES,
+    max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+) -> list[dict]:
+    """Все `image_url`-части истории -> [{"name", "mime", "data"}] в порядке появления.
+
+    Принимаются только data URI с base64 PNG/JPEG: строгая проверка кодировки и
+    соответствия MIME сигнатуре; URL не скачиваются, `file://` не читается,
+    пользовательские пути не используются (имена генерируются: `image_N.<ext>`).
+    Любое нарушение — `ImageInputError` до запуска CLI (fail-closed).
+    """
+    images: list[dict] = []
+    total = 0
+    if not isinstance(messages, list):
+        return images
+    for msg in messages:
+        if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
+            continue
+        for item in msg["content"]:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                continue
+            image_url = item.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else None
+            if not isinstance(url, str):
+                raise ImageInputError("invalid_image_content")
+            if not url.startswith("data:"):
+                raise ImageInputError("image_url_not_allowed")
+            comma = url.find(",")
+            if comma == -1:
+                raise ImageInputError("invalid_image_content")
+            fields = [f.strip().lower() for f in url[5:comma].split(";")]
+            mime = fields[0] if fields else ""
+            if not mime or "base64" not in fields[1:]:
+                raise ImageInputError("invalid_image_content")
+            ext = next((e for m, _magic, e in _IMAGE_FORMATS if m == mime), "")
+            if not ext:
+                raise ImageInputError("unsupported_image_type")
+            if len(images) >= max_images:
+                raise ImageInputError("too_many_images")
+            approx_bytes = (len(url) - comma - 1) * 3 // 4
+            if approx_bytes > max_image_bytes:
+                raise ImageInputError("image_too_large")
+            if total + approx_bytes > max_total_bytes:
+                raise ImageInputError("images_too_large")
+            payload = url[comma + 1 :]
+            if not payload:
+                raise ImageInputError("invalid_image_base64")
+            try:
+                data = base64.b64decode(payload, validate=True)
+            except (binascii.Error, ValueError):
+                raise ImageInputError("invalid_image_base64") from None
+            sniffed = _sniff_image_mime(data)
+            if not sniffed:
+                raise ImageInputError("unsupported_image_type")
+            if sniffed != mime:
+                raise ImageInputError("image_type_mismatch")
+            if len(data) > max_image_bytes:
+                raise ImageInputError("image_too_large")
+            total += len(data)
+            if total > max_total_bytes:
+                raise ImageInputError("images_too_large")
+            images.append(
+                {"name": f"image_{len(images) + 1}.{ext}", "mime": mime, "data": data}
+            )
+    return images
+
+
+def extract_thinking_delta(delta: Any) -> str:
+    """Текст нативной дельты размышления (`thinking_delta`) -> строка; иначе ''.
+
+    Транспортные адаптеры переводят свои события в общий словарь дельты; текст
+    берётся из `thinking` (форма Claude stream-json) либо `thinking_delta`.
+    """
+    if not isinstance(delta, dict) or delta.get("type") != "thinking_delta":
+        return ""
+    value = delta.get("thinking")
+    if value is None:
+        value = delta.get("thinking_delta")
+    return value if isinstance(value, str) else ""
+
+
+class StreamNormalizer:
+    """Единый нормализатор живого потока: content / reasoning / tool_calls (AD-005).
+
+    Один лексический автомат на все выходы транспорта. В обычном тексте первая
+    встреченная конструкция определяет контекст до своего закрытия: теги
+    размышлений (`REASONING_TAGS`) уводят дельты в reasoning, блок `<tool_call>`
+    непрозрачен и целиком уходит в `ToolCallParser` (тег размышления внутри
+    JSON-строки аргумента канал не переключает; `<tool_call>` внутри размышления
+    вызовом не становится). Теги в Markdown-коде каналом не являются (контекст —
+    `_code_context`). Нативное thinking (`feed_thinking`) уже типизировано: в
+    парсер не подаётся и не исполняется.
+
+    Каждое событие сначала добавляется в аккумуляторы (`content`,
+    `reasoning_content`, `tool_calls`), затем синхронно уведомляется sink:
+    SSE-сериализатор публикует `delta.reasoning_content` сразу, до терминального
+    события, JSON берёт тот же итог в `message.reasoning_content`; сумма
+    SSE-дельт равна JSON-итогу при одинаковом входном потоке.
+
+    При `strict_live=True` повреждённый/незакрытый блок, orphan служебный тег и
+    EOF внутри размышления поднимают `LiveParserError` — сырой XML в content не
+    попадает (fail-closed). Мысли не генерируются: upstream не дал — пусто.
+    """
+
+    def __init__(
+        self,
+        on_content=None,
+        on_reasoning=None,
+        on_tool_call=None,
+        *,
+        strict_live: bool = True,
+        reasoning_tags=REASONING_TAGS,
+        max_reasoning_depth: int = DEFAULT_MAX_REASONING_DEPTH,
+    ):
+        self._on_content = on_content or (lambda _text: None)
+        self._on_reasoning = on_reasoning or (lambda _text: None)
+        self._on_tool_call = on_tool_call or (lambda _call: None)
+        self.strict_live = strict_live
+        self._tags = tuple(reasoning_tags)
+        self._max_depth = max(int(max_reasoning_depth), 1)
+        self._parser = ToolCallParser(
+            self._emit_content, self._emit_call, strict_live=strict_live
+        )
+        self._buf = ""
+        self._state = "text"  # text | reasoning | tool
+        self._tag = ""
+        self._depth = 0
+        self._doc = ""  # текст, уже ушедший в ToolCallParser (для _code_context)
+        self._content_pieces: list[str] = []
+        self._reasoning_pieces: list[str] = []
+        self._calls: list[dict] = []
+        candidates: list[tuple[str, str, str]] = []
+        for tag in self._tags:
+            candidates.append((f"<{tag}>", "reasoning_open", tag))
+            candidates.append((f"</{tag}>", "orphan", tag))
+        candidates.append((TOOL_CALL_OPEN, "tool_open", ""))
+        candidates.extend((lit, "orphan", "") for lit in _ORPHAN_SERVICE_TAGS)
+        self._candidates = candidates
+
+    @property
+    def content(self) -> str:
+        return "".join(self._content_pieces)
+
+    @property
+    def reasoning_content(self) -> str:
+        return "".join(self._reasoning_pieces)
+
+    @property
+    def tool_calls(self) -> list[dict]:
+        return list(self._calls)
+
+    def feed(self, text: str) -> None:
+        self.feed_text(text)
+
+    def feed_text(self, text: str) -> None:
+        if text:
+            self._buf += text
+            self._drain(final=False)
+
+    def feed_thinking(self, text: str) -> None:
+        """Нативная дельта размышления транспорта (мимо парсера инструментов)."""
+        if text:
+            self._emit_reasoning(text)
+
+    def feed_event_delta(self, delta: Any) -> None:
+        """Словарь дельты транспорта: `thinking_delta` -> reasoning, `text_delta` -> текст."""
+        thinking = extract_thinking_delta(delta)
+        if thinking:
+            self.feed_thinking(thinking)
+        elif isinstance(delta, dict) and delta.get("type") == "text_delta":
+            text = delta.get("text")
+            if isinstance(text, str):
+                self.feed_text(text)
+
+    def finish(self) -> None:
+        self._drain(final=True)
+        self._parser.finish()
+
+    # -- sink-и нормализатора: аккумулятор сначала, уведомление следом ----------
+    def _emit_content(self, text: str) -> None:
+        if text:
+            self._content_pieces.append(text)
+            self._on_content(text)
+
+    def _emit_reasoning(self, text: str) -> None:
+        if text:
+            self._reasoning_pieces.append(text)
+            self._on_reasoning(text)
+
+    def _emit_call(self, call: dict) -> None:
+        self._calls.append(call)
+        self._on_tool_call(call)
+
+    def _feed_parser(self, text: str) -> None:
+        if text:
+            # JSON вызова не участвует в Markdown-контексте последующего текста.
+            self._doc += _OPAQUE_BLOCK if self._state == "tool" else text
+            self._parser.feed(text)
+
+    def _partial_prefix_len(self, literals) -> int:
+        """Длина хвоста буфера — собственного префикса одного из литералов."""
+        best = 0
+        for literal in literals:
+            limit = min(len(literal) - 1, len(self._buf))
+            for length in range(limit, best, -1):
+                if self._buf[-length:] == literal[:length]:
+                    best = length
+                    break
+        return best
+
+    def _drain(self, final: bool) -> None:
+        while True:
+            if self._state == "reasoning":
+                if not self._drain_reasoning(final):
+                    return
+            elif self._state == "tool":
+                if not self._drain_tool(final):
+                    return
+            elif not self._drain_text(final):
+                return
+
+    def _drain_text(self, final: bool) -> bool:
+        """Шаг в обычном тексте; False — нужно ещё данных (или буфер пуст в финале)."""
+        best_idx = -1
+        best = None
+        for literal, kind, tag in self._candidates:
+            idx = self._buf.find(literal)
+            if idx != -1 and (best_idx == -1 or idx < best_idx):
+                best_idx, best = idx, (literal, kind, tag)
+        if best is None:
+            if final:
+                literals = [
+                    lit for lit, kind, _t in self._candidates if kind != "tool_open"
+                ]
+                if self.strict_live and self._partial_prefix_len(literals):
+                    raise LiveParserError("unresolved reasoning tag prefix at finish")
+                self._feed_parser(self._buf)
+                self._buf = ""
+                return False
+            keep = self._partial_prefix_len([lit for lit, _k, _t in self._candidates])
+            if keep:
+                self._feed_parser(self._buf[:-keep])
+                self._buf = self._buf[-keep:]
+            else:
+                self._feed_parser(self._buf)
+                self._buf = ""
+            return False
+        if best_idx > 0:
+            self._feed_parser(self._buf[:best_idx])
+            self._buf = self._buf[best_idx:]
+            return True
+        literal, kind, tag = best
+        context = _code_context(self._doc + self._buf, len(self._doc), final)
+        if context == "wait":
+            return False
+        if context == "code":
+            self._feed_parser(literal)
+            self._buf = self._buf[len(literal) :]
+            return True
+        if kind == "reasoning_open":
+            self._state, self._tag, self._depth = "reasoning", tag, 1
+            self._buf = self._buf[len(literal) :]
+            return True
+        if kind == "tool_open":
+            self._state = "tool"
+            return True
+        if self.strict_live:
+            raise LiveParserError(f"orphan service tag: {literal.strip('<>/')}")
+        self._feed_parser(literal)
+        self._buf = self._buf[len(literal) :]
+        return True
+
+    def _drain_reasoning(self, final: bool) -> bool:
+        """Шаг внутри размышления; тело выпускается инкрементально, держится только префикс тега."""
+        open_lit, close_lit = f"<{self._tag}>", f"</{self._tag}>"
+        idx_open, idx_close = self._buf.find(open_lit), self._buf.find(close_lit)
+        found = [i for i in (idx_open, idx_close) if i != -1]
+        if not found:
+            if final:
+                raise LiveParserError("unclosed reasoning tag")
+            keep = self._partial_prefix_len((open_lit, close_lit))
+            if keep:
+                self._emit_reasoning(self._buf[:-keep])
+                self._buf = self._buf[-keep:]
+            else:
+                self._emit_reasoning(self._buf)
+                self._buf = ""
+            return False
+        idx = min(found)
+        if idx > 0:
+            self._emit_reasoning(self._buf[:idx])
+            self._buf = self._buf[idx:]
+            return True
+        if self._buf.startswith(close_lit):
+            self._depth -= 1
+            self._buf = self._buf[len(close_lit) :]
+            if self._depth == 0:
+                self._state, self._tag = "text", ""
+            return True
+        self._depth += 1
+        if self._depth > self._max_depth:
+            raise LiveParserError("reasoning tags nested too deeply")
+        self._buf = self._buf[len(open_lit) :]
+        return True
+
+    def _drain_tool(self, final: bool) -> bool:
+        """Шаг внутри `<tool_call>`: блок непрозрачен, целиком уходит в ToolCallParser."""
+        end = _find_tool_close_outside_string(self._buf, len(TOOL_CALL_OPEN))
+        if end == -1:
+            if final:
+                # Финал решает сам парсер: настоящий незакрытый блок — LiveParserError,
+                # процитированный в Markdown-коде — обычный текст.
+                self._feed_parser(self._buf)
+                self._buf = ""
+                self._state = "text"
+            return False
+        self._feed_parser(self._buf[: end + len(TOOL_CALL_CLOSE)])
+        self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
+        self._state = "text"
+        return True
 
 
 _PARALLEL_NAME = "parallel"
@@ -694,7 +1746,9 @@ def _with_arguments(tool_call: Any, arguments: Any) -> Any:
             tool_call, function=replace(tool_call.function, arguments=arguments)
         )
     if isinstance(tool_call.get("function"), dict):
-        return dict(tool_call, function=dict(tool_call["function"], arguments=arguments))
+        return dict(
+            tool_call, function=dict(tool_call["function"], arguments=arguments)
+        )
     return dict(tool_call, arguments=arguments)
 
 
@@ -731,7 +1785,9 @@ def build_tool_schemas(tools: Any) -> dict[str, Any]:
     return schemas
 
 
-def _parameters_schema(tool_name: str, tool_schemas: dict[str, Any] | None) -> dict | None:
+def _parameters_schema(
+    tool_name: str, tool_schemas: dict[str, Any] | None
+) -> dict | None:
     """Объект `parameters` схемы инструмента; None — схемы для имени нет."""
     schema = (tool_schemas or {}).get(tool_name)
     if not isinstance(schema, dict):
@@ -829,7 +1885,11 @@ def _sanitize_arguments(name: str, arguments: Any, tool_schemas: dict | None) ->
     cleaned = _sanitize_arguments_dict(parsed, _parameters_schema(name, tool_schemas))
     if cleaned == parsed:
         return arguments
-    return cleaned if isinstance(arguments, dict) else json.dumps(cleaned, ensure_ascii=False)
+    return (
+        cleaned
+        if isinstance(arguments, dict)
+        else json.dumps(cleaned, ensure_ascii=False)
+    )
 
 
 def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | None:
@@ -841,7 +1901,11 @@ def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | 
     if parsed is None:
         return None
     items = next(
-        (parsed[key] for key in _PARALLEL_LIST_KEYS if isinstance(parsed.get(key), list)),
+        (
+            parsed[key]
+            for key in _PARALLEL_LIST_KEYS
+            if isinstance(parsed.get(key), list)
+        ),
         None,
     )
     calls: list[Any] = []
@@ -883,7 +1947,9 @@ def _sanitize_call(
             for sub in unpacked:
                 if budget[0] <= 0:
                     break
-                results.extend(_sanitize_call(sub, tool_schemas, depth + 1, budget, max_depth))
+                results.extend(
+                    _sanitize_call(sub, tool_schemas, depth + 1, budget, max_depth)
+                )
             return results
     budget[0] -= 1
     cleaned = _sanitize_arguments(name, arguments, tool_schemas)
@@ -910,7 +1976,11 @@ def sanitize_tool_call(
     Невалидные аргументы остаются нетронутыми (fail-safe), повторный вызов идемпотентен.
     """
     return _sanitize_call(
-        tool_call, tool_schemas, 0, [max(int(max_parallel_calls), 1)], max_parallel_depth
+        tool_call,
+        tool_schemas,
+        0,
+        [max(int(max_parallel_calls), 1)],
+        max_parallel_depth,
     )
 
 
@@ -943,6 +2013,11 @@ def finalize_turn(
     tool_schemas: dict[str, Any] | None = None,
     max_parallel_calls: int = DEFAULT_MAX_PARALLEL_CALLS,
     max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
+    allowed_tools=None,
+    invoke_normalization_enabled: bool = True,
+    repetition_guard_enabled: bool = True,
+    max_repetition_repeats: int = DEFAULT_MAX_REPETITION_REPEATS,
+    max_repetition_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
 ) -> TurnResult:
     """Сырой итог адаптера -> `out` фасада с буфером `events` (content/reasoning/tool_call).
 
@@ -989,7 +2064,16 @@ def finalize_turn(
 
     text = raw.text
     if emulate_tools:
-        parser = ToolCallParser(add_content, add_call)
+        parser = ToolCallParser(
+            add_content,
+            add_call,
+            allowed_tools=allowed_tools,
+            tool_schemas=tool_schemas if sanitize else None,
+            invoke_normalization_enabled=invoke_normalization_enabled,
+            repetition_guard_enabled=repetition_guard_enabled,
+            max_repetition_repeats=max_repetition_repeats,
+            max_repetition_token_len=max_repetition_token_len,
+        )
         parser.feed(text)
         parser.finish()
     else:

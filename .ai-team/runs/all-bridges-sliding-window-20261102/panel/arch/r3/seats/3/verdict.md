@@ -1,0 +1,6 @@
+PANEL-NONCE: 198135ccfeda476b
+ARTIFACT-SHA256: 8425114cd2bef4c3cefc42daa7a33de1d7caad86d1b73381e7e322550ea414b1
+Подтверждаю чтение общего канона `~/Мой диск/Context/AGENTS.md` целиком (до `<!-- КАНОН-КОНЕЦ -->`) и проектного файла правил `AGENTS.md` в рабочей папке.
+DISPUTE RW-013 — контр-evidence: analysis/all-bridges-sliding-activity-window/handoff-architect.md:75-135 — _ALLOWED_SETTINGS_KEYS содержит исключительно 9 несекретных ключей таймаутов вотчдога, локальный словарь _DSH_ENV потребляется только хелпером _get_setting() без вызова os.environ.update и не передаётся в child_env дочернего процесса (bridges/claude-p-bridge/server.py:388-396), а архитектурная граница и потребитель явно определены в BND-002 и CD-004.
+DISPUTE RW-014 — контр-evidence: core/watchdog.py:359-512 — вся агент-агностическая логика скользящего окна активности, I/O-grace и мониторинга процессной группы уже вынесена в универсальное ядро AdaptiveTimeoutController, тогда как отдельный процесс моста bridges/claude-p-bridge/server.py:596-632 в цикле очереди Handler._execute содержит лишь тонкую транспортную связку (register_pgid, check, record_activity, close), полностью аналогичную подключению core.tool_emulation.StreamNormalizer.
+VERDICT: ACCEPT

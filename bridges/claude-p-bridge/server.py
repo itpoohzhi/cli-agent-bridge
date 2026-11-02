@@ -61,6 +61,11 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
         sys.path.insert(0, str(_p))
 
 try:
+    from core.watchdog import AdaptiveTimeoutController
+except ImportError:
+    AdaptiveTimeoutController = None  # type: ignore[assignment,misc]
+
+try:
     from core.stream_framing import format_stream_error_sse
     from core.tool_emulation import (  # noqa: E402
         DEFAULT_MAX_IMAGE_BYTES,
@@ -96,6 +101,91 @@ def _env_positive_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+_ALLOWED_SETTINGS_KEYS = frozenset({
+    "CLAUDE_P_BRIDGE_WATCHDOG_ENABLED",
+    "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S",
+    "CLAUDE_P_BRIDGE_IO_WAIT_CAP_S",
+    "CLAUDE_P_BRIDGE_SAFETY_CAP_S",
+    "CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S",
+    "BRIDGE_IDLE_TIMEOUT_S",
+    "BRIDGE_IO_WAIT_CAP_S",
+    "BRIDGE_SAFETY_CAP_S",
+    "BRIDGE_WATCHDOG_INTERVAL_S",
+})
+
+
+def _read_dsh_env_file() -> dict[str, str]:
+    """Безопасно читает только несекретные настройки из ~/.dsh/.env.
+
+    НЕ мутирует os.environ, гарантируя полную изоляцию от окружения pytest и подпроцессов.
+    """
+    env_file = Path.home() / ".dsh" / ".env"
+    if not env_file.is_file():
+        return {}
+    res: dict[str, str] = {}
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k in _ALLOWED_SETTINGS_KEYS:
+                    res[k] = v
+    except OSError:
+        pass
+    return res
+
+
+_DSH_ENV = _read_dsh_env_file()
+
+
+def _get_setting(name: str, fallback_name: str | None = None, default: str = "") -> str:
+    """Двухступенчатый каскад чтения: os.environ -> _DSH_ENV -> fallback -> default."""
+    for k in (name, fallback_name) if fallback_name else (name,):
+        val = os.environ.get(k)
+        if val is not None and val.strip():
+            return val.strip()
+        val = _DSH_ENV.get(k)
+        if val is not None and val.strip():
+            return val.strip()
+    return default
+
+
+def _get_positive_float(name: str, fallback_name: str | None = None, default: float = 0.0) -> float:
+    raw = _get_setting(name, fallback_name)
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+        return val if 0 < val < float("inf") else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _is_watchdog_enabled() -> bool:
+    raw = _get_setting("CLAUDE_P_BRIDGE_WATCHDOG_ENABLED", default="1").lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S = _get_positive_float(
+    "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_IDLE_TIMEOUT_S", 300.0
+)
+CLAUDE_P_BRIDGE_IO_WAIT_CAP_S = _get_positive_float(
+    "CLAUDE_P_BRIDGE_IO_WAIT_CAP_S", "BRIDGE_IO_WAIT_CAP_S", 900.0
+)
+CLAUDE_P_BRIDGE_SAFETY_CAP_S = _get_positive_float(
+    "CLAUDE_P_BRIDGE_SAFETY_CAP_S", "BRIDGE_SAFETY_CAP_S", 3600.0
+)
+CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S = _get_positive_float(
+    "CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_WATCHDOG_INTERVAL_S", 5.0
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -597,39 +687,74 @@ class Handler(BaseHTTPRequestHandler):
             add_content, add_reasoning, add_call, strict_live=True
         )
 
-        while True:
-            if _client_gone(self.connection):
-                return state("client_gone", 1)
-            try:
-                kind, payload = run.q.get(timeout=POLL_INTERVAL_S)
-            except queue.Empty:
-                if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
-                    last_ka = time.monotonic()
-                    if not keepalive():
+        controller = None
+        last_check_ts = time.monotonic()
+        proc = getattr(run, "proc", None)
+        proc_pid = getattr(proc, "pid", None) if proc is not None else None
+
+        if _is_watchdog_enabled() and AdaptiveTimeoutController is not None and proc_pid:
+            controller = AdaptiveTimeoutController(
+                idle_timeout_s=CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S,
+                safety_cap_s=CLAUDE_P_BRIDGE_SAFETY_CAP_S,
+                io_wait_cap_s=CLAUDE_P_BRIDGE_IO_WAIT_CAP_S,
+                watchdog_interval_s=CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S,
+            )
+            controller.register_pgid(proc_pid)
+
+        try:
+            while True:
+                if _client_gone(self.connection):
+                    return state("client_gone", 1)
+
+                now = time.monotonic()
+                if controller is not None and proc is not None and proc_pid and (
+                    now - last_check_ts >= controller.watchdog_interval_s
+                ):
+                    last_check_ts = now
+                    should_stop, reason, _ = controller.check(proc_pid)
+                    if should_stop and reason in ("idle_timeout", "absolute_cap"):
+                        _kill_group(proc)
+                        return state("timeout", 1, f"claude-p watchdog: {reason}")
+                    # Если reason == "child_exited" — нормальный выход потомка,
+                    # не убиваем, ждём done из очереди.
+
+                try:
+                    kind, payload = run.q.get(timeout=POLL_INTERVAL_S)
+                except queue.Empty:
+                    if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                        last_ka = time.monotonic()
+                        if not keepalive():
+                            return state("client_gone", 1)
+                    continue
+
+                if controller is not None and kind in ("text", "thinking", "result"):
+                    controller.record_activity(kind)
+
+                if kind == "text":
+                    normalizer.feed_text(str(payload))
+                    if gone[0]:
                         return state("client_gone", 1)
-                continue
-            if kind == "text":
-                normalizer.feed_text(str(payload))
-                if gone[0]:
-                    return state("client_gone", 1)
-            elif kind == "thinking":
-                normalizer.feed_thinking(str(payload))
-                if gone[0]:
-                    return state("client_gone", 1)
-            elif kind == "result":
-                result_ev = payload
-                usage = payload.get("usage") or {}
-            elif kind == "pump_error":
-                return state("pump_error", 1, str(payload))
-            elif kind == "done":
-                # Fail-closed финал: незакрытый/битый хвост — LiveParserError наверх,
-                # сырой XML текстом не досбрасываем. Fallback на терминальный
-                # `result` исключён (AD-004): пустой ход — ошибка 502 в _error_body.
-                normalizer.finish()
-                if gone[0]:
-                    return state("client_gone", 1)
-                time.sleep(STDERR_DRAIN_S)
-                return state("done", payload, "".join(run.err_box))
+                elif kind == "thinking":
+                    normalizer.feed_thinking(str(payload))
+                    if gone[0]:
+                        return state("client_gone", 1)
+                elif kind == "result":
+                    result_ev = payload
+                    usage = payload.get("usage") or {}
+                elif kind == "pump_error":
+                    return state("pump_error", 1, str(payload))
+                elif kind == "done":
+                    # Fail-closed финал: незакрытый/битый хвост — LiveParserError наверх,
+                    # сырой XML текстом не досбрасываем. Fallback на терминальный
+                    # `result` исключён (AD-004): пустой ход — ошибка 502 в _error_body.
+                    normalizer.finish()
+                    if gone[0]:
+                        return state("client_gone", 1)
+                    time.sleep(STDERR_DRAIN_S)
+                    return state("done", payload, "".join(run.err_box))
+        finally:
+            if controller is not None:
+                controller.close()
 
     def _run_once(self, req: dict, on_text, on_reasoning, on_tool_call, keepalive) -> dict:
         raw_messages = req.get("messages")
@@ -693,7 +818,13 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _error_body(out: dict) -> Any:
-        st = out.get("state")
+        st = str(out.get("state") or "")
+        if st == "timeout":
+            return {
+                "message": str(out.get("err") or "upstream timeout"),
+                "type": "upstream_timeout",
+                "code": 504,
+            }
         if st == "bad_model":
             return {"message": str(out.get("err")), "type": "invalid_request_error", "code": 400}
         if st == "bad_image":

@@ -582,26 +582,54 @@ class TestReworkCycle1(FwdCase):
 
     FAIL_ONCE = {"steps": [{"op": "exit", "rc": 1}]}
 
-    def test_f001_retry_success_syncs_chat_env(self):
-        """F-001: первая попытка упала, retry поднял процесс с env — chat.env == env процесса."""
-        self.set_flag(True)
-        self.hub.script(
-            [self.FAIL_ONCE]
-        )  # попытка 1 падает, попытка 2 — сценарий по умолчанию
-        chat = self.conv("c-f001", extra_body=env_body(GRAFANA_TOKEN="retry-secret"))
-        self.assertEqual(chat.ask("q1")[0], 200)
-        state = self.chat_of("c-f001")
-        self.assertEqual(len(self.hub.spawns()), 2)
-        self.assertEqual(self.probes()[1]["GRAFANA_TOKEN"], "retry-secret")
+    def test_f001_retry_success_syncs_chat_env(self) -> None:
+        """F-001: следующий запрос после 502 восстанавливает процесс и синхронизирует env."""
+        from typing import Callable, Protocol, cast
+
+        class Conversation(Protocol):
+            extra: dict[str, object]
+
+            def ask(self, text: str) -> tuple[int, object]: ...
+
+        class ConversationFactory(Protocol):
+            def __call__(
+                self, key: str, *, extra_body: dict[str, object]
+            ) -> Conversation: ...
+
+        set_flag = cast(Callable[[bool], None], getattr(self, "set_flag"))
+        script = cast(Callable[[list[object]], None], getattr(self.hub, "script"))
+        spawns = cast(Callable[[], list[object]], getattr(self.hub, "spawns"))
+        admissions = cast(Callable[[], list[object]], getattr(self.hub, "admissions"))
+        probes = cast(
+            Callable[[], list[dict[str, str | None]]], getattr(self, "probes")
+        )
+        conv = cast(ConversationFactory, getattr(self, "conv"))
+        chat_of = cast(Callable[[str], server.Chat], getattr(self, "chat_of"))
+        set_flag(True)
+        script([self.FAIL_ONCE])
+        chat = conv("c-f001", extra_body={"env": {"GRAFANA_TOKEN": "retry-secret"}})
+        self.assertEqual(chat.ask("q1")[0], 502)
+        self.assertEqual(len(admissions()), 1)
+        self.assertEqual(len(spawns()), 1)
+        self.assertEqual(chat.ask("q1 retry")[0], 200)
+        self.assertEqual(len(admissions()), 2)
+        state = chat_of("c-f001")
+        self.assertEqual(len(spawns()), 2)
+        self.assertEqual(probes()[1]["GRAFANA_TOKEN"], "retry-secret")
         self.assertEqual(state.env, {"GRAFANA_TOKEN": "retry-secret"})
-        self.assertIn(state.key_hash, server.REGISTRY.env_keys)
+        self.assertIn(
+            state.key_hash, cast(set[str], getattr(server.REGISTRY, "env_keys"))
+        )
+        assert state.proc is not None
         pid = state.proc.pid
         # следующий запрос без env НЕ переиспользует живой процесс с секретом
         chat.extra = {}
         self.assertEqual(chat.ask("q2")[0], 200)
+        self.assertEqual(len(admissions()), 3)
         self.assertTrue(wait_until(lambda: not pid_alive(pid)))
+        assert state.proc is not None
         self.assertNotEqual(state.proc.pid, pid)
-        self.assertIsNone(self.probes()[-1]["GRAFANA_TOKEN"])
+        self.assertIsNone(probes()[-1]["GRAFANA_TOKEN"])
         self.assertIsNone(state.env)
 
     def test_f001_kill_switch_at_spawn_drops_env(self):

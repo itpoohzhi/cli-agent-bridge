@@ -28,7 +28,7 @@ class GoldenCatalogTest(unittest.TestCase):
 
     def test_golden_has_eight_models_sorted(self) -> None:
         ids = [e["id"] for e in GOLDEN]
-        self.assertEqual(len(ids), 8)
+        self.assertEqual(len(ids), 7)
         self.assertEqual(ids, sorted(ids))
 
     def test_limits_follow_min_context_input(self) -> None:
@@ -88,15 +88,15 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("jev-1.13", active)
         self.assertNotIn("not-in-zen-free", active)
         self.assertNotIn("nemotron-3-ultra-free", active)
-        self.assertEqual(len(active), 8)
-        self.assertEqual(zc.DENYLIST, {"jev-1.13", "jev-1.13-free", "test", "claude-opus-5-5-backup"})
+        self.assertEqual(len(active), 7)
+        self.assertEqual(zc.DENYLIST, {"jev-1.13", "jev-1.13-free", "test", "claude-opus-5-5-backup", "glm-5.3-flash-free"})
 
     def test_new_free_model_appears_without_code_change(self) -> None:
         self.models["fresh-free"] = copy.deepcopy(self.models["beam-free"])
         self.models["fresh-free"]["name"] = "Fresh Free"
         catalog = zc.build_catalog(self.models, self.zen | {"fresh-free"})
         self.assertIn("fresh-free", [e["id"] for e in catalog])
-        self.assertEqual(len(catalog), 9)
+        self.assertEqual(len(catalog), 8)
 
     def test_deprecated_model_leaves_catalog(self) -> None:
         self.models["beam-free"]["status"] = "deprecated"

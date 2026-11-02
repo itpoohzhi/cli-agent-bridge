@@ -150,46 +150,6 @@
   }
  },
  {
-  "id": "glm-5.3-flash-free",
-  "api_name": "GLM-5.3-Flash Free",
-  "effort_values": [
-   "low",
-   "high",
-   "max"
-  ],
-  "cordis": {
-   "contextWindow": 200000,
-   "maxTokens": 32000,
-   "input": [
-    "text"
-   ],
-   "reasoningEfforts": {
-    "off": "off",
-    "low": "low",
-    "medium": "high",
-    "high": "high",
-    "xhigh": "max",
-    "max": "max"
-   }
-  },
-  "bridge": {
-   "context_length": 200000,
-   "max_output": 32000,
-   "supports_variant": true,
-   "variant_map": {
-    "minimal": "low",
-    "low": "low",
-    "medium": "high",
-    "high": "high",
-    "xhigh": "max",
-    "max": "max",
-    "ultra": "max",
-    "off": "",
-    "none": ""
-   }
-  }
- },
- {
   "id": "mimo-v2.6-flash-free",
   "api_name": "MiMo-V2.6-Flash Free",
   "effort_values": [],

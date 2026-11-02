@@ -97,6 +97,7 @@ DEFAULT_CONNECT_TIMEOUT_S = 10.0
 DEFAULT_READ_TIMEOUT_S = 1800.0
 DEFAULT_IDLE_TIMEOUT_S = 300.0
 DEFAULT_TOTAL_TIMEOUT_S = 420.0
+DEFAULT_SAFETY_CAP_S = 3600.0
 DEFAULT_QUEUE_TIMEOUT_S = (
     900.0  # ожидание слота `max_concurrent`, если хост своего не задал
 )
@@ -177,6 +178,7 @@ class PassthroughLimits:
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S  # совместимость старого конструктора
     idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S
     total_timeout_s: float = DEFAULT_TOTAL_TIMEOUT_S
+    safety_cap_s: float = DEFAULT_SAFETY_CAP_S
     heartbeat_interval_s: float = 12.0
     poll_interval_s: float = 0.1
     reader_join_timeout_s: float = 0.2
@@ -224,6 +226,9 @@ class PassthroughLimits:
             ),
             total_timeout_s=_positive_float(
                 env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S
+            ),
+            safety_cap_s=_positive_float(
+                env, "BRIDGE_SAFETY_CAP_S", DEFAULT_SAFETY_CAP_S
             ),
             heartbeat_interval_s=_positive_float(
                 env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
@@ -642,16 +647,23 @@ class _TimedSseReader:
         readline: Callable[[int], bytes],
         write: Callable[[bytes], None],
         limits: PassthroughLimits,
-        deadline: float,
+        deadline: float | None = None,
     ) -> None:
         self.limits = limits
-        self.deadline = deadline
+        self.start_time = time.monotonic()
+        # Аварийный потолок жизни стрима; `deadline` (если задан) остаётся жёстким.
+        self.safety_deadline = (
+            deadline if deadline is not None else self.start_time + limits.safety_cap_s
+        )
         self.write = write
         self.items: queue.Queue[bytes | Exception] = queue.Queue(
             maxsize=limits.read_queue_max_entries
         )
         self.stop = threading.Event()
-        self.last_input = time.monotonic()
+        # last_input — каденс heartbeat (вход upstream или свой keepalive);
+        # last_upstream — только реальный ввод upstream, без heartbeat.
+        self.last_input = self.start_time
+        self.last_upstream = self.start_time
         self.last_progress: float | None = None
 
         def read() -> None:
@@ -680,13 +692,19 @@ class _TimedSseReader:
     def readline(self, _limit: int) -> bytes:
         while True:
             now = time.monotonic()
-            remaining = self.deadline - now
-            if self.last_progress is not None:
-                remaining = min(
-                    remaining, self.last_progress + self.limits.idle_timeout_s - now
-                )
-            if remaining <= 0:
-                raise TimeoutError("upstream stream deadline exceeded")
+            safety_remaining = self.safety_deadline - now
+            if safety_remaining <= 0:
+                raise TimeoutError("upstream stream safety cap exceeded")
+            # Скользящее окно: срок тишины отсчитывается от последней активности.
+            activity_base = (
+                self.last_progress
+                if self.last_progress is not None
+                else self.last_upstream
+            )
+            idle_remaining = activity_base + self.limits.idle_timeout_s - now
+            if idle_remaining <= 0:
+                raise TimeoutError("upstream stream idle timeout exceeded")
+            remaining = min(idle_remaining, safety_remaining)
             heartbeat_due = self.last_input + self.limits.heartbeat_interval_s - now
             if heartbeat_due <= 0:
                 self.write(b": keepalive\n\n")
@@ -698,12 +716,12 @@ class _TimedSseReader:
                 )
             except queue.Empty:
                 continue
-            if time.monotonic() >= self.deadline:
-                raise TimeoutError("upstream stream deadline exceeded")
+            if time.monotonic() >= self.safety_deadline:
+                raise TimeoutError("upstream stream safety cap exceeded")
             if isinstance(item, Exception):
                 raise item
             if item:
-                self.last_input = time.monotonic()
+                self.last_input = self.last_upstream = time.monotonic()
             return item
 
     def close(self) -> None:
@@ -732,7 +750,7 @@ def relay_sse(
         readline,
         write,
         limits,
-        deadline if deadline is not None else time.monotonic() + limits.total_timeout_s,
+        deadline,
     )
     outcome = state if state is not None else StreamOutcome()
     client_write = write
@@ -1244,11 +1262,19 @@ class PassthroughAdapter(BackendAdapter):
                 except OSError:
                     continue
 
+        streaming = threading.Event()
+
         def watch() -> None:
-            while not stop.wait(
-                min(self.limits.poll_interval_s, max(0.0, deadline - time.monotonic()))
-            ):
-                if time.monotonic() >= deadline or sink.client_gone():
+            # После начала SSE срок жизни держит скользящее окно ридера (idle + safety cap).
+            while True:
+                interval = self.limits.poll_interval_s
+                if not streaming.is_set():
+                    interval = min(interval, max(0.0, deadline - time.monotonic()))
+                if stop.wait(interval):
+                    return
+                if (
+                    not streaming.is_set() and time.monotonic() >= deadline
+                ) or sink.client_gone():
                     abort()
                     return
 
@@ -1334,7 +1360,11 @@ class PassthroughAdapter(BackendAdapter):
                         sink, 502, "upstream_unavailable", "upstream is unavailable"
                     )
                 return
-            self._respond(resp, request, sink, deadline)
+            content_type = (resp.getheader("Content-Type") or "").lower()
+            is_stream = resp.status == 200 and "text/event-stream" in content_type
+            if is_stream:
+                streaming.set()
+            self._respond(resp, request, sink, None if is_stream else deadline)
         except ClientGone:
             self._log("passthrough client_gone")
         finally:

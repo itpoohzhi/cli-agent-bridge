@@ -392,17 +392,18 @@ SAFETY_CAP_S = positive_env(
 # socket-таймаута соединения) — зависший/нечитающий клиент не держит T/L (см. sse_writer в
 # _serve_sse и add_content/add_reasoning в Handler._execute).
 def parse_live_write_timeout(default: float = 30.0) -> float:
-    """Читает таймаут записи, возвращая default при неверном значении ENV."""
-    raw = os.environ.get("DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S", "").strip()
-    if not raw:
-        return default
-    try:
-        val = float(raw)
-        if not (1.0 <= val <= 300.0):
-            return default
-        return val
-    except (ValueError, TypeError):
-        return default
+    """Читает таймаут записи, поддерживая BRIDGE_CLIENT_WRITE_TIMEOUT_S с fallback на DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S."""
+    for key in ("BRIDGE_CLIENT_WRITE_TIMEOUT_S", "DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S"):
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            continue
+        try:
+            val = float(raw)
+            if 1.0 <= val <= 300.0:
+                return val
+        except (ValueError, TypeError):
+            continue
+    return default
 
 
 LIVE_WRITE_TIMEOUT_S: float = parse_live_write_timeout(30.0)

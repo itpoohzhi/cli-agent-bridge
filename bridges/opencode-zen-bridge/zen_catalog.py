@@ -29,8 +29,8 @@ LEVEL_RANK: Dict[str, int] = {
 CARD_LEVELS: Tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 VARIANT_MAP_LEVELS: Tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
-# Модели из Zen-списка, которых не должно быть в каталоге (служебные и тестовые).
-DENYLIST = frozenset({"jev-1.13", "jev-1.13-free", "test", "claude-opus-5-5-backup"})
+# Модели из Zen-списка, которых не должно быть в каталоге (служебные, тестовые, снятые).
+DENYLIST = frozenset({"jev-1.13", "jev-1.13-free", "test", "claude-opus-5-5-backup", "glm-5.3-flash-free"})
 
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]{0,63}$")
 
@@ -43,6 +43,7 @@ ALIAS_TARGET = "deepseek-v4.1-flash-free"
 
 # Устаревшие id из старых сессий DSH -> актуальная модель. Не удалять: сессии хранят id.
 DEPRECATED_MODEL_ALIASES: Dict[str, str] = {
+    "glm-5.3-flash-free": ALIAS_TARGET,
     "minimax-m3.1-flash-free": ALIAS_TARGET,
     "longcat-2.5-preview-free": ALIAS_TARGET,
     "muse-spark-1.3-contributor-free": ALIAS_TARGET,
@@ -403,7 +404,6 @@ _FALLBACK_SPEC: Tuple[Tuple[str, str, Tuple[str, ...], int, Optional[int], int],
     ("big-pickle", "Big Pickle", (), 200000, 160000, 32000),
     ("deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash Free", ("low", "high", "max"), 200000, None, 32000),
     ("flint-40b-free", "Flint 40B Free", ("low", "medium", "high", "xhigh", "max"), 262144, None, 65536),
-    ("glm-5.3-flash-free", "GLM-5.3-Flash Free", ("low", "high", "max"), 200000, None, 32000),
     ("mimo-v2.6-flash-free", "MiMo-V2.6-Flash Free", (), 200000, None, 32000),
     ("nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning Free", (), 262144, None, 262144),
     ("nemotron-3.5-super-vl-free", "Nemotron 3.5 Super VL Free",

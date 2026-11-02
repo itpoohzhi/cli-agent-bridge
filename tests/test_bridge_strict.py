@@ -20,7 +20,9 @@ from bridge_testlib import (  # noqa: E402
     _DROID_LEGACY_MODELS,
     BridgeCase,
     chat_body,
+    droidify_raw_fleet,
     find_model,
+    install_droid_stand,
     load_raw_fleet,
     make_proof,
 )
@@ -238,6 +240,13 @@ class TestEffortAndModel(BridgeCase):
     `exec`; форма конструктора процесса не тестируется (TM-016).
     """
 
+    def setUp(self):
+        super().setUp()
+        # Обе Gemini проверяются через тот же изолированный FakeDroid-стенд.
+        data = droidify_raw_fleet(load_raw_fleet())
+        find_model(data, "gemini-4-argon")["backend"] = "droid"
+        install_droid_stand(data)
+
     def _post_logged(self, body):
         """POST и (параметры последней initialize_session, effort_source, autonomy_source)."""
         with self.capture_logs() as lines:
@@ -268,7 +277,8 @@ class TestEffortAndModel(BridgeCase):
         # Уровни — строго из fleet.json (sonnet-5-5: только high; xhigh в каталоге нет).
         wanted = {
             "claude-sonnet-5-5": ["high"],
-            "gemini-3.8-flash": ["high"],
+            "gemini-3.8-flash": ["low", "medium", "high"],
+            "gemini-4-argon": ["low", "medium", "high"],
             "deepseek-v4.1-flash": ["high", "max"],
         }
         for model, efforts in wanted.items():
@@ -295,7 +305,9 @@ class TestEffortAndModel(BridgeCase):
             ("claude-sonnet-5-5", "xhigh", "high"),  # nearest lower
             ("claude-sonnet-5-5", "max", "high"),  # AC1: max у high-only
             ("claude-sonnet-5-5", "max\n", "high"),  # strip до клампа
-            ("gemini-3.8-flash", "medium", "high"),  # нет нижнего -> upward fallback
+            ("gemini-3.8-flash", "medium", "medium"),  # exact allowed effort
+            ("gemini-4-argon", "minimal", "low"),
+            ("gemini-4-argon", "xhigh", "high"),
             ("claude-sonnet-5-5", "HIGH", "high"),  # case-insensitive exact
             ("claude-sonnet-5-5", "off", "high"),  # нет нижнего -> upward
             ("claude-sonnet-5-5", "none", "high"),  # unknown -> default (high)
@@ -477,10 +489,14 @@ class TestHealthAndModels(BridgeCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
         # 18 моделей боевого каталога + deepseek-v4.1-flash стенда FakeDroid + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
-        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS) + 7)  # объявленные effort aliases
-        self.assertTrue({"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]})
+        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS))
+        self.assertTrue(
+            {"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]}
+        )
         self.assertIn("muse-wonder-full-1.0", {e["id"] for e in body["data"]})
-        self.assertEqual(body["data"][0]["id"], "muse-wonder-full-1.0")  # умолчание каталога первым
+        self.assertEqual(
+            body["data"][0]["id"], "muse-wonder-full-1.0"
+        )  # умолчание каталога первым
         self.assertIn("claude-sonnet-5-5", {e["id"] for e in body["data"]})
         expected_keys = sorted(
             [

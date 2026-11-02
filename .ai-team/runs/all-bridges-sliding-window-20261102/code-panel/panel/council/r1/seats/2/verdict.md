@@ -1,0 +1,33 @@
+PANEL-NONCE: 79dd1ae3dd1325bd
+ARTIFACT-SHA256: 0be90ffb4493dbe585bad077f3ebd0ba73d8c4b03a1b563b080d9e1ba2ac8f3d
+
+Канон `~/Мой диск/Context/AGENTS.md` прочитан целиком (до `<!-- КАНОН-КОНЕЦ -->`), также прочитан проектный `AGENTS.md` (`~/work/src/cli-agent-bridge/AGENTS.md`).
+Начинаю независимую проверку пакета ревью кода в роли РЕАЛИСТ (R1): читаю целевые файлы из манифеста кандидата.
+Читаю хвост `bridges/claude-p-bridge/server.py`, архитектурный пакет, `core/watchdog.py` и проверяю точный `git diff` по файлам кандидата.
+Читаю полный вывод `git diff` из сохранённого файла шага и запускаю целевые тесты для независимой проверки.
+Запускаю тестовый набор из корня репозитория `/Users/aazhiry1/work/src/cli-agent-bridge` для подтверждения прохождения всех тестов L1/регрессии.
+PANEL-NONCE: 79dd1ae3dd1325bd
+ARTIFACT-SHA256: 0be90ffb4493dbe585bad077f3ebd0ba73d8c4b03a1b563b080d9e1ba2ac8f3d
+
+Канон `~/Мой диск/Context/AGENTS.md` (до `<!-- КАНОН-КОНЕЦ -->`) и проектный `AGENTS.md` (`~/work/src/cli-agent-bridge/AGENTS.md`) прочитаны целиком.
+
+## Экспертная оценка (Роль: РЕАЛИСТ, Раунд: R1)
+
+Проведена независимая ревизия диффа, целевых файлов манифеста и прогон тестового набора (`50 passed in 6.71s` по `tests/test_claude_bridge.py`, `tests/test_claude_p_watchdog.py`, `tests/test_stream_timeout_config.py`).
+
+Реализация полностью соответствует архитектурному пакету (`AD-001`..`AD-004`):
+1. **Минимальность и чистота интеграции вотчдога (`AD-001`):** в [bridges/claude-p-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/claude-p-bridge/server.py#L690-L758) `AdaptiveTimeoutController` подключается локально в `Handler._execute`, вызовы `check(proc_pid)` троттлятся по `controller.watchdog_interval_s`, нормальное завершение потомка (`child_exited`) не обрывает вычитывание очереди до `done`, а `controller.close()` гарантированно вызывается в `finally`, предотвращая утечку состояния PID в `ProcessWatchdog`.
+2. **Безопасность и изоляция чтения `~/.dsh/.env` (`AD-002`):** `_read_dsh_env_file()` в [bridges/claude-p-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/claude-p-bridge/server.py#L106-L143) читает только 9 разрешённых ключей из `_ALLOWED_SETTINGS_KEYS` в локальный словарь `_DSH_ENV` без мутации `os.environ` и без риска утечки `*_KEY` в окружение `pytest` или дочерних процессов.
+3. **Устранение хардкода и вендорской привязки (`AD-003`, `AD-004`):** `STALL_TIMEOUT_S` в [bridges/opencode-zen-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/opencode-zen-bridge/server.py#L1946-L1949) переведён на `_zen_positive_float`, а `parse_live_write_timeout` в [server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/server.py#L394-L406) реализует прозрачный приоритет `BRIDGE_CLIENT_WRITE_TIMEOUT_S` -> `DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S` -> `default`.
+
+Блокирующих замечаний (`BLOCKER-SAFETY`, `BLOCKER-OPINION`) нет. Ниже зафиксированы два неблокирующих эксплуатационных нюанса.
+
+### F-001 NON_BLOCKING — В `_get_positive_float` невалидное непустое значение первичного ключа не передаёт управление `fallback_name`
+- **Доказательство:** [bridges/claude-p-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/claude-p-bridge/server.py#L149-L169) (`_get_setting` и `_get_positive_float`).
+- **Суть:** `_get_setting(name, fallback_name)` возвращает первое непустое строковое значение из пары `(name, fallback_name)`. Если в `CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S` окажется синтаксически некорректная строка (например, `"abc"` или `"-5"`), а в `BRIDGE_IDLE_TIMEOUT_S` — валидное число `"200"`, то `_get_positive_float` получит `"abc"`, отбракует его и сразу вернёт `default` (`300.0`), пропустив валидный `fallback_name` (в отличие от цикла в [server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/server.py#L396-L405), где валидация диапазона выполняется внутри итерации по ключам). Для штатной эксплуатации не критично, так как fallback на безопасный `default` сохраняется.
+
+### F-002 NON_BLOCKING — Однократное чтение `_DSH_ENV` при импорте модуля `claude-p-bridge`
+- **Доказательство:** [bridges/claude-p-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/claude-p-bridge/server.py#L146-L188) (`_DSH_ENV = _read_dsh_env_file()`).
+- **Суть:** В отличие от `_is_watchdog_enabled()`, проверяющего `os.environ` на каждом запросе ([bridges/claude-p-bridge/server.py](file:///Users/aazhiry1/work/src/cli-agent-bridge/bridges/claude-p-bridge/server.py#L172-L174)), словарь `_DSH_ENV` и константы `CLAUDE_P_BRIDGE_*_S` инициализируются один раз при старте процесса моста. При изменении `~/.dsh/.env` в эксплуатации требуется штатный перезапуск службы (`kickstart`), что уже отражено в разделе `evolution.rollout` архитектурного пакета и исключает лишний дисковый I/O на каждом HTTP-запросе.
+
+VERDICT: ACCEPT

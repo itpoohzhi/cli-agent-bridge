@@ -1,0 +1,15 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+code-panel	gpt-6.1-sol-high	panel-judge-k1	42144	42144	2026-11-02T15:08:31.014204+00:00	Mon Nov  2 18:08:31 2026	running
+code-panel	muse-wonder-full-1.0	panel-judge-k2	42142	42142	2026-11-02T15:08:31.014037+00:00	Mon Nov  2 18:08:31 2026	running
+code-panel	claude-sonnet-5-5-high	panel-judge-k3	42189	42189	2026-11-02T15:08:31.104049+00:00	Mon Nov  2 18:08:31 2026	running
+code-panel	claude-sonnet-5-5-high	panel-judge-k3	42189	42189	2026-11-02T15:08:31.104049+00:00	Mon Nov  2 18:08:31 2026	rc=0
+code-panel	gpt-6.1-sol-high	panel-judge-k1	42144	42144	2026-11-02T15:08:31.014204+00:00	Mon Nov  2 18:08:31 2026	rc=0
+code-panel	muse-wonder-full-1.0	panel-judge-k2	42142	42142	2026-11-02T15:08:31.014037+00:00	Mon Nov  2 18:08:31 2026	rc=143
+code-panel	gemini-4-argon-high	panel-judge-k2	77200	77200	2026-11-02T15:56:18.485353+00:00	Mon Nov  2 18:56:18 2026	running
+code-panel	gemini-4-argon-high	panel-judge-k2	77200	77200	2026-11-02T15:56:18.485353+00:00	Mon Nov  2 18:56:18 2026	rc=0
+code-panel	gemini-4-argon-high	panel-judge-k1	97591	97591	2026-11-02T15:58:22.689322+00:00	Mon Nov  2 18:58:22 2026	running
+code-panel	muse-wonder-full-1.0	panel-judge-k3	97599	97599	2026-11-02T15:58:22.696179+00:00	Mon Nov  2 18:58:22 2026	running
+code-panel	claude-sonnet-5-5-high	panel-judge-k2	97634	97634	2026-11-02T15:58:22.779253+00:00	Mon Nov  2 18:58:22 2026	running
+code-panel	claude-sonnet-5-5-high	panel-judge-k2	97634	97634	2026-11-02T15:58:22.779253+00:00	Mon Nov  2 18:58:22 2026	rc=0
+code-panel	muse-wonder-full-1.0	panel-judge-k3	97599	97599	2026-11-02T15:58:22.696179+00:00	Mon Nov  2 18:58:22 2026	rc=0
+code-panel	gemini-4-argon-high	panel-judge-k1	97591	97591	2026-11-02T15:58:22.689322+00:00	Mon Nov  2 18:58:22 2026	rc=0

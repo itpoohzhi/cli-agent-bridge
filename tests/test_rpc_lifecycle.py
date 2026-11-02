@@ -539,9 +539,15 @@ class TestPersistenceAndShutdown(RpcCase):
             sorted(p.name for p in record.parent.iterdir()), [record.name]
         )  # tmp не остался
         # Смерть процесса посреди хода: чат DIRTY на диске, следующий запрос — replay, user ровно один раз.
-        self.hub.script([{"steps": [{"op": "exit", "rc": 1, "stderr": "crash"}]}] * 3)
+        from typing import Callable, cast
+
+        admissions = cast(Callable[[], list[object]], getattr(self.hub, "admissions"))
+        script = cast(Callable[[list[object]], None], getattr(self.hub, "script"))
+        before_crash = len(admissions())
+        script([{"steps": [{"op": "exit", "rc": 1, "stderr": "crash"}]}])
         status, _ = chat.ask("q-crash")
         self.assertEqual(status, 502)
+        self.assertEqual(len(admissions()) - before_crash, 1)
         self.assertEqual(
             json.loads(record.read_text(encoding="utf-8"))["state"], "DIRTY"
         )
@@ -549,6 +555,7 @@ class TestPersistenceAndShutdown(RpcCase):
         self.hub.script([{"steps": [{"op": "text", "text": "recovered"}]}])
         status, body = chat.ask("q-crash")
         self.assertEqual(status, 200)
+        self.assertEqual(len(admissions()) - before_crash, 2)
         replay = self.texts_by_pid()[self.chat_of("secret-chat-key-ABC").proc.pid]
         self.assertEqual(
             [t for t, _ in replay],
@@ -829,6 +836,8 @@ class TestJournalGolden(RpcCase):
 
     def test_tm019_new_lines_outside_strict_regexes_and_order_stable(self):
         """TM-019: session_rpc/instr_guard не совпадают со строгими регулярками; strict-строки и их порядок неизменны."""
+        from typing import cast
+
         instr = (
             "<system-reminder>\nWorkspace instruction budget 106496 bytes: omitted ~/.dsh/AGENTS.md\n"
             "Instructions from: /x/AGENTS.md\nbody\n</system-reminder>"
@@ -840,8 +849,11 @@ class TestJournalGolden(RpcCase):
         with self.capture_logs() as lines:
             self.assertEqual(chat.send()[0], 200)
             self.assertEqual(chat.ask("again")[0], 200)
+        lines = cast(list[str], lines)
         strict = [
-            ln for ln in lines if ln.startswith(("exec ", "usage ", "done ", "reject "))
+            ln
+            for ln in lines
+            if ln.startswith(("exec ", "usage ", "done ", "reject "))
             and not ln.startswith("done route=")
         ]
         for line in strict:
@@ -896,7 +908,8 @@ class TestJournalGolden(RpcCase):
         self.assertEqual(
             usage, ["usage sess=- raw=0/0 cache_read=- rep=0/0 resumed=0 turns=0"]
         )
-        self.assertEqual(len([ln for ln in lines if ln.startswith("exec ")]), 3)
+        failed_lines = cast(list[str], lines)
+        self.assertEqual(len([ln for ln in failed_lines if ln.startswith("exec ")]), 1)
 
 
 class TestBaselineInventory(unittest.TestCase):

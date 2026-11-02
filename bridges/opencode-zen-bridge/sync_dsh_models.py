@@ -165,14 +165,9 @@ def alias_ids(state: Dict[str, Any]) -> List[str]:
 
 
 def render_models_region(indent: int, state: Dict[str, Any]) -> List[str]:
-    by_id = {e["id"]: e for e in state["models"]}
     lines: List[str] = []
     for entry in sorted(state["models"], key=lambda e: e["id"]):
         lines.extend(card_lines(indent, entry["id"], zc.card_name(entry), entry))
-    for old in alias_ids(state):
-        target = state["aliases"][old]
-        if target in by_id:
-            lines.extend(card_lines(indent, old, "%s (deprecated -> %s)" % (old, target), by_id[target]))
     return lines
 
 
@@ -482,7 +477,7 @@ def verify_dump(dump: str, state: Dict[str, Any]) -> List[str]:
                     dict(cordis["reasoningEfforts"]))
         if actual != expected:
             problems.append("card %s differs: %r != %r" % (entry["id"], actual, expected))
-    extra = set(cards) - set(state["active"]) - set(alias_ids(state))
+    extra = set(cards) - set(state["active"])
     if extra:
         problems.append("unexpected cards: %s" % ", ".join(sorted(extra)))
     if sorted(allowed) != sorted(state["active"]):

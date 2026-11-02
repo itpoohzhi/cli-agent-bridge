@@ -1,0 +1,4 @@
+muse: workspace root: /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/all-bridges-sliding-window-20261102/panel/arch/r2 (explicit)
+muse: workspace trust: trusted source=run-flag
+muse: warning: rules file at /Users/aazhiry1/.config/muse/AGENTS.md produced 76584 bytes, over the 65536 byte subagent delegation startup context limit; it will be truncated for this session
+run ended with Failed: model `muse-wonder-full-1.0` does not exist or you lack access [request_id=4e2552d9-4e87-42dc-8ff0-815e799bceb8]

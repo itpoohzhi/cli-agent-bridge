@@ -1,0 +1,1 @@
+seat=3 slot=claude-sonnet-5-5-high transport=claude-p pid=97538 pgid=97538 rc=0 raw_out_bytes=95456 launch=/Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/all-bridges-sliding-window-20261102/panel/arch/r4/seats/3/launch.json

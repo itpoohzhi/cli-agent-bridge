@@ -406,24 +406,40 @@ class TestImageCleanup(ImageCase):
         self.assertEqual(status, 502)
         self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
 
-    def test_cleanup_after_retries(self):
+    def test_cleanup_after_retries(self) -> None:
+        """Каждый явный повтор клиента запускает CLI один раз и очищает свои изображения."""
+        from typing import Callable, cast
+
+        probe_stand = cast(Callable[[], object], getattr(self, "probe_stand"))
+        legacy = cast(
+            Callable[[list[list[tuple[str, object]]]], None],
+            getattr(self.hub, "legacy"),
+        )
+        admissions = cast(Callable[[], list[object]], getattr(self.hub, "admissions"))
+        spawns = cast(
+            Callable[[], list[dict[str, object]]], getattr(self.hub, "spawns")
+        )
+        post = cast(
+            Callable[[dict[str, object]], tuple[int, object]],
+            getattr(self, "_post_json"),
+        )
         server.IMAGE_PROBE = True
-        self.probe_stand()
-        self.hub.legacy(
-            [[("stderr", "Exec failed"), ("done", (1, ""))] for _ in range(3)]
-        )
-        status, _ = self._post_json(
-            {
-                "model": "claude-sonnet-5-5",
-                "reasoning_effort": "high",
-                "messages": [user_message([image_part(make_png(64))])],
-            }
-        )
-        self.assertEqual(status, 502)
-        self.assertEqual(len(self.hub.admissions()), 3)
-        spawns = self.hub.spawns()
-        self.assertEqual(len(spawns), 3)
-        for spawn in spawns:  # temp-файлы жили до последней попытки
+        _ = probe_stand()
+        legacy([[("stderr", "Exec failed"), ("done", (1, ""))] for _ in range(3)])
+        request: dict[str, object] = {
+            "model": "claude-sonnet-5-5",
+            "reasoning_effort": "high",
+            "messages": [user_message([image_part(make_png(64))])],
+        }
+        for expected_calls in range(1, 4):
+            status, _ = post(request)
+            self.assertEqual(status, 502)
+            self.assertEqual(len(admissions()), expected_calls)
+            self.assertEqual(len(spawns()), expected_calls)
+            self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
+        actual_spawns = spawns()
+        self.assertEqual(len(actual_spawns), 3)
+        for spawn in actual_spawns:  # права temp-файлов каждого запроса сохранены
             self.assertEqual(spawn["cwd_files"], {"img-1.png": "0o600"})
         self.assertEqual(list(server.WORKSPACE.glob("img-*")), [])
 

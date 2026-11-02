@@ -155,8 +155,20 @@ class TestSSEFrames(BridgeCase):
 class TestTransientRetry(BridgeCase):
     """M3: rc=1 без выданного текста -> до 3 попыток; успех со второй."""
 
-    def test_retry_until_success(self):
-        self.hub.legacy(
+    def test_retry_until_success(self) -> None:
+        """Сбой CLI завершается 502; восстановление запускает следующий запрос клиента."""
+        from typing import Callable, cast
+
+        legacy = cast(
+            Callable[[list[list[tuple[str, object]]]], None],
+            getattr(self.hub, "legacy"),
+        )
+        admissions = cast(Callable[[], list[object]], getattr(self.hub, "admissions"))
+        post = cast(
+            Callable[[dict[str, object]], tuple[int, dict[str, object]]],
+            getattr(self, "_post_json"),
+        )
+        legacy(
             [
                 [("stderr", "Exec failed"), ("done", (1, ""))],
                 [
@@ -166,29 +178,45 @@ class TestTransientRetry(BridgeCase):
                 ],
             ]
         )
-        status, body = self._post_json(
-            {
-                "model": "claude-sonnet-5-5",
-                "messages": [{"role": "user", "content": "hi"}],
-            }
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(body["choices"][0]["message"]["content"], "Recovered")
-        self.assertEqual(len(self.hub.admissions()), 2)  # принятые циклы agent loop
-
-    def test_retry_gives_up_after_three(self):
-        self.hub.legacy(
-            [[("stderr", "Exec failed"), ("done", (1, ""))] for _ in range(3)]
-        )
-        status, body = self._post_json(
-            {
-                "model": "claude-sonnet-5-5",
-                "messages": [{"role": "user", "content": "hi"}],
-            }
-        )
+        request: dict[str, object] = {
+            "model": "claude-sonnet-5-5",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        status, body = post(request)
         self.assertEqual(status, 502)
-        self.assertEqual(len(self.hub.admissions()), 3)
         self.assertIn("error", body)
+        self.assertEqual(len(admissions()), 1)
+        status, body = post(request)
+        self.assertEqual(status, 200)
+        choice = cast(list[dict[str, object]], body["choices"])[0]
+        message = cast(dict[str, object], choice["message"])
+        self.assertEqual(message["content"], "Recovered")
+        self.assertEqual(len(admissions()), 2)  # по одному циклу на запрос клиента
+
+    def test_retry_gives_up_after_three(self) -> None:
+        """Три явных запроса клиента дают три ошибки и ровно три запуска CLI."""
+        from typing import Callable, cast
+
+        legacy = cast(
+            Callable[[list[list[tuple[str, object]]]], None],
+            getattr(self.hub, "legacy"),
+        )
+        admissions = cast(Callable[[], list[object]], getattr(self.hub, "admissions"))
+        post = cast(
+            Callable[[dict[str, object]], tuple[int, dict[str, object]]],
+            getattr(self, "_post_json"),
+        )
+        legacy([[("stderr", "Exec failed"), ("done", (1, ""))] for _ in range(3)])
+        for expected_calls in range(1, 4):
+            status, body = post(
+                {
+                    "model": "claude-sonnet-5-5",
+                    "messages": [{"role": "user", "content": "hi"}],
+                }
+            )
+            self.assertEqual(status, 502)
+            self.assertEqual(len(admissions()), expected_calls)
+            self.assertIn("error", body)
 
     def test_no_retry_after_content_committed(self):
         # Контент удерживается до terminal; после успешного terminal он закоммичен и

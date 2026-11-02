@@ -17,7 +17,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import math
 import os
 import re
 import subprocess
@@ -33,6 +34,23 @@ PS_TIMEOUT_S: float = 2.0
 DEFAULT_IDLE_TIMEOUT_S: float = IDLE_TIMEOUT_S
 DEFAULT_SAFETY_CAP_S: float = SAFETY_CAP_S
 DEFAULT_FINISH_RESERVE_S: float = FINISH_RESERVE_S
+
+
+def positive_env(name: str, default: float) -> float:
+    """Читает конечное положительное число, сохраняя безопасный fallback."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def io_grace_enabled() -> bool:
+    """Читает явный булев переключатель; некорректное значение даёт дефолт true."""
+    value = os.environ.get("BRIDGE_IO_GRACE_ENABLED", "true").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return False
+    return True
 
 
 _PS_LINE_RE = re.compile(
@@ -86,6 +104,15 @@ class WatchdogMetrics:
     cpu_delta_s: float
     ps_degraded: bool = False
     sample_ts: float = 0.0
+    states: list[str] = field(default_factory=list)
+
+    def is_waiting_io(self) -> bool:
+        """Живая группа ожидает I/O; учитывается первая буква stat без флагов ps."""
+        return (
+            self.alive
+            and not self.ps_degraded
+            and any(state[:1].upper() in {"S", "D", "I", "U"} for state in self.states)
+        )
 
     @property
     def has_progress(self) -> bool:
@@ -156,11 +183,11 @@ class ProcessWatchdog:
 
     def _parse_ps_output(
         self, stdout: str, target_pgid: int
-    ) -> tuple[list[int], dict[int, float], bool]:
-        """Возвращает `(descendant_pids, cpu_by_pid, any_non_zombie_in_group)`."""
+    ) -> tuple[list[int], dict[int, float], list[str]]:
+        """Возвращает PID, CPU и реальные состояния незавершённых членов группы."""
         descendants: list[int] = []
         cpu_by_pid: dict[int, float] = {}
-        any_alive_proc = False
+        states: list[str] = []
         for raw_line in (stdout or "").splitlines():
             line = raw_line.strip()
             if not line:
@@ -178,18 +205,16 @@ class ProcessWatchdog:
                 continue
             stat = match.group(4) or ""
             cputime_str = match.group(5) or ""
-            if stat.upper().startswith("Z"):
+            if stat[:1].upper() in {"Z", "X"}:
                 continue
-            any_alive_proc = True
+            states.append(stat)
             cpu_by_pid[pid] = parse_cputime(cputime_str)
             if pid != target_pgid:
                 descendants.append(pid)
         descendants.sort()
-        return descendants, cpu_by_pid, any_alive_proc
+        return descendants, cpu_by_pid, states
 
-    def seed(
-        self, pgid: int, *, rid: str = "", turn_id: str = ""
-    ) -> WatchdogMetrics:
+    def seed(self, pgid: int, *, rid: str = "", turn_id: str = "") -> WatchdogMetrics:
         """Фиксирует базовый срез PID и cputime группы при старте хода без сброса таймера."""
         metrics = self.sample(pgid, rid=rid, turn_id=turn_id, _seed_only=True)
         return metrics
@@ -274,8 +299,8 @@ class ProcessWatchdog:
                 sample_ts=now,
             )
 
-        descendants, cpu_s, any_alive = self._parse_ps_output(proc.stdout, pgid)
-        if not any_alive and not self.is_group_alive(pgid):
+        descendants, cpu_s, states = self._parse_ps_output(proc.stdout, pgid)
+        if not states and not self.is_group_alive(pgid):
             return WatchdogMetrics(
                 pgid=pgid,
                 alive=False,
@@ -305,6 +330,7 @@ class ProcessWatchdog:
                     cpu_delta_s=0.0,
                     ps_degraded=False,
                     sample_ts=now,
+                    states=states,
                 )
 
             cpu_delta = sum(
@@ -326,6 +352,7 @@ class ProcessWatchdog:
             cpu_delta_s=cpu_delta,
             ps_degraded=False,
             sample_ts=now,
+            states=states,
         )
 
 
@@ -335,7 +362,7 @@ class AdaptiveTimeoutController:
     def __init__(
         self,
         idle_timeout_s: float = IDLE_TIMEOUT_S,
-        safety_cap_s: float = SAFETY_CAP_S,
+        safety_cap_s: float | None = None,
         finish_reserve_s: float = FINISH_RESERVE_S,
         watchdog: ProcessWatchdog | None = None,
         watchdog_enabled: bool = True,
@@ -343,9 +370,31 @@ class AdaptiveTimeoutController:
         rid: str = "",
         turn_id: str = "",
         log_fn: Callable[[str], None] | None = None,
+        io_wait_cap_s: float | None = None,
+        watchdog_interval_s: float | None = None,
     ) -> None:
-        self.idle_timeout_s = float(idle_timeout_s)
-        self.safety_cap_s = float(safety_cap_s)
+        self.watchdog_interval_s = (
+            positive_env("BRIDGE_WATCHDOG_INTERVAL_S", WATCHDOG_INTERVAL_S)
+            if watchdog_interval_s is None
+            else float(watchdog_interval_s)
+        )
+        self.idle_timeout_s = max(
+            10.0, float(idle_timeout_s), 2 * self.watchdog_interval_s
+        )
+        self.safety_cap_s = (
+            positive_env(
+                "BRIDGE_SAFETY_CAP_S",
+                positive_env("DROID_DSH_BRIDGE_SAFETY_CAP_S", SAFETY_CAP_S),
+            )
+            if safety_cap_s is None
+            else float(safety_cap_s)
+        )
+        self.io_wait_cap_s = (
+            positive_env("BRIDGE_IO_WAIT_CAP_S", 900.0)
+            if io_wait_cap_s is None
+            else float(io_wait_cap_s)
+        )
+        self.io_grace_enabled = io_grace_enabled()
         self.finish_reserve_s = float(finish_reserve_s)
         self.watchdog_enabled = bool(watchdog_enabled)
         self._clock = clock
@@ -435,11 +484,24 @@ class AdaptiveTimeoutController:
 
         with self._lock:
             idle_elapsed = now - self.last_activity_ts
-            if idle_elapsed >= self.idle_timeout_s:
+            if idle_elapsed >= self.idle_timeout_s and not self.has_io_grace(
+                metrics, idle_elapsed
+            ):
                 self.terminated_reason = "idle_timeout"
                 return True, "idle_timeout", metrics
 
         return False, "", metrics
+
+    def has_io_grace(
+        self, metrics: WatchdogMetrics | None, idle_elapsed: float
+    ) -> bool:
+        """Даёт ограниченную отсрочку I/O без подмены last_activity_ts."""
+        return bool(
+            self.io_grace_enabled
+            and metrics is not None
+            and metrics.is_waiting_io()
+            and idle_elapsed < self.io_wait_cap_s
+        )
 
     def close(self) -> None:
         """Освобождает состояние отслеживаемой группы в `ProcessWatchdog`."""
@@ -447,3 +509,7 @@ class AdaptiveTimeoutController:
             pgid = self.pgid
         if pgid is not None and self.watchdog is not None:
             self.watchdog.forget(pgid)
+
+
+# Имя из контракта контроллера хода; прежний импорт остаётся совместимым.
+TurnTimeoutController = AdaptiveTimeoutController

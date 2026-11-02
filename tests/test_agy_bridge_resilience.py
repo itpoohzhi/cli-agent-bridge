@@ -225,21 +225,36 @@ def _execute_with_clock(clock: _FakeClock, run: SimpleNamespace) -> dict:
 class IdleDetectionTests(unittest.TestCase):
     @unittest.skipUnless(_DARWIN, "core.watchdog рассчитан на macOS ps")
     def test_idle_timeout_detected_for_sleeping_process(self) -> None:
-        proc = _spawn(["sleep", "100"])
+        proc = subprocess.Popen[bytes](["sleep", "100"], start_new_session=True)
         try:
-            ctrl = AdaptiveTimeoutController(
-                idle_timeout_s=0.2, safety_cap_s=60.0, finish_reserve_s=0.0
-            )
+            clock = _FakeClock()
+            with mock.patch.dict(os.environ, {"BRIDGE_IO_GRACE_ENABLED": "true"}):
+                ctrl = AdaptiveTimeoutController(
+                    idle_timeout_s=0.2,
+                    safety_cap_s=1200.0,
+                    finish_reserve_s=0.0,
+                    clock=clock,
+                    watchdog_interval_s=6.0,
+                    io_wait_cap_s=900.0,
+                )
             ctrl.register_pgid(proc.pid)
-            result: tuple = (False, "", None)
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                result = ctrl.check(proc.pid)
-                if result[0]:
-                    break
-                time.sleep(0.05)
+            marker = ctrl.last_activity_ts
+            self.assertEqual(ctrl.idle_timeout_s, 12.0)
+            clock.advance(12.0)
+            should_stop, reason, metrics = ctrl.check(proc.pid)
+            self.assertFalse(should_stop, reason)
+            self.assertIsNotNone(metrics)
+            assert metrics is not None
+            self.assertTrue(metrics.is_waiting_io())
+            self.assertFalse(metrics.has_progress)
+            self.assertEqual(ctrl.last_activity_ts, marker)
+            clock.advance(887.0)
+            self.assertFalse(ctrl.check(proc.pid)[0])
+            clock.advance(1.0)
+            result = ctrl.check(proc.pid)
             self.assertTrue(result[0])
             self.assertEqual(result[1], "idle_timeout")
+            self.assertEqual(ctrl.last_activity_ts, marker)
             ctrl.close()
         finally:
             _hard_kill(proc)
@@ -272,39 +287,53 @@ class IdleDetectionTests(unittest.TestCase):
                     finish_reserve_s=0.0,
                     watchdog_enabled=False,
                     clock=clock,
+                    watchdog_interval_s=1.0,
                 )
+                self.assertEqual(ctrl.idle_timeout_s, 10.0)
                 for _ in range(5):
-                    clock.advance(0.15)
+                    clock.advance(9.0)
+                    self.assertEqual(ctrl.check(), (False, "", None))
                     ctrl.on_activity(kind)
                     self.assertEqual(ctrl.check(), (False, "", None))
+                    self.assertEqual(ctrl.last_activity_ts, clock())
                 self.assertEqual(ctrl.last_activity_kind, kind)
-                clock.advance(0.25)
+                clock.advance(9.0)
+                self.assertEqual(ctrl.check(), (False, "", None))
+                clock.advance(1.0)
                 should_stop, reason, _m = ctrl.check()
                 self.assertTrue(should_stop)
                 self.assertEqual(reason, "idle_timeout")
 
     @unittest.skipUnless(_POSIX, "нужны процессные группы POSIX")
     def test_ps_degraded_fail_closed(self) -> None:
+        from typing import override
+
         class _DegradedPs(ProcessWatchdog):
-            def _run_ps(self, pgid: int) -> Any:
+            @override
+            def _run_ps(self, pgid: int) -> subprocess.CompletedProcess[str]:
                 raise subprocess.TimeoutExpired(cmd="ps", timeout=2.0)
 
         logs: list[str] = []
-        proc = _spawn(["sleep", "100"])
+        proc = subprocess.Popen[bytes](["sleep", "100"], start_new_session=True)
         try:
             clock = _FakeClock()
-            ctrl = AdaptiveTimeoutController(
-                idle_timeout_s=0.2,
-                safety_cap_s=60.0,
-                finish_reserve_s=0.0,
-                watchdog=_DegradedPs(log_fn=logs.append),
-                clock=clock,
-                log_fn=logs.append,
-            )
+            with mock.patch.dict(os.environ, {"BRIDGE_IO_GRACE_ENABLED": "true"}):
+                ctrl = AdaptiveTimeoutController(
+                    idle_timeout_s=0.2,
+                    safety_cap_s=60.0,
+                    finish_reserve_s=0.0,
+                    watchdog=_DegradedPs(log_fn=logs.append),
+                    clock=clock,
+                    log_fn=logs.append,
+                    watchdog_interval_s=1.0,
+                )
             ctrl.register_pgid(proc.pid)
+            self.assertEqual(ctrl.idle_timeout_s, 10.0)
             self.assertEqual(ctrl.check(proc.pid)[:2], (False, ""))
             marker = ctrl.last_activity_ts
-            clock.advance(0.25)
+            clock.advance(9.0)
+            self.assertFalse(ctrl.check(proc.pid)[0])
+            clock.advance(1.0)
             should_stop, reason, metrics = ctrl.check(proc.pid)
             self.assertTrue(should_stop)
             self.assertEqual(reason, "idle_timeout")
@@ -531,7 +560,10 @@ class ErrorContractTests(unittest.TestCase):
         handler.end_headers = lambda: None
         handler._emit = lambda data: frames.append(data) or True
         handler._run_once = lambda *_a, **_k: self._out()
-        handler._serve_sse({"model": "m"})
+        with mock.patch.dict(
+            os.environ, {"AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": "false"}
+        ):
+            handler._serve_sse({"model": "m"})
         self.assertGreaterEqual(len(frames), 3)
         self.assertEqual(frames[-1], "data: [DONE]\n\n")
         error_frame = frames[-2]
@@ -3821,7 +3853,9 @@ _NOTICE_MARK = "Превышен лимит времени хода agy"
 
 
 def _clean_flags(fx: _Fixture) -> None:
-    """Все пять env-переключателей и таймаут-алиасы сняты: действует только файл/дефолт."""
+    """Старые флаги берутся из файла; legacy-оракулы выполняются без новой SSE-политики."""
+    fx.set_env("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", "false")
+    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", None)
     for env in _FLAG_ENV.values():
         fx.set_env(env, None)
     for env in ("AGY_IDLE_TIMEOUT_S", "AGY_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"):
@@ -4296,6 +4330,77 @@ class SilentPlannerContentTests(unittest.TestCase):
         self.assertEqual(_ofn(broken, "reconcile_result")("xyz"), "")  # несовместим
         self.assertEqual(_oval(broken, "divergences"), 1)
 
+    def test_status_streaming_multi_step_no_freeze_and_final_text_delivered(
+        self,
+    ) -> None:
+        statuses = [
+            "[статус: чтение канона AGENTS.md]",
+            "[статус: дочитывание канона]",
+            "[статус: поиск информации]",
+        ]
+        final_text = "### Детальный анализ переезда..."
+        lines: list[dict[str, object]] = []
+        for status in statuses:
+            lines.append(_stdout_text(None, status))
+            lines.append(_stdout_tool(_MISSING))
+        lines.append(
+            {
+                "event": "result",
+                "result": {
+                    "status": "success",
+                    "response": final_text,
+                },
+            }
+        )
+
+        run, items = _pump_queue(lines, content=True)
+        text_chunks = [
+            str(payload)
+            for kind, payload in items
+            if kind == "text"
+        ]
+        self.assertEqual(text_chunks, statuses)
+        arb = _oval(run, "_arbiter")
+        self.assertEqual(_oval(arb, "divergences"), 0)
+        self.assertFalse(_oval(arb, "overflow"))
+
+        # Проверка reconcile_result и fallback доставки финального ответа
+        reconciled = _str(_ofn(run, "reconcile_result")(final_text))
+        retained = _str(_ofn(arb, "retained_divergent_text")())
+        self.assertEqual(retained, final_text)
+        delivered = reconciled if reconciled else ("\n\n" + final_text)
+        self.assertEqual(
+            "".join(text_chunks) + delivered,
+            "".join(statuses) + "\n\n" + final_text,
+        )
+
+    def test_content_scan_matches_saved_prefix_not_longer_snapshot(self) -> None:
+        arb = _arb()
+        old_text = "[статус: чтение канона AGENTS.md]"
+        short_text = "[статус: "
+        new_text = "[статус: дочитывание канона]"
+
+        self.assertEqual(_offer(arb, "stdout", 1, old_text), old_text)
+
+        # Короткий снимок другого шага не должен стать alias старого.
+        self.assertEqual(_offer(arb, "transcript", 2, short_text), short_text)
+        self.assertEqual(
+            _offer(arb, "transcript", 2, new_text),
+            "дочитывание канона]",
+        )
+        self.assertEqual(_oval(arb, "divergences"), 0)
+
+        # Расширение сохранённого префикса сопоставляется и тогда, когда
+        # соответствующий шаг уже не является последним.
+        other = _arb()
+        self.assertEqual(_offer(other, "stdout", 1, "alpha"), "alpha")
+        self.assertEqual(_offer(other, "stdout", 2, "beta"), "beta")
+        self.assertEqual(
+            _offer(other, "transcript", 3, "alpha extended"),
+            " extended",
+        )
+        self.assertEqual(_oval(other, "divergences"), 0)
+
     def test_silent_planner_content_lookup_work_does_not_scan_history(self) -> None:
         arb = _arb()
         for idx in range(100):
@@ -4610,7 +4715,7 @@ class SilentToolProgressTests(unittest.TestCase):
             _h, _s, wfile, _c = _sse_with(run_once, fail_on=2)
             self.assertEqual(outcomes, [False])
             frames = _frames_json(wfile.writes)
-            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertFalse(any(_has_finish_reason(f, "length") for f in frames))
             self.assertTrue(any(isinstance(f, dict) and "error" in f for f in frames))
 
     def test_silent_tool_progress_json_mode_collects_markers(self) -> None:
@@ -5321,12 +5426,11 @@ def _frames_json(frames: list[str]) -> list[object]:
     return parsed
 
 
-def _is_length(frame: object) -> bool:
+def _has_finish_reason(frame: object, reason: str = "stop") -> bool:
     if not isinstance(frame, dict) or "choices" not in frame:
         return False
     return (
-        _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason")
-        == "length"
+        _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason") == reason
     )
 
 
@@ -5374,6 +5478,140 @@ def _timeout_out(state: str) -> dict[str, object]:
     }
 
 
+class GracefulTimeoutFinishReasonTests(unittest.TestCase):
+    """Таймаут времени не выдаётся за исчерпание токенов; откат настраивается."""
+
+    def _assert_wire_reason(
+        self, expected: str, env: str | None = None, config: object = None
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            for stream in (False, True):
+                with self.subTest(state=state, stream=stream), _Fixture() as fx:
+                    _clean_flags(fx)
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
+                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                    if config is not None:
+                        _write_cfg(fx, config)
+
+                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
+                        out = _timeout_out(state)
+                        out["text"] = "частичный ответ"
+                        out["timeout_limit_s"] = 3600.0
+                        if stream:
+                            on_text(out["text"])
+                        ctx["finalize_timeout"](out)
+                        return out
+
+                    if stream:
+                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
+                        frames = _frames_json(wfile.writes)
+                        choices = [
+                            choice
+                            for frame in frames
+                            if isinstance(frame, dict) and "choices" in frame
+                            for choice in frame["choices"]
+                        ]
+                        self.assertEqual(frames.count("[DONE]"), 1)
+                        self.assertFalse(
+                            any(isinstance(f, dict) and "error" in f for f in frames)
+                        )
+                        notice = "".join(_content_of(f) for f in frames)
+                    else:
+                        sent: list[tuple[int, dict[str, Any]]] = []
+                        with _Sock() as sock:
+                            handler = _make_handler(sock)
+                            handler._run_once = run_once
+                            handler._send = lambda code, p: sent.append((code, p))
+                            handler._serve_json({"model": "m"})
+                        self.assertEqual(len(sent), 1)
+                        self.assertEqual(sent[0][0], 200)
+                        choices = sent[0][1]["choices"]
+                        notice = choices[0]["message"]["content"]
+                    self.assertEqual(
+                        [c["finish_reason"] for c in choices if c["finish_reason"]],
+                        [expected],
+                    )
+                    self.assertIn("частичный ответ", notice)
+                    self.assertIn(_NOTICE_MARK, notice)
+                    self.assertIn("3600s", notice)
+                    self.assertIn(state, notice)
+                    self.assertNotIn("токен", notice.lower())
+
+    def test_default_emits_stop_in_json_and_sse(self) -> None:
+        self._assert_wire_reason("stop")
+
+    def test_env_length_and_max_tokens_override_config(self) -> None:
+        for value in ("length", " MAX_TOKENS "):
+            with self.subTest(value=value):
+                self._assert_wire_reason(
+                    "length", value, {"graceful_timeout_finish_reason": "stop"}
+                )
+
+    def test_dynamic_config_and_uppercase_alias_emit_length(self) -> None:
+        for key in (
+            "graceful_timeout_finish_reason",
+            "AGY_GRACEFUL_TIMEOUT_FINISH_REASON",
+        ):
+            for value in ("length", " MAX_TOKENS "):
+                with self.subTest(key=key, value=value):
+                    self._assert_wire_reason("length", config={key: value})
+
+    def test_invalid_or_empty_values_fall_back_to_stop(self) -> None:
+        for value in ("", "  ", "invalid", None, True, 1, [], {}):
+            with self.subTest(config=value):
+                self._assert_wire_reason(
+                    "stop", config={"graceful_timeout_finish_reason": value}
+                )
+        self._assert_wire_reason(
+            "stop", "invalid", {"graceful_timeout_finish_reason": "length"}
+        )
+
+    def test_empty_env_uses_dynamic_config(self) -> None:
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                self._assert_wire_reason(
+                    "length", value, {"graceful_timeout_finish_reason": "length"}
+                )
+
+    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
+        parse = _bfn("_parse_runtime_flags")
+        for value in ("invalid", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                flags = parse(
+                    json.dumps(
+                        {
+                            "emit_tool_trace": True,
+                            "graceful_timeout_finish_reason": value,
+                        }
+                    )
+                )
+                self.assertTrue(getattr(flags, "emit_tool_trace"))
+                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
+                self.assertEqual(
+                    getattr(flags, "graceful_timeout_finish_reason"), "stop"
+                )
+        with self.assertRaises(ValueError):
+            parse(
+                '{"emit_tool_trace": "true", "graceful_timeout_finish_reason": "length"}'
+            )
+
+    def test_reason_reloads_after_ttl_without_restart(self) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            clock = _clocked(fx)
+            reason = _bfn("_graceful_finish_reason")
+            _write_cfg(fx, {"graceful_timeout_finish_reason": "length"}, 1_000)
+            self.assertEqual(reason(), "length")
+            _write_cfg(fx, {"graceful_timeout_finish_reason": "stop"}, 2_000)
+            self.assertEqual(reason(), "length")
+            clock.advance(1.1)
+            self.assertEqual(reason(), "stop")
+            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "length")
+            self.assertEqual(reason(), "length")
+            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "invalid")
+            self.assertEqual(reason(), "stop")
+
+
 class SilentGracefulTimeoutTests(unittest.TestCase):
     def _flags(self, fx: _Fixture, graceful: bool) -> None:
         _clean_flags(fx)
@@ -5414,11 +5652,11 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                         errors = [
                             f for f in frames if isinstance(f, dict) and "error" in f
                         ]
-                        lengths = [f for f in frames if _is_length(f)]
+                        finals = [f for f in frames if _has_finish_reason(f)]
                         notices = [f for f in frames if _NOTICE_MARK in _content_of(f)]
                         if graceful and kind != "silent":
                             self.assertEqual(errors, [])
-                            self.assertEqual(len(lengths), 1)
+                            self.assertEqual(len(finals), 1)
                             self.assertEqual(len(notices), 1)
                             notice = _content_of(notices[0])
                             self.assertIn(state, notice)
@@ -5436,12 +5674,13 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                                 sum(
                                     1
                                     for f in frames
-                                    if _is_length(f) or "error" in _dict_or_empty(f)
+                                    if _has_finish_reason(f)
+                                    or "error" in _dict_or_empty(f)
                                 ),
                                 1,
                             )
                         else:
-                            self.assertEqual(lengths, [])
+                            self.assertEqual(finals, [])
                             self.assertEqual(notices, [])
                             self.assertEqual(len(errors), 1)
                             err = _dict(_dict(errors[0])["error"])
@@ -5461,7 +5700,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
 
             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
             frames = _frames_json(wfile.writes)
-            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertFalse(any(_has_finish_reason(f) for f in frames))
             errors = [f for f in frames if isinstance(f, dict) and "error" in f]
             self.assertEqual(
                 _dict(_dict(errors[0])["error"])["type"], "first_token_timeout"
@@ -5499,7 +5738,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                         if graceful and kind != "silent":
                             self.assertEqual(code, 200)
                             choice = _dict(cast("list[object]", payload["choices"])[0])
-                            self.assertEqual(choice["finish_reason"], "length")
+                            self.assertEqual(choice["finish_reason"], "stop")
                             message = _dict(choice["message"])
                             content = _str(message["content"])
                             self.assertEqual(content.count(_NOTICE_MARK), 1)
@@ -5538,11 +5777,11 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             ctx = {"model": "m", "t_req_start": 9000.0 - 3000.0}
             _h, sock, wfile, _c = _sse_with(run_once, ctx, clock=clock, cost=0.0)
             frames = _frames_json(wfile.writes)
-            self.assertTrue(any(_is_length(f) for f in frames))
+            self.assertTrue(any(_has_finish_reason(f) for f in frames))
             self.assertEqual(frames[-1], "[DONE]")
             self.assertEqual(
                 sock.timeouts, [5.0, 5.0, 5.0, 5.0]
-            )  # суффикс+notice+length+DONE
+            )  # суффикс+notice+stop+DONE
 
     def test_silent_graceful_timeout_one_shared_window_for_all_final_writes(
         self,
@@ -5569,9 +5808,9 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 sum(1 for f in frames if _NOTICE_MARK in _content_of(f)), 1
             )
             self.assertEqual(
-                sum(1 for f in frames if _is_length(f)), 1
+                sum(1 for f in frames if _has_finish_reason(f)), 1
             )  # третья запись
-            self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + length
+            self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + stop
             self.assertLessEqual(max(sock.timeouts), 5.0)
 
     def test_silent_graceful_timeout_window_never_crosses_request_ceiling(self) -> None:
@@ -5608,14 +5847,14 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 return out
 
             holder: list[dict[str, object]] = []
-            # вызовы: 1 role, 2 суффикс, 3 notice (падает) -> length/DONE не пишутся
+            # вызовы: 1 role, 2 суффикс, 3 notice (падает) -> stop/DONE не пишутся
             _h, sock, wfile, _c = _sse_with(
                 run_once, {"model": "m", "t_req_start": 5000.0}, fail_on=3
             )
             self.assertEqual(wfile.calls, 3)
             frames = _frames_json(wfile.writes)
             self.assertNotIn("[DONE]", frames)
-            self.assertFalse(any(_is_length(f) for f in frames))
+            self.assertFalse(any(_has_finish_reason(f) for f in frames))
             self.assertFalse(any(isinstance(f, dict) and "error" in f for f in frames))
             self.assertIs(
                 holder[0].get("graceful_done"), True
@@ -5636,7 +5875,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
 
             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
             frames = _frames_json(wfile.writes)
-            self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
+            self.assertEqual(sum(1 for f in frames if _has_finish_reason(f)), 1)
             self.assertEqual(frames[-1], "[DONE]")
 
     def test_silent_graceful_timeout_run_once_finalizes_before_close_and_never_retries(
@@ -5782,7 +6021,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 self.assertEqual(len(texts), 3)
                 self.assertIn(_NOTICE_MARK, texts[2])
                 self.assertIn(state, texts[2])
-                self.assertEqual(sum(1 for f in frames if _is_length(f)), 1)
+                self.assertEqual(sum(1 for f in frames if _has_finish_reason(f)), 1)
                 self.assertEqual(list(cast("list[float]", _bval("_last_ok"))), [0.0])
                 self.assertEqual(len(cast("dict[int, object]", _bval("_active"))), 0)
 
@@ -5799,7 +6038,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             code, payload = sent[0]
             self.assertEqual(code, 200)
             choice = _dict(cast("list[object]", payload["choices"])[0])
-            self.assertEqual(choice["finish_reason"], "length")
+            self.assertEqual(choice["finish_reason"], "stop")
             content = _str(_dict(choice["message"])["content"])
             self.assertTrue(content.startswith("Hello world"))
             self.assertEqual(content.count(_NOTICE_MARK), 1)
@@ -5943,7 +6182,7 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
                 self.assertEqual(len(sent), 1)
                 self.assertEqual(sent[0][0], 200)
                 choice = _dict(cast("list[object]", sent[0][1]["choices"])[0])
-                self.assertEqual(choice["finish_reason"], "length")
+                self.assertEqual(choice["finish_reason"], "stop")
 
     def test_silent_rw001_json_finalizes_before_run_close(self) -> None:
         order: list[str] = []
@@ -11460,10 +11699,15 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
         self.assertLessEqual(_ndjson_size(pruned), limit)
         for needle in ("SYS-HEAD", "SYS-TAIL", "ASST-HEAD", "ASST-TAIL"):
             self.assertIn(needle, pruned)
-        self.assertIn(marker + "u", pruned)  # вырезана середина самого длинного
+        # Приоритетное сжатие (Cycle 4 F-002): сначала исторический assistant,
+        # активный ввод пользователя и система остаются целыми.
+        self.assertIn(marker + "a", pruned)
+        self.assertIn("USER-HEAD " + "u" * 60000 + " USER-TAIL", pruned)
+        self.assertIn("SYS-HEAD " + "s" * 30000 + " SYS-TAIL", pruned)
         self.assertTrue(pruned.endswith("USER-TAIL"))
         self.assertNotIn("старое старое", pruned)
-        # Излишек больше любого блока: сжатие пропорционально, ни один не зануляется.
+        # Cycle 5 F-001: сначала вытесняется assistant, затем пропорционально
+        # сжимаются защищённые система и пользователь, превышающие лимит вдвоём.
         edge = _int(_bval("PRUNE_EDGE_MIN_BYTES"))
         self.assertEqual(edge, 512)
         equal = [
@@ -11473,13 +11717,18 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
         ]
         squeezed = _str(_bfn("_messages_to_prompt")(equal))
         self.assertLessEqual(_ndjson_size(squeezed), limit)
-        self.assertEqual(squeezed.count(marker), 3)
+        self.assertEqual(squeezed.count(marker), 2)
         for chunk in squeezed.split("\n\n### "):
+            if marker not in chunk:
+                continue
             head_part, _, tail_part = chunk.partition(marker)
             self.assertGreaterEqual(len(head_part.encode("utf-8")), edge)
             self.assertGreaterEqual(len(tail_part.encode("utf-8")), edge)
-        for needle in ("S-HEAD", "S-TAIL", "A-HEAD", "A-TAIL", "U-HEAD", "U-TAIL"):
+        for needle in ("S-HEAD", "S-TAIL", "U-HEAD", "U-TAIL"):
             self.assertIn(needle, squeezed)
+        self.assertNotIn("A-HEAD", squeezed)
+        self.assertNotIn("A-TAIL", squeezed)
+        self.assertIn(_str(_bval("HISTORY_PRUNED_MARKER")), squeezed)
         # Защитный рубеж: прямой вызов и Run.__init__ на сыром промпте без messages.
         raw = "RAW-HEAD " + "п" * 120000 + " RAW-TAIL"
         guarded = _str(_bfn("_ensure_prompt_fits_ndjson")(raw))
@@ -11505,6 +11754,733 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
             self.assertGreater(len(sent[0].encode("utf-8")), limit)
             self.assertLessEqual(len(sent[-1].encode("utf-8")), limit)
             self.assertIn("RAW-TAIL", sent[-1])
+
+    def test_dsh_synthetic_reminder_does_not_displace_user_prompt(self) -> None:
+        """ADR-0019: синтетические напоминания DSH не вытесняют реальный промпт пользователя."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        system_text = "You are an AI agent powered by DeepSeek Harness. " * 80
+        user_prompt = "по скилу аи дизрапт начни новый прогон"
+        workspace_instructions = (
+            "<system-reminder>\nThe following workspace instructions may be relevant:\n"
+            + ("правило проекта строка данных " * 2500)
+            + "\n</system-reminder>"
+        )
+        runtime_context = (
+            'Current runtime context. This snapshot supersedes earlier snapshots.\n'
+            'Current working directory: "/Users/test/workspace".'
+        )
+        skills_catalog = (
+            "<system-reminder>\nA skill is a reusable set of task-specific instructions:\n"
+            + ("- skill_name: description of skill for agent\n" * 100)
+            + "</system-reminder>"
+        )
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": 'The approval policy changed from "ask" to "never" (changed by the user).'},
+            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": workspace_instructions},
+            {"role": "user", "content": runtime_context},
+            {"role": "user", "content": skills_catalog},
+        ]
+        # Без прунинга размер превышает 96 КиБ
+        full_raw = "\n\n".join(
+            _str(_bfn("_render_message")(m, [i], [0])) for i, m in enumerate(messages)
+        )
+        self.assertGreater(len(full_raw.encode("utf-8")), limit)
+
+        logs: list[str] = []
+        with mock.patch.object(_bridge(), "_log", logs.append):
+            prompt = _str(_bfn("_messages_to_prompt")(messages))
+
+        size = _ndjson_size(prompt)
+        self.assertLessEqual(size, limit)
+        # Ключевой инвариант ADR-0019: реальный пользовательский ввод сохранен в промпте!
+        self.assertIn(user_prompt, prompt)
+        self.assertTrue(prompt.startswith("### 1. system\n"))
+        self.assertIn("Current runtime context.", prompt)
+        # Огромный блок инструкций воркспейса (77+ КБ) отброшен для соблюдения бюджета
+        self.assertNotIn("правило проекта строка данных", prompt)
+        self.assertTrue(any(line.startswith("history pruned: dropped ") for line in logs))
+
+    def test_dsh_resumed_turn_synthetic_reminder_preserves_user_prompt(self) -> None:
+        """ADR-0019: в ходе продолжения (после assistant) реальный ввод не вытесняется синтетикой."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive " * 20},
+            {"role": "user", "content": "исходный запрос 1"},
+            {"role": "assistant", "content": "ответ ассистента 1: " + "описание " * 500},
+            {"role": "user", "content": "актуальный выбор 1,29"},
+            {"role": "user", "content": "<system-reminder>\n" + ("скиллы " * 15000) + "</system-reminder>"},
+        ]
+        prompt = _str(_bfn("_get_resumed_turn_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertIn("актуальный выбор 1,29", prompt)
+
+    def test_all_synthetic_user_messages_fallback(self) -> None:
+        """ADR-0019: запрос только из синтетических user-сообщений обрабатывается без ошибок."""
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "<system-reminder>reminder 1</system-reminder>"},
+            {"role": "user", "content": "Current runtime context. This snapshot supersedes earlier snapshots."},
+        ]
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertIn("Current runtime context.", prompt)
+        self.assertTrue(prompt.startswith("### 1. system\n"))
+
+    def test_is_synthetic_user_block_classification(self) -> None:
+        """ADR-0019: юнит-тесты классификации синтетических блоков."""
+        is_synth = _bfn("_is_synthetic_user_block")
+        self.assertFalse(is_synth("### 1. user\nпо скилу аи дизрапт начни новый прогон"))
+        self.assertFalse(is_synth("### 1. user\n1,29"))
+        self.assertFalse(is_synth("### 1. user\nрасскажи про <system-reminder> в коде"))
+        self.assertTrue(is_synth("### 1. user\n<system-reminder>\nкаталог скиллов\n</system-reminder>"))
+        self.assertTrue(is_synth("### 1. user\nCurrent runtime context. This snapshot supersedes earlier snapshots."))
+        self.assertTrue(is_synth('### 1. user\nThe approval policy changed from "ask" to "never" (changed by the user).'))
+        self.assertTrue(is_synth('### 1. user\nThe user approved bash command'))
+        self.assertFalse(is_synth(""))
+
+    def test_real_user_oversized_message_middle_pruned(self) -> None:
+        """ADR-0019: реальный ввод больше лимита сжимается серединой с маркером."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        marker = _str(_bval("MIDDLE_PRUNED_MARKER"))
+        head = "HUMAN-HEAD: проверь договор целиком\n"
+        tail = "\nHUMAN-TAIL: верни только риски"
+        body = head + ("пункт договора " * 5500) + tail
+        self.assertGreater(len(body.encode("utf-8")), 150 * 1024)
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": body},
+        ]
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertTrue(prompt.startswith("### 1. system\nSystem directive"))
+        self.assertIn("### 2. user\n" + head, prompt)
+        self.assertTrue(prompt.endswith(tail))
+        self.assertEqual(prompt.count(marker), 1)
+
+    def test_user_prompt_with_multiline_system_reminder_quote_preserved(self) -> None:
+        """ADR-0019 F-001: цитата `<system-reminder>` после текста не делает ввод синтетикой."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        human = (
+            "HUMAN_TASK: explain this example\n<system-reminder>\nquoted sample\n"
+            "</system-reminder>"
+        )
+        self.assertFalse(_bfn("_is_synthetic_user_block")("### 4. user\n" + human))
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "OLD-QUESTION " + "q" * 20000},
+            {"role": "assistant", "content": "OLD-ANSWER " + "a" * 2000},
+            {"role": "user", "content": human},
+            {
+                "role": "user",
+                "content": "<system-reminder>\n" + "w" * 90000 + "\n</system-reminder>",
+            },
+        ]
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertIn("### 4. user\n" + human, prompt)
+        # Первой ушла синтетика, а не ранняя история.
+        self.assertNotIn("w" * 100, prompt)
+        self.assertIn("OLD-QUESTION ", prompt)
+        self.assertIn("OLD-ANSWER ", prompt)
+
+    def test_multiturn_tools_and_synthetic_tail_preserves_tools_and_history(
+        self,
+    ) -> None:
+        """ADR-0019 F-001/F-002: tool-результаты — якоря, 77 КБ синтетики уходят первыми."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        synthetic = "<system-reminder>\n" + "w" * (77 * 1024) + "\n</system-reminder>"
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "USER-0 " + "h" * 5000},
+            {"role": "assistant", "content": "ASSISTANT-0 " + "g" * 5000},
+            {"role": "user", "content": "USER-1 прочитай два файла"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "read", "arguments": '{"p": 1}'}},
+                    {"id": "c2", "function": {"name": "read", "arguments": '{"p": 2}'}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "RESULT-1 " + "r" * 8000},
+            {"role": "tool", "tool_call_id": "c2", "content": "RESULT-2 " + "s" * 8000},
+            {"role": "user", "content": synthetic},
+        ]
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(messages)
+        ]
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        self.assertTrue({0, 3, 4, 5, 6} <= anchors, anchors)
+        self.assertNotIn(7, anchors)
+        self.assertGreater(len("\n\n".join(b[2] for b in blocks).encode("utf-8")), limit)
+
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertNotIn("w" * 100, prompt)
+        self.assertNotIn(_str(_bval("MIDDLE_PRUNED_MARKER")), prompt)
+        for needle in (
+            "USER-0 ",
+            "ASSISTANT-0 ",
+            "USER-1 прочитай два файла",
+            '[tool call c1] read({"p": 1})',
+            "[tool result c1] RESULT-1 " + "r" * 8000,
+            "[tool result c2] RESULT-2 " + "s" * 8000,
+        ):
+            self.assertIn(needle, prompt)
+
+    def test_seat1_compact_synthetic_tail_does_not_prune_real_user_prompt(
+        self,
+    ) -> None:
+        """ADR-0019 C2/Seat 1: компактная хвостовая синтетика не вырезает середину реального ввода."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        marker = _str(_bval("MIDDLE_PRUNED_MARKER"))
+        half = "d" * (44 * 1024)
+        human = "HUMAN-HEAD " + half + " HUMAN-MIDDLE-UNIQUE " + half + " HUMAN-TAIL"
+        synthetic = "<system-reminder>\n" + "w" * (14 * 1024) + "\n</system-reminder>"
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": human},
+            {"role": "user", "content": synthetic},
+        ]
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(messages)
+        ]
+        self.assertGreater(len("\n\n".join(b[2] for b in blocks).encode("utf-8")), limit)
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        self.assertEqual(anchors, {0, 1})
+
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertIn("### 2. user\n" + human, prompt)
+        self.assertIn("HUMAN-MIDDLE-UNIQUE", prompt)
+        self.assertNotIn(marker, prompt)
+        self.assertNotIn("w" * 100, prompt)
+
+    def test_seat2_resumed_turn_tools_with_synthetic_tail_preserves_tools(
+        self,
+    ) -> None:
+        """Cycle 5: в срезе продолжения fallback защищён, tool-результаты сохраняют края."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        synthetic = "<system-reminder>\n" + "w" * (77 * 1024) + "\n</system-reminder>"
+        result_1 = "RESULT-1 " + "r" * (12 * 1024)
+        result_2 = "RESULT-2 " + "s" * (12 * 1024)
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "USER-1 прочитай два файла"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "read", "arguments": '{"p": 1}'}},
+                    {"id": "c2", "function": {"name": "read", "arguments": '{"p": 2}'}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": result_1},
+            {"role": "tool", "tool_call_id": "c2", "content": result_2},
+            {"role": "user", "content": synthetic},
+        ]
+        new_msgs = messages[3:]
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(new_msgs)
+        ]
+        self.assertGreater(
+            len("\n\n".join(b[2] for b in blocks).encode("utf-8")), limit
+        )
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        # Cycle 4 F-001: без реальных user последний user закреплён безусловно.
+        self.assertEqual(anchors, {0, 1, 2})
+
+        prompt = _str(_bfn("_get_resumed_turn_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertIn("[tool result c1] RESULT-1 " + "r" * 512, prompt)
+        self.assertIn("r" * 512 + "\n\n### 2. tool", prompt)
+        self.assertIn("[tool result c2] RESULT-2 " + "s" * 512, prompt)
+        self.assertIn("s" * 512 + "\n\n### 3. user", prompt)
+        # Синтетический носитель fallback защищён так же, как реальный ввод.
+        self.assertTrue(prompt.endswith("### 3. user\n" + synthetic))
+        self.assertEqual(prompt.count(_str(_bval("MIDDLE_PRUNED_MARKER"))), 2)
+
+    def test_last_assistant_anchor_does_not_pull_older_assistant(self) -> None:
+        """ADR-0019 F-002: старый крупный assistant не закрепляется лишним якорем."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        user3 = "USER-3 " + "к" * 15000 + " USER-3-END"
+        self.assertGreaterEqual(len(user3.encode("utf-8")), 30000)
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "USER-1 первый вопрос"},
+            {"role": "assistant", "content": "ASSISTANT-1 " + "a" * 200_000},
+            {"role": "user", "content": "USER-2 второй вопрос"},
+            {"role": "assistant", "content": "ASSISTANT-2 коротко"},
+            {"role": "user", "content": user3},
+        ]
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(messages)
+        ]
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        self.assertEqual(anchors, {0, 4, 5})
+
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertNotIn("ASSISTANT-1 ", prompt)
+        self.assertIn("ASSISTANT-2 коротко", prompt)
+        self.assertTrue(prompt.endswith("### 6. user\n" + user3))
+        self.assertNotIn(_str(_bval("MIDDLE_PRUNED_MARKER")), prompt)
+
+    def test_historical_tool_results_not_anchored_and_pruned(self) -> None:
+        """ADR-0019 F-003: якоря — только tool-результаты активного хода, старые вытесняются."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        old_result = "OLD-RESULT " + "o" * (120 * 1024)
+        new_result = "NEW-RESULT " + "n" * 4000
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "USER-1 прочитай старый файл"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "read", "arguments": '{"p": 1}'}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": old_result},
+            {"role": "assistant", "content": "ASSISTANT-2 прочитал"},
+            {"role": "user", "content": "USER-2 теперь новый файл"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c2", "function": {"name": "read", "arguments": '{"p": 2}'}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c2", "content": new_result},
+        ]
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(messages)
+        ]
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        self.assertEqual(anchors, {0, 4, 5, 6, 7})
+        self.assertGreater(len("\n\n".join(b[2] for b in blocks).encode("utf-8")), limit)
+
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertNotIn("OLD-RESULT ", prompt)
+        self.assertIn("[tool result c2] " + new_result, prompt)
+        self.assertIn("USER-2 теперь новый файл", prompt)
+        self.assertIn(_str(_bval("HISTORY_PRUNED_MARKER")), prompt)
+        self.assertNotIn(_str(_bval("MIDDLE_PRUNED_MARKER")), prompt)
+
+    def test_single_oversized_synthetic_user_fallback_middle_pruned(self) -> None:
+        """ADR-0019 F-001: единственный крупный user в fallback сжат серединой, а не выброшен."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        marker = _str(_bval("MIDDLE_PRUNED_MARKER"))
+        body = (
+            "<system-reminder>\nSYN-HEAD "
+            + "w" * (150 * 1024)
+            + " SYN-TAIL\n</system-reminder>"
+        )
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": body},
+        ]
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(messages)
+        ]
+        self.assertTrue(_bfn("_is_synthetic_user_block")(blocks[1][2]))
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        self.assertEqual(anchors, {0, 1})
+
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertIn("### 2. user\n<system-reminder>\nSYN-HEAD ", prompt)
+        self.assertTrue(prompt.endswith(" SYN-TAIL\n</system-reminder>"))
+        self.assertEqual(prompt.count(marker), 1)
+
+    def test_user_approved_human_prompt_not_synthetic(self) -> None:
+        """ADR-0019 F-002: `The user approved ...` — синтетика только как короткое уведомление DSH."""
+        is_synth = _bfn("_is_synthetic_user_block")
+        human = (
+            "The user approved the following migration spec, implement it exactly: "
+            "SPEC-1 добавить колонку"
+        )
+        self.assertFalse(is_synth("### 3. user\n" + human))
+        self.assertFalse(is_synth("### 3. user\nThe user approved " + "x" * 400))
+        self.assertFalse(
+            is_synth("### 3. user\nThe user approved:\nшаг 1\nшаг 2\nшаг 3")
+        )
+        # Cycle 4 F-001: синтетика — только точное служебное уведомление DSH.
+        self.assertFalse(
+            is_synth("### 3. user\nThe user rejected bash command: rm -rf")
+        )
+        for notice in (
+            "The user approved bash command",
+            "The user rejected the tool call.",
+            "The user approved command",
+            "the user APPROVED the bash command.",
+        ):
+            self.assertTrue(is_synth("### 3. user\n" + notice), notice)
+        for human_text in (
+            "The user approved the change. Apply it now.",
+            "The user approved the migration; apply it now.",
+            "The user approved PR 123",
+            "The user approved bash command, now run tests",
+            "The user approved bash command.\nNext step",
+        ):
+            self.assertFalse(is_synth("### 3. user\n" + human_text), human_text)
+        self.assertFalse(is_synth("### 3. user\nThe user changed setting " + "y" * 400))
+
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "OLD " + "q" * 20000},
+            {"role": "assistant", "content": "ANSWER"},
+            {"role": "user", "content": human},
+            {
+                "role": "user",
+                "content": "<system-reminder>\n" + "w" * 90000 + "\n</system-reminder>",
+            },
+        ]
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(
+            _ndjson_size(prompt), _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        )
+        self.assertIn("### 4. user\n" + human, prompt)
+        self.assertNotIn("w" * 100, prompt)
+
+    def test_many_real_user_without_assistant_keeps_goal_and_tail(self) -> None:
+        """ADR-0019 Cycle 4 F-002: пачка user без assistant — якоря первый и хвост пачки."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        tail_count = _int(_bval("ANCHOR_USER_TAIL_COUNT"))
+        self.assertEqual(_int(_bval("ANCHOR_USER_NO_ASSISTANT_MAX")), 5)
+        self.assertEqual(tail_count, 3)
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"}
+        ]
+        for n in range(1, 111):
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "USER_%03d " % n + "z" * 980 + " END_%03d" % n,
+                }
+            )
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(messages)
+        ]
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        self.assertEqual(anchors, {0, 1, 108, 109, 110})
+        full = _str(_bfn("_join_prompt_parts")([b[2] for b in blocks]))
+        self.assertGreater(_ndjson_size(full), limit)
+
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertTrue(prompt.startswith("### 1. system\nSystem directive"))
+        for n in (1, 108, 109, 110):
+            self.assertIn(_str(messages[n]["content"]), prompt)
+        self.assertNotIn("USER_002 ", prompt)
+        self.assertIn(_str(_bval("HISTORY_PRUNED_MARKER")), prompt)
+        self.assertNotIn(_str(_bval("MIDDLE_PRUNED_MARKER")), prompt)
+        # Пять и меньше user без assistant — все остаются якорями.
+        few = blocks[:6]
+        self.assertEqual(
+            cast(set[int], _bfn("_prompt_anchor_indices")(few)), {0, 1, 2, 3, 4, 5}
+        )
+
+    def _assert_prompt_headers_intact(self, prompt: str) -> None:
+        header = re.compile(r"### (?:\d+\. )?[a-z]+")
+        for part in prompt.split("\n\n"):
+            first = part.split("\n", 1)[0]
+            self.assertTrue(header.fullmatch(first), first[:80])
+        for line in prompt.splitlines():
+            if line.startswith("#"):
+                self.assertTrue(header.fullmatch(line), line[:80])
+
+    def _anchor_prompt(self, messages: list[dict[str, object]]) -> tuple[set[int], str]:
+        counter = [0]
+        blocks: list[tuple[int, str, str]] = [
+            (i, _str(m["role"]), _str(_bfn("_render_message")(m, counter, [0])))
+            for i, m in enumerate(messages)
+        ]
+        anchors = cast(set[int], _bfn("_prompt_anchor_indices")(blocks))
+        return anchors, _str(_bfn("_messages_to_prompt")(messages))
+
+    def test_user_approved_short_human_instruction_preserved(self) -> None:
+        """ADR-0019 Cycle 4 F-001: `The user approved the change. Apply it now.` — ввод человека."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        human = "The user approved the change. Apply it now."
+        self.assertFalse(_bfn("_is_synthetic_user_block")("### 4. user\n" + human))
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "OLD-REQUEST " + "q" * 20000},
+            {"role": "assistant", "content": "ANSWER: diff ready"},
+            {"role": "user", "content": human},
+            {
+                "role": "user",
+                "content": "<system-reminder>\n"
+                + "w" * (100 * 1024)
+                + "\n</system-reminder>",
+            },
+        ]
+        anchors, prompt = self._anchor_prompt(messages)
+        self.assertTrue({0, 2, 3} <= anchors, anchors)
+        self.assertNotIn(4, anchors)
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertIn("### 4. user\n" + human, prompt)
+        self.assertNotIn("w" * 100, prompt)
+
+    def test_user_approved_migration_instruction_preserved(self) -> None:
+        """ADR-0019 Cycle 4 F-001: `The user approved the migration; apply it now.` — ввод человека."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        human = "The user approved the migration; apply it now."
+        self.assertFalse(_bfn("_is_synthetic_user_block")("### 4. user\n" + human))
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "OLD-REQUEST " + "q" * 20000},
+            {"role": "assistant", "content": "ANSWER: migration plan"},
+            {"role": "user", "content": human},
+            {
+                "role": "user",
+                "content": "<system-reminder>\n"
+                + "w" * (100 * 1024)
+                + "\n</system-reminder>",
+            },
+        ]
+        anchors, prompt = self._anchor_prompt(messages)
+        self.assertIn(3, anchors)
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertIn("### 4. user\n" + human, prompt)
+        self.assertNotIn("w" * 100, prompt)
+
+    def test_all_synthetic_user_with_historical_tool_fallback(self) -> None:
+        """ADR-0019 Cycle 4 F-001: исторический tool не мешает закрепить последний user."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "Current runtime context. This snapshot supersedes earlier snapshots."},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": "output " + "o" * (120 * 1024),
+            },
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "Current runtime context. This snapshot supersedes earlier runtime-context snapshots."},
+        ]
+        anchors, prompt = self._anchor_prompt(messages)
+        self.assertIn(4, anchors)
+        self.assertNotIn(2, anchors)
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self.assertTrue(prompt.endswith("### 5. user\nCurrent runtime context. This snapshot supersedes earlier runtime-context snapshots."))
+        self.assertNotIn("o" * 100, prompt)
+        # Без давления бюджета короткий срез тоже закрепляет последний user.
+        small = (
+            messages[:2]
+            + [{"role": "tool", "tool_call_id": "c1", "content": "output"}]
+            + messages[3:]
+        )
+        small_anchors, small_prompt = self._anchor_prompt(small)
+        self.assertIn(4, small_anchors)
+        self.assertIn("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.", small_prompt)
+
+    def test_structural_budget_extreme_user_count_prioritized_compression(self) -> None:
+        """ADR-0019 Cycle 4 F-002: тысячи user без assistant — без рваных заголовков."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        system = "SYSTEM-DIRECTIVE " + "s" * 4000 + " SYSTEM-END"
+        for total in (3000, 6000):
+            messages: list[dict[str, object]] = [{"role": "system", "content": system}]
+            messages.extend(
+                {"role": "user", "content": "USER_%05d short note" % n}
+                for n in range(1, total + 1)
+            )
+            last = "USER_%05d short note" % total
+            prompt = _str(_bfn("_messages_to_prompt")(messages))
+            self.assertLessEqual(_ndjson_size(prompt), limit, total)
+            self._assert_prompt_headers_intact(prompt)
+            self.assertTrue(prompt.startswith("### 1. system\n" + system), total)
+            self.assertTrue(prompt.endswith("### %d. user\n%s" % (total + 1, last)))
+            self.assertIn("### 2. user\nUSER_00001 short note", prompt)
+            self.assertIn(_str(_bval("HISTORY_PRUNED_MARKER")), prompt)
+            self.assertNotIn(_str(_bval("MIDDLE_PRUNED_MARKER")), prompt)
+
+    def test_structural_budget_header_overflow_evicts_oldest_messages(self) -> None:
+        """ADR-0019 Cycle 4 F-002: заголовки сверх лимита — вытеснение старых, а не вырез середины."""
+        limit = _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        system = "SYSTEM-DIRECTIVE keep me"
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "TASK: собери отчёт по всем файлам"},
+        ]
+        messages.extend(
+            {"role": "tool", "tool_call_id": "c%d" % n, "content": "out %05d" % n}
+            for n in range(1, 6001)
+        )
+        anchors, _ = self._anchor_prompt(messages[:5])
+        self.assertEqual(anchors, {0, 1, 2, 3, 4})
+        logs: list[str] = []
+        with mock.patch.object(_bridge(), "_log", logs.append):
+            prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(_ndjson_size(prompt), limit)
+        self._assert_prompt_headers_intact(prompt)
+        self.assertTrue(prompt.startswith("### 1. system\n" + system))
+        self.assertIn("### 2. user\nTASK: собери отчёт по всем файлам", prompt)
+        self.assertIn(
+            "TASK: собери отчёт по всем файлам\n\n### user\n"
+            + _str(_bval("HISTORY_PRUNED_MARKER")),
+            prompt,
+        )
+        self.assertIn("### 6002. tool", prompt)
+        self.assertNotIn("### 3. tool", prompt)
+        self.assertTrue(
+            any(line.startswith("history headers evicted: ") for line in logs)
+        )
+        self.assertFalse(any(line.startswith("prompt middle-pruned") for line in logs))
+
+    def test_active_tool_calls_massive_count_does_not_erase_user_prompt(self) -> None:
+        """Cycle 5 F-001: 4800 активных инструментов не стирают запрет человека."""
+        system = "SYSTEM-DIRECTIVE " + "s" * 4000 + " SYSTEM-END"
+        human = "STOP. Do not apply changes."
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "Inspect the files"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c%d" % n,
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{}"},
+                    }
+                    for n in range(4800)
+                ],
+            },
+        ]
+        messages.extend(
+            {"role": "tool", "tool_call_id": "c%d" % n, "content": "result"}
+            for n in range(4800)
+        )
+        messages.append({"role": "user", "content": human})
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        self.assertLessEqual(
+            _ndjson_size(prompt), _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        )
+        self.assertIn("### 4804. user\n" + human, prompt)
+        self.assertIn("### 1. system\n" + system, prompt)
+        self._assert_prompt_headers_intact(prompt)
+
+    def test_attachments_tail_block_not_evicted_during_header_overflow(self) -> None:
+        """Cycle 5 F-003: вытеснение тысяч заголовков сохраняет вложение целиком."""
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "Inspect the attached image"},
+        ]
+        messages.extend(
+            {"role": "tool", "tool_call_id": "c%d" % n, "content": "result"}
+            for n in range(6000)
+        )
+        images: list[dict[str, object]] = [
+            {"index": 1, "path": "/tmp/image-keep.png", "mime": "image/png", "size": 10}
+        ]
+        attachments = _str(_bfn("_attachments_block")(images))
+        prompt = _str(_bfn("_messages_to_prompt")(messages, images))
+        self.assertLessEqual(
+            _ndjson_size(prompt), _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        )
+        self.assertTrue(prompt.endswith(attachments))
+        self.assertIn("System directive", prompt)
+        self.assertIn("Inspect the attached image", prompt)
+
+    def test_no_duplicate_pruned_markers_in_eviction(self) -> None:
+        """Cycle 5 F-004: старый пропуск и новое вытеснение образуют один маркер."""
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "Old request"},
+            {"role": "assistant", "content": "Reading files"},
+        ]
+        messages.extend(
+            {"role": "tool", "tool_call_id": "c%d" % n, "content": "result"}
+            for n in range(6000)
+        )
+        messages.append({"role": "user", "content": "STOP. Do not apply changes."})
+        prompt = _str(_bfn("_messages_to_prompt")(messages))
+        marker = "### user\n" + _str(_bval("HISTORY_PRUNED_MARKER"))
+        self.assertLessEqual(
+            _ndjson_size(prompt), _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        )
+        # Исторический assistant сохранён между двумя разными пропусками:
+        # раннего user и вытесненных активных tools (F-003 tools-first).
+        self.assertEqual(prompt.count(marker), 2)
+        self.assertIn("### 3. assistant", prompt)
+        self.assertNotIn(marker + "\n\n" + marker, prompt)
+
+    def test_many_user_messages_after_assistant_bounded(self) -> None:
+        """Cycle 5 F-005: пачка после assistant закрепляет исходную цель и хвост."""
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "System directive"},
+            {"role": "user", "content": "Previous turn"},
+            {"role": "assistant", "content": "Previous answer"},
+        ]
+        messages.extend(
+            {"role": "user", "content": "USER_%04d " % n + "z" * 1000}
+            for n in range(1000)
+        )
+        anchors, prompt = self._anchor_prompt(messages)
+        tail = _int(_bval("ANCHOR_USER_TAIL_COUNT"))
+        self.assertEqual(
+            anchors, {0, 2, 3} | set(range(len(messages) - tail, len(messages)))
+        )
+        self.assertLessEqual(
+            _ndjson_size(prompt), _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+        )
+        for n in (0, 997, 998, 999):
+            self.assertIn(_str(messages[n + 3]["content"]), prompt)
+        self.assertNotIn("USER_0001 ", prompt)
+        few = messages[:8]
+        few_anchors, _ = self._anchor_prompt(few)
+        self.assertEqual(few_anchors, {0, 2, 3, 4, 5, 6, 7})
+
+    def test_oversized_protected_blocks_keep_edges_after_tool_eviction(self) -> None:
+        """Защищённый оверзайз режется только после удаления всех инструментов."""
+        images: list[dict[str, object]] = [
+            {"index": 1, "path": "/tmp/image-keep.png", "mime": "image/png", "size": 10}
+        ]
+        for carrier in ("HUMAN-BEGIN ", "Current runtime context. BEGIN "):
+            with self.subTest(carrier=carrier):
+                messages: list[dict[str, object]] = [
+                    {
+                        "role": "system",
+                        "content": "SYSTEM-BEGIN " + "s" * 150000 + " SYSTEM-END",
+                    },
+                    {"role": "assistant", "content": "Reading files"},
+                ]
+                messages.extend(
+                    {"role": "tool", "tool_call_id": "c%d" % n, "content": "result"}
+                    for n in range(6000)
+                )
+                messages.append(
+                    {"role": "user", "content": carrier + "u" * 150000 + " USER-END"}
+                )
+                prompt = _str(_bfn("_messages_to_prompt")(messages, images))
+                self.assertLessEqual(
+                    _ndjson_size(prompt), _int(_bval("PROMPT_MAX_NDJSON_BYTES"))
+                )
+                for edge in ("SYSTEM-BEGIN", "SYSTEM-END", carrier, "USER-END"):
+                    self.assertIn(edge, prompt)
+                self.assertNotRegex(prompt, r"### \d+\. tool")
+                self.assertIn(_str(_bval("MIDDLE_PRUNED_MARKER")), prompt)
+                self.assertTrue(
+                    prompt.endswith(_str(_bfn("_attachments_block")(images)))
+                )
 
     def test_chat_id_isolation_different_conversations(self) -> None:
         key_for = _bfn("_session_key_for")
@@ -12017,3 +12993,730 @@ class BridgeConfigurabilityTests(unittest.TestCase):
                 self.assertEqual(cfg.ext_idle_timeout_s, 222.0)
         finally:
             srv.reload_bridge_config()
+
+
+class AgyCouncilPromptReworkTests(unittest.TestCase):
+    """Регрессии замечаний F-001/F-002/F-003/F-005 локального реворка."""
+
+    def test_current_turn_users_all_protected(self) -> None:
+        """F-001: задача и короткое продолжение имеют одинаковую защиту."""
+        blocks = [
+            (0, "system", "### 1. system\nSystem"),
+            (1, "user", "### 2. user\nOld task"),
+            (2, "assistant", "### 3. assistant\nOld answer"),
+            (3, "user", "### 4. user\nTASK " + "x" * 3000),
+            (4, "user", "### 5. user\ncontinue"),
+            (5, "assistant", "### 6. assistant\n[tool call] inspect({})"),
+            (6, "tool", "### 7. tool\n" + "t" * 20000),
+        ]
+        active, protected = _bfn("_prompt_priority_indices")(blocks)
+        self.assertEqual(active, {6})
+        self.assertEqual(protected, {0, 3, 4})
+        with mock.patch.object(_bridge(), "PROMPT_MAX_NDJSON_BYTES", 6000):
+            prompt = _str(_bfn("_prune_prompt_blocks")(blocks, "", 6000))
+        self.assertIn(blocks[3][2], prompt)
+        self.assertIn(blocks[4][2], prompt)
+        self.assertLessEqual(_ndjson_size(prompt), 6000)
+
+    def test_current_turn_users_protected_after_tool_call(self) -> None:
+        """RW-001: вызов инструмента не снимает защиту задачи и continue."""
+        task = (
+            "TASK-HEAD"
+            + "x" * 1400
+            + " STOP-REAL-INSTRUCTION "
+            + "x" * 1400
+            + "TASK-TAIL"
+        )
+        blocks = [
+            (0, "system", "### 1. system\nSystem"),
+            (1, "user", "### 2. user\n" + task),
+            (2, "user", "### 3. user\ncontinue"),
+            (3, "assistant", "### 4. assistant\n[tool call] inspect({})"),
+            (4, "tool", "### 5. tool\n" + "t" * 150000),
+        ]
+        self._assert_task_survives_tool_compression(blocks, {0, 1, 2}, {4})
+
+    def test_trailing_synthetic_user_does_not_steal_task_protection(self) -> None:
+        """RW-001: напоминание после tool не перехватывает защиту задачи."""
+        task = (
+            "TASK-HEAD"
+            + "x" * 1400
+            + " STOP-REAL-INSTRUCTION "
+            + "x" * 1400
+            + "TASK-TAIL"
+        )
+        blocks = [
+            (0, "system", "### 1. system\nSystem"),
+            (1, "user", "### 2. user\n" + task),
+            (2, "assistant", "### 3. assistant\n[tool call] inspect({})"),
+            (3, "tool", "### 4. tool\n" + "t" * 150000),
+            (4, "user", "### 5. user\n<system-reminder>skills</system-reminder>"),
+        ]
+        self._assert_task_survives_tool_compression(blocks, {0, 1}, {3})
+
+    def _assert_task_survives_tool_compression(
+        self,
+        blocks: list[tuple[int, str, str]],
+        expected_protected: set[int],
+        expected_active: set[int],
+    ) -> None:
+        limit = 98304
+        anchors = _bfn("_prompt_anchor_indices")(blocks)
+        active, protected = _bfn("_prompt_priority_indices")(blocks)
+        self.assertTrue(expected_protected <= anchors)
+        self.assertEqual(active, expected_active)
+        with self.subTest(check="protected"):
+            self.assertEqual(protected, expected_protected)
+        parts = [block[2] for block in blocks]
+        historical = [i for i in range(len(parts)) if i not in active | protected]
+        capped = _bfn("_cap_prompt_parts")(
+            parts, historical, sorted(active), limit, protected
+        )
+        for path, prompt in (
+            ("cap", _str(_bfn("_join_prompt_parts")(capped))),
+            ("prune", _str(_bfn("_prune_prompt_blocks")(blocks, "", limit))),
+        ):
+            with self.subTest(path=path):
+                for marker in ("TASK-HEAD", "STOP-REAL-INSTRUCTION", "TASK-TAIL"):
+                    self.assertIn(marker, prompt)
+                for index in expected_protected:
+                    self.assertIn(blocks[index][2], prompt)
+                self.assertLess(prompt.count("t"), 150000)
+                self.assertLessEqual(_ndjson_size(prompt), limit)
+
+    def test_active_tool_bodies_surrender_before_historical_body(self) -> None:
+        """F-001: инструмент уступает бюджет сохранённому контексту истории."""
+        history = "### 1. assistant\nHISTORY " + "h" * 700
+        parts = [history, "### 2. tool\n" + "t" * 10000, "### 3. user\ncontinue"]
+        result = cast(list[str], _bfn("_cap_prompt_parts")(parts, [0], [1], 1400, {2}))
+        self.assertEqual(result[0], history)
+        self.assertLessEqual(_ndjson_size(_str(_bfn("_join_prompt_parts")(result))), 1400)
+
+    def test_tool_headers_evicted_before_historical_headers(self) -> None:
+        """F-003: при дефиците заголовков сначала уходят активные инструменты."""
+        history = "### 1. assistant\nHISTORY-CONTEXT"
+        parts = [history] + [f"### {n + 2}. tool\nt" for n in range(30)]
+        parts.append("### 32. user\nSTOP")
+        result = cast(list[str], _bfn("_cap_prompt_parts")(
+            parts, [0], list(range(1, 31)), 500, {31}
+        ))
+        self.assertIn("### 1. assistant", result)
+        self.assertLess(sum(". tool" in part for part in result), 30)
+        self.assertIn(parts[-1], result)
+        self.assertLessEqual(_ndjson_size(_str(_bfn("_join_prompt_parts")(result))), 500)
+
+    def test_mixed_reminder_tags_and_near_notifications_are_real(self) -> None:
+        """F-002: полезный текст вне завершённых тегов не становится синтетикой."""
+        reminder = "<system-reminder>quoted</system-reminder>"
+        real_cases = (
+            reminder + " STOP-REAL-INSTRUCTION",
+            "STOP-REAL-INSTRUCTION " + reminder,
+            reminder + "\nSTOP-REAL-INSTRUCTION\n" + reminder,
+            "<system-reminder>unfinished",
+            "</system-reminder>",
+            reminder + "<system-reminder>unfinished",
+            "The user changed setting the value back, please revert...",
+            "The user changed setting " + "y" * 400,
+            "The approval policy changed; please investigate.",
+            'The approval policy changed from "ask" to "never" (changed by the user). STOP',
+            "Current runtime context. Explain this phrase.",
+            "The user approved the change. Apply it now.",
+            "The user rejected bash command: rm -rf",
+            "The user approved bash command.\nApply it now.",
+        )
+        for body in real_cases:
+            for prefix in ("", "### 4. user\n"):
+                with self.subTest(body=body, prefix=prefix):
+                    self.assertFalse(_bfn("_is_synthetic_user_block")(prefix + body))
+
+    def test_completed_reminders_and_exact_notifications_are_synthetic(self) -> None:
+        """F-002: завершённые служебные блоки и точные уведомления распознаются."""
+        reminder = "<system-reminder>one\ntwo</system-reminder>"
+        synthetic_cases = (
+            reminder,
+            reminder + "\n\n" + reminder,
+            'The approval policy changed from "ask" to "never" (changed by the user).',
+            'Current runtime context. This snapshot supersedes earlier snapshots.\n'
+            'Current working directory: "/Users/test/workspace".',
+            "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.",
+            "The user approved bash command",
+            "The user rejected the tool call.",
+            "the user APPROVED the bash command.",
+        )
+        for body in synthetic_cases:
+            for prefix in ("", "### 4. user\n"):
+                with self.subTest(body=body, prefix=prefix):
+                    self.assertTrue(_bfn("_is_synthetic_user_block")(prefix + body))
+
+    def test_tail_larger_than_max_is_bounded_in_anchor_and_priority(self) -> None:
+        """F-005: tail > max не превращает всю пачку user в якоря."""
+        for with_assistant in (False, True):
+            roles = ["system", "assistant"] if with_assistant else ["system"]
+            roles += ["user"] * 10
+            blocks = [(i, role, f"### {i + 1}. {role}\nbody-{i}") for i, role in enumerate(roles)]
+            expected = {0, len(roles) - 2, len(roles) - 1, 2 if with_assistant else 1}
+            with (
+                mock.patch.object(_bridge(), "ANCHOR_USER_NO_ASSISTANT_MAX", 2),
+                mock.patch.object(_bridge(), "ANCHOR_USER_TAIL_COUNT", 20),
+                self.subTest(with_assistant=with_assistant),
+            ):
+                anchors = _bfn("_prompt_anchor_indices")(blocks)
+                _, protected = _bfn("_prompt_priority_indices")(blocks)
+                self.assertEqual(anchors, expected | ({1} if with_assistant else set()))
+                self.assertEqual(protected, expected)
+
+    def test_synthetic_fallback_current_turn_users_are_protected(self) -> None:
+        """F-001: без реального ввода все служебные user текущего хода защищены."""
+        blocks = [
+            (0, "system", "### 1. system\nSystem"),
+            (1, "assistant", "### 2. assistant\nAnswer"),
+            (2, "user", "### 3. user\n<system-reminder>one</system-reminder>"),
+            (3, "user", "### 4. user\n<system-reminder>two</system-reminder>"),
+        ]
+        _, protected = _bfn("_prompt_priority_indices")(blocks)
+        self.assertEqual(protected, {0, 2, 3})
+
+
+    def test_header_only_block_survives_repeated_body_capping(self) -> None:
+        """F-003: повторное обнуление тела не обрезает role в заголовке."""
+        for role in ("assistant", "tool", "user", "system"):
+            header = f"### 6002. {role}"
+            for cap in (0, 1, len(header) - 1):
+                with self.subTest(role=role, cap=cap):
+                    self.assertEqual(_bfn("_cap_prompt_block")(header, cap), header)
+
+
+    def test_ambiguous_nested_reminders_are_real(self) -> None:
+        """F-002: вложенные и повреждённые пары не доказывают служебное происхождение."""
+        for body in (
+            "<system-reminder>outer <system-reminder>inner</system-reminder>",
+            "<system-reminder>outer <system-reminder>inner</system-reminder></system-reminder>",
+            "<system-reminder>one</system-reminder></system-reminder>",
+            "<system-reminder>one</system-reminder> HUMAN <system-reminder>two</system-reminder>",
+        ):
+            with self.subTest(body=body):
+                self.assertFalse(_bfn("_is_synthetic_user_block")(body))
+
+    def test_exact_runtime_snapshot_double_newline_cwd(self) -> None:
+        """F-002: известный DSH-раздел cwd допускает штатный пустой разделитель."""
+        body = (
+            "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n"
+            'Current working directory: "/Users/test/workspace".'
+        )
+        self.assertTrue(_bfn("_is_synthetic_user_block")(body))
+        self.assertFalse(_bfn("_is_synthetic_user_block")(body + "\nSTOP"))
+
+
+class DialogueStreamResilienceTests(unittest.TestCase):
+    """QS-001..004: wire-финализация, commit и запрет повторных инструментов."""
+
+    def setUp(self) -> None:
+        flags = mock.patch.dict(
+            os.environ,
+            {
+                "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": "true",
+                "AGY_BRIDGE_EMIT_TOOL_TRACE": "false",
+                "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL": "false",
+                "AGY_GRACEFUL_TIMEOUT_FINISH_REASON": "stop",
+            },
+        )
+        flags.start()
+        self.addCleanup(flags.stop)
+
+    @staticmethod
+    def _out(**extra: Any) -> dict:
+        return {
+            "state": "done",
+            "rc": 0,
+            "text": "",
+            "reasoning": "",
+            "result": {},
+            "tool_events": 0,
+            "usage": {},
+            **extra,
+        }
+
+    def _handler(self) -> Any:
+        handler = srv.Handler.__new__(srv.Handler)
+        handler.wfile = io.BytesIO()
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /v1/chat/completions HTTP/1.1"
+        handler.command = "POST"
+        handler.log_request = lambda *_a: None
+        handler.connection = SimpleNamespace(
+            gettimeout=lambda: None, settimeout=lambda _value: None
+        )
+        return handler
+
+    def _stream(self, out: dict, events: tuple = (), *, enabled: bool = True) -> tuple:
+        handler = self._handler()
+        observed = []
+
+        def run(
+            ctx: dict, text: Any, tool: Any, reasoning: Any, keepalive: Any
+        ) -> dict:
+            observed.append(handler.wfile.getvalue())
+            for kind, value in events:
+                {
+                    "text": text,
+                    "tool": tool,
+                    "reasoning": reasoning,
+                    "keepalive": lambda _v: keepalive(),
+                }[kind](value)
+            return out
+
+        handler._run_once = run
+        with mock.patch.dict(
+            os.environ, {"AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": str(enabled).lower()}
+        ):
+            handler._serve_sse(_ctx())
+        wire = handler.wfile.getvalue()
+        response = http.client.HTTPResponse(
+            cast(
+                socket.socket,
+                cast(
+                    object, SimpleNamespace(makefile=lambda *_a, **_k: io.BytesIO(wire))
+                ),
+            )
+        )
+        response.begin()
+        body = response.read().decode()
+        frames = [
+            json.loads(line[6:])
+            for line in body.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        return response, body, frames, observed
+
+    def test_qs001_reasoning_only_is_success(self) -> None:
+        out = self._out(reasoning="мысль")
+        self.assertIsNone(srv.Handler._error_body(out))
+        response, body, frames, _ = self._stream(out, (("reasoning", "мысль"),))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(frames[-1]["choices"][0]["finish_reason"], "stop")
+        self.assertFalse(any("error" in frame for frame in frames))
+        self.assertEqual(body.count("data: [DONE]"), 1)
+
+    def test_resilience_json_uses_request_flag_snapshot(self) -> None:
+        """RW-002: JSON использует снимок запроса при смене флага в ходе CLI."""
+        name = "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED"
+        for enabled in (True, False):
+            with (
+                self.subTest(enabled=enabled),
+                mock.patch.dict(os.environ, {name: str(not enabled).lower()}),
+            ):
+                handler = self._handler()
+                handler._run_once = lambda *_a: self._out(reasoning="мысль")
+                handler._serve_json(
+                    _ctx(stream=False, stream_resilience_enabled=enabled)
+                )
+                wire = handler.wfile.getvalue()
+                response = http.client.HTTPResponse(
+                    cast(
+                        socket.socket,
+                        cast(
+                            object,
+                            SimpleNamespace(
+                                makefile=lambda *_a, **_k: io.BytesIO(wire)
+                            ),
+                        ),
+                    )
+                )
+                response.begin()
+                payload = json.loads(response.read())
+                self.assertIn("application/json", response.getheader("Content-Type"))
+                if enabled:
+                    self.assertEqual(response.status, 200)
+                    message = payload["choices"][0]["message"]
+                    self.assertEqual(message["content"], "")
+                    self.assertEqual(message["reasoning_content"], "мысль")
+                    self.assertNotIn("error", payload)
+                else:
+                    self.assertEqual(response.status, 502)
+                    self.assertEqual(payload["error"]["code"], 502)
+                    self.assertEqual(payload["error"]["type"], "proxy_error")
+
+    def test_qs002_tool_and_result_only_are_success(self) -> None:
+        for payload in ({"tool_events": 1}, {"result": {"ok": True}}):
+            with self.subTest(payload=payload):
+                out = self._out(**payload)
+                self.assertIsNone(srv.Handler._error_body(out))
+                response, body, frames, _ = self._stream(out)
+                self.assertEqual(response.status, 200)
+                self.assertEqual(frames[-1]["choices"][0]["finish_reason"], "stop")
+                self.assertFalse(any("error" in frame for frame in frames))
+                self.assertEqual(body.count("data: [DONE]"), 1)
+
+    def test_qs003_silence_and_precommit_errors_use_http502(self) -> None:
+        for out in (
+            self._out(),
+            self._out(rc=1, reasoning="мысль"),
+            self._out(state="idle_timeout", rc=124),
+        ):
+            with self.subTest(out=out):
+                response, body, frames, observed = self._stream(
+                    out, (("text", ""), ("reasoning", ""), ("keepalive", None))
+                )
+                self.assertEqual(observed, [b""])
+                self.assertEqual(response.status, 502)
+                self.assertIn("application/json", response.getheader("Content-Type"))
+                self.assertEqual(
+                    json.loads(body)["error"], srv.Handler._error_body(out)
+                )
+                self.assertEqual(frames, [])
+                self.assertNotIn("[DONE]", body)
+
+    def test_qs004_committed_error_has_terminal_choice_before_done(self) -> None:
+        out = self._out(state="pump_error", rc=1, err="broken upstream")
+        response, body, frames, _ = self._stream(out, (("text", "ответ"),))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(frames[-1]["error"], srv.Handler._error_body(out))
+        self.assertEqual(frames[-1]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(body.count("data: [DONE]"), 1)
+        self.assertEqual(len({frame["id"] for frame in frames}), 1)
+
+    def test_first_payload_commits_before_cli_returns(self) -> None:
+        handler = self._handler()
+
+        def run(ctx: dict, text: Any, *_callbacks: Any) -> dict:
+            self.assertEqual(handler.wfile.getvalue(), b"")
+            self.assertTrue(text("первая дельта"))
+            self.assertIn("первая дельта".encode(), handler.wfile.getvalue())
+            self.assertTrue(ctx.get("stream_committed"))
+            return self._out(text="первая дельта")
+
+        handler._run_once = run
+        handler._serve_sse(_ctx())
+
+    def test_failed_terminal_write_stops_without_done(self) -> None:
+        handler = self._handler()
+        frames = []
+
+        def emit(data: str) -> bool:
+            frames.append(data)
+            return '"finish_reason": "stop"' not in data
+
+        handler._emit = emit
+        handler._run_once = lambda *_a: self._out(text="ответ")
+        handler._serve_sse(_ctx())
+        self.assertNotIn("data: [DONE]\n\n", frames)
+
+    def test_delivered_blocks_retry_on_headers_or_tool_side_effects(self) -> None:
+        for committed, tool_events in ((True, 0), (False, 1)):
+            with self.subTest(committed=committed, tool_events=tool_events):
+                handler = self._handler()
+                handler._acquire_slot = lambda _k: None
+                handler._log_done = lambda *_a: None
+                handler._attach_resolved_usage = lambda *_a: None
+                handler._execute = mock.Mock(
+                    return_value=self._out(
+                        state="pump_error", rc=1, tool_events=tool_events
+                    )
+                )
+                with (
+                    mock.patch.object(srv, "_launcher"),
+                    mock.patch.object(srv, "Run"),
+                    mock.patch.object(srv, "_slots"),
+                    mock.patch.object(srv, "_retry_credit"),
+                    mock.patch.object(srv, "_retry_take", return_value=True),
+                    mock.patch.object(srv, "_retry_pause_s", return_value=0),
+                    mock.patch.object(srv, "_build_timeout_policy", return_value=None),
+                ):
+                    handler._run_once(
+                        _ctx(stream_committed=committed),
+                        lambda _v: True,
+                        lambda _v: True,
+                        lambda _v: True,
+                        None,
+                    )
+                self.assertEqual(handler._execute.call_count, 1)
+
+    def test_disabled_flag_preserves_legacy_payload_and_flat_error(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": "false"}
+        ):
+            self.assertEqual(
+                srv.Handler._error_body(self._out(reasoning="мысль"))["code"], 502
+            )
+        response, body, frames, observed = self._stream(self._out(), enabled=False)
+        self.assertEqual(response.status, 200)
+        self.assertTrue(observed[0])
+        self.assertIn("error", frames[-1])
+        self.assertNotIn("choices", frames[-1])
+        self.assertIn("[DONE]", body)
+
+    def test_commit_callback_blocks_actual_second_execution(self) -> None:
+        handler = self._handler()
+        handler._acquire_slot = lambda _k: None
+        handler._log_done = lambda *_a: None
+        handler._attach_resolved_usage = lambda *_a: None
+
+        def execute(_run: Any, text: Any, *_callbacks: Any) -> dict:
+            self.assertTrue(text("уже передано"))
+            return self._out(state="pump_error", rc=1)
+
+        handler._execute = mock.Mock(side_effect=execute)
+        with (
+            mock.patch.object(srv, "_launcher"),
+            mock.patch.object(srv, "Run"),
+            mock.patch.object(srv, "_slots"),
+            mock.patch.object(srv, "_retry_credit"),
+            mock.patch.object(srv, "_retry_take", return_value=True),
+            mock.patch.object(srv, "_retry_pause_s", return_value=0),
+            mock.patch.object(srv, "_build_timeout_policy", return_value=None),
+        ):
+            handler._serve_sse(_ctx())
+        self.assertEqual(handler._execute.call_count, 1)
+        wire = handler.wfile.getvalue()
+        self.assertEqual(wire.count(b"HTTP/1.1 200"), 1)
+        self.assertIn(b'"finish_reason": "stop"', wire)
+        self.assertIn(b'"error":', wire)
+
+    def test_flag_change_applies_to_next_request(self) -> None:
+        handler = self._handler()
+
+        def run(_ctx: dict, text: Any, *_callbacks: Any) -> dict:
+            self.assertTrue(text("дельта"))
+            flags = mock.patch.dict(
+                os.environ, {"AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": "false"}
+            )
+            flags.start()
+            self.addCleanup(flags.stop)
+            return self._out(state="pump_error", rc=1)
+
+        handler._run_once = run
+        handler._serve_sse(_ctx())
+        self.assertIn(b'"finish_reason": "stop"', handler.wfile.getvalue())
+        self.assertEqual(
+            srv.Handler._error_body(self._out(reasoning="мысль"))["code"], 502
+        )
+
+    def test_tool_trace_commits_only_visible_payload(self) -> None:
+        for trace in (False, True):
+            with (
+                self.subTest(trace=trace),
+                mock.patch.dict(
+                    os.environ, {"AGY_BRIDGE_EMIT_TOOL_TRACE": str(trace).lower()}
+                ),
+            ):
+                handler = self._handler()
+
+                def run(ctx: dict, _text: Any, tool: Any, *_callbacks: Any) -> dict:
+                    self.assertTrue(tool({"name": "read_file", "step_index": 1}))
+                    self.assertTrue(ctx["tool_activity"])
+                    self.assertIs(ctx["stream_committed"], trace)
+                    return self._out(tool_events=1)
+
+                handler._run_once = run
+                handler._serve_sse(_ctx())
+                wire = handler.wfile.getvalue()
+                self.assertEqual(wire.count(b"HTTP/1.1 200"), 1)
+                self.assertEqual(b'"reasoning_content"' in wire, trace)
+
+    def test_terminal_error_closes_pending_calls_in_existing_relay(self) -> None:
+        from adapters.passthrough_adapter import PassthroughLimits, relay_sse
+
+        _, body, frames, _ = self._stream(
+            self._out(state="pump_error", rc=1), (("text", "дельта"),)
+        )
+        pending = dict(frames[0])
+        pending["choices"] = [
+            {
+                "index": 0,
+                "finish_reason": None,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ]
+                },
+            }
+        ]
+        upstream = io.BytesIO(("data: " + json.dumps(pending) + "\n\n" + body).encode())
+        downstream: list[bytes] = []
+        outcome = relay_sse(
+            upstream.readline,
+            downstream.append,
+            tool_schemas=None,
+            limits=PassthroughLimits(),
+        )
+        self.assertFalse(outcome.incomplete)
+        self.assertTrue(outcome.done)
+        self.assertNotIn(
+            b"upstream stream ended before finish_reason", b"".join(downstream)
+        )
+        self.assertIn(b'"error"', b"".join(downstream))
+
+    def test_enabled_graceful_timeout_retains_single_stop_final(self) -> None:
+        with mock.patch.dict(os.environ, {"AGY_GRACEFUL_TIMEOUT_ON_PARTIAL": "true"}):
+            _, body, frames, _ = self._stream(
+                self._out(state="idle_timeout", rc=124), (("text", "часть ответа"),)
+            )
+        terminals = [
+            choice["finish_reason"]
+            for frame in frames
+            for choice in frame["choices"]
+            if choice["finish_reason"]
+        ]
+        self.assertEqual(terminals, ["stop"])
+        self.assertEqual(body.count("data: [DONE]"), 1)
+        self.assertFalse(any("error" in frame for frame in frames))
+
+    def test_flag_defaults_config_and_env_precedence(self) -> None:
+        name = "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED"
+        for raw, expected in (
+            ("", False),
+            ("garbage", False),
+            ("true", True),
+            ("OFF", False),
+        ):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {name: raw}):
+                snapshot = srv._parse_runtime_flags(
+                    '{"stream_resilience_enabled":false}'
+                )
+                with mock.patch.object(srv, "_runtime_snapshot", return_value=snapshot):
+                    self.assertIs(srv._new_flag(name, True), expected)
+        with mock.patch.dict(os.environ, {name: ""}):
+            snapshot = srv._parse_runtime_flags("{}")
+            with mock.patch.object(srv, "_runtime_snapshot", return_value=snapshot):
+                self.assertTrue(srv._new_flag(name, True))
+                self.assertFalse(srv._new_flag("emit_tool_trace"))
+
+    def test_config_reload_keeps_lastgood_and_accepts_uppercase_alias(self) -> None:
+        with _Fixture() as fx:
+            fx.set_env("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", None)
+            clock = _clocked(fx)
+            flag = _bfn("_new_flag")
+            self.assertTrue(flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True))
+            _write_cfg(fx, {"AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": False}, 1_000)
+            clock.advance(2)
+            self.assertFalse(flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True))
+            _write_cfg(fx, '{"stream_resilience_enabled":"false"}', 2_000)
+            clock.advance(2)
+            self.assertFalse(flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True))
+            _write_cfg(fx, {"stream_resilience_enabled": True}, 3_000)
+            clock.advance(2)
+            self.assertTrue(flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True))
+
+
+class StreamFormattingAndReasoningIsolationTests(unittest.TestCase):
+    """Детерминированные тесты L1 на разграничение строк, сопоставление префиксов и изоляцию reasoning."""
+
+    def test_step_boundary_newline_separation(self) -> None:
+        """VER-001 / REQ-001: Текст независимых шагов планировщика разделяется \\n\\n без склеивания слов."""
+        run = _bare_run()
+        setattr(run, "_arbiter", _arb())
+        setattr(run, "turn_id", "turn-fmt-1")
+        setattr(run, "run_cid", _CID)
+        offer = _ofn(run, "offer_content")
+
+        # Шаг 1: завершается точкой без перевода строки
+        self.assertTrue(offer("stdout", 1, "Завершаю поиск данных."))
+        # Шаг 2: начинается со слова с заглавной буквы
+        self.assertTrue(offer("stdout", 2, "Проверяю вывод лога задачи 349."))
+        # Шаг 3: завершается с переводом строки
+        self.assertTrue(offer("stdout", 3, "Следующее действие.\n"))
+        # Шаг 4: начинается без перевода строки
+        self.assertTrue(offer("stdout", 4, "Финальный результат."))
+
+        q = cast("queue.Queue[tuple[str, object]]", _oval(run, "q"))
+        chunks = [cast(str, q.get_nowait()[1]) for _ in range(q.qsize())]
+        combined = "".join(chunks)
+
+        # Проверяем, что нет слитного "данных.Проверяю"
+        self.assertNotIn("данных.Проверяю", combined)
+        self.assertIn("Завершаю поиск данных.\n\nПроверяю вывод лога задачи 349.", combined)
+        self.assertIn("Следующее действие.\n\nФинальный результат.", combined)
+
+    def test_arbiter_no_prefix_repetition_on_divergence(self) -> None:
+        """VER-002 / REQ-002: Короткие префиксы новых шагов не вызывают лавины повторов [гейт..."""
+        arb = _arb()
+        step1_text = "[гейт оркестрации: активен | роль: explorer] Читаю канон AGENTS.md"
+        step2_prefix = "[гейт оркестрации: активен"
+        step2_full = "[гейт оркестрации: активен | роль: worker] Запускаю тесты pytest"
+
+        # Шаг 1
+        self.assertEqual(_offer(arb, "transcript", 1, step1_text), step1_text)
+
+        # Шаг 2 начинается с префикса, совпадающего с шагом 1
+        delta_prefix = _offer(arb, "transcript", 2, step2_prefix)
+        self.assertEqual(delta_prefix, step2_prefix)
+        self.assertEqual(_oval(arb, "divergences"), 0)
+
+        # Шаг 2 досылает полный текст
+        delta_full = _offer(arb, "transcript", 2, step2_full)
+        self.assertEqual(delta_full, step2_full[len(step2_prefix):])
+        self.assertEqual(_oval(arb, "divergences"), 0)
+
+        # Проверяем, что в chunks нет зацикленного повтора
+        chunks = _oval(arb, "chunks")
+        joined = "".join(chunks)
+        self.assertEqual(joined.count("[гейт оркестрации: активен"), 2)
+
+    def test_tool_preamble_isolated_to_reasoning(self) -> None:
+        """VER-003 / REQ-003: Сервисная преамбула шага с tool_calls изолируется в reasoning, сохраняя <Think>."""
+        with _Fixture() as fx:
+            content_emitted: list[tuple[int | None, str]] = []
+            reasoning_emitted: list[tuple[int, str]] = []
+
+            def emit_content(idx: int | None, text: str) -> bool:
+                content_emitted.append((idx, text))
+                return True
+
+            def emit_reasoning(idx: int, delta: str, on_del: Any = None) -> bool:
+                reasoning_emitted.append((idx, delta))
+                if on_del is not None:
+                    on_del()
+                return True
+
+            plan = _bfn("_TurnPlan")()
+            setattr(plan, "mode", "OFF")
+            setattr(plan, "base_idx", 0)
+            setattr(plan, "offset", 0)
+
+            tail = _bfn("_TranscriptTail")(
+                emit_reasoning,
+                threading.Event(),
+                threading.Event(),
+                False,
+                plan,
+                "turn-reasoning-1",
+                emit_content,
+                None,
+                False,
+                True,  # isolate_tool_preambles=True
+            )
+            setattr(tail, "cid", _CID)
+
+            # Шаг 1: содержит tool_calls и преамбулу в content
+            fx.append_record(
+                {
+                    "type": "PLANNER_RESPONSE",
+                    "step_index": 1,
+                    "content": "Ищу скилл analyst-teamlead и проверяю базу знаний",
+                    "tool_calls": [{"name": "read_file", "args": {"Path": "/tmp/test"}}],
+                }
+            )
+            # Шаг 2: финальный ответ пользователю (без tool_calls)
+            fx.append_record(
+                {
+                    "type": "PLANNER_RESPONSE",
+                    "step_index": 2,
+                    "content": "Вот согласованный ответ для пользователя.",
+                }
+            )
+
+            _ = _ofn(tail, "_read_transcript")()
+
+            # В content должен попасть ТОЛЬКО финальный ответ шага 2
+            self.assertEqual(len(content_emitted), 1)
+            self.assertEqual(content_emitted[0], (2, "Вот согласованный ответ для пользователя."))
+
+            # В reasoning должна попасть сервисная преамбула шага 1
+            reasoning_texts = [delta for _, delta in reasoning_emitted]
+            self.assertTrue(any("Ищу скилл analyst-teamlead" in t for t in reasoning_texts))
+

@@ -1,0 +1,26 @@
+{
+  "available": false,
+  "family": "Meta",
+  "ladder": [
+    {
+      "argv_sha256": "2c885e46cdfdb6008469c630b102d498a31126f8f46d50fee98388bb70621f83",
+      "end_utc": "2026-11-02T14:48:48.610078+00:00",
+      "error": null,
+      "pgid": "52733",
+      "pid": 52733,
+      "raw_err_sha256": "817883b40a9ad4cf88d9838eacfd5fe3b99821acd54187681ef12ac33686980e",
+      "raw_out_sha256": "88c6ac11602d8587b4fdf1a46624ad529fd253f9d5e10193e677eeb9869061ce",
+      "rc": 1,
+      "start_utc": "2026-11-02T14:48:36.837818+00:00",
+      "status": "failed",
+      "transport": "muse"
+    }
+  ],
+  "launcher_sha256": "b280a404077914253c9561b8dd4e3dfa80096deb3bf7e1d937b84497df82da37",
+  "round": 2,
+  "run_id": "all-bridges-sliding-window-20261102",
+  "schema": "pol-probe/1",
+  "setup": "default",
+  "slot_id": "muse-wonder-full-1.0",
+  "stage": "arch"
+}

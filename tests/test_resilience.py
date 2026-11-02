@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Protocol, cast
 
 import pytest
 
@@ -640,17 +641,45 @@ def facade(monkeypatch):
         upstream.server_close()
 
 
-def test_facade_open_breaker_returns_503_retry_after_without_upstream_call(facade):
+class _FacadeState(Protocol):
+    status: int
+    hits: int
+
+
+class _RetryFacade(Protocol):
+    state: _FacadeState
+    monkeypatch: pytest.MonkeyPatch
+
+    def call(
+        self, body: dict[str, str] | None = None
+    ) -> tuple[int, dict[str, str], dict[str, object]]: ...
+
+
+def test_facade_open_breaker_returns_503_retry_after_without_upstream_call(
+    facade: _RetryFacade,
+) -> None:
+    facade.monkeypatch.setenv("BRIDGE_MAX_RETRIES", "3")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_BUDGET_S", "60")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_BACKOFF_S", "0.001")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_MAX_BACKOFF_S", "0.001")
     manager, _ = make_manager()
     facade.monkeypatch.setattr(server, "RESILIENCE", manager)
     facade.state.status = 502
-    for _ in range(3):
+    for logical_calls in range(1, 4):
         status, _, _ = facade.call()
         assert status == 502  # честный ответ upstream, без подмены
-    assert facade.state.hits == 3
+        assert facade.state.hits == logical_calls * 4
+        snapshot = cast(dict[str, dict[str, object]], manager.snapshot()["backends"])["agy"]
+        assert snapshot["active"] == 0
+        assert snapshot["failures"] == (logical_calls if logical_calls < 3 else 0)
+        assert snapshot["state"] == ("CLOSED" if logical_calls < 3 else "OPEN")
+    snapshot = cast(dict[str, dict[str, object]], manager.snapshot()["backends"])["agy"]
+    assert snapshot["failures"] == 0 and snapshot["active"] == 0
+    assert snapshot["state"] == "OPEN"
+    assert facade.state.hits == 12  # 3 логических допуска, по 4 физических POST
     status, headers, body = facade.call()
     assert status == 503
-    assert facade.state.hits == 3  # fail-fast: upstream не вызывался
+    assert facade.state.hits == 12  # fail-fast: новых физических POST нет
     assert headers["retry-after"] == "30"
     assert body["error"] == {
         "message": "Backend 'agy' is temporarily unavailable: circuit breaker is open",
@@ -661,7 +690,7 @@ def test_facade_open_breaker_returns_503_retry_after_without_upstream_call(facad
     # Другой бэкенд (opencode-zen) не задет и по-прежнему доходит до upstream.
     facade.state.status = 200
     status, _, _ = facade.call({"model": "big-pickle"})
-    assert status == 200 and facade.state.hits == 4
+    assert status == 200 and facade.state.hits == 13
 
 
 def test_facade_4xx_and_success_do_not_trip_breaker(facade):
@@ -675,16 +704,21 @@ def test_facade_4xx_and_success_do_not_trip_breaker(facade):
     assert manager.snapshot()["backends"]["agy"]["state"] == "CLOSED"
 
 
-def test_facade_flags_off_keeps_legacy_behavior(facade):
+def test_facade_flags_off_keeps_legacy_behavior(facade: _RetryFacade) -> None:
+    facade.monkeypatch.setenv("BRIDGE_MAX_RETRIES", "3")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_BUDGET_S", "60")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_BACKOFF_S", "0.001")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_MAX_BACKOFF_S", "0.001")
     facade.monkeypatch.setattr(
         server,
         "RESILIENCE",
         ResilienceManager(ResilienceFlags(StaticSource({}), env={})),
     )
     facade.state.status = 502
-    for _ in range(8):
+    for logical_calls in range(1, 9):
         assert facade.call()[0] == 502
-    assert facade.state.hits == 8
+        assert facade.state.hits == logical_calls * 4
+    assert facade.state.hits == 32  # флаги CB/bulkhead не отключают HTTP retry
 
 
 def test_facade_bulkhead_503_before_headers(facade):

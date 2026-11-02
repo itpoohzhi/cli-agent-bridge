@@ -12,20 +12,26 @@
 3. Безопасную уборку сирот при старте (`reap_orphans_on_startup`, `RW-004`): сверка
    `workspace/state/children.json` через `os.kill(pid, 0)` и имя команды в `ps`,
    мягкое погашение `SIGTERM -> 1s -> SIGKILL` с логом `orphan_reaped`.
-4. Контроль интервала SSE keepalive (`KeepaliveController`, `<= 10.0` с).
+4. Контроль настраиваемого интервала SSE keepalive (`KeepaliveController`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 import json
+import math
 import os
 from pathlib import Path
+import random
 import signal
 import subprocess
 import threading
 import time
-from typing import Any
+from typing import Any, TypeVar
+
+from core.backend_adapter import PreSendTransientError
+from core.resilience import RetryPolicy
+from core.watchdog import positive_env
 
 from core.turn_session_manager import (
     SNAPSHOT_SCHEMA_VERSION,
@@ -69,22 +75,34 @@ class DrainState:
 
 
 class KeepaliveController:
-    """Контроллер интервала SSE keepalive (`<= 10.0` с для защиты от обрыва прокси/туннеля)."""
+    """Настраиваемый интервал SSE keepalive; по умолчанию не более 10 с."""
 
-    def __init__(self, max_interval_s: float = MAX_KEEPALIVE_INTERVAL_S) -> None:
-        self.max_interval_s = max(0.05, min(float(max_interval_s), MAX_KEEPALIVE_INTERVAL_S))
+    def __init__(self, max_interval_s: float | None = None) -> None:
+        configured = positive_env(
+            "BRIDGE_KEEPALIVE_INTERVAL_S",
+            positive_env(
+                "BRIDGE_KEEPALIVE_S",
+                positive_env("DROID_DSH_BRIDGE_KEEPALIVE_S", MAX_KEEPALIVE_INTERVAL_S),
+            ),
+        )
+        self.min_interval_s = positive_env("BRIDGE_KEEPALIVE_MIN_INTERVAL_S", 0.05)
+        value = configured if max_interval_s is None else float(max_interval_s)
+        self.max_interval_s = max(
+            self.min_interval_s,
+            value if math.isfinite(value) and value > 0 else configured,
+        )
 
     def effective_interval(self, requested_s: float | int | None = None) -> float:
-        """Возвращает эффективный интервал keepalive, не превышающий `10.0` с."""
+        """Возвращает интервал в настроенных границах без busy-loop на малом значении."""
         if requested_s is None:
             return self.max_interval_s
         try:
             val = float(requested_s)
         except (TypeError, ValueError):
             return self.max_interval_s
-        if val <= 0:
+        if not math.isfinite(val) or val <= 0:
             return self.max_interval_s
-        return min(val, self.max_interval_s)
+        return max(self.min_interval_s, min(val, self.max_interval_s))
 
     @staticmethod
     def sse_comment() -> str:
@@ -93,23 +111,106 @@ class KeepaliveController:
 
     @staticmethod
     def sse_data_chunk(
+        model: str = "",
+        reasoning: bool = True,
         *,
-        completion_id: str,
-        created: int,
-        model: str,
+        completion_id: str | None = None,
+        created: int | None = None,
     ) -> str:
-        """Возвращает пустой SSE data-чанк keepalive в формате OpenAI `chat.completion.chunk`."""
+        """Возвращает распознаваемый клиентским idle-watchdog чанк вне истории хода."""
+        timestamp = int(time.time()) if created is None else int(created)
         payload = json.dumps(
             {
-                "id": completion_id,
+                "id": completion_id or f"chatcmpl-ping-{time.time_ns()}",
                 "object": "chat.completion.chunk",
-                "created": int(created),
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                "created": timestamp,
+                "model": model or "bridge-keepalive",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"reasoning_content": " "} if reasoning else {},
+                        "finish_reason": None,
+                    }
+                ],
             },
             ensure_ascii=False,
         )
         return f"data: {payload}\n\n"
+
+
+_RetryResult = TypeVar("_RetryResult")
+
+
+class PreSendRetry:
+    """Общий ограниченный retry временного upstream-отказа до первого байта клиенту."""
+
+    def __init__(
+        self,
+        *,
+        committed: Callable[[], bool] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        wait: Callable[[float], bool] | None = None,
+        rng: Callable[[float, float], float] = random.uniform,
+    ) -> None:
+        raw = os.environ.get("BRIDGE_MAX_RETRIES", "3").strip()
+        try:
+            self.max_retries = int(raw) if raw.isdecimal() else 3
+        except ValueError:
+            self.max_retries = 3
+        self.budget_s = positive_env("BRIDGE_RETRY_BUDGET_S", 60.0)
+        self.backoff_s = positive_env("BRIDGE_RETRY_BACKOFF_S", 1.0)
+        self.max_backoff_s = positive_env("BRIDGE_RETRY_MAX_BACKOFF_S", 10.0)
+        self._committed = committed or (lambda: False)
+        self._cancelled = cancelled or (lambda: False)
+        self._clock = clock
+        self.deadline = clock() + self.budget_s
+        self._cancel_poll_s = positive_env("BRIDGE_RETRY_CANCEL_POLL_S", 0.1)
+        self._wait = wait or self._interruptible_wait
+        self._policy = RetryPolicy(
+            max_attempts=self.max_retries + 1,
+            base_delay_s=self.backoff_s,
+            max_delay_s=self.max_backoff_s,
+            rng=rng,
+            is_transient=lambda exc: (
+                isinstance(exc, PreSendTransientError)
+                and exc.status_code in (None, 502, 503)
+            ),
+        )
+
+    def _interruptible_wait(self, delay: float) -> bool:
+        deadline = self._clock() + delay
+        wake = threading.Event()
+        while not self._cancelled():
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return False
+            wake.wait(min(remaining, self._cancel_poll_s))
+        return True
+
+    def run(self, operation: Callable[[], _RetryResult]) -> _RetryResult:
+        """Повторяет только типизированные upstream-отказы в едином бюджете и до commit."""
+        deadline = self.deadline = self._clock() + self.budget_s
+        retries = 0
+        while True:
+            try:
+                return operation()
+            except PreSendTransientError as exc:
+                delay = self._policy.compute_delay(retries, deadline - self._clock())
+                if (
+                    not self._policy.should_retry(retries, self._committed(), exc)
+                    or self._cancelled()
+                    or delay is None
+                ):
+                    raise
+                if (
+                    self._wait(delay)
+                    or self._cancelled()
+                    or self._committed()
+                    or self._clock() >= deadline
+                ):
+                    raise
+                retries += 1
 
 
 class HubLifecycleManager:
@@ -262,20 +363,28 @@ class HubLifecycleManager:
 
         eff_timeout = self.drain_timeout_s if self.is_drain_enabled() else 0.0
         active_before = (
-            self.turn_manager.active_count()
-            if self.turn_manager is not None
-            else (self._active_turns_fn() if self._active_turns_fn is not None else 0)
+            self._active_turns_fn()
+            if self._active_turns_fn is not None
+            else (self.turn_manager.active_count() if self.turn_manager is not None else 0)
         )
         self._log(
             f"drain_started signal={self.last_signal or 0} "
             f"active_turns={active_before} timeout_s={eff_timeout:.1f}"
         )
 
+        if srv is not None and hasattr(srv, "graceful_close_listener"):
+            try:
+                srv.graceful_close_listener()
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"graceful_close_listener_failed err={exc!r}")
+
         remaining = []
         deadline = time.monotonic() + max(0.0, eff_timeout)
         if self.turn_manager is not None:
             if eff_timeout > 0:
-                remaining = self.turn_manager.wait_for_active_turns(timeout=eff_timeout)
+                remaining = self.turn_manager.wait_for_active_turns(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
             else:
                 remaining = self.turn_manager.active_turns()
 
@@ -288,7 +397,8 @@ class HubLifecycleManager:
                     turn,
                     message="bridge restart drain timeout exceeded",
                 )
-        elif self._active_turns_fn is not None and eff_timeout > 0:
+
+        if self._active_turns_fn is not None and eff_timeout > 0:
             while time.monotonic() < deadline and self._active_turns_fn() > 0:
                 time.sleep(0.05)
 
@@ -310,6 +420,7 @@ class HubLifecycleManager:
         self._log(f"drain_completed interrupted_turns={len(remaining)}")
         return {
             "interrupted_turn_ids": [t.turn_id for t in remaining],
+            "active_turns_before": active_before,
             "state": self.state,
         }
 

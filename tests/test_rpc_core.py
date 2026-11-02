@@ -375,18 +375,26 @@ class TestDeltaAndIsolation(RpcCase):
         )
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
-        # EOF посреди хода: до 3 попыток, итог — прежний 502 proxy_error.
-        before = len(self.hub.admissions())
-        self.hub.script([{"steps": [{"op": "exit", "rc": 1, "stderr": "boom"}]}] * 3)
-        status, body = self._post_json(
+        # EOF запущенного хода: один admission, итог — прежний 502 proxy_error.
+        from typing import Callable, cast
+
+        admissions = cast(Callable[[], list[object]], getattr(self.hub, "admissions"))
+        script = cast(Callable[[list[object]], None], getattr(self.hub, "script"))
+        post = cast(
+            Callable[[dict[str, object]], tuple[int, dict[str, object]]],
+            getattr(self, "_post_json"),
+        )
+        before = len(admissions())
+        script([{"steps": [{"op": "exit", "rc": 1, "stderr": "boom"}]}])
+        status, body = post(
             {
                 "model": "claude-sonnet-5-5",
                 "messages": [{"role": "user", "content": "hi"}],
             }
         )
         self.assertEqual(status, 502)
-        self.assertEqual(body["error"]["type"], "proxy_error")
-        self.assertEqual(len(self.hub.admissions()) - before, 3)
+        self.assertEqual(cast(dict[str, object], body["error"])["type"], "proxy_error")
+        self.assertEqual(len(admissions()) - before, 1)
         # Ошибка ответа на add (JSON-RPC error) — pump_error -> 502, без ретраев.
         self.hub.configure(ack_error=True)
         before = len(self.hub.admissions())

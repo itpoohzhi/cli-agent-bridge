@@ -57,12 +57,13 @@ def test_passthrough_deadline_env() -> None:
         limits.heartbeat_interval_s,
     ) == (2, 3, 4, 0.05)
     defaults = PassthroughLimits.from_env({})
+    # Note: DEFAULT_IDLE_TIMEOUT_S = 300.0 on HEAD in adapters/passthrough_adapter.py:92 (commit 0215805227)
     assert (
         defaults.connect_timeout_s,
         defaults.idle_timeout_s,
         defaults.total_timeout_s,
         defaults.heartbeat_interval_s,
-    ) == (10, 60, 420, 12)
+    ) == (10, 300, 420, 12)
 
 
 @pytest.mark.parametrize(
@@ -133,6 +134,39 @@ def test_zen_byte_timeout_selection(zen: Any, monkeypatch: pytest.MonkeyPatch) -
     assert zen._zen_execution_timeout("unrelated-free", "x" * 100) == zen.TIMEOUT_S
     monkeypatch.setenv("BRIDGE_ZEN_TIMEOUT_MODELS", "explicit-model")
     assert zen._zen_execution_timeout("explicit-model", "x" * 9) == 0.1
+
+
+def test_zen_split_timeouts(zen: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "BRIDGE_ZEN_TTFT_TIMEOUT_S",
+        "BRIDGE_ZEN_TIMEOUT_S",
+        "BRIDGE_ZEN_IDLE_TIMEOUT_S",
+        "BRIDGE_ZEN_TOTAL_TIMEOUT_S",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BRIDGE_ZEN_LARGE_PROMPT_BYTES", "8")
+    model, big = "deepseek-v4.1-flash-free", "x" * 9
+    assert zen._zen_ttft_timeout(model, big) == 25.0
+    assert zen._zen_idle_timeout(model, big) == 15.0
+    assert zen._zen_total_timeout(model, big) == 180.0
+    # Нецелевой запрос сохраняет прежний единый дедлайн.
+    assert zen._zen_ttft_timeout("unrelated-free", big) == zen.TIMEOUT_S
+    assert zen._zen_idle_timeout("unrelated-free", big) == zen.TIMEOUT_S
+    assert zen._zen_total_timeout("unrelated-free", big) == zen.TIMEOUT_S
+    # Старое имя переменной остаётся fallback для TTFT, новое имеет приоритет.
+    monkeypatch.setenv("BRIDGE_ZEN_TIMEOUT_S", "7")
+    assert zen._zen_ttft_timeout(model, big) == 7.0
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "3")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "2")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "60")
+    assert zen._zen_ttft_timeout(model, big) == 3.0
+    assert zen._zen_idle_timeout(model, big) == 2.0
+    assert zen._zen_total_timeout(model, big) == 60.0
+    assert zen._zen_execution_timeout(model, big) == 3.0
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "bad")
+    assert zen._zen_idle_timeout(model, big) == 15.0
+    attempts = zen._RequestAttempts(zen._Resilience(), time.monotonic() + 1)
+    assert attempts.t0 <= time.monotonic()
 
 
 def test_zen_short_content_and_pong(zen: Any) -> None:
@@ -901,3 +935,335 @@ def test_nonstream_total_deadline_cannot_become_partial_200(upstream: Any) -> No
         invoke(adapter, sink)
         assert sink.status == 504
         assert b"choices" not in b"".join(sink.chunks)
+
+
+def _zen_fake_stream_child(
+    tmp_path: Path,
+    chunks: int,
+    gap_s: float,
+    lead_s: float = 0.0,
+    tool_s: float = 0.0,
+) -> Path:
+    """Фейковый `opencode run`: пауза lead_s, chunks text-событий с паузой gap_s, затем step_finish.
+
+    tool_s > 0: после первого чанка идёт tool (running -> пауза tool_s -> completed) без токенов.
+    """
+    fake = tmp_path / "fake-opencode"
+    tool = (
+        "    if i == 0 and %r:\n" % tool_s
+        + "        print(json.dumps({'type':'tool_use','part':{'tool':'bash','id':'c1','state':{'status':'running'}}}),flush=True)\n"
+        + f"        time.sleep({tool_s})\n"
+        + "        print(json.dumps({'type':'tool_use','part':{'tool':'bash','id':'c1','state':{'status':'completed'}}}),flush=True)\n"
+    )
+    fake.write_text(
+        "#!"
+        + sys.executable
+        + "\nimport json,sys,time\n"
+        + f"time.sleep({lead_s})\n"
+        + f"for i in range({chunks}):\n"
+        + "    print(json.dumps({'type':'text','part':{'text':'t%d ' % i}}),flush=True)\n"
+        + tool
+        + f"    time.sleep({gap_s})\n"
+        + "print(json.dumps({'type':'step_finish','part':{'tokens':{}}}),flush=True)\n"
+    )
+    fake.chmod(0o700)
+    return fake
+
+
+def _zen_stream_request(
+    zen: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake: Path,
+    stream: bool = True,
+) -> tuple[int, bytes, list[Any]]:
+    import http.client
+
+    monkeypatch.setenv("BRIDGE_ZEN_LARGE_PROMPT_BYTES", "8")
+    monkeypatch.setenv("OPENCODE_ZEN_BRIDGE_TRANSPORT", "run")
+    monkeypatch.setattr(zen, "AUTH_KEY", "test")
+    monkeypatch.setattr(
+        zen,
+        "ALLOWED_MODELS",
+        {"deepseek-v4.1-flash-free": {"context_length": 10000, "max_output": 1000}},
+    )
+    monkeypatch.setattr(zen, "_maybe_reload_catalog", lambda: None)
+    monkeypatch.setattr(zen, "_resolve_launcher", lambda: str(fake))
+    monkeypatch.setattr(zen, "DEFAULTWORKDIR", tmp_path)
+    monkeypatch.setattr(zen, "FIRST_STATUS_DELAY_S", 100)
+    monkeypatch.setattr(zen, "FAIL_RETRY_LIMIT", 0)
+    monkeypatch.setattr(zen, "_run_env", lambda _model: {})
+    procs: list[Any] = []
+    spawn = zen._spawn_with_stdin
+
+    def capture(*args: Any, **kwargs: Any) -> Any:
+        proc = spawn(*args, **kwargs)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(zen, "_spawn_with_stdin", capture)
+    httpd = zen.Server(("127.0.0.1", 0), zen.Handler)
+    thread = threading.Thread(
+        target=httpd.serve_forever, kwargs={"poll_interval": 0.01}
+    )
+    thread.start()
+    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+    try:
+        conn.request(
+            "POST",
+            "/v1/chat/completions",
+            json.dumps(
+                {
+                    "model": "deepseek-v4.1-flash-free",
+                    "messages": [{"role": "user", "content": "x" * 100}],
+                    "stream": stream,
+                }
+            ),
+            {"Authorization": "Bearer test", "X-Bypass-Short-Filter": "1"},
+        )
+        response = conn.getresponse()
+        return response.status, response.read(), procs
+    finally:
+        conn.close()
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(1)
+        for proc in procs:
+            if proc.poll() is None:
+                zen._stop_proc(proc)
+
+
+def test_zen_stream_continues_past_ttft(
+    zen: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Поток, начавшийся в пределах TTFT, живёт дольше TTFT, пока чанки идут чаще Idle."""
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "1.0")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "0.6")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "10")
+    fake = _zen_fake_stream_child(tmp_path, chunks=30, gap_s=0.05)
+    started = time.monotonic()
+    status, body, procs = _zen_stream_request(zen, monkeypatch, tmp_path, fake)
+    elapsed = time.monotonic() - started
+    assert status == 200
+    assert elapsed > 1.0
+    assert b"Gateway Timeout in zen-bridge" not in body
+    for i in range(30):
+        assert f"t{i} ".encode() in body
+    assert body.count(b"data: [DONE]") == 1
+    assert procs and all(proc.poll() is not None for proc in procs)
+
+
+def test_zen_stream_idle_timeout_after_first_token(
+    zen: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """После первого токена тишина дольше Idle обрывает поток и чистит дочерний процесс."""
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "2")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "0.2")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "30")
+    fake = _zen_fake_stream_child(tmp_path, chunks=1, gap_s=10)
+    started = time.monotonic()
+    status, body, procs = _zen_stream_request(zen, monkeypatch, tmp_path, fake)
+    assert time.monotonic() - started < 5
+    assert status == 200
+    assert b"t0 " in body
+    # Idle-обрыв — честная terminal SSE-ошибка, а не успешное завершение потока:
+    # [DONE] только как рамка после error-кадра, без finish_reason=stop.
+    assert b"Gateway Timeout in zen-bridge" in body
+    assert b"timeout_error" in body
+    assert body.index(b"timeout_error") < body.index(b"data: [DONE]")
+    assert b'"finish_reason": "stop"' not in body
+    assert procs and all(proc.poll() is not None for proc in procs)
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_zen_stream_ttft_timeout_returns_504(
+    zen: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stream: bool
+) -> None:
+    """Провайдер завис (0 токенов за TTFT): честный 504 / terminal SSE error с timeout_error."""
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "0.3")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "5")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "30")
+    fake = _zen_fake_stream_child(tmp_path, chunks=1, gap_s=0, lead_s=10)
+    started = time.monotonic()
+    status, body, procs = _zen_stream_request(
+        zen, monkeypatch, tmp_path, fake, stream=stream
+    )
+    assert time.monotonic() - started < 5
+    assert b"timeout_error" in body
+    assert b"Gateway Timeout in zen-bridge" in body
+    assert b"t0 " not in body
+    assert b'"finish_reason": "stop"' not in body
+    if stream:
+        assert body.count(b"data: [DONE]") == 1
+        assert body.index(b"timeout_error") < body.index(b"data: [DONE]")
+    else:
+        assert status == 504, body
+    assert procs and all(proc.poll() is not None for proc in procs)
+
+
+def test_zen_idle_and_total_independent_of_ttft(
+    zen: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FU-001: оператор поднимает TTFT выше TIMEOUT_S, Idle/Total для целевой модели сохраняются."""
+    monkeypatch.setenv("BRIDGE_ZEN_LARGE_PROMPT_BYTES", "8")
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", str(zen.TIMEOUT_S * 10))
+    monkeypatch.delenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", raising=False)
+    model, big = "deepseek-v4.1-flash-free", "x" * 9
+    assert zen._zen_ttft_timeout(model, big) == zen.TIMEOUT_S
+    assert zen._zen_idle_timeout(model, big) == min(zen.TIMEOUT_S, 15.0)
+    assert zen._zen_total_timeout(model, big) == min(zen.TIMEOUT_S, 180.0)
+    assert zen._zen_targeted(model, big)
+    assert not zen._zen_targeted("unrelated-free", big)
+    assert not zen._zen_targeted(model, "x")
+
+
+def test_attempts_t0_is_lazy(zen: Any) -> None:
+    """FU-002: при наличии t0 deadline и env не читаются; заглушка без t0 выводится из deadline."""
+
+    class WithT0:
+        t0 = 12.5
+
+        @property
+        def deadline(self) -> float:
+            raise AssertionError("deadline не должен читаться при наличии t0")
+
+    class Stub:
+        deadline = 1000.0
+
+    assert zen._attempts_t0(WithT0(), "m", "p") == 12.5
+    assert zen._attempts_t0(Stub(), "m", "p") == 1000.0 - zen.TIMEOUT_S
+
+
+def test_zen_idle_expired_skips_active_tools(zen: Any) -> None:
+    """RW-003: Idle не срабатывает, пока исполняется tool; без tool — срабатывает на пороге."""
+    assert zen._zen_idle_expired(20.0, 0.0, 15.0, False)
+    assert not zen._zen_idle_expired(20.0, 0.0, 15.0, True)
+    assert not zen._zen_idle_expired(10.0, 0.0, 15.0, False)
+
+
+def test_tool_activity_tracks_running_tools(zen: Any) -> None:
+    """RW-003: pending/running включают активность, завершённый статус выключает."""
+    activity = zen._ToolActivity()
+    assert not activity
+    running = {"part": {"id": "c1", "tool": "task", "state": {"status": "running"}}}
+    done = {"part": {"id": "c1", "tool": "task", "state": {"status": "completed"}}}
+    activity.observe("text", running)
+    assert not activity
+    activity.observe("tool_use", running)
+    assert activity
+    activity.observe("tool_use", done)
+    assert not activity
+
+
+def test_tool_activity_parallel_calls_not_collapsed(zen: Any) -> None:
+    """RW-004: завершение одного вызова не снимает защиту с остальных активных вызовов того же tool."""
+
+    def event(call_id: str | None, status: str) -> dict[str, Any]:
+        part: dict[str, Any] = {"tool": "bash", "state": {"status": status}}
+        if call_id:
+            part["callID"] = call_id
+        return {"part": part}
+
+    activity = zen._ToolActivity()
+    activity.observe("tool_use", event("a", "running"))
+    activity.observe("tool_use", event("b", "running"))
+    activity.observe("tool_use", event("a", "completed"))
+    assert activity
+    activity.observe("tool_use", event("b", "completed"))
+    assert not activity
+
+    # Без callID/id вызовы одного tool считаются счётчиком, а не одним ключом.
+    anonymous = zen._ToolActivity()
+    anonymous.observe("tool_use", event(None, "running"))
+    anonymous.observe("tool_use", event(None, "running"))
+    anonymous.observe("tool_use", event(None, "completed"))
+    assert anonymous
+    anonymous.observe("tool_use", event(None, "completed"))
+    assert not anonymous
+    anonymous.observe("tool_use", event(None, "completed"))
+    assert not anonymous
+
+
+def test_serve_tool_state_has_active(zen: Any) -> None:
+    """RW-003: вызов активен с первого фрагмента и до complete()."""
+    state = zen._ServeToolState()
+    assert not state.has_active()
+    state.feed({"id": "c1", "name": "bash"})
+    assert state.has_active()
+    state.feed({"id": "c1", "name": "bash", "input": {"command": "pwd"}})
+    assert state.complete("c1", "session.tool.called") is not None
+    assert not state.has_active()
+
+
+def test_zen_stream_retry_ttft_counts_from_attempt_start(
+    zen: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RW-002: запрос, стартовавший давно (очередь/первая попытка), не режется TTFT текущей попытки."""
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "3")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "3")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "30")
+    real_t0 = zen._attempts_t0
+    monkeypatch.setattr(
+        zen,
+        "_attempts_t0",
+        lambda *a, **k: min(real_t0(*a, **k), time.monotonic() - 100.0),
+    )
+    fake = _zen_fake_stream_child(tmp_path, chunks=2, gap_s=0.05, lead_s=0.4)
+    status, body, procs = _zen_stream_request(zen, monkeypatch, tmp_path, fake)
+    assert status == 200
+    assert b"Gateway Timeout in zen-bridge" not in body
+    assert b"t0 " in body and b"t1 " in body
+    assert body.count(b"data: [DONE]") == 1
+
+
+def test_zen_run_retry_ttft_counts_from_attempt_start(
+    zen: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RW-002: тот же сценарий для не-стримингового Run."""
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "3")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "3")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "30")
+    real_t0 = zen._attempts_t0
+    monkeypatch.setattr(
+        zen,
+        "_attempts_t0",
+        lambda *a, **k: min(real_t0(*a, **k), time.monotonic() - 100.0),
+    )
+    fake = _zen_fake_stream_child(tmp_path, chunks=2, gap_s=0.05, lead_s=0.4)
+    status, body, _procs = _zen_stream_request(
+        zen, monkeypatch, tmp_path, fake, stream=False
+    )
+    assert status == 200, body
+    assert b"t0 t1" in body
+
+
+def test_zen_stream_long_tool_not_cut_by_idle(
+    zen: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RW-003: tool дольше Idle без токенов не обрывает стриминговый поток."""
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "2")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "0.3")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "30")
+    fake = _zen_fake_stream_child(tmp_path, chunks=2, gap_s=0.05, tool_s=1.2)
+    status, body, procs = _zen_stream_request(zen, monkeypatch, tmp_path, fake)
+    assert status == 200
+    assert b"Gateway Timeout in zen-bridge" not in body
+    assert b"t0 " in body and b"t1 " in body
+    assert body.count(b"data: [DONE]") == 1
+    assert procs and all(proc.poll() is not None for proc in procs)
+
+
+def test_zen_run_long_tool_not_cut_by_idle(
+    zen: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RW-003: tool дольше Idle не обрывает не-стриминговый Run."""
+    monkeypatch.setenv("BRIDGE_ZEN_TTFT_TIMEOUT_S", "2")
+    monkeypatch.setenv("BRIDGE_ZEN_IDLE_TIMEOUT_S", "0.3")
+    monkeypatch.setenv("BRIDGE_ZEN_TOTAL_TIMEOUT_S", "30")
+    fake = _zen_fake_stream_child(tmp_path, chunks=2, gap_s=0.05, tool_s=1.2)
+    status, body, _procs = _zen_stream_request(
+        zen, monkeypatch, tmp_path, fake, stream=False
+    )
+    assert status == 200, body
+    assert b"t0 t1" in body

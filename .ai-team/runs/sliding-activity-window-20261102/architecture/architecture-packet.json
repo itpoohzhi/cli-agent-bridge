@@ -1,0 +1,371 @@
+{
+  "schema_version": "1.0",
+  "task_id": "cel-sliding-activity-window",
+  "run_id": "sliding-activity-window-20261102",
+  "criticality": "S2",
+  "profile": "python-aisdlc-gcge",
+  "status": "APPROVED",
+  "role_plan": {
+    "path": "plans/architect-01.json",
+    "sha256": "d190811910b19ad59d86a8001ac85c04fc9cc4e714c1054c68139dcecb2c6e9b"
+  },
+  "requirement_ids": [
+    "REQ-SLIDING-001",
+    "REQ-SLIDING-002",
+    "REQ-SLIDING-003"
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "command",
+      "ref": "tail -n 60 logs/bridge.err",
+      "claim": "Passthrough stream обрывается ровно через 420.0с из-за жесткого wall-clock дедлайна, несмотря на активное поступление токенов"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "adapters/passthrough_adapter.py:683",
+      "claim": "self.deadline вычисляется один раз при старте и не сдвигается при поступлении полезных чанков в relay_sse"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "server.py:5005",
+      "claim": "Фасад вычисляет deadline на старте хода и завершает операцию даже при наличии активных событий от процесса"
+    }
+  ],
+  "risk_triggers": [],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "Полезными чанками считаются чанки с непустым content, reasoning_content или tool_calls, обновляющие last_progress",
+      "status": "VALIDATED",
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002"
+      ]
+    },
+    {
+      "id": "ASM-002",
+      "statement": "Аварийный предохранитель safety_cap_s гарантирует защиту от зацикливания генерации при бесконечной активности",
+      "status": "VALIDATED",
+      "evidence_ids": [
+        "EVD-002",
+        "EVD-003"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как предотвратить ложное завершение активного стрима по истечении настенного времени?",
+      "choice": "Перевести проверку дедлайна в скользящий режим (Sliding Activity Deadline): при получении каждого полезного чанка обновлять last_progress и сдвигать дедлайн неактивности (now + idle_timeout_s)",
+      "rationale": "Исключает прибивание живых, работающих процессов и стримов; завершение по таймауту наступает только при реальном простое",
+      "alternatives": [
+        "Увеличение статического wall-clock таймаута до бесконечности (опасно утечкой ресурсов)",
+        "Отказ от таймаута вообще"
+      ],
+      "drivers": [
+        "AGENTS.md vendor-agnostic layer",
+        "REQ-SLIDING-001",
+        "EVD-001"
+      ],
+      "consequences": [
+        "Стрим продолжается столько, сколько поступают данные"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_stream_resilience.py -k test_sliding -v",
+        "expected": "exit 0; sliding deadline verified"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как защититься от бесконечных циклов генерации модели при скользящем окне?",
+      "choice": "Сохранять жесткий абсолютный потолок safety_cap_s (по умолчанию 3600.0с, конфигурируемый через BRIDGE_SAFETY_CAP_S)",
+      "rationale": "Гарантирует детерминированное завершение бесконечно зациклившейся модели даже при непрерывной генерации мусора",
+      "alternatives": [
+        "Не ограничивать общее время",
+        "Ограничивать только по числу токенов"
+      ],
+      "drivers": [
+        "AGENTS.md vendor-agnostic layer",
+        "REQ-SLIDING-002",
+        "EVD-002"
+      ],
+      "consequences": [
+        "Бесконечные генерации принудительно обрываются по safety_cap_s"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_stream_resilience.py -k test_safety_cap -v",
+        "expected": "exit 0; safety cap verified"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как поддерживать жизнь соединения в pi-ai при долгом формировании первого токена или между шагами?",
+      "choice": "Периодически отправлять активный data-чанковый heartbeat с распознаваемой дельтой reasoning",
+      "rationale": "Сбрасывает сторожевой таймер 300 000 мс на стороне клиента pi-ai",
+      "alternatives": [
+        "Только SSE-комментарии (отбрасываются клиентом pi-ai)",
+        "Пустые delta-чанки (отбрасываются клиентом)"
+      ],
+      "drivers": [
+        "AGENTS.md vendor-agnostic layer",
+        "REQ-SLIDING-003",
+        "EVD-003"
+      ],
+      "consequences": [
+        "pi-ai watchdog не срабатывает при фоновой работе"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_stream_resilience.py -k test_keepalive -v",
+        "expected": "exit 0; keepalive verified"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "клиент DSH / pi-ai",
+      "stimulus": "длительная генерация кода или анализ (> 420с) с регулярным поступлением токенов",
+      "environment": "активный SSE-стрим через passthrough-адаптер",
+      "artifact": "adapters/passthrough_adapter.py",
+      "response": "стрим успешно продолжается без ошибки timeout до полного завершения ответа модели",
+      "response_measure": "стрим длительностью > 420с завершается успешно со статусом 200",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "safety",
+      "source": "апстрим LLM",
+      "stimulus": "зацикливание модели и бесконечная генерация токенов",
+      "environment": "активный SSE-стрим",
+      "artifact": "adapters/passthrough_adapter.py",
+      "response": "по истечении safety_cap_s соединение безопасно разрывается с кодом timeout",
+      "response_measure": "время жизни стрима не превышает safety_cap_s",
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "quality": "reliability",
+      "source": "сеть / апстрим",
+      "stimulus": "полная тишина апстрима без единого токена",
+      "environment": "ожидание ответа",
+      "artifact": "adapters/passthrough_adapter.py",
+      "response": "по истечении idle_timeout_s (300с) стрим завершается с ошибкой таймаута неактивности",
+      "response_measure": "ошибка наступает строго через idle_timeout_s после последнего токена",
+      "verification_ids": [
+        "VER-003"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "PassthroughAdapter",
+      "responsibility": "Чтение входящего потока upstream и скользящее обновление дедлайна по last_progress",
+      "allowed_dependencies": [
+        "adapters/passthrough_adapter.py",
+        "core/stream_framing.py"
+      ],
+      "forbidden_dependencies": [
+        "vendor binary patches"
+      ],
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "ServerFacade",
+      "responsibility": "Оркестрация хода, сброс таймера тишины по активности Run и контроль safety cap",
+      "allowed_dependencies": [
+        "server.py",
+        "core/watchdog.py"
+      ],
+      "forbidden_dependencies": [
+        "vendor binary patches"
+      ],
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "BND-003",
+      "component": "AdaptiveWatchdog",
+      "responsibility": "Учет IO-wait состояний ядра ОС (S, D, I, U) и предоставление grace-периода",
+      "allowed_dependencies": [
+        "core/watchdog.py"
+      ],
+      "forbidden_dependencies": [
+        "psutil"
+      ],
+      "verification_ids": [
+        "VER-003"
+      ]
+    }
+  ],
+  "contract_deltas": [
+    {
+      "id": "CD-001",
+      "type": "behavior",
+      "producer": "adapters/passthrough_adapter.py",
+      "consumer": "DSH / pi-ai client",
+      "change": "Дедлайн стрима продлевается при получении каждого полезного чанка; жесткий лимит 420.0с больше не рубит активный поток",
+      "compatibility": "Полная обратная совместимость с OpenAI SSE протоколом",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "CD-002",
+      "type": "behavior",
+      "producer": "server.py",
+      "consumer": "CLI backends",
+      "change": "Ход процесса не прибивается по TIMEOUT_S при наличии событий и активности процесса в ОС",
+      "compatibility": "Полная обратная совместимость с CLI-адаптерами",
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "CD-003",
+      "type": "behavior",
+      "producer": "environment",
+      "consumer": "cli-agent-bridge",
+      "change": "Поддержка параметров BRIDGE_TOTAL_TIMEOUT_S, BRIDGE_IO_WAIT_CAP_S, BRIDGE_SAFETY_CAP_S в ~/.dsh/.env",
+      "compatibility": "Дефолты сохраняются при отсутствии переменных",
+      "verification_ids": [
+        "VER-003"
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "dynamic",
+      "question": "Как скользящее окно активности и аварийный потолок предотвращают ложные таймауты?",
+      "artifact_ref": "analysis/sliding-activity-window/research-report.md"
+    }
+  ],
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Бесконечная генерация токенов моделью приведёт к зависанию слота",
+      "probability": "low",
+      "impact": "high",
+      "mitigation": "Жесткий потолок safety_cap_s (BRIDGE_SAFETY_CAP_S, по умолчанию 3600с) принудительно завершает ход",
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Служебные пустые чанки от апстрима могут ложно сдвигать дедлайн",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "last_progress сдвигается только при наличии полезного контента (content, reasoning, tool_calls)",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "RISK-003",
+      "scenario": "Падение тестов, проверяющих старые значения по умолчанию",
+      "probability": "low",
+      "impact": "low",
+      "mitigation": "from_env сохраняет fallback-значения по умолчанию при пустом словаре окружения",
+      "verification_ids": [
+        "VER-003"
+      ]
+    }
+  ],
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "evolution": {
+    "compatibility": "Полная обратная совместимость со спецификацией OpenAI API и CLI-агентами",
+    "migration": "Не требует миграции БД; конфигурация применяется через переменные окружения",
+    "rollout": "Бесшовный перезапуск моста через SO_REUSEPORT без срыва текущих клиентских соединений",
+    "rollback": "Установка BRIDGE_TOTAL_TIMEOUT_S=420.0 возвращает прежнее поведение"
+  },
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-SLIDING-001",
+        "AD-001",
+        "QA-001",
+        "BND-001",
+        "CD-001"
+      ],
+      "kind": "command",
+      "command": "uv run pytest -o pythonpath=. tests/test_stream_resilience.py -k test_sliding -v",
+      "expected": "exit 0; verify sliding activity deadline extends stream beyond total_timeout_s on active tokens",
+      "environment": "local python virtualenv",
+      "owner": "architect"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-SLIDING-002",
+        "AD-002",
+        "QA-002",
+        "BND-002",
+        "CD-002"
+      ],
+      "kind": "command",
+      "command": "uv run pytest -o pythonpath=. tests/test_stream_resilience.py -k test_safety_cap -v",
+      "expected": "exit 0; verify safety_cap_s terminates infinite stream even if tokens continue",
+      "environment": "local python virtualenv",
+      "owner": "architect"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-SLIDING-003",
+        "AD-003",
+        "QA-003",
+        "BND-003",
+        "CD-003"
+      ],
+      "kind": "command",
+      "command": "uv run pytest -o pythonpath=. tests/test_stream_resilience.py tests/test_http_presend_resilience.py",
+      "expected": "exit 0; 100% pass on all resilience and sliding window tests",
+      "environment": "local python virtualenv",
+      "owner": "architect"
+    }
+  ],
+  "protected_paths": [],
+  "materialization": [],
+  "approval": {
+    "status": "APPROVED",
+    "decision_ids": []
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED"
+  },
+  "open_questions": [],
+  "deferred": []
+}

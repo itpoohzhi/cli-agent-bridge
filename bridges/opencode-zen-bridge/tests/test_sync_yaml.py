@@ -86,15 +86,14 @@ class RenderProfileTest(unittest.TestCase):
             out = sync.render_profile(text, self.state)
             ids = re.findall(r"model: (\S+)", "\n".join(region_lines(out, "allowed")))
             self.assertEqual(ids, sorted(GOLDEN))
-            self.assertEqual(region_lines(out, "allowed").count("      - provider: opencode-zen-bridge"), 8)
+            self.assertEqual(region_lines(out, "allowed").count("      - provider: opencode-zen-bridge"), len(GOLDEN))
 
     def test_hidden_alias_cards_carry_target_metadata(self) -> None:
         out = sync.render_profile(WEB, self.state)
         cards = parse_cards(region_lines(out, "models"))
         for old in zc.DEPRECATED_MODEL_ALIASES:
-            self.assertEqual(cards[old]["name"], f"{old} (deprecated -> {TARGET})")
-            self.assertEqual(cards[old]["reasoningEfforts"], GOLDEN[TARGET]["cordis"]["reasoningEfforts"])
-            self.assertEqual(cards[old]["contextWindow"], 200000)
+            self.assertNotIn(old, cards)
+        self.assertEqual(set(cards), set(GOLDEN))
         allowed = "\n".join(region_lines(out, "allowed"))
         self.assertNotIn("minimax-m3.1-flash-free", allowed)
 
@@ -141,8 +140,7 @@ class RenderProfileTest(unittest.TestCase):
         out = sync.render_profile(WEB, state)
         self.assertNotIn("beam-free", "\n".join(region_lines(out, "allowed")))
         cards = parse_cards(region_lines(out, "models"))
-        self.assertEqual(cards["beam-free"]["name"], f"beam-free (deprecated -> {TARGET})")
-        self.assertEqual(cards["beam-free"]["contextWindow"], 200000)
+        self.assertNotIn("beam-free", cards)
 
 
 class GuardTest(unittest.TestCase):
@@ -275,7 +273,7 @@ class RunSyncTest(unittest.TestCase):
         self.assertEqual(self.paths.profiles["web"].read_text("utf-8"), WEB)
         golden_lines = [ln for ln in self.lines if " | effort=" in ln]
         self.assertEqual(golden_lines, [zc.golden_line(e) for e in GOLDEN.values()])
-        self.assertEqual(len(golden_lines), 8)
+        self.assertEqual(len(golden_lines), len(GOLDEN))
 
     def test_no_profiles_flag(self) -> None:
         self.assertEqual(self._run("--no-profiles"), 0)
@@ -350,7 +348,7 @@ class RunSyncTest(unittest.TestCase):
         self.assertEqual(state["aliases"]["flint-40b-free"], TARGET)
         web = self.paths.profiles["web"].read_text("utf-8")
         self.assertNotIn("flint-40b-free", "\n".join(region_lines(web, "allowed")))
-        self.assertIn("flint-40b-free", parse_cards(region_lines(web, "models")))     # скрытая карточка
+        self.assertNotIn("flint-40b-free", parse_cards(region_lines(web, "models")))
 
     def test_post_check_failure_restores_profiles(self) -> None:
         for dsh in (self.bad_dump, self.failing):
