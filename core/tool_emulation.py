@@ -1362,11 +1362,16 @@ _ORPHAN_SERVICE_TAGS = (
     "<arg_value>",
     "</arg_value>",
 )
-# (MIME, магические байты, расширение файла) — принимаемые форматы вложений.
+# (MIME, магический префикс, расширение файла) — принимаемые форматы вложений.
+# Для GIF/WebP префикс — только ориентир таблицы расширений: точную сигнатуру
+# (GIF87a/GIF89a; RIFF+WEBP в [8:12]) проверяет `_sniff_image_mime`.
 _IMAGE_FORMATS = (
     ("image/png", b"\x89PNG\r\n\x1a\n", "png"),
     ("image/jpeg", b"\xff\xd8\xff", "jpg"),
+    ("image/gif", b"GIF8", "gif"),
+    ("image/webp", b"RIFF", "webp"),
 )
+_SUPPORTED_IMAGE_MIMES = tuple(mime for mime, _magic, _ext in _IMAGE_FORMATS)
 
 
 class ImageInputError(ValueError):
@@ -1378,10 +1383,19 @@ class ImageInputError(ValueError):
 
 
 def _sniff_image_mime(data: bytes) -> str:
-    """MIME по магическим байтам ('' — сигнатура неизвестна)."""
-    for mime, magic, _ext in _IMAGE_FORMATS:
-        if data.startswith(magic):
-            return mime
+    """MIME по магическим байтам ('' — сигнатура неизвестна).
+
+    WebP — составной контейнер RIFF: одного префикса мало, нужен маркер
+    `WEBP` в байтах [8:12] (RIFF/WAVE и обрезанные заголовки отклоняются).
+    """
+    if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(data) >= 3 and data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 6 and (data.startswith(b"GIF87a") or data.startswith(b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
     return ""
 
 
@@ -1394,7 +1408,7 @@ def extract_data_url_images(
 ) -> list[dict]:
     """Все `image_url`-части истории -> [{"name", "mime", "data"}] в порядке появления.
 
-    Принимаются только data URI с base64 PNG/JPEG: строгая проверка кодировки и
+    Принимаются только data URI с base64 PNG/JPEG/GIF/WebP: строгая проверка кодировки и
     соответствия MIME сигнатуре; URL не скачиваются, `file://` не читается,
     пользовательские пути не используются (имена генерируются: `image_N.<ext>`).
     Любое нарушение — `ImageInputError` до запуска CLI (fail-closed).

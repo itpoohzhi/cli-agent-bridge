@@ -1,0 +1,5 @@
+PANEL-NONCE: 412abc6c48ed4382
+ARTIFACT-SHA256: a63c0fc62f291f23726fcd23dd621d2a9bb658e2fc95dccc5ded54b1367e1707
+AGREE RW-008 — проверил: [server.py](/Users/aazhiry1/work/src/cli-agent-bridge/server.py:1497) — хаб (`server.py:6597 _collect_images` → `_sniff_image`) уже поддерживает RIFF/WEBP и GIF, а пакет правит только [core/tool_emulation.py](/Users/aazhiry1/work/src/cli-agent-bridge/core/tool_emulation.py:1366) для `claude-p-bridge`; без фиксации ingress и проверки fleet `max_types` (`server.py:1583`) инцидент через хаб не закрыт, а три расходящихся сниффера вместо канонической таблицы ядра гарантируют повторный дрейф
+AGREE RW-010 — проверил: [server.py](/Users/aazhiry1/work/src/cli-agent-bridge/bridges/opencode-zen-bridge/server.py:7620) — оба вызова `_is_free_quota_error` (`:7631`, `:9219`) недостижимы при `transient_error=False`, а `_is_transient_stream_error` (`:1255`) возвращает False на 400/401/403/404/422 и не знает маркера quota (`:1151`); пакет расширяет только второй этап классификации, сохраняя хрупкую двухступенчатую схему вместо независимой проверки квоты до transient-гейта
+VERDICT: NEEDS WORK

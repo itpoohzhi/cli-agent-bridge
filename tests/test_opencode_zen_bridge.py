@@ -312,12 +312,42 @@ def test_proxy_pool_quarantine_skips_burned_port_and_falls_back_when_all_quarant
         ({"message": "Free usage limit reached"}, True),
         ("USAGE LIMIT REACHED", True),
         ("provider.free-limit", True),
+        ("Request quota exhausted.", True),
+        ("Request quota exhausted. QUOTA", True),
+        ({"message": "subscription quota exhausted"}, True),
+        ("QUOTA EXHAUSTED", True),
         ({"message": "Connection lost"}, False),
         (None, False),
     ],
 )
 def test_is_free_quota_error(bridge: Any, err: object, expected: bool) -> None:
     assert bridge._is_free_quota_error(err) is expected
+
+
+@pytest.mark.parametrize(
+    "ev",
+    [
+        {"statusCode": 400, "message": "Request quota exhausted."},
+        {
+            "type": "error",
+            "error": {"statusCode": 400, "message": "subscription quota exhausted"},
+        },
+        {"type": "error", "error": "Request quota exhausted. QUOTA", "status": 400},
+    ],
+)
+def test_quota_stream_error_is_transient_despite_fatal_status(
+    bridge: Any, ev: dict[str, Any]
+) -> None:
+    assert bridge._is_transient_stream_error(ev) is True
+
+
+def test_fatal_stream_error_without_quota_stays_fatal(bridge: Any) -> None:
+    assert (
+        bridge._is_transient_stream_error(
+            {"statusCode": 400, "message": "invalid request body"}
+        )
+        is False
+    )
 
 
 def test_map_serve_event_preserves_quota_type(bridge: Any) -> None:
