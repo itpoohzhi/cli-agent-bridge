@@ -3926,14 +3926,14 @@ class _ContentArbiter:
         for step in eq.get(text, ()):
             if self._eligible(step, source, idx):
                 return step
-        candidates = [t for t in texts if len(text) >= len(t) and text.startswith(t)]
-        if candidates:
-            candidates.sort(key=len, reverse=True)
-            for cand in candidates:
-                for step in eq[cand]:
-                    if self._eligible(step, source, idx):
-                        return step
         if idx is None:
+            candidates = [t for t in texts if len(text) >= len(t) and text.startswith(t)]
+            if candidates:
+                candidates.sort(key=len, reverse=True)
+                for cand in candidates:
+                    for step in eq[cand]:
+                        if self._eligible(step, source, idx):
+                            return step
             pos = bisect.bisect_left(texts, text)
             while pos < len(texts) and texts[pos].startswith(text):
                 for step in eq[texts[pos]]:
@@ -4152,6 +4152,20 @@ class _UsageSnapshot:
 _EMPTY_USAGE_SNAPSHOT = _UsageSnapshot()
 
 
+def _add_preamble_bounded(
+    target: set[int], item: int, cap: int | None = None
+) -> None:
+    """Добавить индекс шага в коллекцию эмитированных преамбул с ограничением MAX_CONTENT_STEPS * 2."""
+    eff_cap = max(1, MAX_CONTENT_STEPS * 2) if cap is None else cap
+    target.add(item)
+    if len(target) > eff_cap:
+        try:
+            oldest = min(tuple(target))
+            target.discard(oldest)
+        except (ValueError, RuntimeError):
+            pass
+
+
 @final
 class _TranscriptTail:
     """Источник мышления шагов agy: транскрипт разговора и SQLite `conversations/<cid>.db`.
@@ -4185,8 +4199,11 @@ class _TranscriptTail:
         on_activity: Callable[[], None] | None = None,
         usage_enabled: bool = False,
         isolate_tool_preambles: bool = False,
+        preambles_emitted: set[int] | None = None,
+        run_ref: Any = None,
     ) -> None:
         self.emit = emit
+        self.run_ref: Any = run_ref
         # PLANNER_RESPONSE.content -> арбитр (AD-001); None — прежнее поведение.
         self.emit_content = emit_content
         self.isolate_tool_preambles = isolate_tool_preambles
@@ -4223,7 +4240,10 @@ class _TranscriptTail:
         self._transcript_ok: bool = True
         self._owned_cid: str = ""
         self._next_poll_at: float = 0.0
-        self._preambles_emitted: set[int] = set()
+        self._preambles_emitted: set[int] = (
+            preambles_emitted if preambles_emitted is not None else set()
+        )
+        self._tool_step_indices: set[int] = set()
         self._interrupted: bool = False
         self._active_conn: sqlite3.Connection | None = None
         self._conn_lock = threading.Lock()
@@ -4547,15 +4567,27 @@ class _TranscriptTail:
         content = rec.get("content")
         emit_content = self.emit_content
         has_tools = bool(rec.get("tool_calls"))
+        if has_tools and idx is not None:
+            tool_steps = getattr(self, "_tool_step_indices", None)
+            if tool_steps is None:
+                tool_steps = self._tool_step_indices = set()
+            tool_steps.add(idx)
         isolate_tools = getattr(self, "isolate_tool_preambles", False)
         if emit_content is not None and isinstance(content, str) and content.strip():
             if has_tools and isolate_tools:
-                preambles = getattr(self, "_preambles_emitted", None)
-                if preambles is None:
-                    preambles = self._preambles_emitted = set()
-                key_idx = idx if idx is not None else -1
-                if key_idx not in preambles:
-                    preambles.add(key_idx)
+                run_ref = getattr(self, "run_ref", None)
+                claimed = False
+                if run_ref is not None and hasattr(run_ref, "claim_preamble"):
+                    claimed = run_ref.claim_preamble(idx, source="transcript")
+                else:
+                    preambles = getattr(self, "_preambles_emitted", None)
+                    if preambles is None:
+                        preambles = self._preambles_emitted = set()
+                    key_idx = idx if idx is not None else -1
+                    if key_idx not in preambles:
+                        _add_preamble_bounded(preambles, key_idx)
+                        claimed = True
+                if claimed:
                     _ = self.emit(idx if idx is not None else 0, content + "\n\n", None)
             else:
                 _ = emit_content(
@@ -5133,6 +5165,7 @@ class Run:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         work_dir = cwd if (cwd and os.path.isdir(cwd)) else str(WORKSPACE)
         self.work_dir = work_dir
+        self.mode = mode
         if AGY_BRIDGE_ENABLE_HEAD_PRUNING:
             prompt = _ensure_prompt_fits_ndjson(prompt)
         self.stdin_line = _ndjson_user_line(prompt)
@@ -5213,9 +5246,18 @@ class Run:
             _active[self.proc.pid] = self.proc
         self.q = queue.Queue()
         self.err_box = []
-        # Последний виденный текст agent_response по id шага: CLI присылает
-        # накопительный снимок, новым считается только хвост сверх него.
+        # Протокол antigravity-cli передаёт инкрементальные чанки (text_delta).
+        # Run аккумулирует дельты текущего шага в _stdout_step_accum для арбитража и изоляции преамбул.
         self._text_seen: dict = {}
+        self._stdout_step_accum: collections.OrderedDict[object, str] = (
+            collections.OrderedDict()
+        )
+        self._stdout_accum_bytes: int = 0
+        self._preambles_emitted: set[int] = set()
+        self._stdout_preamble_steps: set[int] = set()
+        self._tool_step_indices: set[object] = set()
+        self._last_reasoning_step_index: int | None = None
+        self._last_reasoning_chunk: str = ""
         # Выдача мышления: счётчик байт и закрытие очереди под одним замком.
         self._emit_lock = threading.Lock()
         self.drain_closed: bool = False
@@ -5228,6 +5270,9 @@ class Run:
         self._stop_watch = threading.Event()
         # Арбитр planner-контента двух источников (AD-001): работает под _emit_lock.
         self.content_streaming = _new_flag("planner_content_streaming_enabled")
+        self.isolate_tool_preambles = _new_flag(
+            "isolate_tool_preambles_to_reasoning", True
+        )
         self._arbiter = _ContentArbiter(self.turn_id)
         self._last_step_index: object = None
         self._content_emitted_wire: str = ""
@@ -5246,7 +5291,9 @@ class Run:
             emit_content=self._offer_transcript if self.content_streaming else None,
             on_activity=self._on_tail_activity,
             usage_enabled=self.usage_enabled,
-            isolate_tool_preambles=_new_flag("isolate_tool_preambles_to_reasoning", True),
+            isolate_tool_preambles=self.isolate_tool_preambles,
+            preambles_emitted=self._preambles_emitted,
+            run_ref=self,
         )
         if policy is not None:
             self._tail.deadline_s = policy.effective_max_timeout_s + 60.0
@@ -5264,11 +5311,29 @@ class Run:
 
         Закрытие очереди, счётчик байт и учёт выданного (`on_delivered`) идут под
         одним `_emit_lock`: после ("done", …) ни одно ("reasoning", …) не попадает.
+        При смене `step_index`, если предыдущий фрагмент не оканчивался переводом
+        строки, автоматически добавляется разделитель `\\n\\n`.
         """
-        size = len(delta.encode("utf-8"))
+        orig_len = len(delta)
         outcome = ""
         log_cap = False
         with self._emit_lock:
+            sep = ""
+            last_idx = getattr(self, "_last_reasoning_step_index", None)
+            last_chunk = getattr(self, "_last_reasoning_chunk", "")
+            if (
+                last_idx is not None
+                and last_idx != idx
+                and last_chunk
+                and not last_chunk.endswith("\n")
+                and delta
+            ):
+                if not delta.startswith("\n"):
+                    sep = "\n\n"
+                elif not delta.startswith("\n\n"):
+                    sep = "\n"
+            out_delta = sep + delta
+            size = len(out_delta.encode("utf-8"))
             if self.drain_closed:
                 outcome = "late"
             elif self._reasoning_bytes + size > MAX_REASONING_BYTES_PER_TURN:
@@ -5277,14 +5342,17 @@ class Run:
                 self._cap_logged = True
             else:
                 self._reasoning_bytes += size
-                self.q.put(("reasoning", delta))
+                self._last_reasoning_step_index = idx
+                if out_delta:
+                    self._last_reasoning_chunk = out_delta
+                self.q.put(("reasoning", out_delta))
                 if on_delivered is not None:
                     on_delivered()
                 return True
             total = self._reasoning_bytes
         cid8 = self._tail.cid[:8] or "-"
         if outcome == "late":
-            _log(f"reasoning-late-drop cid={cid8} step={idx} len={len(delta)}")
+            _log(f"reasoning-late-drop cid={cid8} step={idx} len={orig_len}")
         elif log_cap:
             _log(f"reasoning-cap cid={cid8} bytes={total}")
         return False
@@ -5346,19 +5414,44 @@ class Run:
         """Недостающий хвост `result.response` относительно уже принятого арбитром и выданного в wire."""
         with self._emit_lock:
             emitted_wire = getattr(self, "_content_emitted_wire", "")
+            fallback_used = False
+            fallback_idx: object = None
+            if not text and not emitted_wire:
+                step_accum = getattr(self, "_stdout_step_accum", None)
+                if isinstance(step_accum, dict) and step_accum:
+                    last_idx = next(reversed(step_accum))
+                    tool_steps = getattr(self, "_tool_step_indices", None) or set()
+                    tail_tools = (
+                        getattr(getattr(self, "_tail", None), "_tool_step_indices", None)
+                        or set()
+                    )
+                    if last_idx not in tool_steps and last_idx not in tail_tools:
+                        candidate = str(step_accum.get(last_idx) or "")
+                        if candidate:
+                            text = candidate
+                            fallback_used = True
+                            fallback_idx = last_idx
             if emitted_wire and text:
                 if text == emitted_wire or emitted_wire.startswith(text):
                     self._arbiter.last_result_diverged = False
                     return ""
                 if text.startswith(emitted_wire):
                     self._arbiter.last_result_diverged = False
-                    return text[len(emitted_wire) :]
+                    suffix = text[len(emitted_wire) :]
+                    self._content_emitted_wire = text
+                    return suffix
                 clean_text = text.replace("\r\n", "\n").strip()
                 clean_wire = emitted_wire.replace("\r\n", "\n").strip()
                 if clean_text == clean_wire or clean_wire.startswith(clean_text):
                     self._arbiter.last_result_diverged = False
                     return ""
-            return self._arbiter.reconcile_result(text)
+            delta = self._arbiter.reconcile_result(text)
+            if delta:
+                self._content_emitted_wire = emitted_wire + delta
+                if fallback_used and not getattr(self, "drain_closed", True):
+                    self._last_step_index = fallback_idx
+                    self.q.put(("text", delta))
+            return delta
 
     def retained_divergent_text(self) -> str:
         """Расходящийся (непрефиксный) planner-текст, удержанный арбитром."""
@@ -5446,12 +5539,50 @@ class Run:
             pass
         self.err_box.append("\n".join(head).strip())
 
+    def claim_preamble(self, step_idx: int | None, source: str = "transcript") -> bool:
+        """Атомарно заявить право на отправку преамбулы шага.
+
+        - source == "stdout":
+          Если step_idx уже был успешно заявлен stdout (step_idx in _stdout_preamble_steps),
+          возвращает True (продолжение стриминга дельт текущего шага).
+          Если step_idx уже был заявлен transcript (step_idx in _preambles_emitted),
+          возвращает False (подавление дубля).
+          Иначе атомарно регистрирует step_idx и в _preambles_emitted, и в _stdout_preamble_steps
+          и возвращает True.
+
+        - source == "transcript":
+          Если step_idx уже был заявлен (stdout или transcript), возвращает False.
+          Иначе регистрирует в _preambles_emitted и возвращает True.
+        """
+        with self._emit_lock:
+            key_idx = step_idx if step_idx is not None else -1
+            preambles = getattr(self, "_preambles_emitted", None)
+            if preambles is None:
+                preambles = self._preambles_emitted = set()
+            stdout_claimed = getattr(self, "_stdout_preamble_steps", None)
+            if stdout_claimed is None:
+                stdout_claimed = self._stdout_preamble_steps = set()
+
+            if source == "stdout":
+                if key_idx in stdout_claimed:
+                    return True
+                if key_idx in preambles:
+                    return False
+                _add_preamble_bounded(preambles, key_idx)
+                _add_preamble_bounded(stdout_claimed, key_idx)
+                return True
+            else:
+                if key_idx in preambles:
+                    return False
+                _add_preamble_bounded(preambles, key_idx)
+                return True
+
     def _pump(self) -> None:
         """Разбор NDJSON agy 1.3.1.
 
-        `step_update.agent_response` несёт накопительный `text_delta` — наружу
-        уходит только хвост. `step_update.tool` — трассировка нативного
-        инструмента (в stderr моста). `result` — финальный текст, usage, ошибка.
+        `step_update.agent_response` несёт инкрементальные дельты `text_delta`;
+        Run конкатенирует их в `accum = prev + delta`. `step_update.tool` — трассировка
+        нативного инструмента (в stderr моста). `result` — финальный текст, usage, ошибка.
 
         После EOF: ждём выход процесса не дольше PROC_EXIT_WAIT_S, затем даём
         источнику мышления дренировать окно DRAIN_WINDOW_S (join с бюджетом) и
@@ -5502,21 +5633,82 @@ class Run:
                         else {}
                     )
                     kind = step.get("step_type")
+                    if kind == "tool":
+                        t_idx = _as_int(step.get("step_index"))
+                        if t_idx is not None:
+                            tool_steps = getattr(self, "_tool_step_indices", None)
+                            if tool_steps is None:
+                                tool_steps = self._tool_step_indices = set()
+                            tool_steps.add(t_idx)
                     if kind == "agent_response" and step.get("text_delta"):
-                        if self.content_streaming:
-                            _ = self.offer_content(
-                                "stdout",
-                                _as_int(step.get("step_index")),
-                                str(step["text_delta"]),
+                        step_idx = _as_int(step.get("step_index"))
+                        delta = str(step["text_delta"])
+                        if not isinstance(
+                            getattr(self, "_stdout_step_accum", None),
+                            collections.OrderedDict,
+                        ):
+                            self._stdout_step_accum = collections.OrderedDict(
+                                getattr(self, "_stdout_step_accum", None) or {}
                             )
+                        if not hasattr(self, "_stdout_accum_bytes") or (
+                            self._stdout_accum_bytes == 0 and self._stdout_step_accum
+                        ):
+                            self._stdout_accum_bytes = sum(
+                                len(v.encode("utf-8"))
+                                for v in self._stdout_step_accum.values()
+                            )
+                        if step_idx not in self._stdout_step_accum:
+                            while (
+                                len(self._stdout_step_accum) >= MAX_CONTENT_STEPS
+                                and self._stdout_step_accum
+                            ):
+                                _old_idx, old_val = self._stdout_step_accum.popitem(
+                                    last=False
+                                )
+                                self._stdout_accum_bytes = max(
+                                    0,
+                                    self._stdout_accum_bytes
+                                    - len(old_val.encode("utf-8")),
+                                )
+                        prev = self._stdout_step_accum.get(step_idx, "")
+                        delta_bytes = len(delta.encode("utf-8"))
+                        room = max(
+                            0, MAX_CONTENT_BYTES_PER_TURN - self._stdout_accum_bytes
+                        )
+                        if delta_bytes > room:
+                            delta = delta.encode("utf-8")[:room].decode(
+                                "utf-8", "ignore"
+                            )
+                            delta_bytes = len(delta.encode("utf-8"))
+                        self._stdout_accum_bytes += delta_bytes
+                        accum = prev + delta
+                        self._stdout_step_accum[step_idx] = accum
+                        isolate = bool(
+                            getattr(self, "isolate_tool_preambles", False)
+                            and getattr(self, "mode", "") in ("agent", "auto")
+                        )
+                        if self.content_streaming:
+                            if isolate:
+                                if delta and self.claim_preamble(
+                                    step_idx, source="stdout"
+                                ):
+                                    _ = self._emit_reasoning(step_idx or 0, delta)
+                            else:
+                                _ = self.offer_content("stdout", step_idx, accum)
                         else:
                             suffix = _reasoning_suffix(
                                 self._text_seen,
                                 str(step.get("step_index", "")),
-                                str(step["text_delta"]),
+                                accum,
                             )
                             if suffix:
-                                self.q.put(("text", suffix))
+                                if isolate:
+                                    if self.claim_preamble(
+                                        step_idx, source="stdout"
+                                    ):
+                                        _ = self._emit_reasoning(step_idx or 0, suffix)
+                                else:
+                                    self.q.put(("text", suffix))
                     elif kind == "tool" and step.get("state") == "DONE":
                         step_idx = _as_int(step.get("step_index"))
                         trace: dict[str, object] = {
@@ -5582,6 +5774,23 @@ class Run:
             self._join_source(t_exit)
             if rc is None:
                 rc = 0 if result_ev else 1
+            if (
+                rc == 0
+                and not final_text
+                and not getattr(self, "_content_emitted_wire", "")
+            ):
+                step_accum = getattr(self, "_stdout_step_accum", None)
+                if isinstance(step_accum, dict) and step_accum:
+                    last_idx = next(reversed(step_accum))
+                    tool_steps = getattr(self, "_tool_step_indices", None) or set()
+                    tail_tools = (
+                        getattr(getattr(self, "_tail", None), "_tool_step_indices", None)
+                        or set()
+                    )
+                    if last_idx not in tool_steps and last_idx not in tail_tools:
+                        fallback_accum = str(step_accum.get(last_idx) or "")
+                        if fallback_accum:
+                            final_text = fallback_accum
             term_kind = "done"
             term_payload = cast(object, (rc, final_text, result_ev))
         except Exception as exc:  # noqa: BLE001 — читатель не должен умирать молча
@@ -5625,9 +5834,9 @@ class Run:
 
 
 def _reasoning_suffix(seen: dict, rid: str, text: str) -> str:
-    """Хвост накопительного снимка текста.
+    """Новый хвост аккумулированного текста шага (`accum = prev + delta`) сверх уже отданного в `seen[rid]`.
 
-    Пустой результат означает «дубликат, не эмитить»."""
+    Пустой результат означает «нет прироста, не эмитить»."""
     prev = seen.get(rid, "")
     suffix = text[len(prev) :] if text.startswith(prev) else text
     seen[rid] = text
