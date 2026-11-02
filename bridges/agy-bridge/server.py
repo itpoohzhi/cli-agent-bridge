@@ -3926,14 +3926,14 @@ class _ContentArbiter:
         for step in eq.get(text, ()):
             if self._eligible(step, source, idx):
                 return step
-        candidates = [t for t in texts if len(text) >= len(t) and text.startswith(t)]
-        if candidates:
-            candidates.sort(key=len, reverse=True)
-            for cand in candidates:
-                for step in eq[cand]:
-                    if self._eligible(step, source, idx):
-                        return step
         if idx is None:
+            candidates = [t for t in texts if len(text) >= len(t) and text.startswith(t)]
+            if candidates:
+                candidates.sort(key=len, reverse=True)
+                for cand in candidates:
+                    for step in eq[cand]:
+                        if self._eligible(step, source, idx):
+                            return step
             pos = bisect.bisect_left(texts, text)
             while pos < len(texts) and texts[pos].startswith(text):
                 for step in eq[texts[pos]]:

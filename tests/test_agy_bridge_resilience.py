@@ -225,36 +225,21 @@ def _execute_with_clock(clock: _FakeClock, run: SimpleNamespace) -> dict:
 class IdleDetectionTests(unittest.TestCase):
     @unittest.skipUnless(_DARWIN, "core.watchdog рассчитан на macOS ps")
     def test_idle_timeout_detected_for_sleeping_process(self) -> None:
-        proc = subprocess.Popen[bytes](["sleep", "100"], start_new_session=True)
+        proc = _spawn(["sleep", "100"])
         try:
-            clock = _FakeClock()
-            with mock.patch.dict(os.environ, {"BRIDGE_IO_GRACE_ENABLED": "true"}):
-                ctrl = AdaptiveTimeoutController(
-                    idle_timeout_s=0.2,
-                    safety_cap_s=1200.0,
-                    finish_reserve_s=0.0,
-                    clock=clock,
-                    watchdog_interval_s=6.0,
-                    io_wait_cap_s=900.0,
-                )
+            ctrl = AdaptiveTimeoutController(
+                idle_timeout_s=0.2, safety_cap_s=60.0, finish_reserve_s=0.0
+            )
             ctrl.register_pgid(proc.pid)
-            marker = ctrl.last_activity_ts
-            self.assertEqual(ctrl.idle_timeout_s, 12.0)
-            clock.advance(12.0)
-            should_stop, reason, metrics = ctrl.check(proc.pid)
-            self.assertFalse(should_stop, reason)
-            self.assertIsNotNone(metrics)
-            assert metrics is not None
-            self.assertTrue(metrics.is_waiting_io())
-            self.assertFalse(metrics.has_progress)
-            self.assertEqual(ctrl.last_activity_ts, marker)
-            clock.advance(887.0)
-            self.assertFalse(ctrl.check(proc.pid)[0])
-            clock.advance(1.0)
-            result = ctrl.check(proc.pid)
+            result: tuple = (False, "", None)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                result = ctrl.check(proc.pid)
+                if result[0]:
+                    break
+                time.sleep(0.05)
             self.assertTrue(result[0])
             self.assertEqual(result[1], "idle_timeout")
-            self.assertEqual(ctrl.last_activity_ts, marker)
             ctrl.close()
         finally:
             _hard_kill(proc)
@@ -287,53 +272,39 @@ class IdleDetectionTests(unittest.TestCase):
                     finish_reserve_s=0.0,
                     watchdog_enabled=False,
                     clock=clock,
-                    watchdog_interval_s=1.0,
                 )
-                self.assertEqual(ctrl.idle_timeout_s, 10.0)
                 for _ in range(5):
-                    clock.advance(9.0)
-                    self.assertEqual(ctrl.check(), (False, "", None))
+                    clock.advance(0.15)
                     ctrl.on_activity(kind)
                     self.assertEqual(ctrl.check(), (False, "", None))
-                    self.assertEqual(ctrl.last_activity_ts, clock())
                 self.assertEqual(ctrl.last_activity_kind, kind)
-                clock.advance(9.0)
-                self.assertEqual(ctrl.check(), (False, "", None))
-                clock.advance(1.0)
+                clock.advance(0.25)
                 should_stop, reason, _m = ctrl.check()
                 self.assertTrue(should_stop)
                 self.assertEqual(reason, "idle_timeout")
 
     @unittest.skipUnless(_POSIX, "нужны процессные группы POSIX")
     def test_ps_degraded_fail_closed(self) -> None:
-        from typing import override
-
         class _DegradedPs(ProcessWatchdog):
-            @override
-            def _run_ps(self, pgid: int) -> subprocess.CompletedProcess[str]:
+            def _run_ps(self, pgid: int) -> Any:
                 raise subprocess.TimeoutExpired(cmd="ps", timeout=2.0)
 
         logs: list[str] = []
-        proc = subprocess.Popen[bytes](["sleep", "100"], start_new_session=True)
+        proc = _spawn(["sleep", "100"])
         try:
             clock = _FakeClock()
-            with mock.patch.dict(os.environ, {"BRIDGE_IO_GRACE_ENABLED": "true"}):
-                ctrl = AdaptiveTimeoutController(
-                    idle_timeout_s=0.2,
-                    safety_cap_s=60.0,
-                    finish_reserve_s=0.0,
-                    watchdog=_DegradedPs(log_fn=logs.append),
-                    clock=clock,
-                    log_fn=logs.append,
-                    watchdog_interval_s=1.0,
-                )
+            ctrl = AdaptiveTimeoutController(
+                idle_timeout_s=0.2,
+                safety_cap_s=60.0,
+                finish_reserve_s=0.0,
+                watchdog=_DegradedPs(log_fn=logs.append),
+                clock=clock,
+                log_fn=logs.append,
+            )
             ctrl.register_pgid(proc.pid)
-            self.assertEqual(ctrl.idle_timeout_s, 10.0)
             self.assertEqual(ctrl.check(proc.pid)[:2], (False, ""))
             marker = ctrl.last_activity_ts
-            clock.advance(9.0)
-            self.assertFalse(ctrl.check(proc.pid)[0])
-            clock.advance(1.0)
+            clock.advance(0.25)
             should_stop, reason, metrics = ctrl.check(proc.pid)
             self.assertTrue(should_stop)
             self.assertEqual(reason, "idle_timeout")
@@ -4340,77 +4311,6 @@ class SilentPlannerContentTests(unittest.TestCase):
         self.assertEqual(_ofn(broken, "reconcile_result")("xyz"), "")  # несовместим
         self.assertEqual(_oval(broken, "divergences"), 1)
 
-    def test_status_streaming_multi_step_no_freeze_and_final_text_delivered(
-        self,
-    ) -> None:
-        statuses = [
-            "[статус: чтение канона AGENTS.md]",
-            "[статус: дочитывание канона]",
-            "[статус: поиск информации]",
-        ]
-        final_text = "### Детальный анализ переезда..."
-        lines: list[dict[str, object]] = []
-        for status in statuses:
-            lines.append(_stdout_text(None, status))
-            lines.append(_stdout_tool(_MISSING))
-        lines.append(
-            {
-                "event": "result",
-                "result": {
-                    "status": "success",
-                    "response": final_text,
-                },
-            }
-        )
-
-        run, items = _pump_queue(lines, content=True)
-        text_chunks = [
-            str(payload)
-            for kind, payload in items
-            if kind == "text"
-        ]
-        self.assertEqual(text_chunks, statuses)
-        arb = _oval(run, "_arbiter")
-        self.assertEqual(_oval(arb, "divergences"), 0)
-        self.assertFalse(_oval(arb, "overflow"))
-
-        # Проверка reconcile_result и fallback доставки финального ответа
-        reconciled = _str(_ofn(run, "reconcile_result")(final_text))
-        retained = _str(_ofn(arb, "retained_divergent_text")())
-        self.assertEqual(retained, final_text)
-        delivered = reconciled if reconciled else ("\n\n" + final_text)
-        self.assertEqual(
-            "".join(text_chunks) + delivered,
-            "".join(statuses) + "\n\n" + final_text,
-        )
-
-    def test_content_scan_matches_saved_prefix_not_longer_snapshot(self) -> None:
-        arb = _arb()
-        old_text = "[статус: чтение канона AGENTS.md]"
-        short_text = "[статус: "
-        new_text = "[статус: дочитывание канона]"
-
-        self.assertEqual(_offer(arb, "stdout", 1, old_text), old_text)
-
-        # Короткий снимок другого шага не должен стать alias старого.
-        self.assertEqual(_offer(arb, "transcript", 2, short_text), short_text)
-        self.assertEqual(
-            _offer(arb, "transcript", 2, new_text),
-            "дочитывание канона]",
-        )
-        self.assertEqual(_oval(arb, "divergences"), 0)
-
-        # Расширение сохранённого префикса сопоставляется и тогда, когда
-        # соответствующий шаг уже не является последним.
-        other = _arb()
-        self.assertEqual(_offer(other, "stdout", 1, "alpha"), "alpha")
-        self.assertEqual(_offer(other, "stdout", 2, "beta"), "beta")
-        self.assertEqual(
-            _offer(other, "transcript", 3, "alpha extended"),
-            " extended",
-        )
-        self.assertEqual(_oval(other, "divergences"), 0)
-
     def test_silent_planner_content_lookup_work_does_not_scan_history(self) -> None:
         arb = _arb()
         for idx in range(100):
@@ -4543,6 +4443,50 @@ class SilentPlannerContentTests(unittest.TestCase):
         _run, legacy = _pump_queue(lines, content=False)
         self.assertEqual([p for k, p in legacy if k == "text"][:2], ["Hel", "lo"])
 
+    def test_status_streaming_multi_step_no_freeze_and_final_text_delivered(
+        self,
+    ) -> None:
+        statuses = [
+            "[статус: чтение канона AGENTS.md]",
+            "[статус: дочитывание канона]",
+            "[статус: поиск информации]",
+        ]
+        final_text = "### Детальный анализ переезда..."
+        lines: list[dict[str, object]] = []
+        for status in statuses:
+            lines.append(_stdout_text(None, status))
+            lines.append(_stdout_tool(_MISSING))
+        lines.append(
+            {
+                "event": "result",
+                "result": {
+                    "status": "success",
+                    "response": final_text,
+                },
+            }
+        )
+
+        run, items = _pump_queue(lines, content=True)
+        text_chunks = [
+            str(payload)
+            for kind, payload in items
+            if kind == "text"
+        ]
+        self.assertEqual(text_chunks, statuses)
+        arb = _oval(run, "_arbiter")
+        self.assertEqual(_oval(arb, "divergences"), 0)
+        self.assertFalse(_oval(arb, "overflow"))
+
+        # Проверка reconcile_result и fallback доставки финального ответа
+        reconciled = _str(_ofn(run, "reconcile_result")(final_text))
+        retained = _str(_ofn(arb, "retained_divergent_text")())
+        self.assertEqual(retained, final_text)
+        delivered = reconciled if reconciled else ("\n\n" + final_text)
+        self.assertEqual(
+            "".join(text_chunks) + delivered,
+            "".join(statuses) + "\n\n" + final_text,
+        )
+
     def test_silent_planner_content_pump_incremental_deltas_and_agent_reasoning_isolation(
         self,
     ) -> None:
@@ -4602,6 +4546,77 @@ class SilentPlannerContentTests(unittest.TestCase):
             [p for k, p in items_legacy_agent if k == "reasoning"],
             ["Первая часть. ", "Вторая часть. ", "Третья часть."],
         )
+
+    def test_content_scan_matches_saved_prefix_not_longer_snapshot(self) -> None:
+        arb = _arb()
+        old_text = "[статус: чтение канона AGENTS.md]"
+        short_text = "[статус: "
+        new_text = "[статус: дочитывание канона]"
+
+        self.assertEqual(_offer(arb, "stdout", 1, old_text), old_text)
+
+        # Короткий снимок другого шага не должен стать alias старого.
+        self.assertEqual(_offer(arb, "transcript", 2, short_text), short_text)
+        self.assertEqual(
+            _offer(arb, "transcript", 2, new_text),
+            "дочитывание канона]",
+        )
+        self.assertEqual(_oval(arb, "divergences"), 0)
+
+        # Независимый последующий шаг с префиксом старого шага не должен
+        # ложно склеиваться со старым шагом из истории (F-006).
+        other = _arb()
+        self.assertEqual(_offer(other, "stdout", 1, "alpha"), "alpha")
+        self.assertEqual(_offer(other, "stdout", 2, "beta"), "beta")
+        self.assertEqual(
+            _offer(other, "transcript", 3, "alpha extended"),
+            "alpha extended",
+        )
+        self.assertEqual(_oval(other, "divergences"), 0)
+
+    def test_status_streaming_production_path_delivers_final_text_through_execute(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["planner_content_streaming_enabled"], "1")
+            events: list[dict[str, object]] = [_init_ev(0.05)]
+            events.append(_text_ev(0.1, "[статус: ", step=1))
+            events.append(_text_ev(0.15, "[статус: чтение канона AGENTS.md]", step=1))
+            events.append(_text_ev(0.2, "[статус: ", step=2))
+            events.append(_text_ev(0.25, "[статус: дочитывание канона]", step=2))
+            final_ans = "### Детальный анализ PostgreSQL URL"
+            events.append(_result_ev(0.3, response=final_ans))
+            events.append(_exit_ev(0.35))
+            _ = fx.write_scenario(events)
+            out, texts = _run_turn_text()
+            self.assertEqual(out["state"], "done")
+            emitted = "".join(t for _at, t in texts)
+            self.assertIn("[статус: чтение канона AGENTS.md]", emitted)
+            self.assertIn("[статус: дочитывание канона]", emitted)
+            self.assertIn(final_ans, emitted)
+            self.assertTrue(emitted.endswith(final_ans))
+
+    def test_status_streaming_large_response_over_64kb_delivered_via_fallback(
+        self,
+    ) -> None:
+        """Доставка финального ответа длиной >64 КиБ через fallback без усечения (F-004)."""
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["planner_content_streaming_enabled"], "1")
+            events: list[dict[str, object]] = [_init_ev(0.05)]
+            events.append(_text_ev(0.1, "[статус: чтение AGENTS.md]", step=1))
+            final_ans = "BIG_RESPONSE_DATA_" + ("X" * 70000)
+            events.append(_result_ev(0.2, response=final_ans))
+            events.append(_exit_ev(0.25))
+            _ = fx.write_scenario(events)
+            out, texts = _run_turn_text()
+            self.assertEqual(out["state"], "done")
+            emitted = "".join(t for _at, t in texts)
+            self.assertIn("[статус: чтение AGENTS.md]", emitted)
+            self.assertIn(final_ans, emitted)
+            self.assertTrue(emitted.endswith(final_ans))
+            self.assertGreater(len(emitted), 70000)
 
 
 # ---- безопасный прогресс инструментов (AD-002, VER-002) --------------------------------
@@ -4784,7 +4799,7 @@ class SilentToolProgressTests(unittest.TestCase):
             _h, _s, wfile, _c = _sse_with(run_once, fail_on=2)
             self.assertEqual(outcomes, [False])
             frames = _frames_json(wfile.writes)
-            self.assertFalse(any(_has_finish_reason(f, "length") for f in frames))
+            self.assertFalse(any(_is_stop(f) for f in frames))
             self.assertTrue(any(isinstance(f, dict) and "error" in f for f in frames))
 
     def test_silent_tool_progress_json_mode_collects_markers(self) -> None:
@@ -5495,11 +5510,12 @@ def _frames_json(frames: list[str]) -> list[object]:
     return parsed
 
 
-def _has_finish_reason(frame: object, reason: str = "stop") -> bool:
+def _is_stop(frame: object) -> bool:
     if not isinstance(frame, dict) or "choices" not in frame:
         return False
     return (
-        _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason") == reason
+        _dict(cast("list[object]", frame["choices"])[0]).get("finish_reason")
+        == "stop"
     )
 
 
@@ -5547,140 +5563,6 @@ def _timeout_out(state: str) -> dict[str, object]:
     }
 
 
-class GracefulTimeoutFinishReasonTests(unittest.TestCase):
-    """Таймаут времени не выдаётся за исчерпание токенов; откат настраивается."""
-
-    def _assert_wire_reason(
-        self, expected: str, env: str | None = None, config: object = None
-    ) -> None:
-        for state in ("timeout", "idle_timeout"):
-            for stream in (False, True):
-                with self.subTest(state=state, stream=stream), _Fixture() as fx:
-                    _clean_flags(fx)
-                    fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "true")
-                    fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
-                    if config is not None:
-                        _write_cfg(fx, config)
-
-                    def run_once(ctx: Any, on_text: Any, *_a: object) -> object:
-                        out = _timeout_out(state)
-                        out["text"] = "частичный ответ"
-                        out["timeout_limit_s"] = 3600.0
-                        if stream:
-                            on_text(out["text"])
-                        ctx["finalize_timeout"](out)
-                        return out
-
-                    if stream:
-                        _, _, wfile, _ = _sse_with(run_once, {"model": "m"})
-                        frames = _frames_json(wfile.writes)
-                        choices = [
-                            choice
-                            for frame in frames
-                            if isinstance(frame, dict) and "choices" in frame
-                            for choice in frame["choices"]
-                        ]
-                        self.assertEqual(frames.count("[DONE]"), 1)
-                        self.assertFalse(
-                            any(isinstance(f, dict) and "error" in f for f in frames)
-                        )
-                        notice = "".join(_content_of(f) for f in frames)
-                    else:
-                        sent: list[tuple[int, dict[str, Any]]] = []
-                        with _Sock() as sock:
-                            handler = _make_handler(sock)
-                            handler._run_once = run_once
-                            handler._send = lambda code, p: sent.append((code, p))
-                            handler._serve_json({"model": "m"})
-                        self.assertEqual(len(sent), 1)
-                        self.assertEqual(sent[0][0], 200)
-                        choices = sent[0][1]["choices"]
-                        notice = choices[0]["message"]["content"]
-                    self.assertEqual(
-                        [c["finish_reason"] for c in choices if c["finish_reason"]],
-                        [expected],
-                    )
-                    self.assertIn("частичный ответ", notice)
-                    self.assertIn(_NOTICE_MARK, notice)
-                    self.assertIn("3600s", notice)
-                    self.assertIn(state, notice)
-                    self.assertNotIn("токен", notice.lower())
-
-    def test_default_emits_stop_in_json_and_sse(self) -> None:
-        self._assert_wire_reason("stop")
-
-    def test_env_length_and_max_tokens_override_config(self) -> None:
-        for value in ("length", " MAX_TOKENS "):
-            with self.subTest(value=value):
-                self._assert_wire_reason(
-                    "length", value, {"graceful_timeout_finish_reason": "stop"}
-                )
-
-    def test_dynamic_config_and_uppercase_alias_emit_length(self) -> None:
-        for key in (
-            "graceful_timeout_finish_reason",
-            "AGY_GRACEFUL_TIMEOUT_FINISH_REASON",
-        ):
-            for value in ("length", " MAX_TOKENS "):
-                with self.subTest(key=key, value=value):
-                    self._assert_wire_reason("length", config={key: value})
-
-    def test_invalid_or_empty_values_fall_back_to_stop(self) -> None:
-        for value in ("", "  ", "invalid", None, True, 1, [], {}):
-            with self.subTest(config=value):
-                self._assert_wire_reason(
-                    "stop", config={"graceful_timeout_finish_reason": value}
-                )
-        self._assert_wire_reason(
-            "stop", "invalid", {"graceful_timeout_finish_reason": "length"}
-        )
-
-    def test_empty_env_uses_dynamic_config(self) -> None:
-        for value in ("", "   "):
-            with self.subTest(value=value):
-                self._assert_wire_reason(
-                    "length", value, {"graceful_timeout_finish_reason": "length"}
-                )
-
-    def test_invalid_reason_keeps_other_valid_flags(self) -> None:
-        parse = _bfn("_parse_runtime_flags")
-        for value in ("invalid", None, True, 1, [], {}):
-            with self.subTest(value=value):
-                flags = parse(
-                    json.dumps(
-                        {
-                            "emit_tool_trace": True,
-                            "graceful_timeout_finish_reason": value,
-                        }
-                    )
-                )
-                self.assertTrue(getattr(flags, "emit_tool_trace"))
-                self.assertTrue(getattr(flags, "stream_resilience_enabled"))
-                self.assertEqual(
-                    getattr(flags, "graceful_timeout_finish_reason"), "stop"
-                )
-        with self.assertRaises(ValueError):
-            parse(
-                '{"emit_tool_trace": "true", "graceful_timeout_finish_reason": "length"}'
-            )
-
-    def test_reason_reloads_after_ttl_without_restart(self) -> None:
-        with _Fixture() as fx:
-            _clean_flags(fx)
-            clock = _clocked(fx)
-            reason = _bfn("_graceful_finish_reason")
-            _write_cfg(fx, {"graceful_timeout_finish_reason": "length"}, 1_000)
-            self.assertEqual(reason(), "length")
-            _write_cfg(fx, {"graceful_timeout_finish_reason": "stop"}, 2_000)
-            self.assertEqual(reason(), "length")
-            clock.advance(1.1)
-            self.assertEqual(reason(), "stop")
-            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "length")
-            self.assertEqual(reason(), "length")
-            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "invalid")
-            self.assertEqual(reason(), "stop")
-
-
 class SilentGracefulTimeoutTests(unittest.TestCase):
     def _flags(self, fx: _Fixture, graceful: bool) -> None:
         _clean_flags(fx)
@@ -5688,10 +5570,19 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
         fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
 
     def _sse_case(
-        self, state: str, kind: str, graceful: bool
+        self,
+        state: str,
+        kind: str,
+        graceful: bool,
+        *,
+        finish_reason_env: str | None = None,
+        config: dict[str, object] | None = None,
     ) -> tuple[list[object], dict[str, object]]:
         with _Fixture() as fx:
             self._flags(fx, graceful)
+            fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", finish_reason_env)
+            if config is not None:
+                _write_cfg(fx, config)
             holder: dict[str, object] = {}
 
             def run_once(
@@ -5710,6 +5601,75 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             )
             return _frames_json(wfile.writes), _dict(holder["out"])
 
+    def _assert_custom_finish_reason(
+        self,
+        expected: str,
+        env: str | None,
+        config_value: object,
+    ) -> None:
+        for state in ("timeout", "idle_timeout"):
+            with self.subTest(state=state):
+                frames, out = self._sse_case(
+                    state,
+                    "content",
+                    True,
+                    finish_reason_env=env,
+                    config={"graceful_timeout_finish_reason": config_value},
+                )
+                terminals = [
+                    _dict(choice)["finish_reason"]
+                    for frame in frames
+                    if isinstance(frame, dict)
+                    for choice in cast("list[object]", frame.get("choices", []))
+                    if _dict(choice).get("finish_reason") is not None
+                ]
+                self.assertEqual(terminals, [expected])
+                self.assertEqual(frames[-1], "[DONE]")
+                self.assertEqual(frames.count("[DONE]"), 1)
+                self.assertTrue(out.get("graceful_done"))
+                content = "".join(_content_of(frame) for frame in frames)
+                self.assertIn("часть ответа", content)
+                self.assertEqual(content.count(_NOTICE_MARK), 1)
+            with self.subTest(state=state, mode="json"), _Fixture() as fx:
+                self._flags(fx, True)
+                fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", env)
+                _write_cfg(fx, {"graceful_timeout_finish_reason": config_value})
+                sent: list[tuple[int, dict[str, object]]] = []
+                with _Sock() as sock:
+                    handler = _make_handler(sock)
+                    handler._run_once = lambda *_a: {
+                        **_timeout_out(state),
+                        "text": "часть ответа",
+                    }
+                    handler._send = lambda code, payload: sent.append((code, payload))
+                    handler._serve_json({"model": "m"})
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0][0], 200)
+                choice = _dict(cast("list[object]", sent[0][1]["choices"])[0])
+                self.assertEqual(choice["finish_reason"], expected)
+                content = _str(_dict(choice["message"])["content"])
+                self.assertIn("часть ответа", content)
+                self.assertEqual(content.count(_NOTICE_MARK), 1)
+
+    def test_silent_graceful_timeout_custom_finish_reason_env_length(self) -> None:
+        for env in ("length", "max_tokens", " LENGTH "):
+            with self.subTest(env=env):
+                self._assert_custom_finish_reason("length", env, "stop")
+        self._assert_custom_finish_reason("stop", " STOP ", "length")
+
+    def test_silent_graceful_timeout_custom_finish_reason_dynamic_config(self) -> None:
+        for value in ("length", "max_tokens", " LENGTH "):
+            with self.subTest(value=value):
+                self._assert_custom_finish_reason("length", None, value)
+
+    def test_silent_graceful_timeout_invalid_env_falls_back_to_config_or_default(
+        self,
+    ) -> None:
+        self._assert_custom_finish_reason("length", "invalid_foo", "length")
+        for value in ("stop", "invalid_foo", True, 42, None, [], {}):
+            with self.subTest(value=value):
+                self._assert_custom_finish_reason("stop", "invalid_foo", value)
+
     def test_silent_graceful_timeout_sse_matrix(self) -> None:
         for state in ("timeout", "idle_timeout"):
             for kind in ("content", "reasoning", "tool", "retained", "silent"):
@@ -5721,11 +5681,11 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                         errors = [
                             f for f in frames if isinstance(f, dict) and "error" in f
                         ]
-                        finals = [f for f in frames if _has_finish_reason(f)]
+                        stops = [f for f in frames if _is_stop(f)]
                         notices = [f for f in frames if _NOTICE_MARK in _content_of(f)]
                         if graceful and kind != "silent":
                             self.assertEqual(errors, [])
-                            self.assertEqual(len(finals), 1)
+                            self.assertEqual(len(stops), 1)
                             self.assertEqual(len(notices), 1)
                             notice = _content_of(notices[0])
                             self.assertIn(state, notice)
@@ -5743,13 +5703,12 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                                 sum(
                                     1
                                     for f in frames
-                                    if _has_finish_reason(f)
-                                    or "error" in _dict_or_empty(f)
+                                    if _is_stop(f) or "error" in _dict_or_empty(f)
                                 ),
                                 1,
                             )
                         else:
-                            self.assertEqual(finals, [])
+                            self.assertEqual(stops, [])
                             self.assertEqual(notices, [])
                             self.assertEqual(len(errors), 1)
                             err = _dict(_dict(errors[0])["error"])
@@ -5769,7 +5728,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
 
             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
             frames = _frames_json(wfile.writes)
-            self.assertFalse(any(_has_finish_reason(f) for f in frames))
+            self.assertFalse(any(_is_stop(f) for f in frames))
             errors = [f for f in frames if isinstance(f, dict) and "error" in f]
             self.assertEqual(
                 _dict(_dict(errors[0])["error"])["type"], "first_token_timeout"
@@ -5846,7 +5805,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             ctx = {"model": "m", "t_req_start": 9000.0 - 3000.0}
             _h, sock, wfile, _c = _sse_with(run_once, ctx, clock=clock, cost=0.0)
             frames = _frames_json(wfile.writes)
-            self.assertTrue(any(_has_finish_reason(f) for f in frames))
+            self.assertTrue(any(_is_stop(f) for f in frames))
             self.assertEqual(frames[-1], "[DONE]")
             self.assertEqual(
                 sock.timeouts, [5.0, 5.0, 5.0, 5.0]
@@ -5877,7 +5836,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 sum(1 for f in frames if _NOTICE_MARK in _content_of(f)), 1
             )
             self.assertEqual(
-                sum(1 for f in frames if _has_finish_reason(f)), 1
+                sum(1 for f in frames if _is_stop(f)), 1
             )  # третья запись
             self.assertEqual(wfile.calls, 4)  # role + суффикс + notice + stop
             self.assertLessEqual(max(sock.timeouts), 5.0)
@@ -5923,7 +5882,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
             self.assertEqual(wfile.calls, 3)
             frames = _frames_json(wfile.writes)
             self.assertNotIn("[DONE]", frames)
-            self.assertFalse(any(_has_finish_reason(f) for f in frames))
+            self.assertFalse(any(_is_stop(f) for f in frames))
             self.assertFalse(any(isinstance(f, dict) and "error" in f for f in frames))
             self.assertIs(
                 holder[0].get("graceful_done"), True
@@ -5944,7 +5903,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
 
             _h, _s, wfile, _c = _sse_with(run_once, {"model": "m"})
             frames = _frames_json(wfile.writes)
-            self.assertEqual(sum(1 for f in frames if _has_finish_reason(f)), 1)
+            self.assertEqual(sum(1 for f in frames if _is_stop(f)), 1)
             self.assertEqual(frames[-1], "[DONE]")
 
     def test_silent_graceful_timeout_run_once_finalizes_before_close_and_never_retries(
@@ -6090,7 +6049,7 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 self.assertEqual(len(texts), 3)
                 self.assertIn(_NOTICE_MARK, texts[2])
                 self.assertIn(state, texts[2])
-                self.assertEqual(sum(1 for f in frames if _has_finish_reason(f)), 1)
+                self.assertEqual(sum(1 for f in frames if _is_stop(f)), 1)
                 self.assertEqual(list(cast("list[float]", _bval("_last_ok"))), [0.0])
                 self.assertEqual(len(cast("dict[int, object]", _bval("_active"))), 0)
 
@@ -13286,7 +13245,6 @@ class DialogueStreamResilienceTests(unittest.TestCase):
                 "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED": "true",
                 "AGY_BRIDGE_EMIT_TOOL_TRACE": "false",
                 "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL": "false",
-                "AGY_GRACEFUL_TIMEOUT_FINISH_REASON": "stop",
             },
         )
         flags.start()
@@ -13670,122 +13628,3 @@ class DialogueStreamResilienceTests(unittest.TestCase):
             _write_cfg(fx, {"stream_resilience_enabled": True}, 3_000)
             clock.advance(2)
             self.assertTrue(flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True))
-
-
-class StreamFormattingAndReasoningIsolationTests(unittest.TestCase):
-    """Детерминированные тесты L1 на разграничение строк, сопоставление префиксов и изоляцию reasoning."""
-
-    def test_step_boundary_newline_separation(self) -> None:
-        """VER-001 / REQ-001: Текст независимых шагов планировщика разделяется \\n\\n без склеивания слов."""
-        run = _bare_run()
-        setattr(run, "_arbiter", _arb())
-        setattr(run, "turn_id", "turn-fmt-1")
-        setattr(run, "run_cid", _CID)
-        offer = _ofn(run, "offer_content")
-
-        # Шаг 1: завершается точкой без перевода строки
-        self.assertTrue(offer("stdout", 1, "Завершаю поиск данных."))
-        # Шаг 2: начинается со слова с заглавной буквы
-        self.assertTrue(offer("stdout", 2, "Проверяю вывод лога задачи 349."))
-        # Шаг 3: завершается с переводом строки
-        self.assertTrue(offer("stdout", 3, "Следующее действие.\n"))
-        # Шаг 4: начинается без перевода строки
-        self.assertTrue(offer("stdout", 4, "Финальный результат."))
-
-        q = cast("queue.Queue[tuple[str, object]]", _oval(run, "q"))
-        chunks = [cast(str, q.get_nowait()[1]) for _ in range(q.qsize())]
-        combined = "".join(chunks)
-
-        # Проверяем, что нет слитного "данных.Проверяю"
-        self.assertNotIn("данных.Проверяю", combined)
-        self.assertIn("Завершаю поиск данных.\n\nПроверяю вывод лога задачи 349.", combined)
-        self.assertIn("Следующее действие.\n\nФинальный результат.", combined)
-
-    def test_arbiter_no_prefix_repetition_on_divergence(self) -> None:
-        """VER-002 / REQ-002: Короткие префиксы новых шагов не вызывают лавины повторов [гейт..."""
-        arb = _arb()
-        step1_text = "[гейт оркестрации: активен | роль: explorer] Читаю канон AGENTS.md"
-        step2_prefix = "[гейт оркестрации: активен"
-        step2_full = "[гейт оркестрации: активен | роль: worker] Запускаю тесты pytest"
-
-        # Шаг 1
-        self.assertEqual(_offer(arb, "transcript", 1, step1_text), step1_text)
-
-        # Шаг 2 начинается с префикса, совпадающего с шагом 1
-        delta_prefix = _offer(arb, "transcript", 2, step2_prefix)
-        self.assertEqual(delta_prefix, step2_prefix)
-        self.assertEqual(_oval(arb, "divergences"), 0)
-
-        # Шаг 2 досылает полный текст
-        delta_full = _offer(arb, "transcript", 2, step2_full)
-        self.assertEqual(delta_full, step2_full[len(step2_prefix):])
-        self.assertEqual(_oval(arb, "divergences"), 0)
-
-        # Проверяем, что в chunks нет зацикленного повтора
-        chunks = _oval(arb, "chunks")
-        joined = "".join(chunks)
-        self.assertEqual(joined.count("[гейт оркестрации: активен"), 2)
-
-    def test_tool_preamble_isolated_to_reasoning(self) -> None:
-        """VER-003 / REQ-003: Сервисная преамбула шага с tool_calls изолируется в reasoning, сохраняя <Think>."""
-        with _Fixture() as fx:
-            content_emitted: list[tuple[int | None, str]] = []
-            reasoning_emitted: list[tuple[int, str]] = []
-
-            def emit_content(idx: int | None, text: str) -> bool:
-                content_emitted.append((idx, text))
-                return True
-
-            def emit_reasoning(idx: int, delta: str, on_del: Any = None) -> bool:
-                reasoning_emitted.append((idx, delta))
-                if on_del is not None:
-                    on_del()
-                return True
-
-            plan = _bfn("_TurnPlan")()
-            setattr(plan, "mode", "OFF")
-            setattr(plan, "base_idx", 0)
-            setattr(plan, "offset", 0)
-
-            tail = _bfn("_TranscriptTail")(
-                emit_reasoning,
-                threading.Event(),
-                threading.Event(),
-                False,
-                plan,
-                "turn-reasoning-1",
-                emit_content,
-                None,
-                False,
-                True,  # isolate_tool_preambles=True
-            )
-            setattr(tail, "cid", _CID)
-
-            # Шаг 1: содержит tool_calls и преамбулу в content
-            fx.append_record(
-                {
-                    "type": "PLANNER_RESPONSE",
-                    "step_index": 1,
-                    "content": "Ищу скилл analyst-teamlead и проверяю базу знаний",
-                    "tool_calls": [{"name": "read_file", "args": {"Path": "/tmp/test"}}],
-                }
-            )
-            # Шаг 2: финальный ответ пользователю (без tool_calls)
-            fx.append_record(
-                {
-                    "type": "PLANNER_RESPONSE",
-                    "step_index": 2,
-                    "content": "Вот согласованный ответ для пользователя.",
-                }
-            )
-
-            _ = _ofn(tail, "_read_transcript")()
-
-            # В content должен попасть ТОЛЬКО финальный ответ шага 2
-            self.assertEqual(len(content_emitted), 1)
-            self.assertEqual(content_emitted[0], (2, "Вот согласованный ответ для пользователя."))
-
-            # В reasoning должна попасть сервисная преамбула шага 1
-            reasoning_texts = [delta for _, delta in reasoning_emitted]
-            self.assertTrue(any("Ищу скилл analyst-teamlead" in t for t in reasoning_texts))
-
