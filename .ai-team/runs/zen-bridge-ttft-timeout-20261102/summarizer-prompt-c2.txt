@@ -1,0 +1,45 @@
+Read-only besides the one output file. Секреты не печатай. Субагентов не запускай.
+
+Ты panel-rework-summarizer (слот claude-sonnet-5-5-high).
+Переведи замечания Совета Тимлидов Цикла 2 в ОДИН JSON-объект panel-rework-brief.json для Coder.
+
+Контракт и пример валидного объекта:
+~/Мой диск/skils/ai-sdlc/references/panel-rework-brief.md
+
+Входы обязательные (прочитай):
+- /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/code-panel-c2/consensus/final-panel-verdict.md
+- /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/code-panel-c2/consensus/consensus-ledger.md
+- /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/code-panel-c2/panel/council/r1/seats/1/verdict.md
+- /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/code-panel-c2/panel/council/r1/seats/2/verdict.md
+- /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/code-panel-c2/panel/council/r1/seats/3/verdict.md
+- /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/teamlead/package.md
+
+ПОЛНОТА БАТЧА: вход — ВСЕ 15 F-NNN из леджера (F-001..F-015).
+Каждый F-NNN леджера должен быть отражен РОВНО ОДИН раз:
+- Блокирующие замечания (F-001, F-002, F-007, F-008, F-010, F-011, F-012, F-013, F-014): сгруппируй в структурированные instructions[]:
+  1. F-007 + F-013: В serve-пути (`_serve_one_attempt`) фиксировать `first_token_at` при первом tool-событии (`session.tool.input.started`/`delta`/`called`) и учитывать `tool_state.has_active()` в условии проверки TTFT, чтобы вызов инструмента без предварительного reasoning не обрывался по TTFT при длительной генерации аргументов.
+  2. F-002 + F-015: В `tests/test_bridges_speedup_resilience.py:65` включить явное обоснование дефолта `(10, 300, 420, 12)` либо вернуть дефолтное ожидание HEAD с моком env.
+  3. F-001 + F-008 + F-014: Очистить package.md от упоминания нерелевантных тестов чужих модулей; отразить чистый 100% прогон сьюта Zen и смежных контрактов.
+  4. F-010 + F-011 + F-012: Унификация идентичности тулов в `_ToolActivity` и консистентность семантики условий таймаутов.
+- Неблокирующие (F-003, F-004, F-005, F-006, F-009): в non_blocking_followups[] (включая негативные тесты 504 на TTFT/Idle).
+findings_total = 15.
+
+Выход:
+1. Запиши ровно один JSON object в:
+   /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/handoff/panel-rework-brief-c2.json.tmp
+   Без markdown fence, без второго объекта, без прозы вокруг.
+2. Обязательные поля корня и instructions[]:
+   schema_version "1.0", panel_verdict "NEEDS_WORK",
+   summarizer_slot "claude-sonnet-5-5-high", coder_entry "fix-from-panel",
+   repo_root "/Users/aazhiry1/work/src/cli-agent-bridge".
+3. Проверь валидатором:
+   python3 "/Users/aazhiry1/Мой диск/skils/ai-sdlc/universal/teamlead-gate/scripts/validate_panel_rework_brief.py" \
+     /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/handoff/panel-rework-brief-c2.json.tmp \
+     --expected-slot claude-sonnet-5-5-high \
+     --ledger /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/code-panel-c2/consensus/consensus-ledger.md \
+     --final-verdict-md /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/code-panel-c2/consensus/final-panel-verdict.md \
+     --repo-root /Users/aazhiry1/work/src/cli-agent-bridge
+4. При успешной валидации (VALID):
+   mv /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/handoff/panel-rework-brief-c2.json.tmp \
+      /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/zen-bridge-ttft-timeout-20261102/handoff/panel-rework-brief-c2.json
+   Выведи stdout: VALID n_instructions=...

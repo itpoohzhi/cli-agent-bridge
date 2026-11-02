@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "run_id": "zen-bridge-ttft-timeout-20261102",
+  "teamlead_cycle": 1,
+  "panel_slug": "code-panel",
+  "panel_verdict": "NEEDS_WORK",
+  "summarizer_slot": "claude-sonnet-5-5-high",
+  "findings_total": 7,
+  "instructions": [
+    {
+      "id": "RW-001",
+      "priority": "blocking",
+      "criterion": "ПОЛНОТА",
+      "file": ".ai-team/runs/zen-bridge-ttft-timeout-20261102/teamlead/package.md",
+      "line_hint": "58-267",
+      "rule_ref": "AGENTS.md (Верификация и тесты); teamlead-gate package completeness",
+      "action": "Пересобрать раздел 5 «Полный Git Diff» пакета из актуального `git diff -- bridges/opencode-zen-bridge/server.py tests/test_bridges_speedup_resilience.py`: добавить пропущенные ханки класса `Run` (split_timeout / ttft_origin / on_idle, ~server.py:6695, 6729, 6886) и два ханка `_attempts_t0` в Handler (~server.py:8481, 8499), а также весь тестовый diff (+146 строк). Пересчитать статистику раздела 3 и матрицу раздела 4 под итоговый diff после правок RW-002/RW-003.",
+      "acceptance": "Given итоговое рабочее дерево When сравнить раздел 5 package.md с `git diff` двух файлов Then каждый ханк server.py и тестового файла присутствует в пакете, число изменённых строк в разделе 3 совпадает с `git diff --stat`.",
+      "source": "seat-1 / F-001 BLOCKER-OPINION (голоса: seat_1 AGREE, seat_2 CONSENT, seat_3 AGREE; RESOLVED)",
+      "evidence": "«Раздел 5 брифа озаглавлен «Полный Git Diff», но фактический git diff содержит ханки, отсутствующие в пакете: класс Run (@@ -6428, @@ -6569, @@ -6642, @@ -6669, @@ -6815) ... и два ханка _attempts_t0 в Handler. Тестовый diff также опущен, хотя раздел 3 заявляет +146 строк тестов.»",
+      "source_findings": ["F-001"]
+    },
+    {
+      "id": "RW-002",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "8377",
+      "rule_ref": "AGENTS.md п.5 (системное агент-агностичное решение) и п.4 (конфигурируемость)",
+      "action": "Согласовать точку отсчёта TTFT во всех трёх местах: считать TTFT от начала текущей попытки (attempt_start / prompt_send_start), а не от request_t0 всего запроса. В стриминговом watchdog убрать ветку `request_t0` для случая пустых collected_texts/tool_calls; в `Run` (server.py:~6698) выровнять с той же семантикой без зависимости от `total_spawns <= 1`. Retry после очереди слота/startup-gate/первой неудачной попытки не должен убиваться мгновенно. Таймауты остаются конфигурируемыми через env.",
+      "acceptance": "Given запрос, у которого с request_t0 прошло >= 25с (очередь/первая попытка без текста) When стартует повторная попытка Then split_timeout не срабатывает, пока с attempt_start не прошло ttft_timeout; добавлен тест на retry/очередь (двухпопыточный сценарий), все 122 теста матрицы зелёные.",
+      "source": "seat-1 / F-002 BLOCKER-OPINION (голоса: seat_1/2/3 AGREE; RESOLVED)",
+      "evidence": "«В _serve_one_attempt TTFT считается от prompt_send_start (server.py:4829). В Run — от attempts.t0 только при total_spawns <= 1, иначе от attempt_start (server.py:6698). В стриминговом watchdog — от request_t0 всего запроса ... (server.py:8377). Следствие: повторная попытка ... наследует старый request_t0; если с начала запроса прошло >=25с, split_timeout срабатывает до шанса на первый токен.»",
+      "related_locations": [
+        {"file": "bridges/opencode-zen-bridge/server.py", "line_hint": "4829"},
+        {"file": "bridges/opencode-zen-bridge/server.py", "line_hint": "6698"},
+        {"file": "tests/test_bridges_speedup_resilience.py", "line_hint": "новые тесты retry/очередь"}
+      ],
+      "source_findings": ["F-002"]
+    },
+    {
+      "id": "RW-003",
+      "priority": "blocking",
+      "criterion": "КОРРЕКТНОСТЬ",
+      "file": "bridges/opencode-zen-bridge/server.py",
+      "line_hint": "4830",
+      "rule_ref": "AGENTS.md п.5 (системное решение в одном общем механизме, без дублирования по путям) и п.4 (конфигурируемость)",
+      "action": "Защитить исполнение тулов/сабагентов от ложного Idle 15с: в `_serve_one_attempt` и в стриминговом watchdog не применять idle-проверку, пока идёт активное исполнение тула/сабагента (аналог `not subagent_started_at` в `Run.on_idle`, server.py:~6734); либо обновлять `last_token_at` на событиях активности тула. Вынести условие «активная работа тула» в одну общую функцию/состояние, используемую всеми тремя путями (serve, stream watchdog, Run.on_idle), без ветвления по имени агента. Порог при активном туле остаётся конфигурируемым (fallback — прежний STALL_TIMEOUT_S).",
+      "acceptance": "Given тул/сабагент выполняется дольше idle_timeout (15с) без токенов When работает _serve_one_attempt или стриминговый watchdog Then запрос не обрывается по idle (нет 504), а обрывается только по total/stall; добавлены тесты на serve- и stream-путь с долгим тулом; существующие тесты матрицы зелёные.",
+      "source": "seat-1 / F-003 BLOCKER-OPINION (голоса: seat_1 CONSENT, seat_2 CONSENT, seat_3 AGREE; вердикт совета ESCALATED)",
+      "evidence": "«В _serve_one_attempt idle-проверка не имеет освобождения на время исполнения тула (server.py:4830), а last_token_at обновляется только на session.tool.input.delta и завершении тула ... Тот же дефект в стриминговом watchdog (server.py:8382). При этом третий путь Run.on_idle освобождение имеет: not subagent_started_at (server.py:6734) ... Тул дольше 15с (штатно) → 504.»",
+      "related_locations": [
+        {"file": "bridges/opencode-zen-bridge/server.py", "line_hint": "5018"},
+        {"file": "bridges/opencode-zen-bridge/server.py", "line_hint": "5032"},
+        {"file": "bridges/opencode-zen-bridge/server.py", "line_hint": "6734"},
+        {"file": "bridges/opencode-zen-bridge/server.py", "line_hint": "8382"}
+      ],
+      "source_findings": ["F-003"]
+    }
+  ],
+  "non_blocking_followups": [
+    {
+      "id": "FU-001",
+      "text": "Сделать Idle и Total независимо конфигурируемыми: не гейтить `_zen_idle_timeout`/`_zen_total_timeout` значением `_zen_ttft_timeout(...) >= TIMEOUT_S` (server.py:369, 376); убрать дефолты `model=\"\"`/`prompt=\"\"`.",
+      "reason": "Оператор, подняв BRIDGE_ZEN_TTFT_TIMEOUT_S >= TIMEOUT_S, молча теряет Idle/Total-разделение; без блокирующего риска безопасности.",
+      "source_findings": ["F-004"]
+    },
+    {
+      "id": "FU-002",
+      "text": "В `_attempts_t0` (server.py:391) не вычислять default eagerly: использовать условное получение `t0`, а deadline читать только при отсутствии `t0`; не перечитывать env и не перекодировать промпт в UTF-8 на каждом вызове.",
+      "reason": "Совместимость с заглушками и мелкая эффективность; не влияет на корректность основного пути.",
+      "source_findings": ["F-005"]
+    },
+    {
+      "id": "FU-003",
+      "text": "Зафиксировать в решении Совета риск доступности: удержание admission-слота выросло с 25с до 180с (server.py:7963, 7966, 9374); оценить размер пула слотов и добавить тест на исчерпание admission при trickle-стриме.",
+      "reason": "Граница ограничена и архитектурно принята; требуется фиксация риска, а не правка кода.",
+      "source_findings": ["F-006"]
+    },
+    {
+      "id": "FU-004",
+      "text": "Различать причины таймаутов в телеметрии: логировать split-timeout (ttft/idle) с фактическим порогом вместо `stream timeout after {TIMEOUT_S}s` (server.py:8616) и учесть порядок относительно first_token_timeout/stall_timeout (server.py:4826, 4853, 4860).",
+      "reason": "Ухудшение диагностики причин отказов; не блокирует корректность.",
+      "source_findings": ["F-007"]
+    }
+  ],
+  "do_not_change": [
+    "внешний контракт HTTP 504 / terminal SSE error при превышении TTFT или Idle",
+    "env-переменные BRIDGE_ZEN_TTFT_TIMEOUT_S, BRIDGE_ZEN_IDLE_TIMEOUT_S, BRIDGE_ZEN_TOTAL_TIMEOUT_S и fallback на BRIDGE_ZEN_TIMEOUT_S",
+    "обратно-совместимый синоним _zen_execution_timeout и тест test_zen_byte_timeout_selection",
+    "вендорский код не модифицировать; правки только в cli-agent-bridge"
+  ],
+  "coder_entry": "fix-from-panel",
+  "repo_root": "/Users/aazhiry1/work/src/cli-agent-bridge",
+  "iteration_budget_note": "тимлид-цикл +1; blocking только из instructions[] (F-001..F-003); F-004..F-007 — non-blocking follow-ups"
+}
