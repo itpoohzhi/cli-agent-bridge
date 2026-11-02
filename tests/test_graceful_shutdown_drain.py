@@ -1,3 +1,4 @@
+from itertools import chain, repeat
 import signal
 import subprocess
 import tempfile
@@ -144,36 +145,84 @@ class GracefulShutdownDrainTests(unittest.TestCase):
 
     def test_drain_safe_active_count_handles_exception(self) -> None:
         for counts in (
-            [RuntimeError("counter unavailable"), 0],
-            [1, RuntimeError("counter unavailable")],
+            [RuntimeError("counter unavailable")],
+            [3, RuntimeError("counter unavailable")],
         ):
             with self.subTest(counts=counts):
-                active_turns_fn = Mock(side_effect=counts)
+                active_turns_fn = Mock(
+                    side_effect=chain(counts, repeat(RuntimeError("counter unavailable")))
+                )
+                elapsed_s = 0.0
+
+                def advance_time(seconds: float) -> None:
+                    nonlocal elapsed_s
+                    elapsed_s += seconds
+
                 logs: list[str] = []
                 on_complete = Mock()
                 lifecycle = HubLifecycleManager(
                     state_dir=self._state_dir,
                     active_turns_fn=active_turns_fn,
-                    drain_timeout_s=1.0,
+                    drain_timeout_s=0.1,
                     drain_enabled_fn=lambda: True,
                     log_fn=logs.append,
                     on_shutdown_complete=on_complete,
                 )
                 server = Mock()
+                shutdown_times: list[float] = []
+                server.shutdown.side_effect = lambda: shutdown_times.append(elapsed_s)
                 lifecycle.attach_server(server)
 
-                with patch("core.lifecycle.time.monotonic", return_value=0.0):
+                with (
+                    patch("core.lifecycle.time.monotonic", side_effect=lambda: elapsed_s),
+                    patch("core.lifecycle.time.sleep", side_effect=advance_time) as sleep,
+                ):
                     summary = lifecycle.run_drain_once()
 
+                self.assertEqual(sleep.call_count, 2)
+                self.assertEqual(shutdown_times, [0.1])
                 self.assertEqual(summary["state"], DrainState.STOPPED)
                 self.assertEqual(
                     summary["active_turns_before"],
-                    0 if isinstance(counts[0], Exception) else 1,
+                    1 if isinstance(counts[0], Exception) else 3,
+                )
+                self.assertEqual(
+                    lifecycle._safe_active_count(), summary["active_turns_before"]
                 )
                 self.assertTrue(lifecycle.drain_completed.is_set())
-                self.assertTrue(any("counter unavailable" in line for line in logs))
+                self.assertTrue(any("drain_active_count_error" in line for line in logs))
                 server.shutdown.assert_called_once_with()
                 on_complete.assert_called_once_with()
+
+    def test_drain_finally_guarantees_stopped_state_on_server_shutdown_error(self) -> None:
+        lifecycle = HubLifecycleManager(state_dir=self._state_dir)
+        server = Mock()
+        # Exception уже подавляется; SystemExit проверяет выполнение finally.
+        server.shutdown.side_effect = SystemExit("shutdown failed")
+        lifecycle.attach_server(server)
+
+        with self.assertRaisesRegex(SystemExit, "shutdown failed"):
+            lifecycle.run_drain_once()
+
+        server.shutdown.assert_called_once_with()
+        self.assertEqual(lifecycle.state, DrainState.STOPPED)
+        self.assertTrue(lifecycle.drain_completed.is_set())
+
+    def test_drain_finally_guarantees_stopped_state_on_wait_error(self) -> None:
+        manager = Mock(spec=TurnSessionManager)
+        manager.active_count.return_value = 1
+        manager.wait_for_active_turns.side_effect = RuntimeError("wait failed")
+        lifecycle = HubLifecycleManager(
+            state_dir=self._state_dir,
+            turn_manager=manager,
+            drain_enabled_fn=lambda: True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "wait failed"):
+            lifecycle.run_drain_once()
+
+        self.assertEqual(lifecycle.state, DrainState.STOPPED)
+        self.assertTrue(lifecycle.drain_completed.is_set())
 
     def test_drain_mixed_activity_waits_for_both(self) -> None:
         import server
