@@ -55,7 +55,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-for _p in (Path(__file__).resolve().parents[2], Path(__file__).resolve().parents[1]):
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -113,6 +114,37 @@ CLAUDE_BIN = os.environ.get(
 )
 MCP_CONFIG = ROOT / "empty-mcp.json"
 WORKSPACE = ROOT / "workspace"
+
+
+def _prepare_claude_home() -> Path:
+    """Подготовить изолированный фиктивный HOME для claude -p (P0/P2 Zero-Canon).
+
+    В ~/.claude/ переносятся только файлы авторизации, настроек и сертификатов,
+    без глобальных инструкций (agents-global.md, CLAUDE.md) и пользовательских расширений.
+    """
+    real_claude = Path.home() / ".claude"
+    home = WORKSPACE / "runtime" / "claude-home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+
+    allowed_files = (
+        "settings.json",
+        "aeza-8788-ca.pem",
+        "bundle-with-aeza.pem",
+        "policy-limits.json",
+        "policy-limits.json.signature.json",
+        "policy-limits.json.stamp.json",
+    )
+
+    for name in allowed_files:
+        source = real_claude / name
+        if source.is_file():
+            try:
+                shutil.copy2(source, claude_dir / name)
+            except OSError:
+                pass
+
+    return home
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_P_BRIDGE_MAX_CONCURRENT", "8"))
 QUEUE_TIMEOUT_S = int(os.environ.get("CLAUDE_P_BRIDGE_QUEUE_TIMEOUT", "900"))
 KEEPALIVE_S = float(os.environ.get("CLAUDE_P_BRIDGE_KEEPALIVE", "15"))
@@ -323,10 +355,15 @@ class Run:
         self.cmd = cmd
         self.img_dir = img_dir
         _log(f"exec model={model} effort={effort} prompt_bytes={len(prompt.encode())} {tag}")
+        child_env = os.environ.copy()
+        child_env["HOME"] = str(_prepare_claude_home())
+        child_env["BRIDGE_ZERO_CANON"] = "1"
+        child_env.pop("CLAUDE_P_BRIDGE_KEY", None)
+
         self.proc = subprocess.Popen(
             cmd, cwd=str(img_dir if img_dir is not None else WORKSPACE),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True, env=os.environ.copy(),
+            start_new_session=True, env=child_env,
         )
         with _active_lock:
             _active[self.proc.pid] = self.proc

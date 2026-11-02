@@ -1106,14 +1106,87 @@ RESULT_EXIT_GRACE_S = 5.0
 _ACTIVITY_KINDS = frozenset({"init", "text", "reasoning", "tool_trace"})
 
 
+def _prepare_agy_home() -> Path:
+    """Подготовить изолированный фиктивный HOME для agy (P0/P2 Zero-Canon).
+
+    В изолированный каталог переносятся только OAuth-токен и конфигурация рантайма,
+    без hooks.json и канонических инструкций (AGENTS.md, GEMINI.md).
+    """
+    real_home = Path.home()
+    home = WORKSPACE / "runtime" / "agy-home"
+    home.mkdir(parents=True, exist_ok=True)
+
+    gemini_dir = home / ".gemini"
+    gemini_dir.mkdir(parents=True, exist_ok=True)
+
+    token_source = real_home / ".gemini" / "jetski-standalone-oauth-token"
+    if token_source.is_file():
+        try:
+            shutil.copy2(token_source, gemini_dir / "jetski-standalone-oauth-token")
+        except OSError:
+            pass
+
+    config_dir = home / ".config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    launch_source = real_home / ".config" / "agy-launch"
+    launch_target = config_dir / "agy-launch"
+    if launch_source.exists() and not launch_target.exists() and not launch_target.is_symlink():
+        try:
+            launch_target.symlink_to(launch_source, target_is_directory=launch_source.is_dir())
+        except OSError:
+            pass
+
+    local_dir = home / ".local"
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    bin_source = real_home / ".local" / "bin"
+    bin_target = local_dir / "bin"
+    if bin_source.is_dir() and not bin_target.exists() and not bin_target.is_symlink():
+        try:
+            bin_target.symlink_to(bin_source, target_is_directory=True)
+        except OSError:
+            pass
+
+    # Симлинк Library для доступа к macOS Keychain (login.keychain-db) по RCA 2026-10-31
+    library_source = real_home / "Library"
+    library_target = home / "Library"
+    if library_source.is_dir() and not library_target.exists() and not library_target.is_symlink():
+        try:
+            library_target.symlink_to(library_source, target_is_directory=True)
+        except OSError:
+            pass
+
+    # Копии обязательных файлов профиля с правами 0600
+    cli_real = real_home / ".gemini" / "antigravity-cli"
+    cli_target = gemini_dir / "antigravity-cli"
+    cli_target.mkdir(parents=True, exist_ok=True)
+    for fname in ("installation_id", "jetski_state.pbtxt", "settings.json"):
+        src_file = cli_real / fname
+        if src_file.is_file():
+            try:
+                shutil.copy2(src_file, cli_target / fname)
+            except OSError:
+                pass
+
+    return home
+
+
 def _launch_env() -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
     Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) выставляет сам лончер
     agy-cli.sh — мост их не дублирует и не переопределяет.
+    Устанавливается флаг BRIDGE_ZERO_CANON=1 для подавления канонических хуков.
+    Защита headless (DEC-01): BROWSER=/usr/bin/false и заглушка open в PATH.
     """
     env = os.environ.copy()
     env.pop("AGY_BRIDGE_KEY", None)
+    env["BRIDGE_ZERO_CANON"] = "1"
+    env["BROWSER"] = "/usr/bin/false"
+    headless_dir = os.path.expanduser("~/.config/agy-launch/headless-bin")
+    if os.path.isdir(headless_dir):
+        env["PATH"] = f"{headless_dir}:{env.get('PATH', '')}"
     return env
 
 
