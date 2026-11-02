@@ -101,6 +101,7 @@ from core.backend_adapter import (  # noqa: E402
     Transcript,
     TranscriptItem,
     TurnContext,
+    PreSendTransientError,
     ToolCall,
     build_catalog,
     is_bridge_secret_name,
@@ -115,6 +116,8 @@ from core.resilience import (  # noqa: E402
 from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
+    KeepaliveController,
+    PreSendRetry,
 )
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
@@ -155,6 +158,8 @@ from core.watchdog import (  # noqa: E402,F401
     DEFAULT_SAFETY_CAP_S,
     AdaptiveTimeoutController,
     ProcessWatchdog,
+    WatchdogMetrics,
+    positive_env,
 )
 
 
@@ -377,15 +382,30 @@ WORKSPACE = ROOT / "workspace"
 MAX_CONCURRENT = int(_bridge_env("MAX_CONCURRENT", "128"))
 QUEUE_TIMEOUT_S = float(_bridge_env("QUEUE_TIMEOUT_S", "900.0"))
 TIMEOUT_S = float(_bridge_env("TIMEOUT_S", "1800.0"))
-KEEPALIVE_S = float(_bridge_env("KEEPALIVE_S", "10.0"))
+KEEPALIVE_S = KeepaliveController().effective_interval()
 IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
-SAFETY_CAP_S = float(
-    os.environ.get("DROID_DSH_BRIDGE_SAFETY_CAP_S", str(int(DEFAULT_SAFETY_CAP_S)))
+SAFETY_CAP_S = positive_env(
+    "BRIDGE_SAFETY_CAP_S",
+    positive_env("DROID_DSH_BRIDGE_SAFETY_CAP_S", DEFAULT_SAFETY_CAP_S),
 )
 # RW-009 в живом ходе: запись живого куска клиенту ограничена этим таймаутом (а не 300с
 # socket-таймаута соединения) — зависший/нечитающий клиент не держит T/L (см. sse_writer в
 # _serve_sse и add_content/add_reasoning в Handler._execute).
-LIVE_WRITE_TIMEOUT_S = float(os.environ.get("DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S", "3"))
+def parse_live_write_timeout(default: float = 30.0) -> float:
+    """Читает таймаут записи, возвращая default при неверном значении ENV."""
+    raw = os.environ.get("DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S", "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+        if not (1.0 <= val <= 300.0):
+            return default
+        return val
+    except (ValueError, TypeError):
+        return default
+
+
+LIVE_WRITE_TIMEOUT_S: float = parse_live_write_timeout(30.0)
 # Таймаут первого события stream-json от `droid exec` (с момента старта процесса).
 FIRST_TOKEN_TIMEOUT_S = float(
     os.environ.get("DROID_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "90")
@@ -1402,6 +1422,7 @@ class _HandlerSink(ResponseSink):
     """Запись ответа passthrough-шва в сокет клиента; сбой записи — ClientGone."""
 
     _DROP = frozenset({"server", "date"})
+    accepts_presend_errors = True
 
     def __init__(
         self,
@@ -1417,9 +1438,13 @@ class _HandlerSink(ResponseSink):
                 {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
             )
         self.status = 0
+        self.committed = False
+        self.presend_deadline: float | None = None
         self._client_gone_flag = False
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
+        # Даже неудачная частичная запись заголовков закрывает право на повтор.
+        self.committed = True
         self.status = int(status)
         try:
             self._handler.send_response(int(status))
@@ -1441,6 +1466,8 @@ class _HandlerSink(ResponseSink):
         return self._client_gone_flag or _client_gone(self._handler.connection)
 
     def write(self, data: bytes) -> None:
+        if data:
+            self.committed = True
         try:
             self._handler.wfile.write(data)
             self._handler.wfile.flush()
@@ -1578,9 +1605,10 @@ def _clean_err(text: str) -> str:
 
 
 def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
-    """Остановка моста: прекратить приём, interrupt активных, закрыть детей параллельно.
+    """Закрыть детей параллельно после drain либо немедленно без drain.
 
-    Общий грейс (4,5 с) меньше exit timeout launchd (5 с). Принудительно
+    При включённом drain ожиданием активных ходов управляет LIFECYCLE;
+    общий грейс здесь относится только к последующей очистке. Принудительно
     убиваются ТОЛЬКО собственные процессные группы из реестра детей — чужие PID
     никогда. Возвращает число закрывавшихся детей.
     """
@@ -1639,8 +1667,8 @@ def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
 
 
 def _shutdown_one(proc: "RpcProcess", close_kwargs: dict) -> None:
-    """Остановка одного ребёнка: interrupt (не блокируется записью), затем закрытие."""
-    if proc.busy:
+    """Закрыть ребёнка; немедленный interrupt нужен только без drain."""
+    if proc.busy and not _is_drain_enabled():
         proc.interrupt_quietly()
     proc.close(**close_kwargs)
 
@@ -1907,6 +1935,17 @@ def _atomic_write(path: Path, data: bytes) -> None:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+
+_ACTIVE_WRITER_LOCK: Any = None
+
+
+def release_writer_lock() -> None:
+    """Освобождает блокировку реестра для нового экземпляра во время drain."""
+    global _ACTIVE_WRITER_LOCK
+    writer_lock, _ACTIVE_WRITER_LOCK = _ACTIVE_WRITER_LOCK, None
+    if writer_lock is not None:
+        writer_lock.close()
 
 
 def acquire_writer_lock() -> Any:
@@ -4694,6 +4733,23 @@ class Handler(BaseHTTPRequestHandler):
     _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
     _trace: RequestTrace | None = None
     _response_status = 0
+    _downstream_committed = False
+
+    def end_headers(self) -> None:
+        self._downstream_committed = True
+        if LIFECYCLE.is_draining():
+            self.close_connection = True
+            self.send_header("Connection", "close")
+        super().end_headers()
+
+    def handle_one_request(self) -> None:
+        self._downstream_committed = False
+        try:
+            super().handle_one_request()
+        finally:
+            # Drain мог начаться после отправки заголовков активного ответа.
+            if LIFECYCLE.is_draining():
+                self.close_connection = True
 
     def _trace_log_fields(self) -> str:
         """Безопасные поля корреляции для журнала маршрута."""
@@ -4734,6 +4790,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise
 
     def _emit(self, data: str) -> bool:
+        if data:
+            self._downstream_committed = True
         try:
             self.wfile.write(data.encode("utf-8"))
             self.wfile.flush()
@@ -4958,7 +5016,7 @@ class Handler(BaseHTTPRequestHandler):
         usage = {}
         result_ev = {}
         last_ka = time.monotonic()
-        deadline = time.monotonic() + TIMEOUT_S
+        deadline = time.monotonic() + min(TIMEOUT_S, SAFETY_CAP_S)
         cur_mid = [
             None
         ]  # mid последнего content-куска в pieces (разделитель "\n\n" между сообщениями)
@@ -4969,7 +5027,10 @@ class Handler(BaseHTTPRequestHandler):
             "BRIDGE_ADAPTIVE_WATCHDOG_ENABLED", "true"
         ).strip().lower() in ("1", "true", "yes", "on")
         proc_watchdog = ProcessWatchdog(log_fn=_log) if watchdog_enabled else None
+        io_policy = AdaptiveTimeoutController(watchdog_enabled=False)
         watchdog_seeded_pid = [0]
+        watchdog_metrics: WatchdogMetrics | None = None
+        next_watchdog_sample = 0.0
 
         def state(name: str, rc: int, err: str = "") -> dict:
             return {
@@ -5084,6 +5145,8 @@ class Handler(BaseHTTPRequestHandler):
                 and watchdog_seeded_pid[0] != rproc.pid
             ):
                 watchdog_seeded_pid[0] = rproc.pid
+                watchdog_metrics = None
+                next_watchdog_sample = 0.0
                 if proc_watchdog is not None:
                     proc_watchdog.seed(rproc.pid)
                 if managed_turn is not None:
@@ -5107,14 +5170,35 @@ class Handler(BaseHTTPRequestHandler):
                 and run.last_progress
                 and time.monotonic() - run.last_progress > SILENCE_WATCHDOG_S
             ):
+                sampled_now = False
                 if (
-                    SILENCE_WATCHDOG_S >= 10.0
-                    and proc_watchdog is not None
+                    proc_watchdog is not None
                     and rproc is not None
                     and getattr(rproc, "pid", 0)
-                    and proc_watchdog.sample(rproc.pid).has_progress
+                    and (
+                        watchdog_metrics is None
+                        or time.monotonic() >= next_watchdog_sample
+                    )
                 ):
-                    run.last_progress = time.monotonic()
+                    watchdog_metrics = proc_watchdog.sample(rproc.pid)
+                    sampled_now = True
+                    next_watchdog_sample = (
+                        time.monotonic() + io_policy.watchdog_interval_s
+                    )
+                metrics = watchdog_metrics
+                if (
+                    SILENCE_WATCHDOG_S >= 10.0
+                    and metrics is not None
+                    and metrics.has_progress
+                ):
+                    # Положительный срез продвигает clock ровно один раз; кэш
+                    # между тиками наблюдения не создаёт новых событий прогресса.
+                    if sampled_now:
+                        run.last_progress = time.monotonic()
+                elif SILENCE_WATCHDOG_S >= 10.0 and io_policy.has_io_grace(
+                    metrics, time.monotonic() - run.last_progress
+                ):
+                    pass  # I/O-отсрочка не подменяет последнее событие backend.
                 else:
                     # Тишина: сбрасывают только события ТЕКУЩЕГО хода (не keepalive/чужие).
                     return state(
@@ -5340,7 +5424,7 @@ class Handler(BaseHTTPRequestHandler):
     def _run_once(
         self, ctx: dict, keepalive, sse_writer: "StreamSink | None" = None
     ) -> dict:
-        """Ход запроса: порядок ресурсов L -> P -> T, до 3 попыток при транзиентном сбое.
+        """Один CLI-ход запроса с порядком ресурсов L -> P -> T без скрытого переигрывания.
 
         Без sse_writer — прежнее поведение: вывод копится в out["events"] и уходит клиенту
         отдельным этапом после освобождения T/L (RW-009). С sse_writer (живой SSE-ход)
@@ -5429,7 +5513,9 @@ class Handler(BaseHTTPRequestHandler):
             rpc = ctx["rpc"]
             cfg = _config_digest(rpc["system"], work_dir)
             keep_tools = ["Read"] if images else []
-            for attempt in (1, 2, 3):
+            # Ровно один CLI-ход: после запуска процесса отсутствие текста не доказывает
+            # отсутствие побочных эффектов. HTTP pre-send retry идёт отдельно.
+            for _attempt in (1,):
                 plan = _make_plan(ctx, chat, cfg, work_dir, keep_tools)
                 plan["fwd_env"] = ctx.get("fwd_env")
                 holds_slot = False
@@ -5617,23 +5703,9 @@ class Handler(BaseHTTPRequestHandler):
                 open_attempt = None
                 if ok:
                     break
-                # Без sse_writer контент до terminal не отдаётся, delivered здесь — страховка.
-                # С sse_writer часть контента могла уже уйти клиенту ЖИВЬЁМ до сбоя (run._live_mids
-                # непусто) — тихий повтор показал бы его клиенту повторно, поэтому тоже delivered.
-                delivered = bool(
-                    out.get("text") or out.get("tool_calls") or run._live_mids
-                )
-                if out["state"] != "done" or delivered or attempt == 3:
-                    break
-                # Транзиентный сбой (rc!=0, клиенту ничего не выдано): повтор невидим;
-                # он строится заново из истории запроса, а не повтором user в старую сессию.
-                _log(
-                    f"transient failure rc={out['rc']} err={_err_summary(out.get('err'), 120)!r}, "
-                    f"retry {attempt} {tag}"
-                )
-                # Сбой egress не должен сохранять SKIP-префлайт: повтор идёт с полным префлайтом.
+                # Неудачный CLI-ход отменяет кэш пропуска preflight для следующего запроса.
                 _last_ok[0] = 0.0
-                _sleep(2 * attempt)
+                break
             ok_done = bool(
                 run is not None
                 and run.ok
@@ -5910,7 +5982,7 @@ class Handler(BaseHTTPRequestHandler):
         for frame in TURN_MANAGER.iter_sse_stream(
             turn,
             from_seq=from_seq,
-            keepalive_interval_s=min(10.0, KEEPALIVE_S),
+            keepalive_interval_s=KEEPALIVE_S,
             client_gone_fn=lambda: _client_gone(self.connection),
         ):
             if not self._emit(frame):
@@ -6649,7 +6721,7 @@ class Handler(BaseHTTPRequestHandler):
                                 if _is_watchdog_enabled()
                                 else TIMEOUT_S
                             ),
-                            safety_cap_s=TIMEOUT_S,
+                            safety_cap_s=min(TIMEOUT_S, SAFETY_CAP_S),
                         )
                     )
                 except PermissionError:
@@ -7101,9 +7173,56 @@ class Handler(BaseHTTPRequestHandler):
             headers.update(trace_headers)
         sink = _HandlerSink(self, extra_headers=trace_headers)
         try:
-            adapter.handle(
-                path=self.path, raw_body=raw, request=req, headers=headers, sink=sink
+            retry = PreSendRetry(
+                committed=lambda: sink.committed or self._downstream_committed,
+                cancelled=lambda: sink.client_gone() or LIFECYCLE.is_draining(),
             )
+
+            def attempt() -> None:
+                sink.presend_deadline = retry.deadline
+                adapter.handle(
+                    path=self.path,
+                    raw_body=raw,
+                    request=req,
+                    headers=headers,
+                    sink=sink,
+                )
+
+            try:
+                retry.run(attempt)
+            except PreSendTransientError as exc:
+                if sink.committed or self._downstream_committed:
+                    raise
+                status = exc.status_code or (
+                    504 if isinstance(exc.__cause__, TimeoutError) else 502
+                )
+                timeout = status == 504
+                body = exc.response_body
+                headers = list(exc.response_headers)
+                if body is None:
+                    body = json.dumps(
+                        {
+                            "error": {
+                                "message": "upstream did not respond in time"
+                                if timeout
+                                else "upstream is unavailable",
+                                "type": "upstream_timeout"
+                                if timeout
+                                else "upstream_unavailable",
+                                "code": status,
+                            }
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    headers = [
+                        ("Content-Type", "application/json; charset=utf-8"),
+                        ("Content-Length", str(len(body))),
+                    ]
+                try:
+                    sink.start(status, headers)
+                    sink.write(body)
+                except ClientGone:
+                    sink._client_gone_flag = True
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
@@ -7280,7 +7399,7 @@ class Handler(BaseHTTPRequestHandler):
             for frame in TURN_MANAGER.iter_sse_stream(
                 managed_turn,
                 from_seq=from_seq,
-                keepalive_interval_s=min(10.0, KEEPALIVE_S),
+                keepalive_interval_s=KEEPALIVE_S,
                 client_gone_fn=lambda: _client_gone(self.connection),
             ):
                 if not self._emit(frame):
@@ -7309,13 +7428,20 @@ class Handler(BaseHTTPRequestHandler):
         live_sent = [
             0
         ]  # RW-211: байты content/reasoning, реально отданные этим запросом
+        downstream_sent = [0]  # все SSE-байты, без смешивания с backend-текстом
+        last_downstream = [time.monotonic()]
         reasoning_live_chars = 0
         sse_lock = threading.RLock()
         sink_closed = threading.Event()
 
         def emit(frame: str) -> bool:
             with sse_lock:
-                return self._emit(frame)
+                ok = self._emit(frame)
+                # Любой кадр (включая role/heartbeat) считается downstream-выдачей.
+                if ok:
+                    downstream_sent[0] += len(frame.encode("utf-8"))
+                    last_downstream[0] = time.monotonic()
+                return ok
 
         def stream_error_frame(message: str) -> str:
             # RW-202/RW-211: fail-close кадр chat.completion.chunk через core.stream_framing
@@ -7335,6 +7461,8 @@ class Handler(BaseHTTPRequestHandler):
             with sse_lock:
                 if sink_closed.is_set():
                     return False
+                if time.monotonic() - last_downstream[0] < KEEPALIVE_S:
+                    return True
                 return write_keepalive()
 
         def write_keepalive() -> bool:
@@ -7344,7 +7472,14 @@ class Handler(BaseHTTPRequestHandler):
             prev_timeout = self.connection.gettimeout()
             try:
                 self.connection.settimeout(LIVE_WRITE_TIMEOUT_S)
-                return emit(": keepalive\n\n")
+                return emit(
+                    KeepaliveController.sse_comment()
+                    + KeepaliveController.sse_data_chunk(
+                        model=shown_model,
+                        completion_id=completion_id,
+                        created=created,
+                    )
+                )
             finally:
                 self.connection.settimeout(prev_timeout)
 
@@ -7390,6 +7525,26 @@ class Handler(BaseHTTPRequestHandler):
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
             else:
                 return
+
+        def heartbeat_loop() -> None:
+            while True:
+                with sse_lock:
+                    delay = max(
+                        0.0, KEEPALIVE_S - (time.monotonic() - last_downstream[0])
+                    )
+                if sink_closed.wait(delay):
+                    return
+                if not keepalive():
+                    if not sink_closed.is_set():
+                        self._client_write_dead = True
+                    return
+
+        heartbeat_worker = threading.Thread(
+            target=heartbeat_loop,
+            name="sse-keepalive",
+            daemon=True,
+        )
+        heartbeat_worker.start()
         try:
             try:
                 out = self._dispatch(ctx, keepalive, sse_writer)
@@ -7398,6 +7553,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Даже consumer, переживший join(5), больше не может дописать кадр.
                 with sse_lock:
                     sink_closed.set()
+                heartbeat_worker.join(timeout=LIVE_WRITE_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             if self._client_write_dead:
                 _log(
@@ -7406,8 +7562,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 lease.record_discard("client_disconnected")
                 return
-            if not live_sent[0]:
-                raise  # живых байт не было: прежнее поведение (сбой наружу; lease зафиксирует сбой)
+            if not downstream_sent[0]:
+                raise
             _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
             lease.record_failure(exc)
             emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__))
@@ -7514,18 +7670,46 @@ class Handler(BaseHTTPRequestHandler):
 BridgeHandler = Handler
 
 
+def is_so_reuseport_enabled() -> bool:
+    """Проверяет включение совместного bind через BRIDGE_SO_REUSEPORT_ENABLED."""
+    return os.environ.get("BRIDGE_SO_REUSEPORT_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 class Server(ThreadingHTTPServer):
     """HTTP-сервер с семафором числа соединений на уровне приёма (C-11)."""
 
-    daemon_threads = True
+    # ThreadingMixIn отслеживает non-daemon потоки: выход main не обрывает SSE.
+    daemon_threads = False
     request_queue_size = 64
     allow_reuse_address = True
 
-    def __init__(self, *args: Any, **kwargs: Any):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._listener_close_lock = threading.Lock()
+        self._listener_closed = False
         super().__init__(*args, **kwargs)
         self._conn_sem = threading.BoundedSemaphore(
             int(FLEET["admission"]["max_http_connections"])
         )
+
+    def server_bind(self) -> None:
+        """Разрешает совместный bind до привязки сокета, если ОС поддерживает его."""
+        if hasattr(socket, "SO_REUSEPORT") and is_so_reuseport_enabled():
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+        super().server_bind()
+
+    def graceful_close_listener(self) -> None:
+        """Идемпотентно закрывает только listener, сохраняя принятые соединения."""
+        with self._listener_close_lock:
+            if self._listener_closed:
+                return
+            self.socket.close()
+            self._listener_closed = True
+            release_writer_lock()
 
     def _send_raw_503(self, request: socket.socket) -> None:
         body = json.dumps(
@@ -7595,7 +7779,7 @@ def _sweep_workspace(cutoff_s: float = 3600.0) -> None:
 
 
 def main() -> None:
-    global _budget
+    global _budget, _ACTIVE_WRITER_LOCK
     if not AUTH_KEY:
         sys.stderr.write(
             "BRIDGE_KEY (or DROID_DSH_BRIDGE_KEY) is required; refusing to start\n"
@@ -7604,12 +7788,12 @@ def main() -> None:
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
     try:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
-        writer_lock = acquire_writer_lock()
+        _ACTIVE_WRITER_LOCK = acquire_writer_lock()
     except OSError as exc:
         # Каталог состояния чужой/недоступен/не 0700: старт отклоняется понятным сообщением, а не трассировкой.
         sys.stderr.write(f"state directory is not usable ({exc}); refusing to start\n")
         raise SystemExit(1)
-    if writer_lock is None:
+    if _ACTIVE_WRITER_LOCK is None:
         sys.stderr.write(
             "another bridge instance holds the state writer lock; refusing to start\n"
         )
