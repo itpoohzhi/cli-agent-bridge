@@ -7,3 +7,6 @@ NNNN | short-name | Status | дата | автор | теги
 0003 | muse-serve-approval-allowall | Accepted | 2026-10-15 | [agent] | muse, serve, approval, security, dsh
 0004 | muse-live-streaming-all-steps | Accepted | 2026-10-17 | [agent] | muse, streaming, sse, reasoning, dsh, ui
 0012 | muse-native-live-streaming-and-reasoning-extraction | Accepted | 2026-10-30 | [agent] | muse, streaming, reasoning, msp, universal
+0019 | dsh-user-prompt-anchor-preservation | Accepted | 2026-11-01 | [architect: gpt-6.1-sol] | agy-bridge, head-pruning, dsh, synthetic-reminders, prompt-integrity
+0020 | universal-backend-circuit-breaker-bulkhead-and-retries | Proposed | 2026-11-02 | [architect: gpt-6.1-sol] | resilience, circuit-breaker, bulkhead, backoff, jitter, core, zero-hardcode
+0021 | bridges-and-transport-speedup-resilience | Accepted | 2026-11-02 | [architect: gpt-6.1-sol] | speedup, transport, agy-bridge, opencode-zen-bridge, idempotency, timeouts, preflight

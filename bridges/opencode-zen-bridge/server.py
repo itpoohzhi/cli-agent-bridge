@@ -289,9 +289,13 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
 
 import zen_catalog as zc  # noqa: E402
 from core.tool_emulation import (  # noqa: E402
-    DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH,
-    build_tool_schemas, sanitize_tool_calls_list,
+    DEFAULT_MAX_PARALLEL_CALLS,
+    DEFAULT_MAX_PARALLEL_DEPTH,
+    ToolCallParser,
+    build_tool_schemas,
+    sanitize_tool_calls_list,
 )
+
 
 def _positive_int(raw: str | None, default: int) -> int:
     """Положительное целое из env-строки; нечисловое/неположительное значение -> default."""
@@ -301,23 +305,164 @@ def _positive_int(raw: str | None, default: int) -> int:
         return default
     return value if value > 0 else default
 
-BRIDGE_SANITIZE_TOOL_CALLS = os.environ.get("BRIDGE_SANITIZE_TOOL_CALLS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+BRIDGE_SANITIZE_TOOL_CALLS = os.environ.get(
+    "BRIDGE_SANITIZE_TOOL_CALLS", "1"
+).strip().lower() not in ("0", "false", "no", "off")
 _SANITIZE_LIMITS = {
-    "max_parallel_calls": _positive_int(os.environ.get("BRIDGE_MAX_PARALLEL_CALLS"), DEFAULT_MAX_PARALLEL_CALLS),
-    "max_parallel_depth": _positive_int(os.environ.get("BRIDGE_MAX_PARALLEL_DEPTH"), DEFAULT_MAX_PARALLEL_DEPTH),
+    "max_parallel_calls": _positive_int(
+        os.environ.get("BRIDGE_MAX_PARALLEL_CALLS"), DEFAULT_MAX_PARALLEL_CALLS
+    ),
+    "max_parallel_depth": _positive_int(
+        os.environ.get("BRIDGE_MAX_PARALLEL_DEPTH"), DEFAULT_MAX_PARALLEL_DEPTH
+    ),
 }
 
-def _normalize_tool_calls(calls: list[dict[str, Any]], schemas: dict[str, Any]) -> list[dict[str, Any]]:
+
+def _normalize_tool_calls(
+    calls: list[dict[str, Any]], schemas: dict[str, Any]
+) -> list[dict[str, Any]]:
     """Применить общий санитизатор на единой границе всех маршрутов ответа."""
     if not BRIDGE_SANITIZE_TOOL_CALLS:
         return calls
     return sanitize_tool_calls_list(calls, schemas, **_SANITIZE_LIMITS)
+
 
 HOST = os.environ.get("OPENCODE_ZEN_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _positive_int(os.environ.get("OPENCODE_ZEN_BRIDGE_PORT"), 9883)
 AUTH_KEY = os.environ.get("OPENCODE_ZEN_BRIDGE_KEY", "").strip()
 
 TIMEOUT_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_TIMEOUT_S", "1800"))
+
+
+def _zen_positive_float(name: str, default: float) -> float:
+    """Нечисловое, неконечное и неположительное значение заменяется default."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+        return value if 0 < value < float("inf") else default
+    except ValueError:
+        return default
+
+
+def _zen_execution_timeout(model: str, prompt: str) -> float:
+    """Сужение execution deadline только для явно выбранных моделей и большого UTF-8 входа."""
+    models = {
+        "deepseek-v4.1-flash-free",
+        *filter(
+            None, re.split(r"[,\s]+", os.environ.get("BRIDGE_ZEN_TIMEOUT_MODELS", ""))
+        ),
+    }
+    threshold = _positive_int(os.environ.get("BRIDGE_ZEN_LARGE_PROMPT_BYTES"), 8192)
+    if model in models and len(prompt.encode("utf-8")) > threshold:
+        return min(TIMEOUT_S, _zen_positive_float("BRIDGE_ZEN_TIMEOUT_S", 25.0))
+    return TIMEOUT_S
+
+
+def _zen_error(status: int) -> dict[str, Any]:
+    """Согласованный контракт ошибок zen, одинаковый для JSON и terminal SSE."""
+    message, kind = (
+        ("Gateway Timeout in zen-bridge", "timeout_error")
+        if status == 504
+        else ("Empty upstream response", "bad_gateway")
+    )
+    return {"error": {"message": message, "type": kind, "code": status}}
+
+
+def _zen_short_response(
+    prompt: str, content: str, calls: list, bypass: bool = False
+) -> bool:
+    """Малый вход и валидный tool-only ответ не считаются усечённым контентом."""
+    valid_calls = any(
+        isinstance(call, dict)
+        and isinstance(call.get("function"), dict)
+        and call["function"].get("name")
+        and isinstance(call["function"].get("arguments"), str)
+        for call in calls
+    )
+    if (
+        bypass
+        or valid_calls
+        or len(prompt.encode("utf-8"))
+        < _positive_int(os.environ.get("BRIDGE_ZEN_SHORT_PROMPT_BYTES"), 64)
+    ):
+        return False
+    return len(content.encode("utf-8")) < _positive_int(
+        os.environ.get("BRIDGE_ZEN_MIN_CONTENT_BYTES"), 32
+    )
+
+
+def _zen_probe_request(req: dict[str, Any]) -> bool:
+    """Одиночные короткие системные запросы probe/bench помечаются флагом."""
+    messages = req.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    # Если перед user идёт system (напр. длинная преамбула), проверяем первое не-system
+    user_msg = next((m for m in messages if isinstance(m, dict) and m.get("role") == "user"), None)
+    if not user_msg:
+        return False
+    text = str(user_msg.get("content", "")).strip().lower()
+    return text in ("ping", "pong", "health") or text.startswith("reply exactly pong")
+
+
+class _ZenSseFilter:
+    """Инспекция штатных SSE-кадров без накопления текста; ошибка вместо ложного stop."""
+
+    def __init__(self, inner: Any, prompt: str, bypass: bool) -> None:
+        self.inner = inner
+        self.prompt = prompt
+        self.bypass = bypass
+        self.content_bytes = 0
+        self.has_tools = False
+        self.failed = False
+        self.terminated = False
+
+    def write(self, data: bytes) -> int:
+        if self.terminated:
+            return len(data)
+        if not data.startswith(b"data:"):
+            return self.inner.write(data)
+        for raw in data.split(b"\n\n"):
+            if not raw:
+                continue
+            frame = raw + b"\n\n"
+            payload = raw[5:].strip() if raw.startswith(b"data:") else b""
+            try:
+                obj = json.loads(payload) if payload != b"[DONE]" else None
+            except ValueError:
+                obj = None
+            terminal = payload == b"[DONE]"
+            if isinstance(obj, dict):
+                self.failed = self.failed or bool(obj.get("error"))
+                for choice in obj.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        self.content_bytes += len(content.encode("utf-8"))
+                    self.has_tools = self.has_tools or bool(delta.get("tool_calls"))
+                    terminal = terminal or bool(choice.get("finish_reason"))
+            if (
+                terminal
+                and not self.failed
+                and not self.has_tools
+                and not self.bypass
+                and len(self.prompt.encode("utf-8"))
+                >= _positive_int(os.environ.get("BRIDGE_ZEN_SHORT_PROMPT_BYTES"), 64)
+                and self.content_bytes
+                < _positive_int(os.environ.get("BRIDGE_ZEN_MIN_CONTENT_BYTES"), 32)
+            ):
+                self.inner.write(
+                    (
+                        "data: " + json.dumps(_zen_error(502)) + "\n\ndata: [DONE]\n\n"
+                    ).encode("utf-8")
+                )
+                self.inner.flush()
+                self.failed = self.terminated = True
+                break
+            self.inner.write(frame)
+        return len(data)
+
+    def flush(self) -> None:
+        self.inner.flush()
 # Пауза stdout `opencode run` на большом промпте может быть долгой; пока она длится, в SSE уходит
 # пустая дельта раз в KEEPALIVE_INTERVAL_S (0 — выключено), иначе клиент рвёт «молчащий» стрим.
 KEEPALIVE_INTERVAL_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_KEEPALIVE_S", "15.0"))
@@ -714,7 +859,9 @@ def _fit_value(value: Any, schema: Any) -> tuple[bool, Any]:
     return True, value
 
 
-def _fit_args(target: str, args: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any] | None:
+def _fit_args(
+    target: str, args: dict[str, Any], schema: dict[str, Any]
+) -> dict[str, Any] | None:
     """Аргументы встроенного инструмента -> аргументы DSH-инструмента `target` или None.
 
     Верхний уровень: ключи переименовываются по NATIVE_ARG_ALIASES, лишние
@@ -738,10 +885,15 @@ def _fit_args(target: str, args: dict[str, Any], schema: dict[str, Any]) -> dict
         mapped[key] = value
     required = _list_or_empty(schema.get("required"))
     if "description" in required and "description" not in mapped:
-        mapped["description"] = f"{target}: {str(mapped.get('command') or '')[:80]}".strip()
+        mapped["description"] = (
+            f"{target}: {str(mapped.get('command') or '')[:80]}".strip()
+        )
     missing = [r for r in required if r not in mapped]
-    if (len(missing) == 1 and len(leftovers) == 1
-            and (props.get(missing[0]) or {}).get("type") in ("string", None)):
+    if (
+        len(missing) == 1
+        and len(leftovers) == 1
+        and (props.get(missing[0]) or {}).get("type") in ("string", None)
+    ):
         mapped[missing[0]] = leftovers[0]
         missing = []
     if missing:
@@ -761,7 +913,9 @@ def _pick_target(tool: str, schemas: dict[str, dict[str, Any]]) -> str | None:
     return None
 
 
-def _native_to_tool_calls(tool: Any, args: Any, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _native_to_tool_calls(
+    tool: Any, args: Any, tools: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """Вызов встроенного инструмента opencode -> список {"name","arguments"} DSH.
 
     Пустой список — у инструмента нет DSH-двойника в текущем запросе (или
@@ -774,7 +928,9 @@ def _native_to_tool_calls(tool: Any, args: Any, tools: list[dict[str, Any]]) -> 
     if low in ("list", "ls") and tool not in schemas:
         path = str(args.get("path") or ".")
         if "bash" in schemas:
-            fitted = _fit_args("bash", {"command": f"ls -la {shlex.quote(path)}"}, schemas["bash"])
+            fitted = _fit_args(
+                "bash", {"command": f"ls -la {shlex.quote(path)}"}, schemas["bash"]
+            )
             if fitted is not None:
                 return [{"name": "bash", "arguments": fitted}]
         if "glob" in schemas:
@@ -791,7 +947,10 @@ def _native_to_tool_calls(tool: Any, args: Any, tools: list[dict[str, Any]]) -> 
         for edit in edits:
             if not isinstance(edit, dict):
                 return []
-            merged = {"filePath": args.get("filePath"), **{k: v for k, v in edit.items() if v is not None}}
+            merged = {
+                "filePath": args.get("filePath"),
+                **{k: v for k, v in edit.items() if v is not None},
+            }
             fitted = _fit_args(target, merged, schemas[target])
             if fitted is None:
                 return []
@@ -804,14 +963,21 @@ def _native_to_tool_calls(tool: Any, args: Any, tools: list[dict[str, Any]]) -> 
     return [] if fitted is None else [{"name": target, "arguments": fitted}]
 
 
-def _native_to_tool_call(tool: Any, args: Any, tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _native_to_tool_call(
+    tool: Any, args: Any, tools: list[dict[str, Any]]
+) -> dict[str, Any] | None:
     """Совместимость: первый DSH-вызов для встроенного инструмента или None."""
     calls = _native_to_tool_calls(tool, args, tools)
     return calls[0] if calls else None
 
 
-def _unavailable_tools_prompt(prompt: str, partial_text: str, unavailable: list[str],
-                              tools: list[dict[str, Any]], model_id: str = "") -> str:
+def _unavailable_tools_prompt(
+    prompt: str,
+    partial_text: str,
+    unavailable: list[str],
+    tools: list[dict[str, Any]],
+    model_id: str = "",
+) -> str:
     """Промпт повтора: встроенный инструмент без DSH-двойника отклонён, продолжай DSH-инструментами."""
     open_tag, close_tag = _tool_tags_for_model(model_id)
     names = ", ".join(_tool_schemas(tools)) or "(none)"
@@ -969,7 +1135,9 @@ def _tool_name_list(tools: Any) -> list[str]:
             if item:
                 names.append(item)
         elif isinstance(item, dict):
-            fn = item.get("function") if isinstance(item.get("function"), dict) else item
+            fn = (
+                item.get("function") if isinstance(item.get("function"), dict) else item
+            )
             name = fn.get("name") if isinstance(fn, dict) else None
             if isinstance(name, str) and name:
                 names.append(name)
@@ -1070,10 +1238,17 @@ def _no_tools_overridden(body: str, thought: str, names: Iterable[str]) -> bool:
     )
 
 
-def _detect_incomplete_tool_step_signal(text: str, reasoning: str, tools: Any,
-                                        had_mid_stream_error: bool = False, output_tokens: int = 0,
-                                        reasoning_tokens: int = 0, *, tool_choice: Any = None,
-                                        had_error: bool = False) -> int:
+def _detect_incomplete_tool_step_signal(
+    text: str,
+    reasoning: str,
+    tools: Any,
+    had_mid_stream_error: bool = False,
+    output_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    *,
+    tool_choice: Any = None,
+    had_error: bool = False,
+) -> int:
     """Номер сработавшего признака оборванного шага (1..5) или 0.
 
     1 — транзиентная ошибка посреди ответа (или принудительный tool_choice без вызова); 2 — маркер
@@ -1089,60 +1264,113 @@ def _detect_incomplete_tool_step_signal(text: str, reasoning: str, tools: Any,
         return 1
     body = text.strip()
     thought = reasoning.strip()
-    if (had_mid_stream_error or had_error) and (body or thought) and len(body) <= INCOMPLETE_STEP_MAX_TEXT:
+    if (
+        (had_mid_stream_error or had_error)
+        and (body or thought)
+        and len(body) <= INCOMPLETE_STEP_MAX_TEXT
+    ):
         return 1
-    if (_INTERRUPTED_RE.search(body) or _has_interrupted_marker(body)
-            or _INTERRUPTED_RE.search(thought) or _has_interrupted_marker(thought)
-            or _RAW_CALL_RE.search(text)):
+    if (
+        _INTERRUPTED_RE.search(body)
+        or _has_interrupted_marker(body)
+        or _INTERRUPTED_RE.search(thought)
+        or _has_interrupted_marker(thought)
+        or _RAW_CALL_RE.search(text)
+    ):
         return 2
     if len(body) > INCOMPLETE_STEP_MAX_TEXT:
         return 0
     if _NO_TOOLS_RE.search(thought if thought else body) and not (
-            thought and _no_tools_overridden(body, thought, names)):
+        thought and _no_tools_overridden(body, thought, names)
+    ):
         return 0
-    if (len(body) <= SWALLOWED_MAX_TEXT and output_tokens > 0 and not body.endswith("?") and (body or thought)
-            and _swallowed_tokens(body, output_tokens, reasoning_tokens) >= SWALLOWED_TOKENS_MIN):
+    if (
+        len(body) <= SWALLOWED_MAX_TEXT
+        and output_tokens > 0
+        and not body.endswith("?")
+        and (body or thought)
+        and _swallowed_tokens(body, output_tokens, reasoning_tokens)
+        >= SWALLOWED_TOKENS_MIN
+    ):
         return 3
     if thought and len(body) <= PLAN_MAX_TEXT:
         tail = body[-INCOMPLETE_STEP_TAIL:]
         has_plan = bool(_REASONING_TOOL_PLAN_RE.search(thought)) or (
             _mentions_request_tool(thought, names)
-            and bool(_ACTION_INTENT_RE.search(thought) or _CALL_INTENT_RE.search(thought)))
-        has_promise = not body or (not body.endswith("?") and (
-            bool(_ACTION_INTENT_RE.search(tail)) or _mentions_request_tool(tail, names)))
+            and bool(
+                _ACTION_INTENT_RE.search(thought) or _CALL_INTENT_RE.search(thought)
+            )
+        )
+        has_promise = not body or (
+            not body.endswith("?")
+            and (
+                bool(_ACTION_INTENT_RE.search(tail))
+                or _mentions_request_tool(tail, names)
+            )
+        )
         if has_plan and has_promise:
             return 4
     return 5 if _is_status_preamble(body, names) else 0
 
 
-def _is_incomplete_tool_step(text: str, reasoning: str, tools: Any,
-                             had_mid_stream_error: bool = False, output_tokens: int = 0,
-                             reasoning_tokens: int = 0, *, tool_choice: Any = None,
-                             had_error: bool = False) -> bool:
+def _is_incomplete_tool_step(
+    text: str,
+    reasoning: str,
+    tools: Any,
+    had_mid_stream_error: bool = False,
+    output_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    *,
+    tool_choice: Any = None,
+    had_error: bool = False,
+) -> bool:
     """Шаг без `<tool_call>`/`<tool_invoke>` оборвался или остановился на преамбуле — нужен повтор.
 
     Обёртка над `_detect_incomplete_tool_step_signal`: обычный ответ, в т.ч. «no tools», короткий итог
     и длинный итог, — False. Выключается kill-switch'ем STEP_RECOVERY_ENABLED первой же инструкцией.
     """
-    return bool(_detect_incomplete_tool_step_signal(
-        text, reasoning, tools, had_mid_stream_error, output_tokens, reasoning_tokens,
-        tool_choice=tool_choice, had_error=had_error))
+    return bool(
+        _detect_incomplete_tool_step_signal(
+            text,
+            reasoning,
+            tools,
+            had_mid_stream_error,
+            output_tokens,
+            reasoning_tokens,
+            tool_choice=tool_choice,
+            had_error=had_error,
+        )
+    )
 
 
 def _incomplete_step_signal(*args: Any, **kwargs: Any) -> int:
     """Номер признака для повтора шага (0 — повтор не нужен): решает `_is_incomplete_tool_step`, причина — для лога."""
     if not _is_incomplete_tool_step(*args, **kwargs):
         return 0
-    return _detect_incomplete_tool_step_signal(*args, **kwargs) or 1
+    signal = _detect_incomplete_tool_step_signal(*args, **kwargs) or 1
+    if _optimization_flag("OPENCODE_STRICT_INCOMPLETE_SIGNAL_ENABLED") and signal in (
+        4,
+        5,
+    ):
+        # План/преамбула без факта обрыва сами по себе не оправдывают новый процесс.
+        return 0
+    return signal
 
 
-def _incomplete_tool_step_prompt(prompt: str, partial_text: str, tools: list[dict[str, Any]],
-                                 tool_choice: Any = None, model_id: str = "") -> str:
+def _incomplete_tool_step_prompt(
+    prompt: str,
+    partial_text: str,
+    tools: list[dict[str, Any]],
+    tool_choice: Any = None,
+    model_id: str = "",
+) -> str:
     """Промпт повтора: шаг оборвался/остановился на преамбуле — выдай запланированные вызовы."""
     open_tag, close_tag = _tool_tags_for_model(model_id)
     names = ", ".join(_tool_schemas(tools)) or "(none)"
     parts = [prompt]
-    partial = _strip_broken_tool_blocks(_strip_interrupted(partial_text), quiet=True)[0].strip()
+    partial = _strip_broken_tool_blocks(_strip_interrupted(partial_text), quiet=True)[
+        0
+    ].strip()
     if partial:
         parts.append(f"Assistant: {partial}")
     forced = ""
@@ -1163,16 +1391,26 @@ def _incomplete_tool_step_prompt(prompt: str, partial_text: str, tools: list[dic
     return "\n\n".join(parts)
 
 
-def _tools_tail_reminder(history: str, tools: list[dict[str, Any]], tool_choice: Any = None,
-                         model_id: str = "") -> str:
+def _tools_tail_reminder(
+    history: str,
+    tools: list[dict[str, Any]],
+    tool_choice: Any = None,
+    model_id: str = "",
+) -> str:
     """Хвостовое напоминание протокола для длинной истории (секция протокола — за сотни КБ до конца).
 
     Пусто, если история короткая и без смены модели/нескольких реплик assistant.
     """
     open_tag, close_tag = _tool_tags_for_model(model_id)
-    if not tools or _tool_choice_none(tool_choice) or not (
-            len(history) >= TAIL_REMINDER_MIN_CHARS or "[model changed:" in history
-            or history.count("Assistant:") >= 2):
+    if (
+        not tools
+        or _tool_choice_none(tool_choice)
+        or not (
+            len(history) >= TAIL_REMINDER_MIN_CHARS
+            or "[model changed:" in history
+            or history.count("Assistant:") >= 2
+        )
+    ):
         return ""
     names = ", ".join(_tool_schemas(tools)) or "(none)"
     forced = ""
@@ -1432,9 +1670,14 @@ def _is_free_quota_error(err: object) -> bool:
         message = err.lower()
     else:
         return False
-    return any(marker in message for marker in (
-        "free usage limit reached", "usage limit reached", "provider.free-limit",
-    ))
+    return any(
+        marker in message
+        for marker in (
+            "free usage limit reached",
+            "usage limit reached",
+            "provider.free-limit",
+        )
+    )
 
 
 def _quarantine_proxy(proxy_url: str | None, cooldown_s: float | None = None) -> None:
@@ -1545,7 +1788,8 @@ def _next_standalone_proxy() -> str | None:
             if entry not in _proxy_quarantine_until:
                 return entry
         best_proxy = min(
-            _proxy_pool_entries, key=lambda entry: _proxy_quarantine_until.get(entry, 0.0)
+            _proxy_pool_entries,
+            key=lambda entry: _proxy_quarantine_until.get(entry, 0.0),
         )
         _log(
             f"all {len(_proxy_pool_entries)} proxies quarantined, reusing earliest expiring: {_mask_secrets(best_proxy)}"
@@ -1566,20 +1810,28 @@ def _reset_proxy_pool_for_tests() -> None:
 def _run_env(model_id: str = "") -> dict[str, str]:
     """Окружение CLI с отдельным конфигом маршрута для Go-моделей и свежим каталогом для Zen."""
     env = dict(os.environ)
-    env.setdefault("PATH", "/Users/aazhiry1/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    env.setdefault(
+        "PATH",
+        "/Users/aazhiry1/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    )
     if OPENCODE_CONFIG_CONTENT:
         env["OPENCODE_CONFIG_CONTENT"] = OPENCODE_CONFIG_CONTENT
     if ALLOWED_MODELS.get(model_id, {}).get("base_url"):
         for name in _PROXY_VARS:
             env.pop(name, None)
         env["NO_PROXY"] = "127.0.0.1,localhost"
-        env["OPENCODE_CONFIG"] = str(Path(__file__).resolve().parent / "opencode-go.json")
+        env["OPENCODE_CONFIG"] = str(
+            Path(__file__).resolve().parent / "opencode-go.json"
+        )
     elif _uses_standalone(model_id):
         # THREAT-003: окружение standalone-вызова собирается строго по белому списку, а не из
         # полного os.environ — посторонние секреты родителя в дочерний opencode не попадают.
         # OPENCODE_API_KEY удаляется явно: истёкший ключ даёт 401 (для free Zen-моделей он не нужен).
         env = {k: os.environ[k] for k in _STANDALONE_ENV_ALLOWLIST if k in os.environ}
-        env.setdefault("PATH", "/Users/aazhiry1/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        env.setdefault(
+            "PATH",
+            "/Users/aazhiry1/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        )
         if OPENCODE_CONFIG_CONTENT:
             env["OPENCODE_CONFIG_CONTENT"] = OPENCODE_CONFIG_CONTENT
         # Прокси сохраняется: без него приватный сервер получает RegionError («not available in
@@ -1933,6 +2185,72 @@ def _read_dynamic_config_enabled(path: Path | None = None) -> bool:
 
 
 _dynamic_config_enabled = _read_dynamic_config_enabled
+
+_optimization_config_lock = threading.Lock()
+_optimization_config_cache: tuple[tuple[object, ...], dict[str, object]] | None = None
+
+
+def _optimization_config() -> dict[str, object]:
+    """Снимок существующего GigaRC-конфига; атомарная замена inode тоже замечается."""
+    global _optimization_config_cache
+    target = DYNAMIC_CONFIG_PATH
+    try:
+        stat = target.stat()
+        signature = (
+            str(target),
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+        )
+    except OSError:
+        return {}
+    with _optimization_config_lock:
+        if (
+            _optimization_config_cache is not None
+            and _optimization_config_cache[0] == signature
+        ):
+            return _optimization_config_cache[1]
+        try:
+            data = _as_dict(_loads_object(target.read_text("utf-8")))
+        except (OSError, ValueError):
+            data = {}
+        _optimization_config_cache = (signature, data)
+        return data
+
+
+def _optimization_flag(name: str) -> bool:
+    """Новые режимы включаются только boolean true из снимка, default=false."""
+    return _optimization_config().get(name) is True
+
+
+def _optimization_number(name: str, default: float) -> float:
+    """Положительный конечный параметр readiness из того же снимка."""
+    value = _optimization_config().get(name)
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < value < float("inf")
+    ):
+        return float(value)
+    return default
+
+
+def _emulation_env(env: dict[str, str], emulate_tools: bool) -> dict[str, str]:
+    """Опционально убрать встроенные инструменты, сохранив caller-протокол в prompt.
+
+    Некоторые upstream требуют собственный tools-контракт (см. примечание выше
+    OPENCODE_CONFIG_CONTENT): этот режим выключен до живой проверки совместимости.
+    """
+    if not emulate_tools or not _optimization_flag(
+        "OPENCODE_EMULATION_ONLY_TOOLS_ENABLED"
+    ):
+        return env
+    configured = dict(env)
+    config = _as_dict(_loads_object(configured.get("OPENCODE_CONFIG_CONTENT") or "{}"))
+    config["tools"] = {"*": False}
+    configured["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
+    return configured
 
 
 def _serve_permission_effect() -> str:
@@ -2638,6 +2956,8 @@ class _RequestAttempts:
         )
         self.quota_rotations = 0
         self.total_spawns = 0
+        self.spawn_reasons: list[str] = []
+        self._next_spawn_reason = "initial"
         self.retries = 0
         self.signal = 0
         self.exit_reason = ""
@@ -2647,8 +2967,10 @@ class _RequestAttempts:
         self.aux_budget: _AuxIoBudget = _AuxIoBudget()
         res.retry_budget.on_request()
 
-    def note_spawn(self) -> None:
+    def note_spawn(self, reason: str | None = None) -> None:
         self.total_spawns += 1
+        self.spawn_reasons.append(reason or self._next_spawn_reason)
+        self._next_spawn_reason = "continuation"
 
     def can_spawn(self) -> bool:
         """Можно ли ещё запускать: суммарный потолок спавнов на запрос."""
@@ -2670,7 +2992,10 @@ class _RequestAttempts:
         """Разрешить смену прокси без списания бюджета деградации апстрима."""
         if self.quota_rotations >= self.max_quota_rotations:
             return False
-        if self.total_spawns >= min(MAX_TOTAL_SPAWNS, self.max_total) + self.quota_rotations:
+        if (
+            self.total_spawns
+            >= min(MAX_TOTAL_SPAWNS, self.max_total) + self.quota_rotations
+        ):
             return False
         if time.monotonic() >= self.deadline or self.aux_budget.exhausted():
             return False
@@ -2679,6 +3004,7 @@ class _RequestAttempts:
         if self.use_breaker and not self.res.breaker.allow():
             return False
         self.quota_rotations += 1
+        self._next_spawn_reason = reason
         return True
 
     def allow_retry(self, reason: str, charge_budget: bool = True) -> bool:
@@ -2702,6 +3028,7 @@ class _RequestAttempts:
             _log(f"retry denied ({reason}): retry budget exhausted")
             return False
         self.retries += 1
+        self._next_spawn_reason = reason
         delay = (
             _retry_backoff_s(self.retries, self._rng)
             if FAIL_RETRY_BACKOFF_S > 0
@@ -2789,6 +3116,8 @@ def _new_exit_state() -> dict[str, Any]:
         "attempts": None,
         "tools": 0,
         "out_chars": 0,
+        "tool_chars": 0,
+        "reason_chars": 0,
         "rc": None,
         "transport": "none",
         "first_event_ms": None,
@@ -2814,6 +3143,8 @@ def _log_exit(xs: dict[str, Any]) -> None:
         f"exit_reason={reason} rc={xs.get('rc')} total_spawns={attempts_t.total_spawns if attempts_t else 0} "
         f"retries={attempts_t.retries if attempts_t else 0} signal={attempts_t.signal if attempts_t else 0} "
         f"tools={xs.get('tools') or 0} out_chars={xs.get('out_chars') or 0} "
+        f"tool_chars={xs.get('tool_chars') or 0} reason_chars={xs.get('reason_chars') or 0} "
+        f"spawn_reasons={json.dumps(attempts_t.spawn_reasons if attempts_t else [], separators=(',', ':'))} "
         f"transport={xs.get('transport') or 'none'} first_event_ms={xs.get('first_event_ms')} "
         f"ttft_ms={xs.get('ttft_ms')} transport_history={xs.get('transport_history') or []} "
         f"duration_s={time.monotonic() - t0:.2f}"
@@ -3097,6 +3428,44 @@ def _discard_spawn_leftovers(port: int, lifeline_w: int, state_dir: str) -> None
         shutil.rmtree(state_dir, ignore_errors=True)
 
 
+def _wait_for_serve_readiness(
+    helper: subprocess.Popen[str],
+    port: int,
+    password: str,
+    ready_deadline: float,
+    is_client_gone: Callable[[], bool] | None,
+) -> None:
+    """Ожидание живого аутентифицированного HTTP без subprocess-поллинга."""
+    while True:
+        _check_serve_start(ready_deadline, is_client_gone)
+        if helper.poll() is not None:
+            raise ServeUnavailable("serve exited before readiness")
+        remaining = ready_deadline - time.monotonic()
+        if remaining <= 0:
+            raise ServeUnavailable("serve readiness timeout")
+        try:
+            status, active = _serve_http(
+                port,
+                password,
+                "GET",
+                "/api/session/active",
+                timeout=remaining,
+                deadline=ready_deadline,
+                is_client_gone=is_client_gone,
+            )
+        except (OSError, http.client.HTTPException):
+            time.sleep(
+                min(
+                    _optimization_number("OPENCODE_SERVE_READY_POLL_INTERVAL_S", 0.05),
+                    max(0.0, ready_deadline - time.monotonic()),
+                )
+            )
+            continue
+        if status != 200 or not isinstance(active.get("data"), dict):
+            raise ServeUnavailable(f"serve readiness invalid HTTP {status}")
+        break
+
+
 def _spawn_serve(
     attempt_id: str,
     serve_env: dict[str, str],
@@ -3218,15 +3587,31 @@ def _spawn_serve(
             if deadline is not None
             else time.monotonic() + 3.0
         )
-        listener_pid = _lsof_listener_pid(port, _listener_deadline)
-        while (
-            listener_pid is None
-            and time.monotonic() < _listener_deadline
-            and helper.poll() is None
-        ):
-            _check_serve_start(deadline, is_client_gone)
-            time.sleep(min(0.05, max(0.0, _listener_deadline - time.monotonic())))
+        if _optimization_flag("OPENCODE_FAST_READINESS_ENABLED"):
+            _listener_deadline = min(
+                time.monotonic()
+                + _optimization_number("OPENCODE_SERVE_READY_TIMEOUT_S", 3.0),
+                deadline if deadline is not None else float("inf"),
+            )
+            _wait_for_serve_readiness(
+                helper,
+                port,
+                password,
+                _listener_deadline,
+                is_client_gone,
+            )
+            # Ownership сохраняется: один lsof после readiness, не subprocess на каждом тике.
             listener_pid = _lsof_listener_pid(port, _listener_deadline)
+        else:
+            listener_pid = _lsof_listener_pid(port, _listener_deadline)
+            while (
+                listener_pid is None
+                and time.monotonic() < _listener_deadline
+                and helper.poll() is None
+            ):
+                _check_serve_start(deadline, is_client_gone)
+                time.sleep(min(0.05, max(0.0, _listener_deadline - time.monotonic())))
+                listener_pid = _lsof_listener_pid(port, _listener_deadline)
         _check_serve_start(deadline, is_client_gone)
         if not (
             listener_pid is not None
@@ -4027,15 +4412,17 @@ def _serve_one_attempt(
         result["delivered"] = True
         return result
     try:
-        serve_env = _serve_env(model)
+        serve_env = _emulation_env(_serve_env(model), emulate_tools)
     except OSError as exc:
         raise ServeUnavailable(f"serve env failed: {exc}") from exc
     if proxy_url:
         for name in _PROXY_VARS:
             serve_env[name] = proxy_url
     result["proxy_url"] = (
-        serve_env.get("HTTPS_PROXY") or serve_env.get("HTTP_PROXY")
-        or serve_env.get("https_proxy") or serve_env.get("http_proxy")
+        serve_env.get("HTTPS_PROXY")
+        or serve_env.get("HTTP_PROXY")
+        or serve_env.get("https_proxy")
+        or serve_env.get("http_proxy")
     )
     password = serve_env.get("OPENCODE_SERVER_PASSWORD", "")
     attempt_id = uuid.uuid4().hex
@@ -4729,8 +5116,9 @@ def _resolve_launcher() -> str:
     return OPENCODE_BIN
 
 
-def _spawn_with_stdin(cmd: list[str], prompt: str, workdir: Path,
-                      env: dict[str, str]) -> subprocess.Popen[str]:
+def _spawn_with_stdin(
+    cmd: list[str], prompt: str, workdir: Path, env: dict[str, str]
+) -> subprocess.Popen[str]:
     """Запуск `opencode run` с промптом через stdin, а не argv.
 
     Причина: история чата > ~1 МБ пробивает macOS ARG_MAX — Popen падает
@@ -4744,9 +5132,16 @@ def _spawn_with_stdin(cmd: list[str], prompt: str, workdir: Path,
     при tool call, или ранний отказ) — это наблюдают читатели stdout/stderr.
     """
     proc = subprocess.Popen(
-        cmd, cwd=str(workdir), env=env,
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        cmd,
+        cwd=str(workdir),
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
         start_new_session=True,
     )
 
@@ -4755,7 +5150,7 @@ def _spawn_with_stdin(cmd: list[str], prompt: str, workdir: Path,
             assert proc.stdin is not None
             step = 65536
             for off in range(0, len(prompt), step):
-                proc.stdin.write(prompt[off:off + step])
+                proc.stdin.write(prompt[off : off + step])
             proc.stdin.close()
         except (OSError, ValueError):
             pass
@@ -4824,7 +5219,9 @@ def _mask_secrets(text: str) -> str:
 _MAX_EXTRA_BRACES = 16  # предел лишних `}` после полного объекта вызова
 
 
-def _recover_trailing_braces(text: str, strict: bool, quiet: bool = False) -> dict[str, Any] | None:
+def _recover_trailing_braces(
+    text: str, strict: bool, quiet: bool = False
+) -> dict[str, Any] | None:
     """Первый JSON-объект, за которым идут только пробелы и 1..16 лишних `}`; иначе None (холодный путь)."""
     body = text.lstrip()
     try:
@@ -4833,7 +5230,11 @@ def _recover_trailing_braces(text: str, strict: bool, quiet: bool = False) -> di
         return None
     tail = body[end:]
     extra = tail.count("}")
-    if isinstance(obj, dict) and 1 <= extra <= _MAX_EXTRA_BRACES and not tail.strip(" \t\r\n}"):
+    if (
+        isinstance(obj, dict)
+        and 1 <= extra <= _MAX_EXTRA_BRACES
+        and not tail.strip(" \t\r\n}")
+    ):
         if not quiet:
             _log(f"tool_call_recovered extra_braces={extra}")
         return obj
@@ -4944,7 +5345,7 @@ def _tools_section(tools: list[Any], tool_choice: Any, model_id: str = "") -> st
         f"Do not run shell commands or edit files yourself: emit a {block_name} block instead.",
         (
             f"If a tool is needed, you MUST emit the {block_name} block in this reply; prose claims "
-            "like \"I'll check...\" without a block are forbidden and end the turn with no action."
+            'like "I\'ll check..." without a block are forbidden and end the turn with no action.'
         ),
         "The block itself changes nothing: the caller executes the tool and sends back the result.",
     ]
@@ -5100,7 +5501,9 @@ def _split_tool_call_inner(inner: str) -> list[str]:
     return segments
 
 
-def _parse_tool_call_blocks(inner: str, *, quiet: bool = False) -> list[dict[str, Any]] | None:
+def _parse_tool_call_blocks(
+    inner: str, *, quiet: bool = False
+) -> list[dict[str, Any]] | None:
     """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден.
 
     Обычный блок даёт один вызов. Если он не разбирается, но внутри есть
@@ -5335,145 +5738,17 @@ def _strip_broken_tool_blocks(text: str, *, quiet: bool = False) -> tuple[str, i
     return "".join(parts), dropped
 
 
-class ToolCallParser:
-    """Поток текстовых дельт -> content и завершённые вызовы инструментов.
-
-    Тег <tool_call> (или <tool_invoke>) может прийти разорванным между дельтами: хвост, который может
-    оказаться началом тега, удерживается и не уходит в content до разрешения.
-    """
-
-    def __init__(self, on_content, on_tool_call):
-        self._buf = ""
-        self._on_content = on_content
-        self._on_tool_call = on_tool_call
-        self._history = ""  # весь текст, ушедший в content
-        self.tool_calls_count = 0
-        self.trailing_chars_after_tool = 0
-        self._tail_after_tool = (
-            ""  # весь текст после последнего вызова (для инварианта к чанкам)
-        )
-
-    def feed(self, text: str) -> None:
-        self._buf += text
-        self._drain(final=False)
-
-    def finish(self) -> None:
-        self._drain(final=True)
-
-    def has_open_tool_call(self) -> bool:
-        """Тег открыт и ждёт закрытия (или его начало может прийти следующей дельтой)."""
-        return (
-            any(open_tag in self._buf for open_tag, _ in TOOL_CALL_TAGS)
-            or self._pending_prefix() > 0
-        )
-
-    def _classify_open(self, after: int, final: bool) -> str:
-        """`<tool_call>` в буфере: "real" | "quoted" (inline-код markdown) | "wait" (нужен следующий символ)."""
-        context = _code_context(self._history + self._buf, len(self._history), final)
-        if context != "text":
-            return "quoted" if context == "code" else "wait"
-        tail = self._buf[after : after + 3]
-        if not tail:
-            return "real" if final else "wait"
-        if (
-            tail[0] != "`" or tail == "```"
-        ):  # ```json-обёртка внутри блока — настоящий вызов
-            return "real"
-        if not final and tail == "`" * len(tail) and len(tail) < 3:
-            return "wait"
-        return "quoted"
-
-    def _drain(self, final: bool) -> None:
-        while True:
-            start, open_tag, close_tag = self._find_open()
-            if start == -1:
-                if final:
-                    self._flush_all()
-                    return
-                keep = self._pending_prefix()
-                if keep:
-                    self._emit(self._buf[:-keep])
-                    self._buf = self._buf[-keep:]
-                else:
-                    self._flush_all()
-                return
-            if start > 0:
-                # всё до тега завершено: текст уходит в content и в `_history`
-                self._emit(self._buf[:start])
-                self._buf = self._buf[start:]
-            after = len(open_tag)
-            verdict = self._classify_open(after, final)
-            if verdict == "quoted":
-                self._emit(self._buf[:after])
-                self._buf = self._buf[after:]
-                continue
-            if verdict == "wait":
-                return
-            end = self._find_close_outside_string(after, close_tag)
-            if end == -1:
-                if final:
-                    self._flush_all()  # незакрытый/невалидный блок отдаём текстом
-                return
-            inner = self._buf[after:end]
-            self._buf = self._buf[end + len(close_tag) :]
-            calls = _parse_tool_call_blocks(inner)
-            if calls is None:
-                _log(
-                    f"tool_call_unparsed bytes={len(inner.encode('utf-8'))} "
-                    f"head={_mask_secrets(inner[:120])!r}"
-                )
-                self._emit(open_tag + inner + close_tag)
-            else:
-                self._history += _OPAQUE_BLOCK
-                for call in calls:
-                    self.tool_calls_count += 1
-                    self._tail_after_tool = ""
-                    self.trailing_chars_after_tool = 0
-                    self._on_tool_call(call)
-
-    def _find_open(self) -> tuple[int, str, str]:
-        """Ближайший открывающий тег в буфере: (позиция, открывающий, закрывающий) или (-1, "", "")."""
-        best = (-1, "", "")
-        for open_tag, close_tag in TOOL_CALL_TAGS:
-            pos = self._buf.find(open_tag)
-            if pos != -1 and (best[0] == -1 or pos < best[0]):
-                best = (pos, open_tag, close_tag)
-        return best
-
-    def _find_close_outside_string(
-        self, start: int, close_tag: str = TOOL_CALL_CLOSE
-    ) -> int:
-        """Позиция закрывающего тега вне строковых литералов JSON буфера, или -1 (см. `_find_close_in`)."""
-        return _find_close_in(self._buf, start, close_tag)
-
-    def _pending_prefix(self) -> int:
-        """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
-        limit = min(
-            max(len(open_tag) for open_tag, _ in TOOL_CALL_TAGS) - 1, len(self._buf)
-        )
-        for length in range(limit, 0, -1):
-            if any(
-                self._buf[-length:] == open_tag[:length]
-                for open_tag, _ in TOOL_CALL_TAGS
-            ):
-                return length
-        return 0
-
-    def _emit(self, text: str) -> None:
-        if not text:
-            return
-        self._history += text
-        if self.tool_calls_count:
-            # Протокол: после вызова модель ничего не пишет; хвост (бред/цикл) не отдаём.
-            self._tail_after_tool += text
-            self.trailing_chars_after_tool = len(self._tail_after_tool.strip())
-            return
-        self._on_content(text)
-
-    def _flush_all(self) -> None:
-        if self._buf:
-            text, self._buf = self._buf, ""
-            self._emit(text)
+def _new_tool_call_parser(
+    on_content: Callable[[str], None], on_tool_call: Callable[[dict[str, Any]], None]
+) -> ToolCallParser:
+    """Общий парсер с прежним протоколом и lenient-нормализацией этого адаптера."""
+    return ToolCallParser(
+        on_content,
+        on_tool_call,
+        tag_pairs=TOOL_CALL_TAGS,
+        parse_blocks=_parse_tool_call_blocks,
+        suppress_after_tool=True,
+    )
 
 
 def _split_tool_calls(chunks: list[str]) -> tuple[str, list[dict[str, Any]]]:
@@ -5485,15 +5760,19 @@ def _split_tool_calls(chunks: list[str]) -> tuple[str, list[dict[str, Any]]]:
     calls: list[dict[str, Any]] = []
 
     def add_call(call: dict[str, Any]) -> None:
-        calls.append({
-            "index": len(calls),
-            "id": "call_" + uuid.uuid4().hex[:24],
-            "type": "function",
-            "function": {"name": call["name"],
-                         "arguments": json.dumps(call["arguments"], ensure_ascii=False)},
-        })
+        calls.append(
+            {
+                "index": len(calls),
+                "id": "call_" + uuid.uuid4().hex[:24],
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                },
+            }
+        )
 
-    parser = ToolCallParser(pieces.append, add_call)
+    parser = _new_tool_call_parser(pieces.append, add_call)
     for chunk in chunks:
         parser.feed(chunk)
     parser.finish()
@@ -5508,6 +5787,20 @@ def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, int(len(_TOKEN_RE.split(text.strip())) * 1.3))
+
+
+def _tool_argument_chars(calls: list[dict[str, Any]]) -> int:
+    """Сгенерированные аргументы без служебных id/index и повторного JSON-кодирования."""
+    return sum(
+        len(str(call.get("function", {}).get("arguments") or "")) for call in calls
+    )
+
+
+def _estimate_completion_tokens(
+    content: str, calls: list[dict[str, Any]], reason_chars: int
+) -> int:
+    """Честный fallback без usage: content + tool arguments + модельное reasoning."""
+    return max(1, (len(content) + _tool_argument_chars(calls) + reason_chars) // 4)
 
 
 EFFORT_MAP: dict[str, str] = {
@@ -5570,7 +5863,9 @@ def parse_opencode_event(event: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if isinstance(rtext, str) and rtext:
             delta["reasoning_content"] = rtext
         if isinstance(enc_data, str) and enc_data:
-            delta["reasoning_details"] = [{"type": "reasoning.encrypted", "data": enc_data}]
+            delta["reasoning_details"] = [
+                {"type": "reasoning.encrypted", "data": enc_data}
+            ]
         return ("reasoning", delta)
 
     if etype == "text":
@@ -5653,15 +5948,21 @@ def _resolve_opencode_go_auth() -> tuple[str, str]:
 
 
 def _is_google_direct_model(model_id: str) -> bool:
-    return bool(ALLOWED_MODELS.get(model_id, {}).get("base_url", "").rstrip("/").endswith("/v1beta"))
+    return bool(
+        ALLOWED_MODELS.get(model_id, {})
+        .get("base_url", "")
+        .rstrip("/")
+        .endswith("/v1beta")
+    )
 
 
 GOOGLE_STOP_SEQUENCES = ["\nUser:", "\n[tool result "]
 GOOGLE_CONTINUE_TEXT = "Continue."
 
 
-def _messages_to_google_contents(messages: list[dict[str, Any]],
-                                 system_head: str) -> tuple[list[dict[str, Any]], str]:
+def _messages_to_google_contents(
+    messages: list[dict[str, Any]], system_head: str
+) -> tuple[list[dict[str, Any]], str]:
     """История OpenAI -> (contents user/model, systemInstruction) без разбора плоского текста.
 
     Разделители «User: »/«Assistant: » внутри текста сообщений остаются содержимым;
@@ -5683,10 +5984,14 @@ def _messages_to_google_contents(messages: list[dict[str, Any]],
     return contents, system_head
 
 
-def _build_google_payload(prompt: str, effort: str, max_output: int,
-                          contents: list[dict[str, Any]] | None = None,
-                          system_instruction: str = "",
-                          emulate_tools: bool = False) -> dict[str, Any]:
+def _build_google_payload(
+    prompt: str,
+    effort: str,
+    max_output: int,
+    contents: list[dict[str, Any]] | None = None,
+    system_instruction: str = "",
+    emulate_tools: bool = False,
+) -> dict[str, Any]:
     """Тело generateContent: systemInstruction + чередующиеся user/model contents.
 
     Плоский один `user` не попадает в неявный кэш Google (cachedContentTokenCount=0) и
@@ -5702,9 +6007,13 @@ def _build_google_payload(prompt: str, effort: str, max_output: int,
     else:
         payload["contents"] = list(contents)
         if payload["contents"] and payload["contents"][-1]["role"] == "model":
-            payload["contents"].append({"role": "user", "parts": [{"text": GOOGLE_CONTINUE_TEXT}]})
-    gen_cfg: dict[str, Any] = {"maxOutputTokens": max_output,
-                               "stopSequences": list(GOOGLE_STOP_SEQUENCES)}
+            payload["contents"].append(
+                {"role": "user", "parts": [{"text": GOOGLE_CONTINUE_TEXT}]}
+            )
+    gen_cfg: dict[str, Any] = {
+        "maxOutputTokens": max_output,
+        "stopSequences": list(GOOGLE_STOP_SEQUENCES),
+    }
     if effort:
         level = "HIGH" if effort in ("high", "xhigh") else effort.upper()
         gen_cfg["thinkingConfig"] = {"includeThoughts": True, "thinkingLevel": level}
@@ -5712,8 +6021,12 @@ def _build_google_payload(prompt: str, effort: str, max_output: int,
     return payload
 
 
-def _build_openai_usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0,
-                        reasoning_tokens: int = 0) -> dict[str, Any]:
+def _build_openai_usage(
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> dict[str, Any]:
     """OpenAI usage; cached/reasoning читает pi-ai (prompt_tokens_details, completion_tokens_details)."""
     usage_obj: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
@@ -5902,7 +6215,9 @@ def _sanitize_assistant_text(text: str) -> str:
     return text
 
 
-GoogleInput = tuple[list[dict[str, Any]], str]  # (contents, systemInstruction) из _messages_to_google_contents
+GoogleInput = tuple[
+    list[dict[str, Any]], str
+]  # (contents, systemInstruction) из _messages_to_google_contents
 
 
 def _google_request(
@@ -5954,8 +6269,9 @@ def _google_request(
         raise
 
 
-def _execute_google_once(model: str, prompt: str, effort: str,
-                         google_input: GoogleInput | None = None) -> dict[str, Any]:
+def _execute_google_once(
+    model: str, prompt: str, effort: str, google_input: GoogleInput | None = None
+) -> dict[str, Any]:
     """Нативный Google-ответ в том же формате, что результат CLI-прогона."""
     conn = None
     run_id = uuid.uuid4().hex[:8]
@@ -5965,9 +6281,19 @@ def _execute_google_once(model: str, prompt: str, effort: str,
         conn, resp = _google_request(model, prompt, effort, False, google_input)
         raw = resp.read().decode("utf-8", errors="replace")
         if resp.status != 200:
-            return {"rc": 1, "text": "", "chunks": [], "native_calls": [], "reasoning": "", "usage": {},
-                    "err": f"HTTP {resp.status}: {_clean_err(raw)}", "provider_status": resp.status,
-                    "had_output": False, "state": "provider_error", "finish": "error"}
+            return {
+                "rc": 1,
+                "text": "",
+                "chunks": [],
+                "native_calls": [],
+                "reasoning": "",
+                "usage": {},
+                "err": f"HTTP {resp.status}: {_clean_err(raw)}",
+                "provider_status": resp.status,
+                "had_output": False,
+                "state": "provider_error",
+                "finish": "error",
+            }
         event = json.loads(raw)
         if not isinstance(event, dict):
             raise ValueError("google response is not a JSON object")
@@ -5991,20 +6317,49 @@ def _execute_google_once(model: str, prompt: str, effort: str,
         um = event.get("usageMetadata") or {}
         thought_tok = int(um.get("thoughtsTokenCount") or 0)
         cached_tok = int(um.get("cachedContentTokenCount") or 0)
-        usage_dict: dict[str, int] = {"input": int(um.get("promptTokenCount") or 0),
-                                      "output": int(um.get("candidatesTokenCount") or 0) + thought_tok}
+        usage_dict: dict[str, int] = {
+            "input": int(um.get("promptTokenCount") or 0),
+            "output": int(um.get("candidatesTokenCount") or 0) + thought_tok,
+        }
         if cached_tok > 0:
             usage_dict["cached"] = cached_tok
         if thought_tok > 0:
             usage_dict["reasoning"] = thought_tok
-        return {"rc": 0, "text": text, "chunks": texts, "native_calls": [], "reasoning": reasoning,
-                "usage": usage_dict,
-                "err": "", "provider_status": 200, "had_output": bool(text or reasoning),
-                "state": "ok", "finish": ("length" if finish_reason == "MAX_TOKENS" else "stop") if (text or reasoning) else "error"}
-    except (OSError, ValueError, TypeError, AttributeError, http.client.HTTPException) as exc:
-        return {"rc": -1, "text": "", "chunks": [], "native_calls": [], "reasoning": "", "usage": {},
-                "err": _clean_err(str(exc)), "provider_status": None, "had_output": False,
-                "state": "provider_error", "finish": "error"}
+        return {
+            "rc": 0,
+            "text": text,
+            "chunks": texts,
+            "native_calls": [],
+            "reasoning": reasoning,
+            "usage": usage_dict,
+            "err": "",
+            "provider_status": 200,
+            "had_output": bool(text or reasoning),
+            "state": "ok",
+            "finish": ("length" if finish_reason == "MAX_TOKENS" else "stop")
+            if (text or reasoning)
+            else "error",
+        }
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        http.client.HTTPException,
+    ) as exc:
+        return {
+            "rc": -1,
+            "text": "",
+            "chunks": [],
+            "native_calls": [],
+            "reasoning": "",
+            "usage": {},
+            "err": _clean_err(str(exc)),
+            "provider_status": None,
+            "had_output": False,
+            "state": "provider_error",
+            "finish": "error",
+        }
     finally:
         if conn is not None:
             conn.close()
@@ -6015,11 +6370,17 @@ def _execute_google_once(model: str, prompt: str, effort: str,
 class Run:
     """Один прогон `opencode run` с разбором JSON-событий (non-streaming)."""
 
-    def __init__(self, model_id: str, prompt: str, effort: str, workdir: Path,
-                 tools: list[dict[str, Any]] | None = None,
-                 google_input: GoogleInput | None = None,
-                 attempts: _RequestAttempts | None = None,
-                 resilience: _Resilience | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        prompt: str,
+        effort: str,
+        workdir: Path,
+        tools: list[dict[str, Any]] | None = None,
+        google_input: GoogleInput | None = None,
+        attempts: _RequestAttempts | None = None,
+        resilience: _Resilience | None = None,
+    ) -> None:
         # tools задан (эмуляция) -> прогон обрывается в конце шага, давшего вызов для DSH:
         # следующие шаги — реакция модели на «отклонение» (повтор того же вызова).
         self.tools = tools
@@ -6028,7 +6389,9 @@ class Run:
         self.prompt = prompt
         self.effort = effort
         self.workdir = workdir
-        self.res = resilience or (attempts.res if attempts is not None else _DEFAULT_RESILIENCE)
+        self.res = resilience or (
+            attempts.res if attempts is not None else _DEFAULT_RESILIENCE
+        )
         self.attempts = attempts
         self.proc: subprocess.Popen[str] | None = None
         self.feed: _StdoutFeed | None = None
@@ -6063,8 +6426,11 @@ class Run:
         """
         owns_attempts = self.attempts is None
         if self.attempts is None:
-            self.attempts = _RequestAttempts(self.res, time.monotonic() + TIMEOUT_S,
-                                             use_breaker=not _is_google_direct_model(self.model_id))
+            self.attempts = _RequestAttempts(
+                self.res,
+                time.monotonic() + _zen_execution_timeout(self.model_id, self.prompt),
+                use_breaker=not _is_google_direct_model(self.model_id),
+            )
         attempts = self.attempts
         fail_retries = 0
         acc_reasonings: list[str] = []
@@ -6158,12 +6524,16 @@ class Run:
                     bool(out.get("had_output")),
                 ):
                     return _with_previous(out)
-                if not attempts.allow_retry("cli_failure", charge_budget=out.get("provider_status") is not None):
+                if not attempts.allow_retry(
+                    "cli_failure", charge_budget=out.get("provider_status") is not None
+                ):
                     return _with_previous(out)
                 fail_retries += 1
-                _log(f"exec failed rc={out.get('rc')} without output, retry {fail_retries}/{FAIL_RETRY_LIMIT} "
-                     f"total_spawns={attempts.total_spawns}/{attempts.max_total}: "
-                     f"{_clean_err(str(out.get('err') or ''), 300)!r}")
+                _log(
+                    f"exec failed rc={out.get('rc')} without output, retry {fail_retries}/{FAIL_RETRY_LIMIT} "
+                    f"total_spawns={attempts.total_spawns}/{attempts.max_total}: "
+                    f"{_clean_err(str(out.get('err') or ''), 300)!r}"
+                )
                 _save_partial(out)
                 self.close()
         finally:
@@ -6173,20 +6543,34 @@ class Run:
     def _execute_once(self) -> dict[str, Any]:
         """Один прогон: текст — из type:text, мышление — из type:reasoning, usage — из step_finish."""
         if _is_google_direct_model(self.model_id):
-            return _execute_google_once(self.model_id, self.prompt, self.effort, self.google_input)
+            return _execute_google_once(
+                self.model_id, self.prompt, self.effort, self.google_input
+            )
         launcher = _resolve_launcher()
         if not os.access(launcher, os.X_OK):
-            return {"rc": -1, "text": "", "reasoning": "", "usage": {},
-                    "err": f"opencode launcher not executable: {launcher}",
-                    "state": "launcher_missing", "finish": "error"}
+            return {
+                "rc": -1,
+                "text": "",
+                "reasoning": "",
+                "usage": {},
+                "err": f"opencode launcher not executable: {launcher}",
+                "state": "launcher_missing",
+                "finish": "error",
+            }
 
         self.workdir.mkdir(parents=True, exist_ok=True)
-        env = _run_env(self.model_id)
+        env = _emulation_env(_run_env(self.model_id), bool(self.tools))
         model_route = _model_route(self.model_id)
 
         cmd, shown = _build_cmd(launcher, self.model_id, self.effort)
-        _log(f"exec model={model_route} {shown} prompt_chars={len(self.prompt)} cwd={self.workdir}")
-        deadline = self.attempts.deadline if self.attempts is not None else time.monotonic() + TIMEOUT_S
+        _log(
+            f"exec model={model_route} {shown} prompt_chars={len(self.prompt)} cwd={self.workdir}"
+        )
+        deadline = (
+            self.attempts.deadline
+            if self.attempts is not None
+            else time.monotonic() + _zen_execution_timeout(self.model_id, self.prompt)
+        )
         gate = _StartupGate()
         gate.acquire(deadline=deadline, is_client_gone=self.is_client_gone)
         if not self.res.spawn_limiter.acquire(
@@ -6231,8 +6615,15 @@ class Run:
         except OSError as exc:
             self.res.spawn_limiter.refund()
             gate.release()
-            return {"rc": -1, "text": "", "reasoning": "", "usage": {}, "err": f"spawn failed: {exc}",
-                    "state": "spawn_failed", "finish": "error"}
+            return {
+                "rc": -1,
+                "text": "",
+                "reasoning": "",
+                "usage": {},
+                "err": f"spawn failed: {exc}",
+                "state": "spawn_failed",
+                "finish": "error",
+            }
         if self.attempts is not None:
             self.attempts.note_spawn()
 
@@ -6242,8 +6633,8 @@ class Run:
         usage: dict[str, Any] = {}
         err_lines: list[str] = []
         provider_status: int | None = None
-        had_error = False       # транзиентная ошибка провайдера посреди ответа (had_mid_stream_error)
-        fatal_error = False     # детерминированная ошибка посреди ответа (400/401/403/404/422): без повтора
+        had_error = False  # транзиентная ошибка провайдера посреди ответа (had_mid_stream_error)
+        fatal_error = False  # детерминированная ошибка посреди ответа (400/401/403/404/422): без повтора
         stopped_on_error = False
         state = "ok"
         attempt_start = time.monotonic()
@@ -6362,24 +6753,43 @@ class Run:
                 elif etype == "step_finish":
                     if payload:
                         for key in ("input", "output", "cached", "reasoning"):
-                            usage[key] = int(usage.get(key) or 0) + int(payload.get(key) or 0)
+                            usage[key] = int(usage.get(key) or 0) + int(
+                                payload.get(key) or 0
+                            )
                     if self.tools is not None and (
-                            any(_native_to_tool_calls(nc.get("tool"), nc.get("input"), self.tools)
-                                for nc in native_calls)
-                            or any(close_tag in "".join(text_pieces) for _, close_tag in TOOL_CALL_TAGS)):
-                        _log("exec: step with tool call finished, stopping opencode run")
+                        any(
+                            _native_to_tool_calls(
+                                nc.get("tool"), nc.get("input"), self.tools
+                            )
+                            for nc in native_calls
+                        )
+                        or any(
+                            close_tag in "".join(text_pieces)
+                            for _, close_tag in TOOL_CALL_TAGS
+                        )
+                    ):
+                        _log(
+                            "exec: step with tool call finished, stopping opencode run"
+                        )
                         _stop_proc(self.proc)
                         break
                 elif etype == "tool_use":
                     tpart = _dict_or_empty(event.get("part"))
                     tstate = _dict_or_empty(tpart.get("state"))
-                    native_calls.append({"tool": tpart.get("tool"), "input": tstate.get("input"),
-                                         "status": tstate.get("status")})
+                    native_calls.append(
+                        {
+                            "tool": tpart.get("tool"),
+                            "input": tstate.get("input"),
+                            "status": tstate.get("status"),
+                        }
+                    )
                 elif etype == "error":
                     state = "provider_error"
                     if isinstance(payload.get("statusCode"), int):
                         provider_status = payload["statusCode"]
-                    err_lines.append(f"HTTP {payload.get('statusCode')}: {payload.get('message')}")
+                    err_lines.append(
+                        f"HTTP {payload.get('statusCode')}: {payload.get('message')}"
+                    )
                     if text_pieces or reasoning_pieces or native_calls:
                         # Оборванный ответ: иначе opencode сам запустит SYNTHETIC-шаг «Continue…» —
                         # останавливаем сразу. Транзиентная ошибка -> had_error (повтор шага),
@@ -6390,7 +6800,9 @@ class Run:
                             had_error = True
                         else:
                             fatal_error = True
-                        _log(f"exec: provider error mid-response (transient={had_error}), stopping opencode run")
+                        _log(
+                            f"exec: provider error mid-response (transient={had_error}), stopping opencode run"
+                        )
                         stopped_on_error = True
                         _stop_proc(self.proc)
                         break
@@ -6421,7 +6833,11 @@ class Run:
             with _active_lock:
                 _active.pop(run_id, None)
 
-        rc = self.proc.returncode if self.proc and self.proc.returncode is not None else -1
+        rc = (
+            self.proc.returncode
+            if self.proc and self.proc.returncode is not None
+            else -1
+        )
         if stopped_on_error and rc < 0:
             rc = 1  # остановили сами после ошибки провайдера: для классификации отказа — как собственный выход CLI
         if rc != 0 and state == "ok":
@@ -6593,6 +7009,10 @@ class _LockedWfile:
 
 
 class Handler(BaseHTTPRequestHandler):
+    _zen_prompt: str = ""
+    _zen_targeted: bool = False
+    _zen_short_bypass: bool = False
+    _zen_probe: bool = False
     protocol_version = "HTTP/1.1"
     timeout = 300
 
@@ -6606,6 +7026,21 @@ class Handler(BaseHTTPRequestHandler):
     _serve_stream_usage: dict[str, int] | None = None
     _first_visible: threading.Event | None = None
     _downstream_client_gone: bool = False
+
+    def _set_zen_policy(self, model: str, prompt: str) -> None:
+        self._zen_prompt = prompt
+        self._zen_targeted = _zen_execution_timeout(model, prompt) < TIMEOUT_S
+        self._zen_short_bypass = (
+            self._zen_probe
+            or getattr(self, "headers", {}).get("X-Bypass-Short-Filter") == "1"
+        )
+
+    def _send_sanitizer_marker(self) -> None:
+        """Маркер политики: каждый публикуемый tool_call уже собран и санитизирован."""
+        if BRIDGE_SANITIZE_TOOL_CALLS and _optimization_flag(
+            "OPENCODE_SANITIZED_TOOL_MARKER_ENABLED"
+        ):
+            self.send_header("X-Bridge-Tool-Sanitized", "1")
 
     def _exit(self) -> dict[str, Any]:
         """Состояние выхода текущего запроса для структурной строки O-EXIT/v1."""
@@ -6633,6 +7068,28 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _send(self, code: int, payload: dict[str, Any]) -> None:
+        if (
+            code >= 500
+            and getattr(self, "_zen_targeted", False)
+            and self._exit().get("exit_reason") == "timeout"
+        ):
+            code, payload = 504, _zen_error(504)
+        elif code == 200 and "choices" in payload and self._zen_prompt:
+            messages = [
+                choice.get("message") or {} for choice in payload.get("choices") or []
+            ]
+            content = "".join(str(message.get("content") or "") for message in messages)
+            calls = [
+                call for message in messages for call in message.get("tool_calls") or []
+            ]
+            if _zen_short_response(
+                self._zen_prompt,
+                content,
+                calls,
+                getattr(self, "_zen_short_bypass", False),
+            ):
+                code, payload = 502, _zen_error(502)
+                self._exit()["exit_reason"] = "short_response"
         self._exit()["status"] = int(code)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
@@ -6651,6 +7108,12 @@ class Handler(BaseHTTPRequestHandler):
         (openai-node/ai-sdk) бросают исключение на чанке с полем error. finish_reason
         не отправляем: пустого успешного завершения быть не должно.
         """
+        if (
+            getattr(self, "_zen_targeted", False)
+            and self._exit().get("exit_reason") == "timeout"
+        ):
+            payload = _zen_error(504)
+        self.close_connection = True
         _ = self.wfile.write(
             ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode(
                 "utf-8"
@@ -6740,6 +7203,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             last_reasoning[0] = text
             collected_reasonings.append(text)
+            reason_chars = xs.get("reason_chars")
+            xs["reason_chars"] = (
+                reason_chars if isinstance(reason_chars, int) else 0
+            ) + len(text)
             delivered_any[0] = True
             first_visible.set()
             chunk = format_sse_chunk(
@@ -6825,7 +7292,7 @@ class Handler(BaseHTTPRequestHandler):
             if parser_box[0] is not None:
                 parser_box[0].finish()
             parser_box[0] = (
-                ToolCallParser(emit_parsed_content, on_parsed_tool)
+                _new_tool_call_parser(emit_parsed_content, on_parsed_tool)
                 if emulate_tools
                 else None
             )
@@ -6918,7 +7385,7 @@ class Handler(BaseHTTPRequestHandler):
                     _orig_reasoning,
                     _text_seen,
                     on_tool,
-                    attempts.deadline - TIMEOUT_S,
+                    attempts.deadline - _zen_execution_timeout(model, prompt),
                     is_client_gone=self._client_gone_check,
                     on_status=attempt_status,
                     thinking_enabled=thinking,
@@ -6932,6 +7399,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not force_serve and not delivered_any[0]:
                     xs["transport"] = "run"
                     xs["transport_history"] = ["serve", "run"]
+                    attempts._next_spawn_reason = "serve_unavailable_fallback"
                     return False
                 xs["exit_reason"] = "upstream_failed"
                 self._sse_error(_error_payload(f"serve unavailable: {exc}"))
@@ -7144,10 +7612,15 @@ class Handler(BaseHTTPRequestHandler):
                     continue
             return True
 
-    def _stream_google_sse(self, model: str, prompt: str, effort: str,
-                           emulate_tools: bool = False,
-                           google_input: GoogleInput | None = None,
-                           tool_schemas: dict[str, Any] | None = None) -> None:
+    def _stream_google_sse(
+        self,
+        model: str,
+        prompt: str,
+        effort: str,
+        emulate_tools: bool = False,
+        google_input: GoogleInput | None = None,
+        tool_schemas: dict[str, Any] | None = None,
+    ) -> None:
         """Перевести Google SSE в OpenAI SSE, сохранив эмуляцию инструментов."""
         res = self._res()
         if not self._acquire_slot(res):
@@ -7166,12 +7639,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.send_header("X-Accel-Buffering", "no")
+            self._send_sanitizer_marker()
             self.end_headers()
             started = True
             self._exit()["status"] = 200
 
             def emit(delta: dict[str, Any]) -> None:
-                self.wfile.write(format_sse_chunk(resp_id, created, model, delta).encode("utf-8"))
+                xs = self._exit()
+                xs["reason_chars"] = int(xs.get("reason_chars") or 0) + len(
+                    str(delta.get("reasoning_content") or "")
+                )
+                self.wfile.write(
+                    format_sse_chunk(resp_id, created, model, delta).encode("utf-8")
+                )
                 self.wfile.flush()
 
             emit({"role": "assistant", "content": ""})
@@ -7179,7 +7659,11 @@ class Handler(BaseHTTPRequestHandler):
             if resp.status != 200:
                 tail = _clean_err(resp.read().decode("utf-8", errors="replace"))
                 _log(f"google upstream failed HTTP {resp.status}: {tail}")
-                self._sse_error(_error_payload(f"google upstream failed (HTTP {resp.status}): {tail}", tail))
+                self._sse_error(
+                    _error_payload(
+                        f"google upstream failed (HTTP {resp.status}): {tail}", tail
+                    )
+                )
                 return
             collected_texts: list[str] = []
             tool_calls: list[dict[str, Any]] = []
@@ -7190,6 +7674,7 @@ class Handler(BaseHTTPRequestHandler):
 
             def emit_content(text: str) -> None:
                 if text:
+                    collected_texts.append(text)
                     emit({"content": text})
 
             def emit_tool_call(call: dict[str, Any]) -> None:
@@ -7197,16 +7682,26 @@ class Handler(BaseHTTPRequestHandler):
                 if key in seen_calls:
                     return
                 seen_calls.add(key)
-                tc = {"index": len(tool_calls), "id": "call_" + uuid.uuid4().hex[:24],
-                      "type": "function", "function": {"name": call["name"],
-                      "arguments": json.dumps(call["arguments"], ensure_ascii=False)}}
+                tc = {
+                    "index": len(tool_calls),
+                    "id": "call_" + uuid.uuid4().hex[:24],
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                    },
+                }
                 calls = _normalize_tool_calls([tc], tool_schemas)
                 for item in calls:
                     item["index"] = len(tool_calls)
                     tool_calls.append(item)
                     emit({"tool_calls": [item]})
 
-            parser = ToolCallParser(emit_content, emit_tool_call) if emulate_tools else None
+            parser = (
+                _new_tool_call_parser(emit_content, emit_tool_call)
+                if emulate_tools
+                else None
+            )
             while True:
                 # HTTPResponse.readline(), а не resp.fp: корректно декодирует chunked HTTP.
                 line = resp.readline()
@@ -7223,12 +7718,17 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("google response is not a JSON object")
                 if event.get("error"):
                     tail = _clean_err(json.dumps(event["error"], ensure_ascii=False))
-                    self._sse_error(_error_payload(f"google upstream stream failed: {tail}", tail))
+                    self._sse_error(
+                        _error_payload(f"google upstream stream failed: {tail}", tail)
+                    )
                     return
                 um = event.get("usageMetadata") or {}
-                for source, target in (("promptTokenCount", "input"), ("candidatesTokenCount", "output"),
-                                       ("cachedContentTokenCount", "cached"),
-                                       ("thoughtsTokenCount", "reasoning")):
+                for source, target in (
+                    ("promptTokenCount", "input"),
+                    ("candidatesTokenCount", "output"),
+                    ("cachedContentTokenCount", "cached"),
+                    ("thoughtsTokenCount", "reasoning"),
+                ):
                     if source in um:
                         usage[target] = int(um[source] or 0)
                 for cand in event.get("candidates") or []:
@@ -7242,19 +7742,22 @@ class Handler(BaseHTTPRequestHandler):
                             had_reasoning = True
                             emit({"reasoning_content": text})
                         else:
-                            collected_texts.append(text)
                             if parser is not None:
                                 parser.feed(text)
                             else:
                                 emit_content(text)
                 if parser is not None and tool_calls:
                     if not parser.has_open_tool_call() and (
-                            parser.trailing_chars_after_tool > 512
-                            or _detect_repetition_loop("".join(collected_texts)) is not None):
-                        _log("google stream: stopping after tool_call emission (trailing/loop detected)")
+                        parser.trailing_chars_after_tool > 512
+                        or _detect_repetition_loop("".join(collected_texts)) is not None
+                    ):
+                        _log(
+                            "google stream: stopping after tool_call emission (trailing/loop detected)"
+                        )
                         break
-                elif (parser is None or not parser.has_open_tool_call()) \
-                        and _detect_repetition_loop("".join(collected_texts)) is not None:
+                elif (
+                    parser is None or not parser.has_open_tool_call()
+                ) and _detect_repetition_loop("".join(collected_texts)) is not None:
                     _log("google stream: repetition loop detected, stopping stream")
                     break
             if parser is not None:
@@ -7264,22 +7767,54 @@ class Handler(BaseHTTPRequestHandler):
                 return
             reasoning_tokens = usage.get("reasoning", 0)
             prompt_tokens = usage.get("input", 0) or _estimate_tokens(prompt)
-            completion_tokens = (usage.get("output", 0) + reasoning_tokens) or _estimate_tokens(
-                "".join(collected_texts))
-            final = format_sse_chunk(resp_id, created, model, {},
-                finish_reason="tool_calls" if tool_calls else ("length" if finish_reason == "MAX_TOKENS" else "stop"),
-                usage=_build_openai_usage(prompt_tokens, completion_tokens,
-                                          usage.get("cached", 0), reasoning_tokens))
+            completion_tokens = (
+                usage.get("output", 0) + reasoning_tokens
+            ) or _estimate_completion_tokens(
+                "".join(collected_texts),
+                tool_calls,
+                int(self._exit().get("reason_chars") or 0),
+            )
+            final = format_sse_chunk(
+                resp_id,
+                created,
+                model,
+                {},
+                finish_reason="tool_calls"
+                if tool_calls
+                else ("length" if finish_reason == "MAX_TOKENS" else "stop"),
+                usage=_build_openai_usage(
+                    prompt_tokens,
+                    completion_tokens,
+                    usage.get("cached", 0),
+                    reasoning_tokens,
+                ),
+            )
             self.wfile.write(final.encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
-            _log(f"google stream done model={model} tools={len(tool_calls)} out_chars={sum(map(len, collected_texts))}")
-        except (OSError, ValueError, TypeError, AttributeError, http.client.HTTPException) as exc:
+            self._exit().update(
+                exit_reason="ok",
+                tools=len(tool_calls),
+                out_chars=sum(map(len, collected_texts)),
+                tool_chars=_tool_argument_chars(tool_calls),
+            )
+            _log(
+                f"google stream done model={model} tools={len(tool_calls)} out_chars={sum(map(len, collected_texts))}"
+            )
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            AttributeError,
+            http.client.HTTPException,
+        ) as exc:
             tail = _clean_err(str(exc))
             _log(f"google stream failed: {tail}")
             if started:
                 try:
-                    self._sse_error(_error_payload(f"google stream failed: {tail}", tail))
+                    self._sse_error(
+                        _error_payload(f"google stream failed: {tail}", tail)
+                    )
                 except OSError:
                     pass
         finally:
@@ -7289,14 +7824,54 @@ class Handler(BaseHTTPRequestHandler):
                 _active.pop(run_id, None)
             res.slots.release()
 
-    def _stream_sse(self, model: str, prompt: str, effort: str, emulate_tools: bool = False,
-                    tools: list[dict[str, Any]] | None = None,
-                    google_input: GoogleInput | None = None, reported_model: str | None = None,
-                    tool_choice: Any = None) -> None:
+    def _stream_sse(
+        self,
+        model: str,
+        prompt: str,
+        effort: str,
+        emulate_tools: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        google_input: GoogleInput | None = None,
+        reported_model: str | None = None,
+        tool_choice: Any = None,
+    ) -> None:
+        self._set_zen_policy(model, prompt)
+        raw = self.wfile
+        filtered = _ZenSseFilter(raw, prompt, self._zen_short_bypass)
+        self.wfile = cast(io.BufferedIOBase, cast(object, filtered))
+        try:
+            self._stream_sse_body(
+                model,
+                prompt,
+                effort,
+                emulate_tools,
+                tools,
+                google_input,
+                reported_model,
+                tool_choice,
+            )
+        finally:
+            self.wfile = raw
+            if filtered.terminated:
+                self._exit()["exit_reason"] = "short_response"
+
+    def _stream_sse_body(
+        self,
+        model: str,
+        prompt: str,
+        effort: str,
+        emulate_tools: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        google_input: GoogleInput | None = None,
+        reported_model: str | None = None,
+        tool_choice: Any = None,
+    ) -> None:
         shown_model = reported_model or model
         tool_schemas = build_tool_schemas(tools)
         if _is_google_direct_model(model):
-            self._stream_google_sse(model, prompt, effort, emulate_tools, google_input, tool_schemas)
+            self._stream_google_sse(
+                model, prompt, effort, emulate_tools, google_input, tool_schemas
+            )
             return
         xs = self._exit()
         xs["transport"] = "run"
@@ -7319,7 +7894,9 @@ class Handler(BaseHTTPRequestHandler):
         res = self._res()
         if not self._acquire_slot(res):
             return
-        attempts = _RequestAttempts(res, time.monotonic() + TIMEOUT_S)
+        attempts = _RequestAttempts(
+            res, time.monotonic() + _zen_execution_timeout(model, prompt)
+        )
         xs["attempts"] = attempts
 
         resp_id = f"chatcmpl-oczen-{uuid.uuid4().hex[:12]}"
@@ -7385,6 +7962,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.send_header("X-Accel-Buffering", "no")
+            self._send_sanitizer_marker()
             try:
                 self.end_headers()
                 xs["status"] = 200
@@ -7425,7 +8003,7 @@ class Handler(BaseHTTPRequestHandler):
                     max(
                         0.0,
                         attempts.deadline
-                        - TIMEOUT_S
+                        - _zen_execution_timeout(model, prompt)
                         + FIRST_STATUS_DELAY_S
                         - time.monotonic(),
                     ),
@@ -7548,7 +8126,11 @@ class Handler(BaseHTTPRequestHandler):
                         usage=_build_openai_usage(
                             int(usage.get("input") or 0) or _estimate_tokens(prompt),
                             int(usage.get("output") or 0)
-                            or _estimate_tokens(full_text_s),
+                            or _estimate_completion_tokens(
+                                full_text_s,
+                                tool_calls,
+                                int(xs.get("reason_chars") or 0),
+                            ),
                             int(usage.get("cached") or 0),
                             int(usage.get("reasoning") or 0),
                         ),
@@ -7559,6 +8141,7 @@ class Handler(BaseHTTPRequestHandler):
                     xs.update(
                         exit_reason="ok",
                         tools=len(tool_calls),
+                        tool_chars=_tool_argument_chars(tool_calls),
                         out_chars=len(full_text_s),
                         rc=0,
                     )
@@ -7620,7 +8203,10 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     # env на каждую попытку: ретрай получает следующий порт пула (чистый IP)
                     proc = _spawn_with_stdin(
-                        cmd, attempt_prompt, workdir, _run_env(model)
+                        cmd,
+                        attempt_prompt,
+                        workdir,
+                        _emulation_env(_run_env(model), emulate_tools),
                     )
                 except OSError as exc:
                     res.spawn_limiter.refund()
@@ -7639,7 +8225,7 @@ class Handler(BaseHTTPRequestHandler):
                 err_thread.start()
 
                 parser = (
-                    ToolCallParser(emit_parsed_content, emit_tool_call)
+                    _new_tool_call_parser(emit_parsed_content, emit_tool_call)
                     if emulate_tools
                     else None
                 )
@@ -7669,7 +8255,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
                 attempt_start = time.monotonic()
-                first_status_due = attempts.deadline - TIMEOUT_S + FIRST_STATUS_DELAY_S
+                first_status_due = (
+                    attempts.deadline
+                    - _zen_execution_timeout(model, prompt)
+                    + FIRST_STATUS_DELAY_S
+                )
                 watchdog_state: _WatchdogState = {
                     "reason": "",
                     "first_event_at": None,
@@ -7796,7 +8386,13 @@ class Handler(BaseHTTPRequestHandler):
                                 or xs.get("first_event_ms") is None
                             ):
                                 xs["first_event_ms"] = int(
-                                    (time.monotonic() - (attempts.deadline - TIMEOUT_S))
+                                    (
+                                        time.monotonic()
+                                        - (
+                                            attempts.deadline
+                                            - _zen_execution_timeout(model, prompt)
+                                        )
+                                    )
                                     * 1000
                                 )
                         _token_text = str(
@@ -7811,7 +8407,10 @@ class Handler(BaseHTTPRequestHandler):
                                     xs["ttft_ms"] = int(
                                         (
                                             time.monotonic()
-                                            - (attempts.deadline - TIMEOUT_S)
+                                            - (
+                                                attempts.deadline
+                                                - _zen_execution_timeout(model, prompt)
+                                            )
                                         )
                                         * 1000
                                     )
@@ -7828,6 +8427,9 @@ class Handler(BaseHTTPRequestHandler):
                         if payload:
                             attempt_output = True
                             if isinstance(rtext, str) and rtext:
+                                xs["reason_chars"] = int(
+                                    xs.get("reason_chars") or 0
+                                ) + len(rtext)
                                 attempt_reasonings.append(rtext)
                             chunk_str = format_sse_chunk(
                                 resp_id, created, shown_model, payload
@@ -8136,8 +8738,10 @@ class Handler(BaseHTTPRequestHandler):
                 )  # иначе клиент получил бы пустой ответ
             full_text = "".join(collected_texts)
             prompt_tokens = int(usage.get("input") or 0) or _estimate_tokens(prompt)
-            completion_tokens = int(usage.get("output") or 0) or _estimate_tokens(
-                full_text
+            completion_tokens = int(
+                usage.get("output") or 0
+            ) or _estimate_completion_tokens(
+                full_text, tool_calls, int(xs.get("reason_chars") or 0)
             )
 
             final_chunk = format_sse_chunk(
@@ -8159,6 +8763,7 @@ class Handler(BaseHTTPRequestHandler):
             xs.update(
                 exit_reason="ok",
                 tools=len(tool_calls),
+                tool_chars=_tool_argument_chars(tool_calls),
                 out_chars=len(full_text),
                 rc=proc.returncode if proc is not None else None,
             )
@@ -8249,7 +8854,7 @@ class Handler(BaseHTTPRequestHandler):
                     """Не публиковать tool calls из неподтверждённой попытки."""
                     return None
 
-                partial_parser = ToolCallParser(
+                partial_parser = _new_tool_call_parser(
                     partial_texts.append, _discard_partial_call
                 )
                 partial_parser.feed(partial_content)
@@ -8352,6 +8957,7 @@ class Handler(BaseHTTPRequestHandler):
                     or natives
                 )
                 if not force_serve and not _j_delivered:
+                    attempts._next_spawn_reason = "serve_unavailable_fallback"
                     return False
                 xs["exit_reason"] = "upstream_failed"
                 self._send(502, _error_payload("serve spawn limiter timeout"))
@@ -8366,7 +8972,7 @@ class Handler(BaseHTTPRequestHandler):
                     reasonings.append,
                     texts.append,
                     natives.append,
-                    attempts.deadline - TIMEOUT_S,
+                    attempts.deadline - _zen_execution_timeout(model, prompt),
                     is_client_gone=self._client_gone_check,
                     on_status=lambda _t: None,
                     thinking_enabled=thinking,
@@ -8472,7 +9078,9 @@ class Handler(BaseHTTPRequestHandler):
                             )
                         else:
                             attempts.attempt_done(True, False)
-                            retry_allowed = attempts.allow_retry("serve_transient_error")
+                            retry_allowed = attempts.allow_retry(
+                                "serve_transient_error"
+                            )
                         if retry_allowed:
                             _prior_content = "\n\n".join(c for c in contents if c)
                             continue
@@ -8522,7 +9130,7 @@ class Handler(BaseHTTPRequestHandler):
             content = content_raw
             if emulate_tools and content_raw:
                 parsed_texts: list[str] = []
-                parser_json = ToolCallParser(parsed_texts.append, calls.append)
+                parser_json = _new_tool_call_parser(parsed_texts.append, calls.append)
                 parser_json.feed(content_raw)
                 parser_json.finish()
                 content = "".join(parsed_texts)
@@ -8544,7 +9152,11 @@ class Handler(BaseHTTPRequestHandler):
             for native in natives:
                 part = _as_dict(native.get("part"))
                 mapped = _native_call_as_dsh(native, tools) if emulate_tools else []
-                if not mapped and part.get("tool") and (emulate_tools or not content.strip()):
+                if (
+                    not mapped
+                    and part.get("tool")
+                    and (emulate_tools or not content.strip())
+                ):
                     unmapped.append(str(part.get("tool")))
                 for call in mapped:
                     _add_call(call)
@@ -8599,7 +9211,9 @@ class Handler(BaseHTTPRequestHandler):
             xs["exit_reason"] = "upstream_failed"
             self._send(502, _error_payload("serve produced no text"))
             return True
-        tool_calls_all = _normalize_tool_calls(tool_calls_all, build_tool_schemas(tools))
+        tool_calls_all = _normalize_tool_calls(
+            tool_calls_all, build_tool_schemas(tools)
+        )
         for i, tc_item in enumerate(tool_calls_all):
             tc_item["index"] = i
         msg: dict[str, object] = {"role": "assistant", "content": content_final}
@@ -8615,6 +9229,8 @@ class Handler(BaseHTTPRequestHandler):
         xs.update(
             exit_reason="ok",
             tools=len(tool_calls_all),
+            tool_chars=_tool_argument_chars(tool_calls_all),
+            reason_chars=len("".join(reasonings_all)),
             out_chars=len(content_final),
             rc=0,
         )
@@ -8628,7 +9244,10 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
                 "usage": _build_openai_usage(
                     int(tokens.get("input") or 0) or _estimate_tokens(prompt),
-                    int(tokens.get("output") or 0) or _estimate_tokens(content_final),
+                    int(tokens.get("output") or 0)
+                    or _estimate_completion_tokens(
+                        content_final, tool_calls_all, len("".join(reasonings_all))
+                    ),
                     tokens.get("cached", 0),
                     tokens.get("reasoning", 0),
                 ),
@@ -8636,10 +9255,18 @@ class Handler(BaseHTTPRequestHandler):
         )
         return True
 
-    def _serve_json(self, model: str, prompt: str, effort: str, emulate_tools: bool = False,
-                    tools: list[dict[str, Any]] | None = None,
-                    google_input: GoogleInput | None = None, reported_model: str | None = None,
-                    tool_choice: Any = None) -> None:
+    def _serve_json(
+        self,
+        model: str,
+        prompt: str,
+        effort: str,
+        emulate_tools: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        google_input: GoogleInput | None = None,
+        reported_model: str | None = None,
+        tool_choice: Any = None,
+    ) -> None:
+        self._set_zen_policy(model, prompt)
         xs = self._exit()
         contents: list[str] = []
         reasonings: list[str] = []
@@ -8657,7 +9284,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         attempts = _RequestAttempts(
             res,
-            time.monotonic() + TIMEOUT_S,
+            time.monotonic() + _zen_execution_timeout(model, prompt),
             use_breaker=not _is_google_direct_model(model),
         )
         xs["attempts"] = attempts
@@ -8868,7 +9495,11 @@ class Handler(BaseHTTPRequestHandler):
                         f"unmapped built-in tools={unmapped}: re-prompt {unmapped_retries}/{NATIVE_RETRY_LIMIT}"
                     )
                     attempt_prompt = _rewrite_tool_tags_for_model(
-                        _unavailable_tools_prompt(attempt_prompt, out["text"], unmapped, tools or [], model), model)
+                        _unavailable_tools_prompt(
+                            attempt_prompt, out["text"], unmapped, tools or [], model
+                        ),
+                        model,
+                    )
                     continue
                 run_usage = out.get("usage") or {}
                 signal = (
@@ -8918,7 +9549,9 @@ class Handler(BaseHTTPRequestHandler):
         seen_calls: set[str] = set()
         unique_calls: list[dict[str, Any]] = []
         for tc in tool_calls:
-            key = _call_key(tc["function"]["name"], json.loads(tc["function"]["arguments"] or "{}"))
+            key = _call_key(
+                tc["function"]["name"], json.loads(tc["function"]["arguments"] or "{}")
+            )
             if key in seen_calls:
                 _log(f"dropped duplicate tool call {tc['function']['name']}")
                 continue
@@ -8938,16 +9571,14 @@ class Handler(BaseHTTPRequestHandler):
             xs["exit_reason"] = "upstream_failed"
             self._send(
                 502,
-                _error_payload(
-                    f"opencode run produced no text (rc={out.get('rc')}, state={out.get('state')})"
-                    + (f": {tail}" if tail else ""),
-                    tail,
-                ),
+                _zen_error(502),
             )
             return
 
         prompt_tokens = int(tokens.get("input") or 0) or _estimate_tokens(prompt)
-        completion_tokens = int(tokens.get("output") or 0) or _estimate_tokens(content)
+        completion_tokens = int(
+            tokens.get("output") or 0
+        ) or _estimate_completion_tokens(content, tool_calls, len("".join(reasonings)))
 
         msg: dict[str, Any] = {"role": "assistant", "content": content}
         if reasonings:
@@ -8959,6 +9590,8 @@ class Handler(BaseHTTPRequestHandler):
         xs.update(
             exit_reason="ok",
             tools=len(tool_calls),
+            tool_chars=_tool_argument_chars(tool_calls),
+            reason_chars=len("".join(reasonings)),
             out_chars=len(content),
             rc=out.get("rc"),
         )
@@ -9039,6 +9672,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": {"message": f"not found: {path}"}})
 
     def do_POST(self) -> None:
+        self._zen_probe = False
         xs = self._xs = _new_exit_state()
         try:
             self._handle_post(xs)
@@ -9050,14 +9684,18 @@ class Handler(BaseHTTPRequestHandler):
             # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
             self.close_connection = True
             xs["exit_reason"] = "unauthorized"
-            self._send(401, {"error": {"message": "unauthorized", "type": "auth_error"}})
+            self._send(
+                401, {"error": {"message": "unauthorized", "type": "auth_error"}}
+            )
             return
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or "0")
         raw = self.rfile.read(length) if length else b"{}"
         if path in ("/v1/models/reload", "/models/reload"):
             result = reload_catalog()
-            _log(f"catalog reload source={result['source']} models={len(result['models'])}")
+            _log(
+                f"catalog reload source={result['source']} models={len(result['models'])}"
+            )
             xs["exit_reason"] = "catalog_reload"
             self._send(200, result)
             return
@@ -9084,20 +9722,39 @@ class Handler(BaseHTTPRequestHandler):
                 model = alias_target
         if model not in ALLOWED_MODELS:
             xs["exit_reason"] = "bad_request"
-            self._send(400, {"error": {
-                "message": f"unknown model '{model}'; allowed: {sorted(ALLOWED_MODELS)}",
-                "type": "invalid_request_error", "code": "model_not_found"}})
+            self._send(
+                400,
+                {
+                    "error": {
+                        "message": f"unknown model '{model}'; allowed: {sorted(ALLOWED_MODELS)}",
+                        "type": "invalid_request_error",
+                        "code": "model_not_found",
+                    }
+                },
+            )
             return
 
         raw_tools = req.get("tools")
-        tools = [t for t in raw_tools if isinstance(t, dict)] if isinstance(raw_tools, list) else []
+        tools = (
+            [t for t in raw_tools if isinstance(t, dict)]
+            if isinstance(raw_tools, list)
+            else []
+        )
         tool_choice = req.get("tool_choice")
         emulate_tools = bool(tools) and not _tool_choice_none(tool_choice)
 
         system_text, prompt = _messages_to_prompt(req.get("messages") or [])
         if not prompt:
             xs["exit_reason"] = "bad_request"
-            self._send(400, {"error": {"message": "no user content", "type": "invalid_request_error"}})
+            self._send(
+                400,
+                {
+                    "error": {
+                        "message": "no user content",
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
             return
         head: list[str] = []
         if system_text:
@@ -9109,7 +9766,9 @@ class Handler(BaseHTTPRequestHandler):
         google_input: GoogleInput | None = None
         if _is_google_direct_model(model):
             system_head = "\n\n".join(part.removeprefix("[system]\n") for part in head)
-            google_input = _messages_to_google_contents(req.get("messages") or [], system_head)
+            google_input = _messages_to_google_contents(
+                req.get("messages") or [], system_head
+            )
         history = prompt
         if head:
             prompt = "\n\n".join(head) + f"\n\n{prompt}"
@@ -9119,21 +9778,44 @@ class Handler(BaseHTTPRequestHandler):
                 prompt += f"\n\n{reminder}"
 
         prompt = _rewrite_tool_tags_for_model(prompt, model)
+        self._zen_probe = _zen_probe_request(req)
         effort = _map_effort(req, model)
         if req.get("stream") is True:
-            self._stream_sse(model, prompt, effort, emulate_tools, tools, google_input,
-                             reported_model=requested_model, tool_choice=tool_choice)
+            self._stream_sse(
+                model,
+                prompt,
+                effort,
+                emulate_tools,
+                tools,
+                google_input,
+                reported_model=requested_model,
+                tool_choice=tool_choice,
+            )
         else:
-            self._serve_json(model, prompt, effort, emulate_tools, tools, google_input,
-                             reported_model=requested_model, tool_choice=tool_choice)
+            self._serve_json(
+                model,
+                prompt,
+                effort,
+                emulate_tools,
+                tools,
+                google_input,
+                reported_model=requested_model,
+                tool_choice=tool_choice,
+            )
 
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address: Any, handler_class: Any, *args: Any,
-                 resilience: _Resilience | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        server_address: Any,
+        handler_class: Any,
+        *args: Any,
+        resilience: _Resilience | None = None,
+        **kwargs: Any,
+    ) -> None:
         # Защиты process-level: прод передаёт модульный набор (main), тесты получают изолированный.
         self.resilience = resilience or _Resilience()
         super().__init__(server_address, handler_class, *args, **kwargs)

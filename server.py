@@ -45,7 +45,6 @@ import fcntl
 import functools
 import hashlib
 import hmac
-import io
 import itertools
 import json
 import math
@@ -66,7 +65,7 @@ from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -108,6 +107,11 @@ from core.backend_adapter import (  # noqa: E402
     strip_bridge_secrets,
 )
 from core import context_resilience as ctxres  # noqa: E402
+from core.resilience import (  # noqa: E402
+    ResilienceError,
+    ResilienceLease,
+    ResilienceManager,
+)
 from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
@@ -258,7 +262,7 @@ def _load_request_config() -> dict[str, Any]:
         suffixes = tuple(default_suffixes.split(","))
     advertised = _bridge_env(
         "ADVERTISE_EFFORT_ALIASES",
-        "gemini-4-argon-high,gemini-4-argon-medium,gemini-3.8-flash-high,gemini-3.8-flash-medium,gemini-3.8-flash-low,claude-opus-5-5-high,claude-sonnet-5-5-xhigh",
+        "off",
     )
     return {
         "REQUEST_ATTRIBUTION_ENABLED": boolean("REQUEST_ATTRIBUTION_ENABLED"),
@@ -514,6 +518,9 @@ _budget = None
 # ---- ОТКАЗОУСТОЙЧИВОСТЬ КОНТЕКСТА (EYE-33873, ADR-0006): общее ядро core/context_resilience.
 # Флаги читаются из локального снимка GigaRC (дефолт false = прежнее поведение хаба).
 CONTEXT_FLAGS = ctxres.FlagSource()
+# ---- ОТКАЗОУСТОЙЧИВОСТЬ БЭКЕНДОВ (ADR-0020): Circuit Breaker + Bulkhead по backend_id.
+# Все механизмы за флагами GigaRC (дефолт false = прежнее поведение); fallback на другую модель запрещён.
+RESILIENCE = ResilienceManager()
 CONTEXT_EPOCHS = ctxres.EpochStore()
 # Droid-маршрут хаба не квалифицирован (VER-006): строгий admission включается только флагом
 # DYNAMIC_PRUNER_ENABLED; после паспорта счётчика владелец переводит маршрут в enrolled.
@@ -1244,6 +1251,10 @@ def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
     )
 
 
+# Исходы хода, не связанные со здоровьем бэкенда (ADR-0020 §2.А): брейкеру нейтральны.
+_RESILIENCE_NEUTRAL_STATES = frozenset(
+    {"queue_timeout", "spool_error", "persist_error", "delivery_budget", "client_gone"}
+)
 _CHAT_PATHS = ("/v1/chat/completions", "/chat/completions")
 _LOOPBACK_PEERS = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
@@ -1259,6 +1270,131 @@ def _passthrough_open(handler: BaseHTTPRequestHandler) -> bool:
     return str(handler.client_address[0]) in _LOOPBACK_PEERS and any(
         isinstance(adapter, PassthroughAdapter) for adapter in BACKENDS.adapters()
     )
+
+
+_MODEL_BLOCK_STATUSES = re.compile(
+    r"\b(?:TEMP\s+OFF|LIMIT\s+BLOCKED|QUOTA_EXHAUSTED|BANNED)\b", re.I
+)
+
+
+def _parse_blocked_models(text: str) -> frozenset[str]:
+    """Только конкретные ID в статусных колонках; prose и запреты транспортов не модели."""
+    blocked: set[str] = set()
+    headers: list[str] = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            headers = []
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if any("статус" in cell.lower() for cell in cells):
+            headers = [cell.lower() for cell in cells]
+            continue
+        if not headers or len(cells) != len(headers):
+            continue
+        status_index = next(
+            (i for i, cell in enumerate(headers) if "статус" in cell), None
+        )
+        if status_index is None or not _MODEL_BLOCK_STATUSES.search(
+            cells[status_index]
+        ):
+            continue
+        if "группа" in headers:
+            group = cells[headers.index("группа")].lower()
+            if group not in ("модели", "models"):
+                continue
+            model_cell = cells[headers.index("что")]
+        elif "модель" in headers[0] or "model" in headers[0]:
+            model_cell = cells[0].split(" / ", 1)[0]
+        else:
+            continue
+        for model in re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._:-]*)`", model_cell):
+            blocked.add(model)
+    return frozenset(blocked)
+
+
+class ModelNotesFilter:
+    """TTL-снимок: медленный диск не задерживает HTTP, ошибки обновления — fail-open."""
+
+    def __init__(self, path: Path | None = None, ttl_s: float | None = None) -> None:
+        self.path = (
+            path
+            or Path(
+                os.environ.get(
+                    "BRIDGE_MODEL_NOTES_PATH", "~/Мой диск/Context/model-notes.md"
+                )
+            ).expanduser()
+        )
+        self.ttl_s = ttl_s
+        self.blocked: frozenset[str] = frozenset()
+        self.expires_at = 0.0
+        self.lock = threading.Lock()
+        self.loading: threading.Event | None = None
+        self.signature: tuple[int, int] | None = None
+
+    def is_blocked(self, model: str) -> bool:
+        now = time.monotonic()
+        if now < self.expires_at:
+            return model in self.blocked
+        # try-lock: запрос не ждёт чужого I/O под mutex.
+        if not self.lock.acquire(blocking=False):
+            return model in self.blocked
+        try:
+            if now < self.expires_at:
+                return model in self.blocked
+            if self.loading is None:
+                done = self.loading = threading.Event()
+                try:
+                    ttl = (
+                        self.ttl_s
+                        if self.ttl_s is not None
+                        else float(
+                            os.environ.get("BRIDGE_MODEL_NOTES_CACHE_TTL_S", "10")
+                        )
+                    )
+                    if not math.isfinite(ttl) or ttl < 0:
+                        ttl = 10.0
+                    wait_s = float(
+                        os.environ.get("BRIDGE_MODEL_NOTES_READ_BUDGET_S", "0.02")
+                    )
+                    wait_s = (
+                        min(0.04, max(0.0, wait_s)) if math.isfinite(wait_s) else 0.02
+                    )
+                except ValueError:
+                    ttl, wait_s = 10.0, 0.02
+
+                def refresh() -> None:
+                    try:
+                        stat = self.path.stat()
+                        signature = (stat.st_mtime_ns, stat.st_size)
+                        models = (
+                            self.blocked
+                            if signature == self.signature
+                            else _parse_blocked_models(
+                                self.path.read_text(encoding="utf-8")
+                            )
+                        )
+                    except (OSError, UnicodeError, ValueError):
+                        signature, models = None, frozenset()
+                    with self.lock:
+                        self.blocked, self.signature = models, signature
+                        self.expires_at = time.monotonic() + ttl
+                        self.loading = None
+                    done.set()
+
+                threading.Thread(
+                    target=refresh, daemon=True, name="model-notes-refresh"
+                ).start()
+            else:
+                # Другой запрос уже обновляет; возвращаем stale кэш (F-007)
+                return model in self.blocked
+        finally:
+            self.lock.release()
+        if not done.wait(wait_s):
+            return model in self.blocked
+        return model in self.blocked
+
+
+_MODEL_NOTES_FILTER = ModelNotesFilter()
 
 
 class _HandlerSink(ResponseSink):
@@ -1280,6 +1416,7 @@ class _HandlerSink(ResponseSink):
                 {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
             )
         self.status = 0
+        self._client_gone_flag = False
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
@@ -1296,13 +1433,18 @@ class _HandlerSink(ResponseSink):
                 )
             self._handler.end_headers()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._client_gone_flag = True
             raise ClientGone() from exc
+
+    def client_gone(self) -> bool:
+        return self._client_gone_flag or _client_gone(self._handler.connection)
 
     def write(self, data: bytes) -> None:
         try:
             self._handler.wfile.write(data)
             self._handler.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._client_gone_flag = True
             raise ClientGone() from exc
 
 
@@ -5814,6 +5956,12 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/v1/resilience":
+            self._send(
+                200,
+                RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()),
+            )
+            return
         if _is_detached_enabled() and path.startswith("/v1/turns/"):
             m_stream = re.fullmatch(r"/v1/turns/([^/]+)/stream", path)
             if m_stream:
@@ -6125,6 +6273,28 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            idempotency_key = (self.headers.get("X-Idempotency-Key") or "").strip()
+            if idempotency_key and req.get("step_job_id") != idempotency_key:
+                req["step_job_id"] = idempotency_key
+                raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
+            model_filter_deferred = auth_deferred
+            if (
+                not auth_deferred
+                and self.headers.get("X-Bypass-Model-Filter") != "1"
+                and _MODEL_NOTES_FILTER.is_blocked(model_id)
+            ):
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": "Model temporarily blocked by operational limits",
+                            "type": "model_limit_blocked",
+                            "code": 503,
+                        }
+                    },
+                )
+                return
+
             fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
             alias = _resolve_model_alias(model_id, fleet_models)
             alias_effort = None
@@ -6163,6 +6333,24 @@ class Handler(BaseHTTPRequestHandler):
                         code="model_not_in_provider_scope",
                     )
                     return
+
+            if (
+                not auth_deferred
+                and resolved_id != model_id
+                and self.headers.get("X-Bypass-Model-Filter") != "1"
+                and _MODEL_NOTES_FILTER.is_blocked(resolved_id)
+            ):
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": "Model temporarily blocked by operational limits",
+                            "type": "model_limit_blocked",
+                            "code": 503,
+                        }
+                    },
+                )
+                return
 
             model_id = resolved_id
             if model_id not in fleet_models:
@@ -6210,6 +6398,22 @@ class Handler(BaseHTTPRequestHandler):
                             },
                         )
                         return
+                if (
+                    model_filter_deferred
+                    and self.headers.get("X-Bypass-Model-Filter") != "1"
+                    and _MODEL_NOTES_FILTER.is_blocked(model_id)
+                ):
+                    self._send(
+                        503,
+                        {
+                            "error": {
+                                "message": "Model temporarily blocked by operational limits",
+                                "type": "model_limit_blocked",
+                                "code": 503,
+                            }
+                        },
+                    )
+                    return
                 if alias is not None:
                     req = {**req, "model": model_id}
                     if req.get("reasoning_effort") is None:
@@ -6218,7 +6422,10 @@ class Handler(BaseHTTPRequestHandler):
                 _log(
                     f"chat route=passthrough model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
                 )
-                self._serve_passthrough(passthrough, raw, req, model_id)
+                self._serve_resilient(
+                    model["backend"],
+                    lambda: self._serve_passthrough(passthrough, raw, req, model_id),
+                )
                 return
             if auth_deferred:
                 self.close_connection = True
@@ -6492,10 +6699,16 @@ class Handler(BaseHTTPRequestHandler):
             _log(
                 f"chat route=cli model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
             )
-            if ctx["stream"]:
-                self._serve_sse(ctx)
+            serve = (
+                (lambda: self._serve_sse(ctx))
+                if ctx["stream"]
+                else (lambda: self._serve_json(ctx))
+            )
+            if attached_existing:
+                # Присоединение к уже идущему ходу нового вызова бэкенда не создаёт: допуск не нужен.
+                serve()
             else:
-                self._serve_json(ctx)
+                self._serve_resilient(model["backend"], serve)
         finally:
             if (
                 managed_turn is not None
@@ -6811,6 +7024,58 @@ class Handler(BaseHTTPRequestHandler):
             )
         return out
 
+    @staticmethod
+    def _record_turn_outcome(
+        lease: ResilienceLease, out: dict, backend_err: Any
+    ) -> None:
+        """Явный исход хода CLI-бэкенда: успех — `rc == 0` и нет ошибки бэкенда (ADR-0020 §3.2)."""
+        if backend_err is None and out.get("rc") == 0:
+            lease.record_success()
+        elif out.get("state") in _RESILIENCE_NEUTRAL_STATES:
+            # Локальная перегрузка/хранилище моста — не вина бэкенда: брейкер не штрафуем.
+            lease.record_discard(str(out.get("state")))
+        else:
+            lease.record_failure()
+
+    def _current_lease(self) -> ResilienceLease:
+        """Lease текущего запроса; вне `_serve_resilient` (тесты, прямой вызов) — пустой (no-op)."""
+        return getattr(self, "_resilience_lease", None) or ResilienceLease("")
+
+    def _serve_resilient(self, backend_id: str, serve: Callable[[], None]) -> None:
+        """Допуск по брейкеру и отсеку ДО любых заголовков; отказ — честный 503 + Retry-After."""
+        try:
+            lease = RESILIENCE.acquire(backend_id)
+        except ResilienceError as exc:
+            _log(
+                f"reject reason=resilience code={exc.error_code} backend={backend_id} "
+                f"retry_after={exc.retry_after}"
+            )
+            self.close_connection = True
+            self._send(
+                503,
+                {
+                    "error": {
+                        "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
+                        "type": exc.error_type,
+                        "code": exc.error_code,
+                        "retry_after": exc.retry_after,
+                    }
+                },
+                extra_headers={"Retry-After": str(exc.retry_after)},
+            )
+            return
+        # Handler живёт на соединение (keep-alive): lease привязан только к этому запросу.
+        self._resilience_lease = lease
+        try:
+            with lease:
+                try:
+                    serve()
+                except (BrokenPipeError, ConnectionResetError):
+                    lease.record_discard("client_disconnected")
+                    raise
+        finally:
+            self._resilience_lease = None
+
     def _serve_passthrough(
         self,
         adapter: PassthroughAdapter,
@@ -6819,6 +7084,7 @@ class Handler(BaseHTTPRequestHandler):
         model_id: str,
     ) -> None:
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
+        lease = self._current_lease()
         started = time.monotonic()
         _log(
             f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}"
@@ -6837,6 +7103,13 @@ class Handler(BaseHTTPRequestHandler):
             adapter.handle(
                 path=self.path, raw_body=raw, request=req, headers=headers, sink=sink
             )
+            # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
+            if sink.client_gone:
+                lease.record_discard("client_disconnected")
+            elif 0 < sink.status < 500:
+                lease.record_success()
+            else:
+                lease.record_failure()
         finally:
             _log(
                 f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
@@ -6853,10 +7126,14 @@ class Handler(BaseHTTPRequestHandler):
             )
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
+        lease = self._current_lease()
         out = self._dispatch(ctx, None)
         if out.get("state") == "client_gone":
+            lease.record_discard("client_disconnected")
             return
-        err = self._error_body(out) or self._reserve_delivery(out)
+        backend_err = self._error_body(out)
+        self._record_turn_outcome(lease, out, backend_err)
+        err = backend_err or self._reserve_delivery(out)
         if err is not None:
             self._send(err["code"], {"error": err})
             return
@@ -6966,6 +7243,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
     def _serve_sse_body(self, ctx: dict[str, Any]) -> None:
+        lease = self._current_lease()
         # RW-203: состояние отказа живой записи не наследуется следующим запросом.
         self._client_write_dead = False
         completion_id = f"chatcmpl-droid-{uuid.uuid4().hex[:12]}"
@@ -6991,6 +7269,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             _log("client gone before headers")
+            lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
             return
@@ -7114,6 +7393,8 @@ class Handler(BaseHTTPRequestHandler):
             return ok
 
         if not emit(chunk({"role": "assistant", "content": ""})):
+            # Пустой стартовый кадр успехом не считается; обрыв клиента нейтрален.
+            lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 self._client_write_dead = True
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
@@ -7133,10 +7414,12 @@ class Handler(BaseHTTPRequestHandler):
                     f"client_write_dead: dispatch error suppressed "
                     f"err={_err_summary(repr(exc), 160)!r}"
                 )
+                lease.record_discard("client_disconnected")
                 return
             if not live_sent[0]:
-                raise  # живых байт не было: прежнее поведение (сбой наружу)
+                raise  # живых байт не было: прежнее поведение (сбой наружу; lease зафиксирует сбой)
             _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
+            lease.record_failure(exc)
             emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__))
             emit("data: [DONE]\n\n")
             return
@@ -7144,11 +7427,15 @@ class Handler(BaseHTTPRequestHandler):
             # RW-203: сокет отверг живую запись — терминальные кадры (tool_call, stop,
             # usage, error) и [DONE] мёртвому клиенту не отправляются.
             _log("client_write_dead: terminal frames suppressed")
+            lease.record_discard("client_disconnected")
             return
         if out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
+            lease.record_discard("client_disconnected")
             return
-        err = self._error_body(out) or self._reserve_delivery(out)
+        backend_err = self._error_body(out)
+        self._record_turn_outcome(lease, out, backend_err)
+        err = backend_err or self._reserve_delivery(out)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли

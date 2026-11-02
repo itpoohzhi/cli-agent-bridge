@@ -58,7 +58,9 @@ env приоритетнее файла (0/false/no/off — hard-off, 1/true/yes
   * `extended_timeout_enabled` / `AGY_EXTENDED_TIMEOUT_ENABLED` — idle 1800 с по активности
     stdout/transcript и потолок 3600 с (`AGY_IDLE_TIMEOUT_S`, `AGY_TIMEOUT_S`);
   * `graceful_timeout_on_partial` / `AGY_GRACEFUL_TIMEOUT_ON_PARTIAL` — timeout и
-    idle_timeout после частичной выдачи завершаются `finish_reason="length"` вместо 504;
+    idle_timeout после частичной выдачи завершаются настраиваемым `finish_reason`
+    (по умолчанию "stop") вместо 504: `AGY_GRACEFUL_TIMEOUT_FINISH_REASON` или
+    `graceful_timeout_finish_reason` в dynamic_config.json;
   * `step_scoped_usage_enabled` / `AGY_STEP_SCOPED_USAGE_ENABLED` — `usage` по окну
     последнего шага (prompt = input + cache последнего `PLANNER_RESPONSE`, completion =
     сумма output шагов хода) вместо накопительного `result.usage`; без валидного шага —
@@ -80,6 +82,8 @@ AGY_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в �
 from __future__ import annotations
 
 import bisect
+import collections
+import copy
 import base64
 import hashlib
 import json
@@ -187,7 +191,9 @@ def _env_int_with_zero_cap(
     return value
 
 
-def _chain_float(names: tuple[str, ...], default: float, low: float, high: float) -> float:
+def _chain_float(
+    names: tuple[str, ...], default: float, low: float, high: float
+) -> float:
     """Первое заданное имя из цепочки (каноническое -> легаси); иначе default."""
     for name in names:
         if os.environ.get(name, "").strip():
@@ -326,7 +332,11 @@ def _build_bridge_config() -> _BridgeConfig:
             ("AGY_BRIDGE_EXT_MAX_TIMEOUT_S", "AGY_TIMEOUT_S"), 3600.0, 10.0, 86400.0
         ),
         ext_idle_timeout_s=_chain_float(
-            ("AGY_BRIDGE_IDLE_TIMEOUT_S", "AGY_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"),
+            (
+                "AGY_BRIDGE_IDLE_TIMEOUT_S",
+                "AGY_IDLE_TIMEOUT_S",
+                "AGY_BRIDGE_IDLE_TIMEOUT",
+            ),
             1800.0,
             5.0,
             86400.0,
@@ -377,7 +387,10 @@ def _build_bridge_config() -> _BridgeConfig:
         ),
         max_tool_markers_per_turn=_env_int("AGY_BRIDGE_MAX_TOOL_MARKERS", 32, 1, 1024),
         max_retained_divergent_bytes=_chain_int(
-            ("AGY_BRIDGE_MAX_DIVERGENT_BYTES", "AGY_BRIDGE_MAX_RETAINED_DIVERGENT_BYTES"),
+            (
+                "AGY_BRIDGE_MAX_DIVERGENT_BYTES",
+                "AGY_BRIDGE_MAX_RETAINED_DIVERGENT_BYTES",
+            ),
             65536,
             1024,
             1048576,
@@ -391,13 +404,20 @@ def _build_bridge_config() -> _BridgeConfig:
         usage_step_cap=_env_int("AGY_BRIDGE_USAGE_STEP_CAP", 16384, 128, 1048576),
         sqlite_row_limit=_env_int("AGY_BRIDGE_SQLITE_ROW_LIMIT", 16, 1, 1024),
         breaker_failures=_env_int("AGY_BRIDGE_BREAKER_FAILURES", 3, 1, 100),
-        breaker_cooldown_s=_env_float("AGY_BRIDGE_BREAKER_COOLDOWN_S", 30.0, 1.0, 3600.0),
+        breaker_cooldown_s=_env_float(
+            "AGY_BRIDGE_BREAKER_COOLDOWN_S", 30.0, 1.0, 3600.0
+        ),
         breaker_probe_lease_s=_env_float(
             "AGY_BRIDGE_BREAKER_PROBE_LEASE_S", 60.0, 1.0, 3600.0
         ),
-        retry_capacity_tenths=_env_int("AGY_BRIDGE_RETRY_CAPACITY_TENTHS", 30, 10, 1000),
+        retry_capacity_tenths=_env_int(
+            "AGY_BRIDGE_RETRY_CAPACITY_TENTHS", 30, 10, 1000
+        ),
         retry_credit_tenths=_chain_int(
-            ("AGY_BRIDGE_RETRY_REFILL_PER_SEC_TENTHS", "AGY_BRIDGE_RETRY_CREDIT_TENTHS"),
+            (
+                "AGY_BRIDGE_RETRY_REFILL_PER_SEC_TENTHS",
+                "AGY_BRIDGE_RETRY_CREDIT_TENTHS",
+            ),
             2,
             1,
             100,
@@ -417,7 +437,10 @@ def _build_bridge_config() -> _BridgeConfig:
         ),
         poll_cost_tenths=_env_int("AGY_BRIDGE_POLL_COST_TENTHS", 10, 1, 100),
         liveness_gated_timeout_enabled=_chain_bool(
-            ("AGY_BRIDGE_LIVENESS_GATED_TIMEOUT_ENABLED", "AGY_LIVENESS_GATED_TIMEOUT_ENABLED"),
+            (
+                "AGY_BRIDGE_LIVENESS_GATED_TIMEOUT_ENABLED",
+                "AGY_LIVENESS_GATED_TIMEOUT_ENABLED",
+            ),
             True,
         ),
     )
@@ -546,6 +569,33 @@ PROMPT_MAX_NDJSON_BYTES = _env_int(
 )
 # Минимум головы и хвоста якорного блока при пропорциональном сжатии (байты).
 PRUNE_EDGE_MIN_BYTES = _env_int("AGY_BRIDGE_PRUNE_EDGE_MIN_BYTES", 512, 512, 8192)
+# Завершённые напоминания и точные форматы снимка/уведомлений (ADR-0019).
+SYNTHETIC_REMINDER_RE = re.compile(
+    r"<system-reminder>(?:(?!</?system-reminder>).)*</system-reminder>", re.DOTALL
+)
+SYNTHETIC_RUNTIME_RE = re.compile(
+    r"Current runtime context\. This snapshot supersedes earlier "
+    r"(?:runtime-context )?snapshots\."
+    r'(?:\n\n?Current working directory: "[^"\n]+"\.)?'
+)
+SYNTHETIC_POLICY_RE = re.compile(
+    r'The approval policy changed from "[^"\n]+" to "[^"\n]+" '
+    r"\(changed by the user\)\."
+)
+# Служебное уведомление DSH об одобрении/отказе инструмента — синтетика только при
+# точном совпадении всего тела; любой иной текст `The user approved ...` — ввод
+# человека (ADR-0019, Cycle 4 F-001).
+SYNTHETIC_NOTICE_RE = re.compile(
+    r"The user (?:approved|rejected)(?: the)? (?:bash|command|tool)"
+    r"(?: command| call)?(?:\.)?",
+    re.IGNORECASE,
+)
+# Сверх этого числа реальных user текущего хода якорями остаются только
+# первый (исходная цель) и последние ANCHOR_USER_TAIL_COUNT (ADR-0019, Cycle 5 F-005).
+ANCHOR_USER_NO_ASSISTANT_MAX = _env_int(
+    "AGY_BRIDGE_ANCHOR_USER_NO_ASSISTANT_MAX", 5, 1, 100000
+)
+ANCHOR_USER_TAIL_COUNT = _env_int("AGY_BRIDGE_ANCHOR_USER_TAIL_COUNT", 3, 1, 100000)
 HISTORY_PRUNED_MARKER = (
     "[ранняя история диалога опущена мостом для соблюдения лимита контекста]"
 )
@@ -1972,46 +2022,179 @@ def _join_prompt_parts(parts: list[str], tail_block: str = "") -> str:
     return "\n\n".join(joined).strip()
 
 
-def _prune_prompt_blocks(
-    blocks: list[tuple[int, str, str]], tail_block: str, limit: int
-) -> str:
-    """Head-pruning структурированной истории под потолок NDJSON (ADR-0008, REQ-01).
+def _is_synthetic_user_block(rendered_text: str) -> bool:
+    """Синтетическое напоминание/снимок рантайма, а не ввод человека (ADR-0019).
 
-    Якоря не отбрасываются: системное `messages[0]`, последний блок истории
-    с предшествующим ответом ассистента, последний блок `user` с ответом
-    ассистента перед ним (даже за хвостом `assistant(tool_calls)`/`tool`) и
-    `[attachments]`. Промежуточные блоки уходят от старых к новым; на месте
-    каждого отброшенного отрезка — маркерное сообщение. Если не влезают даже
-    якоря, середины крупных блоков вырезаются пропорционально их излишку с
-    явным маркером; голова и хвост каждого — не короче PRUNE_EDGE_MIN_BYTES.
+    Завершённые теги занимают всё тело без полезного текста снаружи. Уведомления
+    распознаются по полному известному формату; совпадения префикса недостаточно.
+    Неизвестные форматы остаются вводом человека, чтобы не потерять директиву.
+    """
+    lines = rendered_text.splitlines()
+    body = "\n".join(
+        lines[1:] if len(lines) > 1 and lines[0].startswith("### ") else lines
+    ).strip()
+    if not body:
+        return False
+    if (
+        SYNTHETIC_REMINDER_RE.search(body)
+        and not SYNTHETIC_REMINDER_RE.sub("", body).strip()
+    ):
+        return True
+    return any(
+        pattern.fullmatch(body) is not None
+        for pattern in (SYNTHETIC_RUNTIME_RE, SYNTHETIC_POLICY_RE, SYNTHETIC_NOTICE_RE)
+    )
+
+
+def _prompt_anchor_indices(blocks: list[tuple[int, str, str]]) -> set[int]:
+    """Индексы блоков, которые head-pruning не отбрасывает (ADR-0008, ADR-0019).
+
+    Якоря: системное `messages[0]`, реальные сообщения пользователя текущего хода
+    (последний не-синтетический user и все реальные после предшествующего ему
+    assistant), сам этот assistant, последний блок истории (assistant/tool/реальный
+    user), ровно один последний assistant всей истории и результаты инструментов
+    активного хода (после последнего assistant; без assistant в срезе — все).
+    Исторические tool-результаты до последнего assistant вытесняются штатно.
+    С числом реальных user текущего хода сверх ANCHOR_USER_NO_ASSISTANT_MAX
+    якоря — первый (исходная цель) и последние ANCHOR_USER_TAIL_COUNT, промежуточные
+    вытесняются head-pruning (Cycle 4 F-002). Без реальных user последний user
+    закрепляется безусловно, даже при исторических tool-блоках (Cycle 4 F-001):
+    крупный сжимается серединой с сохранением краёв, а не теряется.
     """
     count = len(blocks)
     anchors: set[int] = set()
-    if count and blocks[0][0] == 0 and blocks[0][1] == "system":
+    if not count:
+        return anchors
+    if blocks[0][0] == 0 and blocks[0][1] == "system":
         anchors.add(0)
-    if count:
-        last = count - 1
-        anchors.add(last)
-        for i in range(last - 1, -1, -1):
-            if i not in anchors and blocks[i][1] == "assistant":
-                anchors.add(i)
-                break
+    last = count - 1
+
+    # Поиск реальных (не синтетических) пользовательских сообщений (ADR-0019)
+    real_user_indices = [
+        i
+        for i in range(count)
+        if blocks[i][1] == "user" and not _is_synthetic_user_block(blocks[i][2])
+    ]
+
+    if real_user_indices:
+        last_real_user = real_user_indices[-1]
+        anchors.add(last_real_user)
+        preceding_assistant_idx = next(
+            (
+                i
+                for i in range(last_real_user - 1, -1, -1)
+                if blocks[i][1] == "assistant"
+            ),
+            -1,
+        )
+        if preceding_assistant_idx >= 0:
+            anchors.add(preceding_assistant_idx)
+        turn_users = [u for u in real_user_indices if u > preceding_assistant_idx]
+        if len(turn_users) > ANCHOR_USER_NO_ASSISTANT_MAX:
+            # Пачка user с assistant или без: исходная цель и хвост (Cycle 5 F-005).
+            anchors.add(turn_users[0])
+            tail_count = min(ANCHOR_USER_TAIL_COUNT, ANCHOR_USER_NO_ASSISTANT_MAX)
+            anchors.update(turn_users[-tail_count:])
+        else:
+            # Все реальные user текущего хода (после предшествующего assistant).
+            anchors.update(turn_users)
+    else:
+        # Fallback: реальных user нет; последний user — носитель ввода, закрепляется
+        # безусловно, исторические tool-блоки этому не мешают (Cycle 4 F-001).
         last_user_idx = next(
             (i for i in range(last, -1, -1) if blocks[i][1] == "user"), -1
         )
         if last_user_idx >= 0:
             anchors.add(last_user_idx)
-            preceding_assistant_idx = next(
-                (
-                    i
-                    for i in range(last_user_idx - 1, -1, -1)
-                    if blocks[i][1] == "assistant"
-                ),
-                -1,
-            )
-            if preceding_assistant_idx >= 0:
-                anchors.add(preceding_assistant_idx)
-    droppable = [i for i in range(count) if i not in anchors]
+
+    # Сохранение последнего блока, если это assistant или tool, либо реальный user.
+    # Хвостовая синтетика в якоря не попадает: при дефиците бюджета она уходит
+    # первой (секция synthetic в droppable), не вырезая реальный ввод.
+    if blocks[last][1] in ("assistant", "tool"):
+        anchors.add(last)
+    elif not _is_synthetic_user_block(blocks[last][2]):
+        anchors.add(last)
+
+    # Последний assistant всей истории (контекст tool calls) — ровно один: если он
+    # уже якорь, более старые не добираются, чтобы не съедать бюджет (F-002).
+    last_assistant = next(
+        (i for i in range(last, -1, -1) if blocks[i][1] == "assistant"), -1
+    )
+    if last_assistant >= 0:
+        anchors.add(last_assistant)
+
+    # Результаты инструментов только активного хода (после последнего assistant);
+    # срез без assistant (`new_msgs` продолжения) — весь активный ход (F-003).
+    anchors.update(
+        i for i in range(last_assistant + 1, count) if blocks[i][1] == "tool"
+    )
+    return anchors
+
+
+def _prompt_priority_indices(
+    blocks: list[tuple[int, str, str]],
+) -> tuple[set[int], set[int]]:
+    """Активные инструменты и защищённые блоки для сжатия (ADR-0019, Cycle 5 F-001).
+
+    Защищены системное `messages[0]` и якорные user текущего хода;
+    без реальных user используется служебный ввод. Инструменты подчинены им:
+    их тела и заголовки сокращаются до любого сжатия защищённого ввода.
+    """
+    count = len(blocks)
+    protected: set[int] = set()
+    if count and blocks[0][0] == 0 and blocks[0][1] == "system":
+        protected.add(0)
+    users = [i for i in range(count) if blocks[i][1] == "user"]
+    real_users = [i for i in users if not _is_synthetic_user_block(blocks[i][2])]
+    carrier = real_users or users
+    last_assistant = next(
+        (i for i in range(count - 1, -1, -1) if blocks[i][1] == "assistant"), -1
+    )
+    preceding_assistant_idx = (
+        next(
+            (i for i in range(carrier[-1] - 1, -1, -1) if blocks[i][1] == "assistant"),
+            -1,
+        )
+        if carrier
+        else -1
+    )
+    turn_users = [u for u in carrier if u > preceding_assistant_idx]
+    if turn_users:
+        tail_count = min(ANCHOR_USER_TAIL_COUNT, ANCHOR_USER_NO_ASSISTANT_MAX)
+        if len(turn_users) > ANCHOR_USER_NO_ASSISTANT_MAX:
+            protected.add(turn_users[0])
+            protected.update(turn_users[-tail_count:])
+        else:
+            protected.update(turn_users)
+    active_tools = {
+        i for i in range(last_assistant + 1, count) if blocks[i][1] == "tool"
+    }
+    return active_tools, protected
+
+
+def _prune_prompt_blocks(
+    blocks: list[tuple[int, str, str]], tail_block: str, limit: int
+) -> str:
+    """Head-pruning структурированной истории под потолок NDJSON (ADR-0008, REQ-01, ADR-0019).
+
+    Якоря (`_prompt_anchor_indices`) и `[attachments]` не отбрасываются. Первыми
+    уходят неякорные синтетические напоминания, затем история от старых к новым;
+    оставшиеся блоки идут в исходном порядке, на месте каждого отброшенного
+    отрезка — маркерное сообщение. Если не влезают даже якоря — приоритетное
+    сжатие `_cap_prompt_parts`: сначала история и активные tool-результаты,
+    затем их заголовки; система, носитель ввода и вложения защищены. Заголовок `### N. role`
+    каждого оставшегося сообщения сохраняется.
+    """
+    count = len(blocks)
+    anchors = _prompt_anchor_indices(blocks)
+    synthetic = {
+        i
+        for i in range(count)
+        if blocks[i][1] == "user" and _is_synthetic_user_block(blocks[i][2])
+    }
+    droppable = [i for i in range(count) if i not in anchors and i in synthetic] + [
+        i for i in range(count) if i not in anchors and i not in synthetic
+    ]
     marker_block = "### user\n" + HISTORY_PRUNED_MARKER
 
     def assemble(drop_count: int) -> list[str]:
@@ -2042,31 +2225,21 @@ def _prune_prompt_blocks(
     else:
         dropped_count = len(droppable)
         parts = assemble(dropped_count)
+        # Позиции сообщений в `parts` по группам приоритета; маркеры пропуска и
+        # `[attachments]` не сжимаются и не вытесняются.
+        active_blocks, protected_blocks = _prompt_priority_indices(blocks)
+        dropped_set = set(droppable)
+        kept = [i for i in range(count) if i not in dropped_set]
+        message_parts = [k for k, part in enumerate(parts) if part != marker_block]
+        block_at = dict(zip(message_parts, kept))
+        priority_blocks = active_blocks | protected_blocks
+        historical = [k for k in message_parts if block_at[k] not in priority_blocks]
+        active = [k for k in message_parts if block_at[k] in active_blocks]
+        protected = {k for k in message_parts if block_at[k] in protected_blocks}
         if tail_block:
+            protected.add(len(parts))
             parts.append(tail_block)
-        # Излишек делится между крупными блоками пропорционально их запасу
-        # сверх пола (голова + маркер + хвост): ни один блок не зануляется.
-        floor = 2 * PRUNE_EDGE_MIN_BYTES + _json_text_bytes(MIDDLE_PRUNED_MARKER)
-        for _round in range(len(parts) + 1):
-            excess = _ndjson_bytes(_join_prompt_parts(parts)) - limit
-            if excess <= 0:
-                break
-            sizes = [_json_text_bytes(part) for part in parts]
-            spare = [max(size - floor, 0) for size in sizes]
-            pool = sum(spare)
-            if not pool:
-                break
-            changed = False
-            for i, room in enumerate(spare):
-                if not room:
-                    continue
-                cut = min(room, -(-excess * room // pool))
-                pruned = _middle_prune_text(parts[i], sizes[i] - cut)
-                if pruned != parts[i]:
-                    parts[i] = pruned
-                    changed = True
-            if not changed:
-                break
+        parts = _cap_prompt_parts(parts, historical, active, limit, protected)
         text = _ensure_prompt_fits_ndjson(_join_prompt_parts(parts), limit)
     final_bytes = _ndjson_bytes(text)
     _log(
@@ -2074,6 +2247,169 @@ def _prune_prompt_blocks(
         f"final ndjson bytes={final_bytes}"
     )
     return text
+
+
+def _cap_prompt_parts(
+    parts: list[str],
+    historical: list[int],
+    active: list[int],
+    limit: int,
+    protected: set[int] | None = None,
+) -> list[str]:
+    """Приоритетное сжатие якорей под `limit` (ADR-0019, Cycle 5 F-001).
+
+    История и активные инструменты сначала сжимаются до пола с сохранением краёв,
+    затем тела инструментов обнуляются раньше истории; если не влезают заголовки,
+    сначала вытесняются инструменты, затем история. Защищённые система, носитель
+    ввода и вложения не участвуют в этих операциях. Только если они одни превышают лимит, сжимаются их середины.
+    """
+    out = list(parts)
+    keep = protected or set()
+    historical = [k for k in historical if k not in keep]
+    active = [k for k in active if k not in keep]
+    if _prompt_parts_fit(out, limit):
+        return out
+    out = _middle_prune_group(out, historical, limit)
+    out = _middle_prune_group(out, active, limit)
+    if _prompt_parts_fit(out, limit):
+        return out
+    capped = _cap_group_bodies(out, active, limit)
+    if capped is not None:
+        return capped
+    out = _cap_group_to(out, active, 0)
+    capped = _cap_group_bodies(out, historical, limit)
+    if capped is not None:
+        return capped
+    out = _cap_group_to(out, historical, 0)
+
+    evictable = sorted(active) + sorted(historical)
+    active_set = set(active) - keep
+    marker_block = "### user\n" + HISTORY_PRUNED_MARKER
+
+    def evict(n: int) -> tuple[list[str], list[int], list[int]]:
+        dropped = set(evictable[:n])
+        result: list[str] = []
+        result_active: list[int] = []
+        result_protected: list[int] = []
+        for k, part in enumerate(out):
+            if k in dropped or part == marker_block:
+                if not result or result[-1] != marker_block:
+                    result.append(marker_block)
+                continue
+            if k in active_set:
+                result_active.append(len(result))
+            if k in keep:
+                result_protected.append(len(result))
+            result.append(part)
+        return result, result_active, result_protected
+
+    def fits_after(n: int) -> bool:
+        evicted, evicted_active, _ = evict(n)
+        return _prompt_parts_fit(_cap_group_to(evicted, evicted_active, 0), limit)
+
+    low, high = 1, len(evictable)
+    if not high or not fits_after(high):
+        # Все лишние заголовки удалены; лишь теперь режем середины защищённых.
+        evicted, _, survivors = evict(high)
+        evicted = _middle_prune_group(evicted, survivors, limit)
+        if _prompt_parts_fit(evicted, limit):
+            return evicted
+        # Защитный рубеж для лимита меньше суммарного пола защищённых блоков.
+        return _cap_group_bodies(evicted, survivors, limit) or _cap_group_to(
+            evicted, survivors, 0
+        )
+    while low < high:
+        mid = (low + high) // 2
+        if fits_after(mid):
+            high = mid
+        else:
+            low = mid + 1
+    evicted, evicted_active, _ = evict(high)
+    _log(f"history headers evicted: {high} messages")
+    return _cap_group_bodies(evicted, evicted_active, limit) or evicted
+
+
+def _prompt_parts_fit(parts: list[str], limit: int) -> bool:
+    return _ndjson_bytes(_join_prompt_parts(parts)) <= limit
+
+
+def _middle_prune_group(parts: list[str], group: list[int], limit: int) -> list[str]:
+    """Вырезать середины блоков `group` пропорционально их запасу сверх пола.
+
+    Пол — заголовок `### N. role`, голова и хвост тела по PRUNE_EDGE_MIN_BYTES плюс
+    маркер: ни один блок группы не зануляется; блоки вне `group` не трогаются.
+    """
+    out = list(parts)
+    marker_bytes = _json_text_bytes(MIDDLE_PRUNED_MARKER)
+    floors = {
+        k: 2 * (PRUNE_EDGE_MIN_BYTES + _json_text_bytes(parts[k].partition("\n")[0]))
+        + marker_bytes
+        for k in group
+    }
+    for _round in range(len(group) + 1):
+        excess = _ndjson_bytes(_join_prompt_parts(out)) - limit
+        if excess <= 0:
+            break
+        sizes = {k: _json_text_bytes(out[k]) for k in group}
+        spare = {k: max(size - floors[k], 0) for k, size in sizes.items()}
+        pool = sum(spare.values())
+        if not pool:
+            break
+        changed = False
+        for k, room in spare.items():
+            if not room:
+                continue
+            cut = min(room, -(-excess * room // pool))
+            pruned = _middle_prune_text(out[k], sizes[k] - cut)
+            if pruned != out[k]:
+                out[k] = pruned
+                changed = True
+        if not changed:
+            break
+    return out
+
+
+def _cap_group_to(parts: list[str], group: list[int], cap: int) -> list[str]:
+    out = list(parts)
+    for k in group:
+        out[k] = _cap_prompt_block(parts[k], cap)
+    return out
+
+
+def _cap_group_bodies(
+    parts: list[str], group: list[int], limit: int
+) -> list[str] | None:
+    """Наибольший общий потолок блоков `group`, при котором промпт влезает в `limit`.
+
+    Блоки крупнее потолка сжимаются серединой тела, заголовок сохраняется; None —
+    промпт не влезает даже при пустых телах группы.
+    """
+    if not _prompt_parts_fit(_cap_group_to(parts, group, 0), limit):
+        return None
+    low = 0
+    high = max((_json_text_bytes(parts[k]) for k in group), default=0)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _prompt_parts_fit(_cap_group_to(parts, group, mid), limit):
+            low = mid
+        else:
+            high = mid - 1
+    return _cap_group_to(parts, group, low)
+
+
+def _cap_prompt_block(block: str, cap: int) -> str:
+    """Сжать блок промпта до `cap` экранированных байт, не трогая заголовок `### N. role`."""
+    if _json_text_bytes(block) <= cap:
+        return block
+    header, sep, body = block.partition("\n")
+    if not header.startswith("### "):
+        return _middle_prune_text(block, cap)
+    if not sep:
+        return header
+    budget = max(cap - _json_text_bytes(header + sep), 0)
+    pruned = _middle_prune_text(body, budget)
+    # Пустое тело — только заголовок: без висячего перевода строки на границе блоков.
+    return header + sep + pruned if pruned else header
 
 
 def _json_text_bytes(text: str) -> int:
@@ -2306,7 +2642,9 @@ def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
     return entry
 
 
-def _atomic_write_sessions_json(snapshot: dict[tuple[str, ...], dict[str, Any]]) -> None:
+def _atomic_write_sessions_json(
+    snapshot: dict[tuple[str, ...], dict[str, Any]],
+) -> None:
     """Атомарно записать снимок стора: temp в том же каталоге + fsync + os.replace.
 
     Файл 0600, каталог 0700. Ошибка I/O только логируется (fail-open): горячие
@@ -2601,9 +2939,9 @@ def _is_sqlite_reasoning_enabled() -> bool:
 
 
 # ---- Флаги новой политики (AD-005): локальный GigaRC-совместимый снимок -------------
-# Stdlib-only LaunchAgent: ни SDK, ни удалённого транспорта. Все пять флагов имеют
-# строгий кодовый False (прежнее поведение до явного включения). Приоритет:
-# env override > JSON bool из dynamic_config.json > False.
+# Stdlib-only LaunchAgent: ни SDK, ни удалённого транспорта. Старые флаги имеют
+# кодовый False; stream resilience — True по брифу. Приоритет:
+# env override > JSON из dynamic_config.json > кодовый default.
 
 
 class _RuntimeFlags(NamedTuple):
@@ -2614,6 +2952,8 @@ class _RuntimeFlags(NamedTuple):
     extended_timeout_enabled: bool = False
     graceful_timeout_on_partial: bool = False
     step_scoped_usage_enabled: bool = False
+    stream_resilience_enabled: bool = True
+    graceful_timeout_finish_reason: str = "stop"
 
 
 _NEW_FLAG_ENV = {
@@ -2622,6 +2962,7 @@ _NEW_FLAG_ENV = {
     "extended_timeout_enabled": "AGY_EXTENDED_TIMEOUT_ENABLED",
     "graceful_timeout_on_partial": "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL",
     "step_scoped_usage_enabled": "AGY_STEP_SCOPED_USAGE_ENABLED",
+    "stream_resilience_enabled": "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
@@ -2634,26 +2975,37 @@ _cfg_generation: int = 0
 
 
 def _parse_runtime_flags(text: str) -> _RuntimeFlags:
-    """Разобрать dynamic_config.json; ValueError — файл отвергается целиком."""
+    """Разобрать флаги; нестроковый finish_reason заменяется дефолтом 'stop'.
+
+    ValueError для не-bool флагов отвергает файл целиком.
+    """
     data = cast(object, json.loads(text))
     if not isinstance(data, dict):
         raise ValueError("dynamic_config: not an object")
     raw = cast("dict[str, object]", data)
     values: dict[str, bool] = {}
+    finish_reason = _COLD_FLAGS.graceful_timeout_finish_reason
     for name in _RuntimeFlags._fields:
-        value = raw.get(name, False)
+        default = getattr(_COLD_FLAGS, name)
+        if name == "stream_resilience_enabled":
+            default = raw.get(_NEW_FLAG_ENV[name], default)
+        value = raw.get(name, default)
+        if name == "graceful_timeout_finish_reason":
+            finish_reason = value if isinstance(value, str) else "stop"
+            continue
         if not isinstance(value, bool):
             raise ValueError("dynamic_config: %s is not boolean" % name)
         values[name] = value
-    return _RuntimeFlags(**values)
+    return _RuntimeFlags(**values, graceful_timeout_finish_reason=finish_reason)
 
 
 def _runtime_snapshot() -> _RuntimeFlags:
     """Снимок флагов из dynamic_config.json: TTL 1.0 с, ключ версии (mtime_ns, size).
 
     Пока stat не изменился, JSON не разбирается (identity снимка сохраняется). Битый
-    JSON или не-bool значение отвергают файл целиком: действует last-known-good,
-    на холодном старте — False. Отсутствие файла — валидное состояние «все False».
+    JSON или не-bool флаг отвергают файл целиком: действует last-known-good,
+    на холодном старте — кодовые дефолты. Нестроковый finish_reason заменяется
+    на 'stop'. При отсутствии файла используются кодовые дефолты.
     """
     global _cfg_snapshot, _cfg_key, _cfg_checked_at, _cfg_generation
     now = time.monotonic()
@@ -2696,14 +3048,40 @@ def _runtime_snapshot() -> _RuntimeFlags:
     return snapshot
 
 
-def _new_flag(name: str) -> bool:
-    """Флаг новой политики: явный env (0/false/no/off, 1/true/yes/on) > JSON bool > False."""
+def _new_flag(name: str, default: bool = False) -> bool:
+    """Явный env > JSON bool > кодовый default; старые флаги выключены."""
+    if name == "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED":
+        name = "stream_resilience_enabled"
     env = os.environ.get(_NEW_FLAG_ENV[name], "").strip().lower()
     if env in _ENV_TRUE:
         return True
     if env in _ENV_FALSE:
         return False
-    return bool(getattr(_runtime_snapshot(), name))
+    return bool(getattr(_runtime_snapshot(), name, default))
+
+
+def _graceful_finish_reason() -> str:
+    """Возвращает finish_reason graceful-таймаута: 'stop' или 'length'.
+
+    Приоритет: валидный AGY_GRACEFUL_TIMEOUT_FINISH_REASON, затем
+    graceful_timeout_finish_reason из dynamic_config.json, затем 'stop'.
+    Значение 'max_tokens' нормализуется в 'length'.
+    """
+    raw_env = os.getenv("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "").strip().lower()
+    if raw_env in ("length", "max_tokens"):
+        return "length"
+    if raw_env == "stop":
+        return "stop"
+    snap = _runtime_snapshot()
+    val = snap.graceful_timeout_finish_reason.strip().lower()
+    if val in ("length", "max_tokens"):
+        return "length"
+    return "stop"
+
+
+AGY_BRIDGE_STREAM_RESILIENCE_ENABLED = _new_flag(
+    "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True
+)
 
 
 def _positive_env(name: str) -> float | None:
@@ -4485,6 +4863,206 @@ class _TranscriptTail:
 
 
 @final
+class JobConflict(ValueError):
+    """Ключ уже связан с другим входом."""
+
+
+@dataclass
+class _Job:
+    key: str
+    identity: tuple[str, str]
+    events: list[tuple[str, Any]]
+    cancelled: threading.Event
+    readers: int = 1
+    size_bytes: int = 0
+    result: dict | None = None
+    completed_at: float | None = None
+    orphan: bool = False
+    running: bool = True
+    cancel: Callable[[], None] | None = None
+
+
+class JobRegistry:
+    """Атомарные attach/replay, bounded память, TTL/LRU и реальные orphan-слоты."""
+
+    def __init__(
+        self,
+        *,
+        max_buffer_bytes: int | None = None,
+        max_entries: int | None = None,
+        ttl_s: float | None = None,
+        orphan_max: int | None = None,
+    ) -> None:
+        self.max_buffer_bytes = (
+            max_buffer_bytes
+            if max_buffer_bytes is not None
+            else _env_int(
+                "AGY_BRIDGE_JOB_BUFFER_MAX_BYTES", 5 * 1024 * 1024, 1, sys.maxsize
+            )
+        )
+        self.max_entries = (
+            max_entries
+            if max_entries is not None
+            else _env_int("AGY_BRIDGE_JOB_MAX_ENTRIES", 100, 0, sys.maxsize)
+        )
+        self.ttl_s = (
+            ttl_s
+            if ttl_s is not None
+            else _env_float("AGY_BRIDGE_JOB_TTL_S", 900.0, 0.0, float("inf"))
+        )
+        self.orphan_max = (
+            orphan_max
+            if orphan_max is not None
+            else _env_int("AGY_BRIDGE_ORPHAN_CONCURRENCY_MAX", 5, 0, sys.maxsize)
+        )
+        self.condition = threading.Condition(threading.Lock())
+        self.jobs: dict[str, _Job] = {}
+        self.completed: collections.OrderedDict[str, _Job] = collections.OrderedDict()
+        self.expiry: collections.deque[tuple[float, str, _Job]] = collections.deque()
+        self.orphans = 0
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        while self.expiry and self.expiry[0][0] <= now:
+            _at, key, job = self.expiry.popleft()
+            if self.jobs.get(key) is job and job.result is not None:
+                self.jobs.pop(key, None)
+                self.completed.pop(key, None)
+        while len(self.completed) > self.max_entries:
+            key, job = self.completed.popitem(last=False)
+            if self.jobs.get(key) is job:
+                self.jobs.pop(key, None)
+        # Реестр expiry тоже bounded: ссылки вытесненных записей не живут до TTL.
+        if len(self.expiry) > self.max_entries:
+            self.expiry = collections.deque(
+                (at, key, job)
+                for at, key, job in self.expiry
+                if self.jobs.get(key) is job
+            )
+
+    def attach(self, key: str, model: str, prompt: str) -> tuple[_Job, bool]:
+        identity = (model, hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+        with self.condition:
+            self._prune()
+            job = self.jobs.get(key)
+            if job is not None:
+                if job.identity != identity:
+                    raise JobConflict(
+                        "idempotency key is bound to another model or prompt"
+                    )
+                job.readers += 1
+                if job.orphan and not job.cancelled.is_set():
+                    job.orphan = False
+                    self.orphans -= 1
+                if key in self.completed:
+                    self.completed.move_to_end(key)
+                return job, False
+            job = _Job(key, identity, [], threading.Event())
+            self.jobs[key] = job
+            return job, True
+
+    def bind_cancel(self, job: _Job, cancel: Callable[[], None] | None) -> None:
+        with self.condition:
+            job.cancel = cancel
+            should_cancel = job.cancelled.is_set()
+        if should_cancel and cancel is not None:
+            cancel()
+
+    def _terminal(self, job: _Job, result: dict) -> None:
+        if job.result is None:
+            job.result = result
+        self.condition.notify_all()
+        if job.running or job.completed_at is not None:
+            return
+        job.completed_at = time.monotonic()
+        if job.orphan:
+            self.orphans -= 1
+            job.orphan = False
+        key = job.key
+        if self.jobs.get(key) is job:
+            self.completed[key] = job
+            self.expiry.append((job.completed_at + self.ttl_s, key, job))
+        self._prune()
+
+    def publish(self, job: _Job, kind: str, payload: Any) -> bool:
+        size = len(json.dumps((kind, payload), ensure_ascii=False).encode("utf-8"))
+        cancel = None
+        with self.condition:
+            if job.result is not None or job.cancelled.is_set():
+                return False
+            if job.size_bytes + size > self.max_buffer_bytes:
+                job.cancelled.set()
+                self._terminal(job, {"state": "buffer_overflow", "text": "", "rc": 1})
+                cancel = job.cancel
+            else:
+                job.events.append((kind, payload))
+                job.size_bytes += size
+                self.condition.notify_all()
+                return True
+        if cancel is not None:
+            cancel()
+        return False
+
+    def finish(self, job: _Job, result: dict) -> None:
+        with self.condition:
+            job.running = False
+            job.cancel = None
+            if job.cancelled.is_set() and job.result is None:
+                result = {"state": "orphan_limit", "text": "", "rc": 1}
+            if (
+                job.size_bytes
+                + len(
+                    json.dumps(
+                        {
+                            key: result.get(key)
+                            for key in ("text", "reasoning", "retained_events")
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                )
+                > self.max_buffer_bytes
+            ):
+                result = {"state": "buffer_overflow", "text": "", "rc": 1}
+            self._terminal(job, result)
+
+    def read(
+        self, job: _Job, offset: int, timeout: float
+    ) -> tuple[list[tuple[str, Any]], dict | None]:
+        with self.condition:
+            if offset >= len(job.events) and job.result is None:
+                self.condition.wait(timeout=timeout)
+            return job.events[offset:], job.result
+
+    def detach(self, job: _Job) -> None:
+        cancel = None
+        with self.condition:
+            job.readers = max(0, job.readers - 1)
+            if job.readers or job.result is not None or job.orphan:
+                return
+            if self.orphans < self.orphan_max:
+                job.orphan = True
+                self.orphans += 1
+            else:
+                job.cancelled.set()
+                cancel = job.cancel
+                self.condition.notify_all()
+        # close()/kill/reap — только вне mutex; producer освободит Bulkhead в finally.
+        if cancel is not None:
+            cancel()
+
+
+_JOB_REGISTRY = JobRegistry()
+
+
+def resolve_agy_mode(req: dict) -> str:
+    """Текстовый запрос не разрешает нативные инструменты CLI."""
+    return (
+        "agent"
+        if req.get("tools") or req.get("functions") or req.get("agent_tools") is True
+        else "ask"
+    )
+
+
 class Run:
     """Один процесс `agy`; поток-читатель превращает stdout NDJSON в события очереди.
 
@@ -4508,6 +5086,7 @@ class Run:
         turn_id: str = "",
         policy: _TimeoutPolicy | None = None,
         add_dir: Path | None = None,
+        mode: str = "agent",
     ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -4516,6 +5095,13 @@ class Run:
         if AGY_BRIDGE_ENABLE_HEAD_PRUNING:
             prompt = _ensure_prompt_fits_ndjson(prompt)
         self.stdin_line = _ndjson_user_line(prompt)
+        cli_mode = (
+            os.environ.get("AGY_BRIDGE_ASK_CLI_MODE", "plan")
+            if mode in ("ask", "plan")
+            else os.environ.get("AGY_BRIDGE_AGENT_CLI_MODE", "auto")
+            if mode in ("agent", "auto")
+            else mode
+        )
         cmd = [
             launcher,
             "--input-format",
@@ -4523,6 +5109,8 @@ class Run:
             "--output-format",
             "stream-json",
             "--dangerously-skip-permissions",
+            "--mode",
+            cli_mode,
             "--model",
             model,
             "--effort",
@@ -5236,6 +5824,7 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
 
 
 class Handler(BaseHTTPRequestHandler):
+    _registry_job: _Job | None = None
     protocol_version = "HTTP/1.1"
     server_version = "agy-bridge/1.0"
 
@@ -5252,6 +5841,8 @@ class Handler(BaseHTTPRequestHandler):
             return "-"
 
     def _send(self, code: int, payload: dict) -> None:
+        if self._registry_job is not None:
+            return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
             self.send_response(code)
@@ -5345,6 +5936,8 @@ class Handler(BaseHTTPRequestHandler):
         При extended_timeout_enabled ожидание не длиннее остатка бюджета запроса
         за вычетом резерва drain + финального flush.
         """
+        if self._registry_job is not None and self._registry_job.cancelled.is_set():
+            return "client_gone"
         if _slots.acquire(blocking=False):
             return ""
         deadline = time.monotonic() + QUEUE_TIMEOUT_S
@@ -5521,7 +6114,7 @@ class Handler(BaseHTTPRequestHandler):
                     124,
                     f"no agy event within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 )
-            if _client_gone(self.connection):
+            if self._job_client_gone():
                 return state("client_gone", 1)
             if (
                 result_error
@@ -5664,9 +6257,101 @@ class Handler(BaseHTTPRequestHandler):
             f"err={_err_summary(out.get('err'))!r} {tag}"
         )
 
+    def _job_client_gone(self) -> bool:
+        job = getattr(self, "_registry_job", None)
+        return (
+            job.cancelled.is_set() if job is not None else _client_gone(self.connection)
+        )
+
     def _run_once(
         self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
     ) -> dict:
+        key = str(ctx.get("step_job_id") or "")
+        if not key:
+            return self._run_once_impl(
+                ctx, on_text, on_tool_trace, on_reasoning, keepalive
+            )
+        registry = _JOB_REGISTRY
+        try:
+            job, owner = registry.attach(
+                key, str(ctx["model"]), str(ctx["full_prompt"])
+            )
+        except JobConflict:
+            return {"state": "job_conflict", "text": "", "rc": 1}
+        if owner:
+            worker = copy.copy(self)
+            worker._registry_job = job
+            worker_ctx = dict(ctx)
+            worker_ctx.pop("finalize_timeout", None)
+
+            def produce() -> None:
+                try:
+                    out = worker._run_once_impl(
+                        worker_ctx,
+                        lambda value: registry.publish(job, "text", value),
+                        lambda value: registry.publish(job, "tool_trace", value),
+                        lambda value: registry.publish(job, "reasoning", value),
+                        lambda: not job.cancelled.is_set(),
+                    )
+                except Exception as exc:
+                    _log(f"job-producer-error err={type(exc).__name__}")
+                    out = {"state": "pump_error", "text": "", "rc": 1}
+                try:
+                    registry.finish(job, out)
+                finally:
+                    use_cid = str(worker_ctx.get("registry_use_cid") or "")
+                    if use_cid:
+                        with _session_store_lock:
+                            _in_flight_cids.discard(use_cid)
+                    _cid_release(
+                        use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
+                        str(worker_ctx.get("turn_id") or ""),
+                    )
+
+            ctx["job_owns_cid"] = True
+            try:
+                threading.Thread(target=produce, daemon=True, name="agy-job").start()
+            except RuntimeError:
+                ctx["job_owns_cid"] = False
+                registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+        offset = 0
+        heartbeat = _env_float(
+            "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf")
+        )
+        last_delivery = time.monotonic()
+        try:
+            while True:
+                if _client_gone(self.connection):
+                    return {"state": "client_gone", "text": "", "rc": 1}
+                events, out = registry.read(
+                    job, offset, min(heartbeat, TRANSCRIPT_POLL_S)
+                )
+                for kind, payload in events:
+                    callback = {
+                        "text": on_text,
+                        "reasoning": on_reasoning,
+                        "tool_trace": on_tool_trace,
+                    }[kind]
+                    if callback is not None and not callback(payload):
+                        return {"state": "client_gone", "text": "", "rc": 1}
+                    offset += 1
+                    last_delivery = time.monotonic()
+                if out is not None:
+                    return out
+                if time.monotonic() - last_delivery >= heartbeat:
+                    if keepalive is not None and not keepalive():
+                        return {"state": "client_gone", "text": "", "rc": 1}
+                    last_delivery = time.monotonic()
+        finally:
+            registry.detach(job)
+
+    def _run_once_impl(
+        self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
+    ) -> dict:
+        if "stream_resilience_enabled" not in ctx:
+            ctx["stream_resilience_enabled"] = _new_flag(
+                "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True
+            )
         model = ctx["model"]
         effort = ctx["effort"]
         tag = ctx["tag"]
@@ -5785,6 +6470,12 @@ class Handler(BaseHTTPRequestHandler):
                         img_registered = False
             _retry_credit()
             for attempt in (1, 2):
+                if (
+                    self._registry_job is not None
+                    and self._registry_job.cancelled.is_set()
+                ):
+                    out = _terminal_state("client_gone")
+                    break
                 policy = _build_timeout_policy(t_req_start)
                 if policy is not None and not policy.can_start:
                     # Бюджет запроса исчерпан: новой попытки нет, остаток не перезапускается.
@@ -5823,6 +6514,7 @@ class Handler(BaseHTTPRequestHandler):
                         turn_id=str(ctx.get("turn_id") or ""),
                         policy=policy,
                         add_dir=img_dir if images else None,
+                        **({"mode": ctx["agy_mode"]} if "agy_mode" in ctx else {}),
                     )
                 except LauncherUnavailable:
                     self._reject(
@@ -5861,6 +6553,9 @@ class Handler(BaseHTTPRequestHandler):
                         "duration_s": None,
                     }
                     break
+                job = getattr(self, "_registry_job", None)
+                if job is not None:
+                    _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 try:
                     out = self._execute(
                         run, on_text, on_tool_trace, on_reasoning, keepalive
@@ -5879,6 +6574,8 @@ class Handler(BaseHTTPRequestHandler):
                             _log(f"graceful-finalize-error err={type(exc).__name__}")
                 finally:
                     run.close()
+                    if job is not None:
+                        _JOB_REGISTRY.bind_cancel(job, None)
                 if out["state"] == "done":
                     break
                 # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
@@ -5892,6 +6589,14 @@ class Handler(BaseHTTPRequestHandler):
                     or typed_out.get("tool_calls")
                     or delivered_reasoning
                 )
+                if ctx["stream_resilience_enabled"]:
+                    # Commit запрещает невидимый повтор даже при пустом out;
+                    # нативные инструменты могли изменить данные без tool_calls.
+                    delivered = delivered or bool(
+                        ctx.get("stream_committed")
+                        or ctx.get("tool_activity")
+                        or typed_out.get("tool_events")
+                    )
                 if (
                     attempt == 1
                     and universal
@@ -6017,8 +6722,14 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     @staticmethod
-    def _error_body(out: dict) -> Any:
+    def _error_body(out: dict, resilience: bool | None = None) -> Any:
         st = out.get("state")
+        if st in ("job_conflict", "buffer_overflow", "orphan_limit"):
+            return {
+                "message": str(st),
+                "type": str(st),
+                "code": 409 if st == "job_conflict" else 502,
+            }
         limit = out.get("timeout_limit_s")
         has_limit = isinstance(limit, (int, float))
         if st == "timeout":
@@ -6079,7 +6790,17 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "agy_error",
                 "code": 502,
             }
-        if out.get("rc") != 0 or not out.get("text"):
+        if resilience is None:
+            resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
+        has_payload = bool(out.get("text"))
+        if resilience:
+            has_payload = bool(
+                out.get("text")
+                or out.get("reasoning")
+                or out.get("tool_events")
+                or out.get("result")
+            )
+        if out.get("rc") != 0 or not has_payload:
             return {
                 "message": f"agy exited rc={out.get('rc')}",
                 "detail": str(out.get("err"))[:500],
@@ -6210,6 +6931,7 @@ class Handler(BaseHTTPRequestHandler):
             reserved = length
         use_cid = ""
         owned_cid = ""
+        ctx: dict[str, object] = {}
         turn_id = uuid.uuid4().hex
         try:
             raw = self.rfile.read(length) if length else b""
@@ -6443,8 +7165,16 @@ class Handler(BaseHTTPRequestHandler):
                     conversation_id = use_cid
                     is_resumed = True
                     prompt = _get_resumed_turn_prompt(render_messages, images)
-            ctx: dict[str, object] = {
+            ctx = {
+                "registry_use_cid": use_cid,
+                "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,
+                "step_job_id": str(
+                    self.headers.get("X-Idempotency-Key")
+                    or req.get("step_job_id")
+                    or ""
+                ),
+                "agy_mode": resolve_agy_mode(req),
                 "turn_id": turn_id,
                 "sess_key": sess_key,
                 "hot_resumed": is_resumed,
@@ -6472,10 +7202,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._serve_json(ctx)
         finally:
-            if use_cid:
-                with _session_store_lock:
-                    _in_flight_cids.discard(use_cid)
-            _cid_release(use_cid or owned_cid, turn_id)
+            if not ctx.get("job_owns_cid"):
+                if use_cid:
+                    with _session_store_lock:
+                        _in_flight_cids.discard(use_cid)
+                _cid_release(use_cid or owned_cid, turn_id)
             if reserved and budget is not None:
                 budget.release(reserved)
 
@@ -6557,13 +7288,16 @@ class Handler(BaseHTTPRequestHandler):
             return payload
 
         def finalize_timeout(out: dict) -> None:
-            """Graceful-финал timeout/idle_timeout: 200/length (идемпотентно, до run.close())."""
+            """Graceful-финал: HTTP 200, настраиваемый finish_reason (дефолт stop).
+
+            Идемпотентно, до run.close().
+            """
             state = out.get("state")
             if out.get("graceful_done") or state not in ("timeout", "idle_timeout"):
                 return
             if not _new_flag("graceful_timeout_on_partial"):
                 return
-            # Остаток источников из terminal drain + полезный partial -> 200/length.
+            # Остаток terminal drain + partial -> HTTP 200, finish_reason из настроек.
             retained_text, retained_reasoning = consume_retained(out)
             content = str(out.get("text") or "")
             base_reasoning = str(out.get("reasoning") or "")
@@ -6577,7 +7311,9 @@ class Handler(BaseHTTPRequestHandler):
             _log(f"graceful-timeout state={state} mode=json")
             if not self._prepare_flush_write():
                 return
-            self._send(200, build_payload(out, content, reasoning, "length"))
+            self._send(
+                200, build_payload(out, content, reasoning, _graceful_finish_reason())
+            )
 
         ctx["finalize_timeout"] = finalize_timeout
         out = self._run_once(ctx, lambda _v: True, on_tool_trace, lambda _r: True, None)
@@ -6591,7 +7327,7 @@ class Handler(BaseHTTPRequestHandler):
         retained_reasoning = retained_cache[0][1] if retained_cache else ""
         reasoning = str(out.get("reasoning") or "") + retained_reasoning
         reasoning += "".join(markers)
-        err = self._error_body(out)
+        err = self._error_body(out, bool(ctx.get("stream_resilience_enabled", True)))
         if err is not None:
             self._send(err["code"], {"error": err})
             return
@@ -6610,22 +7346,17 @@ class Handler(BaseHTTPRequestHandler):
         completion_id = f"chatcmpl-agy-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         shown_model = ctx["model"]
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            self.close_connection = True
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            _log("client gone before headers")
-            return
+        resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
+        ctx["stream_resilience_enabled"] = resilience
+        ctx["stream_committed"] = False
+        disconnected = False
 
         def chunk(
             delta: dict,
             finish=None,
             usage: dict | None = None,
             conversation_id: str = "",
+            error: dict | None = None,
         ) -> str:
             body: dict = {
                 "id": completion_id,
@@ -6638,7 +7369,38 @@ class Handler(BaseHTTPRequestHandler):
                 body["usage"] = usage
             if conversation_id:
                 body["conversation_id"] = conversation_id
+            if error is not None:
+                body["error"] = error
             return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+
+        def emit(data: str) -> bool:
+            nonlocal disconnected
+            if resilience and disconnected:
+                return False
+            ok = self._emit(data)
+            if resilience and not ok:
+                disconnected = True
+            return ok
+
+        def commit() -> bool:
+            nonlocal disconnected
+            if disconnected:
+                return False
+            if ctx["stream_committed"]:
+                return True
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                disconnected = True
+                _log("client gone before headers")
+                return False
+            ctx["stream_committed"] = True
+            self.close_connection = True
+            return emit(chunk({"role": "assistant", "content": ""}))
 
         # Счётчики полезной выдачи растут только после УСПЕШНОЙ записи клиенту
         # (role-chunk, keepalive и пустые/whitespace-дельты не в счёт).
@@ -6649,7 +7411,9 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         def on_text(value: str) -> bool:
-            ok = self._emit(chunk({"content": value}))
+            if resilience and not value:
+                return not disconnected
+            ok = commit() and emit(chunk({"content": value}))
             if ok and value.strip():
                 emitted_content[0] += len(value.strip())
             return ok
@@ -6657,12 +7421,16 @@ class Handler(BaseHTTPRequestHandler):
         def on_reasoning(value: str) -> bool:
             # Мышление шага: Harness читает первое непустое из
             # reasoning_content|reasoning|reasoning_text — отдаём только первое.
-            ok = self._emit(chunk({"reasoning_content": value}))
+            if resilience and not value:
+                return not disconnected
+            ok = commit() and emit(chunk({"reasoning_content": value}))
             if ok and value.strip():
                 emitted_reasoning_or_tool[0] += 1
             return ok
 
         def on_tool_trace(event: dict) -> bool:
+            if resilience:
+                ctx["tool_activity"] = True
             # Нативный инструмент agy исполняется внутри CLI и наружу не уходит как
             # tool_call. Безопасный маркер прогресса — только при emit_tool_trace;
             # выключенный флаг — полный no-op до любого форматирования строк.
@@ -6677,12 +7445,17 @@ class Handler(BaseHTTPRequestHandler):
             return ok
 
         def keepalive() -> bool:
-            return self._emit(": keepalive\n\n")
+            if not ctx["stream_committed"]:
+                if ctx.get("step_job_id"):
+                    return commit() and emit(": keepalive\n\n")
+                return not disconnected
+            return emit(": keepalive\n\n")
 
         def finalize_timeout(out: dict) -> None:
             """Graceful-финал timeout/idle_timeout после полезной выдачи (идемпотентно).
 
-            Один общий arbiter-досыл, один notice, один `finish_reason="length"`, один
+            Один arbiter-досыл, один notice, один настраиваемый finish_reason
+            (по умолчанию "stop"), один
             [DONE] — всё в одном окне T_FINAL_FLUSH_S; ошибка записи прекращает записи.
             """
             if out.get("graceful_done") or out.get("state") not in (
@@ -6714,7 +7487,7 @@ class Handler(BaseHTTPRequestHandler):
             reason = str(out.get("state"))
             conv_id = str(out.get("conversation_id") or "")
             if ok:
-                ok = self._emit(
+                ok = commit() and emit(
                     chunk(
                         {
                             "content": self._graceful_notice(
@@ -6724,26 +7497,40 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
             if ok:
-                ok = self._emit(chunk({}, "length", conversation_id=conv_id))
+                ok = emit(chunk({}, _graceful_finish_reason(), conversation_id=conv_id))
             if ok:
-                _ = self._emit("data: [DONE]\n\n")
+                _ = emit("data: [DONE]\n\n")
             out["graceful_done"] = True
             _log(f"graceful-timeout state={reason} mode=sse ok={int(bool(ok))}")
 
         ctx["finalize_timeout"] = finalize_timeout
-        if not self._emit(chunk({"role": "assistant", "content": ""})):
+        if not resilience and not ctx.get("step_job_id") and not commit():
             return
         out = self._run_once(ctx, on_text, on_tool_trace, on_reasoning, keepalive)
-        if out.get("state") == "client_gone":
+        if disconnected or out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return
         finalize_timeout(out)  # страховка, если _run_once не вызвал hook
         if out.get("graceful_done"):
             return
-        err = self._error_body(out)
+        err = self._error_body(out, resilience)
+        if (
+            (resilience or ctx.get("step_job_id"))
+            and err is not None
+            and not ctx["stream_committed"]
+        ):
+            self._send(
+                int(err.get("code") or 502) if ctx.get("step_job_id") else 502,
+                {"error": err},
+            )
+            self.close_connection = True
+            return
+        if not commit():
+            return
         if err is None:
             conv_id = str(out.get("conversation_id") or "")
-            self._emit(chunk({}, "stop", conversation_id=conv_id))
+            if not emit(chunk({}, "stop", conversation_id=conv_id)) and resilience:
+                return
             # Harness считает tok/s и % контекста только из usage в потоке
             # (dsh-llm-pi-ai toStreamChunks: usage-chunk -> session usage).
             # Шлём только при ненулевых токенах, чтобы пустой usage от agy
@@ -6752,12 +7539,20 @@ class Handler(BaseHTTPRequestHandler):
                 out.get("usage") or {}, out.get("usage_resolved")
             )
             if usage["prompt_tokens"] or usage["completion_tokens"]:
-                self._emit(chunk({}, "stop", usage, conversation_id=conv_id))
+                if (
+                    not emit(chunk({}, "stop", usage, conversation_id=conv_id))
+                    and resilience
+                ):
+                    return
         else:
-            self._emit(
-                "data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n"
+            error_frame = (
+                chunk({}, "stop", error=err)
+                if resilience
+                else "data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n"
             )
-        self._emit("data: [DONE]\n\n")
+            if not emit(error_frame) and resilience:
+                return
+        emit("data: [DONE]\n\n")
 
 
 class Server(ThreadingHTTPServer):
