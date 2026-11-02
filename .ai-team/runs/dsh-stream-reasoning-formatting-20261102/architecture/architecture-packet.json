@@ -1,0 +1,554 @@
+{
+  "schema_version": "1.0",
+  "task_id": "REQ-DSH-STREAM-REASONING-FORMATTING",
+  "run_id": "dsh-stream-reasoning-formatting-20261102",
+  "criticality": "S2",
+  "profile": "default",
+  "status": "APPROVED",
+  "role_plan": {
+    "path": "plans/architect-01.json",
+    "sha256": "5a718b8f0dedad95a18a18f796fbc809a8c60d235a2c9417d80aa220910db7d4"
+  },
+  "spec_path": ".ai-team/runs/dsh-stream-reasoning-formatting-20261102/architecture/arch-spec.md",
+  "requirement_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004",
+    "REQ-005",
+    "REQ-006",
+    "REQ-007"
+  ],
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "statement": "Гарантировать разделение текста независимых шагов планировщика переносом строки \\n\\n, исключая слитную конкатенацию строк при стриминге в content.",
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-002"
+      ],
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "REQ-002",
+      "statement": "Устранить ложное сопоставление коротких префиксов новых шагов в _ContentArbiter._scan, исключив циклическую заморозку шагов и повторную эмиссию префиксов.",
+      "evidence_ids": [
+        "EVD-002",
+        "EVD-003"
+      ],
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "REQ-003",
+      "statement": "Реализовать семантическую изоляцию сервисных преамбул промежуточных шагов с tool_calls в choices[0].delta.reasoning_content во избежание преждевременного закрытия блока размышлений в UI Harness.",
+      "evidence_ids": [
+        "EVD-001",
+        "EVD-004"
+      ],
+      "verification_ids": [
+        "VER-003"
+      ]
+    },
+    {
+      "id": "REQ-004",
+      "statement": "Сохранить 100% обратную совместимость с существующими тестами моста tests/test_agy_bridge_resilience.py и контрактом OpenAI API.",
+      "evidence_ids": [
+        "EVD-003",
+        "EVD-004"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-002",
+        "VER-003"
+      ]
+    },
+    {
+      "id": "REQ-005",
+      "statement": "Создать синтетический e2e сьют L2 (tests/test_stream_formatting_and_subagents.py) для сквозной проверки стриминга, изоляции reasoning и многошаговой работы сабагентов.",
+      "evidence_ids": [
+        "EVD-005"
+      ],
+      "verification_ids": [
+        "VER-004"
+      ]
+    },
+    {
+      "id": "REQ-006",
+      "statement": "Разработать универсальный смоук-раннер L3 (scripts/smoke_models.py) для автоматической валидации моделей из models.md через хаб-мост и бэкенды.",
+      "evidence_ids": [
+        "EVD-006"
+      ],
+      "verification_ids": [
+        "VER-005"
+      ]
+    },
+    {
+      "id": "REQ-007",
+      "statement": "Зафиксировать регламент обязательного комплексного тестирования стриминга и мостов в локальном AGENTS.md.",
+      "evidence_ids": [
+        "EVD-005"
+      ],
+      "verification_ids": [
+        "VER-006"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "EVD-001",
+      "kind": "document",
+      "ref": "media_1793616686494_bf4c8c99.png",
+      "claim": "В UI DeepSeek Harness строки промежуточных шагов склеиваются без переносов строк, а блок мышления Think отображается только в самом верху сообщения.",
+      "source_ref": "analysis/bridge-testing-modernization/evidence-white.md#W-01",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-02"
+    },
+    {
+      "id": "EVD-002",
+      "kind": "code",
+      "ref": "bridges/agy-bridge/server.py:3915-3935",
+      "claim": "В _ContentArbiter._scan texts[pos].startswith(text) ошибочно сопоставляет короткий префикс нового шага с чужим длинным текстом, вызывая divergence и повторную эмиссию.",
+      "source_ref": "analysis/bridge-testing-modernization/evidence-white.md#W-03",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-02"
+    },
+    {
+      "id": "EVD-003",
+      "kind": "code",
+      "ref": "bridges/agy-bridge/server.py:5281-5285",
+      "claim": "Run.offer_content передает суффиксы шагов в очередь text без добавления разделителя \\n\\n между независимыми шагами.",
+      "source_ref": "analysis/bridge-testing-modernization/evidence-white.md#W-02",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-02"
+    },
+    {
+      "id": "EVD-004",
+      "kind": "code",
+      "ref": "bridges/agy-bridge/server.py:4521-4526",
+      "claim": "PLANNER_RESPONSE.content отправляется в delta.content независимо от наличия tool_calls, преждевременно завершая фазу размышления в UI.",
+      "source_ref": "analysis/bridge-testing-modernization/evidence-white.md#W-04",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-02"
+    },
+    {
+      "id": "EVD-005",
+      "kind": "document",
+      "ref": "analysis/bridge-testing-modernization/debate-ledger.md",
+      "claim": "Существующие тесты не покрывают сквозные мультишаговые сценарии агента с сабагентами и скиллами оркестрации, необходим сьют L2.",
+      "source_ref": "analysis/bridge-testing-modernization/evidence-white.md#W-05",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-02"
+    },
+    {
+      "id": "EVD-006",
+      "kind": "document",
+      "ref": "~/Мой диск/Context/models.md",
+      "claim": "Каталог моделей и транспортов требует регулярного смоук-тестирования через мост-шлюз.",
+      "source_ref": "analysis/bridge-testing-modernization/evidence-white.md#W-06",
+      "source_status": "CONFIRMED",
+      "observed_at": "2026-11-02"
+    }
+  ],
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-004"
+      ],
+      "kind": "command",
+      "command": "pytest tests/test_agy_bridge_resilience.py -k test_step_boundary_newline_separation -v",
+      "expected": "PASS",
+      "environment": "host",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-002",
+        "REQ-004"
+      ],
+      "kind": "command",
+      "command": "pytest tests/test_agy_bridge_resilience.py -k test_arbiter_no_prefix_repetition_on_divergence -v",
+      "expected": "PASS",
+      "environment": "host",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-003",
+        "REQ-004"
+      ],
+      "kind": "command",
+      "command": "pytest tests/test_agy_bridge_resilience.py -k test_tool_preamble_isolated_to_reasoning -v",
+      "expected": "PASS",
+      "environment": "host",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-004",
+      "requirement_ids": [
+        "REQ-005"
+      ],
+      "kind": "command",
+      "command": "pytest tests/test_stream_formatting_and_subagents.py -v",
+      "expected": "PASS",
+      "environment": "host",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-005",
+      "requirement_ids": [
+        "REQ-006"
+      ],
+      "kind": "command",
+      "command": "python3 scripts/smoke_models.py --dry-run",
+      "expected": "PASS",
+      "environment": "host",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-006",
+      "requirement_ids": [
+        "REQ-007"
+      ],
+      "kind": "command",
+      "command": "grep -q 'Регламент тестирования' AGENTS.md",
+      "expected": "PASS",
+      "environment": "host",
+      "owner": "verifier"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как гарантировать разграничение строк между шагами?",
+      "choice": "Добавлять разделитель \\n\\n перед текстом нового шага в Run.offer_content, если предыдущий выданный текст не оканчивается переводом строки.",
+      "alternatives": [
+        "Склеивать чанки без разделителя (текущее as-is поведение)",
+        "Добавлять разделитель \\n\\n перед текстом нового шага в Run.offer_content"
+      ],
+      "drivers": [
+        "Чистое Markdown форматирование",
+        "Устранение слипания слов на границе шагов"
+      ],
+      "consequences": [
+        "Текст статусов и шагов форматируется ровными абзацами без слипания"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_agy_bridge_resilience.py -k test_step_boundary_newline_separation -v",
+        "expected": "PASS"
+      }
+    },
+    {
+      "id": "AD-002",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как устранить ложное сопоставление префиксов в _ContentArbiter._scan?",
+      "choice": "Заменить несимметричный префиксный скан на строгое совпадение либо продолжение (text.startswith(candidate)).",
+      "alternatives": [
+        "Оставить проверку texts[pos].startswith(text) с ложной заморозкой",
+        "Заменить несимметричный префиксный скан на строгое совпадение либо продолжение"
+      ],
+      "drivers": [
+        "Исключение дублирования префиксов гейтов",
+        "Корректный арбитраж шагов"
+      ],
+      "consequences": [
+        "Полное устранение циклических повторов префиксов [гейт оркестрации... и ложных заморозок"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_agy_bridge_resilience.py -k test_arbiter_no_prefix_repetition_on_divergence -v",
+        "expected": "PASS"
+      }
+    },
+    {
+      "id": "AD-003",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как изолировать промежуточные статусы шагов с tool_calls от финального content?",
+      "choice": "Маршрутизировать промежуточный текст шагов с tool_calls в choices[0].delta.reasoning_content (при включенной изоляции), отдавая в delta.content только финальный ответ модели.",
+      "alternatives": [
+        "Отправлять промежуточный текст шагов с tool_calls в delta.content (ломает Thinking блок)",
+        "Маршрутизировать промежуточный текст шагов с tool_calls в delta.reasoning_content"
+      ],
+      "drivers": [
+        "Сохранение Thinking блока активным на протяжении всех вызовов инструментов",
+        "Чистота финального ответа в content"
+      ],
+      "consequences": [
+        "Блок мышления отображает весь ход работы агента, а окно ответа содержит только чистый итоговый результат"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_agy_bridge_resilience.py -k test_tool_preamble_isolated_to_reasoning -v",
+        "expected": "PASS"
+      }
+    },
+    {
+      "id": "AD-004",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как нормализовать рантайм-флаги finish_reason?",
+      "choice": "Считывать alias AGY_GRACEFUL_TIMEOUT_FINISH_REASON, нормализовать к 'length'/'stop', невалидные значения сбрасывать в 'stop'.",
+      "alternatives": [
+        "Оставлять невалидные значения как есть",
+        "Нормализовать к stop/length"
+      ],
+      "drivers": [
+        "Стабильность тестов GracefulTimeoutFinishReasonTests",
+        "Строгое соответствие OpenAI finish_reason контракту"
+      ],
+      "consequences": [
+        "Все тесты GracefulTimeoutFinishReasonTests зелёные"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_agy_bridge_resilience.py -k GracefulTimeoutFinishReasonTests -v",
+        "expected": "PASS"
+      }
+    },
+    {
+      "id": "AD-005",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как построить сценарное тестирование сабагентов и скиллов оркестрации?",
+      "choice": "Создать синтетический e2e сьют L2 tests/test_stream_formatting_and_subagents.py с полной симуляцией жизненного цикла агента и сабагентов.",
+      "alternatives": [
+        "Ограничиться юнит-тестами арбитра",
+        "Создать синтетический e2e сьют L2 tests/test_stream_formatting_and_subagents.py"
+      ],
+      "drivers": [
+        "Надёжный перехват комплексных ошибок стриминга до релиза",
+        "Детерминированность и скорость (<5 сек)"
+      ],
+      "consequences": [
+        "Гарантированная защита от регрессий форматирования, циклов и сабагентов"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "pytest tests/test_stream_formatting_and_subagents.py -v",
+        "expected": "PASS"
+      }
+    },
+    {
+      "id": "AD-006",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как автоматизировать проверку всех моделей из models.md?",
+      "choice": "Создать скрипт scripts/smoke_models.py для безопасного смоук-тестирования моделей через хаб :9882 и бэкенды :9887.",
+      "alternatives": [
+        "Проверять модели вручную в UI",
+        "Создать скрипт scripts/smoke_models.py"
+      ],
+      "drivers": [
+        "Автоматическое выявление деградации моделей",
+        "Освобождение владельца от ручного тестирования"
+      ],
+      "consequences": [
+        "Быстрый смоук доступности всей матрицы моделей одной командой"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "smoke",
+        "command": "python3 scripts/smoke_models.py --dry-run",
+        "expected": "PASS"
+      }
+    },
+    {
+      "id": "AD-007",
+      "status": "APPROVED",
+      "kind": "two-way",
+      "question": "Как зафиксировать правила тестирования для всех последующих доработок?",
+      "choice": "Добавить в локальный AGENTS.md раздел с обязательным регламентом трехуровневого тестирования мостов.",
+      "alternatives": [
+        "Не фиксировать правила в AGENTS.md",
+        "Добавить регламент в локальный AGENTS.md"
+      ],
+      "drivers": [
+        "Единый стандарт качества для всех агентов в проекте",
+        "Недопущение сдачи непроверенных мостов"
+      ],
+      "consequences": [
+        "Все агенты проекта следуют строгим правилам L1/L2/L3 верификации"
+      ],
+      "approval_required": false,
+      "confirmation": {
+        "kind": "test",
+        "command": "grep -q 'Регламент тестирования' AGENTS.md",
+        "expected": "PASS"
+      }
+    }
+  ],
+  "quality_scenarios": [
+    {
+      "id": "QA-001",
+      "quality": "reliability",
+      "source": "DeepSeek Harness UI",
+      "stimulus": "Поступление последовательных шагов PLANNER_RESPONSE из транскрипта и stdout",
+      "environment": "bridges/agy-bridge live streaming",
+      "artifact": "bridges/agy-bridge/server.py",
+      "response": "Каждый новый шаг предваряется разделителем \\n\\n при отсутствии перевода строки",
+      "response_measure": "100% шагов разделены переносом строки, 0 склеенных слов",
+      "verification_ids": [
+        "VER-001"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "quality": "reliability",
+      "source": "DeepSeek Harness UI",
+      "stimulus": "Поступление коротких префиксов нового шага, начинающихся с тех же символов",
+      "environment": "_ContentArbiter under rapid delta streaming",
+      "artifact": "bridges/agy-bridge/server.py",
+      "response": "Арбитр не замораживает шаг и не переэмитит ранее выданный префикс",
+      "response_measure": "0 дубликатов префикса в выданном потоке",
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "quality": "testability",
+      "source": "Developer CI",
+      "stimulus": "Запуск полного набора L1 и L2 тестов",
+      "environment": "Local host",
+      "artifact": "tests/test_stream_formatting_and_subagents.py",
+      "response": "Тесты выполняются детерминированно <5 секунд и ловят любые искажения SSE",
+      "response_measure": "100% PASS, 0 сетевых флаков",
+      "verification_ids": [
+        "VER-004"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "BND-001",
+      "component": "bridges/agy-bridge/_ContentArbiter",
+      "responsibility": "Дедупликация и арбитраж контента между stdout и transcript",
+      "allowed_dependencies": [
+        "hashlib",
+        "bisect",
+        "typing"
+      ],
+      "forbidden_dependencies": [
+        "socket",
+        "subprocess"
+      ],
+      "verification_ids": [
+        "VER-002"
+      ]
+    },
+    {
+      "id": "BND-002",
+      "component": "bridges/agy-bridge/Run",
+      "responsibility": "Маршрутизация очередей text и reasoning в SSE поток",
+      "allowed_dependencies": [
+        "threading",
+        "queue",
+        "time"
+      ],
+      "forbidden_dependencies": [
+        "external_network"
+      ],
+      "verification_ids": [
+        "VER-001",
+        "VER-003"
+      ]
+    }
+  ],
+  "contract_deltas": [],
+  "views": [
+    {
+      "id": "VIEW-001",
+      "type": "context",
+      "question": "Как agy-bridge взаимодействует с DeepSeek Harness и Antigravity CLI?",
+      "artifact_ref": ".ai-team/runs/dsh-stream-reasoning-formatting-20261102/architecture/arch-spec.md#1-контекст-и-архитектурный-контракт"
+    },
+    {
+      "id": "VIEW-002",
+      "type": "dynamic",
+      "question": "Какова последовательность маршрутизации reasoning vs content при вызове инструментов?",
+      "artifact_ref": ".ai-team/runs/dsh-stream-reasoning-formatting-20261102/architecture/arch-spec.md#adr-3-семантическая-изоляция-сервисных-преамбул-промежуточных-шагов-с-tool_calls"
+    }
+  ],
+  "risk_triggers": [],
+  "risks": [
+    {
+      "id": "RISK-001",
+      "scenario": "Регрессия существующих тестов дедупликации agy-bridge",
+      "probability": "low",
+      "impact": "medium",
+      "mitigation": "Покрытие тестами в tests/test_agy_bridge_resilience.py с сохранением всех существующих проверок.",
+      "trigger_threat_model": false,
+      "verification_ids": [
+        "VER-001",
+        "VER-002"
+      ]
+    },
+    {
+      "id": "RISK-002",
+      "scenario": "Превышение лимита памяти на ход при накоплении чанков",
+      "probability": "low",
+      "impact": "low",
+      "mitigation": "Строгое соблюдение лимитов MAX_CONTENT_BYTES_PER_TURN (8 MiB) и MAX_REASONING_BYTES_PER_TURN (2 MiB).",
+      "trigger_threat_model": false,
+      "verification_ids": [
+        "VER-001"
+      ]
+    }
+  ],
+  "threat_model": {
+    "required": false,
+    "assets": [],
+    "trust_boundaries": [],
+    "threats": []
+  },
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "status": "VALIDATED",
+      "statement": "UI DeepSeek Harness ожидает reasoning_content в фазе мышления и переключается на content при получении первого delta.content.",
+      "evidence_ids": [
+        "EVD-001"
+      ]
+    }
+  ],
+  "evolution": {
+    "compatibility": "Полная обратная совместимость со стандартом OpenAI Chat Completions API.",
+    "migration": "Не требуется, флаги управляются через dynamic_config.json и переменные окружения.",
+    "rollout": "Бесшовный перезапуск моста с hot reload dynamic_config.json.",
+    "rollback": "Отключение флагов через dynamic_config.json либо откат diff моста."
+  },
+  "approval": {
+    "status": "APPROVED",
+    "decision_ids": [],
+    "human_notes": "Архитектурный пакет утверждён в рамках пресета panel-analyst-teamlead."
+  },
+  "independent_review": {
+    "required": false,
+    "status": "NOT_REQUIRED",
+    "reviewer": "none",
+    "evidence_ref": "none"
+  },
+  "open_questions": [],
+  "protected_paths": [
+    "AGENTS.md"
+  ],
+  "materialization": [],
+  "deferred": []
+}
