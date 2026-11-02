@@ -3801,6 +3801,7 @@ class _ContentArbiter:
         self.overflow = False
         self.divergences = 0
         self.probes = 0
+        self.last_result_diverged = False
 
     def _set_overflow(self, why: str) -> None:
         if not self.overflow:
@@ -3916,12 +3917,13 @@ class _ContentArbiter:
         for step in eq.get(text, ()):
             if self._eligible(step, source, idx):
                 return step
-        pos = bisect.bisect_left(texts, text)
-        while pos < len(texts) and texts[pos].startswith(text):
-            for step in eq[texts[pos]]:
-                if self._eligible(step, source, idx):
-                    return step
-            pos += 1
+        if idx is None:
+            pos = bisect.bisect_left(texts, text)
+            while pos < len(texts) and texts[pos].startswith(text):
+                for step in eq[texts[pos]]:
+                    if step.origin != source and self._eligible(step, source, idx):
+                        return step
+                pos += 1
         return None
 
     def _advance(self, step: _ArbStep, source: str, text: str) -> str:
@@ -3980,6 +3982,7 @@ class _ContentArbiter:
 
     def reconcile_result(self, text: str) -> str:
         """`result.response` как агрегат: досылается только то, чего ещё не было выдано."""
+        self.last_result_diverged = False
         if self.overflow or not text:
             return ""
         emitted = "".join(self.chunks)
@@ -4009,6 +4012,7 @@ class _ContentArbiter:
             return self._advance(last, "result", text)
         self._retain_divergent(text)
         self.divergences += 1
+        self.last_result_diverged = True
         _log(f"content-divergence turn={self.turn_id[:8] or '-'} source=result")
         return ""
 
@@ -6214,7 +6218,26 @@ class Handler(BaseHTTPRequestHandler):
                     if callable(drain):
                         deliver(list(drain(T_DRAIN_MAX_S)))
                 if content_streaming:
-                    add_content(run.reconcile_result(final_text))
+                    delta = run.reconcile_result(final_text)
+                    if delta:
+                        add_content(delta)
+                    elif final_text and getattr(run._arbiter, "last_result_diverged", False):
+                        full_emitted = "".join(pieces)
+                        sep = (
+                            "\n\n"
+                            if full_emitted and not full_emitted.endswith("\n")
+                            else (
+                                "\n"
+                                if full_emitted and not full_emitted.endswith("\n\n")
+                                else ""
+                            )
+                        )
+                        _log(
+                            f"content-reconcile-fallback "
+                            f"turn={getattr(run, 'turn_id', '')[:8] or '-'} "
+                            f"len={len(final_text)}"
+                        )
+                        add_content(sep + final_text if full_emitted else final_text)
                 elif not pieces and final_text:
                     add_content(final_text)
                 if gone[0]:
