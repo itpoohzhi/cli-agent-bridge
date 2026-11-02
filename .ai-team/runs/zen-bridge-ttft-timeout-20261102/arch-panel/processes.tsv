@@ -1,0 +1,7 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+arch-panel	muse-wonder-full-1.0-medium	panel-judge-k1	25502	25502	2026-11-02T07:02:06.830530+00:00	Mon Nov  2 10:02:06 2026	running
+arch-panel	gpt-6.1-sol-medium	panel-judge-k3	25503	25503	2026-11-02T07:02:06.832555+00:00	Mon Nov  2 10:02:06 2026	running
+arch-panel	claude-opus-5-5-high	panel-judge-k2	25533	25533	2026-11-02T07:02:06.960158+00:00	Mon Nov  2 10:02:06 2026	running
+arch-panel	gpt-6.1-sol-medium	panel-judge-k3	25503	25503	2026-11-02T07:02:06.832555+00:00	Mon Nov  2 10:02:06 2026	rc=0
+arch-panel	claude-opus-5-5-high	panel-judge-k2	25533	25533	2026-11-02T07:02:06.960158+00:00	Mon Nov  2 10:02:06 2026	rc=0
+arch-panel	muse-wonder-full-1.0-medium	panel-judge-k1	25502	25502	2026-11-02T07:02:06.830530+00:00	Mon Nov  2 10:02:06 2026	rc=1
