@@ -19,6 +19,8 @@ import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -110,10 +112,30 @@ def run_stream(events: bytes, limits=None, schemas=None, **kwargs):
     return outcome, out
 
 
+def test_stream_upstream_failure_has_stop_and_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_GRACEFUL_ERROR_FRAMING_ENABLED", "true")
+    outcome, out = run_stream(content("partial"))
+    assert outcome.incomplete
+    assert not outcome.done
+    terminal = payloads(out)[-1]
+    assert terminal["error"]["code"] == "upstream_incomplete_stream"
+    assert terminal["choices"][0]["finish_reason"] == "stop"
+    assert b"".join(out).endswith(DONE)
+    assert b"".join(out).count(DONE) == 1
+
+
+def test_stream_upstream_failure_preserves_legacy_framing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_GRACEFUL_ERROR_FRAMING_ENABLED", "false")
+    outcome, out = run_stream(content("partial"))
+    assert outcome.incomplete
+    assert payloads(out)[-1]["choices"][0]["finish_reason"] is None
+    assert b"".join(out).endswith(DONE)
+
+
 def payloads(frames) -> list:
     """Разобранные data-кадры (без [DONE])."""
     parsed = []
-    for raw in frames:
+    for raw in b"".join(frames).split(b"\n\n"):
         text = raw.decode("utf-8").strip()
         if text.startswith("data:") and text[5:].strip() != "[DONE]":
             parsed.append(json.loads(text[5:]))
@@ -244,14 +266,14 @@ class TestStreamRelay(unittest.TestCase):
         self.assertFalse(outcome.done)
         last = payloads(out)[-1]
         self.assertEqual(last["error"]["code"], "upstream_incomplete_stream")
-        self.assertNotIn(DONE, out)
+        self.assertTrue(b"".join(out).endswith(DONE))
 
     def test_stream_eof_after_done_with_unfinished_calls_is_failure_not_success(self):
         events = tool_delta(0, 0, call_id="c", name="subagent", args="{}") + DONE
         outcome, out = run_stream(events)
         self.assertEqual(published_calls(out), [])
         self.assertTrue(outcome.incomplete)
-        self.assertNotIn(DONE, out)
+        self.assertTrue(b"".join(out).endswith(DONE))
 
     def test_stream_eof_mid_event_line_does_not_publish_calls(self):
         events = (
@@ -351,7 +373,7 @@ class TestAccumulatorLimits(unittest.TestCase):
             ToolCallAccumulator(small).add(0, payload)
         ToolCallAccumulator(large).add(0, payload)
 
-    def test_stream_overflow_emits_error_frame_without_partial_calls_or_done(self):
+    def test_stream_overflow_emits_error_frame_and_done_without_partial_calls(self):
         events = (
             tool_delta(0, 0, call_id="c", name="subagent", args="{" + "x" * 100)
             + finish(0)
@@ -362,7 +384,7 @@ class TestAccumulatorLimits(unittest.TestCase):
         self.assertTrue(outcome.overflow)
         self.assertEqual(published_calls(out), [])
         self.assertEqual(payloads(out)[-1]["error"]["code"], "upstream_response_too_large")
-        self.assertNotIn(DONE, out)
+        self.assertTrue(b"".join(out).endswith(DONE))
         self.assertEqual(process.used, 0)
 
     def test_accumulator_composite_key_pop_orders_by_tool_index(self):
@@ -889,7 +911,7 @@ class TestSeamStream(SeamCase):
         sink = self.call({"model": "m", "stream": True, "tools": TOOLS})
         self.assertEqual(published_calls(sink.chunks), [])
         self.assertEqual(payloads(sink.chunks)[-1]["error"]["code"], "upstream_incomplete_stream")
-        self.assertNotIn(DONE, sink.chunks)
+        self.assertTrue(sink.body.endswith(DONE))
 
     def test_stream_client_gone_closes_upstream_and_releases_budget(self):
         events = b"".join(content("x%d" % i) for i in range(50)) + finish(0, "stop") + DONE

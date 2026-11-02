@@ -28,6 +28,29 @@ STREAMING_EMULATED = "emulated"
 StreamSink = Callable[[str, str], bool]
 PollCallback = Callable[[], bool]
 
+
+class PreSendTransientError(ConnectionError):
+    """Временный HTTP/сетевой отказ до начала downstream-ответа транспорта.
+
+    Фасад разрешает повтор только до первого байта клиенту. HTTP-запрос мог уже
+    уйти upstream; этот контракт не разрешает переигрывать произвольный CLI-ход.
+    Адаптер закрывает соединение неудачной попытки в своём finally.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_headers: tuple[tuple[str, str], ...] = (),
+        response_body: bytes | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_headers = response_headers
+        self.response_body = response_body
+
+
 # Секреты хаба в окружении потомков (ADR 0015, BLOCKER-SAFETY B1): `BRIDGE_KEY`, любое имя на
 # `_BRIDGE_KEY`, `CODEX_LB_API_KEY` и любое вида `BRIDGE_*KEY`; регистр не важен.
 _BRIDGE_SECRET_NAME = re.compile(

@@ -268,6 +268,8 @@ class TestImmediateLockRelease(LiveStreamCase):
         # общий _saved родительского BridgeCase, и не оставляет MAX_CONCURRENT=1 соседям.
         self.addCleanup(setattr, server, "MAX_CONCURRENT", server.MAX_CONCURRENT)
         server.MAX_CONCURRENT = 1
+        self.addCleanup(setattr, server, "LIVE_WRITE_TIMEOUT_S", server.LIVE_WRITE_TIMEOUT_S)
+        server.LIVE_WRITE_TIMEOUT_S = 3.0
         big = "Y" * 2_000_000
         self.hub.script(
             [
