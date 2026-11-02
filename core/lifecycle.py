@@ -139,6 +139,7 @@ class HubLifecycleManager:
         )
         self.turn_manager = turn_manager
         self._active_turns_fn = active_turns_fn
+        self._last_active_count: int = 0
         self.drain_timeout_s = float(drain_timeout_s)
         self.retry_after_s = int(retry_after_s)
         self.orphan_grace_s = float(orphan_grace_s)
@@ -251,6 +252,20 @@ class HubLifecycleManager:
         self.shutdown_requested.wait()
         self.run_drain_once()
 
+    def _safe_active_count(self) -> int:
+        """Возвращает число активных ходов, сохраняя drain при ошибке счётчика."""
+        try:
+            if self._active_turns_fn is not None:
+                self._last_active_count = self._active_turns_fn()
+            elif self.turn_manager is not None:
+                self._last_active_count = self.turn_manager.active_count()
+            else:
+                self._last_active_count = 0
+            return self._last_active_count
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"drain_active_count_error error={exc}")
+            return max(1, self._last_active_count)
+
     def run_drain_once(self) -> dict[str, Any]:
         """Выполняет фазу `DRAINING` в фоновом потоке (идемпотентно)."""
         with self._lock:
@@ -260,56 +275,57 @@ class HubLifecycleManager:
             self.drain_started.set()
             srv = self._server
 
-        eff_timeout = self.drain_timeout_s if self.is_drain_enabled() else 0.0
-        active_before = (
-            self.turn_manager.active_count()
-            if self.turn_manager is not None
-            else (self._active_turns_fn() if self._active_turns_fn is not None else 0)
-        )
-        self._log(
-            f"drain_started signal={self.last_signal or 0} "
-            f"active_turns={active_before} timeout_s={eff_timeout:.1f}"
-        )
+        try:
+            eff_timeout = self.drain_timeout_s if self.is_drain_enabled() else 0.0
+            active_before = self._safe_active_count()
+            self._log(
+                f"drain_started signal={self.last_signal or 0} "
+                f"active_turns={active_before} timeout_s={eff_timeout:.1f}"
+            )
 
-        remaining = []
-        deadline = time.monotonic() + max(0.0, eff_timeout)
-        if self.turn_manager is not None:
-            if eff_timeout > 0:
-                remaining = self.turn_manager.wait_for_active_turns(timeout=eff_timeout)
-            else:
-                remaining = self.turn_manager.active_turns()
+            remaining = []
+            deadline = time.monotonic() + max(0.0, eff_timeout)
+            if self.turn_manager is not None:
+                if eff_timeout > 0:
+                    remaining = self.turn_manager.wait_for_active_turns(
+                        timeout=max(0.0, deadline - time.monotonic())
+                    )
+                else:
+                    remaining = self.turn_manager.active_turns()
 
-            for turn in remaining:
-                self._log(
-                    f"drain_timeout_interrupt rid={turn.rid} turn_id={turn.turn_id} "
-                    f"pgid={turn.pgid}"
-                )
-                self.turn_manager.interrupt_for_drain(
-                    turn,
-                    message="bridge restart drain timeout exceeded",
-                )
-        elif self._active_turns_fn is not None and eff_timeout > 0:
-            while time.monotonic() < deadline and self._active_turns_fn() > 0:
-                time.sleep(0.05)
+                for turn in remaining:
+                    self._log(
+                        f"drain_timeout_interrupt rid={turn.rid} turn_id={turn.turn_id} "
+                        f"pgid={turn.pgid}"
+                    )
+                    self.turn_manager.interrupt_for_drain(
+                        turn,
+                        message="bridge restart drain timeout exceeded",
+                    )
 
-        if srv is not None:
-            try:
-                srv.shutdown()
-            except Exception:  # noqa: BLE001
-                pass
+            if self._active_turns_fn is not None and eff_timeout > 0:
+                while time.monotonic() < deadline and self._safe_active_count() > 0:
+                    time.sleep(0.05)
 
-        if self._on_shutdown_complete is not None:
-            try:
-                self._on_shutdown_complete()
-            except Exception:  # noqa: BLE001
-                pass
+            if srv is not None:
+                try:
+                    srv.shutdown()
+                except Exception:  # noqa: BLE001
+                    pass
 
-        with self._lock:
-            self.state = DrainState.STOPPED
-            self.drain_completed.set()
+            if self._on_shutdown_complete is not None:
+                try:
+                    self._on_shutdown_complete()
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            with self._lock:
+                self.state = DrainState.STOPPED
+                self.drain_completed.set()
         self._log(f"drain_completed interrupted_turns={len(remaining)}")
         return {
             "interrupted_turn_ids": [t.turn_id for t in remaining],
+            "active_turns_before": active_before,
             "state": self.state,
         }
 
