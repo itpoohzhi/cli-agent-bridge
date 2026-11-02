@@ -1228,6 +1228,8 @@ def _is_transient_stream_error(ev: dict[str, Any]) -> bool:
     `ev` — сырое событие `{"type":"error","error":{…}}` или разобранный payload `{statusCode, message}`.
     400/401/403/404/422 — детерминированный отказ (False, без повтора, Fail-Closed). Нет статуса, 0, 408,
     429, >=500 либо маркер сетевого сбоя в сообщении — транзиентна (True).
+    Исключение: исчерпанная квота транзиентна при любом статусе (проверка ДО
+    fatal-статусов) — иначе прокси не уйдёт в карантин и ротации не будет.
     """
     containers: list[dict[str, Any]] = [ev]
     messages: list[str] = []
@@ -1252,6 +1254,12 @@ def _is_transient_stream_error(ev: dict[str, Any]) -> bool:
             value = container.get(key)
             if isinstance(value, str):
                 messages.append(value)
+    if (
+        _is_free_quota_error(ev)
+        or any(_is_free_quota_error(container) for container in containers)
+        or any(_is_free_quota_error(message) for message in messages)
+    ):
+        return True
     if status in _FATAL_STREAM_STATUSES:
         return False
     if status is None or status in (0, 408, 429) or status >= 500:
@@ -1754,6 +1762,9 @@ def _is_free_quota_error(err: object) -> bool:
             "free usage limit reached",
             "usage limit reached",
             "provider.free-limit",
+            "quota exhausted",
+            "request quota exhausted",
+            "subscription quota exhausted",
         )
     )
 
@@ -1943,7 +1954,10 @@ FIRST_EVENT_TIMEOUT_S = float(
 FIRST_TOKEN_TIMEOUT_S = float(
     os.environ.get("OPENCODE_ZEN_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "60.0")
 )
-STALL_TIMEOUT_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S", "60.0"))
+STALL_TIMEOUT_S = _zen_positive_float(
+    "OPENCODE_ZEN_BRIDGE_STALL_TIMEOUT_S",
+    60.0,
+)
 FIRST_STATUS_DELAY_S = 0.65
 STATUS_WAITING_INTERVAL_S = 5.0
 STALL_HEARTBEAT_INTERVAL_S = 15.0
