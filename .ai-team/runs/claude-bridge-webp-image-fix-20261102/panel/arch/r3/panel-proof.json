@@ -1,0 +1,59 @@
+{
+  "artifact_sha256": "a63c0fc62f291f23726fcd23dd621d2a9bb658e2fc95dccc5ded54b1367e1707",
+  "expect_seats": 3,
+  "history_head_seq": 3,
+  "history_head_sha256": "c69c6c682ff7d8af2ac449c98610fc4e4b4195b27998d60f443c71a4e638b533",
+  "manifest_schema": "pol-manifest/2",
+  "manifest_sha256": "84aa08f6364744c916640694f5789f2267254fd030f26840a44ab0d76d228b44",
+  "min_seconds": 8.0,
+  "min_verdict_chars": 200,
+  "pol_version": "v1.1",
+  "result": "PASS",
+  "round": 3,
+  "schema": "pol-receipt/1",
+  "seats": [
+    {
+      "duration_s": 114.323546,
+      "family": "OpenAI",
+      "k": 1,
+      "launch_sha256": "f28662f479984ae10c82a143f3e92b799a046af5d23bbb90b0b595229d9584ea",
+      "raw_out_sha256": "edb9d0cdf43e0060d53a870ac390581376287f27692da489f835958aee756be9",
+      "rc": 0,
+      "slot_id": "gpt-6.1-sol-high",
+      "transport": "codex",
+      "verdict": "NEEDS WORK",
+      "verdict_sha256": "7bfb396f2afb35aaae3f3fd2f2a6691e025f19c31c308f104f6768da0c4924da"
+    },
+    {
+      "duration_s": 208.43017,
+      "family": "Google",
+      "k": 2,
+      "launch_sha256": "df7bf7c6316c05669bf39600e31fe45992037bf210e6513de72a8aebd7625f8f",
+      "raw_out_sha256": "e1c2c585766b50654643a72b210b8ff701b70bb354fa3ebdbfd826d09debfc0f",
+      "rc": 0,
+      "slot_id": "gemini-4-argon-high",
+      "transport": "agy",
+      "verdict": "NEEDS WORK",
+      "verdict_sha256": "c306a30b01b2bf1103dabd7518c5aeccbbc41a9c782909e8f60e048e744510d2"
+    },
+    {
+      "duration_s": 760.034865,
+      "family": "Meta",
+      "k": 3,
+      "launch_sha256": "b3886687ea4dc88edae65b8b05a16dbc56b33deac94beb1082e37bb2de30e358",
+      "raw_out_sha256": "d5071a9b2db1e99397fb1cdbfeab9039eb25dca2af4d3f14fbddd986cac1329d",
+      "rc": 0,
+      "slot_id": "muse-wonder-full-1.0",
+      "transport": "muse",
+      "verdict": "NEEDS WORK",
+      "verdict_sha256": "32b9479747c04f210ad0e97cf12485de5db7845bc01ebf22978d6bcfaff66683"
+    }
+  ],
+  "selector_sha256": "2beee84a0b744156d891ddcb534ff1a4a0649bd371f21de5b66657e6a35bb72c",
+  "stage": "arch",
+  "verdict_counts": {
+    "NEEDS_WORK": 3
+  },
+  "verified_at": "2026-11-02T16:03:13.069703+00:00",
+  "verifier_sha256": "3da21fcec5895b7e3df12428de18a387816cfd532784083732f54eb82a65082e"
+}
