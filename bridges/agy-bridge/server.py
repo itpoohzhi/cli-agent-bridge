@@ -82,6 +82,8 @@ AGY_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в �
 from __future__ import annotations
 
 import bisect
+import collections
+import copy
 import base64
 import hashlib
 import json
@@ -189,7 +191,9 @@ def _env_int_with_zero_cap(
     return value
 
 
-def _chain_float(names: tuple[str, ...], default: float, low: float, high: float) -> float:
+def _chain_float(
+    names: tuple[str, ...], default: float, low: float, high: float
+) -> float:
     """Первое заданное имя из цепочки (каноническое -> легаси); иначе default."""
     for name in names:
         if os.environ.get(name, "").strip():
@@ -328,7 +332,11 @@ def _build_bridge_config() -> _BridgeConfig:
             ("AGY_BRIDGE_EXT_MAX_TIMEOUT_S", "AGY_TIMEOUT_S"), 3600.0, 10.0, 86400.0
         ),
         ext_idle_timeout_s=_chain_float(
-            ("AGY_BRIDGE_IDLE_TIMEOUT_S", "AGY_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"),
+            (
+                "AGY_BRIDGE_IDLE_TIMEOUT_S",
+                "AGY_IDLE_TIMEOUT_S",
+                "AGY_BRIDGE_IDLE_TIMEOUT",
+            ),
             1800.0,
             5.0,
             86400.0,
@@ -379,7 +387,10 @@ def _build_bridge_config() -> _BridgeConfig:
         ),
         max_tool_markers_per_turn=_env_int("AGY_BRIDGE_MAX_TOOL_MARKERS", 32, 1, 1024),
         max_retained_divergent_bytes=_chain_int(
-            ("AGY_BRIDGE_MAX_DIVERGENT_BYTES", "AGY_BRIDGE_MAX_RETAINED_DIVERGENT_BYTES"),
+            (
+                "AGY_BRIDGE_MAX_DIVERGENT_BYTES",
+                "AGY_BRIDGE_MAX_RETAINED_DIVERGENT_BYTES",
+            ),
             65536,
             1024,
             1048576,
@@ -393,13 +404,20 @@ def _build_bridge_config() -> _BridgeConfig:
         usage_step_cap=_env_int("AGY_BRIDGE_USAGE_STEP_CAP", 16384, 128, 1048576),
         sqlite_row_limit=_env_int("AGY_BRIDGE_SQLITE_ROW_LIMIT", 16, 1, 1024),
         breaker_failures=_env_int("AGY_BRIDGE_BREAKER_FAILURES", 3, 1, 100),
-        breaker_cooldown_s=_env_float("AGY_BRIDGE_BREAKER_COOLDOWN_S", 30.0, 1.0, 3600.0),
+        breaker_cooldown_s=_env_float(
+            "AGY_BRIDGE_BREAKER_COOLDOWN_S", 30.0, 1.0, 3600.0
+        ),
         breaker_probe_lease_s=_env_float(
             "AGY_BRIDGE_BREAKER_PROBE_LEASE_S", 60.0, 1.0, 3600.0
         ),
-        retry_capacity_tenths=_env_int("AGY_BRIDGE_RETRY_CAPACITY_TENTHS", 30, 10, 1000),
+        retry_capacity_tenths=_env_int(
+            "AGY_BRIDGE_RETRY_CAPACITY_TENTHS", 30, 10, 1000
+        ),
         retry_credit_tenths=_chain_int(
-            ("AGY_BRIDGE_RETRY_REFILL_PER_SEC_TENTHS", "AGY_BRIDGE_RETRY_CREDIT_TENTHS"),
+            (
+                "AGY_BRIDGE_RETRY_REFILL_PER_SEC_TENTHS",
+                "AGY_BRIDGE_RETRY_CREDIT_TENTHS",
+            ),
             2,
             1,
             100,
@@ -419,7 +437,10 @@ def _build_bridge_config() -> _BridgeConfig:
         ),
         poll_cost_tenths=_env_int("AGY_BRIDGE_POLL_COST_TENTHS", 10, 1, 100),
         liveness_gated_timeout_enabled=_chain_bool(
-            ("AGY_BRIDGE_LIVENESS_GATED_TIMEOUT_ENABLED", "AGY_LIVENESS_GATED_TIMEOUT_ENABLED"),
+            (
+                "AGY_BRIDGE_LIVENESS_GATED_TIMEOUT_ENABLED",
+                "AGY_LIVENESS_GATED_TIMEOUT_ENABLED",
+            ),
             True,
         ),
     )
@@ -2212,9 +2233,7 @@ def _prune_prompt_blocks(
         message_parts = [k for k, part in enumerate(parts) if part != marker_block]
         block_at = dict(zip(message_parts, kept))
         priority_blocks = active_blocks | protected_blocks
-        historical = [
-            k for k in message_parts if block_at[k] not in priority_blocks
-        ]
+        historical = [k for k in message_parts if block_at[k] not in priority_blocks]
         active = [k for k in message_parts if block_at[k] in active_blocks]
         protected = {k for k in message_parts if block_at[k] in protected_blocks}
         if tail_block:
@@ -2623,7 +2642,9 @@ def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
     return entry
 
 
-def _atomic_write_sessions_json(snapshot: dict[tuple[str, ...], dict[str, Any]]) -> None:
+def _atomic_write_sessions_json(
+    snapshot: dict[tuple[str, ...], dict[str, Any]],
+) -> None:
     """Атомарно записать снимок стора: temp в том же каталоге + fsync + os.replace.
 
     Файл 0600, каталог 0700. Ошибка I/O только логируется (fail-open): горячие
@@ -4842,6 +4863,206 @@ class _TranscriptTail:
 
 
 @final
+class JobConflict(ValueError):
+    """Ключ уже связан с другим входом."""
+
+
+@dataclass
+class _Job:
+    key: str
+    identity: tuple[str, str]
+    events: list[tuple[str, Any]]
+    cancelled: threading.Event
+    readers: int = 1
+    size_bytes: int = 0
+    result: dict | None = None
+    completed_at: float | None = None
+    orphan: bool = False
+    running: bool = True
+    cancel: Callable[[], None] | None = None
+
+
+class JobRegistry:
+    """Атомарные attach/replay, bounded память, TTL/LRU и реальные orphan-слоты."""
+
+    def __init__(
+        self,
+        *,
+        max_buffer_bytes: int | None = None,
+        max_entries: int | None = None,
+        ttl_s: float | None = None,
+        orphan_max: int | None = None,
+    ) -> None:
+        self.max_buffer_bytes = (
+            max_buffer_bytes
+            if max_buffer_bytes is not None
+            else _env_int(
+                "AGY_BRIDGE_JOB_BUFFER_MAX_BYTES", 5 * 1024 * 1024, 1, sys.maxsize
+            )
+        )
+        self.max_entries = (
+            max_entries
+            if max_entries is not None
+            else _env_int("AGY_BRIDGE_JOB_MAX_ENTRIES", 100, 0, sys.maxsize)
+        )
+        self.ttl_s = (
+            ttl_s
+            if ttl_s is not None
+            else _env_float("AGY_BRIDGE_JOB_TTL_S", 900.0, 0.0, float("inf"))
+        )
+        self.orphan_max = (
+            orphan_max
+            if orphan_max is not None
+            else _env_int("AGY_BRIDGE_ORPHAN_CONCURRENCY_MAX", 5, 0, sys.maxsize)
+        )
+        self.condition = threading.Condition(threading.Lock())
+        self.jobs: dict[str, _Job] = {}
+        self.completed: collections.OrderedDict[str, _Job] = collections.OrderedDict()
+        self.expiry: collections.deque[tuple[float, str, _Job]] = collections.deque()
+        self.orphans = 0
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        while self.expiry and self.expiry[0][0] <= now:
+            _at, key, job = self.expiry.popleft()
+            if self.jobs.get(key) is job and job.result is not None:
+                self.jobs.pop(key, None)
+                self.completed.pop(key, None)
+        while len(self.completed) > self.max_entries:
+            key, job = self.completed.popitem(last=False)
+            if self.jobs.get(key) is job:
+                self.jobs.pop(key, None)
+        # Реестр expiry тоже bounded: ссылки вытесненных записей не живут до TTL.
+        if len(self.expiry) > self.max_entries:
+            self.expiry = collections.deque(
+                (at, key, job)
+                for at, key, job in self.expiry
+                if self.jobs.get(key) is job
+            )
+
+    def attach(self, key: str, model: str, prompt: str) -> tuple[_Job, bool]:
+        identity = (model, hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+        with self.condition:
+            self._prune()
+            job = self.jobs.get(key)
+            if job is not None:
+                if job.identity != identity:
+                    raise JobConflict(
+                        "idempotency key is bound to another model or prompt"
+                    )
+                job.readers += 1
+                if job.orphan and not job.cancelled.is_set():
+                    job.orphan = False
+                    self.orphans -= 1
+                if key in self.completed:
+                    self.completed.move_to_end(key)
+                return job, False
+            job = _Job(key, identity, [], threading.Event())
+            self.jobs[key] = job
+            return job, True
+
+    def bind_cancel(self, job: _Job, cancel: Callable[[], None] | None) -> None:
+        with self.condition:
+            job.cancel = cancel
+            should_cancel = job.cancelled.is_set()
+        if should_cancel and cancel is not None:
+            cancel()
+
+    def _terminal(self, job: _Job, result: dict) -> None:
+        if job.result is None:
+            job.result = result
+        self.condition.notify_all()
+        if job.running or job.completed_at is not None:
+            return
+        job.completed_at = time.monotonic()
+        if job.orphan:
+            self.orphans -= 1
+            job.orphan = False
+        key = job.key
+        if self.jobs.get(key) is job:
+            self.completed[key] = job
+            self.expiry.append((job.completed_at + self.ttl_s, key, job))
+        self._prune()
+
+    def publish(self, job: _Job, kind: str, payload: Any) -> bool:
+        size = len(json.dumps((kind, payload), ensure_ascii=False).encode("utf-8"))
+        cancel = None
+        with self.condition:
+            if job.result is not None or job.cancelled.is_set():
+                return False
+            if job.size_bytes + size > self.max_buffer_bytes:
+                job.cancelled.set()
+                self._terminal(job, {"state": "buffer_overflow", "text": "", "rc": 1})
+                cancel = job.cancel
+            else:
+                job.events.append((kind, payload))
+                job.size_bytes += size
+                self.condition.notify_all()
+                return True
+        if cancel is not None:
+            cancel()
+        return False
+
+    def finish(self, job: _Job, result: dict) -> None:
+        with self.condition:
+            job.running = False
+            job.cancel = None
+            if job.cancelled.is_set() and job.result is None:
+                result = {"state": "orphan_limit", "text": "", "rc": 1}
+            if (
+                job.size_bytes
+                + len(
+                    json.dumps(
+                        {
+                            key: result.get(key)
+                            for key in ("text", "reasoning", "retained_events")
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                )
+                > self.max_buffer_bytes
+            ):
+                result = {"state": "buffer_overflow", "text": "", "rc": 1}
+            self._terminal(job, result)
+
+    def read(
+        self, job: _Job, offset: int, timeout: float
+    ) -> tuple[list[tuple[str, Any]], dict | None]:
+        with self.condition:
+            if offset >= len(job.events) and job.result is None:
+                self.condition.wait(timeout=timeout)
+            return job.events[offset:], job.result
+
+    def detach(self, job: _Job) -> None:
+        cancel = None
+        with self.condition:
+            job.readers = max(0, job.readers - 1)
+            if job.readers or job.result is not None or job.orphan:
+                return
+            if self.orphans < self.orphan_max:
+                job.orphan = True
+                self.orphans += 1
+            else:
+                job.cancelled.set()
+                cancel = job.cancel
+                self.condition.notify_all()
+        # close()/kill/reap — только вне mutex; producer освободит Bulkhead в finally.
+        if cancel is not None:
+            cancel()
+
+
+_JOB_REGISTRY = JobRegistry()
+
+
+def resolve_agy_mode(req: dict) -> str:
+    """Текстовый запрос не разрешает нативные инструменты CLI."""
+    return (
+        "agent"
+        if req.get("tools") or req.get("functions") or req.get("agent_tools") is True
+        else "ask"
+    )
+
+
 class Run:
     """Один процесс `agy`; поток-читатель превращает stdout NDJSON в события очереди.
 
@@ -4865,6 +5086,7 @@ class Run:
         turn_id: str = "",
         policy: _TimeoutPolicy | None = None,
         add_dir: Path | None = None,
+        mode: str = "agent",
     ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -4873,6 +5095,13 @@ class Run:
         if AGY_BRIDGE_ENABLE_HEAD_PRUNING:
             prompt = _ensure_prompt_fits_ndjson(prompt)
         self.stdin_line = _ndjson_user_line(prompt)
+        cli_mode = (
+            os.environ.get("AGY_BRIDGE_ASK_CLI_MODE", "plan")
+            if mode in ("ask", "plan")
+            else os.environ.get("AGY_BRIDGE_AGENT_CLI_MODE", "auto")
+            if mode in ("agent", "auto")
+            else mode
+        )
         cmd = [
             launcher,
             "--input-format",
@@ -4880,6 +5109,8 @@ class Run:
             "--output-format",
             "stream-json",
             "--dangerously-skip-permissions",
+            "--mode",
+            cli_mode,
             "--model",
             model,
             "--effort",
@@ -5593,6 +5824,7 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
 
 
 class Handler(BaseHTTPRequestHandler):
+    _registry_job: _Job | None = None
     protocol_version = "HTTP/1.1"
     server_version = "agy-bridge/1.0"
 
@@ -5609,6 +5841,8 @@ class Handler(BaseHTTPRequestHandler):
             return "-"
 
     def _send(self, code: int, payload: dict) -> None:
+        if self._registry_job is not None:
+            return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
             self.send_response(code)
@@ -5702,6 +5936,8 @@ class Handler(BaseHTTPRequestHandler):
         При extended_timeout_enabled ожидание не длиннее остатка бюджета запроса
         за вычетом резерва drain + финального flush.
         """
+        if self._registry_job is not None and self._registry_job.cancelled.is_set():
+            return "client_gone"
         if _slots.acquire(blocking=False):
             return ""
         deadline = time.monotonic() + QUEUE_TIMEOUT_S
@@ -5878,7 +6114,7 @@ class Handler(BaseHTTPRequestHandler):
                     124,
                     f"no agy event within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 )
-            if _client_gone(self.connection):
+            if self._job_client_gone():
                 return state("client_gone", 1)
             if (
                 result_error
@@ -6021,7 +6257,95 @@ class Handler(BaseHTTPRequestHandler):
             f"err={_err_summary(out.get('err'))!r} {tag}"
         )
 
+    def _job_client_gone(self) -> bool:
+        job = getattr(self, "_registry_job", None)
+        return (
+            job.cancelled.is_set() if job is not None else _client_gone(self.connection)
+        )
+
     def _run_once(
+        self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
+    ) -> dict:
+        key = str(ctx.get("step_job_id") or "")
+        if not key:
+            return self._run_once_impl(
+                ctx, on_text, on_tool_trace, on_reasoning, keepalive
+            )
+        registry = _JOB_REGISTRY
+        try:
+            job, owner = registry.attach(
+                key, str(ctx["model"]), str(ctx["full_prompt"])
+            )
+        except JobConflict:
+            return {"state": "job_conflict", "text": "", "rc": 1}
+        if owner:
+            worker = copy.copy(self)
+            worker._registry_job = job
+            worker_ctx = dict(ctx)
+            worker_ctx.pop("finalize_timeout", None)
+
+            def produce() -> None:
+                try:
+                    out = worker._run_once_impl(
+                        worker_ctx,
+                        lambda value: registry.publish(job, "text", value),
+                        lambda value: registry.publish(job, "tool_trace", value),
+                        lambda value: registry.publish(job, "reasoning", value),
+                        lambda: not job.cancelled.is_set(),
+                    )
+                except Exception as exc:
+                    _log(f"job-producer-error err={type(exc).__name__}")
+                    out = {"state": "pump_error", "text": "", "rc": 1}
+                try:
+                    registry.finish(job, out)
+                finally:
+                    use_cid = str(worker_ctx.get("registry_use_cid") or "")
+                    if use_cid:
+                        with _session_store_lock:
+                            _in_flight_cids.discard(use_cid)
+                    _cid_release(
+                        use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
+                        str(worker_ctx.get("turn_id") or ""),
+                    )
+
+            ctx["job_owns_cid"] = True
+            try:
+                threading.Thread(target=produce, daemon=True, name="agy-job").start()
+            except RuntimeError:
+                ctx["job_owns_cid"] = False
+                registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+        offset = 0
+        heartbeat = _env_float(
+            "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf")
+        )
+        last_delivery = time.monotonic()
+        try:
+            while True:
+                if _client_gone(self.connection):
+                    return {"state": "client_gone", "text": "", "rc": 1}
+                events, out = registry.read(
+                    job, offset, min(heartbeat, TRANSCRIPT_POLL_S)
+                )
+                for kind, payload in events:
+                    callback = {
+                        "text": on_text,
+                        "reasoning": on_reasoning,
+                        "tool_trace": on_tool_trace,
+                    }[kind]
+                    if callback is not None and not callback(payload):
+                        return {"state": "client_gone", "text": "", "rc": 1}
+                    offset += 1
+                    last_delivery = time.monotonic()
+                if out is not None:
+                    return out
+                if time.monotonic() - last_delivery >= heartbeat:
+                    if keepalive is not None and not keepalive():
+                        return {"state": "client_gone", "text": "", "rc": 1}
+                    last_delivery = time.monotonic()
+        finally:
+            registry.detach(job)
+
+    def _run_once_impl(
         self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
     ) -> dict:
         if "stream_resilience_enabled" not in ctx:
@@ -6146,6 +6470,12 @@ class Handler(BaseHTTPRequestHandler):
                         img_registered = False
             _retry_credit()
             for attempt in (1, 2):
+                if (
+                    self._registry_job is not None
+                    and self._registry_job.cancelled.is_set()
+                ):
+                    out = _terminal_state("client_gone")
+                    break
                 policy = _build_timeout_policy(t_req_start)
                 if policy is not None and not policy.can_start:
                     # Бюджет запроса исчерпан: новой попытки нет, остаток не перезапускается.
@@ -6184,6 +6514,7 @@ class Handler(BaseHTTPRequestHandler):
                         turn_id=str(ctx.get("turn_id") or ""),
                         policy=policy,
                         add_dir=img_dir if images else None,
+                        **({"mode": ctx["agy_mode"]} if "agy_mode" in ctx else {}),
                     )
                 except LauncherUnavailable:
                     self._reject(
@@ -6222,6 +6553,9 @@ class Handler(BaseHTTPRequestHandler):
                         "duration_s": None,
                     }
                     break
+                job = getattr(self, "_registry_job", None)
+                if job is not None:
+                    _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 try:
                     out = self._execute(
                         run, on_text, on_tool_trace, on_reasoning, keepalive
@@ -6240,6 +6574,8 @@ class Handler(BaseHTTPRequestHandler):
                             _log(f"graceful-finalize-error err={type(exc).__name__}")
                 finally:
                     run.close()
+                    if job is not None:
+                        _JOB_REGISTRY.bind_cancel(job, None)
                 if out["state"] == "done":
                     break
                 # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
@@ -6388,6 +6724,12 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _error_body(out: dict, resilience: bool | None = None) -> Any:
         st = out.get("state")
+        if st in ("job_conflict", "buffer_overflow", "orphan_limit"):
+            return {
+                "message": str(st),
+                "type": str(st),
+                "code": 409 if st == "job_conflict" else 502,
+            }
         limit = out.get("timeout_limit_s")
         has_limit = isinstance(limit, (int, float))
         if st == "timeout":
@@ -6589,6 +6931,7 @@ class Handler(BaseHTTPRequestHandler):
             reserved = length
         use_cid = ""
         owned_cid = ""
+        ctx: dict[str, object] = {}
         turn_id = uuid.uuid4().hex
         try:
             raw = self.rfile.read(length) if length else b""
@@ -6822,8 +7165,16 @@ class Handler(BaseHTTPRequestHandler):
                     conversation_id = use_cid
                     is_resumed = True
                     prompt = _get_resumed_turn_prompt(render_messages, images)
-            ctx: dict[str, object] = {
+            ctx = {
+                "registry_use_cid": use_cid,
+                "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,
+                "step_job_id": str(
+                    self.headers.get("X-Idempotency-Key")
+                    or req.get("step_job_id")
+                    or ""
+                ),
+                "agy_mode": resolve_agy_mode(req),
                 "turn_id": turn_id,
                 "sess_key": sess_key,
                 "hot_resumed": is_resumed,
@@ -6851,10 +7202,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._serve_json(ctx)
         finally:
-            if use_cid:
-                with _session_store_lock:
-                    _in_flight_cids.discard(use_cid)
-            _cid_release(use_cid or owned_cid, turn_id)
+            if not ctx.get("job_owns_cid"):
+                if use_cid:
+                    with _session_store_lock:
+                        _in_flight_cids.discard(use_cid)
+                _cid_release(use_cid or owned_cid, turn_id)
             if reserved and budget is not None:
                 budget.release(reserved)
 
@@ -7093,7 +7445,9 @@ class Handler(BaseHTTPRequestHandler):
             return ok
 
         def keepalive() -> bool:
-            if resilience and not ctx["stream_committed"]:
+            if not ctx["stream_committed"]:
+                if ctx.get("step_job_id"):
+                    return commit() and emit(": keepalive\n\n")
                 return not disconnected
             return emit(": keepalive\n\n")
 
@@ -7150,7 +7504,7 @@ class Handler(BaseHTTPRequestHandler):
             _log(f"graceful-timeout state={reason} mode=sse ok={int(bool(ok))}")
 
         ctx["finalize_timeout"] = finalize_timeout
-        if not resilience and not commit():
+        if not resilience and not ctx.get("step_job_id") and not commit():
             return
         out = self._run_once(ctx, on_text, on_tool_trace, on_reasoning, keepalive)
         if disconnected or out.get("state") == "client_gone":
@@ -7160,8 +7514,15 @@ class Handler(BaseHTTPRequestHandler):
         if out.get("graceful_done"):
             return
         err = self._error_body(out, resilience)
-        if resilience and err is not None and not ctx["stream_committed"]:
-            self._send(502, {"error": err})
+        if (
+            (resilience or ctx.get("step_job_id"))
+            and err is not None
+            and not ctx["stream_committed"]
+        ):
+            self._send(
+                int(err.get("code") or 502) if ctx.get("step_job_id") else 502,
+                {"error": err},
+            )
             self.close_connection = True
             return
         if not commit():

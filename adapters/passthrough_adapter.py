@@ -20,7 +20,9 @@ from __future__ import annotations
 import hmac
 import http.client
 import json
+import math
 import os
+import queue
 import re
 import socket
 import threading
@@ -118,7 +120,7 @@ def _positive_float(environ: Mapping[str, str], name: str, default: float) -> fl
         value = float(str(environ.get(name, "")).strip())
     except ValueError:
         return default
-    return value if value > 0 else default
+    return value if math.isfinite(value) and value > 0 else default
 
 
 def _bounded_int(
@@ -151,7 +153,13 @@ class PassthroughLimits:
     accumulator_max_keys: int = DEFAULT_ACC_MAX_KEYS
     accumulator_max_process_bytes: int = DEFAULT_ACC_MAX_PROCESS_BYTES
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S
-    read_timeout_s: float = DEFAULT_READ_TIMEOUT_S
+    read_timeout_s: float = DEFAULT_READ_TIMEOUT_S  # совместимость старого конструктора
+    idle_timeout_s: float = 60.0
+    total_timeout_s: float = 420.0
+    heartbeat_interval_s: float = 12.0
+    poll_interval_s: float = 0.1
+    reader_join_timeout_s: float = 0.2
+    read_queue_max_entries: int = 1
     repetition_max_repeats: int = DEFAULT_MAX_REPETITION_REPEATS
     repetition_max_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN
     repetition_guard_enabled: bool = False
@@ -183,10 +191,26 @@ class PassthroughLimits:
                 env, ENV_ACC_MAX_PROCESS_BYTES, DEFAULT_ACC_MAX_PROCESS_BYTES
             ),
             connect_timeout_s=_positive_float(
-                env, ENV_CONNECT_TIMEOUT_S, DEFAULT_CONNECT_TIMEOUT_S
+                env,
+                "BRIDGE_CONNECT_TIMEOUT_S",
+                _positive_float(env, ENV_CONNECT_TIMEOUT_S, DEFAULT_CONNECT_TIMEOUT_S),
             ),
             read_timeout_s=_positive_float(
                 env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S
+            ),
+            idle_timeout_s=_positive_float(env, "BRIDGE_IDLE_TIMEOUT_S", 60.0),
+            total_timeout_s=_positive_float(env, "BRIDGE_TOTAL_TIMEOUT_S", 420.0),
+            heartbeat_interval_s=_positive_float(
+                env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
+            ),
+            poll_interval_s=_positive_float(
+                env, "BRIDGE_PASSTHROUGH_POLL_INTERVAL_S", 0.1
+            ),
+            reader_join_timeout_s=_positive_float(
+                env, "BRIDGE_PASSTHROUGH_READER_JOIN_TIMEOUT_S", 0.2
+            ),
+            read_queue_max_entries=_positive_int(
+                env, "BRIDGE_PASSTHROUGH_READ_QUEUE_MAX_ENTRIES", 1
             ),
             repetition_max_repeats=_bounded_int(
                 env, ENV_REPETITION_MAX_REPEATS, DEFAULT_MAX_REPETITION_REPEATS, 3, 1000
@@ -252,6 +276,10 @@ class ResponseSink:
 
     def write(self, data: bytes) -> None:
         raise NotImplementedError
+
+    def client_gone(self) -> bool:
+        """Необязательный неблокирующий сигнал отмены от HTTP-фасада."""
+        return False
 
 
 def new_call_id() -> str:
@@ -579,6 +607,83 @@ class StreamOutcome:
     repetition_loop: bool = False
 
 
+class _TimedSseReader:
+    """Один bounded reader; ожидание I/O не мешает heartbeat и дедлайну."""
+
+    def __init__(
+        self,
+        readline: Callable[[int], bytes],
+        write: Callable[[bytes], None],
+        limits: PassthroughLimits,
+        deadline: float,
+    ) -> None:
+        self.limits = limits
+        self.deadline = deadline
+        self.write = write
+        self.items: queue.Queue[bytes | Exception] = queue.Queue(
+            maxsize=limits.read_queue_max_entries
+        )
+        self.stop = threading.Event()
+        self.last_input = time.monotonic()
+        self.last_progress: float | None = None
+
+        def read() -> None:
+            try:
+                while not self.stop.is_set():
+                    line = readline(limits.max_body_bytes + 1)
+                    while not self.stop.is_set():
+                        try:
+                            self.items.put(line, timeout=limits.poll_interval_s)
+                            break
+                        except queue.Full:
+                            continue
+                    if not line:
+                        return
+            except (OSError, http.client.HTTPException, ValueError) as exc:
+                while not self.stop.is_set():
+                    try:
+                        self.items.put(exc, timeout=limits.poll_interval_s)
+                        return
+                    except queue.Full:
+                        continue
+
+        self.thread = threading.Thread(target=read, daemon=True, name="passthrough-sse")
+        self.thread.start()
+
+    def readline(self, _limit: int) -> bytes:
+        while True:
+            now = time.monotonic()
+            remaining = self.deadline - now
+            if self.last_progress is not None:
+                remaining = min(
+                    remaining, self.last_progress + self.limits.idle_timeout_s - now
+                )
+            if remaining <= 0:
+                raise TimeoutError("upstream stream deadline exceeded")
+            heartbeat_due = self.last_input + self.limits.heartbeat_interval_s - now
+            if heartbeat_due <= 0:
+                self.write(b": keepalive\n\n")
+                self.last_input = time.monotonic()
+                heartbeat_due = self.limits.heartbeat_interval_s
+            try:
+                item = self.items.get(
+                    timeout=min(remaining, heartbeat_due, self.limits.poll_interval_s)
+                )
+            except queue.Empty:
+                continue
+            if time.monotonic() >= self.deadline:
+                raise TimeoutError("upstream stream deadline exceeded")
+            if isinstance(item, Exception):
+                raise item
+            if item:
+                self.last_input = time.monotonic()
+            return item
+
+    def close(self) -> None:
+        self.stop.set()
+        self.thread.join(timeout=self.limits.reader_join_timeout_s)
+
+
 def relay_sse(
     readline: Callable[[int], bytes],
     write: Callable[[bytes], None],
@@ -589,12 +694,19 @@ def relay_sse(
     sanitize: bool = True,
     trusted_tools: bool = False,
     state: StreamOutcome | None = None,
+    deadline: float | None = None,
 ) -> StreamOutcome:
     """Пробросить SSE-поток upstream клиенту с санитизацией `tool_calls` (AD-005).
 
     Исходный порядок событий сохраняется; единственное изменение — вызовы choice выходят
     одним кадром прямо перед терминальным чанком своей choice, после санитизации.
     """
+    reader = _TimedSseReader(
+        readline,
+        write,
+        limits,
+        deadline if deadline is not None else time.monotonic() + limits.total_timeout_s,
+    )
     outcome = state if state is not None else StreamOutcome()
     client_write = write
 
@@ -703,7 +815,7 @@ def relay_sse(
         return None
 
     try:
-        for raw, data in iter_sse_events(readline, limits.max_body_bytes):
+        for raw, data in iter_sse_events(reader.readline, limits.max_body_bytes):
             if data is None:
                 write(raw)  # комментарий/keepalive/event без data — дословно
                 continue
@@ -729,9 +841,28 @@ def relay_sse(
             try:
                 chunk = json.loads(data)
             except ValueError:
+                if data.strip():
+                    reader.last_progress = time.monotonic()
                 write(raw)
                 continue
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
+            if isinstance(choices, list):
+                # Role/usage — служебные кадры: TTFT защищён до первого полезного токена.
+                for choice in choices:
+                    delta = choice.get("delta") if isinstance(choice, dict) else None
+                    if isinstance(delta, dict) and any(
+                        delta.get(key)
+                        for key in (
+                            "content",
+                            "reasoning_content",
+                            "reasoning",
+                            "reasoning_text",
+                            "tool_calls",
+                            "function_call",
+                        )
+                    ):
+                        reader.last_progress = time.monotonic()
+                        break
             if not isinstance(choices, list):
                 write(raw)
                 continue
@@ -904,6 +1035,7 @@ def relay_sse(
         return outcome
     finally:
         acc.close()
+        reader.close()
 
 
 def _json_error(
@@ -1049,8 +1181,10 @@ class PassthroughAdapter(BackendAdapter):
         sink: ResponseSink,
     ) -> None:
         """Один запрос: байты тела уходят upstream без мутаций, ответ пишется в `sink`."""
-        queue_timeout = float(
-            getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)
+        deadline = time.monotonic() + self.limits.total_timeout_s
+        queue_timeout = min(
+            float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)),
+            self.limits.total_timeout_s,
         )
         if not self._slots.acquire(timeout=queue_timeout):
             self._fail(sink, 503, "overloaded", "passthrough backend is saturated")
@@ -1058,37 +1192,113 @@ class PassthroughAdapter(BackendAdapter):
         with self._lock:
             self._active += 1
         conn: Optional[http.client.HTTPConnection] = None
+        transport: list[socket.socket] = []
+        stop = threading.Event()
+
+        def abort() -> None:
+            for sock in transport:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    continue
+
+        def watch() -> None:
+            while not stop.wait(
+                min(self.limits.poll_interval_s, max(0.0, deadline - time.monotonic()))
+            ):
+                if time.monotonic() >= deadline or sink.client_gone():
+                    abort()
+                    return
+
+        watcher = threading.Thread(
+            target=watch, daemon=True, name="passthrough-deadline"
+        )
+        watcher.start()
         try:
             try:
-                conn = self._open(path, raw_body, headers)
+                conn = self._open(
+                    path,
+                    raw_body,
+                    headers,
+                    deadline=deadline,
+                    on_socket=transport.append,
+                )
+                if sink.client_gone():
+                    raise ClientGone()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError()
                 resp = conn.getresponse()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError()
             except socket.timeout:
                 self._fail(
                     sink, 504, "upstream_timeout", "upstream did not respond in time"
                 )
                 return
             except (OSError, http.client.HTTPException):
-                self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
+                if time.monotonic() >= deadline:
+                    self._fail(
+                        sink,
+                        504,
+                        "upstream_timeout",
+                        "upstream did not respond in time",
+                    )
+                else:
+                    self._fail(
+                        sink, 502, "upstream_unavailable", "upstream is unavailable"
+                    )
                 return
-            self._respond(resp, request, sink)
+            self._respond(resp, request, sink, deadline)
         except ClientGone:
             self._log("passthrough client_gone")
         finally:
+            stop.set()
+            abort()
             if conn is not None:
                 conn.close()
+            watcher.join(timeout=self.limits.reader_join_timeout_s)
             with self._lock:
                 self._active -= 1
             self._slots.release()
 
     def _open(
-        self, path: str, raw_body: bytes, headers: Mapping[str, str]
+        self,
+        path: str,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        *,
+        deadline: float | None = None,
+        on_socket: Callable[[socket.socket], None] | None = None,
     ) -> http.client.HTTPConnection:
-        conn = http.client.HTTPConnection(
-            self._host, self._port, timeout=self.limits.connect_timeout_s
+        remaining = (
+            self.limits.total_timeout_s
+            if deadline is None
+            else deadline - time.monotonic()
         )
-        conn.connect()
+        if remaining <= 0:
+            raise TimeoutError("upstream total deadline exceeded")
+        conn = http.client.HTTPConnection(
+            self._host,
+            self._port,
+            timeout=min(self.limits.connect_timeout_s, remaining),
+        )
+        try:
+            conn.connect()
+        except BaseException:
+            conn.close()
+            raise
         if conn.sock is not None:
-            conn.sock.settimeout(self.limits.read_timeout_s)
+            if on_socket is not None:
+                on_socket(conn.sock)
+            remaining = (
+                self.limits.total_timeout_s
+                if deadline is None
+                else deadline - time.monotonic()
+            )
+            if remaining <= 0:
+                conn.close()
+                raise TimeoutError("upstream total deadline exceeded")
+            conn.sock.settimeout(min(self.limits.read_timeout_s, remaining))
         forwarded = {
             k: v
             for k, v in headers.items()
@@ -1106,7 +1316,11 @@ class PassthroughAdapter(BackendAdapter):
         route, _, query = path.partition("?")
         suffix = route[len("/v1") :] if route.startswith("/v1/") else route
         target = self._base_path + suffix + ("?" + query if query else "")
-        conn.request("POST", target, body=raw_body, headers=forwarded)
+        try:
+            conn.request("POST", target, body=raw_body, headers=forwarded)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def _fail(
@@ -1127,6 +1341,7 @@ class PassthroughAdapter(BackendAdapter):
         resp: http.client.HTTPResponse,
         request: Mapping[str, Any],
         sink: ResponseSink,
+        deadline: float | None = None,
     ) -> None:
         content_type = (resp.getheader("Content-Type") or "").lower()
         encoded = (
@@ -1135,10 +1350,12 @@ class PassthroughAdapter(BackendAdapter):
         sanitize = self._sanitize_enabled()
         schemas = build_tool_schemas(request.get("tools")) if sanitize else None
         if resp.status == 200 and "text/event-stream" in content_type:
-            self._relay_stream(resp, schemas, sink, sanitize)
+            self._relay_stream(resp, schemas, sink, sanitize, deadline)
             return
         try:
             body = _read_bounded(resp, self.limits.max_body_bytes)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("upstream total deadline exceeded")
         except UpstreamBodyTooLarge:
             self._fail(
                 sink,
@@ -1153,7 +1370,12 @@ class PassthroughAdapter(BackendAdapter):
             )
             return
         except (OSError, http.client.HTTPException):
-            self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
+            if deadline is not None and time.monotonic() >= deadline:
+                self._fail(
+                    sink, 504, "upstream_timeout", "upstream did not respond in time"
+                )
+            else:
+                self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
             return
         if sanitize and resp.status == 200 and "json" in content_type and not encoded:
             body = sanitize_completion_body(body, schemas, self.limits)
@@ -1167,6 +1389,7 @@ class PassthroughAdapter(BackendAdapter):
         schemas: Optional[dict[str, Any]],
         sink: ResponseSink,
         sanitize: bool,
+        deadline: float | None = None,
     ) -> None:
         # Выбор доверия фиксируется до sink.start (первой записи клиенту).
         # Маркер допустим только от настроенного аутентифицированного loopback peer.
@@ -1202,6 +1425,7 @@ class PassthroughAdapter(BackendAdapter):
                 sanitize=sanitize,
                 trusted_tools=trusted,
                 state=outcome,
+                deadline=deadline,
             )
         except (socket.timeout, OSError, http.client.HTTPException):
             sink.write(
