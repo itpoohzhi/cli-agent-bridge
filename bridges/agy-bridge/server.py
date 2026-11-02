@@ -1111,9 +1111,16 @@ def _launch_env() -> dict:
 
     Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) выставляет сам лончер
     agy-cli.sh — мост их не дублирует и не переопределяет.
+    Устанавливается флаг BRIDGE_ZERO_CANON=1 для подавления канонических хуков.
+    Защита headless (DEC-01): BROWSER=/usr/bin/false и заглушка open в PATH.
     """
     env = os.environ.copy()
     env.pop("AGY_BRIDGE_KEY", None)
+    env["BRIDGE_ZERO_CANON"] = "1"
+    env["BROWSER"] = "/usr/bin/false"
+    headless_dir = os.path.expanduser("~/.config/agy-launch/headless-bin")
+    if os.path.isdir(headless_dir):
+        env["PATH"] = f"{headless_dir}:{env.get('PATH', '')}"
     return env
 
 
