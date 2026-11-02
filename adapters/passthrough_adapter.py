@@ -44,16 +44,29 @@ from core.backend_adapter import (
     TurnContext,
     TurnResult,
 )
-from core.tool_emulation import (
-    DEFAULT_MAX_PARALLEL_CALLS,
-    DEFAULT_MAX_PARALLEL_DEPTH,
-    DEFAULT_MAX_REPETITION_REPEATS,
-    DEFAULT_MAX_REPETITION_TOKEN_LEN,
-    RepetitionGuard,
-    ToolCallParser,
-    build_tool_schemas,
-    sanitize_tool_call,
-)
+try:
+    from core.tool_emulation import (
+        DEFAULT_MAX_PARALLEL_CALLS,
+        DEFAULT_MAX_PARALLEL_DEPTH,
+        DEFAULT_MAX_REPETITION_REPEATS,
+        DEFAULT_MAX_REPETITION_TOKEN_LEN,
+        RepetitionGuard,
+        ToolCallParser,
+        build_tool_schemas,
+        sanitize_tool_call,
+    )
+except ImportError:
+    from core.tool_emulation import (  # type: ignore[no-redef]
+        DEFAULT_MAX_PARALLEL_CALLS,
+        DEFAULT_MAX_PARALLEL_DEPTH,
+        ToolCallParser,
+        build_tool_schemas,
+        sanitize_tool_call,
+    )
+    DEFAULT_MAX_REPETITION_REPEATS = 20
+    DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
+    RepetitionGuard = None  # type: ignore[assignment,misc]
+from core.stream_framing import build_stream_error_chunk, format_stream_error_sse
 
 # Имена env (таблица AD-005) и значения по умолчанию: defaults — не потолки, переопределяются.
 ENV_MAX_PARALLEL_CALLS = "BRIDGE_MAX_PARALLEL_CALLS"
@@ -76,6 +89,8 @@ DEFAULT_ACC_MAX_KEYS = 64
 DEFAULT_ACC_MAX_PROCESS_BYTES = 32 * 1024 * 1024
 DEFAULT_CONNECT_TIMEOUT_S = 10.0
 DEFAULT_READ_TIMEOUT_S = 1800.0
+DEFAULT_IDLE_TIMEOUT_S = 300.0
+DEFAULT_TOTAL_TIMEOUT_S = 420.0
 DEFAULT_QUEUE_TIMEOUT_S = (
     900.0  # ожидание слота `max_concurrent`, если хост своего не задал
 )
@@ -154,8 +169,8 @@ class PassthroughLimits:
     accumulator_max_process_bytes: int = DEFAULT_ACC_MAX_PROCESS_BYTES
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S  # совместимость старого конструктора
-    idle_timeout_s: float = 60.0
-    total_timeout_s: float = 420.0
+    idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S
+    total_timeout_s: float = DEFAULT_TOTAL_TIMEOUT_S
     heartbeat_interval_s: float = 12.0
     poll_interval_s: float = 0.1
     reader_join_timeout_s: float = 0.2
@@ -198,8 +213,12 @@ class PassthroughLimits:
             read_timeout_s=_positive_float(
                 env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S
             ),
-            idle_timeout_s=_positive_float(env, "BRIDGE_IDLE_TIMEOUT_S", 60.0),
-            total_timeout_s=_positive_float(env, "BRIDGE_TOTAL_TIMEOUT_S", 420.0),
+            idle_timeout_s=_positive_float(
+                env, "BRIDGE_IDLE_TIMEOUT_S", DEFAULT_IDLE_TIMEOUT_S
+            ),
+            total_timeout_s=_positive_float(
+                env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S
+            ),
             heartbeat_interval_s=_positive_float(
                 env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
             ),
@@ -551,19 +570,14 @@ def _data_frame(payload: Mapping[str, Any]) -> bytes:
 def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
     """Терминальный error-chunk в форме `chat.completion.chunk` (как fail-close кадр фасада)."""
     return _data_frame(
-        {
-            "id": chunk.get("id") or "chatcmpl-passthrough",
-            "object": "chat.completion.chunk",
-            "created": chunk.get("created") or int(time.time()),
-            "model": chunk.get("model") or "",
-            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-            "error": {
-                "message": message,
-                "type": "stream_error",
-                "code": code,
-                "param": None,
-            },
-        }
+        build_stream_error_chunk(
+            message=message,
+            model=str(chunk.get("model") or ""),
+            code=code,
+            finish_reason=None,
+            completion_id=str(chunk.get("id") or "chatcmpl-passthrough"),
+            created=chunk.get("created"),
+        )
     )
 
 
@@ -605,6 +619,8 @@ class StreamOutcome:
     tool_calls_published: int = 0
     committed: bool = False
     repetition_loop: bool = False
+    last_chunk: Optional[dict[str, Any]] = None
+    unfinished_choices: Optional[set[int]] = None
 
 
 class _TimedSseReader:
@@ -864,32 +880,46 @@ def relay_sse(
                         reader.last_progress = time.monotonic()
                         break
             if not isinstance(choices, list):
+                if isinstance(chunk, dict):
+                    meta = {
+                        k: chunk.get(k)
+                        for k in ("id", "created", "model")
+                        if chunk.get(k) is not None
+                    }
+                    if meta:
+                        outcome.last_chunk = {**(outcome.last_chunk or {}), **meta}
                 write(raw)
                 continue
             if not sanitize:
-                if limits.repetition_guard_enabled:
-                    last_chunk = {k: chunk.get(k) for k in ("id", "created", "model")}
-                    for choice in choices:
-                        if not isinstance(choice, dict):
-                            continue
+                outcome.last_chunk = {k: chunk.get(k) for k in ("id", "created", "model")}
+                for choice in choices:
+                    if isinstance(choice, dict):
                         raw_index = choice.get("index")
-                        index = (
+                        idx = (
                             raw_index
                             if isinstance(raw_index, int)
                             and not isinstance(raw_index, bool)
                             else 0
                         )
-                        delta = choice.get("delta")
-                        text_value = (
-                            delta.get("content") if isinstance(delta, dict) else None
-                        )
-                        if isinstance(text_value, str) and check_repetition(
-                            index, text_value
-                        ):
-                            return repetition_error()
+                        seen.add(idx)
+                        if choice.get("finish_reason"):
+                            finished.add(idx)
+                        if limits.repetition_guard_enabled:
+                            delta = choice.get("delta")
+                            text_value = (
+                                delta.get("content")
+                                if isinstance(delta, dict)
+                                else None
+                            )
+                            if isinstance(text_value, str) and check_repetition(
+                                idx, text_value
+                            ):
+                                return repetition_error()
+                outcome.unfinished_choices = set(seen - finished)
                 write(raw)
                 continue
             last_chunk = {k: chunk.get(k) for k in ("id", "created", "model")}
+            outcome.last_chunk = last_chunk
             modified = False
             terminal: list[int] = []
             terminal_content: dict[int, str] = {}
@@ -952,6 +982,7 @@ def relay_sse(
                         delta = {k: v for k, v in delta.items() if k != "content"}
                         choice["delta"] = delta
                         modified = True
+            outcome.unfinished_choices = set(seen - finished)
             for index in sorted(terminal):
                 if index in terminal_content:
                     write(content_frame(chunk, index, terminal_content[index]))
@@ -1428,8 +1459,22 @@ class PassthroughAdapter(BackendAdapter):
                 deadline=deadline,
             )
         except (socket.timeout, OSError, http.client.HTTPException):
+            last_chunk = getattr(outcome, "last_chunk", None) or {}
+            unfinished_set = getattr(outcome, "unfinished_choices", None)
+            if unfinished_set is not None and len(unfinished_set) == 0:
+                sink.write(b"data: [DONE]\n\n")
+                return
+
+            unfinished = sorted(unfinished_set) if unfinished_set is not None else [0]
             sink.write(
-                _error_frame({}, "upstream_stream_error", "upstream stream failed")
+                format_stream_error_sse(
+                    message="upstream stream failed",
+                    code="upstream_stream_error",
+                    model=str(last_chunk.get("model") or getattr(self, "id", "") or ""),
+                    completion_id=last_chunk.get("id"),
+                    created=last_chunk.get("created"),
+                    choice_indices=unfinished,
+                ).encode("utf-8")
             )
             return
         if outcome.incomplete or outcome.overflow:

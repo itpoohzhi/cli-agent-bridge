@@ -62,7 +62,7 @@ def test_passthrough_deadline_env() -> None:
         defaults.idle_timeout_s,
         defaults.total_timeout_s,
         defaults.heartbeat_interval_s,
-    ) == (10, 60, 420, 12)
+    ) == (10, 300, 420, 12)
 
 
 @pytest.mark.parametrize(

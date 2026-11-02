@@ -142,6 +142,7 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     finalize_turn,
     sanitize_tool_call,
 )
+from core.stream_framing import build_stream_error_chunk
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
     HistoryPrefixGuard,
@@ -7456,29 +7457,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._emit(frame)
 
         def stream_error_frame(message: str) -> str:
-            # RW-202/RW-211: fail-close кадр chat.completion.chunk, а не плоский
-            # {"error": ...}: id/created/model те же, что у предыдущих кадров,
-            # пустая delta и finish_reason=null.
-            return (
-                "data: "
-                + json.dumps(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": shown_model,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-                        "error": {
-                            "message": message,
-                            "type": "stream_error",
-                            "code": "live_prefix_invalidated",
-                            "param": None,
-                        },
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n\n"
+            # RW-202/RW-211: fail-close кадр chat.completion.chunk через core.stream_framing
+            # с пустой дельтой и finish_reason=null для отзыва живого префикса Droid.
+            chunk = build_stream_error_chunk(
+                message=message,
+                model=shown_model,
+                code="live_prefix_invalidated",
+                finish_reason=None,
+                completion_id=completion_id,
+                created=created,
             )
+            chunk["choices"][0]["delta"] = {}
+            return "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
 
         def keepalive() -> bool:
             with sse_lock:
