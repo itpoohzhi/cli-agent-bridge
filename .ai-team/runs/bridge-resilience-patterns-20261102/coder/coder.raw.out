@@ -1,0 +1,39 @@
+Реализация готова: `core/resilience.py`, интеграция в `server.py` и `tests/test_resilience.py` (22 теста, все зелёные). В полном прогоне остались 20 падений, но в моих файлах их нет. Проверялась только на тестовом стенде: живой мост и сценарий владельца не запускались, флаги в GigaRC не включались.
+
+**Что сделано**
+- **`core/resilience.py`** содержит всё из брифа: `CircuitBreaker` с generation tokens, `Bulkhead`, `RetryPolicy` (Full Jitter, дедлайн, `bytes_delivered`), `ResilienceFlags`, `ResilienceLease`, `ResilienceManager` и три исключения.
+- **`server.py`:**
+  - `RESILIENCE = ResilienceManager()`.
+  - Допуск и 503 с `Retry-After` обрабатываются в `_serve_resilient` до отправки заголовков.
+  - Исходы фиксируются явно: passthrough — `status < 500` это успех; CLI-ход — `rc == 0` без ошибки бэкенда; обрыв клиента — `record_discard`.
+  - Новая ручка `GET /v1/resilience` с авторизацией.
+  - `/health` не менялся.
+- **Тесты:**
+  - Все 8 сценариев ADR-0020 из брифа есть.
+  - Добавлены тесты lease и сквозные проверки через настоящий `Handler`: 503 без вызова upstream, 4xx не открывает брейкер, при выключенных флагах поведение прежнее, `/v1/resilience` требует авторизацию.
+
+**Что не вошло и где я отклонился от брифа**
+- **`RetryPolicy` в `server.py` не подключена.** Адаптеры вне разрешённых путей, поэтому класс есть и протестирован, но ничем не вызывается.
+- **Допуск стоит в двух местах**, а не одним `with` в начале `do_POST`: перед `_serve_passthrough` и перед `_serve_sse`/`_serve_json`. Так ошибки валидации 400/401 не занимают слоты и не бьют по брейкеру. `_serve_stream` в коде нет.
+- **Lease передаётся через атрибут `Handler._resilience_lease`, а не параметром.** Существующие тесты подменяют `_serve_passthrough` четырёхаргументной заглушкой, и лишний аргумент их ломал. Атрибут сбрасывается в `finally`, потому что `Handler` живёт на соединение.
+- **`_HandlerSink` теперь ставит `client_gone`.** Адаптер проглатывает `ClientGone`, и иначе обрыв клиента считался бы сбоем бэкенда.
+- **Нейтральные состояния хода** (`queue_timeout`, `spool_error`, `persist_error`, `delivery_budget`, `client_gone`) не штрафуют брейкер, потому что это локальная перегрузка моста, а не сбой бэкенда.
+- **Дефолты ретраев — по брифу** (base 1.0 с, max 10 с), хотя в ADR стоят 0.5 и 5.0. Имена env из ADR приняты как алиасы.
+- **Формат `server.py` не применял.** В HEAD там уже 13 неформатированных кусков, и `ruff format` затронул бы чужой код. Мои правки лишних хунков не добавляют. Сам `server.py` проверил только `ruff check`; ошибка F401 на `import io` там была и до меня, оставил как есть.
+- **Песочницу `$WORK` из `feature.md` не поднимал.** В рабочем дереве много чужих незакоммиченных правок, и клон из HEAD их бы потерял. Работал на месте, коммит не делал.
+- **Отказ брейкера в CLI-ветке приходит после `create_or_attach_turn`.** Созданный ход закрывает существующий `finalize_abandoned_turn`. Для присоединения к уже идущему ходу допуск пропускается.
+- **`uv run pytest` не работает:** нет `pyproject.toml`, а `.venv` на Python 3.9. Запускал через `uv run --no-project --python 3.14 --with pytest python -m pytest`.
+
+**Результаты проверок**
+- ruff format и ruff check на новых файлах — чисто.
+- basedpyright по `core/resilience.py` — 0 ошибок, 71 предупреждение строгого режима.
+- Полный прогон: 1767 прошло, 20 упало. Все падения вне моих файлов:
+  - 18 субтестов `test_handler_rechecks_flag_for_each_request`: 503 вместо 401/200. Они падают в паре `test_muse_adapter` → `test_passthrough_adapter` и в копии репозитория с отключённой логикой допуска, так что к моим правкам не относятся.
+  - `test_agy_bridge_resilience`: 504 вместо 200 в тесте тайм-аута.
+  - `test_claude_bridge::test_config_bridge_import_fails_without_core`: `No module named 'core'` и `_REPO_ROOT is not defined`.
+
+```json
+{"changed_files": ["core/resilience.py", "server.py", "tests/test_resilience.py"], "commands": ["uv run --no-project --with ruff ruff format core/resilience.py tests/test_resilience.py", "uv run --no-project --with ruff ruff check --fix core/resilience.py server.py tests/test_resilience.py", "uv run --no-project --python 3.14 --with pytest python -m pytest tests/test_resilience.py -v", "uv run --no-project --python 3.14 --with pytest python -m pytest tests/ -q --maxfail=1000"], "status": "DONE"}
+```
+
+Коммит и MR не создавались. Прежде чем отдавать как «готово», нужен тяжёлый путь: включить флаги на живом мосту и убедиться, что 503 с `Retry-After` приходит на реальном отказе бэкенда.

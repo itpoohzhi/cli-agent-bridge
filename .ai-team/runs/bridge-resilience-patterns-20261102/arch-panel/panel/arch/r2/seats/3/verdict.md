@@ -1,0 +1,10 @@
+PANEL-NONCE: 0b73237871295a0e
+ARTIFACT-SHA256: f11926370796cb83074b1ddfce74de7ba251ee15b25a83a6621cb07ebaee77aa
+Подтверждение канона: общий канон `~/Мой диск/Context/AGENTS.md` прочитан целиком (до `<!-- КАНОН-КОНЕЦ -->`); проектный файл правил `/Users/aazhiry1/work/src/cli-agent-bridge/AGENTS.md` прочитан.
+AGREE RW-001 — проверил: seats/3/brief.md:64-70 — при выходе из блока with без исключения (exc_val is None) и без записи исхода вызывается только close() для Bulkhead; record_discard() для занятого слота пробы HALF_OPEN не вызывается, что навсегда блокирует брейкер в HALF_OPEN.
+AGREE RW-002 — проверил: seats/3/brief.md:68 и :108-111 — в __exit__ любое незаписанное исключение (включая клиентский ConnectionResetError) фиксируется как failure, что позволяет одному клиенту открыть общий брейкер, а условие sink.status < 500 ошибочно считает 429 успехом.
+AGREE RW-003 — проверил: docs/adr/0020-universal-backend-circuit-breaker-bulkhead-and-retries.md:55-63 — предикат bytes_delivered предотвращает только дублирование вывода клиенту, но допускает повторный запуск сессий с уже выполненными неидемпотентными побочными эффектами (tool calls).
+AGREE RW-004 — проверил: seats/3/brief.md:26 и docs/adr/0020-universal-backend-circuit-breaker-bulkhead-and-retries.md:34 — в описании пакета лимит Bulkhead задан константой min(max_concurrent, 64), а в ADR захардкожен диапазон джиттера uniform(0.8, 1.2), что нарушает требование полной конфигурируемости AGENTS.md п.4.
+AGREE RW-005 — проверил: seats/3/brief.md:81 и docs/adr/0020-universal-backend-circuit-breaker-bulkhead-and-retries.md:74 — порядок захвата в RESILIENCE.acquire() не регламентирован; при сбое захвата Bulkhead после взятия слота пробы брейкера откат record_discard() не гарантирован, что приводит к утечке слота пробы.
+
+VERDICT: NEEDS WORK
