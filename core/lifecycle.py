@@ -262,9 +262,9 @@ class HubLifecycleManager:
 
         eff_timeout = self.drain_timeout_s if self.is_drain_enabled() else 0.0
         active_before = (
-            self.turn_manager.active_count()
-            if self.turn_manager is not None
-            else (self._active_turns_fn() if self._active_turns_fn is not None else 0)
+            self._active_turns_fn()
+            if self._active_turns_fn is not None
+            else (self.turn_manager.active_count() if self.turn_manager is not None else 0)
         )
         self._log(
             f"drain_started signal={self.last_signal or 0} "
@@ -275,7 +275,9 @@ class HubLifecycleManager:
         deadline = time.monotonic() + max(0.0, eff_timeout)
         if self.turn_manager is not None:
             if eff_timeout > 0:
-                remaining = self.turn_manager.wait_for_active_turns(timeout=eff_timeout)
+                remaining = self.turn_manager.wait_for_active_turns(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
             else:
                 remaining = self.turn_manager.active_turns()
 
@@ -288,7 +290,8 @@ class HubLifecycleManager:
                     turn,
                     message="bridge restart drain timeout exceeded",
                 )
-        elif self._active_turns_fn is not None and eff_timeout > 0:
+
+        if self._active_turns_fn is not None and eff_timeout > 0:
             while time.monotonic() < deadline and self._active_turns_fn() > 0:
                 time.sleep(0.05)
 
@@ -310,6 +313,7 @@ class HubLifecycleManager:
         self._log(f"drain_completed interrupted_turns={len(remaining)}")
         return {
             "interrupted_turn_ids": [t.turn_id for t in remaining],
+            "active_turns_before": active_before,
             "state": self.state,
         }
 
