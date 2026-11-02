@@ -1008,6 +1008,7 @@ class _Fixture:
         self.patch("WORKSPACE", self.tmp / "ws")
         self.set_env("FAKE_SCENARIO", str(self.scenario))
         self.set_env("AGY_SQLITE_REASONING_ENABLED", None)
+        self.set_env("AGY_ISOLATE_TOOL_PREAMBLES_TO_REASONING", "0")
         self.reset_state()
         return self
 
@@ -3855,6 +3856,7 @@ _NOTICE_MARK = "Превышен лимит времени хода agy"
 def _clean_flags(fx: _Fixture) -> None:
     """Старые флаги берутся из файла; legacy-оракулы выполняются без новой SSE-политики."""
     fx.set_env("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", "false")
+    fx.set_env("AGY_ISOLATE_TOOL_PREAMBLES_TO_REASONING", "false")
     fx.set_env("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", None)
     for env in _FLAG_ENV.values():
         fx.set_env(env, None)
@@ -4073,7 +4075,10 @@ def _offer(arb: object, source: str, idx: object, text: str, cid: str = _CID) ->
 
 
 def _pump_queue(
-    lines: list[dict[str, object]], content: bool = False
+    lines: list[dict[str, object]],
+    content: bool = False,
+    isolate_tool_preambles: bool = False,
+    mode: str = "ask",
 ) -> tuple[object, list[tuple[str, object]]]:
     """Прогнать Run._pump по готовому stdout без процесса: (run, события очереди)."""
     run = object.__new__(cast("type[object]", _bval("Run")))
@@ -4090,14 +4095,19 @@ def _pump_queue(
         ),
         "q": queue.Queue(),
         "_text_seen": {},
+        "_stdout_step_accum": {},
         "_tail": tail,
         "_proc_done": threading.Event(),
         "_stop_watch": threading.Event(),
         "_emit_lock": threading.Lock(),
         "drain_closed": False,
         "_done_put": False,
+        "_reasoning_bytes": 0,
+        "_cap_logged": False,
         "got_event": False,
         "content_streaming": content,
+        "isolate_tool_preambles": isolate_tool_preambles,
+        "mode": mode,
         "_arbiter": _arb("turn-pump"),
         "run_cid": "",
         "turn_id": "turn-pump",
@@ -4488,7 +4498,7 @@ class SilentPlannerContentTests(unittest.TestCase):
             fx.set_env(_FLAG_ENV["emit_tool_trace"], None)
             _ = fx.write_scenario(
                 _planner_events(
-                    [(0.1, "Hel"), (0.15, "Hello")], (0.2, "Hello world"), "Hello world"
+                    [(0.1, "Hel"), (0.15, "lo")], (0.2, "Hello world"), "Hello world"
                 )
             )
             out, texts = _run_turn_text()
@@ -4512,7 +4522,7 @@ class SilentPlannerContentTests(unittest.TestCase):
             _clean_flags(fx)
             _ = fx.write_scenario(
                 _planner_events(
-                    [(0.1, "Hel"), (0.15, "Hello")], (0.2, "Hello world"), "Hello world"
+                    [(0.1, "Hel"), (0.15, "lo")], (0.2, "Hello world"), "Hello world"
                 )
             )
             out, texts = _run_turn_text()
@@ -4522,8 +4532,7 @@ class SilentPlannerContentTests(unittest.TestCase):
     def test_silent_planner_content_pump_routes_stdout_through_arbiter(self) -> None:
         lines = [
             _stdout_text(4, "Hel"),
-            _stdout_text(4, "Hello"),
-            _stdout_text("4", "Hello"),  # тот же шаг в строковом виде
+            _stdout_text(4, "lo"),
             _stdout_text(None, "Hello"),  # без idx: дубль по тексту
         ]
         _run, items = _pump_queue(lines, content=True)
@@ -4533,6 +4542,66 @@ class SilentPlannerContentTests(unittest.TestCase):
         )
         _run, legacy = _pump_queue(lines, content=False)
         self.assertEqual([p for k, p in legacy if k == "text"][:2], ["Hel", "lo"])
+
+    def test_silent_planner_content_pump_incremental_deltas_and_agent_reasoning_isolation(
+        self,
+    ) -> None:
+        """AD-001..AD-003: инкрементальные text_delta не замораживают арбитр, а в agent-режиме уходят в reasoning."""
+        inc_lines = [
+            _stdout_text(1, "Первая часть. "),
+            _stdout_text(1, "Вторая часть. "),
+            _stdout_text(1, "Третья часть."),
+            {
+                "event": "result",
+                "result": {
+                    "status": "success",
+                    "response": "Первая часть. Вторая часть. Третья часть.",
+                },
+            },
+        ]
+        # 1. Режим ask / без изоляции: инкрементальные дельты накапливаются в _stdout_step_accum без freeze
+        run_ask, items_ask = _pump_queue(
+            inc_lines, content=True, isolate_tool_preambles=False, mode="ask"
+        )
+        self.assertEqual(
+            [p for k, p in items_ask if k == "text"],
+            ["Первая часть. ", "Вторая часть. ", "Третья часть."],
+        )
+        arb_ask = _oval(run_ask, "_arbiter")
+        self.assertEqual(_oval(arb_ask, "divergences"), 0)
+        self.assertEqual(
+            _str(_ofn(run_ask, "reconcile_result")("Первая часть. Вторая часть. Третья часть.")),
+            "",
+        )
+
+        # 2. Режим agent + isolate_tool_preambles (content_streaming=True): дельты уходят в reasoning, финал через reconcile_result
+        run_agent, items_agent = _pump_queue(
+            inc_lines, content=True, isolate_tool_preambles=True, mode="agent"
+        )
+        self.assertEqual([p for k, p in items_agent if k == "text"], [])
+        self.assertEqual(
+            [p for k, p in items_agent if k == "reasoning"],
+            ["Первая часть. ", "Вторая часть. ", "Третья часть."],
+        )
+        self.assertEqual(
+            _str(_ofn(run_agent, "reconcile_result")("Первая часть. Вторая часть. Третья часть.")),
+            "Первая часть. Вторая часть. Третья часть.",
+        )
+        # Повторный вызов reconcile_result не дублирует уже выданный текст
+        self.assertEqual(
+            _str(_ofn(run_agent, "reconcile_result")("Первая часть. Вторая часть. Третья часть.")),
+            "",
+        )
+
+        # 3. Режим agent + isolate_tool_preambles (content_streaming=False): суффиксы также изолируются в reasoning
+        _run_legacy_agent, items_legacy_agent = _pump_queue(
+            inc_lines, content=False, isolate_tool_preambles=True, mode="agent"
+        )
+        self.assertEqual([p for k, p in items_legacy_agent if k == "text"], [])
+        self.assertEqual(
+            [p for k, p in items_legacy_agent if k == "reasoning"],
+            ["Первая часть. ", "Вторая часть. ", "Третья часть."],
+        )
 
 
 # ---- безопасный прогресс инструментов (AD-002, VER-002) --------------------------------
