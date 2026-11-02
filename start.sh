@@ -61,8 +61,17 @@ if [[ -f "$HOME/.dsh/.env" ]]; then
       export "$_name=$_k"
     fi
   done
+  # Подгружаем все BRIDGE_* переменные конфигурации из ~/.dsh/.env (если не переопределены)
+  while IFS='=' read -r _bkey _bval || [[ -n "$_bkey" ]]; do
+    _bkey="$(echo "$_bkey" | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//;s/[[:space:]]*$//')"
+    if [[ "$_bkey" =~ ^BRIDGE_[A-Za-z0-9_]+$ && -z "${!_bkey+x}" ]]; then
+      _bval="${_bval%$'\r'}"
+      _bval="$(echo "$_bval" | sed -E 's/^[[:space:]]*["'"'"']?//;s/["'"'"']?[[:space:]]*$//')"
+      export "$_bkey=$_bval"
+    fi
+  done < <(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_[A-Za-z0-9_]+=' "$HOME/.dsh/.env" || true)
 fi
-unset _k _name 2>/dev/null || true
+unset _k _name _bkey _bval 2>/dev/null || true
 
 # Необязательно: Factory-ключ для потомка `droid exec`. Источник — только ~/.zshenv
 # (в ~/.dsh/.env секрет не дублируем: один секрет — один файл).
