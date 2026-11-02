@@ -251,6 +251,17 @@ class HubLifecycleManager:
         self.shutdown_requested.wait()
         self.run_drain_once()
 
+    def _safe_active_count(self) -> int:
+        """Возвращает число активных ходов, сохраняя drain при ошибке счётчика."""
+        try:
+            if self._active_turns_fn is not None:
+                return self._active_turns_fn()
+            if self.turn_manager is not None:
+                return self.turn_manager.active_count()
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"drain_active_count_error error={exc}")
+        return 0
+
     def run_drain_once(self) -> dict[str, Any]:
         """Выполняет фазу `DRAINING` в фоновом потоке (идемпотентно)."""
         with self._lock:
@@ -261,11 +272,7 @@ class HubLifecycleManager:
             srv = self._server
 
         eff_timeout = self.drain_timeout_s if self.is_drain_enabled() else 0.0
-        active_before = (
-            self._active_turns_fn()
-            if self._active_turns_fn is not None
-            else (self.turn_manager.active_count() if self.turn_manager is not None else 0)
-        )
+        active_before = self._safe_active_count()
         self._log(
             f"drain_started signal={self.last_signal or 0} "
             f"active_turns={active_before} timeout_s={eff_timeout:.1f}"
@@ -292,7 +299,7 @@ class HubLifecycleManager:
                 )
 
         if self._active_turns_fn is not None and eff_timeout > 0:
-            while time.monotonic() < deadline and self._active_turns_fn() > 0:
+            while time.monotonic() < deadline and self._safe_active_count() > 0:
                 time.sleep(0.05)
 
         if srv is not None:

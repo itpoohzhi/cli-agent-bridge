@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from core.backend_adapter import TurnResult
 from core.lifecycle import DrainState, HubLifecycleManager, KeepaliveController
-from core.turn_session_manager import TurnSessionManager
+from core.turn_session_manager import ManagedTurn, TurnSessionManager
 
 
 class GracefulShutdownDrainTests(unittest.TestCase):
@@ -140,6 +141,102 @@ class GracefulShutdownDrainTests(unittest.TestCase):
         self.assertEqual(summary["interrupted_turn_ids"], [])
         self.assertEqual(summary["state"], DrainState.STOPPED)
         self.assertTrue(lifecycle.drain_completed.is_set())
+
+    def test_drain_safe_active_count_handles_exception(self) -> None:
+        for counts in (
+            [RuntimeError("counter unavailable"), 0],
+            [1, RuntimeError("counter unavailable")],
+        ):
+            with self.subTest(counts=counts):
+                active_turns_fn = Mock(side_effect=counts)
+                logs: list[str] = []
+                on_complete = Mock()
+                lifecycle = HubLifecycleManager(
+                    state_dir=self._state_dir,
+                    active_turns_fn=active_turns_fn,
+                    drain_timeout_s=1.0,
+                    drain_enabled_fn=lambda: True,
+                    log_fn=logs.append,
+                    on_shutdown_complete=on_complete,
+                )
+                server = Mock()
+                lifecycle.attach_server(server)
+
+                with patch("core.lifecycle.time.monotonic", return_value=0.0):
+                    summary = lifecycle.run_drain_once()
+
+                self.assertEqual(summary["state"], DrainState.STOPPED)
+                self.assertEqual(
+                    summary["active_turns_before"],
+                    0 if isinstance(counts[0], Exception) else 1,
+                )
+                self.assertTrue(lifecycle.drain_completed.is_set())
+                self.assertTrue(any("counter unavailable" in line for line in logs))
+                server.shutdown.assert_called_once_with()
+                on_complete.assert_called_once_with()
+
+    def test_drain_mixed_activity_waits_for_both(self) -> None:
+        import server
+
+        manager = TurnSessionManager(state_root=self._state_dir)
+        turn, _ = manager.create_or_attach_turn(
+            model="test-model",
+            backend="test-backend",
+            cwd=self._state_dir,
+            messages=[{"role": "user", "content": "mixed activity"}],
+            session_id="sess-mixed-drain",
+            owner_token_hash="owner-mixed",
+            requested_turn_id="turn-mixed-drain",
+            stream=True,
+        )
+        backends = Mock()
+        backends.active_total.return_value = 1
+        events: list[str] = []
+        wait_for_active_turns = manager.wait_for_active_turns
+
+        def complete_managed_turn(timeout: float) -> list[ManagedTurn]:
+            self.assertEqual(manager.active_count(), 1)
+            self.assertEqual(backends.active_total(), 1)
+            manager.complete_turn_from_result(turn, TurnResult(text="done"))
+            events.append("managed_complete")
+            return wait_for_active_turns(timeout)
+
+        def complete_stream(_seconds: float) -> None:
+            self.assertEqual(manager.active_count(), 0)
+            backends.active_total.return_value = 0
+            events.append("stream_complete")
+
+        lifecycle = HubLifecycleManager(
+            state_dir=self._state_dir,
+            turn_manager=manager,
+            active_turns_fn=server._active_turn_count,
+            drain_timeout_s=1.0,
+            drain_enabled_fn=lambda: True,
+            on_shutdown_complete=lambda: events.append("complete"),
+        )
+        http_server = Mock()
+        http_server.shutdown.side_effect = lambda: events.append("shutdown")
+        lifecycle.attach_server(http_server)
+
+        with (
+            patch.object(server, "BACKENDS", backends),
+            patch.object(server, "TURN_MANAGER", manager),
+            patch.object(
+                manager, "wait_for_active_turns", side_effect=complete_managed_turn
+            ),
+            patch("core.lifecycle.time.monotonic", return_value=0.0),
+            patch("core.lifecycle.time.sleep", side_effect=complete_stream) as sleep,
+        ):
+            summary = lifecycle.run_drain_once()
+
+        self.assertEqual(summary["active_turns_before"], 2)
+        self.assertEqual(
+            events, ["managed_complete", "stream_complete", "shutdown", "complete"]
+        )
+        self.assertEqual(summary["interrupted_turn_ids"], [])
+        self.assertEqual(summary["state"], DrainState.STOPPED)
+        self.assertTrue(lifecycle.drain_completed.is_set())
+        sleep.assert_called_once_with(0.05)
 
     def test_startup_orphan_reaper_cleans_children_json(self) -> None:
         manager = TurnSessionManager(state_root=self._state_dir)
