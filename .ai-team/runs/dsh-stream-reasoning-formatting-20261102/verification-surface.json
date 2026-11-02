@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "run_id": "dsh-stream-reasoning-formatting-20261102",
+  "verification_surface": [
+    {
+      "id": "VER-001",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-004",
+        "AD-001",
+        "QA-001"
+      ],
+      "kind": "command",
+      "command": "pytest tests/test_agy_bridge_resilience.py -k test_step_boundary_newline_separation -v",
+      "expected": "exit 0; successive steps separated by newlines",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-002",
+      "requirement_ids": [
+        "REQ-002",
+        "REQ-004",
+        "AD-002",
+        "QA-002"
+      ],
+      "kind": "command",
+      "command": "pytest tests/test_agy_bridge_resilience.py -k test_arbiter_no_prefix_repetition_on_divergence -v",
+      "expected": "exit 0; arbiter does not duplicate prefixes on divergence",
+      "environment": "local",
+      "owner": "verifier"
+    },
+    {
+      "id": "VER-003",
+      "requirement_ids": [
+        "REQ-003",
+        "REQ-004",
+        "AD-003"
+      ],
+      "kind": "command",
+      "command": "pytest tests/test_agy_bridge_resilience.py -k test_tool_preamble_isolated_to_reasoning -v",
+      "expected": "exit 0; intermediate steps with tool_calls routed to reasoning_content",
+      "environment": "local",
+      "owner": "verifier"
+    }
+  ]
+}

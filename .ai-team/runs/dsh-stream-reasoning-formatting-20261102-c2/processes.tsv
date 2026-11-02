@@ -1,0 +1,13 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+dsh-stream-reasoning-formatting-20261102-c2	gpt-6.1-sol-high	panel-judge-k2	70291	70291	2026-11-02T13:13:08.192448+00:00	Mon Nov  2 16:13:08 2026	running
+dsh-stream-reasoning-formatting-20261102-c2	muse-wonder-full-1.0	panel-judge-k3	70292	70292	2026-11-02T13:13:08.192645+00:00	Mon Nov  2 16:13:08 2026	running
+dsh-stream-reasoning-formatting-20261102-c2	gemini-4-argon-high	panel-judge-k1	70290	70290	2026-11-02T13:13:08.192269+00:00	Mon Nov  2 16:13:08 2026	running
+dsh-stream-reasoning-formatting-20261102-c2	gemini-4-argon-high	panel-judge-k1	70290	70290	2026-11-02T13:13:08.192269+00:00	Mon Nov  2 16:13:08 2026	rc=0
+dsh-stream-reasoning-formatting-20261102-c2	gpt-6.1-sol-high	panel-judge-k2	70291	70291	2026-11-02T13:13:08.192448+00:00	Mon Nov  2 16:13:08 2026	rc=0
+dsh-stream-reasoning-formatting-20261102-c2	muse-wonder-full-1.0	panel-judge-k3	70292	70292	2026-11-02T13:13:08.192645+00:00	Mon Nov  2 16:13:08 2026	rc=0
+dsh-stream-reasoning-formatting-20261102-c2	muse-wonder-full-1.0	panel-judge-k1	37496	37496	2026-11-02T13:20:14.578985+00:00	Mon Nov  2 16:20:14 2026	running
+dsh-stream-reasoning-formatting-20261102-c2	gpt-6.1-sol-high	panel-judge-k3	37497	37497	2026-11-02T13:20:14.580249+00:00	Mon Nov  2 16:20:14 2026	running
+dsh-stream-reasoning-formatting-20261102-c2	claude-sonnet-5-5-high	panel-judge-k2	37527	37527	2026-11-02T13:20:14.671539+00:00	Mon Nov  2 16:20:14 2026	running
+dsh-stream-reasoning-formatting-20261102-c2	claude-sonnet-5-5-high	panel-judge-k2	37527	37527	2026-11-02T13:20:14.671539+00:00	Mon Nov  2 16:20:14 2026	rc=0
+dsh-stream-reasoning-formatting-20261102-c2	gpt-6.1-sol-high	panel-judge-k3	37497	37497	2026-11-02T13:20:14.580249+00:00	Mon Nov  2 16:20:14 2026	rc=0
+dsh-stream-reasoning-formatting-20261102-c2	muse-wonder-full-1.0	panel-judge-k1	37496	37496	2026-11-02T13:20:14.578985+00:00	Mon Nov  2 16:20:14 2026	rc=0
