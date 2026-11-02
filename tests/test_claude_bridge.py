@@ -32,6 +32,9 @@ BRIDGE_SERVER = BRIDGE_DIR / "server.py"
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 16
 GIF_BYTES = b"GIF89a" + b"\x00" * 16
+GIF87_BYTES = b"GIF87a" + b"\x00" * 16
+WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 16
+RIFF_WAVE_BYTES = b"RIFF\x00\x00\x00\x00WAVEfmt " + b"\x00" * 16
 
 TOOLS = [
     {
@@ -353,6 +356,41 @@ def test_image_extract_rejects_url_bad_base64_and_mismatch():
         core_te.extract_data_url_images(
             [{"role": "user", "content": [_image_part(), _image_part()]}], max_images=1
         )
+
+
+def test_image_extract_webp_and_gif_names():
+    messages = [
+        {"role": "user", "content": [_image_part("image/webp", WEBP_BYTES)]},
+        {"role": "user", "content": [_image_part("image/gif", GIF_BYTES)]},
+        {"role": "user", "content": [_image_part("image/gif", GIF87_BYTES)]},
+    ]
+    images = core_te.extract_data_url_images(messages)
+    assert [im["name"] for im in images] == [
+        "image_1.webp",
+        "image_2.gif",
+        "image_3.gif",
+    ]
+    assert images[0]["data"] == WEBP_BYTES and images[0]["mime"] == "image/webp"
+    assert images[1]["data"] == GIF_BYTES and images[1]["mime"] == "image/gif"
+    assert images[2]["data"] == GIF87_BYTES
+
+
+def test_image_extract_rejects_non_webp_riff_and_webp_mismatch():
+    with pytest.raises(core_te.ImageInputError) as wave:
+        core_te.extract_data_url_images(
+            [{"role": "user", "content": [_image_part("image/webp", RIFF_WAVE_BYTES)]}]
+        )
+    assert wave.value.code == "unsupported_image_type"
+    with pytest.raises(core_te.ImageInputError) as mismatch:
+        core_te.extract_data_url_images(
+            [{"role": "user", "content": [_image_part("image/png", WEBP_BYTES)]}]
+        )
+    assert mismatch.value.code == "image_type_mismatch"
+    with pytest.raises(core_te.ImageInputError) as truncated:
+        core_te.extract_data_url_images(
+            [{"role": "user", "content": [_image_part("image/webp", b"RIFF\x00\x00")]}]
+        )
+    assert truncated.value.code == "unsupported_image_type"
 
 
 def test_image_only_prompt_keeps_marker_not_pong():

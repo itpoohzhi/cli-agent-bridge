@@ -20,7 +20,7 @@ AD-002: этот файл в репозитории — SSOT, локальных
 попадает в `content`, fallback на терминальный `result` исключён, ошибка
 потока — корректный `502 proxy_error`.
 
-Изображения (`image_url` data URI PNG/JPEG) мост материализует в изолированный
+Изображения (`image_url` data URI PNG/JPEG/GIF/WebP) мост материализует в изолированный
 сессионный каталог `/tmp/claude-img-<uuid>/` (0700, файлы 0600) и запускает
 Claude с `--allowedTools "Read(<каталог>/**)"`, `--restricted` и
 `--add-dir <каталог>` (AD-003, workspace-read);
