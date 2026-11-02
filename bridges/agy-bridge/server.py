@@ -607,9 +607,17 @@ MIDDLE_PRUNED_MARKER = (
 
 # Мышление шагов agy: CLI кладёт его в транскрипт разговора пошагово, в середине
 # хода. Путь и имя файла фиксированы CLI (проверено на agy 1.3.1).
+# Изолированный профиль <clean-home> дочерних процессов agy (Zero-Canon): без
+# AGENTS.md/GEMINI.md/hooks.json пользователя; transcript и SQLite — внутри него.
+_AGY_HOME_LOCK = threading.Lock()
+_AGY_HOME_INITIALIZED = False
+CLEAN_HOME_DIR = Path(
+    os.environ.get("AGY_BRIDGE_CLEAN_HOME", "")
+    or str(WORKSPACE / "runtime" / "agy-home")
+)
 BRAIN_DIR = Path(
     os.environ.get("AGY_BRIDGE_BRAIN", "")
-    or str(HOME / ".gemini" / "antigravity-cli" / "brain")
+    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "brain")
 )
 TRANSCRIPT_NAME = "transcript_full.jsonl"
 TRANSCRIPT_FALLBACK_NAME = "transcript.jsonl"
@@ -621,7 +629,7 @@ TRANSCRIPT_READ_MAX = get_bridge_config().transcript_read_max
 # База открывается только на чтение; транскрипт остаётся минимальным источником.
 CONV_DIR = Path(
     os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
-    or str(HOME / ".gemini" / "antigravity-cli" / "conversations")
+    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "conversations")
 )
 # Бинарь agy: его идентичность (mtime_ns, size) ключует семантический canary.
 AGY_BIN = os.environ.get("AGY_BRIDGE_AGY_BIN", "") or str(
@@ -1106,14 +1114,103 @@ RESULT_EXIT_GRACE_S = 5.0
 _ACTIVITY_KINDS = frozenset({"init", "text", "reasoning", "tool_trace"})
 
 
+# Zero-Canon: файлы канона/хуков пользователя, которых не должно быть в <clean-home>.
+_CANON_FILE_NAMES = ("AGENTS.md", "GEMINI.md", "hooks.json")
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Каталог с правами 0700 (umask и ранее созданные права выравниваются chmod)."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def _ensure_symlink(link: Path, target: Path) -> None:
+    """Симлинк link -> target; чужой/битый объект по пути link заменяется."""
+    if link.is_symlink():
+        if os.readlink(link) == str(target):
+            return
+        link.unlink()
+    elif link.exists():
+        if link.is_dir():
+            shutil.rmtree(link)
+        else:
+            link.unlink()
+    os.symlink(target, link)
+
+
+def _copy_private_atomic(src: Path, dst: Path) -> None:
+    """Атомарная копия src -> dst с правами 0600 через временный файл и os.replace."""
+    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _prepare_agy_home() -> Path:
+    """Потокобезопасно (однократно) готовит изолированный HOME для `agy`.
+
+    Library -> ~/Library даёт доступ к Keychain macOS (без OAuth-окна браузера);
+    учётные данные копируются атомарно с 0600; AGENTS.md/GEMINI.md/hooks.json
+    в профиль не попадают никогда (Zero-Canon).
+    """
+    global _AGY_HOME_INITIALIZED
+    with _AGY_HOME_LOCK:
+        if _AGY_HOME_INITIALIZED:
+            return CLEAN_HOME_DIR
+        real_gemini = HOME / ".gemini"
+        real_cli = real_gemini / "antigravity-cli"
+        clean_gemini = CLEAN_HOME_DIR / ".gemini"
+        clean_gemini_cli = clean_gemini / "antigravity-cli"
+
+        _ensure_private_dir(CLEAN_HOME_DIR)
+        _ensure_symlink(CLEAN_HOME_DIR / "Library", HOME / "Library")
+        _ensure_private_dir(clean_gemini)
+        _ensure_private_dir(clean_gemini_cli)
+        for name in ("bin", "builtin"):
+            if (real_cli / name).exists():
+                _ensure_symlink(clean_gemini_cli / name, real_cli / name)
+        for src, dst in (
+            (real_gemini / "jetski-standalone-oauth-token", clean_gemini),
+            (real_gemini / "projects.json", clean_gemini),
+            (real_cli / "installation_id", clean_gemini_cli),
+            (real_cli / "jetski_state.pbtxt", clean_gemini_cli),
+            (real_cli / "settings.json", clean_gemini_cli),
+        ):
+            if src.is_file():
+                _copy_private_atomic(src, dst / src.name)
+        _ensure_private_dir(clean_gemini_cli / "conversations")
+        _ensure_private_dir(clean_gemini_cli / "brain")
+        for base in (CLEAN_HOME_DIR, clean_gemini, clean_gemini_cli):
+            for name in _CANON_FILE_NAMES:
+                canon = base / name
+                if canon.is_symlink() or canon.is_file():
+                    canon.unlink()
+        _AGY_HOME_INITIALIZED = True
+        return CLEAN_HOME_DIR
+
+
 def _launch_env() -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
-    Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) выставляет сам лончер
-    agy-cli.sh — мост их не дублирует и не переопределяет.
+    HOME указывает на изолированный <clean-home> (Zero-Canon); браузер для
+    OAuth заблокирован. Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY)
+    выставляет сам лончер agy-cli.sh — мост их не дублирует и не переопределяет.
     """
     env = os.environ.copy()
     env.pop("AGY_BRIDGE_KEY", None)
+    clean_home = str(_prepare_agy_home())
+    env["HOME"] = clean_home
+    env["BRIDGE_ZERO_CANON"] = "1"
+    env["BROWSER"] = "/usr/bin/false"
     return env
 
 
@@ -3927,7 +4024,9 @@ class _ContentArbiter:
             if self._eligible(step, source, idx):
                 return step
         if idx is None:
-            candidates = [t for t in texts if len(text) >= len(t) and text.startswith(t)]
+            candidates = [
+                t for t in texts if len(text) >= len(t) and text.startswith(t)
+            ]
             if candidates:
                 candidates.sort(key=len, reverse=True)
                 for cand in candidates:
@@ -4152,9 +4251,7 @@ class _UsageSnapshot:
 _EMPTY_USAGE_SNAPSHOT = _UsageSnapshot()
 
 
-def _add_preamble_bounded(
-    target: set[int], item: int, cap: int | None = None
-) -> None:
+def _add_preamble_bounded(target: set[int], item: int, cap: int | None = None) -> None:
     """Добавить индекс шага в коллекцию эмитированных преамбул с ограничением MAX_CONTENT_STEPS * 2."""
     eff_cap = max(1, MAX_CONTENT_STEPS * 2) if cap is None else cap
     target.add(item)
@@ -5422,7 +5519,9 @@ class Run:
                     last_idx = next(reversed(step_accum))
                     tool_steps = getattr(self, "_tool_step_indices", None) or set()
                     tail_tools = (
-                        getattr(getattr(self, "_tail", None), "_tool_step_indices", None)
+                        getattr(
+                            getattr(self, "_tail", None), "_tool_step_indices", None
+                        )
                         or set()
                     )
                     if last_idx not in tool_steps and last_idx not in tail_tools:
@@ -5703,9 +5802,7 @@ class Run:
                             )
                             if suffix:
                                 if isolate:
-                                    if self.claim_preamble(
-                                        step_idx, source="stdout"
-                                    ):
+                                    if self.claim_preamble(step_idx, source="stdout"):
                                         _ = self._emit_reasoning(step_idx or 0, suffix)
                                 else:
                                     self.q.put(("text", suffix))
@@ -5784,7 +5881,9 @@ class Run:
                     last_idx = next(reversed(step_accum))
                     tool_steps = getattr(self, "_tool_step_indices", None) or set()
                     tail_tools = (
-                        getattr(getattr(self, "_tail", None), "_tool_step_indices", None)
+                        getattr(
+                            getattr(self, "_tail", None), "_tool_step_indices", None
+                        )
                         or set()
                     )
                     if last_idx not in tool_steps and last_idx not in tail_tools:
@@ -6490,7 +6589,9 @@ class Handler(BaseHTTPRequestHandler):
                     delta = run.reconcile_result(final_text)
                     if delta:
                         add_content(delta)
-                    elif final_text and getattr(run._arbiter, "last_result_diverged", False):
+                    elif final_text and getattr(
+                        run._arbiter, "last_result_diverged", False
+                    ):
                         full_emitted = "".join(pieces)
                         sep = (
                             "\n\n"
