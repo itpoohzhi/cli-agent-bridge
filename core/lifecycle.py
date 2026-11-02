@@ -17,8 +17,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -58,6 +59,61 @@ KNOWN_CHILD_BINARIES = frozenset(
         "sleep",
     }
 )
+
+
+def _process_probe_timeout_s() -> float:
+    """Возвращает настраиваемый бюджет проверки процесса через ps."""
+    try:
+        value = float(os.environ.get("BRIDGE_PROCESS_PROBE_TIMEOUT_S", "2.0"))
+    except ValueError:
+        return 2.0
+    return value if math.isfinite(value) and value > 0 else 2.0
+
+
+def has_live_parent(pid: int, entry: Mapping[str, object]) -> bool:
+    """Защищает потомков живого экземпляра; неопределённость запрещает сигнал."""
+    for key in ("bridge_pid", "parent_pid", "ppid"):
+        parent = entry.get(key)
+        if isinstance(parent, int) and not isinstance(parent, bool) and parent > 1:
+            try:
+                os.kill(parent, 0)
+                return True
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return True
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=_process_probe_timeout_s(), check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            # Исчезнувший PID не даёт права послать сигнал старому PGID.
+            return True
+        parent = int(result.stdout.strip())
+        if parent <= 1:
+            return False
+        try:
+            os.kill(parent, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True
+
+
+def _matches_start_signature(pid: int, expected: str) -> bool:
+    """Повторно сверяет подписанную личность непосредственно перед сигналом."""
+    if not expected:
+        return True
+    try:
+        identity = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=_process_probe_timeout_s(), check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return identity.returncode == 0 and identity.stdout.strip() == expected
 
 
 class DrainState:
@@ -123,12 +179,13 @@ class HubLifecycleManager:
         turn_manager: TurnSessionManager | None = None,
         active_turns_fn: Callable[[], int] | None = None,
         force_kill_fn: Callable[[], None] | None = None,
-        drain_timeout_s: float = DRAIN_TIMEOUT_S,
+        drain_timeout_s: float | None = None,
         retry_after_s: int = RETRY_AFTER_S,
         orphan_grace_s: float = ORPHAN_SIGTERM_GRACE_S,
         drain_enabled_fn: Callable[[], bool] | None = None,
         log_fn: Callable[[str], None] | None = None,
         on_shutdown_complete: Callable[[], None] | None = None,
+        on_drain_start_fn: Callable[[], Any] | None = None,
     ) -> None:
         ws_source = workspace if workspace is not None else (state_dir or ".")
         self._explicit_state_dir = state_dir
@@ -140,6 +197,16 @@ class HubLifecycleManager:
         self.turn_manager = turn_manager
         self._active_turns_fn = active_turns_fn
         self._last_active_count: int = 0
+        if drain_timeout_s is None:
+            try:
+                configured = float(os.environ.get("BRIDGE_DRAIN_TIMEOUT_S", "").strip())
+            except ValueError:
+                configured = DEFAULT_DRAIN_SECONDS
+            drain_timeout_s = (
+                configured
+                if math.isfinite(configured) and configured > 0
+                else DEFAULT_DRAIN_SECONDS
+            )
         self.drain_timeout_s = float(drain_timeout_s)
         self.retry_after_s = int(retry_after_s)
         self.orphan_grace_s = float(orphan_grace_s)
@@ -154,6 +221,7 @@ class HubLifecycleManager:
         )
         self._log_fn = log_fn
         self._on_shutdown_complete = on_shutdown_complete or force_kill_fn
+        self._on_drain_start_fn = on_drain_start_fn
 
 
         self.shutdown_requested = threading.Event()
@@ -276,6 +344,8 @@ class HubLifecycleManager:
             srv = self._server
 
         try:
+            if self._on_drain_start_fn is not None:
+                self._on_drain_start_fn()
             eff_timeout = self.drain_timeout_s if self.is_drain_enabled() else 0.0
             active_before = self._safe_active_count()
             self._log(
@@ -312,6 +382,13 @@ class HubLifecycleManager:
                     srv.shutdown()
                 except Exception:  # noqa: BLE001
                     pass
+                if hasattr(srv, "graceful_close_listener"):
+                    try:
+                        srv.graceful_close_listener()
+                    except Exception as exc:  # noqa: BLE001
+                        self._log(f"graceful_close_listener_failed err={exc!r}")
+                if hasattr(srv, "close_idle_connections"):
+                    srv.close_idle_connections()
 
             if self._on_shutdown_complete is not None:
                 try:
@@ -433,6 +510,7 @@ class HubLifecycleManager:
                     entries.append({"pid": item, "pgid": item})
 
         reaped_pgids: list[int] = []
+        retained: list[dict[str, Any]] = []
         seen_pgids: set[int] = set()
         for entry in entries:
             pid = int(entry.get("pid") or entry.get("pgid") or 0)
@@ -442,9 +520,21 @@ class HubLifecycleManager:
             if pgid <= 0 or pgid in seen_pgids:
                 continue
             seen_pgids.add(pgid)
+            if has_live_parent(pid, entry):
+                retained.append(entry)
+                continue
             if not self._is_pid_or_group_alive(pid, pgid):
                 continue
             if not self._matches_expected_command(pid, pgid, expected_cmd):
+                retained.append(entry)
+                continue
+
+            # Подписанный реестр не должен деградировать до проверки имени команды.
+            expected_start = str(entry.get("start") or "")
+            if has_live_parent(pid, entry) or not _matches_start_signature(
+                pid, expected_start
+            ):
+                retained.append(entry)
                 continue
 
             try:
@@ -463,6 +553,11 @@ class HubLifecycleManager:
                 time.sleep(0.05)
 
             if self._is_pid_or_group_alive(pid, pgid):
+                if has_live_parent(pid, entry) or not _matches_start_signature(
+                    pid, expected_start
+                ):
+                    retained.append(entry)
+                    continue
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
@@ -477,9 +572,9 @@ class HubLifecycleManager:
 
         try:
             empty_payload: Any = (
-                []
+                retained
                 if isinstance(raw, list)
-                else {"schema_version": SNAPSHOT_SCHEMA_VERSION, "children": []}
+                else {"schema_version": SNAPSHOT_SCHEMA_VERSION, "children": retained}
             )
             _atomic_write_json_0600(path, empty_payload)
         except OSError:
