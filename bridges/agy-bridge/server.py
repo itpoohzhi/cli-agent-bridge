@@ -1111,16 +1111,9 @@ def _launch_env() -> dict:
 
     Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) выставляет сам лончер
     agy-cli.sh — мост их не дублирует и не переопределяет.
-    Устанавливается флаг BRIDGE_ZERO_CANON=1 для подавления канонических хуков.
-    Защита headless (DEC-01): BROWSER=/usr/bin/false и заглушка open в PATH.
     """
     env = os.environ.copy()
     env.pop("AGY_BRIDGE_KEY", None)
-    env["BRIDGE_ZERO_CANON"] = "1"
-    env["BROWSER"] = "/usr/bin/false"
-    headless_dir = os.path.expanduser("~/.config/agy-launch/headless-bin")
-    if os.path.isdir(headless_dir):
-        env["PATH"] = f"{headless_dir}:{env.get('PATH', '')}"
     return env
 
 
@@ -2960,6 +2953,7 @@ class _RuntimeFlags(NamedTuple):
     graceful_timeout_on_partial: bool = False
     step_scoped_usage_enabled: bool = False
     stream_resilience_enabled: bool = True
+    isolate_tool_preambles_to_reasoning: bool = True
     graceful_timeout_finish_reason: str = "stop"
 
 
@@ -2970,6 +2964,7 @@ _NEW_FLAG_ENV = {
     "graceful_timeout_on_partial": "AGY_GRACEFUL_TIMEOUT_ON_PARTIAL",
     "step_scoped_usage_enabled": "AGY_STEP_SCOPED_USAGE_ENABLED",
     "stream_resilience_enabled": "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED",
+    "isolate_tool_preambles_to_reasoning": "AGY_ISOLATE_TOOL_PREAMBLES_TO_REASONING",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
@@ -2996,10 +2991,22 @@ def _parse_runtime_flags(text: str) -> _RuntimeFlags:
         default = getattr(_COLD_FLAGS, name)
         if name == "stream_resilience_enabled":
             default = raw.get(_NEW_FLAG_ENV[name], default)
-        value = raw.get(name, default)
         if name == "graceful_timeout_finish_reason":
-            finish_reason = value if isinstance(value, str) else "stop"
+            raw_val = raw.get("graceful_timeout_finish_reason")
+            if raw_val is None:
+                raw_val = raw.get("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", default)
+            if isinstance(raw_val, str):
+                s = raw_val.strip().lower()
+                if s in ("length", "max_tokens"):
+                    finish_reason = "length"
+                elif s == "stop":
+                    finish_reason = "stop"
+                else:
+                    finish_reason = "stop"
+            else:
+                finish_reason = "stop"
             continue
+        value = raw.get(name, default)
         if not isinstance(value, bool):
             raise ValueError("dynamic_config: %s is not boolean" % name)
         values[name] = value
@@ -3072,12 +3079,14 @@ def _graceful_finish_reason() -> str:
 
     Приоритет: валидный AGY_GRACEFUL_TIMEOUT_FINISH_REASON, затем
     graceful_timeout_finish_reason из dynamic_config.json, затем 'stop'.
-    Значение 'max_tokens' нормализуется в 'length'.
+    Значение 'max_tokens' нормализуется в 'length'. Невалидный непустой env
+    переопределяет конфиг и даёт 'stop'.
     """
-    raw_env = os.getenv("AGY_GRACEFUL_TIMEOUT_FINISH_REASON", "").strip().lower()
-    if raw_env in ("length", "max_tokens"):
-        return "length"
-    if raw_env == "stop":
+    raw_env = os.getenv("AGY_GRACEFUL_TIMEOUT_FINISH_REASON")
+    if raw_env is not None and raw_env.strip():
+        s = raw_env.strip().lower()
+        if s in ("length", "max_tokens"):
+            return "length"
         return "stop"
     snap = _runtime_snapshot()
     val = snap.graceful_timeout_finish_reason.strip().lower()
@@ -3917,6 +3926,13 @@ class _ContentArbiter:
         for step in eq.get(text, ()):
             if self._eligible(step, source, idx):
                 return step
+        candidates = [t for t in texts if len(text) >= len(t) and text.startswith(t)]
+        if candidates:
+            candidates.sort(key=len, reverse=True)
+            for cand in candidates:
+                for step in eq[cand]:
+                    if self._eligible(step, source, idx):
+                        return step
         if idx is None:
             pos = bisect.bisect_left(texts, text)
             while pos < len(texts) and texts[pos].startswith(text):
@@ -4168,10 +4184,12 @@ class _TranscriptTail:
         emit_content: Callable[[int | None, str], bool] | None = None,
         on_activity: Callable[[], None] | None = None,
         usage_enabled: bool = False,
+        isolate_tool_preambles: bool = False,
     ) -> None:
         self.emit = emit
         # PLANNER_RESPONSE.content -> арбитр (AD-001); None — прежнее поведение.
         self.emit_content = emit_content
+        self.isolate_tool_preambles = isolate_tool_preambles
         # Реальный прогресс транскрипта/SQLite текущего хода -> producer activity (AD-003).
         self.on_activity = on_activity
         # Дедлайн потока: синхронизируется с effective_max_timeout_s политики (AD-003).
@@ -4205,6 +4223,7 @@ class _TranscriptTail:
         self._transcript_ok: bool = True
         self._owned_cid: str = ""
         self._next_poll_at: float = 0.0
+        self._preambles_emitted: set[int] = set()
         self._interrupted: bool = False
         self._active_conn: sqlite3.Connection | None = None
         self._conn_lock = threading.Lock()
@@ -4527,10 +4546,21 @@ class _TranscriptTail:
             self._record_usage(rec)
         content = rec.get("content")
         emit_content = self.emit_content
+        has_tools = bool(rec.get("tool_calls"))
+        isolate_tools = getattr(self, "isolate_tool_preambles", False)
         if emit_content is not None and isinstance(content, str) and content.strip():
-            _ = emit_content(
-                idx, content
-            )  # live planner-текст, независимо от tool_calls
+            if has_tools and isolate_tools:
+                preambles = getattr(self, "_preambles_emitted", None)
+                if preambles is None:
+                    preambles = self._preambles_emitted = set()
+                key_idx = idx if idx is not None else -1
+                if key_idx not in preambles:
+                    preambles.add(key_idx)
+                    _ = self.emit(idx if idx is not None else 0, content + "\n\n", None)
+            else:
+                _ = emit_content(
+                    idx, content
+                )  # live planner-текст, независимо от tool_calls
         if idx is None:
             return
         if isinstance(content, str) and content.strip() and not rec.get("tool_calls"):
@@ -5199,6 +5229,8 @@ class Run:
         # Арбитр planner-контента двух источников (AD-001): работает под _emit_lock.
         self.content_streaming = _new_flag("planner_content_streaming_enabled")
         self._arbiter = _ContentArbiter(self.turn_id)
+        self._last_step_index: object = None
+        self._content_emitted_wire: str = ""
         # Реальная активность producer'ов (stdout/transcript), независимо от cpu_delta.
         self._activity_lock = threading.Lock()
         self.last_producer_activity_ts: float = self.started
@@ -5214,6 +5246,7 @@ class Run:
             emit_content=self._offer_transcript if self.content_streaming else None,
             on_activity=self._on_tail_activity,
             usage_enabled=self.usage_enabled,
+            isolate_tool_preambles=_new_flag("isolate_tool_preambles_to_reasoning", True),
         )
         if policy is not None:
             self._tail.deadline_s = policy.effective_max_timeout_s + 60.0
@@ -5289,15 +5322,42 @@ class Run:
                 source, step_index, text, self._tail.cid or self.run_cid
             )
             if suffix:
-                self.q.put(("text", suffix))
+                sep = ""
+                last_idx = getattr(self, "_last_step_index", None)
+                emitted_wire = getattr(self, "_content_emitted_wire", "")
+                if last_idx is not None and last_idx != step_index and emitted_wire:
+                    if not emitted_wire.endswith("\n"):
+                        sep = (
+                            "\n\n"
+                            if not suffix.startswith("\n")
+                            else ("\n" if not suffix.startswith("\n\n") else "")
+                        )
+                    elif not emitted_wire.endswith("\n\n"):
+                        sep = "\n" if not suffix.startswith("\n") else ""
+                self._last_step_index = step_index
+                self._content_emitted_wire = emitted_wire + sep + suffix
+                self.q.put(("text", sep + suffix))
         return True
 
     def _offer_transcript(self, step_index: int | None, text: str) -> bool:
         return self.offer_content("transcript", step_index, text)
 
     def reconcile_result(self, text: str) -> str:
-        """Недостающий хвост `result.response` относительно уже принятого арбитром."""
+        """Недостающий хвост `result.response` относительно уже принятого арбитром и выданного в wire."""
         with self._emit_lock:
+            emitted_wire = getattr(self, "_content_emitted_wire", "")
+            if emitted_wire and text:
+                if text == emitted_wire or emitted_wire.startswith(text):
+                    self._arbiter.last_result_diverged = False
+                    return ""
+                if text.startswith(emitted_wire):
+                    self._arbiter.last_result_diverged = False
+                    return text[len(emitted_wire) :]
+                clean_text = text.replace("\r\n", "\n").strip()
+                clean_wire = emitted_wire.replace("\r\n", "\n").strip()
+                if clean_text == clean_wire or clean_wire.startswith(clean_text):
+                    self._arbiter.last_result_diverged = False
+                    return ""
             return self._arbiter.reconcile_result(text)
 
     def retained_divergent_text(self) -> str:
