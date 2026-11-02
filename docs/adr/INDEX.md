@@ -9,4 +9,5 @@ NNNN | short-name | Status | дата | автор | теги
 0012 | muse-native-live-streaming-and-reasoning-extraction | Accepted | 2026-10-30 | [agent] | muse, streaming, reasoning, msp, universal
 0019 | dsh-user-prompt-anchor-preservation | Accepted | 2026-11-01 | [architect: gpt-6.1-sol] | agy-bridge, head-pruning, dsh, synthetic-reminders, prompt-integrity
 0020 | universal-repetition-guard-and-invoke-normalization | Accepted | 2026-11-01 | [agent] | core, repetition-guard, invoke, claude, zero-leakage, universal
+0020 | universal-backend-circuit-breaker-bulkhead-and-retries | Accepted | 2026-11-02 | [architect: gpt-6.1-sol] | resilience, circuit-breaker, bulkhead, backoff, jitter, core, zero-hardcode
 0021 | bridges-and-transport-speedup-resilience | Accepted | 2026-11-02 | [architect: gpt-6.1-sol] | speedup, transport, agy-bridge, opencode-zen-bridge, idempotency, timeouts, preflight

@@ -1,0 +1,25 @@
+run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
+council-panel	gemini-4-argon-high	panel-judge-k1	1254	1254	2026-11-01T23:28:00.276482+00:00	Mon Nov  2 02:28:00 2026	running
+council-panel	gpt-6.1-sol-high	panel-judge-k3	1255	1255	2026-11-01T23:28:00.277882+00:00	Mon Nov  2 02:28:00 2026	running
+council-panel	claude-sonnet-5-5-high	panel-judge-k2	1282	1282	2026-11-01T23:28:00.370967+00:00	Mon Nov  2 02:28:00 2026	running
+council-panel	claude-sonnet-5-5-high	panel-judge-k2	1282	1282	2026-11-01T23:28:00.370967+00:00	Mon Nov  2 02:28:00 2026	rc=0
+council-panel	gpt-6.1-sol-high	panel-judge-k3	1255	1255	2026-11-01T23:28:00.277882+00:00	Mon Nov  2 02:28:00 2026	rc=0
+council-panel	gemini-4-argon-high	panel-judge-k1	1254	1254	2026-11-01T23:28:00.276482+00:00	Mon Nov  2 02:28:00 2026	rc=0
+council-panel	muse-wonder-full-1.0	panel-judge-k3	40143	40143	2026-11-01T23:31:03.045150+00:00	Mon Nov  2 02:31:03 2026	running
+council-panel	gpt-6.1-sol-high	panel-judge-k2	40142	40142	2026-11-01T23:31:03.041239+00:00	Mon Nov  2 02:31:03 2026	running
+council-panel	claude-sonnet-5-5-high	panel-judge-k1	40186	40186	2026-11-01T23:31:03.181026+00:00	Mon Nov  2 02:31:03 2026	running
+council-panel	muse-wonder-full-1.0	panel-judge-k3	40143	40143	2026-11-01T23:31:03.045150+00:00	Mon Nov  2 02:31:03 2026	rc=1
+council-panel	claude-sonnet-5-5-high	panel-judge-k1	40186	40186	2026-11-01T23:31:03.181026+00:00	Mon Nov  2 02:31:03 2026	rc=0
+council-panel	gpt-6.1-sol-high	panel-judge-k2	40142	40142	2026-11-01T23:31:03.041239+00:00	Mon Nov  2 02:31:03 2026	rc=0
+council-panel	muse-wonder-full-1.0	panel-probe	69109	69109	2026-11-01T23:33:25.606147+00:00	Mon Nov  2 02:33:25 2026	running
+council-panel	muse-wonder-full-1.0	panel-probe	69109	69109	2026-11-01T23:33:25.606147+00:00	Mon Nov  2 02:33:25 2026	rc=1
+council-panel	gemini-3.8-flash-high	panel-judge-k3	72412	72412	2026-11-01T23:33:42.372809+00:00	Mon Nov  2 02:33:42 2026	running
+council-panel	gemini-3.8-flash-high	panel-judge-k3	72412	72412	2026-11-01T23:33:42.372809+00:00	Mon Nov  2 02:33:42 2026	rc=0
+council-panel	muse-wonder-full-1.0	panel-probe	8274	8274	2026-11-01T23:36:45.590420+00:00	Mon Nov  2 02:36:45 2026	running
+council-panel	muse-wonder-full-1.0	panel-probe	8274	8274	2026-11-01T23:36:45.590420+00:00	Mon Nov  2 02:36:45 2026	rc=1
+council-panel	gpt-6.1-sol-high	panel-judge-k1	13033	13033	2026-11-01T23:37:11.054853+00:00	Mon Nov  2 02:37:11 2026	running
+council-panel	gemini-4-argon-high	panel-judge-k2	13034	13034	2026-11-01T23:37:11.054858+00:00	Mon Nov  2 02:37:11 2026	running
+council-panel	claude-sonnet-5-5-high	panel-judge-k3	13066	13066	2026-11-01T23:37:11.158154+00:00	Mon Nov  2 02:37:11 2026	running
+council-panel	claude-sonnet-5-5-high	panel-judge-k3	13066	13066	2026-11-01T23:37:11.158154+00:00	Mon Nov  2 02:37:11 2026	rc=0
+council-panel	gemini-4-argon-high	panel-judge-k2	13034	13034	2026-11-01T23:37:11.054858+00:00	Mon Nov  2 02:37:11 2026	rc=0
+council-panel	gpt-6.1-sol-high	panel-judge-k1	13033	13033	2026-11-01T23:37:11.054853+00:00	Mon Nov  2 02:37:11 2026	rc=0

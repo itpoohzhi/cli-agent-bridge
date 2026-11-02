@@ -1,0 +1,5 @@
+muse: workspace root: /Users/aazhiry1/work/src/cli-agent-bridge/.ai-team/runs/bridge-resilience-patterns-20261102/council-panel/panel/council/r3 (explicit)
+muse: workspace trust: trusted source=run-flag
+muse: warning: rules file at /Users/aazhiry1/.config/muse/AGENTS.md produced 71981 bytes, over the 65536 byte subagent delegation startup context limit; it will be truncated for this session
+muse: subscription allowance unavailable: the server sent no usage data (this can happen before your first use in a new window)
+run ended with Failed: API error 429 [request_id=1aacc009-c6b4-4df0-b870-735e03db1d36]: Subscription quota exhausted. Your usage window resets at 2026-11-02T00:00:00Z. (rate_limit_error)

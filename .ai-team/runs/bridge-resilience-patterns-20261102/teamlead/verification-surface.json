@@ -1,0 +1,43 @@
+{
+  "schema": "verification-surface/1.0",
+  "created_at": "2026-11-02T01:05:00+03:00",
+  "base_sha": "b442c2e48e6e92e1582ccc394fad0113aee19768",
+  "branch": "feature/bridge-resilience-patterns",
+  "runtime": {
+    "python": "3.14.7",
+    "uv": "0.4.x",
+    "pytest": "9.2.0"
+  },
+  "baseline_run": {
+    "command": "PYTHONPATH=. /Users/aazhiry1/.local/bin/uv run pytest tests/ -q",
+    "total_collected": 1693,
+    "passed": 1667,
+    "subtests_passed": 9048,
+    "failed": 20,
+    "duration_s": 662.32
+  },
+  "oracle_scope": {
+    "target_test_file": "tests/test_resilience.py",
+    "planned_scenarios": [
+      "test_circuit_breaker_transitions",
+      "test_circuit_breaker_half_open_probe_success",
+      "test_circuit_breaker_half_open_probe_failure",
+      "test_circuit_breaker_generation_token_safety",
+      "test_circuit_breaker_record_discard",
+      "test_bulkhead_concurrency_isolation",
+      "test_retry_policy_full_jitter_and_deadline",
+      "test_resilience_gigarc_flags"
+    ]
+  },
+  "allowed_modifications": [
+    "core/resilience.py",
+    "core/backend_adapter.py",
+    "server.py",
+    "tests/test_resilience.py"
+  ],
+  "verification_commands": {
+    "l1": "PYTHONPATH=. /Users/aazhiry1/.local/bin/uv run pytest tests/test_resilience.py -v",
+    "l2": "PYTHONPATH=. /Users/aazhiry1/.local/bin/uv run pytest tests/ -q",
+    "l3": "curl -s http://127.0.0.1:9882/health"
+  }
+}
