@@ -115,15 +115,12 @@ from core.resilience import (  # noqa: E402
 from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
+    has_live_parent,
 )
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
-    DEFAULT_MAX_REPETITION_REPEATS,
-    DEFAULT_MAX_REPETITION_TOKEN_LEN,
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
     LiveParserError,
-    RepetitionGuard,
-    RepetitionLoopDetected,
     ToolCallParser,
     _attachments_section,
     _flatten_content,
@@ -145,15 +142,12 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
 from core.stream_framing import build_stream_error_chunk
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
-    HistoryPrefixGuard,
     ManagedTurn,
     TurnSessionManager,
     _is_detached_enabled,
     _is_drain_enabled,
     _is_watchdog_enabled,
-    chain_history_digest,
     hash_token,
-    history_chain_head,
     validate_turn_id,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
@@ -218,13 +212,6 @@ EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
 EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 BRIDGE_LIMITS = PassthroughLimits.from_env()
-# ADR-0020: env BRIDGE_REPETITION_* / BRIDGE_INVOKE_NORMALIZATION_ENABLED читает
-# PassthroughLimits.from_env() (адаптерный слой, BND-001); сервер только пробрасывает
-# эффективные значения в core-компоненты аргументами.
-BRIDGE_REPETITION_MAX_REPEATS = BRIDGE_LIMITS.repetition_max_repeats
-BRIDGE_REPETITION_MAX_TOKEN_LEN = BRIDGE_LIMITS.repetition_max_token_len
-BRIDGE_REPETITION_GUARD_ENABLED = BRIDGE_LIMITS.repetition_guard_enabled
-BRIDGE_INVOKE_NORMALIZATION_ENABLED = BRIDGE_LIMITS.invoke_normalization_enabled
 
 
 def _load_request_config() -> dict[str, Any]:
@@ -399,13 +386,28 @@ SAFETY_CAP_S = float(
 # RW-009 в живом ходе: запись живого куска клиенту ограничена этим таймаутом (а не 300с
 # socket-таймаута соединения) — зависший/нечитающий клиент не держит T/L (см. sse_writer в
 # _serve_sse и add_content/add_reasoning в Handler._execute).
-LIVE_WRITE_TIMEOUT_S = float(os.environ.get("DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S", "3"))
+def parse_live_write_timeout(default: float = 30.0) -> float:
+    """Читает таймаут записи, возвращая default при неверном значении ENV."""
+    raw = os.environ.get("DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S", "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+        if not (1.0 <= val <= 300.0):
+            return default
+        return val
+    except (ValueError, TypeError):
+        return default
+
+
+LIVE_WRITE_TIMEOUT_S: float = parse_live_write_timeout(30.0)
 # Таймаут первого события stream-json от `droid exec` (с момента старта процесса).
 FIRST_TOKEN_TIMEOUT_S = float(
     os.environ.get("DROID_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "90")
 )
 # Окно после успешного хода, в котором лончеру передаётся DROID_SKIP_PREFLIGHT=1.
 PREFLIGHT_SKIP_WINDOW_S = 120.0
+
 
 
 def clamp_effort_downward(
@@ -562,20 +564,16 @@ MULTIMODAL_MODELS = ("gpt-6.1-sol", "gemini-4-argon")
 _PROVIDER_MODELS_RE = re.compile(r"^/v1/providers/([^/]+)/v1/models$")
 _PROVIDER_CHAT_RE = re.compile(r"^/v1/providers/([^/]+)/v1/chat/completions$")
 
-_REFRESH_MIN_INTERVAL = float(
-    os.environ.get("BRIDGE_MODELS_REFRESH_MIN_INTERVAL_S", "10.0")
-)
+_REFRESH_MIN_INTERVAL = float(os.environ.get("BRIDGE_MODELS_REFRESH_MIN_INTERVAL_S", "10.0"))
 _REFRESH_MAX_ENTRIES = int(os.environ.get("BRIDGE_MODELS_REFRESH_MAX_ENTRIES", "1000"))
-_REFRESH_LOCK = threading.Lock()  # single-flight
+_REFRESH_LOCK = threading.Lock()        # single-flight
 _REFRESH_LAST: dict[str, float] = {}
 _MODELS_CACHE: dict[str, dict[str, Any]] = {}
 _MODELS_CACHE_LOCK = threading.Lock()
 
 
 def _refresh_client_key(handler: BaseHTTPRequestHandler) -> str:
-    raw = handler.headers.get("Authorization", "") or handler.headers.get(
-        "X-Api-Key", ""
-    )
+    raw = handler.headers.get("Authorization", "") or handler.headers.get("X-Api-Key", "")
     token = raw.strip()
     if token[:7].lower() == "bearer ":
         token = token[7:].strip()
@@ -615,9 +613,7 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
     return published
 
 
-def _build_models_list(
-    owner_tuple: tuple[str, ...] | None = None,
-) -> list[dict[str, Any]]:
+def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     published = _get_published_models()
     order = []
     if MODEL_ID in published:
@@ -630,9 +626,7 @@ def _build_models_list(
         if mid not in order:
             order.append(mid)
 
-    internal_key = getattr(
-        sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
-    ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+    internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
     hide_internal = bool(internal_key) or (owner_tuple is not None)
 
     data = []
@@ -644,18 +638,11 @@ def _build_models_list(
         owned_by = (
             getattr(a, "owned_by", "")
             if a is not None
-            else (
-                getattr(m, "owned_by", "")
-                or (m.get("owned_by", "") if isinstance(m, dict) else "")
-            )
+            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
         )
         if owner_tuple is not None and owned_by not in owner_tuple:
             continue
-        context_window = (
-            getattr(m, "context_window", 200000)
-            if not isinstance(m, dict)
-            else m.get("context_window", 200000)
-        )
+        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
         card = {
             "id": mid,
             "object": "model",
@@ -679,28 +666,17 @@ def _build_models_list(
             continue
         alias = _resolve_model_alias(alias_id, fleet_models)
         base_id = alias[0] if (alias and isinstance(alias, (tuple, list))) else alias
-        if (
-            not base_id
-            or base_id not in published
-            or (hide_internal and base_id in INTERNAL_MODEL_IDS)
-        ):
+        if not base_id or base_id not in published or (hide_internal and base_id in INTERNAL_MODEL_IDS):
             continue
         a, m = published[base_id]
         owned_by = (
             getattr(a, "owned_by", "")
             if a is not None
-            else (
-                getattr(m, "owned_by", "")
-                or (m.get("owned_by", "") if isinstance(m, dict) else "")
-            )
+            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
         )
         if owner_tuple is not None and owned_by not in owner_tuple:
             continue
-        context_window = (
-            getattr(m, "context_window", 200000)
-            if not isinstance(m, dict)
-            else m.get("context_window", 200000)
-        )
+        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
         card = {
             "id": alias_id,
             "object": "model",
@@ -709,9 +685,7 @@ def _build_models_list(
             "context_window": context_window,
             "context_length": context_window,
             "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "modalities": ["text", "image"]
-            if base_id in MULTIMODAL_MODELS
-            else ["text"],
+            "modalities": ["text", "image"] if base_id in MULTIMODAL_MODELS else ["text"],
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
@@ -753,8 +727,17 @@ RPC_CALL_TIMEOUT_S = float(os.environ.get("DROID_BRIDGE_RPC_CALL_TIMEOUT_S", "60
 INTERRUPT_GRACE_S = 3.0
 # Не больше пяти restore на один SID: шестой — свежая generation (вторичный предел).
 RESTORE_MAX = 5
-# Общий грейс остановки моста (< exit timeout 5 с), SIGTERM->waitpid при вытеснении.
-SHUTDOWN_GRACE_S = 4.5
+# Бюджет очистки детей после drain; входит в общий ExitTimeOut супервизора.
+def _configured_shutdown_grace_s() -> float:
+    """Читает конечный бюджет >= 0; ноль отключает ожидание, fallback — 4.5 с."""
+    try:
+        value = float(os.environ.get("BRIDGE_SHUTDOWN_GRACE_S", "4.5"))
+    except ValueError:
+        return 4.5
+    return value if math.isfinite(value) and value >= 0 else 4.5
+
+
+SHUTDOWN_GRACE_S = _configured_shutdown_grace_s()
 TERM_WAIT_S = 2.0
 KEY_MAX_LEN = 512
 # Структурные признаки title-запроса DSH (F-512): размер сообщения не критерий.
@@ -849,7 +832,7 @@ def _digest(text: str) -> str:
 
 def _chain(head: str, digest: str) -> str:
     """Следующая голова хеш-цепочки потреблённой истории."""
-    return chain_history_digest(head, digest)
+    return hashlib.sha256((head + "|" + digest).encode("utf-8")).hexdigest()
 
 
 def _key_hash(key: str) -> str:
@@ -944,7 +927,6 @@ class _ForwardFlagSource:
     """
 
     _flag_name = FORWARD_FLAG
-    _allow_env_fallback = True
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -973,8 +955,6 @@ class _ForwardFlagSource:
                 self._value = self._load(path) if sig is not None else None
             value = self._value
         if value is None:
-            if not self._allow_env_fallback:
-                return False
             return self._truthy(os.environ.get(self._flag_name, "false"))
         return value
 
@@ -1001,21 +981,6 @@ class _PassthroughAuthFlagSource(_ForwardFlagSource):
 
 
 PASSTHROUGH_AUTH_FLAG_SOURCE = _PassthroughAuthFlagSource()
-
-
-class _TrustedToolStreamingFlagSource(_ForwardFlagSource):
-    """Оптимизация доверенного SSE: только снимок GigaRC, default=false."""
-
-    _flag_name = "BRIDGE_TRUSTED_TOOL_STREAMING_ENABLED"
-    _allow_env_fallback = False
-
-
-_TRUSTED_TOOL_STREAMING_FLAG_SOURCE = _TrustedToolStreamingFlagSource()
-
-
-def is_trusted_tool_streaming_enabled() -> bool:
-    """Kill-switch доверенного транзита перечитывается до начала каждого ответа."""
-    return _TRUSTED_TOOL_STREAMING_FLAG_SOURCE.enabled()
 
 
 def is_browser_forwarding_enabled() -> bool:
@@ -1478,9 +1443,6 @@ class _HandlerSink(ResponseSink):
         self.status = 0
         self._client_gone_flag = False
 
-    def client_gone(self) -> bool:
-        return self._client_gone_flag
-
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
         try:
@@ -1639,14 +1601,17 @@ def _clean_err(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
-    """Остановка моста: прекратить приём, interrupt активных, закрыть детей параллельно.
+def shutdown_all(grace: float | None = None) -> int:
+    """Закрыть детей параллельно после drain либо немедленно без drain.
 
-    Общий грейс (4,5 с) меньше exit timeout launchd (5 с). Принудительно
+    При включённом drain ожиданием активных ходов управляет LIFECYCLE;
+    общий грейс здесь относится только к последующей очистке. Принудительно
     убиваются ТОЛЬКО собственные процессные группы из реестра детей — чужие PID
     никогда. Возвращает число закрывавшихся детей.
     """
     global _shutting_down
+    if grace is None:
+        grace = _configured_shutdown_grace_s()
     _shutting_down = True
     with _active_lock:
         procs = list(_rpc_procs.values())
@@ -1701,14 +1666,14 @@ def shutdown_all(grace: float = SHUTDOWN_GRACE_S) -> int:
 
 
 def _shutdown_one(proc: "RpcProcess", close_kwargs: dict) -> None:
-    """Остановка одного ребёнка: interrupt (не блокируется записью), затем закрытие."""
-    if proc.busy:
+    """Закрыть ребёнка; немедленный interrupt нужен только без drain."""
+    if proc.busy and not _is_drain_enabled():
         proc.interrupt_quietly()
     proc.close(**close_kwargs)
 
 
 def _kill_all(*_: Any) -> None:
-    """SIGTERM/SIGINT моста: graceful-закрытие детей (общий грейс 4,5 с) и выход."""
+    """SIGTERM/SIGINT моста: закрытие детей с настроенным грейсом и выход."""
     closed = shutdown_all()
     # Остальные бэкенды: droid уже закрыт выше (его adapter.shutdown() — тот же shutdown_all).
     BACKENDS.shutdown(exclude=("droid",))
@@ -1851,6 +1816,8 @@ def reconcile_children() -> int:
                         continue
         if owned_pid is None:
             continue
+        if has_live_parent(owned_pid, entry):
+            continue
         try:
             if os.getpgid(owned_pid) != pgid:
                 continue
@@ -1861,6 +1828,8 @@ def reconcile_children() -> int:
                 else next(m["start"] for m in members if m.get("pid") == owned_pid)
             )
             if _proc_start_sig(owned_pid) != expected:
+                continue
+            if has_live_parent(owned_pid, entry):
                 continue
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -1969,6 +1938,20 @@ def _atomic_write(path: Path, data: bytes) -> None:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+
+_ACTIVE_WRITER_LOCK: Any = None
+
+
+def release_writer_lock() -> None:
+    """Освобождает блокировку реестра для нового экземпляра во время drain."""
+    global _ACTIVE_WRITER_LOCK
+    writer_lock, _ACTIVE_WRITER_LOCK = _ACTIVE_WRITER_LOCK, None
+    if writer_lock is not None:
+        try:
+            fcntl.flock(writer_lock, fcntl.LOCK_UN)
+        finally:
+            writer_lock.close()
 
 
 def acquire_writer_lock() -> Any:
@@ -3149,15 +3132,24 @@ def _enforce_forward_kill_switch() -> int:
 
 
 def _active_turn_count() -> int:
-    return BACKENDS.active_total() + TURN_MANAGER.active_count()
+    return max(BACKENDS.active_total(), TURN_MANAGER.active_count())
+
+
+def _configured_drain_timeout_s() -> float:
+    """Читает конечный бюджет drain > 0, иначе возвращает штатный таймаут."""
+    try:
+        value = float(os.environ.get("BRIDGE_DRAIN_TIMEOUT_S", "").strip())
+    except ValueError:
+        return DEFAULT_DRAIN_SECONDS
+    return value if math.isfinite(value) and value > 0 else DEFAULT_DRAIN_SECONDS
 
 
 def _force_kill_all_on_drain() -> None:
     TURN_MANAGER.kill_all_active()
-    shutdown_all(grace=2.0)
+    shutdown_all()
     BACKENDS.shutdown(exclude=("droid",))
     try:
-        _sweep_workspace(cutoff_s=0.0)
+        _sweep_workspace(cutoff_s=60.0)
     except Exception:  # noqa: BLE001
         pass
 
@@ -3174,7 +3166,8 @@ LIFECYCLE = HubLifecycleManager(
     turn_manager=TURN_MANAGER,
     active_turns_fn=_active_turn_count,
     force_kill_fn=_force_kill_all_on_drain,
-    drain_timeout_s=DEFAULT_DRAIN_SECONDS,
+    drain_timeout_s=_configured_drain_timeout_s(),
+    on_drain_start_fn=release_writer_lock,
     log_fn=_log,
 )
 
@@ -3359,7 +3352,10 @@ def _transcribe(messages: list, tools: list, tool_choice: Any, images: list) -> 
 
 def _chain_head(items: list, count: int) -> str:
     """Голова хеш-цепочки по первым count входам."""
-    return history_chain_head((item["digest"] for item in items), count)
+    head = ""
+    for item in items[:count]:
+        head = _chain(head, item["digest"])
+    return head
 
 
 def _config_digest(system: str | None, work_dir: str) -> str:
@@ -4593,9 +4589,8 @@ def _make_plan(
         chat.state in ("READY", "PERSISTED")
         and bool(chat.sid)
         and chat.cfg == cfg
-        and HistoryPrefixGuard(count, chat.head).matches(
-            (item["digest"] for item in items), len(items)
-        )
+        and 0 < count < len(items)
+        and _chain_head(items, count) == chat.head
     )
     if prefix_ok and proc is not None:
         plan.update(
@@ -4755,6 +4750,30 @@ class Handler(BaseHTTPRequestHandler):
     _trace: RequestTrace | None = None
     _response_status = 0
 
+    def end_headers(self) -> None:
+        if LIFECYCLE.is_draining():
+            self.close_connection = True
+            self.send_header("Connection", "close")
+        super().end_headers()
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        finally:
+            tracking = getattr(self.server, "set_connection_active", None)
+            if tracking is not None and not tracking(self.connection, False):
+                self.close_connection = True
+            # Drain мог начаться после отправки заголовков активного ответа.
+            if LIFECYCLE.is_draining():
+                self.close_connection = True
+
+    def parse_request(self) -> bool:
+        parsed = super().parse_request()
+        tracking = getattr(self.server, "set_connection_active", None)
+        if parsed and tracking is not None:
+            return tracking(self.connection, True)
+        return parsed
+
     def _trace_log_fields(self) -> str:
         """Безопасные поля корреляции для журнала маршрута."""
         trace = self._trace if REQUEST_ATTRIBUTION_ENABLED else None
@@ -4856,9 +4875,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("ETag", etag)
             self.end_headers()
             return True
-        self._send(
-            200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"}
-        )
+        self._send(200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"})
         return True
 
     def _handle_models_refresh(self) -> None:
@@ -4926,9 +4943,7 @@ class Handler(BaseHTTPRequestHandler):
             with _MODELS_CACHE_LOCK:
                 cached = _MODELS_CACHE.get(cache_key)
             if cached is None:
-                self._reply_error(
-                    502, "Refresh failed and no cached payload", "refresh_failed"
-                )
+                self._reply_error(502, "Refresh failed and no cached payload", "refresh_failed")
                 return
             status = "stale"
             failed_upstreams = ["*"]
@@ -5127,17 +5142,8 @@ class Handler(BaseHTTPRequestHandler):
             events.append(("tool_call", entry))
             # Managed replay получает вызовы после единственной границы в _dispatch.
 
-        req_limits = PassthroughLimits.from_env()
         parser = (
-            ToolCallParser(
-                add_content,
-                add_call,
-                strict_live=sse_writer is not None,
-                invoke_normalization_enabled=req_limits.invoke_normalization_enabled,
-                repetition_guard_enabled=req_limits.repetition_guard_enabled,
-                max_repetition_repeats=req_limits.repetition_max_repeats,
-                max_repetition_token_len=req_limits.repetition_max_token_len,
-            )
+            ToolCallParser(add_content, add_call, strict_live=sse_writer is not None)
             if emulate_tools
             else None
         )
@@ -6171,15 +6177,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
-        # Внутреннее подтверждение санитизации не принимается с клиентского ingress.
-        if "X-Bridge-Tool-Sanitized" in self.headers:
-            del self.headers["X-Bridge-Tool-Sanitized"]
-        if urlparse(self.path).path in (
-            "/v1/models/refresh",
-            "/models/refresh",
-        ) or re.match(
-            r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path
-        ):
+        if urlparse(self.path).path in ("/v1/models/refresh", "/models/refresh") or re.match(r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path):
             self._handle_models_refresh()
             return
         self._trace = None
@@ -6313,22 +6311,10 @@ class Handler(BaseHTTPRequestHandler):
             provider_id = m_provider_chat.group(1) if m_provider_chat else None
             if m_provider_chat is not None:
                 if not _auth_ok(self):
-                    has_auth = bool(
-                        self.headers.get("Authorization")
-                        or self.headers.get("x-api-key")
-                    )
+                    has_auth = bool(self.headers.get("Authorization") or self.headers.get("x-api-key"))
                     if not (_passthrough_open(self) and has_auth):
                         self.close_connection = True
-                        self._send(
-                            401,
-                            {
-                                "error": {
-                                    "message": "unauthorized",
-                                    "type": "auth_error",
-                                    "code": 401,
-                                }
-                            },
-                        )
+                        self._send(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}})
                         return
                 if provider_id not in PROVIDER_SCOPES:
                     self._reply_error(404, "Unknown provider", "invalid_request_error")
@@ -6349,11 +6335,6 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            idempotency_key = (self.headers.get("X-Idempotency-Key") or "").strip()
-            if idempotency_key and req.get("step_job_id") != idempotency_key:
-                req["step_job_id"] = idempotency_key
-                raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
-
             # (8) модель.
             raw_model = req.get("model")
             model_len = len(raw_model) if isinstance(raw_model, str) else 0
@@ -6399,34 +6380,16 @@ class Handler(BaseHTTPRequestHandler):
             alias_effort = None
             if alias is not None:
                 resolved_id = alias[0] if isinstance(alias, (tuple, list)) else alias
-                alias_effort = (
-                    alias[1]
-                    if isinstance(alias, (tuple, list)) and len(alias) > 1
-                    else None
-                )
+                alias_effort = alias[1] if isinstance(alias, (tuple, list)) and len(alias) > 1 else None
             else:
                 resolved_id = model_id
 
             # Изоляция внутренних моделей (Auth-First / Secret Isolation)
-            internal_key = getattr(
-                sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
-            ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
-            if bool(internal_key) and (
-                raw_model in INTERNAL_MODEL_IDS
-                or model_id in INTERNAL_MODEL_IDS
-                or resolved_id in INTERNAL_MODEL_IDS
-            ):
+            internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+            if bool(internal_key) and (raw_model in INTERNAL_MODEL_IDS or model_id in INTERNAL_MODEL_IDS or resolved_id in INTERNAL_MODEL_IDS):
                 supplied = self.headers.get("X-Internal-Service-Key", "")
-                if not hmac.compare_digest(
-                    supplied.encode("utf-8"), internal_key.encode("utf-8")
-                ):
-                    self._reject(
-                        403,
-                        "internal_model_forbidden",
-                        "Model reserved for internal review",
-                        "unknown",
-                        model_len,
-                    )
+                if not hmac.compare_digest(supplied.encode("utf-8"), internal_key.encode("utf-8")):
+                    self._reject(403, "internal_model_forbidden", "Model reserved for internal review", "unknown", model_len)
                     return
 
             # Проверка скоупа провайдера для чата
@@ -6435,22 +6398,13 @@ class Handler(BaseHTTPRequestHandler):
                 owner_tuple = (owner,) if isinstance(owner, str) else owner
                 published = _get_published_models()
                 if resolved_id not in published:
-                    self._reject(
-                        404,
-                        "model_not_found",
-                        "model is not in the catalogue",
-                        "unknown",
-                        model_len,
-                    )
+                    self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
                     return
                 a, m = published[resolved_id]
                 owned_by = (
                     getattr(a, "owned_by", "")
                     if a is not None
-                    else (
-                        getattr(m, "owned_by", "")
-                        or (m.get("owned_by", "") if isinstance(m, dict) else "")
-                    )
+                    else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
                 )
                 if owned_by not in owner_tuple:
                     self._reply_error(
@@ -7085,15 +7039,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         t0 = time.monotonic()
         raw_turn_result = adapter.execute_turn(turn, sse_writer)
-        req_limits = PassthroughLimits.from_env()
-        result = finalize_turn(
-            raw_turn_result,
-            turn.emulate_tools,
-            invoke_normalization_enabled=req_limits.invoke_normalization_enabled,
-            repetition_guard_enabled=req_limits.repetition_guard_enabled,
-            max_repetition_repeats=req_limits.repetition_max_repeats,
-            max_repetition_token_len=req_limits.repetition_max_token_len,
-        )
+        result = finalize_turn(raw_turn_result, turn.emulate_tools)
         if BRIDGE_SANITIZE_TOOL_CALLS:
             calls: list[ToolCall] = []
             by_id: dict[str, list[ToolCall]] = {}
@@ -7224,11 +7170,7 @@ class Handler(BaseHTTPRequestHandler):
             f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}"
         )
         raw, req = _strip_passthrough_env(raw, req)
-        headers = {
-            key: value
-            for key, value in self.headers.items()
-            if key.lower() != "x-bridge-tool-sanitized"
-        }
+        headers = {key: value for key, value in self.headers.items()}
         trace_headers = _trace_headers(self._trace)
         if REQUEST_ATTRIBUTION_ENABLED:
             names = {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
@@ -7236,8 +7178,6 @@ class Handler(BaseHTTPRequestHandler):
                 key: value for key, value in headers.items() if key.lower() not in names
             }
             headers.update(trace_headers)
-        if req.get("step_job_id") and "X-Idempotency-Key" not in headers:
-            headers["X-Idempotency-Key"] = str(req["step_job_id"])
         sink = _HandlerSink(self, extra_headers=trace_headers)
         try:
             adapter.handle(
@@ -7653,18 +7593,74 @@ class Handler(BaseHTTPRequestHandler):
 BridgeHandler = Handler
 
 
+def is_so_reuseport_enabled() -> bool:
+    """Проверяет включение совместного bind через BRIDGE_SO_REUSEPORT_ENABLED."""
+    return os.environ.get("BRIDGE_SO_REUSEPORT_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 class Server(ThreadingHTTPServer):
     """HTTP-сервер с семафором числа соединений на уровне приёма (C-11)."""
 
-    daemon_threads = True
+    # ThreadingMixIn отслеживает non-daemon потоки: выход main не обрывает SSE.
+    daemon_threads = False
     request_queue_size = 64
     allow_reuse_address = True
 
-    def __init__(self, *args: Any, **kwargs: Any):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._listener_close_lock = threading.Lock()
+        self._listener_closed = False
+        self._connections_lock = threading.Lock()
+        self._connections: dict[socket.socket, bool] = {}
+        self._closing_connections = False
         super().__init__(*args, **kwargs)
         self._conn_sem = threading.BoundedSemaphore(
             int(FLEET["admission"]["max_http_connections"])
         )
+
+    def server_bind(self) -> None:
+        """Разрешает совместный bind до привязки сокета, если ОС поддерживает его."""
+        enabled = is_so_reuseport_enabled()
+        actual = False
+        reason = "disabled" if not enabled else "unsupported"
+        if hasattr(socket, "SO_REUSEPORT") and enabled:
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                actual = True
+                reason = "enabled"
+            except OSError as exc:
+                reason = f"error:{exc}"
+        _log(f"socket_reuseport configured={enabled} enabled={actual} reason={reason}")
+        super().server_bind()
+
+    def set_connection_active(self, request: socket.socket, active: bool) -> bool:
+        """Атомарно отделяет обработку HTTP-запроса от ожидания keepalive."""
+        with self._connections_lock:
+            if self._closing_connections:
+                return False
+            self._connections[request] = active
+            return True
+
+    def close_idle_connections(self) -> None:
+        """Будит только idle-читателей; активные ответы завершаются своими потоками."""
+        with self._connections_lock:
+            self._closing_connections = True
+            for request, active in self._connections.items():
+                if not active:
+                    try:
+                        request.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+    def graceful_close_listener(self) -> None:
+        """Идемпотентно закрывает только listener, сохраняя принятые соединения."""
+        with self._listener_close_lock:
+            if self._listener_closed:
+                return
+            self.socket.close()
+            self._listener_closed = True
+            release_writer_lock()
 
     def _send_raw_503(self, request: socket.socket) -> None:
         body = json.dumps(
@@ -7698,12 +7694,23 @@ class Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
-        super().process_request(request, client_address)
+        with self._connections_lock:
+            self._connections[request] = False
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            with self._connections_lock:
+                self._connections.pop(request, None)
+            self._conn_sem.release()
+            self.shutdown_request(request)
+            raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
+            with self._connections_lock:
+                self._connections.pop(request, None)
             self._conn_sem.release()
 
 
@@ -7734,7 +7741,7 @@ def _sweep_workspace(cutoff_s: float = 3600.0) -> None:
 
 
 def main() -> None:
-    global _budget
+    global _budget, _ACTIVE_WRITER_LOCK
     if not AUTH_KEY:
         sys.stderr.write(
             "BRIDGE_KEY (or DROID_DSH_BRIDGE_KEY) is required; refusing to start\n"
@@ -7743,12 +7750,12 @@ def main() -> None:
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
     try:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
-        writer_lock = acquire_writer_lock()
+        _ACTIVE_WRITER_LOCK = acquire_writer_lock()
     except OSError as exc:
         # Каталог состояния чужой/недоступен/не 0700: старт отклоняется понятным сообщением, а не трассировкой.
         sys.stderr.write(f"state directory is not usable ({exc}); refusing to start\n")
         raise SystemExit(1)
-    if writer_lock is None:
+    if _ACTIVE_WRITER_LOCK is None:
         sys.stderr.write(
             "another bridge instance holds the state writer lock; refusing to start\n"
         )
@@ -7787,7 +7794,12 @@ def main() -> None:
         f"queue_timeout={QUEUE_TIMEOUT_S}s timeout={TIMEOUT_S}s keepalive={KEEPALIVE_S}s"
     )
     print(f"[droid-bridge] listening on http://{HOST}:{PORT}/v1", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        if LIFECYCLE.is_draining():
+            LIFECYCLE.drain_completed.wait()
 
 
 if __name__ == "__main__":

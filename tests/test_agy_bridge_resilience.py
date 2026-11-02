@@ -4434,6 +4434,121 @@ class SilentPlannerContentTests(unittest.TestCase):
         _run, legacy = _pump_queue(lines, content=False)
         self.assertEqual([p for k, p in legacy if k == "text"][:2], ["Hel", "lo"])
 
+    def test_status_streaming_multi_step_no_freeze_and_final_text_delivered(
+        self,
+    ) -> None:
+        statuses = [
+            "[статус: чтение канона AGENTS.md]",
+            "[статус: дочитывание канона]",
+            "[статус: поиск информации]",
+        ]
+        final_text = "### Детальный анализ переезда..."
+        lines: list[dict[str, object]] = []
+        for status in statuses:
+            lines.append(_stdout_text(None, status))
+            lines.append(_stdout_tool(_MISSING))
+        lines.append(
+            {
+                "event": "result",
+                "result": {
+                    "status": "success",
+                    "response": final_text,
+                },
+            }
+        )
+
+        run, items = _pump_queue(lines, content=True)
+        text_chunks = [
+            str(payload)
+            for kind, payload in items
+            if kind == "text"
+        ]
+        self.assertEqual(text_chunks, statuses)
+        arb = _oval(run, "_arbiter")
+        self.assertEqual(_oval(arb, "divergences"), 0)
+        self.assertFalse(_oval(arb, "overflow"))
+
+        # Проверка reconcile_result и fallback доставки финального ответа
+        reconciled = _str(_ofn(run, "reconcile_result")(final_text))
+        retained = _str(_ofn(arb, "retained_divergent_text")())
+        self.assertEqual(retained, final_text)
+        delivered = reconciled if reconciled else ("\n\n" + final_text)
+        self.assertEqual(
+            "".join(text_chunks) + delivered,
+            "".join(statuses) + "\n\n" + final_text,
+        )
+
+    def test_content_scan_matches_saved_prefix_not_longer_snapshot(self) -> None:
+        arb = _arb()
+        old_text = "[статус: чтение канона AGENTS.md]"
+        short_text = "[статус: "
+        new_text = "[статус: дочитывание канона]"
+
+        self.assertEqual(_offer(arb, "stdout", 1, old_text), old_text)
+
+        # Короткий снимок другого шага не должен стать alias старого.
+        self.assertEqual(_offer(arb, "transcript", 2, short_text), short_text)
+        self.assertEqual(
+            _offer(arb, "transcript", 2, new_text),
+            "дочитывание канона]",
+        )
+        self.assertEqual(_oval(arb, "divergences"), 0)
+
+        # Независимый последующий шаг с префиксом старого шага не должен
+        # ложно склеиваться со старым шагом из истории (F-006).
+        other = _arb()
+        self.assertEqual(_offer(other, "stdout", 1, "alpha"), "alpha")
+        self.assertEqual(_offer(other, "stdout", 2, "beta"), "beta")
+        self.assertEqual(
+            _offer(other, "transcript", 3, "alpha extended"),
+            "alpha extended",
+        )
+        self.assertEqual(_oval(other, "divergences"), 0)
+
+    def test_status_streaming_production_path_delivers_final_text_through_execute(
+        self,
+    ) -> None:
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["planner_content_streaming_enabled"], "1")
+            events: list[dict[str, object]] = [_init_ev(0.05)]
+            events.append(_text_ev(0.1, "[статус: ", step=1))
+            events.append(_text_ev(0.15, "[статус: чтение канона AGENTS.md]", step=1))
+            events.append(_text_ev(0.2, "[статус: ", step=2))
+            events.append(_text_ev(0.25, "[статус: дочитывание канона]", step=2))
+            final_ans = "### Детальный анализ PostgreSQL URL"
+            events.append(_result_ev(0.3, response=final_ans))
+            events.append(_exit_ev(0.35))
+            _ = fx.write_scenario(events)
+            out, texts = _run_turn_text()
+            self.assertEqual(out["state"], "done")
+            emitted = "".join(t for _at, t in texts)
+            self.assertIn("[статус: чтение канона AGENTS.md]", emitted)
+            self.assertIn("[статус: дочитывание канона]", emitted)
+            self.assertIn(final_ans, emitted)
+            self.assertTrue(emitted.endswith(final_ans))
+
+    def test_status_streaming_large_response_over_64kb_delivered_via_fallback(
+        self,
+    ) -> None:
+        """Доставка финального ответа длиной >64 КиБ через fallback без усечения (F-004)."""
+        with _Fixture() as fx:
+            _clean_flags(fx)
+            fx.set_env(_FLAG_ENV["planner_content_streaming_enabled"], "1")
+            events: list[dict[str, object]] = [_init_ev(0.05)]
+            events.append(_text_ev(0.1, "[статус: чтение AGENTS.md]", step=1))
+            final_ans = "BIG_RESPONSE_DATA_" + ("X" * 70000)
+            events.append(_result_ev(0.2, response=final_ans))
+            events.append(_exit_ev(0.25))
+            _ = fx.write_scenario(events)
+            out, texts = _run_turn_text()
+            self.assertEqual(out["state"], "done")
+            emitted = "".join(t for _at, t in texts)
+            self.assertIn("[статус: чтение AGENTS.md]", emitted)
+            self.assertIn(final_ans, emitted)
+            self.assertTrue(emitted.endswith(final_ans))
+            self.assertGreater(len(emitted), 70000)
+
 
 # ---- безопасный прогресс инструментов (AD-002, VER-002) --------------------------------
 

@@ -1,0 +1,43 @@
+Все пять задач из брифа сделаны, три критерия приёмки с pytest проходят. Но полный `test_realtime_reasoning.py` падает, причины не выяснены.
+
+## Что изменено
+
+**`bridges/opencode-zen-bridge/server.py`**
+- **RW-001:** в `_serve_one_attempt` первое tool-событие (`input.started`, `input.delta`, `called`) теперь ставит `first_token_at`, `ttft_ms` и `last_token_at`. В условие TTFT добавлено `not tool_state.has_active()`.
+- **RW-004:** `_ToolActivity` берёт ключ только из `callID` или `id`, имя инструмента ключом больше не служит. События без идентификатора считаются счётчиком активных вызовов.
+- **Отклонение от брифа:** ключ `f"{tool}_{id(event)}"` не годится, потому что у события "running" и у события "completed" разные объекты. Вызов тогда никогда бы не закрылся. Поэтому для безымянных вызовов взят счётчик.
+
+**Тесты**
+- **RW-002:** комментарий про `DEFAULT_IDLE_TIMEOUT_S = 300.0` стоит отдельной строкой над `assert` в `test_passthrough_deadline_env`. Строку я сверил: константа на HEAD в `adapters/passthrough_adapter.py:92`. Инлайн-вариант ломал `ruff format`.
+- **Новые тесты:**
+  - `test_serve_tool_without_reasoning_not_cut_by_ttft` (serve-путь).
+  - `test_tool_activity_parallel_calls_not_collapsed`.
+  - `test_zen_stream_ttft_timeout_returns_504`, для stream и non-stream: ошибка `timeout_error` 504, при stream она идёт до `[DONE]`.
+- **Усиленный тест:** в `test_zen_stream_idle_timeout_after_first_token` теперь есть проверка `timeout_error`, порядка error-кадра и `[DONE]`, и отсутствия `finish_reason=stop`.
+- **Про `[DONE]`:** он в потоке остаётся, но только как рамка после error-кадра. Условие «нет успешного `[DONE]`» я понял как «нет `[DONE]` без предшествующей ошибки».
+
+**`package.md` (RW-003):** добавлен блок "Cycle 2 → 3". Раздел 4 содержит только шесть файлов из брифа. Статистика и раздел 5 пересобраны из `git diff` трёх файлов пакета (611 insertions, 23 deletions).
+
+## Проверка
+
+| Критерий | Результат |
+|---|---|
+| 1. `tests/test_bridges_speedup_resilience.py` | 50 passed |
+| 2. `test_serve_long_tool_not_cut_by_idle` и новый serve-тест | 2 passed |
+| 3. `test_request_attribution.py`, `test_bridge_strict.py`, `test_opencode_zen_bridge.py` | 107 passed |
+| `test_zen_catalog.py` | 22 passed |
+| `ruff check` и `ruff format --check` | чисто |
+| 4. `package.md` | чист от посторонних тестов, но с одной оговоркой (ниже) |
+
+В `package.md` остались три вещи:
+- Блок "Широкий прогон" с чужими тестами убран.
+- Добавлена одна строка-оговорка про падения в `test_realtime_reasoning.py`, потому что это файл самого пакета.
+- В прежнем блоке "Rework Cycle 1 → 2" оставлена старая запись: «событие tool в стриме обновляет `last_token_at`». Она относится к циклу 1 и теперь неполна.
+
+## Что не проверено
+
+- **Падения в `test_realtime_reasoning.py`:** полный файл показал 11 падений в одном прогоне и 4 в другом, набор плавает. Три я проверил на откате моих правок TTFT в `server.py`, и они падают так же: `test_frozen_slices_hashes`, `test_fu003_usage_once_across_distinct_retry_branches`, `test_slow_pause_streams_all_deltas_and_single_initial_status`. Откат `_ToolActivity` не проверял: он используется только в legacy Run-пути, а эти тесты идут через serve. Остальные падения не разбирал, причины не выяснены. Этот файл в диффе пакета, поэтому решение за Советом.
+- **Новый serve-тест без фикса:** на пустом дереве без правок не гонял. Защита работает двумя независимыми условиями (`first_token_at` и `has_active`), поэтому по отдельности они не доказаны тестом.
+- **Живой прогон:** реального `opencode serve` не было, только fake-серверы.
+
+В рабочем дереве есть чужие незакоммиченные правки (`adapters/passthrough_adapter.py` и другие). В дифф пакета они не входят, я их не трогал.

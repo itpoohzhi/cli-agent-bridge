@@ -344,8 +344,8 @@ def _zen_positive_float(name: str, default: float) -> float:
         return default
 
 
-def _zen_execution_timeout(model: str, prompt: str) -> float:
-    """Сужение execution deadline только для явно выбранных моделей и большого UTF-8 входа."""
+def _zen_targeted(model: str, prompt: str) -> bool:
+    """Целевая модель (BRIDGE_ZEN_TIMEOUT_MODELS) на большом промпте: к ней применяются split-таймауты."""
     models = {
         "deepseek-v4.1-flash-free",
         *filter(
@@ -353,9 +353,87 @@ def _zen_execution_timeout(model: str, prompt: str) -> float:
         ),
     }
     threshold = _positive_int(os.environ.get("BRIDGE_ZEN_LARGE_PROMPT_BYTES"), 8192)
-    if model in models and len(prompt.encode("utf-8")) > threshold:
-        return min(TIMEOUT_S, _zen_positive_float("BRIDGE_ZEN_TIMEOUT_S", 25.0))
+    return model in models and len(prompt.encode("utf-8")) > threshold
+
+
+def _zen_ttft_timeout(model: str, prompt: str) -> float:
+    """Сужение таймаута до первого токена (TTFT) только для целевых моделей на большом промпте."""
+    if _zen_targeted(model, prompt):
+        return min(
+            TIMEOUT_S,
+            _zen_positive_float(
+                "BRIDGE_ZEN_TTFT_TIMEOUT_S",
+                _zen_positive_float("BRIDGE_ZEN_TIMEOUT_S", 25.0),
+            ),
+        )
     return TIMEOUT_S
+
+
+def _zen_idle_timeout(model: str, prompt: str) -> float:
+    """Таймаут неактивности между чанками после первого токена; только для целевых моделей."""
+    if not _zen_targeted(model, prompt):
+        return TIMEOUT_S
+    return min(TIMEOUT_S, _zen_positive_float("BRIDGE_ZEN_IDLE_TIMEOUT_S", 15.0))
+
+
+def _zen_total_timeout(model: str, prompt: str) -> float:
+    """Общий дедлайн запроса: для целевых моделей BRIDGE_ZEN_TOTAL_TIMEOUT_S (180 с), иначе TIMEOUT_S."""
+    if not _zen_targeted(model, prompt):
+        return TIMEOUT_S
+    return min(
+        TIMEOUT_S,
+        _zen_positive_float("BRIDGE_ZEN_TOTAL_TIMEOUT_S", min(180.0, TIMEOUT_S)),
+    )
+
+
+def _zen_execution_timeout(model: str, prompt: str) -> float:
+    """Обратная совместимость: TTFT-таймаут для целевых моделей, иначе TIMEOUT_S."""
+    return _zen_ttft_timeout(model, prompt)
+
+
+def _zen_idle_expired(
+    now: float, last_token_at: float, idle_timeout: float, tools_active: bool
+) -> bool:
+    """Idle-таймаут между чанками; не применяется, пока исполняется tool/сабагент (остаются stall и total)."""
+    return not tools_active and now - last_token_at >= idle_timeout
+
+
+class _ToolActivity:
+    """Активные tool/сабагент по событиям `opencode run`: единое условие освобождения от Idle."""
+
+    def __init__(self) -> None:
+        self._running: set[str] = set()
+        self._anonymous = 0
+
+    def observe(self, etype: str, event: object) -> None:
+        """Учесть tool_use/tool_call: pending/running — активен, иной статус — завершён."""
+        if etype not in ("tool_use", "tool_call"):
+            return
+        part = _as_dict(_as_dict(event).get("part"))
+        call_id = str(part.get("callID") or part.get("id") or "")
+        status = _as_dict(part.get("state")).get("status")
+        running = status in ("pending", "running")
+        if call_id:
+            if running:
+                self._running.add(call_id)
+            else:
+                self._running.discard(call_id)
+            return
+        # Без callID/id параллельные вызовы одного tool не схлопываем: ведём счётчик активных.
+        if running:
+            self._anonymous += 1
+        elif self._anonymous:
+            self._anonymous -= 1
+
+    def __bool__(self) -> bool:
+        return bool(self._running) or self._anonymous > 0
+
+
+def _attempts_t0(attempts: Any, model: str, prompt: str) -> float:
+    """Момент старта запроса: attempts.t0, а для совместимых заглушек — выводим из deadline."""
+    if hasattr(attempts, "t0"):
+        return attempts.t0
+    return attempts.deadline - _zen_total_timeout(model, prompt)
 
 
 def _zen_error(status: int) -> dict[str, Any]:
@@ -2946,6 +3024,7 @@ class _RequestAttempts:
         max_quota_rotations: int | None = None,
     ) -> None:
         self.res = res
+        self.t0 = time.monotonic()
         self.deadline = deadline
         self.use_breaker = (
             use_breaker  # False: прямой Google-маршрут без `opencode run`
@@ -3776,6 +3855,10 @@ class _ServeToolState:
         input_value = data.get("input")
         if isinstance(input_value, dict):
             item["input"] = _as_dict(input_value)
+
+    def has_active(self) -> bool:
+        """Есть вызов, начатый (feed), но ещё не завершённый (complete): tool исполняется."""
+        return any(call_id not in self.emitted for call_id in self.tools)
 
     def complete(
         self, call_id: str, event_type: str = ""
@@ -4775,6 +4858,8 @@ def _serve_one_attempt(
         status_next = max(t0 + FIRST_STATUS_DELAY_S, prompt_send_start + 0.25)
         _status_emitted = [0]
         last_token_at = prompt_send_start
+        ttft_timeout = _zen_ttft_timeout(model, prompt)
+        idle_timeout = _zen_idle_timeout(model, prompt)
         while time.monotonic() < deadline:
             if is_client_gone is not None and is_client_gone():
                 result["exit_reason"] = "client_gone"
@@ -4783,6 +4868,20 @@ def _serve_one_attempt(
                 result["exit_reason"] = "invalid_serve_event"
                 return result
             now = time.monotonic()
+            # Раздельные таймауты: TTFT до первого токена, Idle между чанками после него.
+            if (
+                result["first_token_at"] is None
+                and not tool_state.has_active()
+                and now - prompt_send_start >= ttft_timeout
+            ) or (
+                result["first_token_at"] is not None
+                and _zen_idle_expired(
+                    now, last_token_at, idle_timeout, tool_state.has_active()
+                )
+            ):
+                result["exit_reason"] = "timeout"
+                result["delivered"] = _is_delivered()
+                break
             if prompt_status.get("aux_exhausted") or (
                 result["first_event_at"] is None and now >= first_event_deadline
             ):
@@ -4967,6 +5066,13 @@ def _serve_one_attempt(
                     last_token_at = time.monotonic()
                     on_text(text_value)
             elif etype == "tool_event":
+                if result["first_token_at"] is None:
+                    # Генерация аргументов tool — это уже вывод модели: TTFT не должен её обрывать.
+                    result["first_token_at"] = time.monotonic()
+                    result["ttft_ms"] = int(
+                        ((result["first_token_at"] or 0.0) - t0) * 1000
+                    )
+                    last_token_at = result["first_token_at"]
                 if etype_raw == "session.tool.input.delta":
                     last_token_at = time.monotonic()
                 tool_state.feed(payload)
@@ -6428,7 +6534,7 @@ class Run:
         if self.attempts is None:
             self.attempts = _RequestAttempts(
                 self.res,
-                time.monotonic() + _zen_execution_timeout(self.model_id, self.prompt),
+                time.monotonic() + _zen_total_timeout(self.model_id, self.prompt),
                 use_breaker=not _is_google_direct_model(self.model_id),
             )
         attempts = self.attempts
@@ -6569,7 +6675,7 @@ class Run:
         deadline = (
             self.attempts.deadline
             if self.attempts is not None
-            else time.monotonic() + _zen_execution_timeout(self.model_id, self.prompt)
+            else time.monotonic() + _zen_total_timeout(self.model_id, self.prompt)
         )
         gate = _StartupGate()
         gate.acquire(deadline=deadline, is_client_gone=self.is_client_gone)
@@ -6642,6 +6748,10 @@ class Run:
         first_token_at: float | None = None
         last_token_at: float | None = None
         watchdog_reason: list[str] = []
+        split_timeout = [False]
+        ttft_timeout = _zen_ttft_timeout(self.model_id, self.prompt)
+        idle_timeout = _zen_idle_timeout(self.model_id, self.prompt)
+        tool_activity = _ToolActivity()
         subagent_started_at: dict[str, float] = {}
         run_id = uuid.uuid4().hex[:8]
 
@@ -6669,9 +6779,23 @@ class Run:
                 if self.proc is not None:
                     _stop_proc(self.proc)
                 return
-            if watchdog_reason:
+            if watchdog_reason or split_timeout[0]:
                 return
             now = time.monotonic()
+            # Раздельные таймауты: TTFT до первого токена, Idle между токенами после него.
+            # TTFT считается от начала текущей попытки: повтор после очереди/сбоя получает полное окно.
+            if (first_token_at is None and now - attempt_start > ttft_timeout) or (
+                last_token_at is not None
+                and not subagent_started_at
+                and _zen_idle_expired(
+                    now, last_token_at, idle_timeout, bool(tool_activity)
+                )
+            ):
+                split_timeout[0] = True
+                _log("opencode run split timeout (ttft/idle)")
+                if self.proc is not None:
+                    _stop_proc(self.proc)
+                return
             reason = ""
             if first_event_at is None and now - attempt_start > float(
                 FIRST_EVENT_TIMEOUT_S
@@ -6715,6 +6839,7 @@ class Run:
                     now_ev = time.monotonic()
                     if first_event_at is None:
                         first_event_at = now_ev
+                    tool_activity.observe(etype, event)
                     frame = _as_dict(cast(object, payload))
                     token = (
                         frame.get("content")
@@ -6815,7 +6940,7 @@ class Run:
                 err_lines.append("stdout queue overflow")
                 had_error = True
                 stopped_on_error = True
-            elif self.feed.timed_out:
+            elif self.feed.timed_out or split_timeout[0]:
                 state = "timeout"
                 _log(f"exec timeout after {TIMEOUT_S:.0f}s, killing proc group")
                 _stop_proc(self.proc)
@@ -7029,7 +7154,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _set_zen_policy(self, model: str, prompt: str) -> None:
         self._zen_prompt = prompt
-        self._zen_targeted = _zen_execution_timeout(model, prompt) < TIMEOUT_S
+        self._zen_targeted = _zen_targeted(model, prompt)
         self._zen_short_bypass = (
             self._zen_probe
             or getattr(self, "headers", {}).get("X-Bypass-Short-Filter") == "1"
@@ -7385,7 +7510,7 @@ class Handler(BaseHTTPRequestHandler):
                     _orig_reasoning,
                     _text_seen,
                     on_tool,
-                    attempts.deadline - _zen_execution_timeout(model, prompt),
+                    _attempts_t0(attempts, model, prompt),
                     is_client_gone=self._client_gone_check,
                     on_status=attempt_status,
                     thinking_enabled=thinking,
@@ -7895,7 +8020,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._acquire_slot(res):
             return
         attempts = _RequestAttempts(
-            res, time.monotonic() + _zen_execution_timeout(model, prompt)
+            res, time.monotonic() + _zen_total_timeout(model, prompt)
         )
         xs["attempts"] = attempts
 
@@ -8002,8 +8127,7 @@ class Handler(BaseHTTPRequestHandler):
                 status_timer = threading.Timer(
                     max(
                         0.0,
-                        attempts.deadline
-                        - _zen_execution_timeout(model, prompt)
+                        _attempts_t0(attempts, model, prompt)
                         + FIRST_STATUS_DELAY_S
                         - time.monotonic(),
                     ),
@@ -8256,8 +8380,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 attempt_start = time.monotonic()
                 first_status_due = (
-                    attempts.deadline
-                    - _zen_execution_timeout(model, prompt)
+                    _attempts_t0(attempts, model, prompt)
                     + FIRST_STATUS_DELAY_S
                 )
                 watchdog_state: _WatchdogState = {
@@ -8274,6 +8397,10 @@ class Handler(BaseHTTPRequestHandler):
                     "last_reasoning": "",
                 }
                 thinking_enabled = effort.strip().lower() not in ("", "off", "none")
+                tool_activity = _ToolActivity()
+                ttft_timeout = _zen_ttft_timeout(model, prompt)
+                idle_timeout = _zen_idle_timeout(model, prompt)
+                split_timeout = [False]
 
                 def emit_synthetic(text: str) -> None:
                     """Синтетический статус отдельной reasoning-дельтой."""
@@ -8296,6 +8423,24 @@ class Handler(BaseHTTPRequestHandler):
                         _log("stream client gone, killing proc group")
                         _stop_proc(proc)
                         raise BrokenPipeError("client gone")
+                    # Раздельные таймауты: TTFT до первого токена запроса, Idle между чанками после него.
+                    # Остановка процесса приводит к EOF в feed, а split_timeout даёт тот же исход, что и дедлайн (504).
+                    # TTFT считается от начала текущей попытки, Idle не применяется, пока исполняется tool.
+                    if (
+                        watchdog_state["first_token_at"] is None
+                        and now_s - attempt_start > ttft_timeout
+                    ) or (
+                        watchdog_state["first_token_at"] is not None
+                        and _zen_idle_expired(
+                            now_s,
+                            float(watchdog_state["last_token_at"]),
+                            idle_timeout,
+                            bool(tool_activity),
+                        )
+                    ):
+                        split_timeout[0] = True
+                        _stop_proc(proc)
+                        return
                     if watchdog_state[
                         "first_event_at"
                     ] is None and now_s - attempt_start > float(FIRST_EVENT_TIMEOUT_S):
@@ -8379,6 +8524,12 @@ class Handler(BaseHTTPRequestHandler):
 
                     etype, payload = parse_opencode_event(event)
                     if etype:
+                        tool_activity.observe(etype, event)
+                        if etype in ("tool_use", "tool_call"):
+                            # Событие tool — активность: Idle отсчитывается от него, как в Run.
+                            watchdog_state["last_token_at"] = time.monotonic()
+                            if watchdog_state["first_token_at"] is None:
+                                watchdog_state["first_token_at"] = time.monotonic()
                         if watchdog_state["first_event_at"] is None:
                             watchdog_state["first_event_at"] = time.monotonic()
                             if (
@@ -8389,8 +8540,7 @@ class Handler(BaseHTTPRequestHandler):
                                     (
                                         time.monotonic()
                                         - (
-                                            attempts.deadline
-                                            - _zen_execution_timeout(model, prompt)
+                                            _attempts_t0(attempts, model, prompt)
                                         )
                                     )
                                     * 1000
@@ -8408,8 +8558,7 @@ class Handler(BaseHTTPRequestHandler):
                                         (
                                             time.monotonic()
                                             - (
-                                                attempts.deadline
-                                                - _zen_execution_timeout(model, prompt)
+                                                _attempts_t0(attempts, model, prompt)
                                             )
                                         )
                                         * 1000
@@ -8526,7 +8675,7 @@ class Handler(BaseHTTPRequestHandler):
                     had_provider_error = True
                     stopped_on_error = True
                     err_lines.append("stdout queue overflow")
-                timed_out = feed.timed_out
+                timed_out = feed.timed_out or split_timeout[0]
                 if timed_out:
                     _log(f"stream timeout after {TIMEOUT_S:.0f}s, killing proc group")
                     _stop_proc(proc)
@@ -8972,7 +9121,7 @@ class Handler(BaseHTTPRequestHandler):
                     reasonings.append,
                     texts.append,
                     natives.append,
-                    attempts.deadline - _zen_execution_timeout(model, prompt),
+                    _attempts_t0(attempts, model, prompt),
                     is_client_gone=self._client_gone_check,
                     on_status=lambda _t: None,
                     thinking_enabled=thinking,
@@ -9284,7 +9433,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         attempts = _RequestAttempts(
             res,
-            time.monotonic() + _zen_execution_timeout(model, prompt),
+            time.monotonic() + _zen_total_timeout(model, prompt),
             use_breaker=not _is_google_direct_model(model),
         )
         xs["attempts"] = attempts
