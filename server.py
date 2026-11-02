@@ -7104,7 +7104,7 @@ class Handler(BaseHTTPRequestHandler):
                 path=self.path, raw_body=raw, request=req, headers=headers, sink=sink
             )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
-            if sink.client_gone:
+            if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
             elif 0 < sink.status < 500:
                 lease.record_success()
