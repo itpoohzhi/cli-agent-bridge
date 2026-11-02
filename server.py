@@ -3149,7 +3149,7 @@ def _enforce_forward_kill_switch() -> int:
 
 
 def _active_turn_count() -> int:
-    return max(BACKENDS.active_total(), TURN_MANAGER.active_count())
+    return BACKENDS.active_total() + TURN_MANAGER.active_count()
 
 
 def _force_kill_all_on_drain() -> None:
