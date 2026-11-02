@@ -333,6 +333,136 @@ PORT = _positive_int(os.environ.get("OPENCODE_ZEN_BRIDGE_PORT"), 9883)
 AUTH_KEY = os.environ.get("OPENCODE_ZEN_BRIDGE_KEY", "").strip()
 
 TIMEOUT_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_TIMEOUT_S", "1800"))
+
+
+def _zen_positive_float(name: str, default: float) -> float:
+    """Нечисловое, неконечное и неположительное значение заменяется default."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+        return value if 0 < value < float("inf") else default
+    except ValueError:
+        return default
+
+
+def _zen_execution_timeout(model: str, prompt: str) -> float:
+    """Сужение execution deadline только для явно выбранных моделей и большого UTF-8 входа."""
+    models = {
+        "deepseek-v4.1-flash-free",
+        *filter(
+            None, re.split(r"[,\s]+", os.environ.get("BRIDGE_ZEN_TIMEOUT_MODELS", ""))
+        ),
+    }
+    threshold = _positive_int(os.environ.get("BRIDGE_ZEN_LARGE_PROMPT_BYTES"), 8192)
+    if model in models and len(prompt.encode("utf-8")) > threshold:
+        return min(TIMEOUT_S, _zen_positive_float("BRIDGE_ZEN_TIMEOUT_S", 25.0))
+    return TIMEOUT_S
+
+
+def _zen_error(status: int) -> dict[str, Any]:
+    """Согласованный контракт ошибок zen, одинаковый для JSON и terminal SSE."""
+    message, kind = (
+        ("Gateway Timeout in zen-bridge", "timeout_error")
+        if status == 504
+        else ("Empty upstream response", "bad_gateway")
+    )
+    return {"error": {"message": message, "type": kind, "code": status}}
+
+
+def _zen_short_response(
+    prompt: str, content: str, calls: list, bypass: bool = False
+) -> bool:
+    """Малый вход и валидный tool-only ответ не считаются усечённым контентом."""
+    valid_calls = any(
+        isinstance(call, dict)
+        and isinstance(call.get("function"), dict)
+        and call["function"].get("name")
+        and isinstance(call["function"].get("arguments"), str)
+        for call in calls
+    )
+    if (
+        bypass
+        or valid_calls
+        or len(prompt.encode("utf-8"))
+        < _positive_int(os.environ.get("BRIDGE_ZEN_SHORT_PROMPT_BYTES"), 64)
+    ):
+        return False
+    return len(content.encode("utf-8")) < _positive_int(
+        os.environ.get("BRIDGE_ZEN_MIN_CONTENT_BYTES"), 32
+    )
+
+
+def _zen_probe_request(req: dict[str, Any]) -> bool:
+    """Одиночные короткие системные запросы probe/bench помечаются флагом."""
+    messages = req.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    # Если перед user идёт system (напр. длинная преамбула), проверяем первое не-system
+    user_msg = next((m for m in messages if isinstance(m, dict) and m.get("role") == "user"), None)
+    if not user_msg:
+        return False
+    text = str(user_msg.get("content", "")).strip().lower()
+    return text in ("ping", "pong", "health") or text.startswith("reply exactly pong")
+
+
+class _ZenSseFilter:
+    """Инспекция штатных SSE-кадров без накопления текста; ошибка вместо ложного stop."""
+
+    def __init__(self, inner: Any, prompt: str, bypass: bool) -> None:
+        self.inner = inner
+        self.prompt = prompt
+        self.bypass = bypass
+        self.content_bytes = 0
+        self.has_tools = False
+        self.failed = False
+        self.terminated = False
+
+    def write(self, data: bytes) -> int:
+        if self.terminated:
+            return len(data)
+        if not data.startswith(b"data:"):
+            return self.inner.write(data)
+        for raw in data.split(b"\n\n"):
+            if not raw:
+                continue
+            frame = raw + b"\n\n"
+            payload = raw[5:].strip() if raw.startswith(b"data:") else b""
+            try:
+                obj = json.loads(payload) if payload != b"[DONE]" else None
+            except ValueError:
+                obj = None
+            terminal = payload == b"[DONE]"
+            if isinstance(obj, dict):
+                self.failed = self.failed or bool(obj.get("error"))
+                for choice in obj.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        self.content_bytes += len(content.encode("utf-8"))
+                    self.has_tools = self.has_tools or bool(delta.get("tool_calls"))
+                    terminal = terminal or bool(choice.get("finish_reason"))
+            if (
+                terminal
+                and not self.failed
+                and not self.has_tools
+                and not self.bypass
+                and len(self.prompt.encode("utf-8"))
+                >= _positive_int(os.environ.get("BRIDGE_ZEN_SHORT_PROMPT_BYTES"), 64)
+                and self.content_bytes
+                < _positive_int(os.environ.get("BRIDGE_ZEN_MIN_CONTENT_BYTES"), 32)
+            ):
+                self.inner.write(
+                    (
+                        "data: " + json.dumps(_zen_error(502)) + "\n\ndata: [DONE]\n\n"
+                    ).encode("utf-8")
+                )
+                self.inner.flush()
+                self.failed = self.terminated = True
+                break
+            self.inner.write(frame)
+        return len(data)
+
+    def flush(self) -> None:
+        self.inner.flush()
 # Пауза stdout `opencode run` на большом промпте может быть долгой; пока она длится, в SSE уходит
 # пустая дельта раз в KEEPALIVE_INTERVAL_S (0 — выключено), иначе клиент рвёт «молчащий» стрим.
 KEEPALIVE_INTERVAL_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_KEEPALIVE_S", "15.0"))
@@ -6298,7 +6428,7 @@ class Run:
         if self.attempts is None:
             self.attempts = _RequestAttempts(
                 self.res,
-                time.monotonic() + TIMEOUT_S,
+                time.monotonic() + _zen_execution_timeout(self.model_id, self.prompt),
                 use_breaker=not _is_google_direct_model(self.model_id),
             )
         attempts = self.attempts
@@ -6439,7 +6569,7 @@ class Run:
         deadline = (
             self.attempts.deadline
             if self.attempts is not None
-            else time.monotonic() + TIMEOUT_S
+            else time.monotonic() + _zen_execution_timeout(self.model_id, self.prompt)
         )
         gate = _StartupGate()
         gate.acquire(deadline=deadline, is_client_gone=self.is_client_gone)
@@ -6879,6 +7009,10 @@ class _LockedWfile:
 
 
 class Handler(BaseHTTPRequestHandler):
+    _zen_prompt: str = ""
+    _zen_targeted: bool = False
+    _zen_short_bypass: bool = False
+    _zen_probe: bool = False
     protocol_version = "HTTP/1.1"
     timeout = 300
 
@@ -6892,6 +7026,14 @@ class Handler(BaseHTTPRequestHandler):
     _serve_stream_usage: dict[str, int] | None = None
     _first_visible: threading.Event | None = None
     _downstream_client_gone: bool = False
+
+    def _set_zen_policy(self, model: str, prompt: str) -> None:
+        self._zen_prompt = prompt
+        self._zen_targeted = _zen_execution_timeout(model, prompt) < TIMEOUT_S
+        self._zen_short_bypass = (
+            self._zen_probe
+            or getattr(self, "headers", {}).get("X-Bypass-Short-Filter") == "1"
+        )
 
     def _send_sanitizer_marker(self) -> None:
         """Маркер политики: каждый публикуемый tool_call уже собран и санитизирован."""
@@ -6926,6 +7068,28 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _send(self, code: int, payload: dict[str, Any]) -> None:
+        if (
+            code >= 500
+            and getattr(self, "_zen_targeted", False)
+            and self._exit().get("exit_reason") == "timeout"
+        ):
+            code, payload = 504, _zen_error(504)
+        elif code == 200 and "choices" in payload and self._zen_prompt:
+            messages = [
+                choice.get("message") or {} for choice in payload.get("choices") or []
+            ]
+            content = "".join(str(message.get("content") or "") for message in messages)
+            calls = [
+                call for message in messages for call in message.get("tool_calls") or []
+            ]
+            if _zen_short_response(
+                self._zen_prompt,
+                content,
+                calls,
+                getattr(self, "_zen_short_bypass", False),
+            ):
+                code, payload = 502, _zen_error(502)
+                self._exit()["exit_reason"] = "short_response"
         self._exit()["status"] = int(code)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
@@ -6944,6 +7108,12 @@ class Handler(BaseHTTPRequestHandler):
         (openai-node/ai-sdk) бросают исключение на чанке с полем error. finish_reason
         не отправляем: пустого успешного завершения быть не должно.
         """
+        if (
+            getattr(self, "_zen_targeted", False)
+            and self._exit().get("exit_reason") == "timeout"
+        ):
+            payload = _zen_error(504)
+        self.close_connection = True
         _ = self.wfile.write(
             ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode(
                 "utf-8"
@@ -7215,7 +7385,7 @@ class Handler(BaseHTTPRequestHandler):
                     _orig_reasoning,
                     _text_seen,
                     on_tool,
-                    attempts.deadline - TIMEOUT_S,
+                    attempts.deadline - _zen_execution_timeout(model, prompt),
                     is_client_gone=self._client_gone_check,
                     on_status=attempt_status,
                     thinking_enabled=thinking,
@@ -7665,6 +7835,37 @@ class Handler(BaseHTTPRequestHandler):
         reported_model: str | None = None,
         tool_choice: Any = None,
     ) -> None:
+        self._set_zen_policy(model, prompt)
+        raw = self.wfile
+        filtered = _ZenSseFilter(raw, prompt, self._zen_short_bypass)
+        self.wfile = cast(io.BufferedIOBase, cast(object, filtered))
+        try:
+            self._stream_sse_body(
+                model,
+                prompt,
+                effort,
+                emulate_tools,
+                tools,
+                google_input,
+                reported_model,
+                tool_choice,
+            )
+        finally:
+            self.wfile = raw
+            if filtered.terminated:
+                self._exit()["exit_reason"] = "short_response"
+
+    def _stream_sse_body(
+        self,
+        model: str,
+        prompt: str,
+        effort: str,
+        emulate_tools: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        google_input: GoogleInput | None = None,
+        reported_model: str | None = None,
+        tool_choice: Any = None,
+    ) -> None:
         shown_model = reported_model or model
         tool_schemas = build_tool_schemas(tools)
         if _is_google_direct_model(model):
@@ -7693,7 +7894,9 @@ class Handler(BaseHTTPRequestHandler):
         res = self._res()
         if not self._acquire_slot(res):
             return
-        attempts = _RequestAttempts(res, time.monotonic() + TIMEOUT_S)
+        attempts = _RequestAttempts(
+            res, time.monotonic() + _zen_execution_timeout(model, prompt)
+        )
         xs["attempts"] = attempts
 
         resp_id = f"chatcmpl-oczen-{uuid.uuid4().hex[:12]}"
@@ -7800,7 +8003,7 @@ class Handler(BaseHTTPRequestHandler):
                     max(
                         0.0,
                         attempts.deadline
-                        - TIMEOUT_S
+                        - _zen_execution_timeout(model, prompt)
                         + FIRST_STATUS_DELAY_S
                         - time.monotonic(),
                     ),
@@ -8052,7 +8255,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
                 attempt_start = time.monotonic()
-                first_status_due = attempts.deadline - TIMEOUT_S + FIRST_STATUS_DELAY_S
+                first_status_due = (
+                    attempts.deadline
+                    - _zen_execution_timeout(model, prompt)
+                    + FIRST_STATUS_DELAY_S
+                )
                 watchdog_state: _WatchdogState = {
                     "reason": "",
                     "first_event_at": None,
@@ -8179,7 +8386,13 @@ class Handler(BaseHTTPRequestHandler):
                                 or xs.get("first_event_ms") is None
                             ):
                                 xs["first_event_ms"] = int(
-                                    (time.monotonic() - (attempts.deadline - TIMEOUT_S))
+                                    (
+                                        time.monotonic()
+                                        - (
+                                            attempts.deadline
+                                            - _zen_execution_timeout(model, prompt)
+                                        )
+                                    )
                                     * 1000
                                 )
                         _token_text = str(
@@ -8194,7 +8407,10 @@ class Handler(BaseHTTPRequestHandler):
                                     xs["ttft_ms"] = int(
                                         (
                                             time.monotonic()
-                                            - (attempts.deadline - TIMEOUT_S)
+                                            - (
+                                                attempts.deadline
+                                                - _zen_execution_timeout(model, prompt)
+                                            )
                                         )
                                         * 1000
                                     )
@@ -8756,7 +8972,7 @@ class Handler(BaseHTTPRequestHandler):
                     reasonings.append,
                     texts.append,
                     natives.append,
-                    attempts.deadline - TIMEOUT_S,
+                    attempts.deadline - _zen_execution_timeout(model, prompt),
                     is_client_gone=self._client_gone_check,
                     on_status=lambda _t: None,
                     thinking_enabled=thinking,
@@ -9050,6 +9266,7 @@ class Handler(BaseHTTPRequestHandler):
         reported_model: str | None = None,
         tool_choice: Any = None,
     ) -> None:
+        self._set_zen_policy(model, prompt)
         xs = self._exit()
         contents: list[str] = []
         reasonings: list[str] = []
@@ -9067,7 +9284,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         attempts = _RequestAttempts(
             res,
-            time.monotonic() + TIMEOUT_S,
+            time.monotonic() + _zen_execution_timeout(model, prompt),
             use_breaker=not _is_google_direct_model(model),
         )
         xs["attempts"] = attempts
@@ -9354,11 +9571,7 @@ class Handler(BaseHTTPRequestHandler):
             xs["exit_reason"] = "upstream_failed"
             self._send(
                 502,
-                _error_payload(
-                    f"opencode run produced no text (rc={out.get('rc')}, state={out.get('state')})"
-                    + (f": {tail}" if tail else ""),
-                    tail,
-                ),
+                _zen_error(502),
             )
             return
 
@@ -9459,6 +9672,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": {"message": f"not found: {path}"}})
 
     def do_POST(self) -> None:
+        self._zen_probe = False
         xs = self._xs = _new_exit_state()
         try:
             self._handle_post(xs)
@@ -9564,6 +9778,7 @@ class Handler(BaseHTTPRequestHandler):
                 prompt += f"\n\n{reminder}"
 
         prompt = _rewrite_tool_tags_for_model(prompt, model)
+        self._zen_probe = _zen_probe_request(req)
         effort = _map_effort(req, model)
         if req.get("stream") is True:
             self._stream_sse(

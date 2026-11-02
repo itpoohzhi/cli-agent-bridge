@@ -1319,6 +1319,131 @@ def _passthrough_open(handler: BaseHTTPRequestHandler) -> bool:
     )
 
 
+_MODEL_BLOCK_STATUSES = re.compile(
+    r"\b(?:TEMP\s+OFF|LIMIT\s+BLOCKED|QUOTA_EXHAUSTED|BANNED)\b", re.I
+)
+
+
+def _parse_blocked_models(text: str) -> frozenset[str]:
+    """Только конкретные ID в статусных колонках; prose и запреты транспортов не модели."""
+    blocked: set[str] = set()
+    headers: list[str] = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            headers = []
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if any("статус" in cell.lower() for cell in cells):
+            headers = [cell.lower() for cell in cells]
+            continue
+        if not headers or len(cells) != len(headers):
+            continue
+        status_index = next(
+            (i for i, cell in enumerate(headers) if "статус" in cell), None
+        )
+        if status_index is None or not _MODEL_BLOCK_STATUSES.search(
+            cells[status_index]
+        ):
+            continue
+        if "группа" in headers:
+            group = cells[headers.index("группа")].lower()
+            if group not in ("модели", "models"):
+                continue
+            model_cell = cells[headers.index("что")]
+        elif "модель" in headers[0] or "model" in headers[0]:
+            model_cell = cells[0].split(" / ", 1)[0]
+        else:
+            continue
+        for model in re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._:-]*)`", model_cell):
+            blocked.add(model)
+    return frozenset(blocked)
+
+
+class ModelNotesFilter:
+    """TTL-снимок: медленный диск не задерживает HTTP, ошибки обновления — fail-open."""
+
+    def __init__(self, path: Path | None = None, ttl_s: float | None = None) -> None:
+        self.path = (
+            path
+            or Path(
+                os.environ.get(
+                    "BRIDGE_MODEL_NOTES_PATH", "~/Мой диск/Context/model-notes.md"
+                )
+            ).expanduser()
+        )
+        self.ttl_s = ttl_s
+        self.blocked: frozenset[str] = frozenset()
+        self.expires_at = 0.0
+        self.lock = threading.Lock()
+        self.loading: threading.Event | None = None
+        self.signature: tuple[int, int] | None = None
+
+    def is_blocked(self, model: str) -> bool:
+        now = time.monotonic()
+        if now < self.expires_at:
+            return model in self.blocked
+        # try-lock: запрос не ждёт чужого I/O под mutex.
+        if not self.lock.acquire(blocking=False):
+            return model in self.blocked
+        try:
+            if now < self.expires_at:
+                return model in self.blocked
+            if self.loading is None:
+                done = self.loading = threading.Event()
+                try:
+                    ttl = (
+                        self.ttl_s
+                        if self.ttl_s is not None
+                        else float(
+                            os.environ.get("BRIDGE_MODEL_NOTES_CACHE_TTL_S", "10")
+                        )
+                    )
+                    if not math.isfinite(ttl) or ttl < 0:
+                        ttl = 10.0
+                    wait_s = float(
+                        os.environ.get("BRIDGE_MODEL_NOTES_READ_BUDGET_S", "0.02")
+                    )
+                    wait_s = (
+                        min(0.04, max(0.0, wait_s)) if math.isfinite(wait_s) else 0.02
+                    )
+                except ValueError:
+                    ttl, wait_s = 10.0, 0.02
+
+                def refresh() -> None:
+                    try:
+                        stat = self.path.stat()
+                        signature = (stat.st_mtime_ns, stat.st_size)
+                        models = (
+                            self.blocked
+                            if signature == self.signature
+                            else _parse_blocked_models(
+                                self.path.read_text(encoding="utf-8")
+                            )
+                        )
+                    except (OSError, UnicodeError, ValueError):
+                        signature, models = None, frozenset()
+                    with self.lock:
+                        self.blocked, self.signature = models, signature
+                        self.expires_at = time.monotonic() + ttl
+                        self.loading = None
+                    done.set()
+
+                threading.Thread(
+                    target=refresh, daemon=True, name="model-notes-refresh"
+                ).start()
+            else:
+                # Другой запрос уже обновляет; возвращаем stale кэш (F-007)
+                return model in self.blocked
+        finally:
+            self.lock.release()
+        if not done.wait(wait_s):
+            return model in self.blocked
+        return model in self.blocked
+
+
+_MODEL_NOTES_FILTER = ModelNotesFilter()
+
+
 class _HandlerSink(ResponseSink):
     """Запись ответа passthrough-шва в сокет клиента; сбой записи — ClientGone."""
 
@@ -1338,6 +1463,10 @@ class _HandlerSink(ResponseSink):
                 {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
             )
         self.status = 0
+        self._client_gone_flag = False
+
+    def client_gone(self) -> bool:
+        return self._client_gone_flag
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
@@ -1361,6 +1490,7 @@ class _HandlerSink(ResponseSink):
             self._handler.wfile.write(data)
             self._handler.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._client_gone_flag = True
             raise ClientGone() from exc
 
 
@@ -6196,6 +6326,11 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            idempotency_key = (self.headers.get("X-Idempotency-Key") or "").strip()
+            if idempotency_key and req.get("step_job_id") != idempotency_key:
+                req["step_job_id"] = idempotency_key
+                raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
+
             # (8) модель.
             raw_model = req.get("model")
             model_len = len(raw_model) if isinstance(raw_model, str) else 0
@@ -6211,6 +6346,24 @@ class Handler(BaseHTTPRequestHandler):
                     "model must be a string from the catalogue",
                     "unknown",
                     model_len,
+                )
+                return
+
+            model_filter_deferred = auth_deferred
+            if (
+                not auth_deferred
+                and self.headers.get("X-Bypass-Model-Filter") != "1"
+                and _MODEL_NOTES_FILTER.is_blocked(model_id)
+            ):
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": "Model temporarily blocked by operational limits",
+                            "type": "model_limit_blocked",
+                            "code": 503,
+                        }
+                    },
                 )
                 return
 
@@ -6280,6 +6433,24 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
 
+            if (
+                not auth_deferred
+                and resolved_id != model_id
+                and self.headers.get("X-Bypass-Model-Filter") != "1"
+                and _MODEL_NOTES_FILTER.is_blocked(resolved_id)
+            ):
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": "Model temporarily blocked by operational limits",
+                            "type": "model_limit_blocked",
+                            "code": 503,
+                        }
+                    },
+                )
+                return
+
             model_id = resolved_id
             if model_id not in fleet_models:
                 self._reject(
@@ -6326,6 +6497,22 @@ class Handler(BaseHTTPRequestHandler):
                             },
                         )
                         return
+                if (
+                    model_filter_deferred
+                    and self.headers.get("X-Bypass-Model-Filter") != "1"
+                    and _MODEL_NOTES_FILTER.is_blocked(model_id)
+                ):
+                    self._send(
+                        503,
+                        {
+                            "error": {
+                                "message": "Model temporarily blocked by operational limits",
+                                "type": "model_limit_blocked",
+                                "code": 503,
+                            }
+                        },
+                    )
+                    return
                 if alias is not None:
                     req = {**req, "model": model_id}
                     if req.get("reasoning_effort") is None:
@@ -6960,6 +7147,8 @@ class Handler(BaseHTTPRequestHandler):
                 key: value for key, value in headers.items() if key.lower() not in names
             }
             headers.update(trace_headers)
+        if req.get("step_job_id") and "X-Idempotency-Key" not in headers:
+            headers["X-Idempotency-Key"] = str(req["step_job_id"])
         sink = _HandlerSink(self, extra_headers=trace_headers)
         try:
             adapter.handle(
