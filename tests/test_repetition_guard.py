@@ -118,6 +118,12 @@ class TestRepetitionGuard(unittest.TestCase):
         _, detected = guard.feed(tags)
         self.assertFalse(detected, "список инлайн-кода через запятую не должен триггерить FP")
 
+        # Списки обычных тегов через запятую без кодовых кавычек
+        guard = RepetitionGuard()
+        plain_tags = ", ".join(f"@user_{i}" for i in range(30))
+        _, detected = guard.feed(plain_tags)
+        self.assertFalse(detected, "список обычных тегов через запятую не должен триггерить FP")
+
         # Таблицы Markdown с вертикальными чертами
         guard = RepetitionGuard()
         table_row = "| " + " | ".join(f"col_{i}" for i in range(25)) + " |\n"
