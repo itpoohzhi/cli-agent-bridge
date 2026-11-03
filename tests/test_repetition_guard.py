@@ -112,6 +112,32 @@ class TestRepetitionGuard(unittest.TestCase):
         _, detected = guard.feed(("---\n" * 30) + ("===\n" * 30) + ("***\n" * 30))
         self.assertFalse(detected, "markdown-разделители не детектятся")
 
+        # Списки инлайн-кода через запятую (сессия 73c65940, шаг 95)
+        guard = RepetitionGuard()
+        tags = ", ".join(f"`@user_{i}`" for i in range(30))
+        _, detected = guard.feed(tags)
+        self.assertFalse(detected, "список инлайн-кода через запятую не должен триггерить FP")
+
+        # Таблицы Markdown с вертикальными чертами
+        guard = RepetitionGuard()
+        table_row = "| " + " | ".join(f"col_{i}" for i in range(25)) + " |\n"
+        _, detected = guard.feed(table_row * 3)
+        self.assertFalse(detected, "вертикальные черты Markdown не должны триггерить FP")
+
+    def test_repetition_guard_detects_emoji_loop(self):
+        guard = RepetitionGuard(max_repeats=10)
+        _, detected = guard.feed("🚀 " * 9)
+        self.assertFalse(detected)
+        _, detected = guard.feed("🚀 ")
+        self.assertTrue(detected)
+
+    def test_repetition_guard_detects_repeated_words_with_punctuation(self):
+        guard = RepetitionGuard(max_repeats=10)
+        _, detected = guard.feed("hello, " * 9)
+        self.assertFalse(detected)
+        _, detected = guard.feed("hello, ")
+        self.assertTrue(detected)
+
     def test_repetition_guard_loop_outside_code_still_detected(self):
         guard = RepetitionGuard()
         text = "```\nsome code\n```\n" + "\n\n_placeholder" * 25
