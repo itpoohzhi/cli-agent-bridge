@@ -704,5 +704,24 @@ class TestD1SettleGuards(unittest.TestCase):
                     self.assertTrue(normalizer.has_open_tool_call())
 
 
+
+    def test_tool_turn_repetition_loop_classification(self) -> None:
+        """_ToolTurn классифицирует RepetitionLoopDetected как upstream_repetition_loop, а не malformed tool call."""
+        from core.tool_emulation import RepetitionLoopDetected
+        from unittest.mock import MagicMock
+        bridge = _load_bridge()
+        _ToolTurn = bridge._ToolTurn
+        turn = _ToolTurn([], lambda c: True, lambda r: True, lambda tc: True)
+        turn._normalizer = MagicMock()
+        turn._normalizer.feed_text.side_effect = RepetitionLoopDetected("upstream_repetition_loop: excessive token repetitions")
+        turn._normalizer.has_open_tool_call.return_value = False
+        
+        turn.feed("test")
+        self.assertTrue(getattr(turn, "_is_repetition_loop", False))
+        body = turn.error_body()
+        self.assertEqual(body["type"], "upstream_repetition_loop")
+        self.assertEqual(body["message"], "upstream repetition loop detected")
+        self.assertEqual(body["code"], 502)
+
 if __name__ == "__main__":
     unittest.main()

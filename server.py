@@ -7039,7 +7039,13 @@ class Handler(BaseHTTPRequestHandler):
         )
         t0 = time.monotonic()
         raw_turn_result = adapter.execute_turn(turn, sse_writer)
-        result = finalize_turn(raw_turn_result, turn.emulate_tools)
+        limits = PassthroughLimits.from_env()
+        result = finalize_turn(
+            raw_turn_result,
+            turn.emulate_tools,
+            invoke_normalization_enabled=limits.invoke_normalization_enabled,
+            repetition_guard_enabled=limits.repetition_guard_enabled,
+        )
         if BRIDGE_SANITIZE_TOOL_CALLS:
             calls: list[ToolCall] = []
             by_id: dict[str, list[ToolCall]] = {}
