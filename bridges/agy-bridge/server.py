@@ -23,17 +23,19 @@
 agy отвергает базу без effort — `--model "gemini-3.8-flash" requires --effort
 (available: low, medium, high)` (проверено 2026-10-07 на 1.3.1).
 
-Инструменты (tools) НЕ эмулируются текстовым протоколом. `agy` 1.3.1 сам
-пробрасывает ~51 нативный инструмент (`run_command`, `write_to_file`, `view_file`
-и др.) и с `--dangerously-skip-permissions` реально их исполняет. Штатный режим
-моста:
+Инструменты (tools) эмулируются общим ядром `core.tool_emulation` (OpenAI function
+calling поверх текста):
 
-  * если запрос пришёл без `tools` — это текстовый ход (роль судьи/ревьюера);
-    `--dangerously-skip-permissions` всё равно передаётся (набор флагов не зависит
-    от tools), но шаг без инструментов их и не вызывает;
-  * если запрос пришёл с `tools` — мост работает как АГЕНТНЫЙ ход: модель сама
-    исполняет свои нативные инструменты, мост лишь ждёт финальный текст. Наружу
-    `delta.tool_calls` НЕ отдаются (см. README, раздел «Инструменты»).
+  * если запрос пришёл без `tools` или с `tool_choice: "none"` — это текстовый ход
+    (роль судьи/ревьюера): вся выдача идёт в `content`, `finish_reason="stop"`;
+  * если запрос пришёл с `tools` — в промпт добавляется протокол `<tool_call>` ядра,
+    agy запускается без нативных инструментов (режим `ask`), текст хода проходит
+    `StreamNormalizer(strict_live=True)`: блоки `<tool_call>` уходят клиенту как
+    `delta.tool_calls` / `message.tool_calls` с `finish_reason="tool_calls"`. После
+    первого закрытого `</tool_call>` ход завершается сразу (группа процессов agy
+    гасится), не дожидаясь фоновых задач CLI. Аварийный выключатель — флаг
+    `tool_emulation_enabled` в dynamic_config.json / `AGY_TOOL_EMULATION_ENABLED=0`
+    (прежний агентный ход с нативными инструментами agy).
 
 События NDJSON разбираются как: `step_update` (`agent_response` -> текст,
 `step_type: tool` -> трассировка в stderr, `state: DONE` -> завершение) и
@@ -120,6 +122,14 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.tool_emulation import (  # noqa: E402
+    LiveParserError,
+    StreamNormalizer,
+    _messages_to_prompt as _core_messages_to_prompt,
+    _tool_choice_none,
+    build_tool_schemas,
+    sanitize_tool_call,
+)
 
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
@@ -607,9 +617,17 @@ MIDDLE_PRUNED_MARKER = (
 
 # Мышление шагов agy: CLI кладёт его в транскрипт разговора пошагово, в середине
 # хода. Путь и имя файла фиксированы CLI (проверено на agy 1.3.1).
+# Изолированный профиль <clean-home> дочерних процессов agy (Zero-Canon): без
+# AGENTS.md/GEMINI.md/hooks.json пользователя; transcript и SQLite — внутри него.
+_AGY_HOME_LOCK = threading.Lock()
+_AGY_HOME_INITIALIZED = False
+CLEAN_HOME_DIR = Path(
+    os.environ.get("AGY_BRIDGE_CLEAN_HOME", "")
+    or str(WORKSPACE / "runtime" / "agy-home")
+)
 BRAIN_DIR = Path(
     os.environ.get("AGY_BRIDGE_BRAIN", "")
-    or str(HOME / ".gemini" / "antigravity-cli" / "brain")
+    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "brain")
 )
 TRANSCRIPT_NAME = "transcript_full.jsonl"
 TRANSCRIPT_FALLBACK_NAME = "transcript.jsonl"
@@ -621,7 +639,7 @@ TRANSCRIPT_READ_MAX = get_bridge_config().transcript_read_max
 # База открывается только на чтение; транскрипт остаётся минимальным источником.
 CONV_DIR = Path(
     os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
-    or str(HOME / ".gemini" / "antigravity-cli" / "conversations")
+    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "conversations")
 )
 # Бинарь agy: его идентичность (mtime_ns, size) ключует семантический canary.
 AGY_BIN = os.environ.get("AGY_BRIDGE_AGY_BIN", "") or str(
@@ -1106,14 +1124,103 @@ RESULT_EXIT_GRACE_S = 5.0
 _ACTIVITY_KINDS = frozenset({"init", "text", "reasoning", "tool_trace"})
 
 
+# Zero-Canon: файлы канона/хуков пользователя, которых не должно быть в <clean-home>.
+_CANON_FILE_NAMES = ("AGENTS.md", "GEMINI.md", "hooks.json")
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Каталог с правами 0700 (umask и ранее созданные права выравниваются chmod)."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def _ensure_symlink(link: Path, target: Path) -> None:
+    """Симлинк link -> target; чужой/битый объект по пути link заменяется."""
+    if link.is_symlink():
+        if os.readlink(link) == str(target):
+            return
+        link.unlink()
+    elif link.exists():
+        if link.is_dir():
+            shutil.rmtree(link)
+        else:
+            link.unlink()
+    os.symlink(target, link)
+
+
+def _copy_private_atomic(src: Path, dst: Path) -> None:
+    """Атомарная копия src -> dst с правами 0600 через временный файл и os.replace."""
+    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _prepare_agy_home() -> Path:
+    """Потокобезопасно (однократно) готовит изолированный HOME для `agy`.
+
+    Library -> ~/Library даёт доступ к Keychain macOS (без OAuth-окна браузера);
+    учётные данные копируются атомарно с 0600; AGENTS.md/GEMINI.md/hooks.json
+    в профиль не попадают никогда (Zero-Canon).
+    """
+    global _AGY_HOME_INITIALIZED
+    with _AGY_HOME_LOCK:
+        if _AGY_HOME_INITIALIZED:
+            return CLEAN_HOME_DIR
+        real_gemini = HOME / ".gemini"
+        real_cli = real_gemini / "antigravity-cli"
+        clean_gemini = CLEAN_HOME_DIR / ".gemini"
+        clean_gemini_cli = clean_gemini / "antigravity-cli"
+
+        _ensure_private_dir(CLEAN_HOME_DIR)
+        _ensure_symlink(CLEAN_HOME_DIR / "Library", HOME / "Library")
+        _ensure_private_dir(clean_gemini)
+        _ensure_private_dir(clean_gemini_cli)
+        for name in ("bin", "builtin"):
+            if (real_cli / name).exists():
+                _ensure_symlink(clean_gemini_cli / name, real_cli / name)
+        for src, dst in (
+            (real_gemini / "jetski-standalone-oauth-token", clean_gemini),
+            (real_gemini / "projects.json", clean_gemini),
+            (real_cli / "installation_id", clean_gemini_cli),
+            (real_cli / "jetski_state.pbtxt", clean_gemini_cli),
+            (real_cli / "settings.json", clean_gemini_cli),
+        ):
+            if src.is_file():
+                _copy_private_atomic(src, dst / src.name)
+        _ensure_private_dir(clean_gemini_cli / "conversations")
+        _ensure_private_dir(clean_gemini_cli / "brain")
+        for base in (CLEAN_HOME_DIR, clean_gemini, clean_gemini_cli):
+            for name in _CANON_FILE_NAMES:
+                canon = base / name
+                if canon.is_symlink() or canon.is_file():
+                    canon.unlink()
+        _AGY_HOME_INITIALIZED = True
+        return CLEAN_HOME_DIR
+
+
 def _launch_env() -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
-    Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) выставляет сам лончер
-    agy-cli.sh — мост их не дублирует и не переопределяет.
+    HOME указывает на изолированный <clean-home> (Zero-Canon); браузер для
+    OAuth заблокирован. Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY)
+    выставляет сам лончер agy-cli.sh — мост их не дублирует и не переопределяет.
     """
     env = os.environ.copy()
     env.pop("AGY_BRIDGE_KEY", None)
+    clean_home = str(_prepare_agy_home())
+    env["HOME"] = clean_home
+    env["BRIDGE_ZERO_CANON"] = "1"
+    env["BROWSER"] = "/usr/bin/false"
     return env
 
 
@@ -1161,10 +1268,6 @@ def _flatten_content(content: Any, img_counter: list[int] | None = None) -> str:
                 parts.append(str(item["text"]))
         return "\n".join(p for p in parts if p)
     return str(content)
-
-
-def _tool_choice_none(tool_choice: Any) -> bool:
-    return isinstance(tool_choice, str) and tool_choice.strip().lower() == "none"
 
 
 @final
@@ -1991,9 +2094,8 @@ def _messages_to_prompt(
 ) -> str:
     """Собрать единый текстовый промпт хода.
 
-    Секции протокола инструментов нет намеренно: agy исполняет СВОИ нативные
-    инструменты, а не инструменты DSH (см. README, раздел «Инструменты»).
-    Image-части получают сквозные маркеры `[image N]` (нумерация с `img_start + 1`),
+    Секцию протокола инструментов добавляет `_with_tools_protocol` (только при
+    эмуляции tools). Image-части получают сквозные маркеры `[image N]` (нумерация с `img_start + 1`),
     а `images` описываются блоком `[attachments]` с абсолютными путями файлов.
     Промпт сверх `PROMPT_MAX_NDJSON_BYTES` проходит head-pruning (ADR-0008).
     """
@@ -2954,6 +3056,7 @@ class _RuntimeFlags(NamedTuple):
     step_scoped_usage_enabled: bool = False
     stream_resilience_enabled: bool = True
     isolate_tool_preambles_to_reasoning: bool = True
+    tool_emulation_enabled: bool = True
     graceful_timeout_finish_reason: str = "stop"
 
 
@@ -2965,6 +3068,7 @@ _NEW_FLAG_ENV = {
     "step_scoped_usage_enabled": "AGY_STEP_SCOPED_USAGE_ENABLED",
     "stream_resilience_enabled": "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED",
     "isolate_tool_preambles_to_reasoning": "AGY_ISOLATE_TOOL_PREAMBLES_TO_REASONING",
+    "tool_emulation_enabled": "AGY_TOOL_EMULATION_ENABLED",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
@@ -3927,7 +4031,9 @@ class _ContentArbiter:
             if self._eligible(step, source, idx):
                 return step
         if idx is None:
-            candidates = [t for t in texts if len(text) >= len(t) and text.startswith(t)]
+            candidates = [
+                t for t in texts if len(text) >= len(t) and text.startswith(t)
+            ]
             if candidates:
                 candidates.sort(key=len, reverse=True)
                 for cand in candidates:
@@ -4152,9 +4258,7 @@ class _UsageSnapshot:
 _EMPTY_USAGE_SNAPSHOT = _UsageSnapshot()
 
 
-def _add_preamble_bounded(
-    target: set[int], item: int, cap: int | None = None
-) -> None:
+def _add_preamble_bounded(target: set[int], item: int, cap: int | None = None) -> None:
     """Добавить индекс шага в коллекцию эмитированных преамбул с ограничением MAX_CONTENT_STEPS * 2."""
     eff_cap = max(1, MAX_CONTENT_STEPS * 2) if cap is None else cap
     target.add(item)
@@ -5136,6 +5240,108 @@ def resolve_agy_mode(req: dict) -> str:
     )
 
 
+def _with_tools_protocol(prompt: str, tools: list, tool_choice: object) -> str:
+    """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
+    section = _core_messages_to_prompt([], tools, tool_choice)
+    return f"{section}\n\n{prompt}" if prompt else section
+
+
+@final
+class _ToolTurn:
+    """Эмуляция OpenAI function calling одного хода поверх текстового потока agy.
+
+    Разбор и санитизация — только ядром (`StreamNormalizer`, `sanitize_tool_call`);
+    класс связывает их с sink-ами сериализатора (SSE/JSON) и сообщает `_execute`,
+    что ход завершён (`turn_complete`). Sink возвращает False, если клиент ушёл.
+    """
+
+    def __init__(
+        self,
+        tools: list,
+        on_content: Callable[[str], bool],
+        on_reasoning: Callable[[str], bool],
+        on_calls: Callable[[list[dict[str, object]]], bool],
+    ) -> None:
+        self._schemas = build_tool_schemas(tools)
+        self._on_content = on_content
+        self._on_reasoning = on_reasoning
+        self._on_calls = on_calls
+        self.calls: list[dict[str, object]] = []
+        self.error = ""
+        self.ok = True
+        self._finished = False
+        self._normalizer = StreamNormalizer(
+            self._content, self._reasoning, self._call, strict_live=True
+        )
+
+    @property
+    def content(self) -> str:
+        return self._normalizer.content
+
+    @property
+    def reasoning(self) -> str:
+        return self._normalizer.reasoning_content
+
+    def _content(self, text: str) -> None:
+        if self.ok and not self._on_content(text):
+            self.ok = False
+
+    def _reasoning(self, text: str) -> None:
+        if self.ok and not self._on_reasoning(text):
+            self.ok = False
+
+    def _call(self, call: dict[str, Any]) -> None:
+        entry: dict[str, object] = {
+            "index": len(self.calls),
+            "id": str(call.get("id") or "call_" + uuid.uuid4().hex[:24]),
+            "type": "function",
+            "function": {
+                "name": str(call.get("name") or ""),
+                "arguments": json.dumps(
+                    call.get("arguments") or {}, ensure_ascii=False
+                ),
+            },
+        }
+        published = [
+            dict(cast("dict[str, object]", item), index=len(self.calls) + offset)
+            for offset, item in enumerate(sanitize_tool_call(entry, self._schemas))
+        ]
+        self.calls.extend(published)
+        if self.ok and not self._on_calls(published):
+            self.ok = False
+
+    def feed(self, text: str) -> bool:
+        """Текстовая дельта хода; повреждённый блок фиксируется в `error` (fail-closed)."""
+        if not (self.error or self._finished) and text:
+            try:
+                self._normalizer.feed_text(text)
+            except LiveParserError as exc:
+                self.error = str(exc) or type(exc).__name__
+        return self.ok
+
+    def finish(self) -> None:
+        """Конец хода: удержанный хвост уходит в content, незакрытый блок — в `error`."""
+        if self.error or self._finished:
+            return
+        self._finished = True
+        try:
+            self._normalizer.finish()
+        except LiveParserError as exc:
+            self.error = str(exc) or type(exc).__name__
+
+    def turn_complete(self) -> bool:
+        """Ход окончен: вызов инструмента закрыт либо поток повреждён."""
+        return bool(self.calls or self.error)
+
+    def error_body(self) -> dict[str, Any]:
+        return {
+            "message": "agy emitted a malformed tool call",
+            "detail": self.error[:500],
+            "type": "tool_call_parse_error",
+            "code": 502,
+        }
+
+
 class Run:
     """Один процесс `agy`; поток-читатель превращает stdout NDJSON в события очереди.
 
@@ -5422,7 +5628,9 @@ class Run:
                     last_idx = next(reversed(step_accum))
                     tool_steps = getattr(self, "_tool_step_indices", None) or set()
                     tail_tools = (
-                        getattr(getattr(self, "_tail", None), "_tool_step_indices", None)
+                        getattr(
+                            getattr(self, "_tail", None), "_tool_step_indices", None
+                        )
                         or set()
                     )
                     if last_idx not in tool_steps and last_idx not in tail_tools:
@@ -5703,9 +5911,7 @@ class Run:
                             )
                             if suffix:
                                 if isolate:
-                                    if self.claim_preamble(
-                                        step_idx, source="stdout"
-                                    ):
+                                    if self.claim_preamble(step_idx, source="stdout"):
                                         _ = self._emit_reasoning(step_idx or 0, suffix)
                                 else:
                                     self.q.put(("text", suffix))
@@ -5784,7 +5990,9 @@ class Run:
                     last_idx = next(reversed(step_accum))
                     tool_steps = getattr(self, "_tool_step_indices", None) or set()
                     tail_tools = (
-                        getattr(getattr(self, "_tail", None), "_tool_step_indices", None)
+                        getattr(
+                            getattr(self, "_tail", None), "_tool_step_indices", None
+                        )
                         or set()
                     )
                     if last_idx not in tool_steps and last_idx not in tail_tools:
@@ -6232,11 +6440,19 @@ class Handler(BaseHTTPRequestHandler):
         return "queue_timeout"
 
     def _execute(
-        self, run: Run, on_text, on_tool_trace, on_reasoning, keepalive
+        self,
+        run: Run,
+        on_text,
+        on_tool_trace,
+        on_reasoning,
+        keepalive,
+        turn_complete: Callable[[], bool] | None = None,
     ) -> dict:
         """Гнать ход до конца; сквозной таймаут TIMEOUT_S на весь ход.
 
-        Колбэки возвращают False, если клиент ушёл.
+        Колбэки возвращают False, если клиент ушёл. `turn_complete` (эмуляция tools)
+        проверяется на каждой итерации: True — ход окончен (`done`,
+        `tool_turn_stop`), фоновые задачи CLI не ждём, группу гасит `run.close()`.
         Превышение deadline -> kill группы (в run.close()), state=timeout.
 
         При extended_timeout_enabled (политика `run.policy`) действуют раздельные
@@ -6355,6 +6571,10 @@ class Handler(BaseHTTPRequestHandler):
             return out
 
         while True:
+            if turn_complete is not None and turn_complete():
+                stopped = state("done", 0)
+                stopped["tool_turn_stop"] = True
+                return stopped
             now = time.monotonic()
             ext = policy is not None and _new_flag("extended_timeout_enabled")
             if ext:
@@ -6490,7 +6710,9 @@ class Handler(BaseHTTPRequestHandler):
                     delta = run.reconcile_result(final_text)
                     if delta:
                         add_content(delta)
-                    elif final_text and getattr(run._arbiter, "last_result_diverged", False):
+                    elif final_text and getattr(
+                        run._arbiter, "last_result_diverged", False
+                    ):
                         full_emitted = "".join(pieces)
                         sep = (
                             "\n\n"
@@ -6855,9 +7077,19 @@ class Handler(BaseHTTPRequestHandler):
                 job = getattr(self, "_registry_job", None)
                 if job is not None:
                     _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
+                stop_hook = ctx.get("tool_stop")
                 try:
                     out = self._execute(
-                        run, on_text, on_tool_trace, on_reasoning, keepalive
+                        run,
+                        on_text,
+                        on_tool_trace,
+                        on_reasoning,
+                        keepalive,
+                        **(
+                            {"turn_complete": stop_hook}
+                            if stop_hook is not None
+                            else {}
+                        ),
                     )
                     self._attach_resolved_usage(run, out, model)
                     finalize = ctx.get("finalize_timeout")
@@ -6977,7 +7209,12 @@ class Handler(BaseHTTPRequestHandler):
                     f"err={_err_summary(out.get('err'), 120)!r}, retry {attempt} {tag}"
                 )
                 time.sleep(_retry_pause_s(attempt))
-            if (
+            if out.get("tool_turn_stop"):
+                # Ход прерван после <tool_call>: разговор agy не завершён штатно и
+                # горячей сессией не служит (следующий ход — холодный, с историей).
+                if ctx.get("hot_resumed"):
+                    _session_invalidate(ctx["sess_key"], str(ctx["conversation_id"]))
+            elif (
                 out.get("state") == "done"
                 and out.get("conversation_id")
                 and ctx.get("sess_key")
@@ -7415,13 +7652,24 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(raw_tools, list)
                 else []
             )
-            tools_count = 0 if _tool_choice_none(req.get("tool_choice")) else len(tools)
+            tool_choice = req.get("tool_choice")
+            tools_count = 0 if _tool_choice_none(tool_choice) else len(tools)
+            # Эмуляция OpenAI function calling ядром: tools есть и tool_choice != "none".
+            emulate_tools = tools_count > 0 and _new_flag(
+                "tool_emulation_enabled", True
+            )
             if force_cold or (universal and not images):
                 full_prompt = stripped_full_prompt
             else:
                 full_prompt = _messages_to_prompt(render_messages, images)
                 if universal:
                     stripped_full_prompt = stripped_full_prompt or full_prompt
+            if emulate_tools:
+                full_prompt = _with_tools_protocol(full_prompt, tools, tool_choice)
+                if stripped_full_prompt:
+                    stripped_full_prompt = _with_tools_protocol(
+                        stripped_full_prompt, tools, tool_choice
+                    )
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -7464,6 +7712,8 @@ class Handler(BaseHTTPRequestHandler):
                     conversation_id = use_cid
                     is_resumed = True
                     prompt = _get_resumed_turn_prompt(render_messages, images)
+                    if emulate_tools:
+                        prompt = _with_tools_protocol(prompt, tools, tool_choice)
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
@@ -7473,7 +7723,10 @@ class Handler(BaseHTTPRequestHandler):
                     or req.get("step_job_id")
                     or ""
                 ),
-                "agy_mode": resolve_agy_mode(req),
+                # Эмуляция: модель зовёт инструменты клиента, нативные agy выключены.
+                "agy_mode": "ask" if emulate_tools else resolve_agy_mode(req),
+                "emulate_tools": emulate_tools,
+                "tools": tools,
                 "turn_id": turn_id,
                 "sess_key": sess_key,
                 "hot_resumed": is_resumed,
@@ -7562,10 +7815,30 @@ class Handler(BaseHTTPRequestHandler):
             retained_cache.append((retained_text, retained_reasoning))
             return retained_cache[0]
 
+        tool_turn = (
+            _ToolTurn(
+                cast(list, ctx.get("tools") or []),
+                lambda _text: True,
+                lambda _text: True,
+                lambda _calls: True,
+            )
+            if ctx.get("emulate_tools")
+            else None
+        )
+        if tool_turn is not None:
+            ctx["tool_stop"] = tool_turn.turn_complete
+
         def build_payload(
-            out: dict, content: str, reasoning: str, finish_reason: str
+            out: dict,
+            content: str,
+            reasoning: str,
+            finish_reason: str,
+            tool_calls: list[dict[str, object]] | None = None,
         ) -> dict:
-            message = {"role": "assistant", "content": content}
+            message: dict[str, object] = {"role": "assistant", "content": content}
+            if tool_calls:
+                message["content"] = content or None
+                message["tool_calls"] = tool_calls
             if reasoning:
                 # OpenAI-совместимое поле мышления: Harness читает его из сообщения
                 # ассистента так же, как из дельты потока.
@@ -7601,6 +7874,12 @@ class Handler(BaseHTTPRequestHandler):
             content = str(out.get("text") or "")
             base_reasoning = str(out.get("reasoning") or "")
             reasoning = base_reasoning + retained_reasoning + "".join(markers)
+            if tool_turn is not None:
+                # Сырой <tool_call> в content не уходит: незакрытый блок отброшен.
+                _ = tool_turn.feed(retained_text)
+                tool_turn.finish()
+                content, retained_text = tool_turn.content, ""
+                reasoning += tool_turn.reasoning
             if not (content.strip() or reasoning.strip() or retained_text.strip()):
                 return  # полная тишина: прежняя ошибка 504
             content += retained_text
@@ -7615,7 +7894,13 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         ctx["finalize_timeout"] = finalize_timeout
-        out = self._run_once(ctx, lambda _v: True, on_tool_trace, lambda _r: True, None)
+        out = self._run_once(
+            ctx,
+            tool_turn.feed if tool_turn is not None else (lambda _v: True),
+            on_tool_trace,
+            lambda _r: True,
+            None,
+        )
         if out.get("state") == "client_gone":
             return
         if out.get("graceful_done"):
@@ -7627,11 +7912,27 @@ class Handler(BaseHTTPRequestHandler):
         reasoning = str(out.get("reasoning") or "") + retained_reasoning
         reasoning += "".join(markers)
         err = self._error_body(out, bool(ctx.get("stream_resilience_enabled", True)))
+        if err is None and tool_turn is not None:
+            tool_turn.finish()
+            if tool_turn.error:
+                err = tool_turn.error_body()
         if err is not None:
             self._send(err["code"], {"error": err})
             return
+        if tool_turn is None:
+            self._send(
+                200, build_payload(out, str(out.get("text") or ""), reasoning, "stop")
+            )
+            return
         self._send(
-            200, build_payload(out, str(out.get("text") or ""), reasoning, "stop")
+            200,
+            build_payload(
+                out,
+                tool_turn.content,
+                reasoning + tool_turn.reasoning,
+                "tool_calls" if tool_turn.calls else "stop",
+                tool_turn.calls,
+            ),
         )
 
     def _serve_sse(self, ctx: dict) -> None:
@@ -7743,6 +8044,21 @@ class Handler(BaseHTTPRequestHandler):
                 progress.commit()
             return ok
 
+        tool_turn: _ToolTurn | None = None
+        if ctx.get("emulate_tools"):
+
+            def on_calls(calls: list[dict[str, object]]) -> bool:
+                ok = commit() and emit(chunk({"tool_calls": calls}))
+                if ok:
+                    emitted_reasoning_or_tool[0] += 1
+                return ok
+
+            tool_turn = _ToolTurn(
+                cast(list, ctx.get("tools") or []), on_text, on_reasoning, on_calls
+            )
+            ctx["tool_stop"] = tool_turn.turn_complete
+        stream_text = tool_turn.feed if tool_turn is not None else on_text
+
         def keepalive() -> bool:
             if not ctx["stream_committed"]:
                 if ctx.get("step_job_id"):
@@ -7776,13 +8092,17 @@ class Handler(BaseHTTPRequestHandler):
             ok = True
             for kind, payload in retained:
                 if kind == "text":
-                    ok = on_text(str(payload))
+                    ok = stream_text(str(payload))
                 elif kind == "reasoning":
                     ok = on_reasoning(str(payload))
                 elif kind == "tool_trace":
                     ok = on_tool_trace(payload)
                 if not ok:
                     break
+            if ok and tool_turn is not None:
+                # Удержанный хвост — в content; незакрытый <tool_call> отброшен.
+                tool_turn.finish()
+                ok = tool_turn.ok
             reason = str(out.get("state"))
             conv_id = str(out.get("conversation_id") or "")
             if ok:
@@ -7805,7 +8125,7 @@ class Handler(BaseHTTPRequestHandler):
         ctx["finalize_timeout"] = finalize_timeout
         if not resilience and not ctx.get("step_job_id") and not commit():
             return
-        out = self._run_once(ctx, on_text, on_tool_trace, on_reasoning, keepalive)
+        out = self._run_once(ctx, stream_text, on_tool_trace, on_reasoning, keepalive)
         if disconnected or out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return
@@ -7813,6 +8133,15 @@ class Handler(BaseHTTPRequestHandler):
         if out.get("graceful_done"):
             return
         err = self._error_body(out, resilience)
+        finish_reason = "stop"
+        if err is None and tool_turn is not None:
+            tool_turn.finish()
+            if disconnected or not tool_turn.ok:
+                return
+            if tool_turn.error:
+                err = tool_turn.error_body()
+            elif tool_turn.calls:
+                finish_reason = "tool_calls"
         if (
             (resilience or ctx.get("step_job_id"))
             and err is not None
@@ -7828,7 +8157,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if err is None:
             conv_id = str(out.get("conversation_id") or "")
-            if not emit(chunk({}, "stop", conversation_id=conv_id)) and resilience:
+            if (
+                not emit(chunk({}, finish_reason, conversation_id=conv_id))
+                and resilience
+            ):
                 return
             # Harness считает tok/s и % контекста только из usage в потоке
             # (dsh-llm-pi-ai toStreamChunks: usage-chunk -> session usage).
@@ -7839,7 +8171,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             if usage["prompt_tokens"] or usage["completion_tokens"]:
                 if (
-                    not emit(chunk({}, "stop", usage, conversation_id=conv_id))
+                    not emit(chunk({}, finish_reason, usage, conversation_id=conv_id))
                     and resilience
                 ):
                     return
