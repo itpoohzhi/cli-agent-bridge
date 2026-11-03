@@ -621,14 +621,17 @@ MIDDLE_PRUNED_MARKER = (
 # AGENTS.md/GEMINI.md/hooks.json пользователя; transcript и SQLite — внутри него.
 _AGY_HOME_LOCK = threading.Lock()
 _AGY_HOME_INITIALIZED = False
+# Верифицированный (resolved) корень <clean-home>: фиксируется под _AGY_HOME_LOCK
+# при первой успешной проверке; последующая подмена пути отвергается.
+_VERIFIED_CLEAN_HOME: Path | None = None
 CLEAN_HOME_DIR = Path(
     os.environ.get("AGY_BRIDGE_CLEAN_HOME", "")
     or str(WORKSPACE / "runtime" / "agy-home")
-)
+).resolve()
 BRAIN_DIR = Path(
     os.environ.get("AGY_BRIDGE_BRAIN", "")
     or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "brain")
-)
+).resolve()
 TRANSCRIPT_NAME = "transcript_full.jsonl"
 TRANSCRIPT_FALLBACK_NAME = "transcript.jsonl"
 TRANSCRIPT_POLL_S = get_bridge_config().transcript_poll_s
@@ -640,7 +643,7 @@ TRANSCRIPT_READ_MAX = get_bridge_config().transcript_read_max
 CONV_DIR = Path(
     os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
     or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "conversations")
-)
+).resolve()
 # Бинарь agy: его идентичность (mtime_ns, size) ключует семантический canary.
 AGY_BIN = os.environ.get("AGY_BRIDGE_AGY_BIN", "") or str(
     HOME / ".local" / "bin" / "agy.real"
@@ -1128,24 +1131,163 @@ _ACTIVITY_KINDS = frozenset({"init", "text", "reasoning", "tool_trace"})
 _CANON_FILE_NAMES = ("AGENTS.md", "GEMINI.md", "hooks.json")
 
 
+def _assert_inside_clean_home(path: Path) -> None:
+    """Путь (после resolve) обязан лежать внутри <clean-home> или совпадать с ним.
+
+    Защита от symlink-атак: запись, chmod и удаление не выходят за границы профиля.
+    """
+    base = CLEAN_HOME_DIR.resolve()
+    resolved = path.resolve()
+    if resolved != base and base not in resolved.parents:
+        raise RuntimeError(
+            f"Path {path} resolves outside clean-home {base}: {resolved}"
+        )
+
+
 def _ensure_private_dir(path: Path) -> None:
-    """Каталог с правами 0700 (umask и ранее созданные права выравниваются chmod)."""
+    """Каталог с правами 0700 (umask и ранее созданные права выравниваются chmod).
+
+    Симлинк вместо каталога отвергается без перехода по нему: chmod/mkdir
+    во внешнем каталоге недопустимы.
+    """
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing to use symlink as private directory: {path}")
+    _assert_inside_clean_home(path)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path, 0o700)
 
 
 def _ensure_symlink(link: Path, target: Path) -> None:
-    """Симлинк link -> target; чужой/битый объект по пути link заменяется."""
+    """Симлинк link -> target; чужой симлинк/файл/битая ссылка заменяются.
+
+    Настоящий каталог по пути link не удаляется никогда (RuntimeError).
+    Родитель link обязан находиться внутри <clean-home>.
+    """
+    _assert_inside_clean_home(link.parent)
     if link.is_symlink():
         if os.readlink(link) == str(target):
             return
-        link.unlink()
+        link.unlink(missing_ok=True)
     elif link.exists():
         if link.is_dir():
-            shutil.rmtree(link)
+            raise RuntimeError(
+                f"Refusing to replace real directory {link} with symlink to {target}"
+            )
+        link.unlink(missing_ok=True)
+    link.symlink_to(target)
+
+
+def _mirror_regular_files(
+    src_dir: Path, dst_dir: Path, ancestors: frozenset[Path]
+) -> None:
+    """Пробрасывает содержимое src_dir в приватный dst_dir симлинками на файлы.
+
+    Подкаталоги не линкуются целиком: для каждого создаётся приватный каталог
+    0700 в <clean-home>, симлинками пробрасываются только файлы внутри него.
+    Так сквозная запись в реальный профиль через вложенные каталоги невозможна.
+    Циклы симлинков отсекаются по множеству resolved-предков.
+    """
+    _ensure_private_dir(dst_dir)
+    ancestors = ancestors | {src_dir.resolve()}
+    for entry in src_dir.iterdir():
+        dst = dst_dir / entry.name
+        if entry.is_dir():
+            if entry.resolve() in ancestors:
+                continue
+            # Наследие прежних версий: симлинк на каталог/файл вместо приватного каталога.
+            if dst.is_symlink() or (dst.exists() and not dst.is_dir()):
+                dst.unlink()
+            _mirror_regular_files(entry, dst, ancestors)
         else:
-            link.unlink()
-    os.symlink(target, link)
+            _ensure_symlink(dst, entry)
+
+
+def _unlink_quiet(path: Path) -> None:
+    """Удаляет файл/ссылку; подавляется только ENOENT (конкурентное удаление).
+
+    Прочие ошибки (EACCES/EPERM и т.п.) пробрасываются: запуск `agy` при
+    неудалённом каноне недопустим (fail-loud).
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _remove_canon_hooks(clean_gemini: Path) -> None:
+    """Удаляет PreInvocation-хуки из фактического пути `.gemini/config/`.
+
+    Симлинк `config` убирается как ссылка (цель не затрагивается); внутрь
+    внешнего каталога удаление не заходит. Конкурентное удаление (ENOENT)
+    допустимо; ошибки прав и прочие сбои удаления пробрасываются наружу.
+    """
+    config = clean_gemini / "config"
+    if config.is_symlink():
+        _unlink_quiet(config)
+        return
+    if not config.is_dir():
+        return
+    _assert_inside_clean_home(config)
+    hooks_file = config / "hooks.json"
+    if hooks_file.is_symlink() or hooks_file.is_file():
+        _unlink_quiet(hooks_file)
+    hooks_dir = config / "hooks"
+    if hooks_dir.is_symlink() or hooks_dir.is_file():
+        _unlink_quiet(hooks_dir)
+    elif hooks_dir.is_dir():
+        try:
+            shutil.rmtree(hooks_dir)
+        except FileNotFoundError:
+            pass
+
+
+def _clean_canon_files(clean_home: Path) -> None:
+    """Zero-Canon: удаляет каноны и хуки из <clean-home> (идемпотентно).
+
+    Вызывается при инициализации профиля и перед КАЖДЫМ запуском `agy`.
+    Fail-loud: симлинк (или не-каталог) на месте <clean-home>, `.gemini` или
+    `antigravity-cli` — признак подмены после инициализации. Тихое удаление
+    ссылки оставило бы `agy` в разобранном профиле без креденшалов и каталогов
+    состояния, поэтому запуск прерывается RuntimeError. Внутрь ссылки обход не
+    заходит: канон за пределами <clean-home> никогда не затрагивается.
+    """
+    clean_gemini = clean_home / ".gemini"
+    clean_cli = clean_gemini / "antigravity-cli"
+    for base in (clean_home, clean_gemini, clean_cli):
+        if base.is_symlink() or not base.is_dir():
+            raise RuntimeError(
+                "Invalid clean-home: profile directory cannot be a symlink "
+                f"or missing ({base})"
+            )
+        _assert_inside_clean_home(base)
+    _remove_canon_hooks(clean_gemini)
+    for base in (clean_home, clean_gemini, clean_cli):
+        for name in _CANON_FILE_NAMES:
+            canon = base / name
+            if canon.is_symlink() or canon.is_file():
+                # Симлинк-канон на внешний файл удаляется как ссылка: проверяем
+                # родителя (resolve симлинка вышел бы за границы и ложно упал).
+                _assert_inside_clean_home(canon.parent if canon.is_symlink() else canon)
+                _unlink_quiet(canon)
+    _assert_zero_canon(clean_home, clean_gemini)
+
+
+def _assert_zero_canon(clean_home: Path, clean_gemini: Path) -> None:
+    """Пост-проверка Zero-Canon: после очистки канонов и хуков не осталось."""
+    for base in (clean_home, clean_gemini, clean_gemini / "antigravity-cli"):
+        for name in _CANON_FILE_NAMES:
+            canon = base / name
+            if canon.is_file() or canon.is_symlink():
+                raise RuntimeError(
+                    f"Zero-Canon invariant violated: canon file {canon} "
+                    "still exists after cleaning"
+                )
+    config = clean_gemini / "config"
+    for hook in (config / "hooks.json", config / "hooks"):
+        if hook.is_symlink() or hook.exists():
+            raise RuntimeError(
+                f"Zero-Canon invariant violated: hook {hook} still exists after cleaning"
+            )
 
 
 def _copy_private_atomic(src: Path, dst: Path) -> None:
@@ -1165,17 +1307,89 @@ def _copy_private_atomic(src: Path, dst: Path) -> None:
         raise
 
 
+def _verify_clean_home_root(clean_home: Path) -> Path:
+    """Проверяет корень <clean-home> перед любой очисткой (вызывать под _AGY_HOME_LOCK).
+
+    Корень, `.gemini` и `antigravity-cli` не могут быть симлинками, а после
+    инициализации `.gemini` обязан существовать (fail-loud вместо запуска в
+    разобранном профиле). Корень обязан совпадать с верифицированным при
+    инициализации resolved-путём (подмена после старта отвергается) и не может
+    совпадать с HOME или его предком, а также пересекаться с реальным профилем
+    ~/.gemini (совпадать, быть его предком или лежать внутри): очистка канонов
+    иначе удалила бы пользовательские файлы. Возвращает resolved-путь.
+    """
+    global _VERIFIED_CLEAN_HOME
+    if clean_home.is_symlink():
+        raise RuntimeError(
+            "Invalid clean-home directory: CLEAN_HOME_DIR cannot be a symlink"
+        )
+    clean_home_resolved = clean_home.resolve()
+    if _VERIFIED_CLEAN_HOME is not None and clean_home_resolved != _VERIFIED_CLEAN_HOME:
+        raise RuntimeError(
+            "Clean-home path mutated after initialization: "
+            f"{clean_home_resolved} != {_VERIFIED_CLEAN_HOME}"
+        )
+    home_resolved = HOME.resolve()
+    real_gemini_resolved = (HOME / ".gemini").resolve()
+    if (
+        clean_home_resolved == home_resolved
+        or clean_home_resolved in home_resolved.parents
+        or clean_home_resolved == real_gemini_resolved
+        or clean_home_resolved in real_gemini_resolved.parents
+        or real_gemini_resolved in clean_home_resolved.parents
+    ):
+        raise RuntimeError(
+            "Invalid clean-home directory: overlaps with HOME or real .gemini "
+            f"({clean_home_resolved})"
+        )
+    clean_gemini = clean_home / ".gemini"
+    if clean_gemini.is_symlink():
+        raise RuntimeError("Invalid clean-home directory: .gemini cannot be a symlink")
+    if _AGY_HOME_INITIALIZED and not clean_gemini.is_dir():
+        raise RuntimeError(
+            "Invalid clean-home state: .gemini directory is missing or damaged "
+            "after initialization"
+        )
+    if (clean_gemini / "antigravity-cli").is_symlink():
+        raise RuntimeError(
+            "Invalid clean-home directory: antigravity-cli cannot be a symlink"
+        )
+    _VERIFIED_CLEAN_HOME = clean_home_resolved
+    return clean_home_resolved
+
+
 def _prepare_agy_home() -> Path:
     """Потокобезопасно (однократно) готовит изолированный HOME для `agy`.
 
     Library -> ~/Library даёт доступ к Keychain macOS (без OAuth-окна браузера);
     учётные данные копируются атомарно с 0600; AGENTS.md/GEMINI.md/hooks.json
     в профиль не попадают никогда (Zero-Canon).
+
+    Модель владения профилем: источник истины при старте — реальный профиль
+    пользователя `~/.gemini`. Мост выполняет однократный атомарный снимок
+    учётных данных с правами 0600 при инициализации процесса под локом.
+    Ротация токенов в реальном профиле подхватывается при следующем
+    перезапуске процесса моста, если копия в реальном профиле не старше
+    файла в <clean-home> (mtime-guard: токен, обновлённый самим agy внутри
+    <clean-home>, не затирается). Состояние сессий и транскрипты пишутся
+    исключительно в изолированный <clean-home> и не загрязняют профиль
+    пользователя.
+
+    Инвариант изоляции: CLEAN_HOME_DIR, BRAIN_DIR и CONV_DIR замкнуты внутри
+    <clean-home>; внешние AGY_BRIDGE_BRAIN/AGY_BRIDGE_CONVERSATIONS отвергаются.
     """
     global _AGY_HOME_INITIALIZED
     with _AGY_HOME_LOCK:
+        clean_home_resolved = _verify_clean_home_root(CLEAN_HOME_DIR)
         if _AGY_HOME_INITIALIZED:
-            return CLEAN_HOME_DIR
+            return clean_home_resolved
+        for state_dir in (BRAIN_DIR, CONV_DIR):
+            try:
+                _assert_inside_clean_home(state_dir)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"BRAIN_DIR/CONV_DIR resolves outside clean-home: {state_dir}"
+                ) from exc
         real_gemini = HOME / ".gemini"
         real_cli = real_gemini / "antigravity-cli"
         clean_gemini = CLEAN_HOME_DIR / ".gemini"
@@ -1186,8 +1400,15 @@ def _prepare_agy_home() -> Path:
         _ensure_private_dir(clean_gemini)
         _ensure_private_dir(clean_gemini_cli)
         for name in ("bin", "builtin"):
-            if (real_cli / name).exists():
-                _ensure_symlink(clean_gemini_cli / name, real_cli / name)
+            src_dir = real_cli / name
+            if src_dir.is_dir():
+                clean_sub = clean_gemini_cli / name
+                # Симлинк всего каталога (наследие прежних версий) допускал бы
+                # сквозное создание файлов в реальном профиле: убираем ссылку,
+                # цель не затрагивается.
+                if clean_sub.is_symlink():
+                    clean_sub.unlink()
+                _mirror_regular_files(src_dir, clean_sub, frozenset())
         for src, dst in (
             (real_gemini / "jetski-standalone-oauth-token", clean_gemini),
             (real_gemini / "projects.json", clean_gemini),
@@ -1195,17 +1416,28 @@ def _prepare_agy_home() -> Path:
             (real_cli / "jetski_state.pbtxt", clean_gemini_cli),
             (real_cli / "settings.json", clean_gemini_cli),
         ):
+            dst_file = dst / src.name
             if src.is_file():
-                _copy_private_atomic(src, dst / src.name)
+                # mtime-guard: более свежий файл в <clean-home> (например, токен,
+                # обновлённый дочерним agy при OAuth-рефреше) не затирается
+                # устаревшей копией из реального профиля. Симлинк на месте копии
+                # не сохраняется (stat пошёл бы по ссылке): он удаляется и файл
+                # копируется заново; сохранённый файл остаётся строго 0600.
+                if dst_file.is_symlink():
+                    dst_file.unlink()
+                if (
+                    not dst_file.exists()
+                    or src.stat().st_mtime >= dst_file.stat().st_mtime
+                ):
+                    _copy_private_atomic(src, dst_file)
+                else:
+                    _assert_inside_clean_home(dst_file)
+                    dst_file.chmod(0o600)
         _ensure_private_dir(clean_gemini_cli / "conversations")
         _ensure_private_dir(clean_gemini_cli / "brain")
-        for base in (CLEAN_HOME_DIR, clean_gemini, clean_gemini_cli):
-            for name in _CANON_FILE_NAMES:
-                canon = base / name
-                if canon.is_symlink() or canon.is_file():
-                    canon.unlink()
+        _clean_canon_files(CLEAN_HOME_DIR)
         _AGY_HOME_INITIALIZED = True
-        return CLEAN_HOME_DIR
+        return clean_home_resolved
 
 
 def _launch_env() -> dict:
@@ -1214,11 +1446,28 @@ def _launch_env() -> dict:
     HOME указывает на изолированный <clean-home> (Zero-Canon); браузер для
     OAuth заблокирован. Прокси-переменные (HTTPS_PROXY/HTTP_PROXY/NO_PROXY)
     выставляет сам лончер agy-cli.sh — мост их не дублирует и не переопределяет.
+
+    agy-cli.sh ищет бинарь (`$HOME/.local/bin/agy.real`) и список разрешённых
+    моделей (`$HOME/.config/agy-launch/allowed-models.txt`) относительно HOME, а
+    в <clean-home> их нет (rc=64 «generation guard» / rc=127). Поэтому пути
+    реального профиля пробрасываются явными AGY_BIN и AGY_ALLOWED_MODELS_FILE;
+    значения, уже заданные в окружении моста, сохраняются (`setdefault`).
     """
     env = os.environ.copy()
     env.pop("AGY_BRIDGE_KEY", None)
     clean_home = str(_prepare_agy_home())
+    # Per-launch Zero-Canon: канон, появившийся после инициализации, удаляется
+    # перед каждым порождением процесса. Корень перепроверяется непосредственно
+    # перед очисткой (подмена на симлинк/другой путь), очистка сериализована.
+    with _AGY_HOME_LOCK:
+        _verify_clean_home_root(CLEAN_HOME_DIR)
+        _clean_canon_files(Path(clean_home))
     env["HOME"] = clean_home
+    env.setdefault("AGY_BIN", str(AGY_BIN))
+    env.setdefault(
+        "AGY_ALLOWED_MODELS_FILE",
+        str(HOME / ".config" / "agy-launch" / "allowed-models.txt"),
+    )
     env["BRIDGE_ZERO_CANON"] = "1"
     env["BROWSER"] = "/usr/bin/false"
     return env
