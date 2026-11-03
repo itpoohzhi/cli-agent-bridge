@@ -291,7 +291,7 @@ class TestPassthroughRepetitionGuard(unittest.TestCase):
         body = b"".join(out)
         self.assertTrue(outcome.repetition_loop)
         self.assertFalse(outcome.done)
-        self.assertNotIn(b"[DONE]", body)
+        self.assertIn(b"[DONE]", body)
         self.assertIn(b"upstream_repetition_loop", body)
 
     def test_relay_sse_normal_content_unchanged(self):

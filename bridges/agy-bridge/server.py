@@ -124,6 +124,7 @@ from core.watchdog import (  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 from core.tool_emulation import (  # noqa: E402
     LiveParserError,
+    RepetitionLoopDetected,
     StreamNormalizer,
     _messages_to_prompt as _core_messages_to_prompt,
     _tool_choice_none,
@@ -5541,6 +5542,7 @@ class _ToolTurn:
         self.calls: list[dict[str, object]] = []
         self.error = ""
         self.ok = True
+        self._is_repetition_loop = False
         self._finished = False
         self._max_calls = _safe_int_env("AGY_MAX_TOOL_CALLS", 32)
         self._max_bytes = _safe_int_env("AGY_MAX_TOOL_BYTES", 10 * 1024 * 1024)
@@ -5620,6 +5622,9 @@ class _ToolTurn:
             self._last_open_chunk_ts = self._last_chunk_ts
         try:
             self._normalizer.feed_text(text)
+        except RepetitionLoopDetected as exc:
+            self._is_repetition_loop = True
+            self.error = str(exc) or type(exc).__name__
         except LiveParserError as exc:
             self.error = str(exc) or type(exc).__name__
         # Проверяем состояние ПОСЛЕ feed_text
@@ -5636,6 +5641,9 @@ class _ToolTurn:
         self._finished = True
         try:
             self._normalizer.finish()
+        except RepetitionLoopDetected as exc:
+            self._is_repetition_loop = True
+            self.error = str(exc) or type(exc).__name__
         except LiveParserError as exc:
             self.error = str(exc) or type(exc).__name__
 
@@ -5660,9 +5668,17 @@ class _ToolTurn:
         return False
 
     def error_body(self) -> dict[str, Any]:
+        err_msg = self.error or ""
+        if getattr(self, "_is_repetition_loop", False) or "upstream_repetition_loop" in err_msg:
+            return {
+                "message": "upstream repetition loop detected",
+                "detail": err_msg[:500],
+                "type": "upstream_repetition_loop",
+                "code": 502,
+            }
         return {
             "message": "agy emitted a malformed tool call",
-            "detail": self.error[:500],
+            "detail": err_msg[:500],
             "type": "tool_call_parse_error",
             "code": 502,
         }
