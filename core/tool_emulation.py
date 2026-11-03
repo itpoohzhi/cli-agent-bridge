@@ -1553,6 +1553,16 @@ class StreamNormalizer:
     def tool_calls(self) -> list[dict]:
         return list(self._calls)
 
+    def has_open_tool_call(self) -> bool:
+        """Есть ли незакрытый блок вызова инструмента, рассуждения или удержанный префикс."""
+        if self._state in ("tool", "reasoning") or self._parser.has_open_tool_call():
+            return True
+        if self._state == "text" and self._buf:
+            literals = [lit for lit, _k, _t in self._candidates]
+            if self._partial_prefix_len(literals) > 0:
+                return True
+        return False
+
     def feed(self, text: str) -> None:
         self.feed_text(text)
 

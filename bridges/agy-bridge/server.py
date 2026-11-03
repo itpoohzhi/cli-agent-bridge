@@ -5496,13 +5496,35 @@ def _with_tools_protocol(prompt: str, tools: list, tool_choice: object) -> str:
     return f"{section}\n\n{prompt}" if prompt else section
 
 
+def _safe_float_env(name: str, default: float) -> float:
+    val = os.getenv(name)
+    if not val:
+        return default
+    try:
+        parsed = float(val)
+        return parsed if (math.isfinite(parsed) and parsed > 0.0) else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    val = os.getenv(name)
+    if not val:
+        return default
+    try:
+        parsed = int(val)
+        return parsed if parsed > 0 else default
+    except (ValueError, TypeError):
+        return default
+
+
 @final
 class _ToolTurn:
-    """Эмуляция OpenAI function calling одного хода поверх текстового потока agy.
+    """Эмуляция одного хода OpenAI function calling поверх потока agy.
 
-    Разбор и санитизация — только ядром (`StreamNormalizer`, `sanitize_tool_call`);
-    класс связывает их с sink-ами сериализатора (SSE/JSON) и сообщает `_execute`,
-    что ход завершён (`turn_complete`). Sink возвращает False, если клиент ушёл.
+    Закрытие отдельного вызова не завершает ход: ожидаем следующего
+    вызова, EOF либо периода тишины без открытого блока. Любая активность
+    upstream (текст, reasoning, tool_trace) сбрасывает таймер тишины.
     """
 
     def __init__(
@@ -5520,6 +5542,13 @@ class _ToolTurn:
         self.error = ""
         self.ok = True
         self._finished = False
+        self._max_calls = _safe_int_env("AGY_MAX_TOOL_CALLS", 32)
+        self._max_bytes = _safe_int_env("AGY_MAX_TOOL_BYTES", 10 * 1024 * 1024)
+        self._settle_timeout_s = _safe_float_env("AGY_TOOL_SETTLE_TIMEOUT_S", 5.0)
+        self._stall_timeout_s = _safe_float_env("AGY_TOOL_CALL_STALL_TIMEOUT_S", 30.0)
+        self._total_bytes = 0
+        self._last_chunk_ts = time.monotonic()
+        self._last_open_chunk_ts = 0.0
         self._normalizer = StreamNormalizer(
             self._content, self._reasoning, self._call, strict_live=True
         )
@@ -5532,6 +5561,19 @@ class _ToolTurn:
     def reasoning(self) -> str:
         return self._normalizer.reasoning_content
 
+    def notify_activity(self) -> None:
+        """Сбросить таймеры тишины при полезной активности upstream."""
+        self._last_chunk_ts = time.monotonic()
+        if self._normalizer.has_open_tool_call():
+            self._last_open_chunk_ts = self._last_chunk_ts
+
+    def feed_reasoning(self, text: str) -> bool:
+        """Принять reasoning от upstream, сбросив таймер тишины хода."""
+        self.notify_activity()
+        if self.ok and not self._on_reasoning(text):
+            self.ok = False
+        return self.ok
+
     def _content(self, text: str) -> None:
         if self.ok and not self._on_content(text):
             self.ok = False
@@ -5541,6 +5583,8 @@ class _ToolTurn:
             self.ok = False
 
     def _call(self, call: dict[str, Any]) -> None:
+        if len(self.calls) >= self._max_calls:
+            raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
         entry: dict[str, object] = {
             "index": len(self.calls),
             "id": str(call.get("id") or "call_" + uuid.uuid4().hex[:24]),
@@ -5556,21 +5600,37 @@ class _ToolTurn:
             dict(cast("dict[str, object]", item), index=len(self.calls) + offset)
             for offset, item in enumerate(sanitize_tool_call(entry, self._schemas))
         ]
+        if len(self.calls) + len(published) > self._max_calls:
+            raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
         self.calls.extend(published)
         if self.ok and not self._on_calls(published):
             self.ok = False
 
     def feed(self, text: str) -> bool:
-        """Текстовая дельта хода; повреждённый блок фиксируется в `error` (fail-closed)."""
-        if not (self.error or self._finished) and text:
-            try:
-                self._normalizer.feed_text(text)
-            except LiveParserError as exc:
-                self.error = str(exc) or type(exc).__name__
+        """Принять дельту; ошибки разбора и превышение лимитов — fail-closed."""
+        if self.error or self._finished or not text:
+            return self.ok
+        chunk_bytes = len(text.encode("utf-8"))
+        if self._total_bytes + chunk_bytes > self._max_bytes:
+            self.error = f"tool call buffer exceeded max bytes ({self._max_bytes})"
+            return self.ok
+        self._total_bytes += chunk_bytes
+        self.notify_activity()
+        if self._normalizer.has_open_tool_call():
+            self._last_open_chunk_ts = self._last_chunk_ts
+        try:
+            self._normalizer.feed_text(text)
+        except LiveParserError as exc:
+            self.error = str(exc) or type(exc).__name__
+        # Проверяем состояние ПОСЛЕ feed_text
+        if self._normalizer.has_open_tool_call():
+            self._last_open_chunk_ts = self._last_chunk_ts
+        else:
+            self._last_open_chunk_ts = 0.0
         return self.ok
 
     def finish(self) -> None:
-        """Конец хода: удержанный хвост уходит в content, незакрытый блок — в `error`."""
+        """На EOF сбросить хвост; незакрытый блок зафиксировать как ошибку."""
         if self.error or self._finished:
             return
         self._finished = True
@@ -5580,8 +5640,24 @@ class _ToolTurn:
             self.error = str(exc) or type(exc).__name__
 
     def turn_complete(self) -> bool:
-        """Ход окончен: вызов инструмента закрыт либо поток повреждён."""
-        return bool(self.calls or self.error)
+        """Завершить ход при ошибке или после тишины вне блока вызова."""
+        if self.error:
+            return True
+        now = time.monotonic()
+        if self._normalizer.has_open_tool_call():
+            if (
+                self._last_open_chunk_ts > 0.0
+                and now - self._last_open_chunk_ts >= self._stall_timeout_s
+            ):
+                self.error = (
+                    "tool call block stalled without progress for "
+                    f"{self._stall_timeout_s:g}s"
+                )
+                return True
+            return False
+        if self.calls:
+            return now - self._last_chunk_ts >= self._settle_timeout_s
+        return False
 
     def error_body(self) -> dict[str, Any]:
         return {
@@ -6821,7 +6897,7 @@ class Handler(BaseHTTPRequestHandler):
             return out
 
         while True:
-            if turn_complete is not None and turn_complete():
+            if turn_complete is not None and run.q.empty() and turn_complete():
                 stopped = state("done", 0)
                 stopped["tool_turn_stop"] = True
                 return stopped
@@ -8144,11 +8220,22 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         ctx["finalize_timeout"] = finalize_timeout
+
+        def _json_tool_trace_wrapped(payload: Any) -> bool:
+            if tool_turn is not None:
+                tool_turn.notify_activity()
+            return on_tool_trace(payload)
+
+        def _json_reasoning_wrapped(text: str) -> bool:
+            if tool_turn is not None:
+                return tool_turn.feed_reasoning(text)
+            return True
+
         out = self._run_once(
             ctx,
             tool_turn.feed if tool_turn is not None else (lambda _v: True),
-            on_tool_trace,
-            lambda _r: True,
+            _json_tool_trace_wrapped,
+            _json_reasoning_wrapped,
             None,
         )
         if out.get("state") == "client_gone":
@@ -8375,7 +8462,18 @@ class Handler(BaseHTTPRequestHandler):
         ctx["finalize_timeout"] = finalize_timeout
         if not resilience and not ctx.get("step_job_id") and not commit():
             return
-        out = self._run_once(ctx, stream_text, on_tool_trace, on_reasoning, keepalive)
+
+        def _sse_tool_trace_wrapped(payload: Any) -> bool:
+            if tool_turn is not None:
+                tool_turn.notify_activity()
+            return on_tool_trace(payload)
+
+        stream_reasoning = (
+            tool_turn.feed_reasoning if tool_turn is not None else on_reasoning
+        )
+        out = self._run_once(
+            ctx, stream_text, _sse_tool_trace_wrapped, stream_reasoning, keepalive
+        )
         if disconnected or out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return
