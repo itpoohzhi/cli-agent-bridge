@@ -12,6 +12,7 @@ import base64
 import binascii
 import json
 import re
+import unicodedata
 import uuid
 from dataclasses import replace
 from typing import Any, Callable
@@ -641,8 +642,11 @@ def _strip_code_for_guard(
 
 
 def _is_separator_token(token: str) -> bool:
-    """Токен только из символов Markdown-разделителей (`---`, `===`, `***`)."""
-    return bool(token) and all(char in "-=*_" for char in token)
+    """Токен только из символов пунктуации и табличных разделителей (Markdown, списки, запятые)."""
+    return bool(token) and all(
+        unicodedata.category(c).startswith("P") or c in "-=*_|~" or c.isspace()
+        for c in token
+    )
 
 
 class RepetitionGuard:
@@ -738,8 +742,10 @@ class RepetitionGuard:
         prev: str | None = None
         run = 0
         for token in cleaned.split():
-            if len(token) > self.max_token_len or _is_separator_token(token):
+            if len(token) > self.max_token_len:
                 prev, run = None, 0
+                continue
+            if _is_separator_token(token):
                 continue
             if token == prev:
                 run += 1
@@ -752,7 +758,7 @@ class RepetitionGuard:
         for pat_len in range(1, max_pat + 1):
             pattern = tail[-pat_len:]
             core = pattern.strip()
-            if not core or set(core) <= set("-=*_"):
+            if not core or _is_separator_token(core):
                 continue
             if len(set(core)) == 1 and not core.isalnum():
                 continue

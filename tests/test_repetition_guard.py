@@ -112,6 +112,94 @@ class TestRepetitionGuard(unittest.TestCase):
         _, detected = guard.feed(("---\n" * 30) + ("===\n" * 30) + ("***\n" * 30))
         self.assertFalse(detected, "markdown-разделители не детектятся")
 
+        # Списки инлайн-кода через запятую (сессия 73c65940, шаг 95)
+        guard = RepetitionGuard()
+        tags = ", ".join(f"`@user_{i}`" for i in range(30))
+        _, detected = guard.feed(tags)
+        self.assertFalse(detected, "список инлайн-кода через запятую не должен триггерить FP")
+
+        # Списки обычных тегов через запятую без кодовых кавычек
+        guard = RepetitionGuard()
+        plain_tags = ", ".join(f"@user_{i}" for i in range(30))
+        _, detected = guard.feed(plain_tags)
+        self.assertFalse(detected, "список обычных тегов через запятую не должен триггерить FP")
+
+    def test_repetition_guard_exact_session_73c65940_step_95_reproduction(self):
+        # Дословный фрагмент шага 95 из сессии session-73c65940
+        verbatim_step_95 = (
+            "Аккаунты для мониторинга: "
+            "`@AIatMeta`, `@Alibaba_Qwen`, `@DrJimFan`, `@karpathy`, `@ylecun`, "
+            "`@sama`, `@gdb`, `@ilyasut`, `@AnthropicAI`, `@GoogleDeepMind`, "
+            "`@OpenAI`, `@MistralAI`, `@Cohere`, `@hwchase17`, `@swyx`, "
+            "`@bindureddy`, `@emostaque`, `@rasbt`, `@hardmaru`, `@shaboris`, "
+            "`@alexandr_wang`, `@natfriedman`"
+        )
+        guard = RepetitionGuard()
+        _, detected = guard.feed(verbatim_step_95)
+        self.assertFalse(detected, "Дословный шаг 95 не должен приводить к FP")
+
+        # Проверка через ToolCallParser (сквозной путь, вызывавший LiveParserError -> 502 malformed tool call)
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed(verbatim_step_95)
+        p.finish()
+        self.assertEqual("".join(c.content), verbatim_step_95)
+
+        # Таблицы Markdown с вертикальными чертами
+        guard = RepetitionGuard()
+        table_row = "| " + " | ".join(f"col_{i}" for i in range(25)) + " |\n"
+        _, detected = guard.feed(table_row * 3)
+        self.assertFalse(detected, "вертикальные черты Markdown не должны триггерить FP")
+
+    def test_repetition_guard_detects_emoji_loop(self):
+        guard = RepetitionGuard(max_repeats=10)
+        _, detected = guard.feed("🚀 " * 9)
+        self.assertFalse(detected)
+        _, detected = guard.feed("🚀 ")
+        self.assertTrue(detected)
+
+    def test_repetition_guard_detects_repeated_words_with_punctuation(self):
+        guard = RepetitionGuard(max_repeats=10)
+        _, detected = guard.feed("hello, " * 9)
+        self.assertFalse(detected)
+        _, detected = guard.feed("hello, ")
+        self.assertTrue(detected)
+
+    def test_repetition_guard_detects_repeated_words_with_standalone_separators(self):
+        # Проверяем, что когда разделитель идёт отдельным токеном, счётчик не сбрасывается и цикл ловится
+        guard = RepetitionGuard(max_repeats=10)
+        _, detected = guard.feed("word , " * 9)
+        self.assertFalse(detected)
+        _, detected = guard.feed("word , ")
+        self.assertTrue(detected)
+
+        # Разделитель точка с запятой
+        guard = RepetitionGuard(max_repeats=10)
+        _, detected = guard.feed("item ; " * 9)
+        self.assertFalse(detected)
+        _, detected = guard.feed("item ; ")
+        self.assertTrue(detected)
+
+        # Разделитель дефис
+        guard = RepetitionGuard(max_repeats=10)
+        _, detected = guard.feed("token - " * 9)
+        self.assertFalse(detected)
+        _, detected = guard.feed("token - ")
+        self.assertTrue(detected)
+
+    def test_repetition_guard_punctuation_edge_cases(self):
+        # Естественные цепочки многоточий и разделителей не должны вызывать ложных срабатываний
+        guard = RepetitionGuard()
+        text = "... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ..."
+        _, detected = guard.feed(text)
+        self.assertFalse(detected, "цепочки многоточий не должны триггерить FP")
+
+        # Комбинации знаков препинания (?! , ; -) в естественном тексте
+        guard = RepetitionGuard()
+        mixed_punct = "!? ... ,,, ;;; --- ___ " * 10
+        _, detected = guard.feed(mixed_punct)
+        self.assertFalse(detected, "смешанная пунктуация не должна триггерить FP")
+
     def test_repetition_guard_loop_outside_code_still_detected(self):
         guard = RepetitionGuard()
         text = "```\nsome code\n```\n" + "\n\n_placeholder" * 25
