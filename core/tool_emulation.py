@@ -644,7 +644,7 @@ def _strip_code_for_guard(
 def _is_separator_token(token: str) -> bool:
     """Токен только из символов пунктуации и табличных разделителей (Markdown, списки, запятые)."""
     return bool(token) and all(
-        unicodedata.category(c).startswith("P") or c in "-=*_|~"
+        unicodedata.category(c).startswith("P") or c in "-=*_|~" or c.isspace()
         for c in token
     )
 
@@ -742,8 +742,10 @@ class RepetitionGuard:
         prev: str | None = None
         run = 0
         for token in cleaned.split():
-            if len(token) > self.max_token_len or _is_separator_token(token):
+            if len(token) > self.max_token_len:
                 prev, run = None, 0
+                continue
+            if _is_separator_token(token):
                 continue
             if token == prev:
                 run += 1

@@ -8398,7 +8398,9 @@ class Handler(BaseHTTPRequestHandler):
 
         def keepalive() -> bool:
             if not ctx["stream_committed"]:
-                return commit() and emit(": keepalive\n\n")
+                if ctx.get("step_job_id"):
+                    return commit() and emit(": keepalive\n\n")
+                return not disconnected
             return emit(": keepalive\n\n")
 
         def finalize_timeout(out: dict) -> None:
