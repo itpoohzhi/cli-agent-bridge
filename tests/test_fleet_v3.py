@@ -566,5 +566,306 @@ class TestFleetCheckParity(unittest.TestCase):
         self.assertIn("model_invalid", result["checks"][0]["errors"][0])
 
 
+
+
+import importlib
+import os
+import sys
+import time
+from hashlib import sha256
+from unittest import mock
+
+
+class _CredentialsReportRecorder:
+    def __init__(self):
+        self.calls = []
+
+    def add(self, name, errs, details=None):
+        self.calls.append((name, list(errs), details))
+
+
+class TestProviderCredentialsCheck(unittest.TestCase):
+    SECRET_A = "sk-test-SECRET-aaaaaaaaaaaaaaaa"
+    SECRET_B = "sk-test-SECRET-bbbbbbbbbbbbbbbb"
+    SECRET_SHELL = "sk-test-SECRET-shell-cccccccccc"
+    KEY = "DSH_TEST_FLEET_KEY_A"
+    NOT_PI = "DSH_TEST_FLEET_NOT_PI"
+
+    @classmethod
+    def setUpClass(cls):
+        root = str(Path(__file__).resolve().parents[1])
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        cls.fc = importlib.import_module("fleet_check")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    @staticmethod
+    def lines(*parts):
+        return "\n".join(parts) + "\n"
+
+    @staticmethod
+    def full_digest(value):
+        return sha256(value.encode("utf-8")).hexdigest()
+
+    def digest8(self, value):
+        return self.full_digest(value)[:8]
+
+    def write(self, name, text):
+        path = self.tmp / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def profiles(self, *names):
+        providers = [{"id": n, "type": "llm-pi-ai", "apiKeyEnv": n} for n in names]
+        providers.append({"id": "other", "type": "openai", "apiKeyEnv": self.NOT_PI})
+        return {"desktop": {"providers": providers}, "web": {}}
+
+    def check(self, env_lines, refs_values, environ=None, profiles=None):
+        env_path = self.write(".env", self.lines(*env_lines))
+        refs_lines = ["  %s: %s" % kv for kv in refs_values]
+        creds_path = self.write(
+            "credentials.yaml", self.lines("refs:", *refs_lines)
+        )
+        report = _CredentialsReportRecorder()
+        self.fc.check_provider_credentials(
+            profiles or self.profiles(self.KEY),
+            env_path,
+            creds_path,
+            report,
+            environ={} if environ is None else environ,
+        )
+        self.assertEqual(len(report.calls), 1)
+        name, errs, details = report.calls[0]
+        self.assertEqual(name, "provider_credentials")
+        return errs, {v["name"]: v for v in details["variables"]}
+
+    def run_main(self, argv, names=None, env_vars=None):
+        catalogue = self.write("catalogue.json", "{}")
+        profile = self.profiles(*(names or (self.KEY,)))["desktop"]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.multiple(
+            self.fc,
+            check_catalogue=mock.DEFAULT,
+            droid_scope=mock.MagicMock(side_effect=lambda cat: cat),
+            check_policy=mock.DEFAULT,
+            check_efforts=mock.DEFAULT,
+            check_profile=mock.MagicMock(return_value=profile),
+            check_default_compat=mock.DEFAULT,
+            check_opus=mock.DEFAULT,
+        ), mock.patch.dict(os.environ, env_vars or {}), contextlib.redirect_stdout(
+            out
+        ), contextlib.redirect_stderr(err):
+            code = self.fc.main(["--catalogue", catalogue] + argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def cli_files(self, env_value, refs_value):
+        env_path = self.write(
+            ".env", self.lines("export %s='%s'" % (self.KEY, env_value))
+        )
+        creds_path = self.write(
+            "credentials.yaml",
+            self.lines("refs:", "  %s: %s" % (self.KEY, refs_value)),
+        )
+        return env_path, creds_path
+
+    def assert_no_secrets(self, *texts):
+        for text in texts:
+            for secret in (self.SECRET_A, self.SECRET_B, self.SECRET_SHELL):
+                self.assertNotIn(secret, text)
+                self.assertNotIn(self.full_digest(secret), text)
+
+    def test_status_ok(self):
+        errs, found = self.check(
+            ["%s=%s" % (self.KEY, self.SECRET_A)], [(self.KEY, self.SECRET_A)]
+        )
+        self.assertEqual(errs, [])
+        item = found[self.KEY]
+        self.assertEqual(item["status"], "ok")
+        self.assertEqual(item["env_sha256_8"], self.digest8(self.SECRET_A))
+        self.assertEqual(item["refs_sha256_8"], self.digest8(self.SECRET_A))
+        self.assertNotIn(self.NOT_PI, found)
+
+    def test_status_missing_in_env(self):
+        for env_lines in (["OTHER_VAR=1"], ["%s=" % self.KEY]):
+            with self.subTest(env_lines=env_lines):
+                errs, found = self.check(env_lines, [(self.KEY, self.SECRET_A)])
+                self.assertEqual(found[self.KEY]["status"], "missing_in_env")
+                self.assertIn("%s: missing_in_env" % self.KEY, errs)
+
+    def test_status_missing_in_refs(self):
+        env_lines = ["%s=%s" % (self.KEY, self.SECRET_A)]
+        for refs in ([], [("OTHER_VAR", "x")], [(self.KEY, '""')]):
+            with self.subTest(refs=refs):
+                errs, found = self.check(env_lines, refs)
+                self.assertEqual(found[self.KEY]["status"], "missing_in_refs")
+                self.assertIn("%s: missing_in_refs" % self.KEY, errs)
+
+    def test_status_digest_mismatch(self):
+        errs, found = self.check(
+            ["%s=%s" % (self.KEY, self.SECRET_A)], [(self.KEY, self.SECRET_B)]
+        )
+        item = found[self.KEY]
+        self.assertEqual(item["status"], "digest_mismatch")
+        self.assertNotEqual(item["env_sha256_8"], item["refs_sha256_8"])
+        self.assertIn("%s: digest_mismatch" % self.KEY, errs)
+
+    def test_status_shadowed_by_environ(self):
+        env_lines = ["%s=%s" % (self.KEY, self.SECRET_A)]
+        refs = [(self.KEY, self.SECRET_A)]
+        errs, found = self.check(env_lines, refs, environ={self.KEY: self.SECRET_SHELL})
+        item = found[self.KEY]
+        self.assertEqual(item["status"], "shadowed_by_environ")
+        self.assertEqual(item["environ_sha256_8"], self.digest8(self.SECRET_SHELL))
+        self.assertIn("%s: shadowed_by_environ" % self.KEY, errs)
+        for same in ({self.KEY: self.SECRET_A}, {self.KEY: ""}):
+            with self.subTest(environ=sorted(same)):
+                errs, found = self.check(env_lines, refs, environ=same)
+                self.assertEqual(errs, [])
+                self.assertEqual(found[self.KEY]["status"], "ok")
+
+    def test_collects_pi_providers_from_both_profiles(self):
+        key_d, key_w = "DSH_TEST_FLEET_KEY_D", "DSH_TEST_FLEET_KEY_W"
+        profiles = {
+            "desktop": {"providers": [{"type": "llm-pi-ai", "apiKeyEnv": key_d}]},
+            "web": {
+                "llm-pi-ai": {"apiKeyEnv": key_w},
+                "other": {"type": "openai", "apiKeyEnv": self.NOT_PI},
+            },
+        }
+        errs, found = self.check(
+            ["%s=%s" % (k, self.SECRET_A) for k in (key_d, key_w)],
+            [(k, self.SECRET_A) for k in (key_d, key_w)],
+            profiles=profiles,
+        )
+        self.assertEqual(errs, [])
+        self.assertEqual(set(found), {key_d, key_w})
+
+    def test_unreadable_files_are_reported_without_paths_or_content(self):
+        report = _CredentialsReportRecorder()
+        self.fc.check_provider_credentials(
+            self.profiles(self.KEY),
+            str(self.tmp / "absent.env"),
+            str(self.tmp / "absent.yaml"),
+            report,
+            environ={},
+        )
+        _, errs, details = report.calls[0]
+        self.assertIn("env_unreadable: FileNotFoundError", errs)
+        self.assertIn("credentials_unreadable: FileNotFoundError", errs)
+        self.assertEqual(details["variables"][0]["status"], "missing_in_env")
+
+    def test_dotenv_parser_handles_quotes_export_and_comments(self):
+        path = self.write(
+            ".env",
+            self.lines(
+                "# comment",
+                "",
+                'export DSH_TEST_A="value a"',
+                "DSH_TEST_B='value b'",
+                "DSH_TEST_C=value-c # tail",
+                "  DSH_TEST_D = spaced ",
+                "no-equals-line",
+                "DSH_TEST_E=",
+            ),
+        )
+        self.assertEqual(
+            self.fc._parse_dotenv(path),
+            {
+                "DSH_TEST_A": "value a",
+                "DSH_TEST_B": "value b",
+                "DSH_TEST_C": "value-c",
+                "DSH_TEST_D": "spaced",
+                "DSH_TEST_E": "",
+            },
+        )
+
+    def test_credentials_parser_reads_only_refs_section(self):
+        path = self.write(
+            "credentials.yaml",
+            self.lines(
+                "version: 1",
+                "refs:  # secrets",
+                '  DSH_TEST_A: "value a"',
+                "  'DSH_TEST_B': value-b",
+                "    nested: ignored",
+                "other:",
+                "  DSH_TEST_C: nope",
+            ),
+        )
+        self.assertEqual(
+            self.fc._parse_credentials_refs(path),
+            {"DSH_TEST_A": "value a", "DSH_TEST_B": "value-b"},
+        )
+
+    def test_report_contains_no_secret_values(self):
+        errs, found = self.check(
+            ["%s=%s" % (self.KEY, self.SECRET_A)],
+            [(self.KEY, self.SECRET_B)],
+            environ={self.KEY: self.SECRET_SHELL},
+        )
+        dump = json.dumps([errs, found])
+        self.assert_no_secrets(dump)
+        for item in found.values():
+            for field in ("env_sha256_8", "refs_sha256_8", "environ_sha256_8"):
+                self.assertTrue(item[field] is None or len(item[field]) == 8)
+
+    def test_main_runs_check_with_env_and_credentials_flags(self):
+        env_path, creds_path = self.cli_files(self.SECRET_A, self.SECRET_A)
+        code, out, err = self.run_main(["--env", env_path, "--credentials", creds_path])
+        self.assertEqual(code, 0, out)
+        result = json.loads(out)
+        self.assertTrue(result["ok"])
+        self.assertIn("provider_credentials", out)
+        self.assert_no_secrets(out, err)
+
+    def test_main_reports_mismatch_without_leaking_secrets(self):
+        env_path, creds_path = self.cli_files(self.SECRET_A, self.SECRET_B)
+        code, out, err = self.run_main(["--env", env_path, "--credentials", creds_path])
+        self.assertEqual(code, 1)
+        result = json.loads(out)
+        self.assertFalse(result["ok"])
+        self.assertIn("digest_mismatch", out)
+        self.assertIn(self.KEY, out)
+        self.assert_no_secrets(out, err)
+
+    def test_main_single_flag_takes_other_path_from_environment(self):
+        env_path, creds_path = self.cli_files(self.SECRET_A, self.SECRET_A)
+        code, out, err = self.run_main(
+            ["--env", env_path], env_vars={"DSH_CREDENTIALS_PATH": creds_path}
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("provider_credentials", out)
+        self.assert_no_secrets(out, err)
+
+    def test_main_check_credentials_flag_uses_environment_defaults(self):
+        env_path, creds_path = self.cli_files(self.SECRET_A, self.SECRET_B)
+        code, out, err = self.run_main(
+            ["--check-credentials"],
+            env_vars={"DSH_ENV_PATH": env_path, "DSH_CREDENTIALS_PATH": creds_path},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("digest_mismatch", out)
+        self.assert_no_secrets(out, err)
+
+    def test_main_without_flags_skips_credentials_check(self):
+        code, out, err = self.run_main([])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("provider_credentials", out)
+
+    def test_check_completes_within_200ms(self):
+        names = ["DSH_TEST_FLEET_KEY_%02d" % i for i in range(20)]
+        env_lines = ["%s=%s-%d" % (n, self.SECRET_A, i) for i, n in enumerate(names)]
+        refs = [(n, "%s-%d" % (self.SECRET_A, i)) for i, n in enumerate(names)]
+        start = time.perf_counter()
+        errs, found = self.check(env_lines, refs, profiles=self.profiles(*names))
+        elapsed = time.perf_counter() - start
+        self.assertEqual(errs, [])
+        self.assertEqual(len(found), 20)
+        self.assertLessEqual(elapsed, 0.2)
+
 if __name__ == "__main__":
     unittest.main()
