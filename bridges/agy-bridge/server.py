@@ -3433,14 +3433,15 @@ def _graceful_finish_reason() -> str:
     Приоритет: валидный AGY_GRACEFUL_TIMEOUT_FINISH_REASON, затем
     graceful_timeout_finish_reason из dynamic_config.json, затем 'stop'.
     Значение 'max_tokens' нормализуется в 'length'. Невалидный непустой env
-    переопределяет конфиг и даёт 'stop'.
+    не переопределяет конфиг.
     """
     raw_env = os.getenv("AGY_GRACEFUL_TIMEOUT_FINISH_REASON")
     if raw_env is not None and raw_env.strip():
         s = raw_env.strip().lower()
         if s in ("length", "max_tokens"):
             return "length"
-        return "stop"
+        if s == "stop":
+            return "stop"
     snap = _runtime_snapshot()
     val = snap.graceful_timeout_finish_reason.strip().lower()
     if val in ("length", "max_tokens"):
