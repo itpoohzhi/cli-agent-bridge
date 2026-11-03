@@ -943,6 +943,7 @@ class _Fixture:
     tmp: Path
     brain: Path
     conv: Path
+    clean_home: Path
     agy_bin: Path
     config: Path
     launcher: Path
@@ -956,21 +957,27 @@ class _Fixture:
         self.env_saved = {}
         self.writers = []
         self.tmp = Path(tempfile.mkdtemp(prefix="agy-rt-"))
-        self.brain = self.tmp / "brain"
-        self.conv = self.tmp / "conv"
+        # <clean-home> фикстуры: BRAIN_DIR/CONV_DIR обязаны лежать внутри него.
+        self.clean_home = self.tmp / "agy-home"
+        self.brain = self.clean_home / "brain"
+        self.conv = self.clean_home / "conv"
         self.agy_bin = self.tmp / "agy.real"
         self.config = self.tmp / "dynamic_config.json"
         self.launcher = self.tmp / "fake-agy.py"
         self.scenario = self.tmp / "scenario.json"
 
     def __enter__(self) -> _Fixture:
-        self.brain.mkdir()
-        self.conv.mkdir()
+        self.brain.mkdir(parents=True)
+        self.conv.mkdir(parents=True)
         _ = self.agy_bin.write_text("agy-fixture-binary", encoding="utf-8")
         _ = self.launcher.write_text(
             "#!" + sys.executable + "\n" + _FAKE_AGY_SOURCE, encoding="utf-8"
         )
         self.launcher.chmod(0o755)
+        self.patch("HOME", self.tmp / "home")
+        self.patch("CLEAN_HOME_DIR", self.clean_home)
+        self.patch("_AGY_HOME_INITIALIZED", False)
+        self.patch("_VERIFIED_CLEAN_HOME", None)
         self.patch("BRAIN_DIR", self.brain)
         self.patch("CONV_DIR", self.conv)
         self.patch("AGY_BIN", str(self.agy_bin))
