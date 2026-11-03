@@ -688,6 +688,151 @@ def check_image_census(path, cat, profiles, report):
     report.add("image_census", errs, info)
 
 
+
+import hashlib
+
+PI_PROVIDER_KIND = "llm-pi-ai"
+DEFAULT_DSH_ENV = "~/.dsh/.env"
+DEFAULT_DSH_CREDENTIALS = "~/.dsh/.credentials.yaml"
+
+
+def _unquote(value):
+    value = value.strip()
+    if value[:1] in ("'", '"'):
+        end = value.find(value[0], 1)
+        if end != -1:
+            return value[1:end]
+    cut = value.find(" #")
+    if cut != -1:
+        value = value[:cut]
+    return value.strip()
+
+
+def _parse_dotenv(path):
+    """KEY=VALUE с кавычками и префиксом export; бросает OSError/ValueError."""
+    values = {}
+    with open(path, "r", encoding="utf-8-sig") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].lstrip()
+            key, sep, value = line.partition("=")
+            key = key.strip()
+            if sep and key:
+                values[key] = _unquote(value)
+    return values
+
+
+def _parse_credentials_refs(path):
+    """Плоская секция refs: в YAML без внешних зависимостей."""
+    refs = {}
+    in_refs = False
+    indent = None
+    with open(path, "r", encoding="utf-8-sig") as fh:
+        for raw in fh:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not raw[0].isspace():
+                in_refs = stripped.split("#", 1)[0].strip() == "refs:"
+                indent = None
+                continue
+            if not in_refs:
+                continue
+            width = len(raw) - len(raw.lstrip())
+            if indent is None:
+                indent = width
+            if width != indent:
+                continue
+            key, sep, value = stripped.partition(":")
+            key = _unquote(key)
+            if sep and key:
+                refs[key] = _unquote(value)
+    return refs
+
+
+def _digest(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _short(digest):
+    return digest[:8] if digest else None
+
+
+def _collect_api_key_envs(node, inherited=False, found=None):
+    # apiKeyEnv берём у словарей с маркером llm-pi-ai или внутри ключа llm-pi-ai
+    if found is None:
+        found = set()
+    if isinstance(node, dict):
+        markers = [v for v in node.values() if isinstance(v, str)]
+        name = node.get("apiKeyEnv")
+        if (inherited or PI_PROVIDER_KIND in markers) and isinstance(name, str):
+            if name.strip():
+                found.add(name.strip())
+        for key, child in node.items():
+            _collect_api_key_envs(child, inherited or key == PI_PROVIDER_KIND, found)
+    elif isinstance(node, list):
+        for child in node:
+            _collect_api_key_envs(child, inherited, found)
+    return found
+
+
+def check_provider_credentials(
+    profiles, env_path, credentials_path, report, environ=None
+):
+    """Read-only сверка apiKeyEnv провайдеров llm-pi-ai с .env и refs.
+
+    В отчёт попадают только имена, статусы и первые 8 hex SHA-256.
+    """
+    environ = os.environ if environ is None else environ
+    errs = []
+    names = set()
+    for profile in (profiles or {}).values():
+        _collect_api_key_envs(profile, False, names)
+    try:
+        env_values = _parse_dotenv(env_path)
+    except (OSError, ValueError) as exc:
+        env_values = {}
+        errs.append("env_unreadable: %s" % type(exc).__name__)
+    try:
+        refs = _parse_credentials_refs(credentials_path)
+    except (OSError, ValueError) as exc:
+        refs = {}
+        errs.append("credentials_unreadable: %s" % type(exc).__name__)
+    variables = []
+    for name in sorted(names):
+        env_val = env_values.get(name) or ""
+        ref_val = refs.get(name) or ""
+        shell_val = environ.get(name) or ""
+        env_dg = _digest(env_val) if env_val else None
+        ref_dg = _digest(ref_val) if ref_val else None
+        shell_dg = _digest(shell_val) if shell_val else None
+        if env_dg is None:
+            status = "missing_in_env"
+        elif ref_dg is None:
+            status = "missing_in_refs"
+        elif env_dg != ref_dg:
+            status = "digest_mismatch"
+        elif shell_dg is not None and shell_dg != env_dg:
+            status = "shadowed_by_environ"
+        else:
+            status = "ok"
+        variables.append(
+            {
+                "name": name,
+                "status": status,
+                "env_sha256_8": _short(env_dg),
+                "refs_sha256_8": _short(ref_dg),
+                "environ_sha256_8": _short(shell_dg),
+            }
+        )
+        if status != "ok":
+            errs.append("%s: %s" % (name, status))
+    report.add("provider_credentials", errs, {"variables": variables})
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Проверка каталога Droid-флота и профилей DSH (C-07)."
@@ -700,6 +845,21 @@ def main(argv=None):
     parser.add_argument("--web-dump", default=None)
     parser.add_argument("--live-droid", action="store_true")
     parser.add_argument("--image-census", default=None)
+    parser.add_argument(
+        "--env",
+        default=None,
+        help="путь к .env (по умолчанию DSH_ENV_PATH); включает проверку ключей провайдеров",
+    )
+    parser.add_argument(
+        "--credentials",
+        default=None,
+        help="путь к credentials YAML (по умолчанию DSH_CREDENTIALS_PATH); включает проверку ключей провайдеров",
+    )
+    parser.add_argument(
+        "--check-credentials",
+        action="store_true",
+        help="проверить ключи провайдеров по путям из DSH_ENV_PATH / DSH_CREDENTIALS_PATH",
+    )
     args = parser.parse_args(argv)
 
     report = Report()
@@ -732,6 +892,20 @@ def main(argv=None):
             check_live_droid(cat, launcher, report)
         if args.image_census is not None:
             check_image_census(args.image_census, cat, profiles, report)
+        if (
+            args.env is not None
+            or args.credentials is not None
+            or args.check_credentials
+        ):
+            env_path = os.path.expanduser(
+                args.env or os.environ.get("DSH_ENV_PATH") or DEFAULT_DSH_ENV
+            )
+            credentials_path = os.path.expanduser(
+                args.credentials
+                or os.environ.get("DSH_CREDENTIALS_PATH")
+                or DEFAULT_DSH_CREDENTIALS
+            )
+            check_provider_credentials(profiles, env_path, credentials_path, report)
 
     out = {
         "ok": report.ok,
