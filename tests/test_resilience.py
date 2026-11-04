@@ -604,6 +604,13 @@ def facade(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
     monkeypatch.setattr(server, "_is_detached_enabled", lambda: False)
     monkeypatch.setattr(server, "_budget", server._ByteBudget(1_000_000))
+    monkeypatch.setattr(
+        server,
+        "_PENALTY_TRACKER",
+        server.get_penalty_tracker().__class__(
+            storage_path=tmp_path / "facade_penalties.json", max_start_fails=999
+        ),
+    )
     bridge = Srv(("127.0.0.1", 0), server.Handler)
     threading.Thread(
         target=bridge.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
