@@ -115,6 +115,11 @@ from core.resilience import (  # noqa: E402
 from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
+    KEEPALIVE_INTERVAL_S,
+    QoSSlotManager,
+    QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
+    RESERVED_INTERACTIVE_SLOTS,
+    get_qos_manager,
     has_live_parent,
 )
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
@@ -6511,11 +6516,12 @@ class Handler(BaseHTTPRequestHandler):
         if not m_cancel and (
             _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
         ):
+            retry_drain = str(int(os.environ.get("BRIDGE_RETRY_AFTER_S", "3")))
             self._reject(
                 503,
                 "overloaded",
                 "bridge is shutting down",
-                extra_headers={"Retry-After": "5", "X-Bridge-Draining": "1"},
+                extra_headers={"Retry-After": retry_drain, "X-Bridge-Draining": "1"},
             )
             return
         # (1) framing: Transfer-Encoding не поддерживаем, Content-Length строго числовой.
@@ -6600,8 +6606,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(req, dict):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
-            if REQUEST_ATTRIBUTION_ENABLED:
-                self._trace = _resolve_trace(dict(self.headers.items()), req)
+            self._parsed_req = req
+            self._trace = _resolve_trace(dict(self.headers.items()), req)
             # (7) путь.
             m_provider_chat = _PROVIDER_CHAT_RE.match(path)
             provider_id = m_provider_chat.group(1) if m_provider_chat else None
@@ -7453,39 +7459,147 @@ class Handler(BaseHTTPRequestHandler):
         return getattr(self, "_resilience_lease", None) or ResilienceLease("")
 
     def _serve_resilient(self, backend_id: str, serve: Callable[[], None]) -> None:
-        """Допуск по брейкеру и отсеку ДО любых заголовков; отказ — честный 503 + Retry-After."""
-        try:
-            lease = RESILIENCE.acquire(backend_id)
-        except ResilienceError as exc:
-            _log(
-                f"reject reason=resilience code={exc.error_code} backend={backend_id} "
-                f"retry_after={exc.retry_after}"
-            )
+        """Допуск по QoS-квоте, брейкеру и отсеку ДО любых заголовков; отказ — честный 503."""
+        trace = getattr(self, "_trace", None)
+        subagent_id = (
+            getattr(trace, "subagent_id", None)
+            if trace
+            else self.headers.get("x-subagent-id")
+        )
+        is_interactive = subagent_id is None or str(subagent_id).strip() == ""
+
+        qos_timeout = float(os.environ.get("BRIDGE_QUEUE_TIMEOUT_S", "15.0"))
+        qos = get_qos_manager(
+            max_concurrent=MAX_CONCURRENT,
+            reserved_interactive=int(
+                os.environ.get(
+                    "BRIDGE_RESERVED_INTERACTIVE_SLOTS",
+                    str(RESERVED_INTERACTIVE_SLOTS),
+                )
+            ),
+            queue_timeout_s=qos_timeout,
+            keepalive_interval_s=float(
+                os.environ.get(
+                    "BRIDGE_KEEPALIVE_INTERVAL_S", str(KEEPALIVE_INTERVAL_S)
+                )
+            ),
+            drain_event=getattr(LIFECYCLE, "drain_started", None),
+        )
+
+        headers_sent = [False]
+        req = getattr(self, "_parsed_req", None)
+        is_stream = bool(isinstance(req, dict) and req.get("stream") is True)
+
+        def _keepalive_cb() -> bool:
+            if _client_gone(self.connection):
+                return False
+            if is_stream:
+                try:
+                    if not headers_sent[0]:
+                        headers_sent[0] = True
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "text/event-stream; charset=utf-8"
+                        )
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "keep-alive")
+                        self.send_header("X-Accel-Buffering", "no")
+                        self.end_headers()
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    return True
+                except Exception:
+                    return False
+            return True
+
+        qos_ok, qos_reason = qos.acquire_slot(
+            is_interactive=is_interactive,
+            keepalive_cb=_keepalive_cb if is_stream else None,
+            timeout=qos_timeout,
+            client_gone_fn=lambda: _client_gone(self.connection),
+        )
+        if not qos_ok:
+            if qos_reason == "client_gone":
+                self.close_connection = True
+                return
+            if headers_sent[0]:
+                err_payload = json.dumps(
+                    {
+                        "error": {
+                            "message": (
+                                "bridge is draining for restart"
+                                if qos_reason == "draining"
+                                else "Queue timeout exceeded waiting for slot"
+                            ),
+                            "type": "overloaded_error",
+                            "code": 503,
+                        }
+                    }
+                )
+                try:
+                    self.wfile.write(f"data: {err_payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                self.close_connection = True
+                return
+
             self.close_connection = True
+            retry_s = int(os.environ.get("BRIDGE_RETRY_AFTER_S", "3"))
+            extra_headers = {"Retry-After": str(retry_s)}
+            if qos_reason == "draining":
+                extra_headers["X-Bridge-Draining"] = "true"
             self._send(
                 503,
                 {
                     "error": {
-                        "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
-                        "type": exc.error_type,
-                        "code": exc.error_code,
-                        "retry_after": exc.retry_after,
+                        "message": (
+                            "bridge is draining for restart"
+                            if qos_reason == "draining"
+                            else "Queue timeout exceeded waiting for slot"
+                        ),
+                        "type": "overloaded",
+                        "code": 503,
                     }
                 },
-                extra_headers={"Retry-After": str(exc.retry_after)},
+                extra_headers=extra_headers,
             )
             return
-        # Handler живёт на соединение (keep-alive): lease привязан только к этому запросу.
-        self._resilience_lease = lease
+
         try:
-            with lease:
-                try:
-                    serve()
-                except (BrokenPipeError, ConnectionResetError):
-                    lease.record_discard("client_disconnected")
-                    raise
+            try:
+                lease = RESILIENCE.acquire(backend_id)
+            except ResilienceError as exc:
+                _log(
+                    f"reject reason=resilience code={exc.error_code} backend={backend_id} "
+                    f"retry_after={exc.retry_after}"
+                )
+                self.close_connection = True
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
+                            "type": exc.error_type,
+                            "code": exc.error_code,
+                            "retry_after": exc.retry_after,
+                        }
+                    },
+                    extra_headers={"Retry-After": str(exc.retry_after)},
+                )
+                return
+            self._resilience_lease = lease
+            try:
+                with lease:
+                    try:
+                        serve()
+                    except (BrokenPipeError, ConnectionResetError):
+                        lease.record_discard("client_disconnected")
+                        raise
+            finally:
+                self._resilience_lease = None
         finally:
-            self._resilience_lease = None
+            qos.release_slot(is_interactive=is_interactive)
 
     def _serve_passthrough(
         self,
