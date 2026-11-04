@@ -261,6 +261,10 @@ class QoSSlotManager:
                             return (False, "client_gone")
                         continue
                     step = min(1.0, remaining)
+                    if keepalive_cb is not None:
+                        time_since_ka = now - last_ka
+                        time_until_ka = max(0.005, self.keepalive_interval_s - time_since_ka)
+                        step = min(step, time_until_ka)
                     self._cv.wait(timeout=step)
             finally:
                 if counted_waiting:
