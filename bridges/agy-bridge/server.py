@@ -83,7 +83,6 @@ AGY_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env); в �
 
 from __future__ import annotations
 
-import bisect
 import collections
 import copy
 import base64
@@ -109,6 +108,38 @@ from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, cast, final
+
+_BRIDGE_DIR = str(Path(__file__).resolve().parent)
+if _BRIDGE_DIR not in sys.path:
+    sys.path.insert(0, _BRIDGE_DIR)
+
+from agy_runtime.process_supervisor import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    ProcessSupervisor,
+    ProcessSupervisorConfig,
+)
+from agy_runtime.account_pool import AccountPool, AccountPoolConfig  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from agy_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from agy_runtime.arbiter_types import _StepState  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from agy_runtime.content_arbiter import _ContentArbiter  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from agy_runtime.media_normalizer import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    _IMAGE_OMITTED,
+    _lower_keys,
+    _classify_part,
+    _part_text,
+    _content_items,
+    _image_part_canonical,
+    _media_part_counts,
+    _collect_image_parts_universal,
+    _json_copy,
+    _flatten_content_stripped,
+    _strip_media_from_messages,
+    _universal_render_messages,
+)
+from agy_runtime.tool_progress import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    _ToolProgress,
+    _safe_tool_name,
+    _format_tool_marker,
+)
 
 # Корень репозитория cli-agent-bridge: resolve() раскрывает симлинк деплоя
 # (~/.dsh/bridges/agy-bridge -> <repo>/bridges/agy-bridge), parents[2] = <repo>.
@@ -484,6 +515,7 @@ def _build_steps_sql(config: _BridgeConfig) -> str:
 
 
 def reload_bridge_config() -> _BridgeConfig:
+    global _config, _slots, _account_pool
     """Перечитать окружение, обновить снимок и глобальные константы (для тестов)."""
     global _config, _slots
     config = _build_bridge_config()
@@ -671,6 +703,7 @@ SQLITE_ROW_LIMIT = get_bridge_config().sqlite_row_limit
 STEP_TYPE_PLANNER = 15
 STEP_STATUS_GENERATING = 8
 STEP_STATUS_DONE = 3
+_STEPS_SQL = _build_steps_sql(get_bridge_config())
 # cid, из которого строится путь к базе, обязан быть hex-строкой с дефисами.
 _CID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
 _STEP_INDEX_RE = re.compile(rb'"step_index"\s*:\s*(\d+)')
@@ -784,6 +817,7 @@ SESSION_MAX_TURNS = get_bridge_config().session_max_turns
 _started = time.time()
 _active: dict = {}
 _active_lock = threading.Lock()
+_account_pool = AccountPool(AccountPoolConfig(max_concurrent=MAX_CONCURRENT, n_floor=1))
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 _budget = None
 _last_ok = [0.0]
@@ -1747,208 +1781,7 @@ def _image_gate_universal(model_id: str, effort: str | None) -> ImageReject | No
     return None
 
 
-# ---- Универсальная нормализация медиа (AD-002) ---------------------------------------
-
-_IMAGE_PART_TYPES = frozenset({"image_url", "image", "input_image"})
-_IMAGE_PAYLOAD_KEYS = ("image_url", "image")
-_MEDIA_PART_NAMES = (
-    "input_audio",
-    "audio",
-    "video",
-    "video_url",
-    "file",
-    "document",
-    "inlineData",
-    "inline_data",
-    "fileData",
-    "file_data",
-)
-_MEDIA_PART_TYPES = frozenset(name.lower() for name in _MEDIA_PART_NAMES)
-_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
-_IMAGE_OMITTED = "[image omitted]"
-_MEDIA_OMITTED = "[media omitted]"
-_JSON_COPY_MAX_DEPTH = 32
-
-
-def _lower_keys(part: dict[str, object]) -> dict[str, object]:
-    """Копия part с ключами в нижнем регистре: `InlineData`/`Image_Url` не обходят классификацию."""
-    lowered: dict[str, object] = {}
-    for key, value in part.items():
-        lowered_key = str(key).lower()
-        if lowered_key not in lowered:
-            lowered[lowered_key] = value
-    return lowered
-
-
-def _classify_part(part: dict[str, object]) -> str:
-    """'image' | 'media' | 'text' | 'unknown'; медиа определяется ДО чтения `text`.
-
-    `text` с не-строковым значением (dict/list) — структурный payload, не текст.
-    """
-    lowered = _lower_keys(part)
-    raw_kind = lowered.get("type")
-    kind = raw_kind.strip().lower() if isinstance(raw_kind, str) else ""
-    if kind in _IMAGE_PART_TYPES or any(
-        lowered.get(key) is not None for key in _IMAGE_PAYLOAD_KEYS
-    ):
-        return "image"
-    if kind in _MEDIA_PART_TYPES or any(
-        lowered.get(key) is not None for key in _MEDIA_PART_TYPES
-    ):
-        return "media"
-    text = lowered.get("text")
-    only_text_keys = set(lowered) <= {"type", "text"}
-    if kind in _TEXT_PART_TYPES and (
-        isinstance(text, str) or (text is None and only_text_keys)
-    ):
-        # Пустой/None text с посторонними ключами — скрытый payload, не текст.
-        return "text" if text or only_text_keys else "unknown"
-    if not kind and isinstance(text, str):
-        return "text" if text or only_text_keys else "unknown"
-    return "unknown"
-
-
-def _part_text(part: dict[str, object]) -> str:
-    """Текст text-части (`""` для отсутствующего/None); только после `_classify_part == 'text'`."""
-    value = _lower_keys(part).get("text")
-    return value if isinstance(value, str) else ""
-
-
-def _content_items(content: object) -> list[object]:
-    """Части контента: list как есть, dict-content — одна часть, прочее — пусто."""
-    if isinstance(content, list):
-        return cast("list[object]", content)
-    if isinstance(content, dict):
-        return [content]
-    return []
-
-
-def _image_part_canonical(part: dict[str, object]) -> dict[str, object]:
-    """Image-алиас в форме `image_url`; `image_url` приоритетнее `image`, URL не угадывается."""
-    lowered = _lower_keys(part)
-    payload = lowered.get("image_url")
-    if payload is None:
-        payload = lowered.get("image")
-    url: object = None
-    if isinstance(payload, str):
-        url = payload
-    elif isinstance(payload, dict):
-        url = cast("dict[str, object]", payload).get("url")
-    return {"type": "image_url", "image_url": {"url": url}}
-
-
-def _media_part_counts(messages: object) -> tuple[int, int]:
-    """(image-частей, прочих media/неизвестных структурных частей) во всей истории.
-
-    dict-content считается одной частью (`_content_items`); не-text часть любого вида
-    попадает в счёт, чтобы нормализация не обходилась неизвестным payload.
-    """
-    images = 0
-    other = 0
-    if not isinstance(messages, list):
-        return images, other
-    for msg in cast("list[object]", messages):
-        if not isinstance(msg, dict):
-            continue
-        for item in _content_items(cast("dict[str, object]", msg).get("content")):
-            if not isinstance(item, dict):
-                continue
-            kind = _classify_part(cast("dict[str, object]", item))
-            if kind == "image":
-                images += 1
-            elif kind != "text":
-                other += 1
-    return images, other
-
-
-def _collect_image_parts_universal(
-    messages: object,
-) -> list[tuple[int, int, dict[str, object]]]:
-    """Все image-части истории (любой алиас, list и dict-content) в форме `image_url`."""
-    found: list[tuple[int, int, dict[str, object]]] = []
-    if not isinstance(messages, list):
-        return found
-    number = 0
-    for msg_index, msg in enumerate(cast("list[object]", messages)):
-        if not isinstance(msg, dict):
-            continue
-        for item in _content_items(cast("dict[str, object]", msg).get("content")):
-            if not isinstance(item, dict):
-                continue
-            part = cast("dict[str, object]", item)
-            if _classify_part(part) == "image":
-                number += 1
-                found.append((msg_index, number, _image_part_canonical(part)))
-    return found
-
-
-def _json_copy(value: object, depth: int = 0) -> object:
-    """Копия JSON-значения без разделяемых контейнеров (глубина ограничена)."""
-    if depth > _JSON_COPY_MAX_DEPTH:
-        return None
-    if isinstance(value, dict):
-        return {
-            str(k): _json_copy(v, depth + 1)
-            for k, v in cast("dict[object, object]", value).items()
-        }
-    if isinstance(value, list):
-        return [_json_copy(v, depth + 1) for v in cast("list[object]", value)]
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    return str(value)
-
-
-def _flatten_content_stripped(content: object) -> str:
-    """Контент в безопасный текст без media: image -> `[image omitted]`, media -> `[media omitted]`.
-
-    Обычный текст сохраняется в порядке следования (склейка `\\n`), неизвестные
-    структурные объекты не сериализуются; сообщение только из них даёт
-    `[media omitted]`, чтобы контекст не стал пустым.
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    dropped = False
-    for item in _content_items(content):
-        if isinstance(item, str):
-            parts.append(item)
-        elif isinstance(item, dict):
-            part = cast("dict[str, object]", item)
-            kind = _classify_part(part)
-            if kind == "image":
-                parts.append(_IMAGE_OMITTED)
-            elif kind == "media":
-                parts.append(_MEDIA_OMITTED)
-            elif kind == "text":
-                parts.append(_part_text(part))
-            else:
-                dropped = True
-        elif isinstance(item, list):
-            dropped = True
-    if not parts and dropped:
-        parts.append(_MEDIA_OMITTED)
-    return "\n".join(p for p in parts if p)
-
-
-def _strip_media_from_messages(messages: object) -> list[dict[str, object]]:
-    """Новый список сообщений без media; вход не мутируется, роли и порядок сохранены."""
-    out: list[dict[str, object]] = []
-    if not isinstance(messages, list):
-        return out
-    for msg in cast("list[object]", messages):
-        if not isinstance(msg, dict):
-            continue
-        fresh: dict[str, object] = {}
-        for key, value in cast("dict[object, object]", msg).items():
-            if key == "content":
-                fresh["content"] = _flatten_content_stripped(value)
-            else:
-                fresh[str(key)] = _json_copy(value)
-        out.append(fresh)
-    return out
-
+# [Refactored] Media normalization moved to agy_runtime.media_normalizer
 
 def _messages_to_stripped_prompt(messages: object) -> str:
     """Промпт всей истории без media: нет `[image N]`, `[attachments]`, путей и payload."""
@@ -1956,37 +1789,6 @@ def _messages_to_stripped_prompt(messages: object) -> str:
         cast("list[object]", _strip_media_from_messages(messages))
     )
 
-
-def _universal_render_messages(messages: object) -> list[object]:
-    """Копия истории для оптимистичной отправки: image — каноничные, прочее media — вон.
-
-    Длина и индексы сохранены (нужны сквозной нумерации `[image N]` и resume-срезу).
-    """
-    out: list[object] = []
-    if not isinstance(messages, list):
-        return out
-    for msg in cast("list[object]", messages):
-        if not isinstance(msg, dict):
-            out.append(msg)
-            continue
-        src = cast("dict[str, object]", msg)
-        fresh = dict(src)
-        raw_content = src.get("content")
-        if isinstance(raw_content, (list, dict)):
-            items: list[object] = []
-            for item in _content_items(src.get("content")):
-                if isinstance(item, str):
-                    items.append(item)
-                elif isinstance(item, dict):
-                    part = cast("dict[str, object]", item)
-                    kind = _classify_part(part)
-                    if kind == "image":
-                        items.append(_image_part_canonical(part))
-                    elif kind == "text":
-                        items.append({"type": "text", "text": _part_text(part)})
-            fresh["content"] = items
-        out.append(fresh)
-    return out
 
 
 def _log_token(value: object, max_len: int = 64) -> str:
@@ -3127,67 +2929,16 @@ def _ndjson_user_line(prompt: str) -> str:
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
-def _group_alive(pgid: int) -> bool:
-    """Есть ли в процессной группе хоть один процесс (`killpg(pgid, 0)`)."""
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _kill_group(proc: subprocess.Popen) -> None:
-    """Зачистить процессную группу хода: SIGTERM -> ожидание -> SIGKILL -> reap лидера.
-
-    `proc.wait()` вызывается ВСЕГДА (в том числе когда группы уже нет), иначе
-    завершившийся лидер остаётся зомби (`Z`).
-    """
-    pgid = proc.pid
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass  # группы уже нет — остаётся только reap лидера
-    except (PermissionError, OSError):
-        try:
-            proc.terminate()
-        except OSError:
-            pass
-    else:
-        deadline = time.monotonic() + KILL_TERM_GRACE_S
-        while time.monotonic() < deadline:
-            if proc.poll() is not None and not _group_alive(pgid):
-                break
-            time.sleep(0.05)
-        if proc.poll() is None or _group_alive(pgid):
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except (PermissionError, OSError):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-    try:
-        proc.wait(timeout=KILL_WAIT_S)
-    except subprocess.TimeoutExpired:
-        _log(f"kill_group_wait_timeout pid={pgid} after {KILL_WAIT_S:g}s")
-
-
-def _kill_all(*_: Any) -> None:
-    with _active_lock:
-        procs = list(_active.values())
-    for proc in procs:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    _log(f"shutdown: killed {len(procs)} child process group(s)")
-    os._exit(0)
+# Delegated to agy_runtime.process_supervisor (AD-002, M-MOD-I1)
+_supervisor = ProcessSupervisor(
+    ProcessSupervisorConfig(
+        kill_term_grace_s=KILL_TERM_GRACE_S,
+        kill_wait_s=KILL_WAIT_S,
+    )
+)
+_group_alive = _supervisor.group_alive
+_kill_group = _supervisor.kill_group
+_kill_all = _supervisor.kill_all
 
 
 # ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
@@ -4084,395 +3835,7 @@ def _as_int(value: object) -> int | None:
     return None
 
 
-@final
-class _StepState:
-    """Состояние одного шага планировщика (общее для SQLite и транскрипта).
-
-    Текст мышления не хранится: только длины и sha256. observed_* — последний
-    SQLite-снимок (любой режим), delivered_* — реально отданное клиенту.
-    """
-
-    def __init__(self) -> None:
-        self.blob_len: int = -1
-        self.blob_sha: str = ""
-        self.observed_len: int = 0
-        self.observed_sha: str = ""
-        self.observed_final: bool = False
-        self.delivered_len: int = 0
-        self.delivered_sha = hashlib.sha256()
-        self.final_len: int = 0
-        self.final_sha: str = ""
-        self.diverged: bool = False
-        self.finalized: bool = False
-        self.sql_seen: bool = False
-        self.sql_done: bool = False
-        self.canary_done: bool = False
-
-
-_STEPS_SQL = _build_steps_sql(get_bridge_config())
-
-
-@final
-class _ArbStep:
-    """Канонический шаг арбитра: источник-создатель, выданный префикс, заморозка."""
-
-    __slots__ = ("origin", "emitted", "frozen")
-
-    def __init__(self, origin: str) -> None:
-        self.origin = origin
-        self.emitted = ""
-        self.frozen = False
-
-
-@final
-class _ContentArbiter:
-    """Двухуровневый арбитр planner-текста двух источников (stdout и transcript), AD-001.
-
-    Вызывается под `Run._emit_lock`; ввода-вывода внутри нет. Кандидат — кумулятивный
-    снимок текста шага.
-
-    Уровень 1 — ключ `(turn_id, cid, step_idx)` при валидном `step_idx >= 0`: равный
-    снимок или его префикс дают 0 байт, расширение — только суффикс, непрефиксное
-    расхождение замораживает шаг (без повтора старого префикса и склейки мусора).
-
-    Уровень 2 — turn-level: кандидат без валидного idx (None/<0/не-int) либо со
-    «чужим» idx сверяется со снимками шагов, созданных ДРУГИМ источником (при idx
-    None — любым): равный/префикс -> 0 байт, расширение последнего снимка -> суффикс;
-    совпавший шаг получает alias (source, idx) -> канонический watermark. Два
-    валидных шага одного источника с одинаковым текстом сохраняются оба.
-
-    Индексы: equality — dict, префикс — bisect по отсортированным снимкам; обхода
-    всей истории на каждый чанк нет. При исчерпании лимитов приём прекращается с
-    явным `overflow` (accepted-текст молча не отбрасывается и не переотдаётся).
-    """
-
-    def __init__(self, turn_id: str) -> None:
-        self.turn_id = turn_id
-        self.by_key: dict[tuple[str, str, int], _ArbStep] = {}
-        self.step_count = 0
-        self.eq_index: dict[str, list[_ArbStep]] = {}
-        self.sorted_texts: list[str] = []
-        # Те же индексы в разрезе источника-создателя: кандидат с валидным idx
-        # сверяется только с шагами ДРУГИХ источников, без скана одноимённых.
-        self._eq_by_source: dict[str, dict[str, list[_ArbStep]]] = {}
-        self._sorted_by_source: dict[str, list[str]] = {}
-        self.retained_divergent: list[str] = []
-        self.retained_divergent_bytes = 0
-        self.last_step: _ArbStep | None = None
-        self.last_by_source: dict[str, _ArbStep] = {}
-        self.chunks: list[str] = []
-        self.bytes_total = 0
-        self.overflow = False
-        self.divergences = 0
-        self.probes = 0
-        self.last_result_diverged = False
-
-    def _set_overflow(self, why: str) -> None:
-        if not self.overflow:
-            self.overflow = True
-            _log(f"content-overflow turn={self.turn_id[:8] or '-'} why={why}")
-
-    def _retain_divergent(self, text: str) -> None:
-        """Удержать расходящийся текст (до MAX_RETAINED_DIVERGENT_BYTES суммарно)."""
-        room = MAX_RETAINED_DIVERGENT_BYTES - self.retained_divergent_bytes
-        if room <= 0 or not text:
-            return
-        data = text.encode("utf-8")
-        if len(data) > room:
-            text = data[:room].decode("utf-8", "ignore")
-            data = text.encode("utf-8")
-        if text:
-            self.retained_divergent.append(text)
-            self.retained_divergent_bytes += len(data)
-
-    def retained_divergent_text(self) -> str:
-        return "".join(self.retained_divergent)
-
-    @staticmethod
-    def _drop(
-        eq: dict[str, list[_ArbStep]],
-        texts: list[str],
-        step: _ArbStep,
-        old: str,
-    ) -> None:
-        bucket = eq.get(old)
-        if bucket is None:
-            return
-        bucket.remove(step)
-        if not bucket:
-            del eq[old]
-            pos = bisect.bisect_left(texts, old)
-            if pos < len(texts) and texts[pos] == old:
-                del texts[pos]
-
-    @staticmethod
-    def _put(
-        eq: dict[str, list[_ArbStep]], texts: list[str], step: _ArbStep, text: str
-    ) -> None:
-        bucket = eq.setdefault(text, [])
-        if not bucket:
-            bisect.insort(texts, text)
-        bucket.append(step)
-
-    def _unindex(self, step: _ArbStep) -> None:
-        old = step.emitted
-        if not old:
-            return
-        self._drop(self.eq_index, self.sorted_texts, step, old)
-        self._drop(
-            self._eq_by_source.setdefault(step.origin, {}),
-            self._sorted_by_source.setdefault(step.origin, []),
-            step,
-            old,
-        )
-
-    def _index(self, step: _ArbStep, text: str) -> None:
-        self._put(self.eq_index, self.sorted_texts, step, text)
-        self._put(
-            self._eq_by_source.setdefault(step.origin, {}),
-            self._sorted_by_source.setdefault(step.origin, []),
-            step,
-            text,
-        )
-
-    def _eligible(self, step: _ArbStep, source: str, idx: int | None) -> bool:
-        self.probes += 1
-        return idx is None or step.origin != source
-
-    def _match(self, source: str, idx: int | None, text: str) -> _ArbStep | None:
-        """Шаг, к которому относится кандидат без прямого ключа (уровень 2)."""
-        if idx is None:
-            found = self._scan(self.eq_index, self.sorted_texts, source, idx, text)
-        else:
-            # Валидный idx: подходят только шаги других источников; одноимённые
-            # (N одинаковых шагов одного источника) не просматриваются вовсе.
-            found = None
-            for other, eq in self._eq_by_source.items():
-                if other == source:
-                    continue
-                found = self._scan(eq, self._sorted_by_source[other], source, idx, text)
-                if found is not None:
-                    break
-        if found is not None:
-            return found
-        refs: list[_ArbStep] = []
-        if self.last_step is not None:
-            refs.append(self.last_step)
-        for other, step in self.last_by_source.items():
-            if other != source and step not in refs:
-                refs.append(step)
-        for step in refs:
-            if (
-                step.emitted
-                and text.startswith(step.emitted)
-                and self._eligible(step, source, idx)
-            ):
-                return step
-        return None
-
-    def _scan(
-        self,
-        eq: dict[str, list[_ArbStep]],
-        texts: list[str],
-        source: str,
-        idx: int | None,
-        text: str,
-    ) -> _ArbStep | None:
-        for step in eq.get(text, ()):
-            if self._eligible(step, source, idx):
-                return step
-        if idx is None:
-            candidates = [
-                t for t in texts if len(text) >= len(t) and text.startswith(t)
-            ]
-            if candidates:
-                candidates.sort(key=len, reverse=True)
-                for cand in candidates:
-                    for step in eq[cand]:
-                        if self._eligible(step, source, idx):
-                            return step
-            pos = bisect.bisect_left(texts, text)
-            while pos < len(texts) and texts[pos].startswith(text):
-                for step in eq[texts[pos]]:
-                    if step.origin != source and self._eligible(step, source, idx):
-                        return step
-                pos += 1
-        return None
-
-    def _advance(self, step: _ArbStep, source: str, text: str) -> str:
-        if step.frozen:
-            return ""
-        prefix = step.emitted
-        if text == prefix or (len(text) < len(prefix) and prefix.startswith(text)):
-            return ""
-        if not text.startswith(prefix):
-            step.frozen = True
-            self._retain_divergent(text)
-            self.divergences += 1
-            _log(f"content-divergence turn={self.turn_id[:8] or '-'} source={source}")
-            return ""
-        suffix = text[len(prefix) :]
-        size = len(suffix.encode("utf-8"))
-        if self.bytes_total + size > MAX_CONTENT_BYTES_PER_TURN:
-            self._set_overflow("bytes")
-            return ""
-        self._unindex(step)
-        step.emitted = text
-        self._index(step, text)
-        self.chunks.append(suffix)
-        self.bytes_total += size
-        self.last_step = step
-        self.last_by_source[source] = step
-        return suffix
-
-    def offer(self, source: str, step_index: object, text: str, cid: str = "") -> str:
-        """Кумулятивный снимок -> новый суффикс ('' — дубль, префикс или заморозка)."""
-        if self.overflow or not text:
-            return ""
-        idx = (
-            step_index
-            if isinstance(step_index, int)
-            and not isinstance(step_index, bool)
-            and step_index >= 0
-            else None
-        )
-        key = (self.turn_id, cid, idx) if idx is not None else None
-        step = self.by_key.get(key) if key is not None else None
-        if step is None:
-            step = self._match(source, idx, text)
-            if step is None:
-                if self.step_count >= MAX_CONTENT_STEPS:
-                    self._set_overflow("steps")
-                    return ""
-                step = _ArbStep(source)
-                self.step_count += 1
-            if key is not None:
-                if len(self.by_key) >= 4 * MAX_CONTENT_STEPS:
-                    self._set_overflow("aliases")
-                    return ""
-                self.by_key[key] = step
-        return self._advance(step, source, text)
-
-    def reconcile_result(self, text: str) -> str:
-        """`result.response` как агрегат: досылается только то, чего ещё не было выдано."""
-        self.last_result_diverged = False
-        if self.overflow or not text:
-            return ""
-        emitted = "".join(self.chunks)
-        if not emitted:
-            if self.step_count >= MAX_CONTENT_STEPS:
-                self._set_overflow("steps")
-                return ""
-            self.step_count += 1
-            return self._advance(_ArbStep("result"), "result", text)
-        if text == emitted or emitted.startswith(text):
-            return ""
-        if text.startswith(emitted):
-            if self.step_count >= MAX_CONTENT_STEPS:
-                self._set_overflow("steps")
-                return ""
-            self.step_count += 1
-            return self._advance(_ArbStep("result"), "result", text[len(emitted) :])
-        if text in self.eq_index:
-            self.probes += 1
-            return ""
-        pos = bisect.bisect_left(self.sorted_texts, text)
-        if pos < len(self.sorted_texts) and self.sorted_texts[pos].startswith(text):
-            self.probes += 1
-            return ""
-        last = self.last_step
-        if last is not None and last.emitted and text.startswith(last.emitted):
-            return self._advance(last, "result", text)
-        self._retain_divergent(text)
-        self.divergences += 1
-        self.last_result_diverged = True
-        _log(f"content-divergence turn={self.turn_id[:8] or '-'} source=result")
-        return ""
-
-
-def _safe_tool_name(raw: object) -> str:
-    """Имя инструмента для маркера: только закрытый список, всё остальное -> `tool`."""
-    if not isinstance(raw, str):
-        return "tool"
-    name = raw.strip()
-    if (
-        not name
-        or len(name) > 128
-        or name[0] in "/."
-        or ".." in name
-        or re.fullmatch(r"[A-Za-z0-9_:./-]+", name) is None
-    ):
-        return "tool"
-    bare = re.split(r"[:./]", name)[-1]
-    if bare in TOOL_NAME_ALLOWLIST or _SAFE_MCP_TOOL_RE.fullmatch(bare) is not None:
-        return bare
-    return "tool"
-
-
-def _format_tool_marker(safe_name: str) -> str:
-    return "\n[🔧 tool: %s — done]\n" % safe_name
-
-
-@final
-class _ToolProgress:
-    """Дедупликация DONE нативных инструментов хода и безопасный маркер (AD-002).
-
-    Идентичность — `(turn_id, cid, step_index)`; без валидного `step_index` —
-    `("id", call_id)`, затем монотонный `("ord", fallback_ordinal)` из `Run._pump`,
-    иначе уникальный `("anon", n)` (событие не теряется, но тоже под потолком
-    `max_markers`). Имя инструмента ключом не является. Ни args, ни result, ни пути
-    в маркер не попадают.
-
-    Двухфазный учёт: `marker(ev, commit=False)` ключ лишь резервирует, а `commit()`
-    расходует лимит только после успешной записи маркера клиенту.
-    """
-
-    def __init__(
-        self, turn_id: str, cid: str, max_markers: int = MAX_TOOL_MARKERS_PER_TURN
-    ) -> None:
-        self.turn_id = turn_id
-        self.cid = cid
-        self.max_markers = max_markers
-        self._seen: set[tuple[object, ...]] = set()
-        self._anon_seq = 0
-        self._pending_key: tuple[object, ...] | None = None
-
-    def _key_for(self, ev: dict[str, object]) -> tuple[object, ...]:
-        step = _as_int(ev.get("step_index"))
-        if step is not None and step >= 0:
-            return (self.turn_id, self.cid, step)
-        raw_id = ev.get("call_id") or ev.get("tool_call_id") or ev.get("id")
-        if isinstance(raw_id, (str, int)) and str(raw_id).strip():
-            return ("id", str(raw_id).strip())
-        ordinal = _as_int(ev.get("fallback_ordinal"))
-        if ordinal is not None:
-            return ("ord", ordinal)
-        self._anon_seq += 1
-        return ("anon", self._anon_seq)
-
-    def marker(self, event: object, *, commit: bool = True) -> str | None:
-        """Строка маркера или None (дубль DONE того же шага / лимит маркеров)."""
-        self._pending_key = None
-        if not isinstance(event, dict):
-            return None
-        ev = cast("dict[str, object]", event)
-        key = self._key_for(ev)
-        if key in self._seen or len(self._seen) >= self.max_markers:
-            return None
-        if commit:
-            self._seen.add(key)
-        else:
-            self._pending_key = key
-        return _format_tool_marker(_safe_tool_name(ev.get("name")))
-
-    def commit(self, event: object | None = None) -> None:
-        """Засчитать маркер после успешной записи (ключ из последнего `commit=False`)."""
-        key = self._pending_key
-        self._pending_key = None
-        if key is None and isinstance(event, dict):
-            key = self._key_for(cast("dict[str, object]", event))
-        if key is not None and len(self._seen) < self.max_markers:
-            self._seen.add(key)
+# [Refactored] _StepState, _ContentArbiter, _ToolProgress moved to agy_runtime/
 
 
 # ---- Step-scoped usage (step_scoped_usage_enabled): счётчики шагов хода из транскрипта --
@@ -8303,6 +7666,7 @@ class Handler(BaseHTTPRequestHandler):
         ctx["stream_resilience_enabled"] = resilience
         ctx["stream_committed"] = False
         disconnected = False
+        self._stream_relay = StreamRelay(self.wfile)
 
         def chunk(
             delta: dict,
@@ -8684,3 +8048,29 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = [
+    "ProcessSupervisor",
+    "ProcessSupervisorConfig",
+    "AccountPool",
+    "AccountPoolConfig",
+    "StreamRelay",
+    "_StepState",
+    "_ContentArbiter",
+    "_ToolProgress",
+    "_safe_tool_name",
+    "_format_tool_marker",
+    "_lower_keys",
+    "_classify_part",
+    "_part_text",
+    "_content_items",
+    "_image_part_canonical",
+    "_media_part_counts",
+    "_collect_image_parts_universal",
+    "_json_copy",
+    "_flatten_content_stripped",
+    "_strip_media_from_messages",
+    "_universal_render_messages",
+]
+
