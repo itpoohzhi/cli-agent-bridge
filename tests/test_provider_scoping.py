@@ -37,9 +37,11 @@ FLEET_MODELS = [
 
 
 @pytest.fixture
-def port(monkeypatch):
+def port(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "BACKENDS", SimpleNamespace(models=lambda: FLEET_MODELS, adapters=lambda: []))
+    monkeypatch.setattr(server, "AUTH_KEY", KEY)
     monkeypatch.setattr(server, "BRIDGE_KEY", KEY)
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-provider.env", environ={"AUTH_KEY": KEY, "BRIDGE_KEY": KEY}))
     monkeypatch.setattr(server, "_INTERNAL_SERVICE_KEY", INTERNAL_KEY)
     monkeypatch.setattr(server, "ADVERTISED_EFFORT_ALIASES", {
         "claude-sonnet-5-5-high": "claude-sonnet-5-5",

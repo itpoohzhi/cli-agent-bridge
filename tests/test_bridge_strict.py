@@ -5,12 +5,16 @@
 значения и reasoning-объект отклоняются до запуска droid.
 """
 
+from __future__ import annotations
+
 import copy
 import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -31,6 +35,550 @@ REJECT_STRICT = re.compile(
     r"^reject reason=[a-z0-9_]+ model=(claude-sonnet-5-5|gemini-3\.8-flash|grok-4\.7|"
     r"deepseek-v4\.1-flash|gpt-6\.1-sol|glm-5\.3|unknown) model_len=[0-9]+ client=[0-9a-f.:]+$"
 )
+
+
+def test_token_cache_ttl_rotation_and_constant_time(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    path = tmp_path / ".env"
+    path.write_text('BRIDGE_KEY="file-first"\nDROID_DSH_BRIDGE_KEY=legacy\n')
+    env = {"BRIDGE_KEY": "env-first"}
+    clock = [10.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    cache = server.TokenCache(path=path, environ=env, ttl_s=300)
+    assert cache.is_valid("file-first")
+    assert cache.is_valid("legacy")
+    with patch.object(Path, "read_text", side_effect=AssertionError("cached contents")):
+        assert not cache.is_valid("env-first")
+        assert not cache.is_valid("")
+        assert not cache.is_valid("wrong")
+    env["BRIDGE_KEY"] = "env-second"
+    assert not cache.is_valid("env-second")
+    assert not cache.is_valid("env-first")
+    path.write_text("BRIDGE_KEY=file-second-longer\n")
+    with patch.object(
+        server.hmac, "compare_digest", wraps=server.hmac.compare_digest
+    ) as compare:
+        assert cache.is_valid("file-second-longer")
+        assert compare.called
+    assert not cache.is_valid("file-first")
+    assert not cache.is_valid("legacy")
+    path.unlink()
+    assert not cache.is_valid("file-second-longer")
+    assert not cache.is_valid("env-second")
+
+
+def test_token_cache_rejects_stale_global_keys(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=current-file-key\n")
+    monkeypatch.setattr(server, "AUTH_KEY", "revoked-global-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "revoked-global-key")
+    monkeypatch.setattr(server.TOKEN_CACHE, "_path", path)
+    monkeypatch.setattr(server.TOKEN_CACHE, "_env", {})
+    monkeypatch.setattr(server.TOKEN_CACHE, "_next_check", 0)
+    monkeypatch.setattr(server.TOKEN_CACHE, "_signature", None)
+    monkeypatch.setattr(server.TOKEN_CACHE, "_file_keys", ())
+    assert server.TOKEN_CACHE.is_valid("current-file-key")
+    assert not server.TOKEN_CACHE.is_valid("revoked-global-key")
+
+
+def test_auth_ok_rejects_patched_module_keys_with_isolated_cache(tmp_path, monkeypatch):
+    """Модульные ключи не принимаются; без файла действует только _env."""
+    from email.message import Message
+
+    monkeypatch.setattr(server, "AUTH_KEY", "module-auth-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "module-bridge-key")
+    cache = server.TokenCache(path=tmp_path / "missing", environ={"BRIDGE_KEY": "cache-key"})
+    monkeypatch.setattr(server, "TOKEN_CACHE", cache)
+    assert not cache.is_valid("module-auth-key")
+    assert not cache.is_valid("module-bridge-key")
+
+    def make_handler(headers: dict[str, str]) -> server.Handler:
+        message = Message()
+        for name, value in headers.items():
+            message[name] = value
+        handler = object.__new__(server.Handler)
+        handler.headers = message
+        return handler
+
+    assert not server._auth_ok(make_handler({"Authorization": "Bearer module-auth-key"}))
+    assert not server._auth_ok(make_handler({"Authorization": "module-bridge-key"}))
+    assert not server._auth_ok(make_handler({"x-api-key": "module-auth-key"}))
+    assert server._auth_ok(make_handler({"Authorization": "Bearer cache-key"}))
+    assert not server._auth_ok(make_handler({"Authorization": "Bearer wrong-key"}))
+    assert not server._auth_ok(make_handler({}))
+
+
+def test_auth_ok_revokes_stale_module_keys_when_file_key_present(tmp_path, monkeypatch):
+    """Файловый ключ исключителен: устаревший модульный ключ через _auth_ok отозван."""
+    from email.message import Message
+
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=current-file-key\n")
+    monkeypatch.setattr(server, "AUTH_KEY", "revoked-global-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "revoked-global-key")
+    cache = server.TokenCache(path=path, environ={})
+    monkeypatch.setattr(server, "TOKEN_CACHE", cache)
+
+    def make_handler(token: str) -> server.Handler:
+        message = Message()
+        message["Authorization"] = f"Bearer {token}"
+        handler = object.__new__(server.Handler)
+        handler.headers = message
+        return handler
+
+    assert server._auth_ok(make_handler("current-file-key"))
+    assert not server._auth_ok(make_handler("revoked-global-key"))
+
+
+def test_token_cache_rejects_module_keys_without_file_keys(tmp_path, monkeypatch):
+    """Без файловых ключей TokenCache не принимает модульные ключи monkeypatch."""
+    monkeypatch.setattr(server, "AUTH_KEY", "module-auth-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "module-bridge-key")
+    cache = server.TokenCache(path=tmp_path / "missing", environ={})
+    assert not cache.is_valid("module-auth-key")
+    assert not cache.is_valid("module-bridge-key")
+    assert not cache.is_valid("wrong-key")
+
+
+def test_external_peer_upstream_token_rejected_before_body(monkeypatch):
+    """Внешний IP с upstream-токеном без мастер-ключа получает 401 до чтения тела."""
+    from email.message import Message
+    from unittest.mock import Mock
+
+    from adapters.passthrough_adapter import PassthroughAdapter
+    from core.backend_adapter import AdapterRegistry
+
+    registry = AdapterRegistry()
+    registry.register(
+        PassthroughAdapter(
+            "test",
+            {"base_url": "http://127.0.0.1:2455/v1", "api_key": "known-upstream-key"},
+            dict,
+        )
+    )
+    monkeypatch.setattr(server, "BACKENDS", registry)
+    monkeypatch.setattr(server, "TOKEN_CACHE", Mock(is_valid=Mock(return_value=False)))
+    monkeypatch.setattr(
+        server, "PASSTHROUGH_AUTH_FLAG_SOURCE", Mock(enabled=Mock(return_value=True))
+    )
+    monkeypatch.setattr(server, "_shutting_down", False)
+    monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    handler = object.__new__(server.Handler)
+    handler.path = "/v1/chat/completions"
+    handler.client_address = ("192.0.2.1", 1234)
+    handler.headers = Message()
+    handler.headers["Authorization"] = "Bearer known-upstream-key"
+    handler.headers["Content-Length"] = "2"
+    handler.rfile = Mock()
+    handler._send = Mock()
+    handler.do_POST()
+    handler.rfile.read.assert_not_called()
+    assert handler.close_connection
+    handler._send.assert_called_once_with(
+        401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}}
+    )
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.1", "::1", "192.0.2.1"])
+@pytest.mark.parametrize("token", [None, "Bearer wrong"])
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/models/refresh"])
+def test_invalid_auth_rejected_before_body_and_budget(monkeypatch, peer, token, path):
+    from email.message import Message
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(server, "TOKEN_CACHE", Mock(is_valid=Mock(return_value=False)))
+    budget = Mock()
+    monkeypatch.setattr(server, "_budget", budget)
+    monkeypatch.setattr(server, "_shutting_down", False)
+    monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    handler = object.__new__(server.Handler)
+    handler.path = path
+    handler.client_address = (peer, 1234)
+    handler.headers = Message()
+    if token is not None:
+        handler.headers["Authorization"] = token
+    handler.headers["Content-Length"] = "2"
+    handler.rfile = Mock()
+    handler._send = Mock()
+    handler.do_POST()
+    handler.rfile.read.assert_not_called()
+    budget.reserve.assert_not_called()
+    assert handler.close_connection
+    handler._send.assert_called_once_with(
+        401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}}
+    )
+
+
+def test_token_cache_missing_or_unreadable_file_fails_closed(tmp_path):
+    cache = server.TokenCache(path=tmp_path / "missing", environ={})
+    assert not cache.is_valid("anything")
+    assert not cache.is_valid("")
+    cache = server.TokenCache(path=tmp_path, environ={})
+    assert not cache.is_valid("anything")
+
+def test_token_cache_missing_from_start_accepts_env_key(tmp_path):
+    cache = server.TokenCache(path=tmp_path / "missing", environ={"BRIDGE_KEY": "env-only"})
+    assert cache.is_valid("env-only")
+    assert not cache.is_valid("anything")
+
+
+def test_token_cache_file_removed_before_first_check_rejects_env_key(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=file-key\n", encoding="utf-8")
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "old-key"})
+    path.unlink()
+    assert not cache.is_valid("old-key")
+    assert not cache.is_valid("file-key")
+
+
+def test_token_cache_utf8_after_rotation_rejects_old_and_new(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=old-key\n")
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "old-key"})
+    monkeypatch.setattr(server, "TOKEN_CACHE", cache)
+
+    def _status(token: str) -> int:
+        seen: list[int] = []
+        handler = _make_bearer_handler(token)
+        handler.path = "/v1/models"
+
+        def _fake_send(code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
+            seen.append(code)
+
+        handler._send = _fake_send
+        server.Handler.do_GET(handler)
+        assert seen
+        return seen[-1]
+
+    assert cache.is_valid("old-key")
+    path.write_text("BRIDGE_KEY=new-key-longer\n")
+    assert cache.is_valid("new-key-longer")
+    assert not cache.is_valid("old-key")
+    path.write_bytes(b"\xff")
+    assert not cache.is_valid("old-key")
+    assert not cache.is_valid("new-key-longer")
+    assert _status("old-key") == 401
+    assert _status("new-key-longer") == 401
+
+
+def test_token_cache_unlink_after_seen_rejects_env_old_key(tmp_path, monkeypatch):
+    from email.message import Message
+
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=old-key\n")
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "old-key"})
+    monkeypatch.setattr(server, "TOKEN_CACHE", cache)
+    handler = object.__new__(server.Handler)
+    handler.headers = Message()
+    handler.headers["Authorization"] = "Bearer old-key"
+    assert server._auth_ok(handler)
+    path.unlink()
+    assert not cache.is_valid("old-key")
+    assert not server._auth_ok(handler)
+    seen: list[int] = []
+    http_handler = _make_bearer_handler("old-key")
+    http_handler.path = "/v1/models"
+
+    def _fake_send(code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
+        seen.append(code)
+
+    http_handler._send = _fake_send
+    server.Handler.do_GET(http_handler)
+    assert seen == [401]
+
+
+class _CaptureAdapter:
+    id = "capture"
+
+    def __init__(self, upstream=None):
+        self._upstream_key = upstream
+        self.headers = None
+
+    def handle(self, *, path, raw_body, request, headers, sink):
+        self.headers = dict(headers)
+
+
+def _capture_passthrough(monkeypatch, handler, adapter, hub_auth_ok):
+    from types import SimpleNamespace
+
+    lease = SimpleNamespace(
+        record_success=lambda: None,
+        record_failure=lambda: None,
+        record_discard=lambda *a: None,
+    )
+    handler._current_lease = lambda: lease
+    handler._trace_log_fields = lambda: ""
+    handler._trace = None
+    handler.path = "/v1/chat/completions"
+    monkeypatch.setattr(server, "_log", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_strip_passthrough_env", lambda raw, req: (raw, req))
+    monkeypatch.setattr(server, "_trace_headers", lambda trace: {})
+    monkeypatch.setattr(server, "REQUEST_ATTRIBUTION_ENABLED", False)
+
+    class _Sink:
+        def __init__(self, h, extra_headers=None):
+            self.status = 200
+            self._client_gone_flag = False
+
+    monkeypatch.setattr(server, "_HandlerSink", _Sink)
+    handler._serve_passthrough(adapter, b"{}", {}, "m", _hub_auth_ok=hub_auth_ok)
+    headers = adapter.headers
+    assert headers is not None, "passthrough did not capture headers"
+    return headers
+
+
+def _make_bearer_handler(token, extra=None):
+    from email.message import Message
+
+    handler = object.__new__(server.Handler)
+    handler.headers = Message()
+    handler.headers["Authorization"] = f"Bearer {token}"
+    for name, value in (extra or {}).items():
+        handler.headers[name] = value
+    return handler
+
+
+def test_passthrough_strips_hub_credentials_with_captured_decision_after_rotation(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=old-key\n")
+    monkeypatch.setattr(
+        server, "TOKEN_CACHE", server.TokenCache(path=path, environ={})
+    )
+    handler = _make_bearer_handler("old-key", {"X-Api-Key": "old-key", "X-Other": "keep"})
+    hub_auth_ok = server._auth_ok(handler)
+    assert hub_auth_ok
+    path.write_text("BRIDGE_KEY=new-key-longer\n")
+    assert not server._auth_ok(handler)
+    headers = _capture_passthrough(monkeypatch, handler, _CaptureAdapter(), hub_auth_ok)
+    assert not ({k.lower() for k in headers} & {"authorization", "x-api-key"})
+    assert headers.get("X-Other") == "keep"
+
+
+def test_passthrough_retains_credentials_for_deferred_or_upstream_key(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=hub-key\n")
+    monkeypatch.setattr(
+        server, "TOKEN_CACHE", server.TokenCache(path=path, environ={})
+    )
+    deferred = _make_bearer_handler("provider-key", {"X-Api-Key": "provider-key"})
+    hub_auth_ok = server._auth_ok(deferred)
+    assert not hub_auth_ok
+    headers = _capture_passthrough(monkeypatch, deferred, _CaptureAdapter(), hub_auth_ok)
+    lowered = {k.lower(): v for k, v in headers.items()}
+    assert lowered["authorization"] == "Bearer provider-key"
+    assert lowered["x-api-key"] == "provider-key"
+    hubbed = _make_bearer_handler("hub-key")
+    assert server._auth_ok(hubbed)
+    headers = _capture_passthrough(
+        monkeypatch, hubbed, _CaptureAdapter(upstream="upstream-key"), True
+    )
+    assert {k.lower(): v for k, v in headers.items()}["authorization"] == "Bearer hub-key"
+
+def test_token_cache_existing_file_without_bridge_keys_fails_closed(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("OTHER_KEY=value\n")
+    cache = server.TokenCache(path=path, environ={"DROID_DSH_BRIDGE_KEY": "env-legacy"})
+    assert not cache.is_valid("env-legacy")
+    assert not cache.is_valid("value")
+    assert not cache.is_valid("anything")
+
+def test_token_cache_unreadable_path_without_file_keys_fails_closed(tmp_path, monkeypatch):
+    """Unreadable path после наблюдения файла -> fail-closed без env/module."""
+    monkeypatch.setattr(server, "AUTH_KEY", "module-auth-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "module-bridge-key")
+    cache = server.TokenCache(path=tmp_path, environ={"BRIDGE_KEY": "env-only"})
+    assert not cache.is_valid("env-only")
+    assert not cache.is_valid("module-auth-key")
+    assert not cache.is_valid("module-bridge-key")
+    assert not cache.is_valid("wrong-key")
+    assert cache._file_keys == ()
+    assert cache._file_seen is True
+    assert cache._signature is None
+
+def test_token_cache_utf8_corruption_rejects_file_key_and_fails_closed(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=file-key\n")
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "env-key"}, ttl_s=300)
+    assert cache.is_valid("file-key")
+    path.write_bytes(b"\xff")
+    assert not cache.is_valid("file-key")
+    assert not cache.is_valid("env-key")
+
+def test_token_cache_permission_denied_rejects_file_keys_and_fails_closed(tmp_path):
+    from unittest.mock import patch
+
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=file-key\n")
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "env-key"}, ttl_s=300)
+    assert cache.is_valid("file-key")
+    path.write_text("BRIDGE_KEY=file-key-longer\n")
+    with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+        assert not cache.is_valid("file-key")
+        assert not cache.is_valid("file-key-longer")
+        assert not cache.is_valid("env-key")
+
+
+@pytest.mark.parametrize("fail_at", ["stat", "read_text"])
+@pytest.mark.parametrize(
+    "exc", [PermissionError("denied"), OSError("io error")], ids=["permission", "oserror"]
+)
+def test_token_cache_stat_or_read_error_clears_state_immediately(
+    tmp_path, monkeypatch, fail_at, exc
+):
+    from unittest.mock import patch
+
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=file-key\n")
+    clock = [10.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "env-key"}, ttl_s=300)
+    assert cache.is_valid("file-key")
+    assert cache._next_check > clock[0]
+    if fail_at == "read_text":
+        path.write_text("BRIDGE_KEY=file-key-longer\n")
+    with patch.object(Path, fail_at, side_effect=exc):
+        assert not cache.is_valid("file-key")
+        assert not cache.is_valid("env-key")
+        assert cache._file_keys == ()
+        assert cache._signature is None
+        assert cache._next_check == 0.0
+        assert cache._file_seen is True
+
+
+def test_token_cache_chmod_only_change_bypasses_signature_fast_path(tmp_path, monkeypatch):
+    import os
+    from unittest.mock import patch
+
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=file-key\n")
+    clock = [10.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "env-key"}, ttl_s=300)
+    assert cache.is_valid("file-key")
+    before = path.stat()
+    try:
+        os.chmod(path, 0o000)
+        after = path.stat()
+        assert (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_size,
+        )
+        assert before.st_mode != after.st_mode
+        with patch.object(
+            Path, "read_text", side_effect=PermissionError("denied")
+        ) as read_mock:
+            assert not cache.is_valid("file-key")
+            assert read_mock.called
+            assert cache._file_keys == ()
+            assert cache._signature is None
+            assert cache._next_check == 0.0
+            assert cache._file_seen is True
+    finally:
+        os.chmod(path, 0o600)
+
+
+def test_token_cache_real_chmod000_revokes_cached_key_without_ttl_expiry(
+    tmp_path, monkeypatch
+):
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root can read chmod 000 files")
+    path = tmp_path / ".env"
+    path.write_text("BRIDGE_KEY=file-key\n")
+    clock = [10.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    cache = server.TokenCache(path=path, environ={"BRIDGE_KEY": "env-key"}, ttl_s=300)
+    assert cache.is_valid("file-key")
+    try:
+        os.chmod(path, 0o000)
+        assert not cache.is_valid("file-key")
+        assert not cache.is_valid("env-key")
+        assert cache._file_keys == ()
+        assert cache._signature is None
+        assert cache._next_check == 0.0
+        assert cache._file_seen is True
+    finally:
+        os.chmod(path, 0o600)
+    assert cache.is_valid("file-key")
+
+
+def test_non_loopback_invalid_token_rejected_before_body_read(monkeypatch):
+    from email.message import Message
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(server, "TOKEN_CACHE", Mock(is_valid=Mock(return_value=False)))
+    monkeypatch.setattr(server, "_shutting_down", False)
+    monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    handler = object.__new__(server.Handler)
+    handler.path = "/v1/chat/completions"
+    handler.client_address = ("192.0.2.1", 1234)
+    handler.headers = Message()
+    handler.headers["Authorization"] = "Bearer wrong"
+    handler.headers["Content-Length"] = "2"
+    handler.rfile = Mock()
+    handler._send = Mock()
+    handler.do_POST()
+    handler.rfile.read.assert_not_called()
+    assert handler.close_connection
+    assert handler._send.call_args.args[0] == 401
+
+
+@pytest.mark.parametrize("token", [None, "Bearer wrong"])
+def test_invalid_auth_rejected_before_body_and_budget_with_tolerance_flag_enabled(
+    monkeypatch, token
+):
+    from email.message import Message
+    from unittest.mock import Mock
+
+    from adapters.passthrough_adapter import PassthroughAdapter
+    from core.backend_adapter import AdapterRegistry
+
+    registry = AdapterRegistry()
+    registry.register(
+        PassthroughAdapter(
+            "test",
+            {"base_url": "http://127.0.0.1:2455/v1", "api_key": "known-upstream-key"},
+            dict,
+        )
+    )
+    monkeypatch.setattr(server, "BACKENDS", registry)
+    monkeypatch.setattr(server, "AUTH_KEY", "hub-known-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "hub-known-key")
+    monkeypatch.setattr(server, "TOKEN_CACHE", Mock(is_valid=Mock(return_value=False)))
+    monkeypatch.setattr(
+        server,
+        "PASSTHROUGH_AUTH_FLAG_SOURCE",
+        Mock(enabled=Mock(return_value=True)),
+    )
+    budget = Mock()
+    monkeypatch.setattr(server, "_budget", budget)
+    monkeypatch.setattr(server, "_shutting_down", False)
+    monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    handler = object.__new__(server.Handler)
+    handler.path = "/v1/chat/completions"
+    handler.client_address = ("127.0.0.1", 1234)
+    handler.headers = Message()
+    if token is not None:
+        handler.headers["Authorization"] = token
+    handler.headers["Content-Length"] = "2"
+    handler.rfile = Mock()
+    handler._send = Mock()
+    handler.do_POST()
+    handler.rfile.read.assert_not_called()
+    budget.reserve.assert_not_called()
+    assert handler.close_connection
+    handler._send.assert_called_once_with(
+        401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}}
+    )
+
 
 EXEC_LINE = re.compile(
     r"^exec model=(?P<model>\S+) effort=(?P<effort>\S+) effort_source=(?P<source>\S+) "

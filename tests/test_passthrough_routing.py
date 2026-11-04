@@ -17,7 +17,7 @@ from core.backend_adapter import AdapterRegistry  # noqa: E402
 
 
 @pytest.fixture
-def route(monkeypatch):
+def route(monkeypatch, tmp_path):
     data = json.loads((server.ROOT / "fleet.json").read_text())
     data["backends"]["codex"]["enabled"] = True
     catalog = server._build_catalog(data)
@@ -28,12 +28,19 @@ def route(monkeypatch):
         AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog, server),
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
+    monkeypatch.setattr(
+        server,
+        "TOKEN_CACHE",
+        server.TokenCache(
+            path=tmp_path / ".env", environ={"BRIDGE_KEY": "hub-test-key"}
+        ),
+    )
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
     budget = server._ByteBudget(1_000_000)
     monkeypatch.setattr(server, "_budget", budget)
 
-    def post(body, auth="Bearer upstream-test-key", error=None):
+    def post(body, auth="Bearer hub-test-key", error=None):
         raw = body if isinstance(body, bytes) else json.dumps(body).encode()
         initial = budget._used
         handler = object.__new__(server.Handler)
@@ -67,7 +74,7 @@ def route(monkeypatch):
 @pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6.1-terra"])
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("auth", [None, "Bearer upstream-test-key"])
+@pytest.mark.parametrize("auth", ["hub-test-key", "Bearer hub-test-key"])
 def test_exact_route_preserves_body_and_reserves_budget(
     route, model, effort, stream, auth
 ):
@@ -102,10 +109,11 @@ def test_unknown_and_invalid_models_fail_before_backend(route, model, status):
     handler._serve_passthrough.assert_not_called()
 
 
-def test_deferred_auth_cannot_execute_cli_backend(route):
-    handler, reserve = route({"model": "muse-wonder-full-1.0"})
+def test_invalid_auth_cannot_execute_cli_backend(route):
+    handler, reserve = route({"model": "muse-wonder-full-1.0"}, auth="Bearer upstream-test-key")
     assert handler._send.call_args.args[0] == 401
-    reserve.assert_called_once()
+    reserve.assert_not_called()
+    handler.rfile.read.assert_not_called()
     handler._serve_passthrough.assert_not_called()
 
 
@@ -130,8 +138,11 @@ def test_exhausted_body_budget_rejects_before_read(route):
 
 @pytest.mark.parametrize("auth", [None, "Bearer hub-test-key"])
 def test_invalid_json_releases_body_budget(route, auth):
-    handler, _ = route(b"{", auth)
-    assert handler._send.call_args.args[0] == 400
+    handler, reserve = route(b"{", auth)
+    assert handler._send.call_args.args[0] == (401 if auth is None else 400)
+    if auth is None:
+        reserve.assert_not_called()
+        handler.rfile.read.assert_not_called()
 
 
 @pytest.mark.parametrize("error", [RuntimeError("upstream"), BrokenPipeError("client disconnected")])

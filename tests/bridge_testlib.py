@@ -372,6 +372,7 @@ class BridgeCase(unittest.TestCase):
             name: getattr(server, name, _MISSING)
             for name in (
                 "AUTH_KEY",
+                "TOKEN_CACHE",
                 "WORKSPACE",
                 "FLEET",
                 "IMAGE_PROBE",
@@ -418,6 +419,10 @@ class BridgeCase(unittest.TestCase):
         os.environ["FAKE_DROID_DIR"] = str(self.hub.base)
         server.LAUNCHER = str(self.hub.launcher)
         server.AUTH_KEY = "test-key"
+        server.TOKEN_CACHE = server.TokenCache(
+            path=Path(self._tmp.name) / ".env",
+            environ={"BRIDGE_KEY": "test-key"},
+        )
         server.WORKSPACE = Path(self._tmp.name) / "workspace"
         server.WORKSPACE.mkdir(parents=True, exist_ok=True)
         server._budget = None
