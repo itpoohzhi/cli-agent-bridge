@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, Mapping, cast
 import unittest
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -584,12 +584,14 @@ class TestNonStreamBody(unittest.TestCase):
 class FakeUpstream:
     """Локальный OpenAI-совместимый upstream; сценарий задаёт `respond(handler, body)`."""
 
-    def __init__(self):
+    def __init__(self, keep_alive=False):
         self.requests: list = []
         self.respond = lambda handler, body: None
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1" if keep_alive else "HTTP/1.0"
+
             def log_message(self, *args):  # noqa: D401
                 return
 
@@ -651,15 +653,774 @@ class CollectSink(ResponseSink):
         return next((v for k, v in self.headers if k.lower() == name.lower()), None)
 
 
-def make_adapter(port: int, limits=None, **kw) -> PassthroughAdapter:
+def make_adapter(port: int, limits: PassthroughLimits | None = None, **kw: Any) -> PassthroughAdapter:
     config = {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % port, "max_concurrent": 4}
+    kw.setdefault("is_hub_key", server.is_hub_key)
     return PassthroughAdapter("codex", config, lambda: {}, None, limits=limits or PassthroughLimits(), **kw)
+
+
+def _call_passthrough(adapter: PassthroughAdapter, headers: Mapping[str, str]) -> CollectSink:
+    sink = CollectSink()
+    adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers=headers, sink=sink)
+    assert sink.status == 200
+    return sink
+
+
+def _credential_values(sent_headers: Mapping[str, str]) -> list[str]:
+    return [v for k, v in sent_headers.items() if k.lower() in ("authorization", "x-api-key")]
+
+
+def test_adapter_module_has_no_server_import() -> None:
+    import ast
+
+    source = (Path(__file__).resolve().parent.parent / "adapters" / "passthrough_adapter.py").read_text(encoding="utf-8")
+    imported: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+    assert not [name for name in imported if name == "server" or name.startswith("server.")]
+
+
+def test_injected_is_hub_key_strips_both_credentials_and_keeps_request_drop() -> None:
+    upstream = FakeUpstream()
+    upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+    adapter = make_adapter(upstream.port, is_hub_key=lambda tok: tok == "hub-key")
+    try:
+        _call_passthrough(adapter, {"Authorization": "Bearer own-key", "X-Api-Key": "hub-key", "X-Custom": "keep", "Proxy-Authorization": "secret"})
+        sent = upstream.requests[-1]["headers"]
+        assert _credential_values(sent) == []
+        assert sent["X-Custom"] == "keep"
+        assert [v for k, v in sent.items() if k.lower() == "proxy-authorization"] == []
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_injected_is_hub_key_false_and_missing_forward_credentials() -> None:
+    upstream = FakeUpstream()
+    upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+    adapters = [make_adapter(upstream.port, is_hub_key=lambda tok: False), make_adapter(upstream.port, is_hub_key=None)]
+    try:
+        for adapter in adapters:
+            _call_passthrough(adapter, {"authorization": "bearer client-key", "x-api-key": "client-x-api-key"})
+            assert sorted(_credential_values(upstream.requests[-1]["headers"])) == ["bearer client-key", "client-x-api-key"]
+    finally:
+        for adapter in adapters:
+            adapter.shutdown()
+        upstream.close()
+
+
+def test_host_is_hub_key_callback_strips_mixed_credentials(monkeypatch) -> None:
+    monkeypatch.setattr(server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False))
+    upstream = FakeUpstream()
+    upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+    adapter = PassthroughAdapter("codex", {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % upstream.port, "max_concurrent": 4}, lambda: {}, SimpleNamespace(is_hub_key=lambda tok: tok == "hub-key"), limits=PassthroughLimits(), sanitize=True)
+    try:
+        _call_passthrough(adapter, {"Authorization": "Bearer own-key", "x-api-key": "hub-key"})
+        assert _credential_values(upstream.requests[-1]["headers"]) == []
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_constructor_is_hub_key_overrides_host_callback() -> None:
+    upstream = FakeUpstream()
+    upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+    config = {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % upstream.port, "max_concurrent": 4}
+    adapters = [PassthroughAdapter("codex", config, lambda: {}, SimpleNamespace(is_hub_key=lambda tok: True), limits=PassthroughLimits(), sanitize=True, is_hub_key=lambda tok: False), PassthroughAdapter("codex", config, lambda: {}, SimpleNamespace(is_hub_key=lambda tok: False), limits=PassthroughLimits(), sanitize=True, is_hub_key=lambda tok: tok == "hub-key")]
+    try:
+        _call_passthrough(adapters[0], {"Authorization": "Bearer hub-key"})
+        assert _credential_values(upstream.requests[-1]["headers"]) == ["Bearer hub-key"]
+        _call_passthrough(adapters[1], {"Authorization": "Bearer hub-key", "x-api-key": "own-key"})
+        assert _credential_values(upstream.requests[-1]["headers"]) == []
+    finally:
+        for adapter in adapters:
+            adapter.shutdown()
+        upstream.close()
+
+
+def test_server_is_hub_key_delegates_to_token_cache_and_host_integration(monkeypatch) -> None:
+    monkeypatch.setattr(server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: tok == "hub-key"))
+    assert server.is_hub_key("hub-key") is True
+    assert server.is_hub_key("own-key") is False
+    upstream = FakeUpstream()
+    upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+    adapter = PassthroughAdapter("codex", {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % upstream.port, "max_concurrent": 4}, lambda: {}, server, limits=PassthroughLimits(), sanitize=True)
+    try:
+        _call_passthrough(adapter, {"authorization": "bearer hub-key", "X-API-KEY": "own-key"})
+        assert _credential_values(upstream.requests[-1]["headers"]) == []
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_connection_pool_reuses_socket_and_isolates_headers(monkeypatch) -> None:
+    monkeypatch.setattr(
+        server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False)
+    )
+    upstream = FakeUpstream(keep_alive=True)
+    sockets = []
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        FakeUpstream.json(handler, {"ok": True})
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    try:
+        for headers in (
+            {"Authorization": "Bearer first", "X-Subagent-Id": "first"},
+            {"Authorization": "Bearer second", "X-Subagent-Id": "second"},
+            {},
+        ):
+            sink = CollectSink()
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers=headers,
+                sink=sink,
+            )
+            assert sink.status == 200
+        assert sockets[0] is sockets[1] is sockets[2]
+        assert upstream.requests[0]["headers"]["Authorization"] == "Bearer first"
+        assert upstream.requests[1]["headers"]["Authorization"] == "Bearer second"
+        assert upstream.requests[1]["headers"]["X-Subagent-Id"] == "second"
+        assert "Authorization" not in upstream.requests[2]["headers"]
+        assert "X-Subagent-Id" not in upstream.requests[2]["headers"]
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_parallel_requests_do_not_share_inflight_connection_or_headers(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(
+        server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False)
+    )
+
+    upstream = FakeUpstream(keep_alive=True)
+    adapter = make_adapter(upstream.port)
+    barrier = threading.Barrier(4)
+    sockets = []
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        barrier.wait(timeout=5)
+        FakeUpstream.json(
+            handler,
+            {
+                "auth": handler.headers.get("Authorization"),
+                "subagent": handler.headers.get("X-Subagent-Id"),
+            },
+        )
+
+    def call(index):
+        key = str(index)
+        sink = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={"Authorization": key, "X-Subagent-Id": key},
+            sink=sink,
+        )
+        assert sink.status == 200
+        assert json.loads(sink.body) == {"auth": key, "subagent": key}
+
+    upstream.respond = respond
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(call, range(4)))
+        assert len({id(sock) for sock in sockets}) == 4
+        assert adapter.active_count() == 0
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_connection_close_response_is_never_pooled() -> None:
+    upstream = FakeUpstream(keep_alive=True)
+    adapter = make_adapter(upstream.port)
+    sockets = []
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        FakeUpstream.json(handler, {"ok": True}, extra=[("Connection", "close")])
+
+    upstream.respond = respond
+    try:
+        for _ in range(2):
+            sink = CollectSink()
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers={},
+                sink=sink,
+            )
+            assert sink.status == 200
+        assert sockets[0] is not sockets[1]
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "FALSE", "No", "off", " Off ", " 0 ", "unexpected", "", "   "])
+def test_pooling_kill_switch_closes_and_never_reuses(value, monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", value)
+    upstream = FakeUpstream(keep_alive=True)
+    sockets = []
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        FakeUpstream.json(handler, {"ok": True})
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    try:
+        for _ in range(2):
+            sink = CollectSink()
+            adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+            assert sink.status == 200
+        assert sockets[0] is not sockets[1]
+        for req in upstream.requests:
+            headers = {k.lower(): v for k, v in req["headers"].items()}
+            assert headers["connection"] == "close"
+        assert adapter._pool._idle == {}
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", " On ", " TRUE ", " 1 ", "YES"])
+def test_pooling_enabled_keeps_alive_and_reuses(value, monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", value)
+    upstream = FakeUpstream(keep_alive=True)
+    sockets = []
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        FakeUpstream.json(handler, {"ok": True})
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    try:
+        for _ in range(2):
+            sink = CollectSink()
+            adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+            assert sink.status == 200
+        assert sockets[0] is sockets[1]
+        for req in upstream.requests:
+            headers = {k.lower(): v for k, v in req["headers"].items()}
+            assert headers["connection"] == "keep-alive"
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_pooling_disabled_after_idle_does_not_take_pooled_socket(monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
+    upstream = FakeUpstream(keep_alive=True)
+    sockets = []
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        FakeUpstream.json(handler, {"ok": True})
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    try:
+        sink = CollectSink()
+        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        assert sink.status == 200
+        assert adapter._pool._idle
+        monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "0")
+        sink = CollectSink()
+        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        assert sink.status == 200
+        assert sockets[0] is not sockets[1]
+        headers = {k.lower(): v for k, v in upstream.requests[-1]["headers"].items()}
+        assert headers["connection"] == "close"
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_pooling_disabled_drains_idle_before_next_open(monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
+    upstream = FakeUpstream(keep_alive=True)
+    sockets = []
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        FakeUpstream.json(handler, {"ok": True})
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    try:
+        sink = CollectSink()
+        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        assert sink.status == 200
+        assert adapter._pool._idle
+        idle_conn, _ = next(iter(adapter._pool._idle.values()))[0]
+        assert idle_conn.sock is not None
+        idle_sock = idle_conn.sock
+        assert idle_sock.fileno() != -1
+        events = []
+        orig_close = adapter._pool.close_all
+        orig_get = adapter._pool.get_connection
+
+        def track_close():
+            events.append("close_all")
+            orig_close()
+
+        def track_get(*args, **kwargs):
+            events.append(("get", idle_sock.fileno()))
+            return orig_get(*args, **kwargs)
+
+        monkeypatch.setattr(adapter._pool, "close_all", track_close)
+        monkeypatch.setattr(adapter._pool, "get_connection", track_get)
+        monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "off")
+        sink = CollectSink()
+        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        assert sink.status == 200
+        assert events[0] == "close_all"
+        assert events[1] == ("get", -1)
+        assert idle_sock.fileno() == -1
+        assert adapter._pool._idle == {}
+        assert sockets[0] is not sockets[1]
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+def test_pooling_disabled_during_request_does_not_pool(monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
+    upstream = FakeUpstream(keep_alive=True)
+
+    def respond(handler, body):
+        monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "0")
+        FakeUpstream.json(handler, {"ok": True})
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    try:
+        sink = CollectSink()
+        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        assert sink.status == 200
+        assert adapter._pool._idle == {}
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_pooling_enabled_during_request_closes_and_does_not_pool(monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "0")
+    upstream = FakeUpstream(keep_alive=True)
+    server_sockets = []
+    client_sockets = []
+
+    def respond(handler, body):
+        server_sockets.append(handler.connection)
+        monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
+        FakeUpstream.json(handler, {"ok": True})
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    orig_get_connection = adapter._pool.get_connection
+
+    def track_get_connection(*args, **kwargs):
+        conn, reused = orig_get_connection(*args, **kwargs)
+        assert conn.sock is not None
+        client_sockets.append(conn.sock)
+        return conn, reused
+
+    monkeypatch.setattr(adapter._pool, "get_connection", track_get_connection)
+    try:
+        sink = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink,
+        )
+        assert sink.status == 200
+        first_headers = {
+            k.lower(): v for k, v in upstream.requests[0]["headers"].items()
+        }
+        assert first_headers["connection"] == "close"
+        assert adapter._pool._idle == {}
+        assert len(client_sockets) == 1
+        assert client_sockets[0].fileno() == -1
+
+        sink2 = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink2,
+        )
+        assert sink2.status == 200
+        assert server_sockets[0] is not server_sockets[1]
+        assert client_sockets[0] is not client_sockets[1]
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_pool_limits_from_env() -> None:
+    limits = PassthroughLimits.from_env(
+        {
+            "BRIDGE_MAX_KEEPALIVE_CONNECTIONS": "7",
+            "BRIDGE_KEEPALIVE_EXPIRY_S": "12.5",
+        }
+    )
+    assert limits.max_keepalive_connections == 7
+    assert limits.keepalive_expiry_s == 12.5
+
+
+def test_keepalive_expiry_defaults_to_30() -> None:
+    from adapters.passthrough_adapter import PassthroughConnectionPool
+
+    assert PassthroughLimits().keepalive_expiry_s == 30.0
+    assert PassthroughLimits.from_env({}).keepalive_expiry_s == 30.0
+    assert PassthroughConnectionPool()._keepalive_expiry_s == 30.0
+
+
+def test_handler_sink_flushes_every_chunk() -> None:
+    handler = unittest.mock.Mock()
+    sink = server._HandlerSink(handler)
+    sink.write(content("first"))
+    sink.write(DONE)
+    assert handler.wfile.method_calls == [
+        unittest.mock.call.write(content("first")),
+        unittest.mock.call.flush(),
+        unittest.mock.call.write(DONE),
+        unittest.mock.call.flush(),
+    ]
+
+
+def test_pool_lifo_expiry_capacity_and_shutdown(monkeypatch) -> None:
+    from adapters.passthrough_adapter import PassthroughConnectionPool
+
+    clock = [1.0]
+    monkeypatch.setattr("adapters.passthrough_adapter.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "adapters.passthrough_adapter.select.select", lambda *args: ([], [], [])
+    )
+    pool = PassthroughConnectionPool(max_keepalive=2, keepalive_expiry_s=10)
+    connections = [unittest.mock.Mock() for _ in range(4)]
+    with unittest.mock.patch(
+        "http.client.HTTPConnection", side_effect=connections
+    ) as factory:
+        first, reused = pool.get_connection("localhost", 1234, 2)
+        assert not reused
+        second, _ = pool.get_connection("localhost", 1234, 2)
+        third, _ = pool.get_connection("localhost", 1234, 2)
+        pool.release_connection("localhost", 1234, first)
+        pool.release_connection("localhost", 1234, second)
+        pool.release_connection("localhost", 1234, third)
+        third.close.assert_called_once()
+        current, reused = pool.get_connection("localhost", 1234, 5)
+        assert current is second and reused
+        current.sock.settimeout.assert_called_with(5)
+        pool.release_connection("localhost", 1234, current)
+        clock[0] += 11
+        current, reused = pool.get_connection("localhost", 1234, 1)
+        assert current is connections[3] and not reused
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+        assert factory.call_count == 4
+        pool.release_connection("localhost", 1234, current)
+        pool.close_all()
+        current.close.assert_called_once()
+        pool.release_connection("localhost", 1234, third)
+        assert third.close.call_count == 2
+
+
+@pytest.mark.parametrize("peek", [b"", b"unexpected", OSError("reset")])
+def test_pool_rejects_readable_idle_socket(peek, monkeypatch) -> None:
+    from adapters.passthrough_adapter import PassthroughConnectionPool
+
+    old, new = unittest.mock.Mock(), unittest.mock.Mock()
+    old.sock.recv.side_effect = [peek]
+    monkeypatch.setattr(
+        "adapters.passthrough_adapter.select.select", lambda *args: ([old.sock], [], [])
+    )
+    pool = PassthroughConnectionPool()
+    pool.release_connection("localhost", 1234, old)
+    with unittest.mock.patch("http.client.HTTPConnection", return_value=new):
+        conn, reused = pool.get_connection("localhost", 1234, 1)
+    assert conn is new and not reused
+    old.sock.recv.assert_called_once_with(1, socket.MSG_PEEK)
+    old.close.assert_called_once()
+    new.close()
+
+
+@pytest.mark.parametrize(
+    "method,error,expected_status,expected_get_count,expected_fresh",
+    [
+        ("request", BrokenPipeError, 502, 1, False),
+        ("request", ConnectionResetError, 502, 1, False),
+        ("request", http.client.CannotSendRequest, 200, 2, True),
+    ],
+)
+def test_reused_connection_race_retries_once_on_fresh_socket(
+    method, error, expected_status, expected_get_count, expected_fresh
+) -> None:
+    upstream = FakeUpstream(keep_alive=True)
+    upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+    adapter = make_adapter(upstream.port)
+    try:
+
+        def call(status=200):
+            sink = CollectSink()
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers={},
+                sink=sink,
+            )
+            assert sink.status == status
+
+        call()
+        old, reused = adapter._pool.get_connection("127.0.0.1", upstream.port, 2)
+        assert reused
+        adapter._pool.release_connection("127.0.0.1", upstream.port, old)
+        with (
+            unittest.mock.patch.object(
+                old, method, side_effect=error("stale")
+            ) as failed,
+            unittest.mock.patch.object(
+                adapter._pool, "get_connection", wraps=adapter._pool.get_connection
+            ) as get,
+        ):
+            call(expected_status)
+            failed.assert_called_once()
+            assert get.call_count == expected_get_count
+            assert get.call_args.kwargs["fresh"] is expected_fresh
+        assert old.sock is None
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionResetError, http.client.BadStatusLine, http.client.ResponseNotReady],
+)
+@pytest.mark.parametrize("accepts_presend_errors", [False, True])
+def test_reused_connection_response_failure_never_replays_post(
+    error, accepts_presend_errors
+) -> None:
+    upstream = FakeUpstream(keep_alive=True)
+    received = threading.Event()
+
+    def respond(handler, body):
+        FakeUpstream.json(handler, {"ok": True})
+        received.set()
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port)
+    try:
+        first = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=first,
+        )
+        assert first.status == 200
+        old, reused = adapter._pool.get_connection("127.0.0.1", upstream.port, 2)
+        assert reused
+        adapter._pool.release_connection("127.0.0.1", upstream.port, old)
+        received.clear()
+
+        def fail_response():
+            assert received.wait(2)
+            raise error("response lost after POST execution")
+
+        with (
+            unittest.mock.patch.object(old, "getresponse", side_effect=fail_response),
+            unittest.mock.patch.object(
+                adapter._pool, "get_connection", wraps=adapter._pool.get_connection
+            ) as get,
+        ):
+            sink = CollectSink()
+            sink.accepts_presend_errors = accepts_presend_errors
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers={},
+                sink=sink,
+            )
+            assert sink.status == 502
+            assert get.call_count == 1
+        assert len(upstream.requests) == 2
+        assert old.sock is None
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+def test_successful_sse_without_content_length_closes_connection(monkeypatch) -> None:
+    adapter = make_adapter(1234)
+    conn = unittest.mock.Mock()
+    response = conn.getresponse.return_value
+    response.isclosed.return_value = True
+    response.will_close = False
+    response.getheader.side_effect = lambda name: {
+        "Content-Type": "text/event-stream",
+        "Transfer-Encoding": "chunked",
+    }.get(name)
+    monkeypatch.setattr(
+        adapter._pool, "get_connection", lambda *args, **kwargs: (conn, False)
+    )
+    monkeypatch.setattr(
+        "adapters.passthrough_adapter.select.select", lambda *args: ([], [], [])
+    )
+    monkeypatch.setattr(adapter, "_respond", lambda *args, **kwargs: True)
+    try:
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={"stream": True},
+            headers={},
+            sink=CollectSink(),
+        )
+        conn.close.assert_called_once()
+        assert adapter.active_count() == 0
+    finally:
+        adapter.shutdown()
+
+
+def test_stream_first_chunk_arrives_before_upstream_finishes_and_socket_reused() -> (
+    None
+):
+    upstream = FakeUpstream(keep_alive=True)
+    first_received = threading.Event()
+    streamed_before_end = []
+    sockets = []
+    first = content("first")
+    rest = finish(0, "stop") + DONE
+
+    def respond(handler, body):
+        sockets.append(handler.connection)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Content-Length", str(len(first + rest)))
+        handler.end_headers()
+        handler.wfile.write(first)
+        handler.wfile.flush()
+        streamed_before_end.append(first_received.wait(3))
+        handler.wfile.write(rest)
+        handler.wfile.flush()
+
+    class StreamingSink(CollectSink):
+        def write(self, data):
+            super().write(data)
+            if data == first:
+                first_received.set()
+
+    upstream.respond = respond
+    adapter = make_adapter(upstream.port, sanitize=False)
+    try:
+        for _ in range(2):
+            first_received.clear()
+            sink = StreamingSink()
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers={},
+                sink=sink,
+            )
+            assert sink.body == first + rest
+        assert streamed_before_end == [True, True]
+        assert sockets[0] is sockets[1]
+    finally:
+        adapter.shutdown()
+        upstream.close()
+
+
+@pytest.mark.parametrize("send_done", [True, False])
+def test_stream_cleanup_does_not_wait_for_next_http_chunk(send_done) -> None:
+    upstream = FakeUpstream(keep_alive=True)
+    returned = threading.Event()
+    observed = threading.Event()
+    returned_before_upstream_eof = []
+
+    def respond(handler, body):
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Transfer-Encoding", "chunked")
+        handler.end_headers()
+        data = content("first") + (finish(0, "stop") + DONE if send_done else b"")
+        handler.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+        handler.wfile.flush()
+        returned_before_upstream_eof.append(returned.wait(3))
+        observed.set()
+        try:
+            handler.wfile.write(b"0\r\n\r\n")
+            handler.wfile.flush()
+        except OSError:
+            pass
+
+    upstream.respond = respond
+    adapter = make_adapter(
+        upstream.port,
+        limits=PassthroughLimits(
+            idle_timeout_s=0.05,
+            total_timeout_s=5,
+            read_timeout_s=5,
+            heartbeat_interval_s=0.01,
+            poll_interval_s=0.01,
+        ),
+        sanitize=False,
+    )
+    try:
+        sink = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink,
+        )
+        returned.set()
+        assert observed.wait(1)
+        assert returned_before_upstream_eof == [True]
+        assert adapter.active_count() == 0
+        if send_done:
+            assert sink.body.endswith(DONE)
+        else:
+            assert b"upstream_stream_error" in sink.body
+    finally:
+        returned.set()
+        adapter.shutdown()
+        upstream.close()
 
 
 class SeamCase(unittest.TestCase):
     def setUp(self):
         self.upstream = FakeUpstream()
         self.addCleanup(self.upstream.close)
+        # Детерминированно: мастер-ключом хаба считается только hub-key.
+        patcher = unittest.mock.patch.object(
+            server,
+            "TOKEN_CACHE",
+            SimpleNamespace(is_valid=lambda tok: tok == "hub-key"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def call(self, request: dict, adapter=None, headers=None, raw=None, path="/v1/chat/completions"):
         adapter = adapter or make_adapter(self.upstream.port, sanitize=True)
@@ -723,28 +1484,48 @@ class TestSeamNonStream(SeamCase):
         )
         for config, environ, expected in cases:
             for header in ("Authorization", "authorization", "AUTHORIZATION"):
-                with (
-                    self.subTest(config=config, header=header),
-                    unittest.mock.patch.dict(os.environ, environ, clear=True),
-                ):
-                    adapter = PassthroughAdapter(
-                        "test",
-                        {
-                            "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
-                            **config,
-                        },
-                        dict,
-                    )
-                    headers = {header: "Bearer client-key", "X-Custom": "keep"}
-                    sink = self.call({"model": "m"}, adapter=adapter, headers=headers)
-                    sent = self.upstream.requests[-1]["headers"]
-                    self.assertEqual(sink.status, 200)
-                    self.assertEqual(
-                        [v for k, v in sent.items() if k.lower() == "authorization"],
-                        [f"Bearer {expected}"],
-                    )
-                    self.assertEqual(sent["X-Custom"], "keep")
-                    self.assertEqual(headers[header], "Bearer client-key")
+                for api_key_header in ("x-api-key", "X-Api-Key", "X-API-KEY"):
+                    with (
+                        self.subTest(
+                            config=config,
+                            header=header,
+                            api_key_header=api_key_header,
+                        ),
+                        unittest.mock.patch.dict(os.environ, environ, clear=True),
+                    ):
+                        adapter = PassthroughAdapter(
+                            "test",
+                            {
+                                "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
+                                **config,
+                            },
+                            dict,
+                        )
+                        headers = {
+                            header: "Bearer client-key",
+                            api_key_header: "client-x-api-key",
+                            "X-Custom": "keep",
+                        }
+                        sink = self.call(
+                            {"model": "m"}, adapter=adapter, headers=headers
+                        )
+                        sent = self.upstream.requests[-1]["headers"]
+                        self.assertEqual(sink.status, 200)
+                        self.assertEqual(
+                            [
+                                v
+                                for k, v in sent.items()
+                                if k.lower() == "authorization"
+                            ],
+                            [f"Bearer {expected}"],
+                        )
+                        self.assertEqual(
+                            [v for k, v in sent.items() if k.lower() == "x-api-key"],
+                            [],
+                        )
+                        self.assertEqual(sent["X-Custom"], "keep")
+                        self.assertEqual(headers[header], "Bearer client-key")
+                        self.assertEqual(headers[api_key_header], "client-x-api-key")
 
     def test_upstream_auth_override_without_client_authorization_and_with_streaming(
         self,
@@ -769,7 +1550,7 @@ class TestSeamNonStream(SeamCase):
             self.upstream.requests[-1]["headers"]["Authorization"], "Bearer config-key"
         )
 
-    def test_upstream_auth_unconfigured_or_empty_keeps_client_authorization(
+    def test_upstream_auth_unconfigured_preserves_own_client_authorization(
         self,
     ) -> None:
         self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
@@ -780,29 +1561,196 @@ class TestSeamNonStream(SeamCase):
             ({"api_key": ""}, {}),
         )
         for config, environ in cases:
-            with (
-                self.subTest(config=config),
-                unittest.mock.patch.dict(os.environ, environ, clear=True),
-            ):
-                adapter = PassthroughAdapter(
-                    "test",
-                    {
-                        "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
-                        **config,
-                    },
-                    dict,
-                )
-                sink = self.call(
-                    {"model": "m"},
-                    adapter=adapter,
-                    headers={"authorization": "Bearer client-key"},
-                )
+            for api_key_header in ("x-api-key", "X-Api-Key", "X-API-KEY"):
+                with (
+                    self.subTest(config=config, api_key_header=api_key_header),
+                    unittest.mock.patch.dict(os.environ, environ, clear=True),
+                ):
+                    adapter = PassthroughAdapter(
+                        "test",
+                        {
+                            "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
+                            **config,
+                        },
+                        dict,
+                    )
+                    sink = self.call(
+                        {"model": "m"},
+                        adapter=adapter,
+                        headers={
+                            "authorization": "Bearer client-key",
+                            api_key_header: "client-x-api-key",
+                        },
+                    )
+                    self.assertEqual(sink.status, 200)
+                    sent = self.upstream.requests[-1]["headers"]
+                    self.assertEqual(
+                        sorted(
+                            v
+                            for k, v in sent.items()
+                            if k.lower() in ("authorization", "x-api-key")
+                        ),
+                        ["Bearer client-key", "client-x-api-key"],
+                    )
+
+    def test_unconfigured_hub_credential_is_hidden_from_upstream(self) -> None:
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+        for headers in (
+            {"Authorization": "Bearer hub-key", "X-Api-Key": "own-key"},
+            {"Authorization": "Bearer own-key", "x-api-key": "hub-key"},
+            {"authorization": "bearer hub-key"},
+            {"AUTHORIZATION": "Bearer hub-key"},
+            {"X-API-KEY": "hub-key"},
+            {"x-api-key": "hub-key"},
+        ):
+            with self.subTest(headers=headers):
+                sink = self.call({"model": "m"}, headers=headers)
                 self.assertEqual(sink.status, 200)
                 sent = self.upstream.requests[-1]["headers"]
                 self.assertEqual(
-                    [v for k, v in sent.items() if k.lower() == "authorization"],
-                    ["Bearer client-key"],
+                    [v for k, v in sent.items() if k.lower() in ("authorization", "x-api-key")],
+                    [],
                 )
+
+    def test_token_cache_error_does_not_leak_credentials_upstream(self) -> None:
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(
+            handler, {"ok": True}
+        )
+        is_valid = unittest.mock.Mock(side_effect=RuntimeError("token check boom"))
+        with unittest.mock.patch.object(
+            server, "TOKEN_CACHE", SimpleNamespace(is_valid=is_valid)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "token check boom"):
+                self.call(
+                    {"model": "m"},
+                    headers={
+                        "Authorization": "Bearer client-key",
+                        "x-api-key": "client-x-api-key",
+                    },
+                )
+        is_valid.assert_called_once_with("client-key")
+        self.assertEqual(self.upstream.requests, [])
+
+    def test_injected_is_hub_key_error_does_not_leak_credentials_upstream(self) -> None:
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(
+            handler, {"ok": True}
+        )
+        is_hub_key = unittest.mock.Mock(side_effect=RuntimeError("token check boom"))
+        adapter = make_adapter(self.upstream.port, sanitize=True, is_hub_key=is_hub_key)
+        with self.assertRaisesRegex(RuntimeError, "token check boom"):
+            self.call(
+                {"model": "m"},
+                adapter=adapter,
+                headers={
+                    "Authorization": "Bearer client-key",
+                    "x-api-key": "client-x-api-key",
+                },
+            )
+        is_hub_key.assert_called_once_with("client-key")
+        self.assertEqual(self.upstream.requests, [])
+
+    def test_abort_before_getresponse_and_late_socket_cleanup(self) -> None:
+        self.upstream.respond = lambda h, b: FakeUpstream.json(h, {"ok": True})
+        adapter = make_adapter(
+            self.upstream.port,
+            PassthroughLimits(poll_interval_s=0.01),
+            sanitize=True,
+        )
+        self.addCleanup(adapter.shutdown)
+
+        # 1. ClientGone right before conn.getresponse() skips getresponse and cleans up.
+        gone_after_open = False
+        orig_open = adapter._open
+
+        def open_then_gone(*args, **kwargs):
+            nonlocal gone_after_open
+            conn = orig_open(*args, **kwargs)
+            conn.getresponse = unittest.mock.MagicMock(  # type: ignore[method-assign]
+                side_effect=AssertionError("getresponse must not be called")
+            )
+            gone_after_open = True
+            return conn
+
+        sink1 = CollectSink()
+        sink1.client_gone = lambda: gone_after_open  # type: ignore[method-assign]
+        with unittest.mock.patch.object(adapter, "_open", side_effect=open_then_gone):
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={"model": "m"},
+                headers={},
+                sink=sink1,
+            )
+        self.assertIsNone(sink1.status)
+        self.assertEqual(adapter.active_count(), 0)
+
+        # 2. Late socket arriving in on_socket after watcher abort closes socket immediately.
+        late_sockets: list[socket.socket] = []
+        connect_entered = threading.Event()
+        orig_get_conn = adapter._pool.get_connection
+
+        def delayed_get_conn(host: str, port: int, timeout: float, *, fresh: bool = False):
+            conn, reused = orig_get_conn(host, port, timeout, fresh=fresh)
+            assert conn.sock is not None
+            late_sockets.append(conn.sock)
+            conn.request = unittest.mock.MagicMock(  # type: ignore[method-assign]
+                side_effect=AssertionError("request must not be sent on aborted socket")
+            )
+            connect_entered.set()
+            for thread in threading.enumerate():
+                if thread.name == "passthrough-deadline":
+                    thread.join(timeout=1.0)
+            return conn, reused
+
+        sink2 = CollectSink()
+        sink2.client_gone = lambda: connect_entered.is_set()  # type: ignore[method-assign]
+        before_requests = len(self.upstream.requests)
+        with unittest.mock.patch.object(
+            adapter._pool, "get_connection", side_effect=delayed_get_conn
+        ):
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={"model": "m"},
+                headers={},
+                sink=sink2,
+            )
+        self.assertEqual(len(late_sockets), 1)
+        self.assertEqual(late_sockets[0].fileno(), -1)
+        self.assertEqual(len(self.upstream.requests), before_requests)
+        self.assertIsNone(sink2.status)
+        self.assertEqual(adapter.active_count(), 0)
+
+    def test_stream_relay_socket_timeout_triggers_on_timeout_py39_compat(self) -> None:
+        class LegacySocketTimeout(OSError):
+            pass
+
+        adapter = make_adapter(self.upstream.port, sanitize=True)
+        self.addCleanup(adapter.shutdown)
+        resp = unittest.mock.MagicMock()
+        resp.getheaders.return_value = [("Content-Type", "text/event-stream")]
+        resp.getheader.return_value = None
+        sink = CollectSink()
+        timed_out = False
+
+        def on_timeout() -> None:
+            nonlocal timed_out
+            timed_out = True
+
+        with (
+            unittest.mock.patch(
+                "adapters.passthrough_adapter.socket.timeout", LegacySocketTimeout
+            ),
+            unittest.mock.patch(
+                "adapters.passthrough_adapter.relay_sse",
+                side_effect=LegacySocketTimeout("read timed out"),
+            ),
+        ):
+            ok = adapter._relay_stream(
+                resp, None, sink, False, on_timeout=on_timeout
+            )
+        self.assertFalse(ok)
+        self.assertTrue(timed_out)
 
     def test_non_200_status_and_body_verbatim(self):
         error = b'{"error": {"message": "rate limited", "type": "rate"}}'
@@ -1109,8 +2057,8 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                 path.write_text("{broken")
                 self.assertFalse(source.enabled())
 
-    def test_handler_rechecks_flag_for_each_request(self) -> None:
-        """Реальный Handler проверяет kill-switch без рестарта и без socket.bind()."""
+    def test_handler_dual_tolerance_depends_on_flag(self) -> None:
+        """Реальный Handler допускает собственный ключ passthrough только при включённом флаге."""
         data = load_raw_fleet()
         data["backends"]["codex"].update(enabled=True, api_key="own-test-key")
         data["backends"]["codex"].pop("api_key_env", None)
@@ -1133,13 +2081,17 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
             def sendall(self, chunk: bytes) -> None:
                 self.output.extend(chunk)
 
+        captured_hub_auth: list[bool] = []
+
         def serve(
             handler: server.Handler,
             adapter: PassthroughAdapter,
             raw: bytes,
             request: dict,
             model: str,
+            _hub_auth_ok: bool,
         ) -> None:
+            captured_hub_auth.append(_hub_auth_ok)
             handler._send(200, {"accepted": True})
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1156,7 +2108,18 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                 unittest.mock.patch.object(server, "FLEET", catalog),
                 unittest.mock.patch.object(server, "BACKENDS", registry),
                 unittest.mock.patch.object(server, "AUTH_KEY", "hub-test-key"),
+                unittest.mock.patch.object(
+                    server,
+                    "TOKEN_CACHE",
+                    server.TokenCache(
+                        path=Path(directory) / ".env",
+                        environ={"BRIDGE_KEY": "hub-test-key"},
+                    ),
+                ),
                 unittest.mock.patch.object(server, "_budget", None),
+                unittest.mock.patch.object(server, "_shutting_down", False),
+                unittest.mock.patch.object(server, "_is_drain_enabled", lambda: False),
+                unittest.mock.patch.object(server, "_is_detached_enabled", lambda: False),
                 unittest.mock.patch.object(server.Handler, "_serve_passthrough", serve),
             ):
                 for enabled in (False, True, False):
@@ -1170,6 +2133,7 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                             with self.subTest(
                                 enabled=enabled, token=token, stream=stream
                             ):
+                                captured_hub_auth.clear()
                                 body = json.dumps(
                                     {
                                         "model": "gpt-6.1-terra",
@@ -1196,6 +2160,10 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                                 self.assertEqual(
                                     int(bytes(conn.output).split(b" ", 2)[1]), expected
                                 )
+                                self.assertEqual(
+                                    captured_hub_auth,
+                                    [token == "hub-test-key"] if expected == 200 else [],
+                                )
                                 if expected == 401:
                                     self.assertEqual(
                                         json.loads(
@@ -1205,6 +2173,7 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                                             "error": {
                                                 "message": "unauthorized",
                                                 "type": "auth_error",
+                                                "code": 401,
                                             }
                                         },
                                     )
@@ -1253,7 +2222,7 @@ class TestHubRoute(BridgeCase):
     def post(
         self,
         body: dict,
-        auth: str | None = "Bearer upstream-key",
+        auth: str | None = "Bearer test-key",
         extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
@@ -1274,7 +2243,7 @@ class TestHubRoute(BridgeCase):
         return {"model": "gpt-6.1-terra", "reasoning_effort": "xhigh", "tools": TOOLS,
                 "messages": [{"role": "user", "content": "hi"}], **extra}
 
-    def test_deferred_auth_reserves_body_budget_before_upstream(self):
+    def test_authorized_request_reserves_body_budget_before_upstream(self):
         budget = server._ByteBudget(1)
         with unittest.mock.patch.object(server, "_budget", budget), unittest.mock.patch.object(budget, "reserve", wraps=budget.reserve) as reserve:
             status, _ = self.post(self.request_body())
@@ -1297,23 +2266,22 @@ class TestHubRoute(BridgeCase):
         self.assertEqual(json.loads(raw)["error"]["type"], "model_not_found")
         self.assertEqual(self.upstream.requests, [])
 
-    def test_passthrough_model_with_upstream_key_routes_verbatim_and_sanitizes(self):
+    def test_passthrough_model_with_hub_key_routes_verbatim_and_sanitizes(self):
         status, raw = self.post(self.request_body())
         self.assertEqual(status, 200)
         data = json.loads(raw)
         self.assertEqual(args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"})
         sent = self.upstream.requests[0]
-        self.assertEqual(sent["headers"]["Authorization"], "Bearer upstream-key")
+        self.assertNotIn("Authorization", sent["headers"])
         body = json.loads(sent["body"])
         self.assertEqual((body["model"], body["reasoning_effort"]), ("gpt-6.1-terra", "xhigh"))  # без клампа
 
-    def test_passthrough_model_without_authorization_is_forwarded_not_rejected_by_hub(self):
+    def test_passthrough_model_without_authorization_is_rejected_by_hub(self):
         self.upstream.respond = lambda h, b: FakeUpstream.json(h, {"error": {"message": "no key"}}, status=401)
         status, raw = self.post(self.request_body(), auth=None)
         self.assertEqual(status, 401)
-        self.assertEqual(json.loads(raw)["error"]["message"], "no key")  # ответ upstream, не хаба
-        self.assertEqual(len(self.upstream.requests), 1)
-        self.assertNotIn("authorization", {k.lower() for k in self.upstream.requests[0]["headers"]})
+        self.assertEqual(json.loads(raw)["error"]["message"], "unauthorized")
+        self.assertEqual(self.upstream.requests, [])
 
     def test_hub_key_still_works_for_passthrough_model(self):
         status, _ = self.post(self.request_body(), auth="Bearer " + self.HUB_KEY)
@@ -1327,7 +2295,7 @@ class TestHubRoute(BridgeCase):
         )
 
     @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True)
-    def test_dual_tolerance_upstream_key_accepted_when_auth_deferred(
+    def test_upstream_key_accepted_when_tolerance_flag_enabled(
         self, flag: unittest.mock.Mock
     ) -> None:
         self.configure_upstream_key()
@@ -1353,12 +2321,8 @@ class TestHubRoute(BridgeCase):
                         extra_headers=extra_headers,
                     )
                     self.assertEqual(status, 200)
-                    self.assertEqual(
-                        self.upstream.requests[-1]["headers"]["Authorization"],
-                        "Bearer config-key",
-                    )
-                    if stream:
-                        self.assertEqual(raw, events)
+                    self.assertTrue(self.upstream.requests)
+                    self.upstream.requests.clear()
 
     def test_dual_tolerance_bridge_key_accepted(self) -> None:
         self.configure_upstream_key()
@@ -1388,7 +2352,7 @@ class TestHubRoute(BridgeCase):
                     self.assertEqual(status, 401)
                     self.assertEqual(
                         json.loads(raw),
-                        {"error": {"message": "unauthorized", "type": "auth_error"}},
+                        {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}},
                     )
         self.assertEqual(self.upstream.requests, [])
 
@@ -1404,7 +2368,7 @@ class TestHubRoute(BridgeCase):
                     self.assertEqual(status, 401)
                     self.assertEqual(
                         json.loads(raw),
-                        {"error": {"message": "unauthorized", "type": "auth_error"}},
+                        {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}},
                     )
         self.assertEqual(self.upstream.requests, [])
 
@@ -1442,7 +2406,7 @@ class TestHubRoute(BridgeCase):
             {"prompt": "p"},
         )
 
-    def test_unauthorized_deferred_with_upstream_key_is_401(self) -> None:
+    def test_unauthorized_with_upstream_key_is_401(self) -> None:
         server.FLEET["backends"]["codex"]["api_key"] = "config-key"
         server.BACKENDS = AdapterRegistry.from_fleet(
             server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
@@ -1454,7 +2418,7 @@ class TestHubRoute(BridgeCase):
                     self.assertEqual(status, 401)
                     self.assertEqual(
                         json.loads(raw),
-                        {"error": {"message": "unauthorized", "type": "auth_error"}},
+                        {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}},
                     )
                     self.assertEqual(self.upstream.requests, [])
 
@@ -1473,10 +2437,22 @@ class TestHubRoute(BridgeCase):
         finally:
             conn.close()
 
-    def test_models_listing_includes_passthrough_model_for_loopback_without_hub_key(self):
+    def test_models_listing_rejects_upstream_key_and_includes_passthrough_model_with_hub_key(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
             conn.request("GET", "/v1/models", headers={"Authorization": "Bearer upstream-key"})
+            resp = conn.getresponse()
+            err_data = json.loads(resp.read())
+        finally:
+            conn.close()
+        self.assertEqual(resp.status, 401)
+        self.assertEqual(err_data["error"]["type"], "authentication_error")
+        self.assertEqual(resp.getheader("WWW-Authenticate"), "Bearer")
+        self.assertEqual(self.upstream.requests, [])
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("GET", "/v1/models", headers={"Authorization": f"Bearer {self.HUB_KEY}"})
             resp = conn.getresponse()
             data = json.loads(resp.read())
         finally:

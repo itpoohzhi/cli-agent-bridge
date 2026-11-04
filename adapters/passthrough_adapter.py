@@ -3,7 +3,7 @@
 Отдельный raw HTTP-шов вне `TurnContext`/`TurnResult`: запрос уходит upstream (`base_url`
 из `fleet.json`, например `codex-lb` на `127.0.0.1:2455`) дословно, ответ возвращается с
 единственной нормализацией — санитизацией `tool_calls` общим ядром `core.tool_emulation`.
-Модуль не знает ни об одном конкретном upstream, клиенте или модели и не импортирует `server`.
+Модуль не знает ни об одном конкретном upstream, клиенте или модели; для скрытия мастер-ключа хаба проверка токена инжектируется callback'ом `is_hub_key` (параметр конструктора или host), модуль `server` не импортируется.
 
 Стриминг: `content`/`reasoning` идут без задержки; дельты `tool_calls` копятся по составному
 ключу `(choice.index, tool_call.index)` и выпускаются только вместе с терминальным
@@ -24,6 +24,7 @@ import math
 import os
 import queue
 import re
+import select
 import socket
 import threading
 import time
@@ -45,6 +46,7 @@ from core.backend_adapter import (
     TurnContext,
     TurnResult,
 )
+
 try:
     from core.tool_emulation import (
         DEFAULT_MAX_PARALLEL_CALLS,
@@ -64,6 +66,7 @@ except ImportError:
         build_tool_schemas,
         sanitize_tool_call,
     )
+
     DEFAULT_MAX_REPETITION_REPEATS = 20
     DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
     RepetitionGuard = None  # type: ignore[assignment,misc]
@@ -185,6 +188,8 @@ class PassthroughLimits:
     repetition_max_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN
     repetition_guard_enabled: bool = False
     invoke_normalization_enabled: bool = False
+    max_keepalive_connections: int = 32
+    keepalive_expiry_s: float = 30.0
 
     @classmethod
     def from_env(
@@ -193,6 +198,10 @@ class PassthroughLimits:
         """Лимиты из окружения; нечисловое и неположительное значение -> default."""
         env = os.environ if environ is None else environ
         return cls(
+            max_keepalive_connections=_positive_int(
+                env, "BRIDGE_MAX_KEEPALIVE_CONNECTIONS", 32
+            ),
+            keepalive_expiry_s=_positive_float(env, "BRIDGE_KEEPALIVE_EXPIRY_S", 30.0),
             max_parallel_calls=_positive_int(
                 env, ENV_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_CALLS
             ),
@@ -254,6 +263,84 @@ class PassthroughLimits:
                 env, ENV_INVOKE_NORMALIZATION_ENABLED, False
             ),
         )
+
+
+class PassthroughConnectionPool:
+    """Потокобезопасный LIFO-пул свободных соединений без состояния запроса."""
+
+    def __init__(
+        self, max_keepalive: int = 32, keepalive_expiry_s: float = 30.0
+    ) -> None:
+        self._max_keepalive: int = max_keepalive
+        self._keepalive_expiry_s: float = keepalive_expiry_s
+        self._idle: dict[
+            tuple[str, int], list[tuple[http.client.HTTPConnection, float]]
+        ] = {}
+        self._lock: threading.Lock = threading.Lock()
+        self._closed: bool = False
+
+    def get_connection(
+        self, host: str, port: int, timeout: float, *, fresh: bool = False
+    ) -> tuple[http.client.HTTPConnection, bool]:
+        """Выдать живое свободное соединение либо подключить новое."""
+        while not fresh:
+            with self._lock:
+                entries = self._idle.get((host, port))
+                entry = entries.pop() if entries else None
+                if not entries:
+                    _ = self._idle.pop((host, port), None)
+            if entry is None:
+                break
+            conn, last_used = entry
+            sock = conn.sock
+            try:
+                if (
+                    sock is not None
+                    and time.monotonic() - last_used <= self._keepalive_expiry_s
+                ):
+                    readable, _, _ = select.select([sock], [], [], 0)
+                    if not readable:
+                        conn.timeout = timeout
+                        _ = sock.settimeout(timeout)
+                        return conn, True
+                    # EOF и незапрошенные данные одинаково запрещают переиспользование.
+                    _ = sock.recv(1, socket.MSG_PEEK)
+            except (OSError, ValueError):
+                pass
+            conn.close()
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        try:
+            conn.connect()
+        except BaseException:
+            conn.close()
+            raise
+        return conn, False
+
+    def release_connection(
+        self,
+        host: str,
+        port: int,
+        conn: http.client.HTTPConnection,
+        can_reuse: bool = True,
+    ) -> None:
+        """Вернуть полностью прочитанное соединение или закрыть его."""
+        if can_reuse and conn.sock is not None:
+            with self._lock:
+                if not self._closed:
+                    entries = self._idle.setdefault((host, port), [])
+                    if len(entries) < self._max_keepalive:
+                        entries.append((conn, time.monotonic()))
+                        return
+        conn.close()
+
+    def close_all(self) -> None:
+        """Закрыть пул; соединения в работе закроются при возврате."""
+        with self._lock:
+            self._closed = True
+            idle, self._idle = self._idle, {}
+        for entries in idle.values():
+            for conn, _ in entries:
+                conn.close()
 
 
 class ClientGone(Exception):
@@ -632,6 +719,7 @@ class StreamOutcome:
     repetition_loop: bool = False
     last_chunk: Optional[dict[str, Any]] = None
     unfinished_choices: Optional[set[int]] = None
+    reader_stopped: bool = False
 
 
 class _TimedSseReader:
@@ -651,12 +739,19 @@ class _TimedSseReader:
             maxsize=limits.read_queue_max_entries
         )
         self.stop = threading.Event()
+        self.request_read: threading.Semaphore = threading.Semaphore(0)
         self.last_input = time.monotonic()
         self.last_progress: float | None = None
 
         def read() -> None:
             try:
                 while not self.stop.is_set():
+                    # Без чтения вперёд: после [DONE]/ошибки поток не должен
+                    # удерживать lock HTTPResponse в блокирующем readline.
+                    if not self.request_read.acquire(timeout=limits.poll_interval_s):
+                        continue
+                    if self.stop.is_set():
+                        return
                     line = readline(limits.max_body_bytes + 1)
                     while not self.stop.is_set():
                         try:
@@ -678,6 +773,7 @@ class _TimedSseReader:
         self.thread.start()
 
     def readline(self, _limit: int) -> bytes:
+        self.request_read.release()
         while True:
             now = time.monotonic()
             remaining = self.deadline - now
@@ -708,6 +804,7 @@ class _TimedSseReader:
 
     def close(self) -> None:
         self.stop.set()
+        self.request_read.release()
         self.thread.join(timeout=self.limits.reader_join_timeout_s)
 
 
@@ -902,7 +999,9 @@ def relay_sse(
                 write(raw)
                 continue
             if not sanitize:
-                outcome.last_chunk = {k: chunk.get(k) for k in ("id", "created", "model")}
+                outcome.last_chunk = {
+                    k: chunk.get(k) for k in ("id", "created", "model")
+                }
                 for choice in choices:
                     if isinstance(choice, dict):
                         raw_index = choice.get("index")
@@ -1078,6 +1177,7 @@ def relay_sse(
     finally:
         acc.close()
         reader.close()
+        outcome.reader_stopped = not reader.thread.is_alive()
 
 
 def _json_error(
@@ -1128,8 +1228,10 @@ class PassthroughAdapter(BackendAdapter):
         limits: Optional[PassthroughLimits] = None,
         process_budget: Optional[ProcessBudget] = None,
         sanitize: Optional[bool] = None,
+        is_hub_key: Optional[Callable[[str], bool]] = None,
     ) -> None:
         super().__init__(backend_id, config, catalog_source, host)
+        self._is_hub_key = is_hub_key
         api_key_env = self.config.get("api_key_env")
         api_key = self.config.get("api_key")
         self._upstream_key = (
@@ -1137,6 +1239,9 @@ class PassthroughAdapter(BackendAdapter):
         ) or (api_key if isinstance(api_key, str) else "")
         self._limits = limits
         initial_limits = self.limits
+        self._pool: PassthroughConnectionPool = PassthroughConnectionPool(
+            initial_limits.max_keepalive_connections, initial_limits.keepalive_expiry_s
+        )
         self.process_budget = process_budget or ProcessBudget(
             initial_limits.accumulator_max_process_bytes
         )
@@ -1200,7 +1305,7 @@ class PassthroughAdapter(BackendAdapter):
         return None
 
     def shutdown(self) -> None:
-        return None
+        self._pool.close_all()
 
     # -- raw-шов -------------------------------------------------------------------------
     def _log(self, message: str) -> None:
@@ -1234,15 +1339,24 @@ class PassthroughAdapter(BackendAdapter):
         with self._lock:
             self._active += 1
         conn: Optional[http.client.HTTPConnection] = None
+        opened_pooling: list[bool] = []
         transport: list[socket.socket] = []
         stop = threading.Event()
+        aborted = threading.Event()
+        transport_lock = threading.Lock()
+        resp: http.client.HTTPResponse | None = None
+        successful = False
 
         def abort() -> None:
-            for sock in transport:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    continue
+            with transport_lock:
+                if stop.is_set():
+                    return
+                aborted.set()
+                for sock in transport:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        continue
 
         def watch() -> None:
             while not stop.wait(
@@ -1252,23 +1366,39 @@ class PassthroughAdapter(BackendAdapter):
                     abort()
                     return
 
+        def on_socket(sock: socket.socket) -> None:
+            with transport_lock:
+                if aborted.is_set():
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    sock.close()
+                    raise ClientGone() if sink.client_gone() else TimeoutError()
+                transport.append(sock)
+
         watcher = threading.Thread(
             target=watch, daemon=True, name="passthrough-deadline"
         )
         watcher.start()
         try:
             try:
+                if sink.client_gone():
+                    raise ClientGone()
+                if aborted.is_set() or time.monotonic() >= deadline:
+                    raise TimeoutError()
                 conn = self._open(
                     path,
                     raw_body,
                     headers,
                     deadline=deadline,
-                    on_socket=transport.append,
+                    on_socket=on_socket,
                     presend_deadline=getattr(sink, "presend_deadline", None),
+                    on_pooling=opened_pooling.append,
                 )
                 if sink.client_gone():
                     raise ClientGone()
-                if time.monotonic() >= deadline:
+                if aborted.is_set() or time.monotonic() >= deadline:
                     raise TimeoutError()
                 resp = conn.getresponse()
                 if time.monotonic() >= deadline:
@@ -1315,13 +1445,7 @@ class PassthroughAdapter(BackendAdapter):
                     sink, 504, "upstream_timeout", "upstream did not respond in time"
                 )
                 return
-            except (OSError, http.client.HTTPException) as exc:
-                if isinstance(
-                    exc, (ConnectionError, http.client.IncompleteRead)
-                ) and getattr(sink, "accepts_presend_errors", False):
-                    raise PreSendTransientError(
-                        "upstream reset before downstream response"
-                    ) from exc
+            except (OSError, http.client.HTTPException):
                 if time.monotonic() >= deadline:
                     self._fail(
                         sink,
@@ -1334,15 +1458,41 @@ class PassthroughAdapter(BackendAdapter):
                         sink, 502, "upstream_unavailable", "upstream is unavailable"
                     )
                 return
-            self._respond(resp, request, sink, deadline)
+            successful = self._respond(resp, request, sink, deadline, on_timeout=abort)
         except ClientGone:
+            abort()
             self._log("passthrough client_gone")
         finally:
-            stop.set()
-            abort()
-            if conn is not None:
-                conn.close()
+            # Watcher не должен сбросить сокет, уже выданный следующему запросу.
+            with transport_lock:
+                stop.set()
+                transport.clear()
             watcher.join(timeout=self.limits.reader_join_timeout_s)
+            if conn is not None:
+                can_reuse = (
+                    os.environ.get("BRIDGE_CONNECTION_POOLING_ENABLED", "1").lower()
+                    not in ("0", "false", "no")
+                    and bool(opened_pooling)
+                    and opened_pooling[-1]
+                    and successful
+                    and not aborted.is_set()
+                    and resp is not None
+                    and resp.isclosed()
+                    and not resp.will_close
+                    and not (
+                        "text/event-stream"
+                        in (resp.getheader("Content-Type") or "").lower()
+                        and resp.getheader("Content-Length") is None
+                    )
+                    and "close"
+                    not in {
+                        token.strip().lower()
+                        for token in (resp.getheader("Connection") or "").split(",")
+                    }
+                )
+                self._pool.release_connection(
+                    self._host, self._port, conn, can_reuse=can_reuse
+                )
             with self._lock:
                 self._active -= 1
             self._slots.release()
@@ -1356,6 +1506,9 @@ class PassthroughAdapter(BackendAdapter):
         deadline: float | None = None,
         on_socket: Callable[[socket.socket], None] | None = None,
         presend_deadline: float | None = None,
+        on_reuse: Callable[[bool], None] | None = None,
+        on_pooling: Callable[[bool], None] | None = None,
+        fresh: bool = False,
     ) -> http.client.HTTPConnection:
         remaining = (
             self.limits.total_timeout_s
@@ -1371,51 +1524,103 @@ class PassthroughAdapter(BackendAdapter):
                 raise PreSendTransientError(
                     "upstream connect budget exhausted", status_code=504
                 )
-        conn = http.client.HTTPConnection(
-            self._host,
-            self._port,
-            timeout=min(self.limits.connect_timeout_s, connect_remaining),
-        )
+        is_pooling_enabled = os.environ.get(
+            "BRIDGE_CONNECTION_POOLING_ENABLED", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        if not is_pooling_enabled:
+            self._pool.close_all()
         try:
-            conn.connect()
+            conn, reused = self._pool.get_connection(
+                self._host,
+                self._port,
+                min(self.limits.connect_timeout_s, connect_remaining),
+                fresh=fresh or not is_pooling_enabled,
+            )
         except (ConnectionError, socket.gaierror, TimeoutError) as exc:
             # Запрос ещё не посылался: это транспортный отказ, безопасный для общего retry.
-            conn.close()
             raise PreSendTransientError("upstream connect failed") from exc
-        except BaseException:
-            conn.close()
-            raise
-        if conn.sock is not None:
-            if on_socket is not None:
-                on_socket(conn.sock)
-            remaining = (
-                self.limits.total_timeout_s
-                if deadline is None
-                else deadline - time.monotonic()
-            )
-            if remaining <= 0:
-                conn.close()
-                raise TimeoutError("upstream total deadline exceeded")
-            conn.sock.settimeout(min(self.limits.read_timeout_s, remaining))
-        forwarded = {
-            k: v
-            for k, v in headers.items()
-            if k.lower() not in _REQUEST_DROP
-            and (not self._upstream_key or k.lower() != "authorization")
-        }
-        if self._upstream_key:
-            forwarded["Authorization"] = f"Bearer {self._upstream_key}"
-        forwarded["Host"] = f"{self._host}:{self._port}"
-        forwarded["Content-Length"] = str(len(raw_body))
-        forwarded["Accept-Encoding"] = (
-            "identity"  # тело нужно разобрать, а не передать сжатым
-        )
-        forwarded["Connection"] = "close"
-        route, _, query = path.partition("?")
-        suffix = route[len("/v1") :] if route.startswith("/v1/") else route
-        target = self._base_path + suffix + ("?" + query if query else "")
         try:
-            conn.request("POST", target, body=raw_body, headers=forwarded)
+            if on_pooling is not None:
+                on_pooling(is_pooling_enabled)
+            if on_reuse is not None:
+                on_reuse(reused)
+            if conn.sock is not None:
+                if on_socket is not None:
+                    on_socket(conn.sock)
+                remaining = (
+                    self.limits.total_timeout_s
+                    if deadline is None
+                    else deadline - time.monotonic()
+                )
+                if remaining <= 0:
+                    conn.close()
+                    raise TimeoutError("upstream total deadline exceeded")
+                conn.sock.settimeout(min(self.limits.read_timeout_s, remaining))
+            forwarded = {
+                k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP
+            }
+            if self._upstream_key:
+                forwarded = {
+                    k: v
+                    for k, v in forwarded.items()
+                    if k.lower() not in ("authorization", "x-api-key")
+                }
+                forwarded["Authorization"] = f"Bearer {self._upstream_key}"
+            else:
+                client_toks: list[str] = []
+                for k, v in headers.items():
+                    if k.lower() == "authorization" and v.strip():
+                        parts = v.strip().split(None, 1)
+                        if len(parts) == 2 and parts[0].lower() == "bearer":
+                            if parts[1].strip():
+                                client_toks.append(parts[1].strip())
+                        elif len(parts) == 1:
+                            client_toks.append(parts[0])
+                    elif k.lower() == "x-api-key" and v.strip():
+                        client_toks.append(v.strip())
+                is_hub_credential = False
+                if client_toks:
+                    is_hub_key_cb = getattr(self, "_is_hub_key", None)
+                    if is_hub_key_cb is None:
+                        is_hub_key_cb = getattr(self.host, "is_hub_key", None)
+                    if callable(is_hub_key_cb):
+                        is_hub_credential = any(
+                            is_hub_key_cb(client_tok) for client_tok in client_toks
+                        )
+                if is_hub_credential:
+                    # Мастер-ключ хаба на upstream не уходит.
+                    forwarded = {
+                        k: v
+                        for k, v in forwarded.items()
+                        if k.lower() not in ("authorization", "x-api-key")
+                    }
+            forwarded["Host"] = f"{self._host}:{self._port}"
+            forwarded["Content-Length"] = str(len(raw_body))
+            forwarded["Accept-Encoding"] = (
+                "identity"  # тело нужно разобрать, а не передать сжатым
+            )
+            forwarded["Connection"] = "keep-alive" if is_pooling_enabled else "close"
+            route, _, query = path.partition("?")
+            suffix = route[len("/v1") :] if route.startswith("/v1/") else route
+            target = self._base_path + suffix + ("?" + query if query else "")
+            try:
+                conn.request("POST", target, body=raw_body, headers=forwarded)
+            except http.client.CannotSendRequest:
+                conn.close()
+                if not reused or fresh:
+                    raise
+                # Повтор допустим только при CannotSendRequest: запрос ещё не отправлен. BrokenPipe/ConnectionReset пробрасываются в 502 — байты могли уже уйти.
+                return self._open(
+                    path,
+                    raw_body,
+                    headers,
+                    deadline=deadline,
+                    on_socket=on_socket,
+                    presend_deadline=presend_deadline,
+                    on_reuse=on_reuse,
+                    on_pooling=on_pooling,
+                    fresh=True,
+                )
         except BaseException:
             conn.close()
             raise
@@ -1440,7 +1645,9 @@ class PassthroughAdapter(BackendAdapter):
         request: Mapping[str, Any],
         sink: ResponseSink,
         deadline: float | None = None,
-    ) -> None:
+        *,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> bool:
         content_type = (resp.getheader("Content-Type") or "").lower()
         encoded = (
             resp.getheader("Content-Encoding") or "identity"
@@ -1448,8 +1655,9 @@ class PassthroughAdapter(BackendAdapter):
         sanitize = self._sanitize_enabled()
         schemas = build_tool_schemas(request.get("tools")) if sanitize else None
         if resp.status == 200 and "text/event-stream" in content_type:
-            self._relay_stream(resp, schemas, sink, sanitize, deadline)
-            return
+            return self._relay_stream(
+                resp, schemas, sink, sanitize, deadline, on_timeout=on_timeout
+            )
         try:
             body = _read_bounded(resp, self.limits.max_body_bytes)
             if deadline is not None and time.monotonic() >= deadline:
@@ -1461,31 +1669,26 @@ class PassthroughAdapter(BackendAdapter):
                 "upstream_response_too_large",
                 "upstream response exceeds the bridge limit",
             )
-            return
+            return False
         except socket.timeout:
             self._fail(
                 sink, 504, "upstream_timeout", "upstream did not respond in time"
             )
-            return
-        except (OSError, http.client.HTTPException) as exc:
-            if isinstance(
-                exc, (ConnectionError, http.client.IncompleteRead)
-            ) and getattr(sink, "accepts_presend_errors", False):
-                raise PreSendTransientError(
-                    "upstream reset before downstream body"
-                ) from exc
+            return False
+        except (OSError, http.client.HTTPException):
             if deadline is not None and time.monotonic() >= deadline:
                 self._fail(
                     sink, 504, "upstream_timeout", "upstream did not respond in time"
                 )
             else:
                 self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
-            return
+            return False
         if sanitize and resp.status == 200 and "json" in content_type and not encoded:
             body = sanitize_completion_body(body, schemas, self.limits)
         headers = self._response_headers(resp) + [("Content-Length", str(len(body)))]
         sink.start(resp.status, headers)
         sink.write(body)
+        return True
 
     def _relay_stream(
         self,
@@ -1494,7 +1697,9 @@ class PassthroughAdapter(BackendAdapter):
         sink: ResponseSink,
         sanitize: bool,
         deadline: float | None = None,
-    ) -> None:
+        *,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> bool:
         # Выбор доверия фиксируется до sink.start (первой записи клиенту).
         # Маркер допустим только от настроенного аутентифицированного loopback peer.
         flag = getattr(self.host, "is_trusted_tool_streaming_enabled", None)
@@ -1531,12 +1736,17 @@ class PassthroughAdapter(BackendAdapter):
                 state=outcome,
                 deadline=deadline,
             )
-        except (socket.timeout, OSError, http.client.HTTPException):
+        except (socket.timeout, OSError, http.client.HTTPException) as exc:
+            if (
+                isinstance(exc, (TimeoutError, socket.timeout))
+                and on_timeout is not None
+            ):
+                on_timeout()
             last_chunk = getattr(outcome, "last_chunk", None) or {}
             unfinished_set = getattr(outcome, "unfinished_choices", None)
             if unfinished_set is not None and len(unfinished_set) == 0:
                 sink.write(b"data: [DONE]\n\n")
-                return
+                return False
 
             unfinished = sorted(unfinished_set) if unfinished_set is not None else [0]
             sink.write(
@@ -1549,8 +1759,14 @@ class PassthroughAdapter(BackendAdapter):
                     choice_indices=unfinished,
                 ).encode("utf-8")
             )
-            return
+            return False
         if outcome.incomplete or outcome.overflow:
             self._log(
                 f"passthrough stream incomplete={outcome.incomplete} overflow={outcome.overflow}"
             )
+        return (
+            outcome.reader_stopped
+            and not outcome.incomplete
+            and not outcome.overflow
+            and not outcome.repetition_loop
+        )

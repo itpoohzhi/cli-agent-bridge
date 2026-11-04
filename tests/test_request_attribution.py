@@ -37,9 +37,11 @@ ALIASES = (
 
 
 @pytest.fixture
-def route(monkeypatch):
+def route(monkeypatch, tmp_path):
     """Выполнить do_POST без сокета, сохранив наблюдаемую границу адаптера."""
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-route.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
     monkeypatch.setattr(server, "_budget", server._ByteBudget(1_000_000))
@@ -65,7 +67,7 @@ def route(monkeypatch):
 
 
 @pytest.fixture
-def wire(monkeypatch):
+def wire(monkeypatch, tmp_path):
     """Два loopback HTTP-сервера: реальный фасад и записывающий upstream."""
     records, logs = [], []
     lock = threading.Lock()
@@ -132,6 +134,8 @@ def wire(monkeypatch):
         AdapterRegistry.from_fleet(fleet, ADAPTER_KINDS, lambda: server.FLEET, server),
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-wire.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
     monkeypatch.setattr(server, "_log", logs.append)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
