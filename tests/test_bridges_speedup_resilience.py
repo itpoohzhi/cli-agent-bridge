@@ -631,6 +631,7 @@ def test_gateway_preflight_bypass_and_idempotency(
     import server
 
     captured: list[tuple[bytes, dict]] = []
+    hub_auth_ok: list[bool] = []
     checks: list[str] = []
 
     class Filter:
@@ -641,11 +642,11 @@ def test_gateway_preflight_bypass_and_idempotency(
     monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", Filter())
     monkeypatch.setattr(server, "_auth_ok", lambda _h: True)
     monkeypatch.setattr(server, "_enforce_forward_kill_switch", lambda: None)
-    monkeypatch.setattr(
-        server.Handler,
-        "_serve_passthrough",
-        lambda self, a, raw, req, model: captured.append((raw, req)),
-    )
+    def _fake_passthrough(self, a, raw, req, model, _hub_auth_ok=False):
+        hub_auth_ok.append(_hub_auth_ok)
+        captured.append((raw, req))
+
+    monkeypatch.setattr(server.Handler, "_serve_passthrough", _fake_passthrough)
     model = "gpt-6.1-sol"
 
     def handler(bypass: bool) -> Any:
@@ -675,6 +676,7 @@ def test_gateway_preflight_bypass_and_idempotency(
     third = handler(True)
     third.do_POST()
     assert len(captured) == 1
+    assert hub_auth_ok == [True]
     assert captured[0][1]["step_job_id"] == "idempotent-step"
     assert json.loads(captured[0][0])["step_job_id"] == "idempotent-step"
     second = handler(True)

@@ -550,7 +550,7 @@ def test_disabled_flags_give_noop_lease():
 
 
 @pytest.fixture
-def facade(monkeypatch):
+def facade(monkeypatch, tmp_path):
     """Настоящий Handler + управляемый upstream; RESILIENCE подменяется тестом."""
     state = SimpleNamespace(status=200, hits=0)
     lock = threading.Lock()
@@ -597,6 +597,8 @@ def facade(monkeypatch):
         ),
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
+    monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-facade.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
     monkeypatch.setattr(server, "_log", lambda message: None)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)

@@ -28,8 +28,8 @@ Completions (stream и не-stream); thinking транслируется в `rea
 Мост эмулирует OpenAI function calling (дословно из claude-p-bridge): если запрос
 содержит непустой `tools`, в промпт добавляется протокол и схемы инструментов.
 
-Секреты с диска не читаются: ключ авторизации берётся только из окружения
-BRIDGE_KEY, затем DROID_DSH_BRIDGE_KEY (его подкладывает start.sh из ~/.dsh/.env);
+Ключи авторизации берутся из текущего окружения и ~/.dsh/.env:
+BRIDGE_KEY и DROID_DSH_BRIDGE_KEY; ротация файла отзывает прежние ключи;
 в окружение дочернего процесса ключи моста (любые `*_BRIDGE_KEY`, `BRIDGE_*KEY*`)
 не передаются. FACTORY_API_KEY (headless-вход Droid
 без интерактивного логина) наследуется потомком как есть — его подкладывает
@@ -139,7 +139,7 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     finalize_turn,
     sanitize_tool_call,
 )
-from core.stream_framing import build_stream_error_chunk
+from core.stream_framing import build_stream_error_chunk  # noqa: E402
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
     ManagedTurn,
@@ -383,6 +383,8 @@ IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
 SAFETY_CAP_S = float(
     os.environ.get("DROID_DSH_BRIDGE_SAFETY_CAP_S", str(int(DEFAULT_SAFETY_CAP_S)))
 )
+
+
 # RW-009 в живом ходе: запись живого куска клиенту ограничена этим таймаутом (а не 300с
 # socket-таймаута соединения) — зависший/нечитающий клиент не держит T/L (см. sse_writer в
 # _serve_sse и add_content/add_reasoning в Handler._execute).
@@ -407,7 +409,6 @@ FIRST_TOKEN_TIMEOUT_S = float(
 )
 # Окно после успешного хода, в котором лончеру передаётся DROID_SKIP_PREFLIGHT=1.
 PREFLIGHT_SKIP_WINDOW_S = 120.0
-
 
 
 def clamp_effort_downward(
@@ -564,16 +565,20 @@ MULTIMODAL_MODELS = ("gpt-6.1-sol", "gemini-4-argon")
 _PROVIDER_MODELS_RE = re.compile(r"^/v1/providers/([^/]+)/v1/models$")
 _PROVIDER_CHAT_RE = re.compile(r"^/v1/providers/([^/]+)/v1/chat/completions$")
 
-_REFRESH_MIN_INTERVAL = float(os.environ.get("BRIDGE_MODELS_REFRESH_MIN_INTERVAL_S", "10.0"))
+_REFRESH_MIN_INTERVAL = float(
+    os.environ.get("BRIDGE_MODELS_REFRESH_MIN_INTERVAL_S", "10.0")
+)
 _REFRESH_MAX_ENTRIES = int(os.environ.get("BRIDGE_MODELS_REFRESH_MAX_ENTRIES", "1000"))
-_REFRESH_LOCK = threading.Lock()        # single-flight
+_REFRESH_LOCK = threading.Lock()  # single-flight
 _REFRESH_LAST: dict[str, float] = {}
 _MODELS_CACHE: dict[str, dict[str, Any]] = {}
 _MODELS_CACHE_LOCK = threading.Lock()
 
 
 def _refresh_client_key(handler: BaseHTTPRequestHandler) -> str:
-    raw = handler.headers.get("Authorization", "") or handler.headers.get("X-Api-Key", "")
+    raw = handler.headers.get("Authorization", "") or handler.headers.get(
+        "X-Api-Key", ""
+    )
     token = raw.strip()
     if token[:7].lower() == "bearer ":
         token = token[7:].strip()
@@ -613,7 +618,9 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
     return published
 
 
-def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+def _build_models_list(
+    owner_tuple: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
     published = _get_published_models()
     order = []
     if MODEL_ID in published:
@@ -626,7 +633,9 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
         if mid not in order:
             order.append(mid)
 
-    internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+    internal_key = getattr(
+        sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
+    ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
     hide_internal = bool(internal_key) or (owner_tuple is not None)
 
     data = []
@@ -638,11 +647,18 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
         owned_by = (
             getattr(a, "owned_by", "")
             if a is not None
-            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+            else (
+                getattr(m, "owned_by", "")
+                or (m.get("owned_by", "") if isinstance(m, dict) else "")
+            )
         )
         if owner_tuple is not None and owned_by not in owner_tuple:
             continue
-        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
+        context_window = (
+            getattr(m, "context_window", 200000)
+            if not isinstance(m, dict)
+            else m.get("context_window", 200000)
+        )
         card = {
             "id": mid,
             "object": "model",
@@ -666,17 +682,28 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
             continue
         alias = _resolve_model_alias(alias_id, fleet_models)
         base_id = alias[0] if (alias and isinstance(alias, (tuple, list))) else alias
-        if not base_id or base_id not in published or (hide_internal and base_id in INTERNAL_MODEL_IDS):
+        if (
+            not base_id
+            or base_id not in published
+            or (hide_internal and base_id in INTERNAL_MODEL_IDS)
+        ):
             continue
         a, m = published[base_id]
         owned_by = (
             getattr(a, "owned_by", "")
             if a is not None
-            else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+            else (
+                getattr(m, "owned_by", "")
+                or (m.get("owned_by", "") if isinstance(m, dict) else "")
+            )
         )
         if owner_tuple is not None and owned_by not in owner_tuple:
             continue
-        context_window = getattr(m, "context_window", 200000) if not isinstance(m, dict) else m.get("context_window", 200000)
+        context_window = (
+            getattr(m, "context_window", 200000)
+            if not isinstance(m, dict)
+            else m.get("context_window", 200000)
+        )
         card = {
             "id": alias_id,
             "object": "model",
@@ -685,7 +712,9 @@ def _build_models_list(owner_tuple: tuple[str, ...] | None = None) -> list[dict[
             "context_window": context_window,
             "context_length": context_window,
             "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "modalities": ["text", "image"] if base_id in MULTIMODAL_MODELS else ["text"],
+            "modalities": ["text", "image"]
+            if base_id in MULTIMODAL_MODELS
+            else ["text"],
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
@@ -727,6 +756,8 @@ RPC_CALL_TIMEOUT_S = float(os.environ.get("DROID_BRIDGE_RPC_CALL_TIMEOUT_S", "60
 INTERRUPT_GRACE_S = 3.0
 # Не больше пяти restore на один SID: шестой — свежая generation (вторичный предел).
 RESTORE_MAX = 5
+
+
 # Бюджет очистки детей после drain; входит в общий ExitTimeOut супервизора.
 def _configured_shutdown_grace_s() -> float:
     """Читает конечный бюджет >= 0; ноль отключает ожидание, fallback — 4.5 с."""
@@ -1258,22 +1289,117 @@ def _extract_auth_token(handler: BaseHTTPRequestHandler) -> str:
     return handler.headers.get("x-api-key", "") or hdr.strip()
 
 
+class TokenCache:
+    """Кэш актуальных ключей окружения и .dsh/.env с отзывом при смене файла."""
+
+    _NAMES: tuple[str, str] = ("BRIDGE_KEY", "DROID_DSH_BRIDGE_KEY")
+
+    def __init__(
+        self,
+        *,
+        path: Path | None = None,
+        ttl_s: float | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        self._path: Path = path if path is not None else HOME / ".dsh" / ".env"
+        self._env: Mapping[str, str] = os.environ if environ is None else environ
+        if ttl_s is None:
+            try:
+                ttl_s = float(self._env.get("BRIDGE_TOKEN_CACHE_TTL_S", "300"))
+            except ValueError:
+                ttl_s = 300.0
+        self._ttl_s: float = ttl_s if math.isfinite(ttl_s) and ttl_s > 0 else 300.0
+        self._file_keys: tuple[bytes, ...] = ()
+        try:
+            self._path.stat()
+            self._file_seen: bool = True
+        except FileNotFoundError:
+            self._file_seen = False
+        except OSError:
+            self._file_seen = True
+        self._signature: tuple[int, int, int, int, int, int] | None = None
+        self._next_check: float = 0.0
+        self._lock: threading.Lock = threading.Lock()
+
+    def _refresh_file(self, now: float) -> None:
+        try:
+            st = self._path.stat()
+            self._file_seen = True
+            signature = (
+                st.st_dev,
+                st.st_ino,
+                st.st_mtime_ns,
+                st.st_size,
+                st.st_mode,
+                st.st_ctime_ns,
+            )
+            if signature == self._signature and now < self._next_check:
+                return
+            self._next_check = now + self._ttl_s
+            keys: dict[str, str] = {}
+            for line in self._path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].lstrip()
+                name, sep, value = line.partition("=")
+                if sep and name.strip() in self._NAMES:
+                    value = value.strip()
+                    if value.startswith(("'", '"')):
+                        quote = value[0]
+                        end = value.find(quote, 1)
+                        if end < 0 or (
+                            value[end + 1 :].strip()
+                            and not value[end + 1 :].lstrip().startswith("#")
+                        ):
+                            continue
+                        value = value[1:end]
+                    else:
+                        value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+                    keys[name.strip()] = value
+            self._file_keys = tuple(
+                value.encode("utf-8") for value in keys.values() if value
+            )
+            self._signature = signature
+        except FileNotFoundError:
+            if self._file_seen:
+                self._file_keys = ()
+            self._signature = None
+            self._next_check = 0.0
+        except (OSError, UnicodeError):
+            self._file_keys = ()
+            self._signature = None
+            self._next_check = 0.0
+            self._file_seen = True
+
+    def is_valid(self, token: str) -> bool:
+        """Проверить непустой ключ; каждый кандидат сравнивается через compare_digest."""
+        if not token:
+            return False
+        candidate = token.encode("utf-8")
+        with self._lock:
+            self._refresh_file(time.monotonic())
+            if self._file_seen:
+                expected = self._file_keys
+            else:
+                env_keys = tuple(self._env.get(name, "") for name in self._NAMES)
+                expected = tuple(key.encode("utf-8") for key in env_keys if key)
+        valid = False
+        for key in expected:
+            valid |= hmac.compare_digest(candidate, key)
+        return valid
+
+
+TOKEN_CACHE = TokenCache()
+
+
+def is_hub_key(token: str) -> bool:
+    """Проверяет токен по актуальному кэшу мастер-ключей хаба."""
+    return TOKEN_CACHE.is_valid(token)
+
+
 def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
-    expected = getattr(sys.modules[__name__], "BRIDGE_KEY", None) or AUTH_KEY
-    if not expected:
-        return False
-    hdr = handler.headers.get("Authorization", "")
-    if hdr.startswith("Bearer "):
-        return hmac.compare_digest(
-            hdr[7:].strip().encode("utf-8"), expected.encode("utf-8")
-        )
-    return hmac.compare_digest(
-        handler.headers.get("x-api-key", "").encode("utf-8"),
-        expected.encode("utf-8"),
-    ) or hmac.compare_digest(
-        hdr.strip().encode("utf-8"),
-        expected.encode("utf-8"),
-    )
+    """Проверить токен хаба исключительно через актуальный кэш ключей."""
+    return TOKEN_CACHE.is_valid(_extract_auth_token(handler))
 
 
 # Исходы хода, не связанные со здоровьем бэкенда (ADR-0020 §2.А): брейкеру нейтральны.
@@ -1282,19 +1408,6 @@ _RESILIENCE_NEUTRAL_STATES = frozenset(
 )
 _CHAT_PATHS = ("/v1/chat/completions", "/chat/completions")
 _LOOPBACK_PEERS = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
-
-
-def _passthrough_open(handler: BaseHTTPRequestHandler) -> bool:
-    """AD-007: ключ хаба не сверяется до выбора маршрута, если есть passthrough и пир — loopback.
-
-    Окончательный допуск решает маршрут: passthrough-модель идёт к upstream (аутентификатор — он),
-    любой другой маршрут по-прежнему требует ключ хаба.
-    """
-    if not hasattr(BACKENDS, "adapters"):
-        return False
-    return str(handler.client_address[0]) in _LOOPBACK_PEERS and any(
-        isinstance(adapter, PassthroughAdapter) for adapter in BACKENDS.adapters()
-    )
 
 
 _MODEL_BLOCK_STATUSES = re.compile(
@@ -1465,6 +1578,7 @@ class _HandlerSink(ResponseSink):
         return self._client_gone_flag or _client_gone(self._handler.connection)
 
     def write(self, data: bytes) -> None:
+        """Отправить чанк сразу, включая сброс буфера wfile для SSE."""
         try:
             self._handler.wfile.write(data)
             self._handler.wfile.flush()
@@ -4848,17 +4962,13 @@ class Handler(BaseHTTPRequestHandler):
 
         # Auth-First: 401 до 404
         if not _auth_ok(self):
-            has_auth = bool(
-                self.headers.get("Authorization") or self.headers.get("x-api-key")
+            self._reply_error(
+                401,
+                "Unauthorized",
+                "authentication_error",
+                headers={"WWW-Authenticate": "Bearer"},
             )
-            if not (_passthrough_open(self) and has_auth):
-                self._reply_error(
-                    401,
-                    "Unauthorized",
-                    "authentication_error",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-                return True
+            return True
 
         owner_tuple = None
         if provider_id is not None:
@@ -4875,7 +4985,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("ETag", etag)
             self.end_headers()
             return True
-        self._send(200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"})
+        self._send(
+            200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"}
+        )
         return True
 
     def _handle_models_refresh(self) -> None:
@@ -4943,7 +5055,9 @@ class Handler(BaseHTTPRequestHandler):
             with _MODELS_CACHE_LOCK:
                 cached = _MODELS_CACHE.get(cache_key)
             if cached is None:
-                self._reply_error(502, "Refresh failed and no cached payload", "refresh_failed")
+                self._reply_error(
+                    502, "Refresh failed and no cached payload", "refresh_failed"
+                )
                 return
             status = "stale"
             failed_upstreams = ["*"]
@@ -6177,7 +6291,39 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
-        if urlparse(self.path).path in ("/v1/models/refresh", "/models/refresh") or re.match(r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path):
+        hub_auth_ok = _auth_ok(self)
+        deferred_passthrough_auth = False
+        if not hub_auth_ok:
+            if (
+                self.client_address[0] in _LOOPBACK_PEERS
+                and urlparse(self.path).path in _CHAT_PATHS
+                and PASSTHROUGH_AUTH_FLAG_SOURCE.enabled()
+                and any(
+                    isinstance(adapter, PassthroughAdapter)
+                    and adapter.validate_client_token(_extract_auth_token(self))
+                    for adapter in BACKENDS.adapters()
+                )
+            ):
+                deferred_passthrough_auth = True
+            else:
+                self.close_connection = True
+                self._send(
+                    401,
+                    {
+                        "error": {
+                            "message": "unauthorized",
+                            "type": "auth_error",
+                            "code": 401,
+                        }
+                    },
+                )
+                return
+        if urlparse(self.path).path in (
+            "/v1/models/refresh",
+            "/models/refresh",
+        ) or re.match(
+            r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path
+        ):
             self._handle_models_refresh()
             return
         self._trace = None
@@ -6203,25 +6349,6 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers={"Retry-After": "5", "X-Bridge-Draining": "1"},
             )
             return
-        # AD-007: при настроенном passthrough допуск chat-запроса решается по маршруту (после модели).
-        auth_deferred = False
-        if not _auth_ok(self):
-            if path in _CHAT_PATHS and _passthrough_open(self):
-                auth_deferred = True
-            else:
-                # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
-                self.close_connection = True
-                self._send(
-                    401,
-                    {
-                        "error": {
-                            "message": "unauthorized",
-                            "type": "auth_error",
-                            "code": 401,
-                        }
-                    },
-                )
-                return
         # (1) framing: Transfer-Encoding не поддерживаем, Content-Length строго числовой.
         if self.headers.get_all("Transfer-Encoding") is not None:
             self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
@@ -6311,11 +6438,18 @@ class Handler(BaseHTTPRequestHandler):
             provider_id = m_provider_chat.group(1) if m_provider_chat else None
             if m_provider_chat is not None:
                 if not _auth_ok(self):
-                    has_auth = bool(self.headers.get("Authorization") or self.headers.get("x-api-key"))
-                    if not (_passthrough_open(self) and has_auth):
-                        self.close_connection = True
-                        self._send(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}})
-                        return
+                    self.close_connection = True
+                    self._send(
+                        401,
+                        {
+                            "error": {
+                                "message": "unauthorized",
+                                "type": "auth_error",
+                                "code": 401,
+                            }
+                        },
+                    )
+                    return
                 if provider_id not in PROVIDER_SCOPES:
                     self._reply_error(404, "Unknown provider", "invalid_request_error")
                     return
@@ -6357,12 +6491,9 @@ class Handler(BaseHTTPRequestHandler):
             if idempotency_key and req.get("step_job_id") != idempotency_key:
                 req["step_job_id"] = idempotency_key
                 raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
-            model_filter_deferred = auth_deferred
-            if (
-                not auth_deferred
-                and self.headers.get("X-Bypass-Model-Filter") != "1"
-                and _MODEL_NOTES_FILTER.is_blocked(model_id)
-            ):
+            if self.headers.get(
+                "X-Bypass-Model-Filter"
+            ) != "1" and _MODEL_NOTES_FILTER.is_blocked(model_id):
                 self._send(
                     503,
                     {
@@ -6380,16 +6511,34 @@ class Handler(BaseHTTPRequestHandler):
             alias_effort = None
             if alias is not None:
                 resolved_id = alias[0] if isinstance(alias, (tuple, list)) else alias
-                alias_effort = alias[1] if isinstance(alias, (tuple, list)) and len(alias) > 1 else None
+                alias_effort = (
+                    alias[1]
+                    if isinstance(alias, (tuple, list)) and len(alias) > 1
+                    else None
+                )
             else:
                 resolved_id = model_id
 
             # Изоляция внутренних моделей (Auth-First / Secret Isolation)
-            internal_key = getattr(sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
-            if bool(internal_key) and (raw_model in INTERNAL_MODEL_IDS or model_id in INTERNAL_MODEL_IDS or resolved_id in INTERNAL_MODEL_IDS):
+            internal_key = getattr(
+                sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
+            ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
+            if bool(internal_key) and (
+                raw_model in INTERNAL_MODEL_IDS
+                or model_id in INTERNAL_MODEL_IDS
+                or resolved_id in INTERNAL_MODEL_IDS
+            ):
                 supplied = self.headers.get("X-Internal-Service-Key", "")
-                if not hmac.compare_digest(supplied.encode("utf-8"), internal_key.encode("utf-8")):
-                    self._reject(403, "internal_model_forbidden", "Model reserved for internal review", "unknown", model_len)
+                if not hmac.compare_digest(
+                    supplied.encode("utf-8"), internal_key.encode("utf-8")
+                ):
+                    self._reject(
+                        403,
+                        "internal_model_forbidden",
+                        "Model reserved for internal review",
+                        "unknown",
+                        model_len,
+                    )
                     return
 
             # Проверка скоупа провайдера для чата
@@ -6398,13 +6547,22 @@ class Handler(BaseHTTPRequestHandler):
                 owner_tuple = (owner,) if isinstance(owner, str) else owner
                 published = _get_published_models()
                 if resolved_id not in published:
-                    self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
+                    self._reject(
+                        404,
+                        "model_not_found",
+                        "model is not in the catalogue",
+                        "unknown",
+                        model_len,
+                    )
                     return
                 a, m = published[resolved_id]
                 owned_by = (
                     getattr(a, "owned_by", "")
                     if a is not None
-                    else (getattr(m, "owned_by", "") or (m.get("owned_by", "") if isinstance(m, dict) else ""))
+                    else (
+                        getattr(m, "owned_by", "")
+                        or (m.get("owned_by", "") if isinstance(m, dict) else "")
+                    )
                 )
                 if owned_by not in owner_tuple:
                     self._reply_error(
@@ -6415,8 +6573,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
             if (
-                not auth_deferred
-                and resolved_id != model_id
+                resolved_id != model_id
                 and self.headers.get("X-Bypass-Model-Filter") != "1"
                 and _MODEL_NOTES_FILTER.is_blocked(resolved_id)
             ):
@@ -6443,6 +6600,23 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             model = fleet_models[model_id]
+            if deferred_passthrough_auth:
+                selected = BACKENDS.get(model["backend"])
+                if not isinstance(
+                    selected, PassthroughAdapter
+                ) or not selected.validate_client_token(_extract_auth_token(self)):
+                    self.close_connection = True
+                    self._send(
+                        401,
+                        {
+                            "error": {
+                                "message": "unauthorized",
+                                "type": "auth_error",
+                                "code": 401,
+                            }
+                        },
+                    )
+                    return
             # (8a) passthrough (AD-003/AD-007): raw-шов ДО effort-клампа, транскрипции и контекста —
             # model/reasoning_effort/tools/Authorization уходят upstream дословно.
             passthrough = BACKENDS.get(model["backend"])
@@ -6452,46 +6626,6 @@ class Handler(BaseHTTPRequestHandler):
                         400,
                         "model_not_allowed",
                         "passthrough requires an exact model id",
-                    )
-                    return
-                if auth_deferred:
-                    hdr = self.headers.get("Authorization", "")
-                    client_token = (
-                        hdr[7:].strip()
-                        if hdr.startswith("Bearer ")
-                        else (self.headers.get("x-api-key", "").strip() or hdr.strip())
-                    )
-                    if (
-                        PASSTHROUGH_AUTH_FLAG_SOURCE.enabled()
-                        and passthrough.validate_client_token(client_token)
-                    ):
-                        auth_deferred = False
-                    elif getattr(passthrough, "_upstream_key", None):
-                        self.close_connection = True
-                        self._send(
-                            401,
-                            {
-                                "error": {
-                                    "message": "unauthorized",
-                                    "type": "auth_error",
-                                }
-                            },
-                        )
-                        return
-                if (
-                    model_filter_deferred
-                    and self.headers.get("X-Bypass-Model-Filter") != "1"
-                    and _MODEL_NOTES_FILTER.is_blocked(model_id)
-                ):
-                    self._send(
-                        503,
-                        {
-                            "error": {
-                                "message": "Model temporarily blocked by operational limits",
-                                "type": "model_limit_blocked",
-                                "code": 503,
-                            }
-                        },
                     )
                     return
                 if alias is not None:
@@ -6504,20 +6638,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._serve_resilient(
                     model["backend"],
-                    lambda: self._serve_passthrough(passthrough, raw, req, model_id),
-                )
-                return
-            if auth_deferred:
-                self.close_connection = True
-                self._send(
-                    401,
-                    {
-                        "error": {
-                            "message": "unauthorized",
-                            "type": "auth_error",
-                            "code": 401,
-                        }
-                    },
+                    lambda _h=hub_auth_ok: self._serve_passthrough(
+                        passthrough, raw, req, model_id, _hub_auth_ok=_h
+                    ),
                 )
                 return
             # (9) effort: строковый вне каталога клампится вниз к allowed модели.
@@ -7168,6 +7291,7 @@ class Handler(BaseHTTPRequestHandler):
         raw: bytes,
         req: dict,
         model_id: str,
+        _hub_auth_ok: bool = False,
     ) -> None:
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
         lease = self._current_lease()
@@ -7184,6 +7308,12 @@ class Handler(BaseHTTPRequestHandler):
                 key: value for key, value in headers.items() if key.lower() not in names
             }
             headers.update(trace_headers)
+        if _hub_auth_ok and not getattr(adapter, "_upstream_key", None):
+            headers = {
+                key: value
+                for key, value in headers.items()
+                if key.lower() not in {"authorization", "x-api-key"}
+            }
         sink = _HandlerSink(self, extra_headers=trace_headers)
         try:
             adapter.handle(
@@ -7602,7 +7732,10 @@ BridgeHandler = Handler
 def is_so_reuseport_enabled() -> bool:
     """Проверяет включение совместного bind через BRIDGE_SO_REUSEPORT_ENABLED."""
     return os.environ.get("BRIDGE_SO_REUSEPORT_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 
