@@ -39,6 +39,7 @@ DEFAULT_DRAIN_SECONDS: float = DRAIN_TIMEOUT_S
 RETRY_AFTER_S: int = 5
 ORPHAN_SIGTERM_GRACE_S: float = 1.0
 MAX_KEEPALIVE_INTERVAL_S: float = 10.0
+DEFAULT_DRAIN_SUBAGENT_GRACE_S: float = 5.0
 
 KNOWN_CHILD_BINARIES = frozenset(
     {
@@ -356,6 +357,34 @@ class HubLifecycleManager:
             remaining = []
             deadline = time.monotonic() + max(0.0, eff_timeout)
             if self.turn_manager is not None:
+                active_turns_fn = getattr(self.turn_manager, "active_turns", None)
+                active_now = active_turns_fn() if callable(active_turns_fn) else None
+                if isinstance(active_now, (list, tuple, set)) and eff_timeout > 0:
+                    subagents = [
+                        t for t in active_now
+                        if getattr(t, "is_subagent", False) or getattr(t, "subagent_id", None)
+                    ]
+                    if subagents:
+                        subagent_grace = min(DEFAULT_DRAIN_SUBAGENT_GRACE_S, max(0.0, deadline - time.monotonic()))
+                        self._log(
+                            f"drain_subagents_grace_start count={len(subagents)} grace_s={subagent_grace:.1f}"
+                        )
+                        deadline_grace = time.monotonic() + subagent_grace
+                        while time.monotonic() < deadline_grace:
+                            if all(getattr(t, "is_terminal", False) for t in subagents):
+                                break
+                            time.sleep(0.05)
+                        for st in subagents:
+                            if not getattr(st, "is_terminal", False):
+                                self._log(
+                                    f"drain_subagent_interrupt rid={st.rid} turn_id={st.turn_id} "
+                                    f"subagent_id={getattr(st, 'subagent_id', None)}"
+                                )
+                                self.turn_manager.interrupt_for_drain(
+                                    st,
+                                    message="bridge restart drain: subagent cancelled with Retry-After: 3",
+                                )
+
                 if eff_timeout > 0:
                     remaining = self.turn_manager.wait_for_active_turns(
                         timeout=max(0.0, deadline - time.monotonic())
@@ -406,10 +435,30 @@ class HubLifecycleManager:
             "state": self.state,
         }
 
-    def draining_response(self) -> tuple[int, dict[str, str], dict[str, Any]]:
+    def draining_response(
+        self,
+        is_subagent: bool = False,
+        retry_after_s: int | None = None,
+    ) -> tuple[int, dict[str, str], dict[str, Any]]:
         """Возвращает `(status_code, headers, body)` для отказа новым запросам при `DRAINING`."""
+        try:
+            retry = (
+                retry_after_s
+                if retry_after_s is not None
+                else int(
+                    os.environ.get("BRIDGE_RETRY_AFTER_S", str(self.retry_after_s))
+                )
+            )
+        except ValueError:
+            retry = int(self.retry_after_s)
+        if (
+            retry_after_s is None
+            and is_subagent
+            and "BRIDGE_RETRY_AFTER_S" not in os.environ
+        ):
+            retry = 3
         headers = {
-            "Retry-After": str(self.retry_after_s),
+            "Retry-After": str(retry),
             "X-Bridge-Draining": "true",
         }
         body = {

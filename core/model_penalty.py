@@ -13,7 +13,9 @@ from typing import Any, Callable, TypeVar
 
 
 DEFAULT_MAX_START_FAILS = 3
-DEFAULT_COOLDOWN_SECONDS = 10800.0  # 3 hours
+DEFAULT_INITIAL_COOLDOWN_SECONDS = 10.0
+DEFAULT_MAX_COOLDOWN_SECONDS = 300.0
+DEFAULT_COOLDOWN_SECONDS = 10.0  # 10s default initial cooldown (adaptive backoff 10s -> 30s -> 120s..300s)
 DEFAULT_STORAGE_PATH = Path(
     "~/.config/cli-agent-bridge/model_penalties.json"
 ).expanduser()
@@ -21,6 +23,30 @@ DEFAULT_STORAGE_PATH = Path(
 _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _State = dict[str, dict[str, Any]]
+
+
+def _is_infrastructure_network_error(error_reason: str | None) -> bool:
+    """Return True if error is caused by proxy, bridge socket or gateway issues, not model startup."""
+    if not error_reason:
+        return False
+    lower = str(error_reason).strip().lower()
+    return any(
+        token in lower
+        for token in (
+            "http_502",
+            "http_504",
+            "connection refused",
+            "connectionrefused",
+            "connect_error",
+            "network_error",
+            "broken pipe",
+            "bad gateway",
+            "gateway timeout",
+            "connection reset",
+            "connectionreset",
+            "econnreset",
+        )
+    )
 
 
 def _is_finite_nonnegative(value: Any) -> bool:
@@ -82,6 +108,7 @@ def _empty_entry() -> dict[str, Any]:
         "penalized_until": 0.0,
         "last_fail_at": 0.0,
         "last_error": None,
+        "penalty_trips": 0,
     }
 
 
@@ -109,6 +136,10 @@ class ModelPenaltyTracker:
         self.storage_path = Path(configured_path).expanduser()
         self.lock_path = self.storage_path.with_suffix(".json.lock")
         self.max_start_fails = _configured_max_start_fails(max_start_fails)
+        self._has_custom_cooldown = (
+            cooldown_seconds is not None
+            or bool(os.environ.get("BRIDGE_COOLDOWN_SECONDS", "").strip())
+        )
         self.cooldown_seconds = _configured_cooldown(cooldown_seconds)
         self._lock = threading.Lock()
         self._state: _State = {}
@@ -160,11 +191,15 @@ class ModelPenaltyTracker:
                 invalid_entries = True
                 continue
 
+            trips = entry.get("penalty_trips", 0)
+            if not isinstance(trips, int) or trips < 0:
+                trips = 0
             state[model_id.strip().lower()] = {
                 "fails": fails,
                 "penalized_until": float(until),
                 "last_fail_at": float(last_fail),
                 "last_error": error,
+                "penalty_trips": trips,
             }
 
         if invalid_entries:
@@ -330,6 +365,15 @@ class ModelPenaltyTracker:
                     False,
                 )
 
+            # Do not penalize models for infrastructure or network proxy errors (502, connection refused).
+            if _is_infrastructure_network_error(error_reason):
+                _LOGGER.info(
+                    "Skipping model failure penalty for infrastructure/network error: %s (model=%s)",
+                    error_reason,
+                    norm_id,
+                )
+                return (False, entry["fails"], entry["penalized_until"]), False
+
             self._expire(entry, now)
             entry["fails"] += 1
             entry["last_fail_at"] = now
@@ -337,7 +381,20 @@ class ModelPenaltyTracker:
 
             threshold_reached = entry["fails"] >= self.max_start_fails
             if threshold_reached:
-                until = now + self.cooldown_seconds
+                trips = int(entry.get("penalty_trips", 0)) + 1
+                entry["penalty_trips"] = trips
+                if self._has_custom_cooldown:
+                    eff_cooldown = self.cooldown_seconds
+                else:
+                    if trips == 1:
+                        eff_cooldown = 10.0
+                    elif trips == 2:
+                        eff_cooldown = 30.0
+                    elif trips == 3:
+                        eff_cooldown = 120.0
+                    else:
+                        eff_cooldown = min(120.0 * (2 ** min(trips - 3, 20)), DEFAULT_MAX_COOLDOWN_SECONDS)
+                until = now + eff_cooldown
                 if not _is_finite_nonnegative(until):
                     until = float.fromhex("0x1.fffffffffffffp+1023")
                 entry["penalized_until"] = until
@@ -366,11 +423,13 @@ class ModelPenaltyTracker:
             if entry is None or (
                 entry.get("fails", 0) == 0
                 and entry.get("penalized_until", 0.0) == 0.0
+                and entry.get("penalty_trips", 0) == 0
                 and entry.get("last_error") is None
             ):
                 return None, False
             entry["fails"] = 0
             entry["penalized_until"] = 0.0
+            entry["penalty_trips"] = 0
             entry["last_error"] = None
             return None, True
 

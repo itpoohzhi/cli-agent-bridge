@@ -702,6 +702,8 @@ class ManagedTurn:
     result: TurnResult | None = None
     final_dict: dict[str, Any] | None = None
     state_dump_path: str = ""
+    is_subagent: bool = False
+    subagent_id: str | None = None
     _slot_release_fn: Callable[[], None] | None = None
     _slot_released: bool = False
     _cancel_callbacks: list[Callable[[], None]] = field(default_factory=list)

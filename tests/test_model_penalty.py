@@ -94,7 +94,7 @@ def test_default_state(tmp_path, clock):
     tracker = _make_tracker(path)
 
     assert model_penalty.DEFAULT_MAX_START_FAILS == 3
-    assert model_penalty.DEFAULT_COOLDOWN_SECONDS == 10800.0
+    assert model_penalty.DEFAULT_COOLDOWN_SECONDS == 10.0
     assert model_penalty.DEFAULT_STORAGE_PATH is not None
     assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
 
@@ -436,4 +436,75 @@ def test_passthrough_429_trips_penalty(tmp_path, monkeypatch):
     )
     is_pen, _ = tracker.is_penalized("claude-sonnet-5-5")
     assert not is_pen
+
+
+def test_adaptive_backoff_steps(tmp_path, clock):
+    path = tmp_path / "penalties.json"
+    tracker = model_penalty.ModelPenaltyTracker(storage_path=path, max_start_fails=3)
+
+    # Trip 1 (fails 1..3) -> cooldown 10s
+    for _ in range(3):
+        tracker.record_start_failure(MODEL_ID)
+    is_pen, rem = tracker.is_penalized(MODEL_ID)
+    assert is_pen
+    assert rem == pytest.approx(10.0, rel=0, abs=1e-3)
+
+    # Advance clock past 10s
+    clock[0] += 11.0
+    assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
+
+    # Trip 2 (fails 1..3 again) -> cooldown 30s
+    for _ in range(3):
+        tracker.record_start_failure(MODEL_ID)
+    is_pen, rem = tracker.is_penalized(MODEL_ID)
+    assert is_pen
+    assert rem == pytest.approx(30.0, rel=0, abs=1e-3)
+
+    # Advance clock past 30s
+    clock[0] += 31.0
+    assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
+
+    # Trip 3 (fails 1..3 again) -> cooldown 120s
+    for _ in range(3):
+        tracker.record_start_failure(MODEL_ID)
+    is_pen, rem = tracker.is_penalized(MODEL_ID)
+    assert is_pen
+    assert rem == pytest.approx(120.0, rel=0, abs=1e-3)
+
+    # Advance clock past 120s
+    clock[0] += 121.0
+    assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
+
+    # Trip 4 -> cooldown 240s
+    for _ in range(3):
+        tracker.record_start_failure(MODEL_ID)
+    is_pen, rem = tracker.is_penalized(MODEL_ID)
+    assert is_pen
+    assert rem == pytest.approx(240.0, rel=0, abs=1e-3)
+
+    # Advance clock past 240s
+    clock[0] += 241.0
+    assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
+
+    # Trip 5 -> capped at 300s
+    for _ in range(3):
+        tracker.record_start_failure(MODEL_ID)
+    is_pen, rem = tracker.is_penalized(MODEL_ID)
+    assert is_pen
+    assert rem == pytest.approx(300.0, rel=0, abs=1e-3)
+
+
+def test_infrastructure_network_errors_neutral(tmp_path, clock):
+    path = tmp_path / "penalties.json"
+    tracker = model_penalty.ModelPenaltyTracker(storage_path=path, max_start_fails=3)
+
+    for err in ("http_502", "http_504", "Connection refused", "connect_error", "network_error"):
+        for _ in range(5):
+            tripped, fails, until = tracker.record_start_failure(MODEL_ID, error_reason=err)
+            assert not tripped
+            assert fails == 0
+            assert until == 0.0
+
+    assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
+
 
