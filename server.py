@@ -6485,6 +6485,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._headers_already_sent = False
         hub_auth_ok = _auth_ok(self)
         deferred_passthrough_auth = False
         if not hub_auth_ok:
@@ -6541,7 +6542,7 @@ class Handler(BaseHTTPRequestHandler):
                 503,
                 "overloaded",
                 "bridge is shutting down",
-                extra_headers={"Retry-After": retry_drain, "X-Bridge-Draining": "1"},
+                extra_headers={"Retry-After": retry_drain, "X-Bridge-Draining": "true"},
             )
             return
         # (1) framing: Transfer-Encoding не поддерживаем, Content-Length строго числовой.
@@ -7503,6 +7504,7 @@ class Handler(BaseHTTPRequestHandler):
                 "BRIDGE_KEEPALIVE_INTERVAL_S", KEEPALIVE_INTERVAL_S
             ),
             drain_event=getattr(LIFECYCLE, "drain_started", None),
+            max_queue_size=_env_int_nonneg("BRIDGE_MAX_QUEUE_SIZE", 128),
         )
 
         headers_sent = [False]
