@@ -653,7 +653,7 @@ def facade(monkeypatch, tmp_path):
             conn.close()
 
     try:
-        yield SimpleNamespace(call=call, state=state, monkeypatch=monkeypatch)
+        yield SimpleNamespace(call=call, state=state, monkeypatch=monkeypatch, port=bridge.server_port)
     finally:
         bridge.shutdown()
         bridge.server_close()
@@ -1025,3 +1025,97 @@ def test_malformed_env_resilience(facade):
     facade.monkeypatch.setenv("BRIDGE_KEEPALIVE_INTERVAL_S", "nan")
     status, _, _ = facade.call({"model": "gemini-4-argon"})
     assert status == 200
+
+
+def test_strict_interactive_priority_over_background_in_queue():
+    """Фоновые запросы не могут обойти ждущий интерактивный запрос при освобождении слота (F-002)."""
+    mgr = QoSSlotManager(max_concurrent=3, reserved_interactive=1, queue_timeout_s=5.0)
+    # Занимаем 2 фоновых слота (лимит фоновых = 3 - 1 = 2)
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+
+    # Запускаем фоновый запрос в ожидание
+    bg_t, bg_done, bg_box = _acquire_async(mgr, is_interactive=False)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_background"] == 1)
+
+    # Запускаем интерактивный запрос в ожидание (занимает последний 3-й слот)
+    assert mgr.acquire_slot(is_interactive=True) == (True, "")
+    # Теперь активных 3 из 3. Запускаем 2-й интерактивный в очередь:
+    ui_t, ui_done, ui_box = _acquire_async(mgr, is_interactive=True)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1)
+
+    # Освобождаем один фоновый слот. Слот ОБЯЗАН достаться интерактивному запросу, а не фоновому!
+    mgr.release_slot(is_interactive=False)
+    assert ui_done.wait(1.0)
+    assert ui_box["result"] == (True, "")
+    assert not bg_done.is_set()  # фоновый всё ещё ждёт в очереди
+
+    # Очистка
+    mgr.release_slot(is_interactive=False)
+    mgr.release_slot(is_interactive=True)
+    mgr.release_slot(is_interactive=True)
+    assert bg_done.wait(1.0)
+    mgr.release_slot(is_interactive=False)
+    assert mgr.snapshot()["active_total"] == 0
+
+
+def test_bounded_queue_size_limit():
+    """Очередь ограничена не только временем, но и числом ожидающих max_queue_size (F-003)."""
+    mgr = QoSSlotManager(max_concurrent=1, max_queue_size=2, queue_timeout_s=5.0)
+    assert mgr.acquire_slot(is_interactive=True) == (True, "")
+    # 2 запроса встают в очередь (достигая предела max_queue_size=2)
+    t1, d1, _ = _acquire_async(mgr, is_interactive=True)
+    t2, d2, _ = _acquire_async(mgr, is_interactive=True)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 2)
+
+    # 3-й запрос немедленно отбивается как queue_full
+    assert mgr.acquire_slot(is_interactive=True) == (False, "queue_full")
+
+    mgr.release_slot(is_interactive=True)
+    assert d1.wait(1.0)
+    mgr.release_slot(is_interactive=True)
+    assert d2.wait(1.0)
+    mgr.release_slot(is_interactive=True)
+    assert mgr.snapshot()["active_total"] == 0
+
+
+def test_http_sse_streaming_with_keepalive_no_duplicate_headers(facade):
+    """Сквозной HTTP SSE стрим: keepalive в очереди не дублирует HTTP заголовки при выдаче ответа (F-001/F-005)."""
+    facade.monkeypatch.setattr(server, "MAX_CONCURRENT", 1)
+    mgr = QoSSlotManager(
+        max_concurrent=1,
+        reserved_interactive=0,
+        queue_timeout_s=2.0,
+        keepalive_interval_s=0.08,
+    )
+    set_qos_manager(mgr)
+    # Занимаем единственный слот
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+
+    conn = http.client.HTTPConnection("127.0.0.1", facade.port, timeout=5)
+    try:
+        body = json.dumps({"model": "gemini-4-argon", "stream": True})
+        headers = {"Authorization": "Bearer hub-test-key", "Content-Type": "application/json"}
+        conn.request("POST", "/v1/chat/completions", body=body, headers=headers)
+        
+        # Ждем отправки keepalive
+        assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1 or mgr.snapshot()["waiting_background"] == 1)
+        # Получаем HTTP заголовки (200 OK + text/event-stream)
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert "text/event-stream" in resp.getheader("Content-Type", "")
+        # Читаем первый keepalive комментарий
+        first_chunk = resp.read(len(b": keepalive\n\n"))
+        assert first_chunk == b": keepalive\n\n"
+        
+        # Теперь освобождаем слот для выполнения запроса
+        mgr.release_slot(is_interactive=False)
+        
+        # Читаем полезные данные ответа (mock upstream возвращает JSON)
+        # Убеждаемся, что в сокете нет повторного заголовка HTTP/1.1
+        rest = resp.read(len(b"{\"id\": \"x\", \"choices\": []}"))
+        assert b"HTTP/1.1" not in rest
+        assert b"choices" in rest
+    finally:
+        conn.close()
+        reset_qos_manager()

@@ -1750,6 +1750,8 @@ class _HandlerSink(ResponseSink):
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
+        if getattr(self._handler, "_headers_already_sent", False):
+            return
         try:
             self._handler.send_response(int(status))
             for key, value in headers:
@@ -6325,7 +6327,7 @@ class Handler(BaseHTTPRequestHandler):
                     "tool_emulation": True,
                     "uptime_s": int(time.time() - _started),
                 },
-                extra_headers={"X-Bridge-Draining": "1"} if draining else None,
+                extra_headers={"X-Bridge-Draining": "true"} if draining else None,
             )
             return
         if self._handle_models_get():
@@ -6625,7 +6627,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
             self._parsed_req = req
-            self._trace = _resolve_trace(dict(self.headers.items()), req)
+            if REQUEST_ATTRIBUTION_ENABLED:
+                self._trace = _resolve_trace(dict(self.headers.items()), req)
+            else:
+                self._trace = None
             # (7) путь.
             m_provider_chat = _PROVIDER_CHAT_RE.match(path)
             provider_id = m_provider_chat.group(1) if m_provider_chat else None
@@ -7511,6 +7516,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if not headers_sent[0]:
                         headers_sent[0] = True
+                        self._headers_already_sent = True
                         self.send_response(200)
                         self.send_header(
                             "Content-Type", "text/event-stream; charset=utf-8"
@@ -7543,7 +7549,11 @@ class Handler(BaseHTTPRequestHandler):
                             "message": (
                                 "bridge is draining for restart"
                                 if qos_reason == "draining"
-                                else "Queue timeout exceeded waiting for slot"
+                                else (
+                                    "Request queue is full"
+                                    if qos_reason == "queue_full"
+                                    else "Queue timeout exceeded waiting for slot"
+                                )
                             ),
                             "type": "overloaded_error",
                             "code": 503,
@@ -7570,7 +7580,11 @@ class Handler(BaseHTTPRequestHandler):
                         "message": (
                             "bridge is draining for restart"
                             if qos_reason == "draining"
-                            else "Queue timeout exceeded waiting for slot"
+                            else (
+                                "Request queue is full"
+                                if qos_reason == "queue_full"
+                                else "Queue timeout exceeded waiting for slot"
+                            )
                         ),
                         "type": "overloaded",
                         "code": 503,
@@ -7589,6 +7603,23 @@ class Handler(BaseHTTPRequestHandler):
                     f"retry_after={exc.retry_after}"
                 )
                 self.close_connection = True
+                if headers_sent[0]:
+                    err_payload = json.dumps(
+                        {
+                            "error": {
+                                "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
+                                "type": exc.error_type,
+                                "code": exc.error_code,
+                                "retry_after": exc.retry_after,
+                            }
+                        }
+                    )
+                    try:
+                        self.wfile.write(f"data: {err_payload}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    return
                 self._send(
                     503,
                     {

@@ -181,6 +181,7 @@ class QoSSlotManager:
         queue_timeout_s: float = 15.0,
         keepalive_interval_s: float = 5.0,
         drain_event: threading.Event | None = None,
+        max_queue_size: int = 128,
     ) -> None:
         self.max_concurrent = max(1, int(max_concurrent))
         self.reserved_interactive = (
@@ -190,12 +191,41 @@ class QoSSlotManager:
         )
         self.queue_timeout_s = max(0.1, float(queue_timeout_s))
         self.keepalive_interval_s = max(0.1, float(keepalive_interval_s))
+        self.max_queue_size = max(1, int(max_queue_size))
         self.drain_event = drain_event or threading.Event()
         self._cv = threading.Condition()
         self.active_total = 0
         self.active_background = 0
         self.waiting_interactive = 0
         self.waiting_background = 0
+
+    def reconfigure(
+        self,
+        max_concurrent: int | None = None,
+        reserved_interactive: int | None = None,
+        queue_timeout_s: float | None = None,
+        keepalive_interval_s: float | None = None,
+        max_queue_size: int | None = None,
+        drain_event: threading.Event | None = None,
+    ) -> None:
+        with self._cv:
+            if max_concurrent is not None:
+                self.max_concurrent = max(1, int(max_concurrent))
+            if reserved_interactive is not None:
+                self.reserved_interactive = (
+                    min(max(0, int(reserved_interactive)), max(0, self.max_concurrent - 1))
+                    if self.max_concurrent >= 2
+                    else 0
+                )
+            if queue_timeout_s is not None:
+                self.queue_timeout_s = max(0.1, float(queue_timeout_s))
+            if keepalive_interval_s is not None:
+                self.keepalive_interval_s = max(0.1, float(keepalive_interval_s))
+            if max_queue_size is not None:
+                self.max_queue_size = max(1, int(max_queue_size))
+            if drain_event is not None:
+                self.drain_event = drain_event
+            self._cv.notify_all()
 
     def acquire_slot(
         self,
@@ -223,12 +253,16 @@ class QoSSlotManager:
                                 return (False, "client_gone")
                         except Exception:  # noqa: BLE001
                             return (False, "client_gone")
+                    if (self.waiting_interactive + self.waiting_background) >= self.max_queue_size and not counted_waiting:
+                        return (False, "queue_full")
                     if is_interactive:
                         allowed = self.active_total < self.max_concurrent
                     else:
+                        # Фоновый запрос не может опередить ждущий интерактивный запрос
                         allowed = (
                             self.active_total < self.max_concurrent
                             and self.active_background < subagent_limit
+                            and self.waiting_interactive == 0
                         )
                     if allowed:
                         self.active_total += 1
@@ -304,6 +338,7 @@ def get_qos_manager(
     queue_timeout_s: float = 15.0,
     keepalive_interval_s: float = 5.0,
     drain_event: threading.Event | None = None,
+    max_queue_size: int = 128,
 ) -> QoSSlotManager:
     """Возвращает процессный синглтон `QoSSlotManager`, создавая его при необходимости."""
     global _qos_manager
@@ -315,6 +350,7 @@ def get_qos_manager(
                 queue_timeout_s=queue_timeout_s,
                 keepalive_interval_s=keepalive_interval_s,
                 drain_event=drain_event,
+                max_queue_size=max_queue_size,
             )
         return _qos_manager
 
