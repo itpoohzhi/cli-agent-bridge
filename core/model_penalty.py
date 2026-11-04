@@ -12,10 +12,20 @@ import time
 from typing import Any, Callable, TypeVar
 
 
-DEFAULT_MAX_START_FAILS = 3
-DEFAULT_INITIAL_COOLDOWN_SECONDS = 10.0
-DEFAULT_MAX_COOLDOWN_SECONDS = 300.0
-DEFAULT_COOLDOWN_SECONDS = 10.0  # 10s default initial cooldown (adaptive backoff 10s -> 30s -> 120s..300s)
+DEFAULT_MAX_START_FAILS = int(os.environ.get("BRIDGE_MAX_START_FAILS", "3"))
+DEFAULT_INITIAL_COOLDOWN_SECONDS = float(
+    os.environ.get("BRIDGE_INITIAL_COOLDOWN_SECONDS", "10.0")
+)
+DEFAULT_STEP2_COOLDOWN_SECONDS = float(
+    os.environ.get("BRIDGE_STEP2_COOLDOWN_SECONDS", "30.0")
+)
+DEFAULT_STEP3_COOLDOWN_SECONDS = float(
+    os.environ.get("BRIDGE_STEP3_COOLDOWN_SECONDS", "120.0")
+)
+DEFAULT_MAX_COOLDOWN_SECONDS = float(
+    os.environ.get("BRIDGE_MAX_COOLDOWN_SECONDS", "300.0")
+)
+DEFAULT_COOLDOWN_SECONDS = DEFAULT_INITIAL_COOLDOWN_SECONDS
 DEFAULT_STORAGE_PATH = Path(
     "~/.config/cli-agent-bridge/model_penalties.json"
 ).expanduser()
@@ -387,13 +397,14 @@ class ModelPenaltyTracker:
                     eff_cooldown = self.cooldown_seconds
                 else:
                     if trips == 1:
-                        eff_cooldown = 10.0
+                        eff_cooldown = DEFAULT_INITIAL_COOLDOWN_SECONDS
                     elif trips == 2:
-                        eff_cooldown = 30.0
+                        eff_cooldown = DEFAULT_STEP2_COOLDOWN_SECONDS
                     elif trips == 3:
-                        eff_cooldown = 120.0
+                        eff_cooldown = DEFAULT_STEP3_COOLDOWN_SECONDS
                     else:
-                        eff_cooldown = min(120.0 * (2 ** min(trips - 3, 20)), DEFAULT_MAX_COOLDOWN_SECONDS)
+                        base = DEFAULT_STEP3_COOLDOWN_SECONDS
+                        eff_cooldown = min(base * (2 ** min(trips - 3, 20)), DEFAULT_MAX_COOLDOWN_SECONDS)
                 until = now + eff_cooldown
                 if not _is_finite_nonnegative(until):
                     until = float.fromhex("0x1.fffffffffffffp+1023")

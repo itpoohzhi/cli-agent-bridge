@@ -27,24 +27,29 @@ class DummyHandler:
     _is_subagent_request = server.Handler._is_subagent_request
     _subagent_id = server.Handler._subagent_id
     _effective_turn_timeout_s = server.Handler._effective_turn_timeout_s
+    _effective_idle_timeout_s = server.Handler._effective_idle_timeout_s
+    _effective_safety_cap_s = server.Handler._effective_safety_cap_s
 
 
 def test_effective_timeout_subagent_clamped_to_cap():
-    # Без заголовка: сабагент получает дефолтный SUBAGENT_WATCHDOG_CAP_S (300с)
+    # Без заголовка: idle = 120s, safety cap сабагента = 300s
     h1 = DummyHandler(subagent_id="test-agent")
-    assert h1._effective_turn_timeout_s() == 300.0
+    assert h1._effective_idle_timeout_s() == server.IDLE_TIMEOUT_S
+    assert h1._effective_safety_cap_s() == server.SUBAGENT_WATCHDOG_CAP_S
 
-    # С заголовком 120с: сабагент получает 120с
-    h2 = DummyHandler(headers={"X-Timeout-Seconds": "120"}, subagent_id="test-agent")
-    assert h2._effective_turn_timeout_s() == 120.0
+    # С заголовком X-Timeout-Seconds 90с: idle = 90с
+    h2 = DummyHandler(headers={"X-Timeout-Seconds": "90"}, subagent_id="test-agent")
+    assert h2._effective_idle_timeout_s() == 90.0
+    assert h2._effective_safety_cap_s() == server.SUBAGENT_WATCHDOG_CAP_S
 
-    # С заголовком 600с: сабагент ограничен потолком 300с
-    h3 = DummyHandler(headers={"X-Timeout-Seconds": "600"}, subagent_id="test-agent")
-    assert h3._effective_turn_timeout_s() == 300.0
+    # С заголовком X-Watchdog-Cap-Seconds 600с: safety cap = 600с
+    h3 = DummyHandler(headers={"X-Watchdog-Cap-Seconds": "600"}, subagent_id="test-agent")
+    assert h3._effective_safety_cap_s() == 600.0
 
-    # UI запрос (без subagent_id): дефолт TIMEOUT_S (1800с)
+    # UI запрос (без subagent_id): idle = 120с, safety cap = TIMEOUT_S (1800с)
     h_ui = DummyHandler()
-    assert h_ui._effective_turn_timeout_s() == server.TIMEOUT_S
+    assert h_ui._effective_idle_timeout_s() == server.IDLE_TIMEOUT_S
+    assert h_ui._effective_safety_cap_s() == server.TIMEOUT_S
 
 
 def test_subagent_id_resolution():
@@ -160,18 +165,8 @@ def test_release_turn_slot_subagent(monkeypatch):
     t_held = True
     t_released = [False]
 
-    def _release_turn_slot() -> None:
-        if t_held and not t_released[0]:
-            t_released[0] = True
-            with server._qos_lock:
-                server._slots.release()
-                if getattr(h, "_subagent_slot_held", False):
-                    h._subagent_slot_held = False
-                    server._subagent_slots.release()
-                server._qos_lock.notify_all()
-
-    # Вызов _release_turn_slot освобождает оба семафора и сбрасывает флаг
-    _release_turn_slot()
+    # Вызов production-функции server.release_turn_slot освобождает оба семафора и сбрасывает флаг
+    server.release_turn_slot(h, t_held, t_released)
     assert h._subagent_slot_held is False
     assert t_released[0] is True
 
@@ -182,6 +177,6 @@ def test_release_turn_slot_subagent(monkeypatch):
         subagent_slots.release()
 
     # Повторный вызов идемпотентен и не приводит к лишним release()
-    _release_turn_slot()
+    server.release_turn_slot(h, t_held, t_released)
     assert t_released[0] is True
 

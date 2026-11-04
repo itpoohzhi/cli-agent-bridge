@@ -5028,6 +5028,18 @@ class _LiveBudgetExceeded(Exception):
     """RW-011 в живом ходе: очередной кусок live-доставки не влез в бюджет памяти."""
 
 
+def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> None:
+    """Освобождает слоты хода под _qos_lock с оповещением ожидающих запросов."""
+    if t_held and not t_released[0]:
+        t_released[0] = True
+        with _qos_lock:
+            _slots.release()
+            if getattr(handler, "_subagent_slot_held", False):
+                handler._subagent_slot_held = False
+                _subagent_slots.release()
+            _qos_lock.notify_all()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
@@ -5088,27 +5100,36 @@ class Handler(BaseHTTPRequestHandler):
             return trace.subagent_id
         return None
 
-    def _effective_turn_timeout_s(self) -> float:
+    def _effective_safety_cap_s(self) -> float:
+        raw_cap = None
+        if hasattr(self, "headers") and self.headers:
+            raw_cap = self.headers.get("X-Watchdog-Cap-Seconds")
+        if raw_cap:
+            try:
+                val = float(raw_cap.strip())
+                if val > 0 and math.isfinite(val):
+                    return min(val, TIMEOUT_S)
+            except ValueError:
+                pass
+        if self._is_subagent_request():
+            return SUBAGENT_WATCHDOG_CAP_S
+        return TIMEOUT_S
+
+    def _effective_idle_timeout_s(self) -> float:
         raw_to = None
         if hasattr(self, "headers") and self.headers:
             raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get("X-Subagent-Timeout")
-        client_to: float | None = None
         if raw_to:
             try:
                 val = float(raw_to.strip())
-                if val > 0:
-                    client_to = val
+                if val > 0 and math.isfinite(val):
+                    return max(val, 1.0)
             except ValueError:
-                client_to = None
+                pass
+        return IDLE_TIMEOUT_S
 
-        if self._is_subagent_request():
-            if client_to is not None:
-                return min(client_to, SUBAGENT_WATCHDOG_CAP_S)
-            return SUBAGENT_WATCHDOG_CAP_S
-
-        if client_to is not None:
-            return min(client_to, TIMEOUT_S)
-        return TIMEOUT_S
+    def _effective_turn_timeout_s(self) -> float:
+        return self._effective_idle_timeout_s()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
@@ -5411,23 +5432,10 @@ class Handler(BaseHTTPRequestHandler):
         last_ka = time.monotonic()
         is_subagent = self._is_subagent_request()
         # Safety cap is the absolute upper bound (watchdog against infinite loops)
-        safety_cap_s = SUBAGENT_WATCHDOG_CAP_S if is_subagent else TIMEOUT_S
+        safety_cap_s = self._effective_safety_cap_s()
         safety_deadline = turn_start + safety_cap_s
 
-        # Sliding idle window: client X-Timeout-Seconds (or X-Subagent-Timeout) sets allowed silence timeout
-        raw_to = None
-        if hasattr(self, "headers") and self.headers:
-            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get("X-Subagent-Timeout")
-        client_to: float | None = None
-        if raw_to:
-            try:
-                val = float(raw_to.strip())
-                if val > 0:
-                    client_to = val
-            except ValueError:
-                client_to = None
-
-        idle_timeout_s = client_to if client_to is not None else IDLE_TIMEOUT_S
+        idle_timeout_s = self._effective_idle_timeout_s()
         last_activity = turn_start
         cur_mid = [
             None
@@ -5918,14 +5926,7 @@ class Handler(BaseHTTPRequestHandler):
                 t_released = [False]
 
                 def _release_turn_slot() -> None:
-                    if t_held and not t_released[0]:
-                        t_released[0] = True
-                        with _qos_lock:
-                            _slots.release()
-                            if getattr(self, "_subagent_slot_held", False):
-                                self._subagent_slot_held = False
-                                _subagent_slots.release()
-                            _qos_lock.notify_all()
+                    release_turn_slot(self, t_held, t_released)
 
                 managed_turn = getattr(self, "_active_managed_turn", None)
                 if managed_turn is not None:
@@ -7159,12 +7160,8 @@ class Handler(BaseHTTPRequestHandler):
                             resume_turn_id=resume_turn_id or None,
                             stream=bool(req.get("stream")),
                             emulate_tools=emulate_tools,
-                            idle_timeout_s=(
-                                SILENCE_WATCHDOG_S
-                                if _is_watchdog_enabled()
-                                else TIMEOUT_S
-                            ),
-                            safety_cap_s=self._effective_turn_timeout_s(),
+                            idle_timeout_s=self._effective_idle_timeout_s(),
+                            safety_cap_s=self._effective_safety_cap_s(),
                         )
                     )
                 except PermissionError:

@@ -36,10 +36,15 @@ from core.turn_session_manager import (
 
 DRAIN_TIMEOUT_S: float = 110.0
 DEFAULT_DRAIN_SECONDS: float = DRAIN_TIMEOUT_S
-RETRY_AFTER_S: int = 5
-ORPHAN_SIGTERM_GRACE_S: float = 1.0
+RETRY_AFTER_S: int = int(os.environ.get("BRIDGE_RETRY_AFTER_S", "5"))
+ORPHAN_SIGTERM_GRACE_S: float = float(os.environ.get("BRIDGE_ORPHAN_SIGTERM_GRACE_S", "1.0"))
 MAX_KEEPALIVE_INTERVAL_S: float = 10.0
-DEFAULT_DRAIN_SUBAGENT_GRACE_S: float = 5.0
+DEFAULT_DRAIN_SUBAGENT_GRACE_S: float = float(
+    os.environ.get("BRIDGE_DRAIN_SUBAGENT_GRACE_S", "5.0")
+)
+DEFAULT_SUBAGENT_RETRY_AFTER_S: int = int(
+    os.environ.get("BRIDGE_SUBAGENT_RETRY_AFTER_S", "3")
+)
 
 KNOWN_CHILD_BINARIES = frozenset(
     {
@@ -382,7 +387,7 @@ class HubLifecycleManager:
                                 )
                                 self.turn_manager.interrupt_for_drain(
                                     st,
-                                    message="bridge restart drain: subagent cancelled with Retry-After: 3",
+                                    message=f"bridge restart drain: subagent cancelled with Retry-After: {DEFAULT_SUBAGENT_RETRY_AFTER_S}",
                                 )
 
                 if eff_timeout > 0:
@@ -456,7 +461,7 @@ class HubLifecycleManager:
             and is_subagent
             and "BRIDGE_RETRY_AFTER_S" not in os.environ
         ):
-            retry = 3
+            retry = DEFAULT_SUBAGENT_RETRY_AFTER_S
         headers = {
             "Retry-After": str(retry),
             "X-Bridge-Draining": "true",
