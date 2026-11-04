@@ -25,14 +25,18 @@ _POSIX = sys.platform != "win32"
 
 def _load_agy_bridge() -> Any:
     """Load standalone agy-bridge server module for process isolation tests."""
-    spec = importlib.util.spec_from_file_location(
-        "agy_bridge_process_test_module", _BRIDGE_PY
-    )
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    saved_path = list(sys.path)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "agy_bridge_process_test_module", _BRIDGE_PY
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        sys.path[:] = saved_path
 
 
 srv = _load_agy_bridge()

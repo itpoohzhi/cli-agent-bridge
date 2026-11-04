@@ -42,6 +42,7 @@ def _execute_bridge_isolation(
     """Underlying generator performing bridge isolation snapshot and reset."""
     # --- PHASE 1: Pre-test snapshot ---
     env_snapshot = dict(os.environ)
+    sys_path_snapshot = list(sys.path)
 
     baseline_tasks: set[asyncio.Task[Any]] = set()
     try:
@@ -161,6 +162,9 @@ def _execute_bridge_isolation(
     for key, val in env_snapshot.items():
         if os.environ.get(key) != val:
             os.environ[key] = val
+
+    # 5. Restore sys.path to prevent module resolution poisoning across suites
+    sys.path[:] = sys_path_snapshot
 
     # 5. Fail-fast if strict leak checking is active (canary diversion / T-ISO-I2)
     node = getattr(request, "node", None)

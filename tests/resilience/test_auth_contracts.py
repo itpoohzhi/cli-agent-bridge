@@ -5,10 +5,30 @@ across all endpoints and peer IP types without leaking request bodies.
 """
 
 from email.message import Message
+import importlib.util
+from pathlib import Path
+import sys
+from typing import Any
 import unittest
 from unittest.mock import Mock
 
-import server
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ROOT_SERVER = _REPO_ROOT / "server.py"
+
+
+def _get_root_server() -> Any:
+    mod = sys.modules.get("server")
+    if mod is not None and getattr(mod, "__file__", "") == str(_ROOT_SERVER):
+        return mod
+    spec = importlib.util.spec_from_file_location("server", _ROOT_SERVER)
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    sys.modules["server"] = loaded
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+server = _get_root_server()
 
 
 class TestCriticalFixes(unittest.TestCase):
