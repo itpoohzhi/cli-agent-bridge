@@ -157,6 +157,7 @@ from core.watchdog import (  # noqa: E402,F401
     AdaptiveTimeoutController,
     ProcessWatchdog,
 )
+from core.model_penalty import get_penalty_tracker  # noqa: E402
 
 
 HOME = Path.home()
@@ -659,6 +660,9 @@ def _build_models_list(
             if not isinstance(m, dict)
             else m.get("context_window", 200000)
         )
+        stat = _PENALTY_TRACKER.get_model_status(mid)
+        is_pen = stat["is_penalized"]
+        pen_until = int(stat["penalized_until"]) if is_pen else None
         card = {
             "id": mid,
             "object": "model",
@@ -671,7 +675,8 @@ def _build_models_list(
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
-            "available": True,
+            "available": not is_pen,
+            "penalized_until": pen_until,
         }
         data.append(card)
         listed.add(mid)
@@ -704,6 +709,10 @@ def _build_models_list(
             if not isinstance(m, dict)
             else m.get("context_window", 200000)
         )
+        target_id = base_id if base_id else alias_id
+        stat = _PENALTY_TRACKER.get_model_status(target_id)
+        is_pen = stat["is_penalized"]
+        pen_until = int(stat["penalized_until"]) if is_pen else None
         card = {
             "id": alias_id,
             "object": "model",
@@ -718,7 +727,8 @@ def _build_models_list(
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
-            "available": True,
+            "available": not is_pen,
+            "penalized_until": pen_until,
         }
         data.append(card)
         listed.add(alias_id)
@@ -1415,8 +1425,14 @@ _MODEL_BLOCK_STATUSES = re.compile(
 )
 
 
-def _parse_blocked_models(text: str) -> frozenset[str]:
+def _parse_blocked_models(
+    text: str, now_utc: float | None = None, *,
+    parsed_rules: list[tuple[frozenset[str], frozenset[str], float | None]] | None = None,
+) -> frozenset[str]:
     """Только конкретные ID в статусных колонках; prose и запреты транспортов не модели."""
+    from datetime import datetime, timedelta, timezone
+
+    now_utc = time.time() if now_utc is None else now_utc
     blocked: set[str] = set()
     headers: list[str] = []
     for line in text.splitlines():
@@ -1436,6 +1452,18 @@ def _parse_blocked_models(text: str) -> frozenset[str]:
             cells[status_index]
         ):
             continue
+        expiration = re.search(
+            r"\(до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)",
+            line, re.I,
+        )
+        expires = None
+        if expiration:
+            try:
+                expires = datetime.strptime(
+                    expiration.group(1), "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=timezone(timedelta(hours=3))).timestamp()
+            except ValueError:
+                pass
         if "группа" in headers:
             group = cells[headers.index("группа")].lower()
             if group not in ("модели", "models"):
@@ -1445,8 +1473,12 @@ def _parse_blocked_models(text: str) -> frozenset[str]:
             model_cell = cells[0].split(" / ", 1)[0]
         else:
             continue
-        for model in re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._:-]*)`", model_cell):
-            blocked.add(model)
+        models = frozenset(re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._:-]*)`", model_cell))
+        if parsed_rules is not None:
+            parsed_rules.append((frozenset(), models, expires))
+        if expires is not None and now_utc > expires:
+            continue
+        blocked.update(models)
     return frozenset(blocked)
 
 
@@ -1468,6 +1500,7 @@ class ModelNotesFilter:
         self.lock = threading.Lock()
         self.loading: threading.Event | None = None
         self.signature: tuple[int, int] | None = None
+        self._parsed_rules: list[tuple[frozenset[str], frozenset[str], float | None]] | None = None
 
     def is_blocked(self, model: str) -> bool:
         now = time.monotonic()
@@ -1504,17 +1537,26 @@ class ModelNotesFilter:
                     try:
                         stat = self.path.stat()
                         signature = (stat.st_mtime_ns, stat.st_size)
-                        models = (
-                            self.blocked
-                            if signature == self.signature
-                            else _parse_blocked_models(
-                                self.path.read_text(encoding="utf-8")
+                        now_utc = time.time()
+                        if signature == self.signature and self._parsed_rules is not None:
+                            rules = self._parsed_rules
+                            models = frozenset(
+                                model
+                                for _, model_ids, expiry_ts in rules
+                                if expiry_ts is None or expiry_ts >= now_utc
+                                for model in model_ids
                             )
-                        )
+                        else:
+                            rules = []
+                            models = _parse_blocked_models(
+                                self.path.read_text(encoding="utf-8"),
+                                now_utc, parsed_rules=rules,
+                            )
                     except (OSError, UnicodeError, ValueError):
-                        signature, models = None, frozenset()
+                        signature, models, rules = None, frozenset(), None
                     with self.lock:
                         self.blocked, self.signature = models, signature
+                        self._parsed_rules = rules
                         self.expires_at = time.monotonic() + ttl
                         self.loading = None
                     done.set()
@@ -1533,6 +1575,7 @@ class ModelNotesFilter:
 
 
 _MODEL_NOTES_FILTER = ModelNotesFilter()
+_PENALTY_TRACKER = get_penalty_tracker()
 
 
 class _HandlerSink(ResponseSink):
@@ -6541,6 +6584,29 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # Проверка штрафа модели (Fail-Fast 503) по каноническому идентификатору
+            canonical_pen_id = (resolved_id or model_id).strip().lower()
+            stat = _PENALTY_TRACKER.get_model_status(canonical_pen_id)
+            if stat["is_penalized"]:
+                retry_after_s = max(1, math.ceil(stat["remaining_cooldown"]))
+                pen_until = int(stat["penalized_until"])
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": (
+                                f"Model '{model_id}' is temporarily penalized due to start failures. "
+                                f"Cooldown active for {retry_after_s}s."
+                            ),
+                            "type": "model_penalized",
+                            "code": 503,
+                            "penalized_until": pen_until,
+                        }
+                    },
+                    extra_headers={"Retry-After": str(retry_after_s)},
+                )
+                return
+
             # Проверка скоупа провайдера для чата
             if provider_id is not None:
                 owner = PROVIDER_SCOPES[provider_id]
@@ -7235,16 +7301,24 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _record_turn_outcome(
-        lease: ResilienceLease, out: dict, backend_err: Any
+        lease: ResilienceLease, out: dict, backend_err: Any, model_id: str = ""
     ) -> None:
         """Явный исход хода CLI-бэкенда: успех — `rc == 0` и нет ошибки бэкенда (ADR-0020 §3.2)."""
         if backend_err is None and out.get("rc") == 0:
             lease.record_success()
+            if model_id:
+                _PENALTY_TRACKER.record_start_success(model_id)
         elif out.get("state") in _RESILIENCE_NEUTRAL_STATES:
             # Локальная перегрузка/хранилище моста — не вина бэкенда: брейкер не штрафуем.
             lease.record_discard(str(out.get("state")))
         else:
             lease.record_failure()
+            if model_id:
+                reason = str(out.get("error") or out.get("state") or "rc_non_zero").strip()[:120]
+                _PENALTY_TRACKER.record_start_failure(
+                    model_id,
+                    reason,
+                )
 
     def _current_lease(self) -> ResilienceLease:
         """Lease текущего запроса; вне `_serve_resilient` (тесты, прямой вызов) — пустой (no-op)."""
@@ -7319,13 +7393,29 @@ class Handler(BaseHTTPRequestHandler):
             adapter.handle(
                 path=self.path, raw_body=raw, request=req, headers=headers, sink=sink
             )
+            fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+            canonical_model_id = (
+                _resolve_model_alias(model_id, fleet_models)[0]
+                if _resolve_model_alias(model_id, fleet_models)
+                else model_id
+            )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
-            elif 0 < sink.status < 500:
+            elif sink.status == 429 or sink.status in (402, 408):
+                # 429 / 402 / 408: модель исчерпала квоту/лимит/таймаут старта
+                lease.record_success()
+                _PENALTY_TRACKER.record_start_failure(canonical_model_id, f"http_{sink.status}")
+            elif 200 <= sink.status < 300:
+                # 2xx: реальный успешный ответ модели
+                lease.record_success()
+                _PENALTY_TRACKER.record_start_success(canonical_model_id)
+            elif 400 <= sink.status < 500:
+                # Клиентские ошибки (400, 401, 403, 404, 422 и т.д.): нейтральны к здоровью модели
                 lease.record_success()
             else:
                 lease.record_failure()
+                _PENALTY_TRACKER.record_start_failure(canonical_model_id, f"http_{sink.status}")
         finally:
             _log(
                 f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
@@ -7348,7 +7438,16 @@ class Handler(BaseHTTPRequestHandler):
             lease.record_discard("client_disconnected")
             return
         backend_err = self._error_body(out)
-        self._record_turn_outcome(lease, out, backend_err)
+        raw_m = str(ctx.get("model") or "")
+        fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+        cli_canon_id = (
+            _resolve_model_alias(raw_m, fleet_models)[0]
+            if _resolve_model_alias(raw_m, fleet_models)
+            else raw_m
+        )
+        self._record_turn_outcome(
+            lease, out, backend_err, model_id=cli_canon_id
+        )
         err = backend_err or self._reserve_delivery(out)
         if err is not None:
             self._send(err["code"], {"error": err})
@@ -7639,7 +7738,16 @@ class Handler(BaseHTTPRequestHandler):
             lease.record_discard("client_disconnected")
             return
         backend_err = self._error_body(out)
-        self._record_turn_outcome(lease, out, backend_err)
+        raw_m = str(ctx.get("model") or "")
+        fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+        cli_canon_id = (
+            _resolve_model_alias(raw_m, fleet_models)[0]
+            if _resolve_model_alias(raw_m, fleet_models)
+            else raw_m
+        )
+        self._record_turn_outcome(
+            lease, out, backend_err, model_id=cli_canon_id
+        )
         err = backend_err or self._reserve_delivery(out)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
