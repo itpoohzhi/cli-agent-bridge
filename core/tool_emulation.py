@@ -17,6 +17,7 @@ import uuid
 from dataclasses import replace
 from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
+from core.stream_fsm.repetition_guard import StreamRepetitionGuard
 
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
@@ -650,17 +651,7 @@ def _is_separator_token(token: str) -> bool:
 
 
 class RepetitionGuard:
-    """Детектор циклов повторений в потоке текста (ADR-0020 AD-001).
-
-    `feed(chunk)` накапливает текст и возвращает `(chunk, detected)`: `detected`
-    взводится, когда один непробельный токен длиной до `max_token_len` или
-    периодический паттерн такой длины (например `\\n\\n_placeholder`)
-    повторяется подряд не менее `max_repeats` раз. Fenced/inline-код, чистый
-    whitespace и строки-разделители Markdown из детекции исключены.
-    """
-
-    _MAX_BUFFER = 32768
-    _KEEP_BUFFER = 16384
+    """Тонкий фасад к StreamRepetitionGuard (ADR-0020, M-MOD-I2)."""
 
     def __init__(
         self,
@@ -668,6 +659,7 @@ class RepetitionGuard:
         max_token_len: int = DEFAULT_MAX_REPETITION_TOKEN_LEN,
         enabled: bool = True,
     ) -> None:
+        self.enabled = bool(enabled)
         self.max_repeats = (
             min(int(max_repeats), REPETITION_MAX_REPEATS_CAP)
             if int(max_repeats) >= 1
@@ -678,98 +670,61 @@ class RepetitionGuard:
             if int(max_token_len) >= 1
             else DEFAULT_MAX_REPETITION_TOKEN_LEN
         )
-        self.enabled = bool(enabled)
         self._max_buffer = max(
-            self._MAX_BUFFER, (self.max_repeats + 10) * (self.max_token_len + 4)
+            32768, (self.max_repeats + 10) * (self.max_token_len + 4)
         )
         self._keep_buffer = self._max_buffer // 2
-        self._buffer = ""
         self._buffer_fence: tuple[Any, ...] | None = None
-        self._detected = False
+        self._guard = StreamRepetitionGuard(
+            max_repeats=self.max_repeats,
+            max_token_len=self.max_token_len,
+            enabled=self.enabled,
+        )
 
     @property
     def detected(self) -> bool:
-        return self._detected
+        return self._guard.detected
 
     @property
     def loop_detected(self) -> bool:
-        return self._detected
+        return self._guard.detected
 
     @property
     def triggered(self) -> bool:
-        return self._detected
+        return self._guard.detected
 
     def reset(self) -> None:
-        self._buffer = ""
         self._buffer_fence = None
-        self._detected = False
+        self._guard.reset()
 
     def feed(self, chunk: str) -> tuple[str, bool]:
         """Принять очередной кусок текста; `(chunk, loop_detected)`."""
-        if not self.enabled or not chunk:
-            return chunk, False
-        self._buffer += chunk
-        if len(self._buffer) > self._max_buffer:
-            cut = len(self._buffer) - self._keep_buffer
-            newline = self._buffer.find("\n", cut)
-            if newline != -1 and newline + 1 < len(self._buffer):
-                cut = newline + 1
-            self._buffer_fence = _fence_state_after(
-                self._buffer[:cut], self._buffer_fence
-            )
-            self._buffer = self._buffer[cut:]
-        if not self._detected:
-            cleaned, _ = _strip_code_for_guard(self._buffer, self._buffer_fence)
-            self._detected = self._scan_cleaned(cleaned)
-        return chunk, self._detected
+        if not self.enabled or not chunk or self._guard.detected:
+            return chunk, self._guard.detected
+        cleaned, self._buffer_fence = _strip_code_for_guard(chunk, self._buffer_fence)
+        if cleaned:
+            self._guard.feed(cleaned)
+        return chunk, self._guard.detected
 
     def check(self, chunk: str | None = None) -> bool:
         """Скормить `chunk` (если дан) и вернуть флаг детекции."""
         if chunk:
             return self.feed(chunk)[1]
-        return self._detected
+        return self.detected
 
     def detect(self, text: str) -> bool:
         """Разовая проверка целого текста без изменения состояния guard."""
         if not self.enabled or not text:
             return False
         cleaned, _ = _strip_code_for_guard(text, None)
-        return self._scan_cleaned(cleaned)
-
-    def _scan_cleaned(self, cleaned: str) -> bool:
-        if not cleaned.strip():
+        if not cleaned:
             return False
-        prev: str | None = None
-        run = 0
-        for token in cleaned.split():
-            if len(token) > self.max_token_len:
-                prev, run = None, 0
-                continue
-            if _is_separator_token(token):
-                continue
-            if token == prev:
-                run += 1
-            else:
-                prev, run = token, 1
-            if run >= self.max_repeats:
-                return True
-        tail = cleaned[-(self.max_token_len * self.max_repeats + self.max_token_len) :]
-        max_pat = min(self.max_token_len, len(tail) // self.max_repeats)
-        for pat_len in range(1, max_pat + 1):
-            pattern = tail[-pat_len:]
-            core = pattern.strip()
-            if not core or _is_separator_token(core):
-                continue
-            if len(set(core)) == 1 and not core.isalnum():
-                continue
-            count = 0
-            index = len(tail)
-            while index - pat_len >= 0 and tail[index - pat_len : index] == pattern:
-                count += 1
-                index -= pat_len
-                if count >= self.max_repeats:
-                    return True
-        return False
+        temp = StreamRepetitionGuard(
+            max_repeats=self.max_repeats,
+            max_token_len=self.max_token_len,
+            enabled=self.enabled,
+        )
+        return temp.feed(cleaned)[1]
 
 
 _INVOKE_CANDIDATE_RE = re.compile(
