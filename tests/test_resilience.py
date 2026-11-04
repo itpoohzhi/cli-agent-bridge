@@ -1016,3 +1016,12 @@ def test_graceful_drain_headers_and_rejection(facade):
     assert headers["retry-after"] == "5"
     assert headers["x-bridge-draining"] in ("1", "true")
     assert facade.state.hits == 0
+
+def test_malformed_env_resilience(facade):
+    """Защита от некорректных env: нечисло/отрицательные значения откатываются к дефолтам (RW-014)."""
+    facade.monkeypatch.setenv("BRIDGE_QUEUE_TIMEOUT_S", "invalid_float")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_AFTER_S", "not_a_number")
+    facade.monkeypatch.setenv("BRIDGE_RESERVED_INTERACTIVE_SLOTS", "-5")
+    facade.monkeypatch.setenv("BRIDGE_KEEPALIVE_INTERVAL_S", "nan")
+    status, _, _ = facade.call({"model": "gemini-4-argon"})
+    assert status == 200

@@ -915,6 +915,24 @@ def _env_limit(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _env_float(name: str, default: float) -> float:
+    """Положительный вещественный параметр из окружения; нечисло/nan/<=0 -> безопасный дефолт."""
+    try:
+        val = float(os.environ.get(name, default))
+        return val if math.isfinite(val) and val > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int_nonneg(name: str, default: int) -> int:
+    """Неотрицательный целочисленный параметр из окружения; нечисло/<0 -> безопасный дефолт."""
+    try:
+        val = int(os.environ.get(name, default))
+        return val if val >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
 FORWARD_ENV_MAX_VALUE = _env_limit("BRIDGE_FORWARD_ENV_MAX_VALUE", 32768)
 _FORWARD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -6516,7 +6534,7 @@ class Handler(BaseHTTPRequestHandler):
         if not m_cancel and (
             _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
         ):
-            retry_drain = str(int(os.environ.get("BRIDGE_RETRY_AFTER_S", "3")))
+            retry_drain = str(_env_int_nonneg("BRIDGE_RETRY_AFTER_S", 3))
             self._reject(
                 503,
                 "overloaded",
@@ -7468,20 +7486,16 @@ class Handler(BaseHTTPRequestHandler):
         )
         is_interactive = subagent_id is None or str(subagent_id).strip() == ""
 
-        qos_timeout = float(os.environ.get("BRIDGE_QUEUE_TIMEOUT_S", "15.0"))
+        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", 15.0)
         qos = get_qos_manager(
             max_concurrent=MAX_CONCURRENT,
-            reserved_interactive=int(
-                os.environ.get(
-                    "BRIDGE_RESERVED_INTERACTIVE_SLOTS",
-                    str(RESERVED_INTERACTIVE_SLOTS),
-                )
+            reserved_interactive=_env_int_nonneg(
+                "BRIDGE_RESERVED_INTERACTIVE_SLOTS",
+                RESERVED_INTERACTIVE_SLOTS,
             ),
             queue_timeout_s=qos_timeout,
-            keepalive_interval_s=float(
-                os.environ.get(
-                    "BRIDGE_KEEPALIVE_INTERVAL_S", str(KEEPALIVE_INTERVAL_S)
-                )
+            keepalive_interval_s=_env_float(
+                "BRIDGE_KEEPALIVE_INTERVAL_S", KEEPALIVE_INTERVAL_S
             ),
             drain_event=getattr(LIFECYCLE, "drain_started", None),
         )
@@ -7545,7 +7559,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self.close_connection = True
-            retry_s = int(os.environ.get("BRIDGE_RETRY_AFTER_S", "3"))
+            retry_s = _env_int_nonneg("BRIDGE_RETRY_AFTER_S", 3)
             extra_headers = {"Retry-After": str(retry_s)}
             if qos_reason == "draining":
                 extra_headers["X-Bridge-Draining"] = "true"
