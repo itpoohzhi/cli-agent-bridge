@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """opencode-zen-bridge — локальный OpenAI-совместимый мост поверх CLI `opencode run`.
 
 Один запрос `/v1/chat/completions` = один headless-ход
@@ -28,236 +29,29 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+_ZEN_ROOT = str(Path(__file__).resolve().parent)
+if _ZEN_ROOT not in sys.path:
+    sys.path.insert(0, _ZEN_ROOT)
 
-def _run_serve_helper_cli(args: list[str]) -> int:
-    """Ранний помощник serve: один лидер группы на попытку, lease и дренаж пайпов."""
-    if len(args) != 6:
-        return 2
-    (
-        attempt_id,
-        port_text,
-        opencode_bin,
-        lease_dir_text,
-        parent_pid_text,
-        parent_lstart,
-    ) = args
-    if not attempt_id or not opencode_bin or not lease_dir_text or not parent_lstart:
-        return 2
-    if not port_text.isdecimal() or not parent_pid_text.isdecimal():
-        return 2
-    port = int(port_text)
-    parent_pid = int(parent_pid_text)
-    if not 1 <= port <= 65535 or parent_pid <= 0:
-        return 2
-    lease_dir = Path(lease_dir_text)
-    stopped: dict[str, bool] = {"flag": False}
-
-    def _on_term(_signum: int, _frame: object) -> None:
-        """Отметить SIGTERM без тяжёлой работы в обработчике."""
-        stopped["flag"] = True
-
-    _ = signal.signal(signal.SIGTERM, _on_term)
-    try:
-        lease_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(lease_dir, 0o700)
-    except OSError:
-        return 2
-    lease_path = lease_dir / f"lease-{attempt_id}.json"
-
-    def _lstart_of(pid: int) -> str:
-        """lstart процесса из ps; при сбое ps — epoch-секунды."""
-        try:
-            out = subprocess.run(
-                ["ps", "-o", "lstart=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            return out.stdout.strip() or str(int(time.time()))
-        except (OSError, subprocess.SubprocessError):
-            return str(int(time.time()))
-
-    helper_lstart = _lstart_of(os.getpid())
-
-    def _write_lease(extra: dict[str, object]) -> None:
-        """Атомарно опубликовать lease помощника."""
-        payload: dict[str, object] = {
-            "schema_version": 1,
-            "attempt_id": attempt_id,
-            "owner_uid": os.getuid(),
-            "parent_pid": parent_pid,
-            "parent_start_ts": parent_lstart,
-            "helper_pid": os.getpid(),
-            "helper_lstart": helper_lstart,
-            "pgid": os.getpgrp(),
-            "port": port,
-            "start_ts": time.time(),
-            "phase": "starting",
-        }
-        payload.update(extra)
-        tmp_path = lease_path.with_suffix(".tmp")
-        try:
-            _ = tmp_path.write_text(json.dumps(payload), "utf-8")
-            os.replace(tmp_path, lease_path)
-        except OSError:
-            pass
-
-    def _fd_ready() -> bool:
-        """EOF на lifeline fd 0 виден без блокировки."""
-        try:
-            ready, _w, _x = select.select([0], [], [], 0)
-            return bool(ready)
-        except BlockingIOError:
-            return False
-        except (OSError, ValueError) as _gone_exc:
-            if isinstance(_gone_exc, OSError) and _gone_exc.errno in (
-                errno.EAGAIN,
-                errno.EWOULDBLOCK,
-            ):
-                return False
-            return True
-
-    _write_lease({})
-    if _fd_ready():
-        try:
-            lease_path.unlink()
-        except OSError:
-            pass
-        return 0
-    serve_env = dict(os.environ)
-    _ = serve_env.pop("OPENCODE_BIN", None)
-    try:
-        serve_proc = subprocess.Popen(
-            [opencode_bin, "serve", "--hostname", "127.0.0.1", "--port", str(port)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=False,
-            close_fds=True,
-            env=serve_env,
-        )
-    except OSError:
-        return 2
-    serve_lstart = _lstart_of(serve_proc.pid)
-    _write_lease(
-        {"serve_pid": serve_proc.pid, "serve_lstart": serve_lstart, "phase": "ready"}
-    )
-    try:
-        _ = sys.stdout.write(
-            json.dumps({"serve_pid": serve_proc.pid, "pgid": os.getpgrp()}) + "\n"
-        )
-        _ = sys.stdout.flush()
-    except OSError:
-        pass
-    pipes: list[int] = []
-    for stream in (serve_proc.stdout, serve_proc.stderr):
-        if stream is not None:
-            pipes.append(stream.fileno())
-            os.set_blocking(stream.fileno(), False)
-    code = 0
-    try:
-        while True:
-            if stopped["flag"] or _fd_ready():
-                break
-            poll = serve_proc.poll()
-            if poll is not None:
-                code = int(poll)
-                break
-            watch: list[int] = [0, *pipes]
-            try:
-                ready, _w, _x = select.select(watch, [], [], 0.05)
-            except (OSError, ValueError):
-                ready = []
-            for item in ready:
-                if item == 0:
-                    stopped["flag"] = True
-                    continue
-                try:
-                    chunk = os.read(item, 65536)
-                except OSError:
-                    chunk = b""
-                if chunk:
-                    try:
-                        _ = sys.stderr.write(chunk.decode("utf-8", "replace"))
-                        _ = sys.stderr.flush()
-                    except OSError:
-                        pass
-            if stopped["flag"]:
-                break
-    finally:
-        # Убить всю собственную группу (serve и внуков), lease — только после смерти группы.
-        _pgid = os.getpgrp()
-
-        def _group_members() -> list[int]:
-            """Живые члены группы, кроме самого помощника (ps — в отдельной сессии)."""
-            _ = serve_proc.poll()
-            try:
-                listing = subprocess.run(
-                    ["ps", "-A", "-o", "pid=,pgid="],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                    start_new_session=True,
-                )
-            except (OSError, subprocess.SubprocessError):
-                return [serve_proc.pid] if serve_proc.poll() is None else []
-            members: list[int] = []
-            for row in listing.stdout.splitlines():
-                cols = row.split()
-                if (
-                    len(cols) == 2
-                    and cols[0].isdecimal()
-                    and cols[1] == str(_pgid)
-                    and int(cols[0]) != os.getpid()
-                ):
-                    members.append(int(cols[0]))
-            return members
-
-        try:
-            os.killpg(_pgid, signal.SIGTERM)
-        except OSError:
-            if serve_proc.poll() is None:
-                try:
-                    serve_proc.terminate()
-                except OSError:
-                    pass
-        members_now = _group_members()
-        _term_deadline = time.monotonic() + 4.0
-        while members_now and time.monotonic() < _term_deadline:
-            time.sleep(0.1)
-            members_now = _group_members()
-        if members_now:
-            # Эскалация: SIGKILL всем оставшимся членам группы, даже если serve уже вышел.
-            for _pid in members_now:
-                try:
-                    os.kill(_pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            _kill_deadline = time.monotonic() + 2.0
-            while members_now and time.monotonic() < _kill_deadline:
-                time.sleep(0.05)
-                members_now = _group_members()
-        # Дренировать остаток пайпов, чтобы потомок не остался с полным буфером.
-        for fd in pipes:
-            try:
-                while True:
-                    chunk = os.read(fd, 65536)
-                    if not chunk:
-                        break
-                    _ = sys.stderr.write(chunk.decode("utf-8", "replace"))
-            except OSError:
-                pass
-        if not members_now:
-            try:
-                lease_path.unlink()
-            except OSError:
-                pass
-    return code
+from zen_bridge.adapters.serve_helper_cli import _run_serve_helper_cli
 
 
 if sys.argv[1:2] == ["--serve-helper"]:
     raise SystemExit(_run_serve_helper_cli(sys.argv[2:]))
 else:
+    from zen_bridge.adapters.cli_fallback import ZenCliFallback
+    from zen_bridge.adapters.http_upstream import ZenHttpUpstream
+    from zen_bridge.application.chat_service import ZenChatService
+
+    def get_chat_service(spawn_limiter: Any = None) -> ZenChatService:
+        """Возвращает прикладной сервис координации HTTP upstream и CLI fallback."""
+        base_url = os.environ.get("OPENCODE_ZEN_UPSTREAM_URL", "http://127.0.0.1:4096")
+        cli_cmd = [os.environ.get("OPENCODE_BIN", "opencode"), "run"]
+        return ZenChatService(
+            http_upstream=ZenHttpUpstream(base_url=base_url),
+            cli_fallback=ZenCliFallback(cli_cmd=cli_cmd),
+            spawn_limiter=spawn_limiter,
+        )
     import base64
     import collections
     import hmac
@@ -267,7 +61,6 @@ else:
     import random
     import re
     import secrets
-    import shlex
     import shutil
     import socket
     import sqlite3
@@ -447,7 +240,7 @@ def _zen_error(status: int) -> dict[str, Any]:
 
 
 def _zen_short_response(
-    prompt: str, content: str, calls: list, bypass: bool = False
+    prompt: str, content: str, calls: list, bypass: bool = False, reasonings: list | None = None
 ) -> bool:
     """Малый вход и валидный tool-only ответ не считаются усечённым контентом."""
     valid_calls = any(
@@ -460,6 +253,7 @@ def _zen_short_response(
     if (
         bypass
         or valid_calls
+        or (reasonings and any(isinstance(r, str) and r.strip() for r in reasonings))
         or len(prompt.encode("utf-8"))
         < _positive_int(os.environ.get("BRIDGE_ZEN_SHORT_PROMPT_BYTES"), 64)
     ):
@@ -482,65 +276,7 @@ def _zen_probe_request(req: dict[str, Any]) -> bool:
     return text in ("ping", "pong", "health") or text.startswith("reply exactly pong")
 
 
-class _ZenSseFilter:
-    """Инспекция штатных SSE-кадров без накопления текста; ошибка вместо ложного stop."""
-
-    def __init__(self, inner: Any, prompt: str, bypass: bool) -> None:
-        self.inner = inner
-        self.prompt = prompt
-        self.bypass = bypass
-        self.content_bytes = 0
-        self.has_tools = False
-        self.failed = False
-        self.terminated = False
-
-    def write(self, data: bytes) -> int:
-        if self.terminated:
-            return len(data)
-        if not data.startswith(b"data:"):
-            return self.inner.write(data)
-        for raw in data.split(b"\n\n"):
-            if not raw:
-                continue
-            frame = raw + b"\n\n"
-            payload = raw[5:].strip() if raw.startswith(b"data:") else b""
-            try:
-                obj = json.loads(payload) if payload != b"[DONE]" else None
-            except ValueError:
-                obj = None
-            terminal = payload == b"[DONE]"
-            if isinstance(obj, dict):
-                self.failed = self.failed or bool(obj.get("error"))
-                for choice in obj.get("choices") or []:
-                    delta = choice.get("delta") or {}
-                    content = delta.get("content")
-                    if isinstance(content, str):
-                        self.content_bytes += len(content.encode("utf-8"))
-                    self.has_tools = self.has_tools or bool(delta.get("tool_calls"))
-                    terminal = terminal or bool(choice.get("finish_reason"))
-            if (
-                terminal
-                and not self.failed
-                and not self.has_tools
-                and not self.bypass
-                and len(self.prompt.encode("utf-8"))
-                >= _positive_int(os.environ.get("BRIDGE_ZEN_SHORT_PROMPT_BYTES"), 64)
-                and self.content_bytes
-                < _positive_int(os.environ.get("BRIDGE_ZEN_MIN_CONTENT_BYTES"), 32)
-            ):
-                self.inner.write(
-                    (
-                        "data: " + json.dumps(_zen_error(502)) + "\n\ndata: [DONE]\n\n"
-                    ).encode("utf-8")
-                )
-                self.inner.flush()
-                self.failed = self.terminated = True
-                break
-            self.inner.write(frame)
-        return len(data)
-
-    def flush(self) -> None:
-        self.inner.flush()
+from zen_bridge.adapters.sse_filter import _ZenSseFilter
 # Пауза stdout `opencode run` на большом промпте может быть долгой; пока она длится, в SSE уходит
 # пустая дельта раз в KEEPALIVE_INTERVAL_S (0 — выключено), иначе клиент рвёт «молчащий» стрим.
 KEEPALIVE_INTERVAL_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_KEEPALIVE_S", "15.0"))
@@ -768,49 +504,10 @@ OPENCODE_CONFIG_CONTENT = os.environ.get(
     '{"permission":{"*":"ask"},"provider":{"opencode":{"options":{"baseURL":"http://127.0.0.1:10830/v1"}}}}',
 )
 
-# Модель часто зовёт встроенный инструмент opencode с тем же именем, что у DSH
-# (bash/read/edit/write/glob/grep). Отклонённый вызов переводим в tool_call DSH.
-NATIVE_ARG_ALIASES: dict[str, str] = {
-    "filePath": "file_path",
-    "oldString": "old_string",
-    "newString": "new_string",
-    "replaceAll": "replace_all",
-    "timeout": "timeoutMs",
-}
-
-
-# 2026-10-08 (18:46, живая сессия): Muse вызвал встроенный `todowrite`, DSH-инструмента
-# с таким именем нет (у DSH — `todo_write`) → mapped=False, 87 символов преамбулы и
-# finish "stop", DSH закончил ход после одного шага. Встроенный инструмент opencode
-# -> кандидаты DSH (по порядку; первый предложенный в запросе выигрывает).
-NATIVE_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
-    "todowrite": ("todo_write", "TodoWrite", "write_todos"),
-    "webfetch": ("web_fetch", "WebFetch", "fetch"),
-    "websearch": ("web_search", "WebSearch"),
-    "codesearch": ("web_search", "WebSearch"),
-    "task": ("subagent", "Task", "agent"),
-    "patch": ("apply_patch", "patch"),
-    "apply_patch": ("apply_patch", "patch"),
-    "skill": ("skill", "Skill"),
-    "question": ("ask_user_question", "AskUserQuestion"),
-    "plan_exit": ("exit_plan_mode", "ExitPlanMode"),
-    "exitplanmode": ("exit_plan_mode", "ExitPlanMode"),
-    "read": ("read", "Read", "read_file"),
-    "write": ("write", "Write", "write_file"),
-    "edit": ("edit", "Edit"),
-    "bash": ("bash", "Bash", "shell"),
-    # opencode v2.1.2: встроенный шелл называется `shell`, а не `bash`.
-    "shell": ("bash", "Bash", "shell"),
-    "glob": ("glob", "Glob"),
-    "grep": ("grep", "Grep"),
-}
-# Подстрока имени DSH-инструмента, если точного кандидата нет (MCP-поиск и т.п.).
-NATIVE_TOOL_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
-    "websearch": ("web_search", "websearch"),
-    "codesearch": ("web_search", "websearch"),
-}
-# Значения enum, которых нет у DSH (opencode todo: cancelled).
-ENUM_VALUE_ALIASES: dict[str, str] = {"cancelled": "completed", "canceled": "completed"}
+from zen_bridge.domain.native_tools import (
+    ENUM_VALUE_ALIASES,
+    NATIVE_ARG_ALIASES,
+)
 
 NATIVE_RETRY_LIMIT = int(os.environ.get("OPENCODE_ZEN_BRIDGE_NATIVE_RETRIES", "2"))
 
@@ -937,116 +634,9 @@ def _fit_value(value: Any, schema: Any) -> tuple[bool, Any]:
     return True, value
 
 
-def _fit_args(
-    target: str, args: dict[str, Any], schema: dict[str, Any]
-) -> dict[str, Any] | None:
-    """Аргументы встроенного инструмента -> аргументы DSH-инструмента `target` или None.
-
-    Верхний уровень: ключи переименовываются по NATIVE_ARG_ALIASES, лишние
-    отбрасываются, вложенные объекты/массивы приводятся к схеме (enum, strict).
-    Отсутствующий обязательный `description` (bash DSH) подставляется; одно
-    недостающее обязательное строковое поле заполняется единственным
-    неиспользованным строковым аргументом (query -> search_query и т.п.).
-    """
-    props = _dict_or_empty(schema.get("properties"))
-    mapped: dict[str, Any] = {}
-    leftovers: list[str] = []
-    for key, value in args.items():
-        key = NATIVE_ARG_ALIASES.get(key, key)
-        if props and key not in props:
-            if isinstance(value, str) and value.strip():
-                leftovers.append(value)
-            continue
-        ok, value = _fit_value(value, props.get(key))
-        if not ok:
-            return None
-        mapped[key] = value
-    required = _list_or_empty(schema.get("required"))
-    if "description" in required and "description" not in mapped:
-        mapped["description"] = (
-            f"{target}: {str(mapped.get('command') or '')[:80]}".strip()
-        )
-    missing = [r for r in required if r not in mapped]
-    if (
-        len(missing) == 1
-        and len(leftovers) == 1
-        and (props.get(missing[0]) or {}).get("type") in ("string", None)
-    ):
-        mapped[missing[0]] = leftovers[0]
-        missing = []
-    if missing:
-        return None
-    return mapped
-
-
-def _pick_target(tool: str, schemas: dict[str, dict[str, Any]]) -> str | None:
-    """Имя DSH-инструмента для встроенного `tool` (сначала то же имя)."""
-    for name in (tool, *NATIVE_TOOL_ALIASES.get(tool.lower(), ())):
-        if name in schemas:
-            return name
-    for pattern in NATIVE_TOOL_NAME_PATTERNS.get(tool.lower(), ()):
-        for name in schemas:
-            if pattern in name.lower():
-                return name
-    return None
-
-
-def _native_to_tool_calls(
-    tool: Any, args: Any, tools: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Вызов встроенного инструмента opencode -> список {"name","arguments"} DSH.
-
-    Пустой список — у инструмента нет DSH-двойника в текущем запросе (или
-    аргументы не приводятся к его схеме). multiedit даёт несколько edit.
-    """
-    if not isinstance(tool, str) or not isinstance(args, dict):
-        return []
-    schemas = _tool_schemas(tools)
-    low = tool.lower()
-    if low in ("list", "ls") and tool not in schemas:
-        path = str(args.get("path") or ".")
-        if "bash" in schemas:
-            fitted = _fit_args(
-                "bash", {"command": f"ls -la {shlex.quote(path)}"}, schemas["bash"]
-            )
-            if fitted is not None:
-                return [{"name": "bash", "arguments": fitted}]
-        if "glob" in schemas:
-            fitted = _fit_args("glob", {"pattern": "*", "path": path}, schemas["glob"])
-            if fitted is not None:
-                return [{"name": "glob", "arguments": fitted}]
-        return []
-    if low == "multiedit" and tool not in schemas:
-        target = _pick_target("edit", schemas)
-        edits = args.get("edits")
-        if target is None or not isinstance(edits, list) or not edits:
-            return []
-        calls: list[dict[str, Any]] = []
-        for edit in edits:
-            if not isinstance(edit, dict):
-                return []
-            merged = {
-                "filePath": args.get("filePath"),
-                **{k: v for k, v in edit.items() if v is not None},
-            }
-            fitted = _fit_args(target, merged, schemas[target])
-            if fitted is None:
-                return []
-            calls.append({"name": target, "arguments": fitted})
-        return calls
-    target = _pick_target(tool, schemas)
-    if target is None:
-        return []
-    fitted = _fit_args(target, args, schemas[target])
-    return [] if fitted is None else [{"name": target, "arguments": fitted}]
-
-
-def _native_to_tool_call(
-    tool: Any, args: Any, tools: list[dict[str, Any]]
-) -> dict[str, Any] | None:
-    """Совместимость: первый DSH-вызов для встроенного инструмента или None."""
-    calls = _native_to_tool_calls(tool, args, tools)
-    return calls[0] if calls else None
+from zen_bridge.domain.native_tools import (
+    _native_to_tool_calls,
+)
 
 
 def _unavailable_tools_prompt(
@@ -2017,10 +1607,6 @@ class ServeClientDisconnect(Exception):
     """Клиент отключился при запуске serve: повтор через run запрещён."""
 
 
-class ServeStartupDeadlineExceeded(Exception):
-    """Общий бюджет запроса исчерпан при запуске serve."""
-
-
 class ServeProtocolError(ValueError):
     """Битое событие serve: протокол, а не модель."""
 
@@ -2029,40 +1615,7 @@ class ServeSecurityError(Exception):
     """Отказ безопасности serve: fail-closed без fallback."""
 
 
-class _ServeHealth:
-    """Sticky деградация serve по протокольным отказам: 3 отказа, TTL 120 с."""
-
-    def __init__(self, threshold: int = 3, ttl_s: float = 120.0) -> None:
-        self.threshold = threshold
-        self.ttl_s = ttl_s
-        self.failures = 0
-        self._degraded_until = 0.0
-        self._lock = threading.Lock()
-
-    def record_failure(self, now: float | None = None) -> None:
-        """Засчитать протокольный отказ serve."""
-        with self._lock:
-            self.failures += 1
-            if self.failures >= self.threshold:
-                self._degraded_until = (
-                    time.monotonic() if now is None else now
-                ) + self.ttl_s
-
-    def record_success(self) -> None:
-        """Сбросить деградацию после успешной попытки."""
-        with self._lock:
-            self.failures = 0
-            self._degraded_until = 0.0
-
-    def is_degraded(self, now: float | None = None) -> bool:
-        """Истёк ли sticky TTL деградации."""
-        with self._lock:
-            at = time.monotonic() if now is None else now
-            if self._degraded_until and at >= self._degraded_until:
-                self.failures = 0
-                self._degraded_until = 0.0
-                return False
-            return bool(self._degraded_until and at < self._degraded_until)
+from zen_bridge.adapters.breaker import _ServeHealth
 
 
 FALLBACK_DECISION_TABLE: list[dict[str, object]] = [
@@ -2597,61 +2150,17 @@ def _error_payload(message: str, detail: str = "") -> dict[str, object]:
     return {"error": err}
 
 
-class _StartupGate:
-    """Сериализует старт `opencode run`: sqlite opencode роняет «database is locked».
-
-    Замок берётся до spawn и отпускается по первому событию stdout, завершению
-    процесса или таймеру-предохранителю (STARTUP_GATE_S) — зависший CLI не блокирует остальных.
-    Ожидание замка ограничено `wait_s` (STARTUP_WAIT_S): по таймауту — Fail-Open, запуск без замка
-    (вспомогательная сериализация; «database is locked» ловит повтор транзиторного отказа CLI).
-    """
-
-    def __init__(self, wait_s: float | None = None) -> None:
-        self._wait_s = STARTUP_WAIT_S if wait_s is None else wait_s
-        self._held = False
-        self._guard = threading.Lock()
-        self._timer: threading.Timer | None = None
-
-    def acquire(
-        self,
-        deadline: float | None = None,
-        is_client_gone: Callable[[], bool] | None = None,
-    ) -> None:
-        wait_until = time.monotonic() + max(0.0, self._wait_s)
-        while True:
-            now = time.monotonic()
-            if (is_client_gone is not None and is_client_gone()) or (
-                deadline is not None and now >= deadline
-            ):
-                return
-            remaining = max(
-                0.0,
-                min(wait_until, deadline if deadline is not None else wait_until) - now,
-            )
-            if _STARTUP_LOCK.acquire(timeout=min(0.05, remaining)):
-                break
-            if time.monotonic() >= wait_until:
-                _log(
-                    f"startup_gate_timeout wait_s={self._wait_s:.1f}, starting without the gate"
-                )
-                return
-        with self._guard:
-            self._held = True
-        timer = threading.Timer(STARTUP_GATE_S, self.release)
-        timer.daemon = True
-        self._timer = timer
-        timer.start()
-
-    def release(self) -> None:
-        with self._guard:
-            if not self._held:
-                return
-            self._held = False
-            timer, self._timer = self._timer, None
-        if timer is not None:
-            timer.cancel()
-        _STARTUP_LOCK.release()
-
+from zen_bridge.adapters.resilience import (
+    _StartupGate,
+)
+from zen_bridge.adapters.breaker import (
+    _Resilience,
+)
+from zen_bridge.adapters.request_attempts import (
+    ServeStartupDeadlineExceeded,
+    _AuxIoBudget,
+    _RequestAttempts as _RequestAttemptsBase,
+)
 
 _STARTUP_LOCK = threading.Lock()
 STARTUP_GATE_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_STARTUP_GATE_S", "12"))
@@ -2662,7 +2171,6 @@ _active: dict[str, float] = {}
 _active_lock = threading.Lock()
 
 _LOG_LOCK = threading.Lock()
-
 
 def _log(msg: str) -> None:
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {_mask_secrets(msg)}"
@@ -2676,356 +2184,8 @@ def _log(msg: str) -> None:
         pass
 
 
-class _SlotBulkhead:
-    """Слоты параллельных `opencode run` с ограниченным ожиданием (bulkhead).
-
-    Занято `max_concurrent` слотов -> до `max_waiters` запросов ждут не дольше `wait_timeout_s`;
-    следующий ждущий получает отказ мгновенно ("overflow"). `in_use` и `waiters` уменьшаются
-    в `finally`/`release` на любом выходе (таймаут, исключение, отмена).
-    """
-
-    def __init__(
-        self,
-        max_concurrent: int | None = None,
-        max_waiters: int | None = None,
-        wait_timeout_s: float | None = None,
-        clock_fn: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._max = MAX_CONCURRENT if max_concurrent is None else max_concurrent
-        self._max_waiters = MAX_SLOT_WAITERS if max_waiters is None else max_waiters
-        self._wait_timeout_s = (
-            SLOT_WAIT_TIMEOUT_S if wait_timeout_s is None else wait_timeout_s
-        )
-        self._clock = clock_fn
-        self._cond = threading.Condition(threading.Lock())
-        self.in_use = 0
-        self.waiters = 0
-
-    def acquire_ex(self, timeout: float | None = None) -> str:
-        """ "ok" | "timeout" | "overflow" (все слоты заняты и очередь ждущих полна)."""
-        wait = (
-            self._wait_timeout_s
-            if timeout is None
-            else min(timeout, self._wait_timeout_s)
-        )
-        with self._cond:
-            if self.in_use < self._max:
-                self.in_use += 1
-                return "ok"
-            if self.waiters >= self._max_waiters:
-                return "overflow"
-            self.waiters += 1
-            try:
-                deadline = self._clock() + wait
-                while self.in_use >= self._max:
-                    remaining = deadline - self._clock()
-                    if remaining <= 0:
-                        return "timeout"
-                    self._cond.wait(remaining)
-                self.in_use += 1
-                return "ok"
-            finally:
-                self.waiters -= 1
-
-    def acquire(self, timeout: float | None = None) -> bool:
-        return self.acquire_ex(timeout) == "ok"
-
-    def release(self) -> None:
-        with self._cond:
-            if self.in_use > 0:
-                self.in_use -= 1
-            self._cond.notify()
-
-
-class _SpawnRateLimiter:
-    """Token bucket запусков `opencode run`: не более `rate_rps` запусков в секунду (burst — ёмкость).
-
-    Резервирование токена (GCRA): токен списывается сразу, при дефиците ждущий получает FIFO-очередь
-    по моменту резерва; `acquire` возвращает False без резерва, если ожидание превысит `max_wait_s`.
-    """
-
-    def __init__(
-        self,
-        rate_rps: float = 1.0,
-        burst: float = 1.0,
-        clock_fn: Callable[[], float] = time.monotonic,
-        sleep_fn: Callable[[float], None] = time.sleep,
-    ) -> None:
-        self._rate = max(rate_rps, 1e-9)
-        self._burst = max(burst, 1.0)
-        self._clock = clock_fn
-        self._sleep = sleep_fn
-        self._lock = threading.Lock()
-        self._tokens = self._burst
-        self._last = clock_fn()
-
-    def acquire(
-        self,
-        max_wait_s: float | None = None,
-        deadline: float | None = None,
-        is_client_gone: Callable[[], bool] | None = None,
-    ) -> bool:
-        if (is_client_gone is not None and is_client_gone()) or (
-            deadline is not None and self._clock() >= deadline
-        ):
-            return False
-        with self._lock:
-            now = self._clock()
-            self._tokens = min(
-                self._burst, self._tokens + max(0.0, now - self._last) * self._rate
-            )
-            self._last = now
-            wait = max(0.0, (1.0 - self._tokens) / self._rate)
-            if max_wait_s is not None and wait > max_wait_s:
-                return False
-            if deadline is not None and wait >= deadline - now:
-                return False
-            self._tokens -= 1.0
-        if deadline is None and is_client_gone is None:
-            if wait > 0:
-                self._sleep(wait)
-            return True
-        ready_at = now + wait
-        while True:
-            now = self._clock()
-            if (is_client_gone is not None and is_client_gone()) or (
-                deadline is not None and now >= deadline
-            ):
-                self.refund()
-                return False
-            if now >= ready_at:
-                break
-            self._sleep(
-                min(
-                    0.05,
-                    ready_at - now,
-                    deadline - now if deadline is not None else 0.05,
-                )
-            )
-        return True
-
-    def refund(self, amount: float = 1.0) -> None:
-        """Вернуть резерв, если дочерний процесс не был запущен."""
-        with self._lock:
-            self._tokens = min(self._burst, self._tokens + amount)
-
-
-class _RetryBudget:
-    """Process-level бюджет повторных запусков: ёмкость `capacity`, +`per_request_refill` за запрос, +`reserve_rps` в секунду."""
-
-    def __init__(
-        self,
-        capacity: float | None = None,
-        per_request_refill: float | None = None,
-        reserve_rps: float | None = None,
-        clock_fn: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._capacity = RETRY_BUDGET_MAX if capacity is None else capacity
-        self._per_request = (
-            RETRY_BUDGET_PER_REQUEST
-            if per_request_refill is None
-            else per_request_refill
-        )
-        self._reserve_rps = (
-            RETRY_BUDGET_RESERVE_RPS if reserve_rps is None else reserve_rps
-        )
-        self._clock = clock_fn
-        self._lock = threading.Lock()
-        self.tokens = float(self._capacity)
-        self._last = clock_fn()
-
-    def _refill_time(self) -> None:
-        now = self._clock()
-        self.tokens = min(
-            self._capacity, self.tokens + max(0.0, now - self._last) * self._reserve_rps
-        )
-        self._last = now
-
-    def on_request(self) -> None:
-        """Первичный запрос: +per_request_refill токена (не выше capacity)."""
-        with self._lock:
-            self._refill_time()
-            self.tokens = min(self._capacity, self.tokens + self._per_request)
-
-    def try_acquire_retry(self) -> bool:
-        with self._lock:
-            self._refill_time()
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
-                return True
-            return False
-
-
-class _UpstreamBreaker:
-    """Circuit Breaker зависимости `opencode run`: CLOSED -> OPEN (N подряд транзиентных отказов) -> HALF_OPEN (1 проба)."""
-
-    def __init__(
-        self,
-        fail_threshold: int | None = None,
-        reset_timeout_s: float | None = None,
-        clock_fn: Callable[[], float] = time.monotonic,
-        rng_fn: Callable[[float, float], float] = random.uniform,
-        max_half_open_probes: int = 1,
-        log_fn: Callable[[str], None] | None = None,
-    ) -> None:
-        self._threshold = (
-            CB_FAIL_THRESHOLD if fail_threshold is None else fail_threshold
-        )
-        self._reset_s = CB_RESET_S if reset_timeout_s is None else reset_timeout_s
-        self._clock = clock_fn
-        self._rng = rng_fn
-        self._max_probes = max_half_open_probes
-        self._log_fn = log_fn
-        self._lock = threading.Lock()
-        self._state = "CLOSED"
-        self._failures = 0
-        self._open_until = 0.0
-        self._probes = 0
-        self._probe_started = 0.0
-        self.max_half_open_probes = max_half_open_probes
-
-    def _say(self, msg: str) -> None:
-        (self._log_fn or _log)(msg)
-
-    def _refresh(self, now: float) -> None:
-        if self._state == "OPEN" and now >= self._open_until:
-            self._state = "HALF_OPEN"
-            self._probes = 0
-            self._say("circuit_breaker state=HALF_OPEN")
-
-    @property
-    def state(self) -> str:
-        with self._lock:
-            self._refresh(self._clock())
-            return self._state
-
-    def is_blocking(self) -> bool:
-        """OPEN и cooldown не истёк (без резервирования пробы)."""
-        return self.state == "OPEN"
-
-    def allow(self) -> bool:
-        """Можно ли запускать `opencode run` (в HALF_OPEN — ровно одна проба; потерянная проба истекает через reset)."""
-        with self._lock:
-            now = self._clock()
-            self._refresh(now)
-            if self._state == "CLOSED":
-                return True
-            if self._state == "OPEN":
-                return False
-            if (
-                self._probes >= self._max_probes
-                and now - self._probe_started < self._reset_s
-            ):
-                return False
-            self._probes = 1 if self._probes >= self._max_probes else self._probes + 1
-            self._probe_started = now
-            return True
-
-    def record_success(self) -> None:
-        with self._lock:
-            self._failures = 0
-            if self._state != "CLOSED":
-                self._state = "CLOSED"
-                self._probes = 0
-                self._say("circuit_breaker state=CLOSED")
-
-    def record_failure(self) -> None:
-        with self._lock:
-            now = self._clock()
-            self._refresh(now)
-            if self._state == "OPEN":
-                return
-            self._failures += 1
-            if self._state == "HALF_OPEN" or self._failures >= self._threshold:
-                cooldown = self._reset_s * self._rng(0.8, 1.2)
-                self._state = "OPEN"
-                self._open_until = now + cooldown
-                self._probes = 0
-                self._say(
-                    f"circuit_breaker state=OPEN failures={self._failures} cooldown_s={cooldown:.1f}"
-                )
-
-
-class _Resilience:
-    """Набор process-level защит одного сервера: bulkhead слотов, spawn token bucket, Retry Budget, Breaker.
-
-    В проде один `Server` на процесс (main передаёт модульный `_DEFAULT_RESILIENCE`); тесты создают
-    отдельные `Server` и получают изолированные защиты.
-    """
-
-    def __init__(self) -> None:
-        self.slots = _SlotBulkhead()
-        self.spawn_limiter = _SpawnRateLimiter(SPAWN_RATE_PER_S, SPAWN_BURST)
-        self.retry_budget = _RetryBudget()
-        self.breaker = _UpstreamBreaker()
-        self.serve_health = _ServeHealth()
-
-
-_DEFAULT_RESILIENCE = _Resilience()
-_slots = _DEFAULT_RESILIENCE.slots  # прежнее имя семафора слотов
-
-
-class _AuxIoBudget:
-    """Общий бюджет вспомогательного I/O одного запроса через все попытки (FU-002).
-
-    Считается фактически проведённое время aux-фаз (gate/limiter, spawn/ready,
-    control create/prompt до заголовков, подписка до первого SSE, backoff);
-    модельный стриминг и cleanup-резерв в бюджет не входят.
-    """
-
-    def __init__(
-        self,
-        budget_s: float | None = None,
-        clock_fn: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._budget_s: float = _AUX_IO_BUDGET_S if budget_s is None else budget_s
-        self._clock: Callable[[], float] = clock_fn
-        self._spent_s: float = 0.0
-        self._lock: threading.Lock = threading.Lock()
-
-    def now_s(self) -> float:
-        """Текущее время часов бюджета (точка старта aux-фазы)."""
-        return self._clock()
-
-    def spent_s(self) -> float:
-        """Фактически потраченное aux-время запроса."""
-        with self._lock:
-            return self._spent_s
-
-    def remaining_s(self) -> float:
-        """Остаток aux-бюджета запроса."""
-        return max(0.0, self._budget_s - self.spent_s())
-
-    def exhausted(self) -> bool:
-        """Исчерпан ли aux-бюджет: новый I/O и попытки не стартуют."""
-        return self.remaining_s() <= 0.0
-
-    def check(self) -> None:
-        """Запретить старт нового I/O при исчерпанном бюджете."""
-        if self.exhausted():
-            raise ServeStartupDeadlineExceeded("aux io budget exhausted")
-
-    def deadline(self, request_deadline: float | None = None) -> float:
-        """Дедлайн следующей aux-фазы: не позже запроса и остатка бюджета."""
-        phase_deadline = self._clock() + self.remaining_s()
-        if request_deadline is None:
-            return phase_deadline
-        return min(phase_deadline, request_deadline)
-
-    def debit_elapsed(self, started: float) -> None:
-        """Списать фактически проведённое время aux-фазы (вызов из finally)."""
-        elapsed = max(0.0, self._clock() - started)
-        with self._lock:
-            self._spent_s = min(self._budget_s, self._spent_s + elapsed)
-
-    def debit_seconds(self, seconds: float) -> None:
-        """Списать измеренную длительность aux-фазы в секундах."""
-        with self._lock:
-            self._spent_s = min(self._budget_s, self._spent_s + max(0.0, seconds))
-
-
-class _RequestAttempts:
-    """Учёт запусков одного HTTP-запроса: потолок MAX_TOTAL_SPAWNS, общий deadline, breaker, Retry Budget, backoff."""
+class _RequestAttempts(_RequestAttemptsBase):
+    """Учёт запусков одного HTTP-запроса с динамическим чтением MAX_TOTAL_SPAWNS."""
 
     def __init__(
         self,
@@ -3037,124 +2197,29 @@ class _RequestAttempts:
         use_breaker: bool = True,
         max_quota_rotations: int | None = None,
     ) -> None:
-        self.res = res
-        self.t0 = time.monotonic()
-        self.deadline = deadline
-        self.use_breaker = (
-            use_breaker  # False: прямой Google-маршрут без `opencode run`
-        )
-        self.max_total = MAX_TOTAL_SPAWNS if max_total is None else max_total
-        self.max_quota_rotations = (
-            QUOTA_ROTATION_LIMIT if max_quota_rotations is None else max_quota_rotations
-        )
-        self.quota_rotations = 0
-        self.total_spawns = 0
-        self.spawn_reasons: list[str] = []
-        self._next_spawn_reason = "initial"
-        self.retries = 0
-        self.signal = 0
-        self.exit_reason = ""
-        self._pending_failure = False
-        self._sleep = sleep_fn
-        self._rng = rng_fn
-        self.aux_budget: _AuxIoBudget = _AuxIoBudget()
-        res.retry_budget.on_request()
-
-    def note_spawn(self, reason: str | None = None) -> None:
-        self.total_spawns += 1
-        self.spawn_reasons.append(reason or self._next_spawn_reason)
-        self._next_spawn_reason = "continuation"
-
-    def can_spawn(self) -> bool:
-        """Можно ли ещё запускать: суммарный потолок спавнов на запрос."""
-        limit = min(MAX_TOTAL_SPAWNS, self.max_total) + self.quota_rotations
-        return self.total_spawns < limit
-
-    def remaining_s(self) -> float:
-        return max(0.0, self.deadline - time.monotonic())
-
-    def begin_attempt(self) -> bool:
-        """Первичный запуск: потолок, deadline и Circuit Breaker (в HALF_OPEN резервирует единственную пробу)."""
-        return (
-            self.can_spawn()
-            and time.monotonic() < self.deadline
-            and (not self.use_breaker or self.res.breaker.allow())
+        super().__init__(
+            res,
+            deadline,
+            max_total=MAX_TOTAL_SPAWNS if max_total is None else max_total,
+            sleep_fn=sleep_fn,
+            rng_fn=rng_fn,
+            use_breaker=use_breaker,
+            max_quota_rotations=QUOTA_ROTATION_LIMIT if max_quota_rotations is None else max_quota_rotations,
+            log_fn=_log,
         )
 
-    def allow_quota_rotation(self, reason: str = "free_quota_proxy_rotate") -> bool:
-        """Разрешить смену прокси без списания бюджета деградации апстрима."""
-        if self.quota_rotations >= self.max_quota_rotations:
-            return False
-        if (
-            self.total_spawns
-            >= min(MAX_TOTAL_SPAWNS, self.max_total) + self.quota_rotations
-        ):
-            return False
-        if time.monotonic() >= self.deadline or self.aux_budget.exhausted():
-            return False
-        if self.use_breaker and self.res.breaker.is_blocking():
-            return False
-        if self.use_breaker and not self.res.breaker.allow():
-            return False
-        self.quota_rotations += 1
-        self._next_spawn_reason = reason
-        return True
 
-    def allow_retry(self, reason: str, charge_budget: bool = True) -> bool:
-        """Можно ли сделать повторный запуск: потолок, deadline, breaker, Retry Budget; затем Full Jitter пауза.
-
-        charge_budget=False — локальный отказ старта CLI без обращения к провайдеру («database is locked»):
-        он не нагружает апстрим, ограничен FAIL_RETRY_LIMIT, MAX_TOTAL_SPAWNS и темпом запусков.
-        """
-        if self.total_spawns >= self.max_total:
-            _log(f"retry denied ({reason}): MAX_TOTAL_SPAWNS={self.max_total} reached")
-            return False
-        if time.monotonic() >= self.deadline:
-            return False
-        if self.aux_budget.exhausted():
-            _log(f"retry denied ({reason}): aux io budget exhausted")
-            return False
-        if self.use_breaker and self.res.breaker.is_blocking():
-            _log(f"retry denied ({reason}): upstream circuit open")
-            return False
-        if charge_budget and not self.res.retry_budget.try_acquire_retry():
-            _log(f"retry denied ({reason}): retry budget exhausted")
-            return False
-        self.retries += 1
-        self._next_spawn_reason = reason
-        delay = (
-            _retry_backoff_s(self.retries, self._rng)
-            if FAIL_RETRY_BACKOFF_S > 0
-            else 0.0
-        )
-        delay = min(delay, self.remaining_s(), self.aux_budget.remaining_s())
-        if delay > 0:
-            aux_started = self.aux_budget.now_s()
-            try:
-                self._sleep(delay)
-            finally:
-                self.aux_budget.debit_elapsed(aux_started)
-        return not self.use_breaker or self.res.breaker.allow()
-
-    def attempt_done(self, transient_failure: bool, success: bool) -> None:
-        """Итог попытки для Circuit Breaker: успех учитывается сразу, транзиентный отказ — по итогу запроса (commit).
-
-        Запрос, который повтором дошёл до успеха, апстрим не «роняет»; отказ засчитывается, только
-        если запрос закончился отказом. Нейтральные итоги (таймаут, детерминированный 4xx) не считаются.
-        """
-        if not self.use_breaker:
-            return
-        if success and not transient_failure:
-            self._pending_failure = False
-            self.res.breaker.record_success()
-        else:
-            self._pending_failure = transient_failure
-
-    def commit(self) -> None:
-        """Итог запроса: незакрытый транзиентный отказ последней попытки -> breaker.record_failure()."""
-        if self._pending_failure:
-            self._pending_failure = False
-            self.res.breaker.record_failure()
+_DEFAULT_RESILIENCE = _Resilience(
+    max_concurrent=MAX_CONCURRENT,
+    max_waiters=MAX_SLOT_WAITERS,
+    spawn_rate_per_s=SPAWN_RATE_PER_S,
+    spawn_burst=SPAWN_BURST,
+    fail_threshold=CB_FAIL_THRESHOLD,
+    reset_timeout_s=CB_RESET_S,
+    log_fn=_log,
+    serve_health=_ServeHealth(),
+)
+_slots = _DEFAULT_RESILIENCE.slots
 
 
 class _PrefixDedup:
@@ -4049,6 +3114,18 @@ def _serve_attempt_error_reason(
     raise ServeUnavailable(f"serve startup failed: {exc}") from exc
 
 
+from zen_bridge.adapters.serve_events import (
+    _MAX_SERVE_ACCUMULATED_BYTES,
+    _MAX_SERVE_QUEUE_BYTES,
+    _MAX_SSE_LINE_BYTES,
+    _finish_serve_tool_step as _finish_serve_tool_step_impl,
+    _read_serve_events as _read_serve_events_impl,
+    _serve_accumulated_bytes as _serve_accumulated_bytes_impl,
+    _serve_step_message_id,
+)
+from zen_bridge.adapters.serve_drain import _drain_serve_step_usage as _drain_serve_step_usage_impl
+
+
 def _drain_serve_step_usage(
     events: queue.Queue[dict[str, object] | None],
     session_id: str,
@@ -4063,10 +3140,7 @@ def _drain_serve_step_usage(
     attempt_deadline: float | None = None,
     is_client_gone: Callable[[], bool] | None = None,
     pending_calls: list[dict[str, object]] | None = None,
-    ctrl_http: Callable[
-        [str, str, dict[str, object] | None], tuple[int, dict[str, object]]
-    ]
-    | None = None,
+    ctrl_http: Callable[[str, str, dict[str, object] | None], tuple[int, dict[str, object]]] | None = None,
     reasoning_cb: Callable[[str], None] | None = None,
     text_cb: Callable[[str], None] | None = None,
     emulate_tools: bool = False,
@@ -4075,206 +3149,19 @@ def _drain_serve_step_usage(
     replied_permissions: set[str] | None = None,
     cascade_reject_state: dict[str, bool] | None = None,
 ) -> bool:
-    """Дочитать все события шага до подтверждённого конца того же шага.
-
-    Управляющие события и дельты обрабатываются как в основном цикле;
-    готовые native вызовы складываются в `pending_calls` без публикации.
-    """
-    pending: list[dict[str, object]] = (
-        pending_calls if pending_calls is not None else []
+    return _drain_serve_step_usage_impl(
+        events, session_id, assistant_message_id, deadline, usage, tool_state, result, on_tool, release_event,
+        attempt_deadline=attempt_deadline, is_client_gone=is_client_gone, pending_calls=pending_calls,
+        ctrl_http=ctrl_http, reasoning_cb=reasoning_cb, text_cb=text_cb, emulate_tools=emulate_tools,
+        accumulated_bytes=accumulated_bytes, t0=t0, replied_permissions=replied_permissions,
+        cascade_reject_state=cascade_reject_state, as_dict_fn=_as_dict, as_int_fn=_as_int,
+        map_serve_event_fn=_map_serve_event,
+        serve_accumulated_bytes_fn=_serve_accumulated_bytes,
+        is_transient_error_fn=_is_transient_stream_error, protocol_error_cls=ServeProtocolError,
+        disconnect_error_cls=ServeClientDisconnect, security_error_cls=ServeSecurityError,
+        unavailable_error_cls=ServeUnavailable, deadline_error_cls=ServeStartupDeadlineExceeded,
+        step_drain_window_s=_STEP_DRAIN_WINDOW_S, stall_timeout_s=float(STALL_TIMEOUT_S),
     )
-    replied_perms: set[str] = (
-        replied_permissions if replied_permissions is not None else set()
-    )
-    cascade_state = (
-        cascade_reject_state
-        if cascade_reject_state is not None
-        else {"succeeded": False}
-    )
-
-    def _check_bytes(event_kind: str, payload: dict[str, object]) -> None:
-        """Проверить байтовый бюджет с учётом накопленного и tool_state."""
-        base = accumulated_bytes[0] if accumulated_bytes is not None else 0
-        updated = _serve_accumulated_bytes(base, event_kind, payload, tool_state)
-        if accumulated_bytes is not None:
-            accumulated_bytes[0] = updated
-
-    def _ctrl_quiet(path: str) -> None:
-        """Best-effort управляющий вызов безопасности без маскировки итога дренажа."""
-        if ctrl_http is None:
-            return
-        try:
-            _ = ctrl_http("POST", path, None)
-        except (
-            OSError,
-            http.client.HTTPException,
-            ServeUnavailable,
-            ServeProtocolError,
-            ServeClientDisconnect,
-            ServeStartupDeadlineExceeded,
-        ):
-            pass
-
-    hard_deadline = attempt_deadline if attempt_deadline is not None else deadline
-    wait_deadline = min(hard_deadline, deadline)
-    while time.monotonic() < wait_deadline:
-        if is_client_gone is not None and is_client_gone():
-            raise ServeClientDisconnect("client disconnected")
-        slice_timeout = min(0.05, max(0.0, wait_deadline - time.monotonic()))
-        try:
-            event = events.get(timeout=slice_timeout)
-        except queue.Empty:
-            if time.monotonic() >= wait_deadline:
-                return False
-            continue
-        if event is None:
-            return False
-        release_event(event)
-        if is_client_gone is not None and is_client_gone():
-            raise ServeClientDisconnect("client disconnected")
-        event_type = str(event.get("type") or "")
-        if event_type == "__invalid_json__":
-            raise ServeProtocolError("invalid event while draining tool step")
-        data = _as_dict(event.get("data"))
-        # form.created: до верхнего sessionID-фильтра и до разбора схемы события.
-        if event_type == "form.created":
-            form = _as_dict(data.get("form"))
-            form_session = form.get("sessionID") or data.get("sessionID")
-            if form_session != session_id:
-                continue
-            form_id = form.get("id") or data.get("id")
-            if isinstance(form_id, str) and form_id:
-                _ctrl_quiet(f"/api/session/{session_id}/form/{form_id}/cancel")
-            _ctrl_quiet(f"/api/session/{session_id}/interrupt")
-            raise ServeSecurityError(
-                "serve requested interactive form during tool drain"
-            )
-        ev_msg_id = data.get("assistantMessageID")
-        ev_sid = data.get("sessionID")
-        sid_optional = ev_sid is None and event_type in (
-            "permission.asked",
-            "permission.replied",
-            "session.execution.failed",
-            "session.step.failed",
-        )
-        if (ev_sid != session_id and not sid_optional) or (
-            assistant_message_id and ev_msg_id and ev_msg_id != assistant_message_id
-        ):
-            continue
-        mapped = _map_serve_event(event)
-        if mapped is None:
-            continue
-        mapped_kind, payload = mapped
-        if attempt_deadline is not None:
-            wait_deadline = min(
-                hard_deadline,
-                max(
-                    wait_deadline,
-                    time.monotonic()
-                    + min(_STEP_DRAIN_WINDOW_S, float(STALL_TIMEOUT_S)),
-                ),
-            )
-        if mapped_kind == "permission_replied":
-            replied_id = str(payload.get("id") or "").strip()
-            if replied_id:
-                replied_perms.add(replied_id)
-            continue
-        if mapped_kind == "permission":
-            request_id = str(payload.get("id") or "").strip()
-            if not request_id:
-                _ctrl_quiet(f"/api/session/{session_id}/interrupt")
-                raise ServeSecurityError("permission reject failed")
-            if request_id in replied_perms:
-                # Уже закрыт каскадным reject serve: повторный POST не нужен.
-                continue
-            reject_failed = ctrl_http is None
-            if ctrl_http is not None:
-                try:
-                    status, _body = ctrl_http(
-                        "POST",
-                        f"/api/session/{session_id}/permission/{request_id}/reply",
-                        {"decision": "reject"},
-                    )
-                    if status in (200, 204):
-                        cascade_state["succeeded"] = True
-                        replied_perms.add(request_id)
-                        reject_failed = False
-                    elif status == 404 and cascade_state.get("succeeded"):
-                        # Идемпотентное подтверждение каскада после успешного reject.
-                        replied_perms.add(request_id)
-                        reject_failed = False
-                    else:
-                        reject_failed = True
-                except (
-                    OSError,
-                    http.client.HTTPException,
-                    ServeUnavailable,
-                    ServeProtocolError,
-                ):
-                    reject_failed = True
-            if reject_failed:
-                _ctrl_quiet(f"/api/session/{session_id}/interrupt")
-                raise ServeSecurityError("permission reject failed")
-            continue
-        if mapped_kind == "error":
-            result["error"] = payload
-            result["transient_error"] = _is_transient_stream_error(payload)
-            result["terminal"] = "failed"
-            return False
-        if mapped_kind in ("reasoning", "text"):
-            _check_bytes(mapped_kind, payload)
-            if mapped_kind == "reasoning":
-                text_value = str(payload.get("reasoning_content") or "")
-                if text_value:
-                    if result["first_token_at"] is None and t0:
-                        result["first_token_at"] = time.monotonic()
-                        result["ttft_ms"] = int(
-                            ((result["first_token_at"] or 0.0) - t0) * 1000
-                        )
-                    result["reasonings"].append(text_value)
-                    if reasoning_cb is not None:
-                        reasoning_cb(text_value)
-            else:
-                text_value = str(payload.get("content") or "")
-                if text_value:
-                    if result["first_token_at"] is None and t0:
-                        result["first_token_at"] = time.monotonic()
-                        result["ttft_ms"] = int(
-                            ((result["first_token_at"] or 0.0) - t0) * 1000
-                        )
-                    result["texts"].append(text_value)
-                    if text_cb is not None:
-                        text_cb(text_value)
-            continue
-        if mapped_kind == "tool_event":
-            if not assistant_message_id and ev_msg_id:
-                assistant_message_id = ev_msg_id
-            tool_state.feed(payload)
-            _check_bytes("tool_event", {})
-            if event_type in (
-                "session.tool.called",
-                "session.tool.failed",
-                "session.tool.success",
-            ):
-                done = tool_state.complete(str(payload.get("id") or ""), event_type)
-                if done is not None:
-                    pending.append(done[1])
-            continue
-        if mapped_kind == "step_finish":
-            if result["error"] is not None:
-                return False
-            for call_id in list(tool_state.tools):
-                done = tool_state.complete(call_id, event_type)
-                if done is not None:
-                    pending.append(done[1])
-            for key in ("input", "output", "cached", "reasoning"):
-                usage[key] = usage.get(key, 0) + _as_int(payload.get(key))
-            if pending_calls is None:
-                for call in pending:
-                    result["native_calls"].append(call)
-                    on_tool(call)
-            return True
-    return False
 
 
 def _read_serve_events(
@@ -4285,111 +3172,21 @@ def _read_serve_events(
     queue_bytes_lock: threading.Lock,
     release_event: Callable[[dict[str, object]], None],
 ) -> None:
-    """Читать SSE с ограничением байтов очереди в пределах одной попытки."""
-
-    def _put_event(item: dict[str, object] | None) -> bool:
-        """Неблокирующая постановка с проверкой stop_event."""
-        while not stop_event.is_set():
-            try:
-                events.put(item, timeout=0.25)
-                return True
-            except queue.Full:
-                continue
-        return False
-
-    def _read() -> None:
-        """Читатель SSE в очередь событий; тишина сокета не рвёт поток."""
-        try:
-            while not stop_event.is_set():
-                try:
-                    line = sse_resp.readline(_MAX_SSE_LINE_BYTES + 1)
-                except (OSError, ValueError, AttributeError, http.client.HTTPException):
-                    # Сокет закрыт или сброшен: watchdog главного цикла решает судьбу попытки.
-                    break
-                if not line:
-                    break
-                if len(line) > _MAX_SSE_LINE_BYTES:
-                    _ = _put_event({"type": "__invalid_json__", "data": {}})
-                    break
-                text_line = line.decode("utf-8", "replace").strip()
-                if not text_line.startswith("data:"):
-                    continue
-                payload = text_line[5:].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    obj: dict[str, object] | None = _loads_serve_object(payload)
-                except ServeProtocolError:
-                    _ = _put_event({"type": "__invalid_json__", "data": {}})
-                    continue
-                with queue_bytes_lock:
-                    overflow = queued_bytes[0] + len(line) > _MAX_SERVE_QUEUE_BYTES
-                    if not overflow:
-                        queued_bytes[0] += len(line)
-                        obj["_raw_bytes"] = len(line)
-                if overflow:
-                    _ = _put_event({"type": "__invalid_json__", "data": {}})
-                    break
-                if not _put_event(obj):
-                    release_event(obj)
-                    break
-        except (OSError, ValueError, AttributeError, http.client.HTTPException):
-            pass
-        finally:
-            _ = _put_event(None)
-
-    _read()
-
-
-def _serve_step_message_id(
-    data: dict[str, object], session_id: str, step_closed: bool, current: str
-) -> str:
-    """Запомнить ID только открытого шага текущей сессии."""
-    msg_id = data.get("assistantMessageID")
-    if (
-        data.get("sessionID") == session_id
-        and not step_closed
-        and isinstance(msg_id, str)
-        and msg_id
-    ):
-        return msg_id
-    return current
-
-
-def _serve_tool_state_bytes(tool_state: _ServeToolState) -> int:
-    """UTF-8 объём ID, имён, text и сериализованных input native вызовов."""
-    total = 0
-    for call_id, item in tool_state.tools.items():
-        total += len(call_id.encode("utf-8", "replace"))
-        total += len(item["name"].encode("utf-8", "replace"))
-        total += len(item["text"].encode("utf-8", "replace"))
-        args = item["input"]
-        if isinstance(args, dict):
-            total += len(
-                json.dumps(
-                    args, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8", "replace")
-            )
-    return total
+    return _read_serve_events_impl(
+        sse_resp, events, stop_event, queued_bytes, queue_bytes_lock, release_event,
+        loads_serve_object_fn=_loads_serve_object, protocol_error_cls=ServeProtocolError,
+        max_line_bytes_fn=lambda: _MAX_SSE_LINE_BYTES,
+        max_queue_bytes_fn=lambda: _MAX_SERVE_QUEUE_BYTES,
+    )
 
 
 def _serve_accumulated_bytes(
-    current: int,
-    event_type: str,
-    payload: dict[str, object],
-    tool_state: _ServeToolState | None = None,
+    current: int, event_type: str, payload: dict[str, object], tool_state: _ServeToolState | None = None
 ) -> int:
-    """Учесть общий UTF-8 бюджет reasoning/text и удерживаемого tool_state."""
-    if event_type in ("reasoning", "text"):
-        text_value = str(
-            payload.get("reasoning_content" if event_type == "reasoning" else "content")
-            or ""
-        )
-        current += len(text_value.encode("utf-8", "replace"))
-    held = _serve_tool_state_bytes(tool_state) if tool_state is not None else 0
-    if current + held > _MAX_SERVE_ACCUMULATED_BYTES:
-        raise ServeProtocolError("serve accumulated output exceeded byte cap")
-    return current
+    return _serve_accumulated_bytes_impl(
+        current, event_type, payload, tool_state, ServeProtocolError,
+        max_accumulated_bytes_fn=lambda: _MAX_SERVE_ACCUMULATED_BYTES,
+    )
 
 
 def _finish_serve_tool_step(
@@ -4405,10 +3202,7 @@ def _finish_serve_tool_step(
     attempt_deadline: float | None = None,
     is_client_gone: Callable[[], bool] | None = None,
     pending_calls: list[dict[str, object]] | None = None,
-    ctrl_http: Callable[
-        [str, str, dict[str, object] | None], tuple[int, dict[str, object]]
-    ]
-    | None = None,
+    ctrl_http: Callable[[str, str, dict[str, object] | None], tuple[int, dict[str, object]]] | None = None,
     reasoning_cb: Callable[[str], None] | None = None,
     text_cb: Callable[[str], None] | None = None,
     emulate_tools: bool = False,
@@ -4417,46 +3211,14 @@ def _finish_serve_tool_step(
     replied_permissions: set[str] | None = None,
     cascade_reject_state: dict[str, bool] | None = None,
 ) -> bool:
-    """Закрыть инструментальный шаг только после подтверждённого step.ended.
-
-    True — шаг подтверждён и pending-вызовы опубликованы один раз; False —
-    в дренаже записана provider-ошибка (`result["error"]`), pending не публикуется.
-    """
-    step_confirmed = _drain_serve_step_usage(
-        events,
-        session_id,
-        assistant_message_id,
-        deadline,
-        result["usage"],
-        tool_state,
-        result,
-        on_tool,
-        release_event,
-        attempt_deadline=attempt_deadline,
-        is_client_gone=is_client_gone,
-        pending_calls=pending_calls,
-        ctrl_http=ctrl_http,
-        reasoning_cb=reasoning_cb,
-        text_cb=text_cb,
-        emulate_tools=emulate_tools,
-        accumulated_bytes=accumulated_bytes,
-        t0=t0,
-        replied_permissions=replied_permissions,
-        cascade_reject_state=cascade_reject_state,
+    return _finish_serve_tool_step_impl(
+        _drain_serve_step_usage, events, session_id, assistant_message_id, deadline, tool_state, result,
+        on_tool, release_event, attempt_deadline=attempt_deadline, is_client_gone=is_client_gone,
+        pending_calls=pending_calls, ctrl_http=ctrl_http, reasoning_cb=reasoning_cb, text_cb=text_cb,
+        emulate_tools=emulate_tools, accumulated_bytes=accumulated_bytes, t0=t0,
+        replied_permissions=replied_permissions, cascade_reject_state=cascade_reject_state,
+        protocol_error_cls=ServeProtocolError, disconnect_error_cls=ServeClientDisconnect,
     )
-    if result["error"] is not None:
-        return False
-    if not step_confirmed:
-        raise ServeProtocolError("incomplete tool step without step.ended")
-    if is_client_gone is not None and is_client_gone():
-        raise ServeClientDisconnect("client disconnected")
-    if pending_calls is not None:
-        for call in pending_calls:
-            result["native_calls"].append(call)
-            on_tool(call)
-    result["terminal"] = "tool_calls"
-    result["step_closed"] = True
-    return True
 
 
 def _serve_one_attempt(
@@ -4495,6 +3257,7 @@ def _serve_one_attempt(
         "prompt_status": None,
         "transient_error": False,
         "proxy_url": None,
+        "process_spawned": False,
     }
     attempt_deadline = min(
         deadline if deadline is not None else t0 + TIMEOUT_S, t0 + TIMEOUT_S
@@ -4531,6 +3294,7 @@ def _serve_one_attempt(
             deadline=aux.deadline(attempt_deadline),
             is_client_gone=is_client_gone,
         )
+        result["process_spawned"] = True
     except (ServeClientDisconnect, ServeStartupDeadlineExceeded) as exc:
         result["exit_reason"] = (
             "client_gone" if isinstance(exc, ServeClientDisconnect) else "timeout"
@@ -5447,46 +4211,13 @@ def _tool_choice_name(tool_choice: Any) -> str:
     return str(name) if name else ""
 
 
+from zen_bridge.domain.tool_signals import _tools_section as _tools_section_impl
+
+
 def _tools_section(tools: list[Any], tool_choice: Any, model_id: str = "") -> str:
-    """Английская секция протокола и схем инструментов для промпта."""
-    open_tag, close_tag = _tool_tags_for_model(model_id)
-    # у GLM подстрока `tool_call` в промпте провоцирует нативный спец-токен
-    block_name = "tool_invoke" if _uses_alt_tool_tag(model_id) else "tool_call"
-    lines = [
-        "[system]",
-        "# Tool calling protocol",
-        "You may call the external tools listed below.",
-        "When you need a tool, output ONLY blocks exactly in this form:",
-        f'{open_tag}{{"name": "<tool_name>", "arguments": {{<json>}}}}{close_tag}',
-        "You may output several such blocks in a row. Do not narrate around them.",
-        "Tool results arrive later as lines like [tool result <id>] with the result text.",
-        "If no tool is needed, reply normally in plain text.",
-        "Never attempt to use built-in tools; the only tools available are the ones listed here.",
-        f"Do not run shell commands or edit files yourself: emit a {block_name} block instead.",
-        (
-            f"If a tool is needed, you MUST emit the {block_name} block in this reply; prose claims "
-            'like "I\'ll check..." without a block are forbidden and end the turn with no action.'
-        ),
-        "The block itself changes nothing: the caller executes the tool and sends back the result.",
-    ]
-    if tool_choice == "required":
-        lines.append("You MUST call at least one tool now.")
-    else:
-        forced = _tool_choice_name(tool_choice)
-        if forced:
-            lines.append(f'You MUST call the tool "{forced}" now.')
-    lines.append("")
-    lines.append("Available tools:")
-    for item in tools:
-        fn = item.get("function") if isinstance(item.get("function"), dict) else item
-        if not isinstance(fn, dict):
-            continue
-        name = str(fn.get("name") or "")
-        desc = str(fn.get("description") or "")
-        params = _dict_or_empty(fn.get("parameters"))
-        lines.append(f"- {name}: {desc}")
-        lines.append("  parameters: " + json.dumps(params, ensure_ascii=False))
-    return "\n".join(lines)
+    return _tools_section_impl(
+        tools, tool_choice, model_id, _tool_tags_for_model, _uses_alt_tool_tag, _tool_choice_name
+    )
 
 
 def _render_turn(msg: dict[str, Any]) -> tuple[str, str]:
@@ -5966,54 +4697,7 @@ def _map_effort(req: dict[str, Any], model_id: str = "") -> str:
     return _level_to_variant(meta, key)
 
 
-def parse_opencode_event(event: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Разбор одного события `opencode run` для чанков OpenAI SSE / non-stream."""
-    if not isinstance(event, dict):
-        return "", {}
-    etype = str(event.get("type") or "").strip()
-    part = _dict_or_empty(event.get("part"))
-
-    if etype == "reasoning":
-        rtext = part.get("text")
-        meta = _dict_or_empty(part.get("metadata"))
-        openai_meta = _dict_or_empty(meta.get("openai"))
-        enc_data = openai_meta.get("reasoningEncryptedContent")
-
-        delta: dict[str, Any] = {}
-        if isinstance(rtext, str) and rtext:
-            delta["reasoning_content"] = rtext
-        if isinstance(enc_data, str) and enc_data:
-            delta["reasoning_details"] = [
-                {"type": "reasoning.encrypted", "data": enc_data}
-            ]
-        return ("reasoning", delta)
-
-    if etype == "text":
-        ttext = part.get("text")
-        if isinstance(ttext, str) and ttext:
-            return ("text", {"content": ttext})
-        return ("text", {})
-
-    if etype == "step_finish":
-        tokens = _dict_or_empty(part.get("tokens"))
-        return ("step_finish", tokens)
-
-    if etype == "error":
-        err_obj = event.get("error")
-        if not isinstance(err_obj, dict):
-            err_obj = {"message": str(err_obj)}
-        data = err_obj.get("data")
-        if isinstance(data, dict):
-            message = str(data.get("message") or err_obj.get("message") or err_obj)
-            status = data.get("statusCode")
-        else:
-            message = str(err_obj.get("message") or err_obj)
-            status = None
-        if "provider.no-route" in message or "Variant unavailable" in message:
-            status = 400
-        return ("error", {"statusCode": status, "message": message})
-
-    return (etype, {})
+from zen_bridge.domain.tool_signals import parse_opencode_event
 
 
 def format_sse_chunk(
@@ -6104,62 +4788,10 @@ def _messages_to_google_contents(
     return contents, system_head
 
 
-def _build_google_payload(
-    prompt: str,
-    effort: str,
-    max_output: int,
-    contents: list[dict[str, Any]] | None = None,
-    system_instruction: str = "",
-    emulate_tools: bool = False,
-) -> dict[str, Any]:
-    """Тело generateContent: systemInstruction + чередующиеся user/model contents.
-
-    Плоский один `user` не попадает в неявный кэш Google (cachedContentTokenCount=0) и
-    провоцирует модель дописывать чужие реплики, поэтому do_POST передаёт структуру.
-    Без contents prompt уходит одним user-сообщением. emulate_tools оставлен для
-    совместимости сигнатуры: stopSequences одинаковы с инструментами и без.
-    """
-    payload: dict[str, Any] = {}
-    if system_instruction.strip():
-        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-    if contents is None:
-        payload["contents"] = [{"role": "user", "parts": [{"text": prompt}]}]
-    else:
-        payload["contents"] = list(contents)
-        if payload["contents"] and payload["contents"][-1]["role"] == "model":
-            payload["contents"].append(
-                {"role": "user", "parts": [{"text": GOOGLE_CONTINUE_TEXT}]}
-            )
-    gen_cfg: dict[str, Any] = {
-        "maxOutputTokens": max_output,
-        "stopSequences": list(GOOGLE_STOP_SEQUENCES),
-    }
-    if effort:
-        level = "HIGH" if effort in ("high", "xhigh") else effort.upper()
-        gen_cfg["thinkingConfig"] = {"includeThoughts": True, "thinkingLevel": level}
-    payload["generationConfig"] = gen_cfg
-    return payload
-
-
-def _build_openai_usage(
-    prompt_tokens: int,
-    completion_tokens: int,
-    cached_tokens: int = 0,
-    reasoning_tokens: int = 0,
-) -> dict[str, Any]:
-    """OpenAI usage; cached/reasoning читает pi-ai (prompt_tokens_details, completion_tokens_details)."""
-    usage_obj: dict[str, Any] = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-    }
-    if cached_tokens > 0:
-        usage_obj["cached_tokens"] = cached_tokens
-        usage_obj["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
-    if reasoning_tokens > 0:
-        usage_obj["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
-    return usage_obj
-
+from zen_bridge.adapters.google_payload import (
+    _build_google_payload,
+    _build_openai_usage,
+)
 
 _LOOP_TAIL_CHARS = 600
 _LOOP_MIN_REPEATS = 6
@@ -6173,123 +4805,7 @@ _TABLE_SEP_RE = re.compile(
 )
 
 
-def _in_active_markdown_table(
-    text: str, loop_start: int, sep_ends: list[int] | None = None
-) -> bool:
-    """Перед loop_start идёт строка-разделитель таблицы, а после неё нет пустой строки и все строки с «|».
-
-    sep_ends — заранее посчитанные концы разделителей всего text (для многократных проверок без O(n) на вызов).
-    """
-    if sep_ends is None:
-        sep_ends = [m.end() for m in _TABLE_SEP_RE.finditer(text, 0, loop_start)]
-        last_end = sep_ends[-1] if sep_ends else None
-    else:
-        last_end = next((e for e in reversed(sep_ends) if e <= loop_start), None)
-    if last_end is None:
-        return False
-    between = text[last_end:loop_start]
-    for eol in ("\r\n", "\n"):  # перевод строки, завершающий сам разделитель
-        if between.startswith(eol):
-            between = between[len(eol) :]
-            break
-    lines = between.splitlines()
-    if lines and not between.endswith(
-        ("\n", "\r")
-    ):  # хвост до loop_start оборван посреди строки таблицы
-        lines.pop()
-    # Пустая строка (в т.ч. из пробелов/табов, CRLF) завершает таблицу.
-    return all(ln.strip() and "|" in ln and "||" not in ln for ln in lines)
-
-
-def _is_table_block(unit: str, text: str = "", loop_start: int = 0) -> bool:
-    """Блок содержит разделитель ячеек markdown-таблицы (в т.ч. без крайних «|» и оборванную ротацию строки)."""
-    if "\n" not in unit:
-        return False
-    lines = [s.strip() for s in (unit * 3).splitlines()[1:-1] if s.strip()]
-    if not lines:
-        return False
-    if not all("|" in s and "||" not in s for s in lines):
-        return False
-    if _in_active_markdown_table(text, loop_start):
-        return True
-    return all(
-        s.startswith("|")
-        or s.endswith("|")
-        or s.count("|") >= 2
-        or (" | " in s and not s.endswith((".", "!", "?", ";")))
-        for s in lines
-    )
-
-
-_CDATA_GAP_MAX = 80
-
-
-def _cdata_loop_start(text: str) -> int | None:
-    """Начало цикла «]]>»: >= _CDATA_END_MIN «]]>» вне таблиц в последних 300 символах, иначе None.
-
-    «]]>» в строках активной markdown-таблицы и в окне после «<![CDATA[» — не цикл и в кластер не входят;
-    назад идём по цепочке «]]>» с интервалом <= _CDATA_GAP_MAX символов.
-    """
-    recent_start = max(0, len(text) - 300)
-    if text.count("]]>", recent_start) < _CDATA_END_MIN:
-        return None
-    seps = [m.end() for m in _TABLE_SEP_RE.finditer(text)]
-
-    def is_terminator(pos: int) -> bool:
-        return "<![CDATA[" not in text[
-            max(0, pos - 300) : pos
-        ] and not _in_active_markdown_table(text, pos, seps)
-
-    recent = []
-    pos = text.find("]]>", recent_start)
-    while pos >= 0:
-        if is_terminator(pos):
-            recent.append(pos)
-        pos = text.find("]]>", pos + 3)
-    if len(recent) < _CDATA_END_MIN:
-        return None
-    start = recent[0]
-    while (
-        prev := text.rfind("]]>", max(0, start - _CDATA_GAP_MAX), start)
-    ) >= 0 and is_terminator(prev):
-        start = prev
-    return start
-
-
-def _detect_repetition_loop(text: str) -> int | None:
-    """Индекс начала зацикленного хвоста (кусок 4..80 символов >= 6 раз подряд, >= 120 символов) или None."""
-    tail = text[-_LOOP_TAIL_CHARS:]
-    base = len(text) - len(tail)
-    if (
-        "<![CDATA[" not in tail[-300:]
-        and (cdata_idx := _cdata_loop_start(text)) is not None
-    ):
-        return cdata_idx
-    size_total = len(tail)
-    for size in range(4, 81):
-        if size * _LOOP_MIN_REPEATS > size_total:
-            break
-        unit = tail[-size:]
-        if len(set(unit) - set(" \t\r\n")) < 3:  # «-----», «0, 0, 0» — не цикл
-            continue
-        pos = size_total - size
-        reps = 1
-        while pos - size >= 0 and tail[pos - size : pos] == unit:
-            reps += 1
-            pos -= size
-        if reps < _LOOP_MIN_REPEATS or size * reps < _LOOP_MIN_BLOCK_CHARS:
-            continue
-        full_pos = (
-            base + pos
-        )  # цикл мог начаться раньше хвоста — отматываем по всему тексту
-        while full_pos - size >= 0 and text[full_pos - size : full_pos] == unit:
-            full_pos -= size
-        if _is_table_block(
-            unit, text, full_pos
-        ):  # строки markdown-таблицы повторяются законно
-            continue
-        return full_pos
-    return None
+from zen_bridge.domain.repetition import _detect_repetition_loop
 
 
 _THOUGHT_CLOSED_RE = re.compile(r"<unused94>thought\b.*?<unused95>\s*", re.DOTALL)
@@ -7028,123 +5544,7 @@ class Run:
         }
 
 
-class _LockedWfile:
-    """wfile потокового запроса под общим замком с конечным таймаутом записи клиенту.
-
-    Запись ограничена `_DOWNSTREAM_WRITE_TIMEOUT_S` и остатком дедлайна запроса;
-    `abort_socket` прерывает зависшую запись shutdown/close без замка.
-    """
-
-    def __init__(
-        self,
-        inner: io.BufferedIOBase,
-        lock: threading.Lock | threading.RLock,
-        sock: socket.socket | None = None,
-        deadline: float | None = None,
-        deadline_fn: Callable[[], float | None] | None = None,
-        on_client_gone: Callable[[], None] | None = None,
-    ) -> None:
-        self._inner: io.BufferedIOBase = inner
-        self._lock: threading.Lock | threading.RLock = lock
-        self._sock: socket.socket | None = sock
-        self._deadline: float | None = deadline
-        self._deadline_fn: Callable[[], float | None] | None = deadline_fn
-        self._on_client_gone: Callable[[], None] | None = on_client_gone
-        self.client_gone: bool = False
-        self._timer: threading.Timer | None = None
-        # Авто-abort ровно на дедлайне не делается: обработчик ещё шлёт финальную
-        # timeout-ошибку клиенту. Зависшая запись ограничена таймаутом сокета в
-        # write/flush, а abort_socket доступен внешнему watchdog/таймеру.
-
-    def _effective_deadline(self) -> float | None:
-        """Дедлайн записи: явный или от deadline_fn."""
-        if self._deadline_fn is not None:
-            return self._deadline_fn()
-        return self._deadline
-
-    def _apply_write_timeout(self) -> None:
-        """Ограничить сокет остатком дедлайна и downstream-таймаутом, если умеет."""
-        sock = self._sock
-        if sock is None:
-            return
-        set_timeout = getattr(sock, "settimeout", None)
-        if not callable(set_timeout):
-            return
-        effective_deadline = self._effective_deadline()
-        if effective_deadline is None:
-            timeout = _DOWNSTREAM_WRITE_TIMEOUT_S
-        else:
-            remaining = effective_deadline - time.monotonic()
-            timeout = min(_DOWNSTREAM_WRITE_TIMEOUT_S, max(0.05, remaining))
-        try:
-            _ = set_timeout(timeout)
-        except OSError:
-            pass
-
-    def _mark_client_gone(self) -> None:
-        """Отметить уход клиента один раз и уведомить обработчик запроса."""
-        if self.client_gone:
-            return
-        self.client_gone = True
-        try:
-            if self._on_client_gone is not None:
-                try:
-                    self._on_client_gone()
-                except Exception as exc:
-                    _log(f"client_gone callback error: {_mask_secrets(str(exc))}")
-        finally:
-            self.abort_socket()
-
-    def cancel_deadline_timer(self) -> None:
-        """Отменить watchdog-таймер дедлайна при штатном завершении запроса."""
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-
-    def abort_socket(self) -> None:
-        """Прервать клиентский сокет без замка записи (доступно watchdog/таймеру)."""
-        if not self.client_gone:
-            self._mark_client_gone()
-            return
-        sock = self._sock
-        if sock is None:
-            return
-        try:
-            _ = sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            sock.close()
-        except OSError:
-            pass
-
-    def write(self, data: bytes) -> int:
-        """Записать чанк целиком под замком с ограниченным ожиданием сокета."""
-        try:
-            with self._lock:
-                self._apply_write_timeout()
-                return int(self._inner.write(data) or 0)
-        except (OSError, ValueError) as exc:
-            self.abort_socket()
-            if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
-                raise
-            raise BrokenPipeError(errno.EPIPE, "downstream write failed") from exc
-
-    def flush(self) -> None:
-        """Сбросить буфер под замком с ограниченным ожиданием сокета."""
-        try:
-            with self._lock:
-                self._apply_write_timeout()
-                self._inner.flush()
-        except (OSError, ValueError) as exc:
-            self.abort_socket()
-            if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
-                raise
-            raise BrokenPipeError(errno.EPIPE, "downstream flush failed") from exc
-
-    def __getattr__(self, name: str) -> object:
-        """Прочие атрибуты (closed, close, fileno) — у исходного wfile."""
-        return cast(object, getattr(self._inner, name))
+from zen_bridge.adapters.locked_wfile import _LockedWfile
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -7221,11 +5621,15 @@ class Handler(BaseHTTPRequestHandler):
             calls = [
                 call for message in messages for call in message.get("tool_calls") or []
             ]
+            reasonings = [
+                str(message.get("reasoning_content") or "") for message in messages
+            ]
             if _zen_short_response(
                 self._zen_prompt,
                 content,
                 calls,
                 getattr(self, "_zen_short_bypass", False),
+                reasonings=reasonings,
             ):
                 code, payload = 502, _zen_error(502)
                 self._exit()["exit_reason"] = "short_response"
@@ -7539,6 +5943,8 @@ class Handler(BaseHTTPRequestHandler):
                     xs["transport"] = "run"
                     xs["transport_history"] = ["serve", "run"]
                     attempts._next_spawn_reason = "serve_unavailable_fallback"
+                    if _limiter_ok:
+                        res.spawn_limiter.refund()
                     return False
                 xs["exit_reason"] = "upstream_failed"
                 self._sse_error(_error_payload(f"serve unavailable: {exc}"))
@@ -7600,6 +6006,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not _delivered_now and not force_serve:
                     xs["transport"] = "run"
                     xs["transport_history"] = ["serve", "run"]
+                    if _limiter_ok and not result.get("process_spawned"):
+                        res.spawn_limiter.refund()
                     return False
                 if attempts.allow_retry(reason):
                     continue
@@ -7613,6 +6021,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not _delivered_now and not force_serve:
                     xs["transport"] = "run"
                     xs["transport_history"] = ["serve", "run"]
+                    if _limiter_ok and not result.get("process_spawned"):
+                        res.spawn_limiter.refund()
                     return False
                 if attempts.allow_retry(f"prompt_status_{_ps_code}"):
                     continue
@@ -7660,6 +6070,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not _delivered_err and not force_serve:
                         xs["transport"] = "run"
                         xs["transport_history"] = ["serve", "run"]
+                        if _limiter_ok and not result.get("process_spawned"):
+                            res.spawn_limiter.refund()
                         return False
                     # После частичной доставки: step-interruption recovery ниже по incomplete-сигналу.
                     signal_t = _incomplete_step_signal(
@@ -8091,6 +6503,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 deadline=attempts.deadline,
                 on_client_gone=_mark_downstream_gone,
+                write_timeout_s=lambda: _DOWNSTREAM_WRITE_TIMEOUT_S,
             )
             locked_wfile.flush()
             self.wfile = cast(io.BufferedIOBase, cast(object, locked_wfile))
@@ -9155,6 +7568,8 @@ class Handler(BaseHTTPRequestHandler):
                     or natives
                 )
                 if not force_serve and not _j_delivered:
+                    if limiter_ok:
+                        res.spawn_limiter.refund()
                     return False
                 xs["exit_reason"] = "upstream_failed"
                 self._send(502, _error_payload(f"serve unavailable: {exc}"))
@@ -9206,6 +7621,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     attempts.attempt_done(True, False)
                 if not _delivered_j and not force_serve:
+                    if limiter_ok and not result.get("process_spawned"):
+                        res.spawn_limiter.refund()
                     return False
                 if attempts.allow_retry(reason):
                     _save_partial_output(texts, reasonings)
@@ -9218,6 +7635,8 @@ class Handler(BaseHTTPRequestHandler):
                 if _ps_j == 429 or 500 <= _ps_j <= 599:
                     attempts.attempt_done(True, False)
                 if not _delivered_j and not force_serve:
+                    if limiter_ok and not result.get("process_spawned"):
+                        res.spawn_limiter.refund()
                     return False
                 if attempts.allow_retry(f"prompt_status_{_ps_j}"):
                     _save_partial_output(texts, reasonings)
@@ -9250,6 +7669,8 @@ class Handler(BaseHTTPRequestHandler):
                     attempts.attempt_done(True, False)
                     _save_partial_output(texts, reasonings)
                     if not _delivered_j and not force_serve:
+                        if limiter_ok and not result.get("process_spawned"):
+                            res.spawn_limiter.refund()
                         return False
                     _sig_j = _incomplete_step_signal(
                         "".join(texts),
