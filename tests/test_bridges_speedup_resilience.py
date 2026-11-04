@@ -195,6 +195,43 @@ def test_preflight_concrete_models_only() -> None:
     )
 
 
+def test_model_notes_msk_expiration() -> None:
+    from datetime import datetime, timezone
+    import server
+
+    text = """| Модель | Статус |
+|---|---|
+| `claude-sonnet-5-5` | LIMIT BLOCKED (до 2030-01-01 12:00 MSK) |
+"""
+    reset = datetime(2030, 1, 1, 9, tzinfo=timezone.utc).timestamp()
+    assert server._parse_blocked_models(text, reset - 1) == frozenset(
+        {"claude-sonnet-5-5"}
+    )
+    assert server._parse_blocked_models(text, reset) == frozenset({"claude-sonnet-5-5"})
+    assert not server._parse_blocked_models(text, reset + 1)
+
+
+def test_quota_cache_ttl_and_effort_suffix(tmp_path, monkeypatch) -> None:
+    import server
+
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
+    path = tmp_path / "quota.json"
+    cache = server.QuotaCircuitBreakerCache(path)
+    monkeypatch.setattr(server, "_QUOTA_CB_CACHE", cache)
+    cache.record_429("claude-sonnet-5-5", ttl_s=30)
+    assert cache.is_blocked("claude-sonnet-5-5-high")
+    assert server.QuotaCircuitBreakerCache(path).is_blocked("claude-sonnet-5-5")
+    notes = server.ModelNotesFilter(tmp_path / "missing")
+    assert notes.is_blocked("claude-sonnet-5-5-high")
+    clock[0] = 1031.0
+    assert not cache.is_blocked("claude-sonnet-5-5-high")
+    notes.blocked = frozenset({"claude-sonnet-5-5"})
+    notes.expires_at = server.time.monotonic() + 60
+    assert notes.is_blocked("claude-sonnet-5-5-high")
+    assert not notes.is_blocked("unrelated")
+
+
 class Sink:
     def __init__(self, disconnect: bool = False) -> None:
         self.status = 0
@@ -642,6 +679,7 @@ def test_gateway_preflight_bypass_and_idempotency(
     monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", Filter())
     monkeypatch.setattr(server, "_auth_ok", lambda _h: True)
     monkeypatch.setattr(server, "_enforce_forward_kill_switch", lambda: None)
+
     def _fake_passthrough(self, a, raw, req, model, _hub_auth_ok=False):
         hub_auth_ok.append(_hub_auth_ok)
         captured.append((raw, req))

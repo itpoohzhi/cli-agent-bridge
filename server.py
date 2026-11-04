@@ -1425,9 +1425,119 @@ _MODEL_BLOCK_STATUSES = re.compile(
 )
 
 
+def _base_quota_model(model: str) -> str:
+    return re.sub(r"-(?:minimal|low|medium|high|xhigh|max)$", "", model)
+
+
+class QuotaCircuitBreakerCache:
+    """Thread-safe quota deadlines, persisted best-effort using wall-clock time."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(
+            path
+            or os.environ.get(
+                "BRIDGE_QUOTA_CACHE_PATH", "/tmp/cli-agent-bridge-429-cache.json"
+            )
+        )
+        self.lock = threading.Lock()
+        self.entries: dict[str, dict] = {}
+        self._file_sig: tuple[int, int] | None = None
+        try:
+            self._load()
+        except (OSError, ValueError, UnicodeDecodeError):
+            pass
+
+    def _load(self) -> None:
+        try:
+            st = self.path.stat()
+            signature = (st.st_mtime_ns, st.st_size)
+            if signature == self._file_sig:
+                return
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            entries: dict[str, dict] = {}
+            now = time.time()
+            if isinstance(data, dict):
+                for model, entry in data.items():
+                    if isinstance(entry, dict):
+                        expires = float(entry.get("expires_at", 0))
+                        if math.isfinite(expires) and expires > now:
+                            entries[str(model)] = {
+                                "expires_at": expires,
+                                "reason": str(entry.get("reason", "429_quota")),
+                            }
+            self.entries, self._file_sig = entries, signature
+        except FileNotFoundError:
+            self.entries, self._file_sig = {}, None
+        except (OSError, ValueError, UnicodeDecodeError, TypeError):
+            pass
+
+    def _save(self) -> None:
+        now = time.time()
+        self.entries = {
+            key: entry
+            for key, entry in self.entries.items()
+            if entry["expires_at"] > now
+        }
+        temporary = None
+        try:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=self.path.name + ".",
+                delete=False,
+            ) as stream:
+                temporary = stream.name
+                json.dump(self.entries, stream)
+                stream.flush()
+                st = os.fstat(stream.fileno())
+            os.replace(temporary, self.path)
+            self._file_sig = (st.st_mtime_ns, st.st_size)
+        except (OSError, ValueError):
+            pass
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    def record_429(
+        self, model_id: str, ttl_s: float = 1800.0, reason: str = "429_quota"
+    ) -> None:
+        if not math.isfinite(ttl_s):
+            ttl_s = 1800.0
+        expires = time.time() + max(0.0, ttl_s)
+        with self.lock:
+            try:
+                self._load()
+            except (OSError, ValueError, UnicodeDecodeError):
+                pass
+            for key in {model_id, _base_quota_model(model_id)}:
+                old = self.entries.get(key, {}).get("expires_at", 0)
+                self.entries[key] = {"expires_at": max(old, expires), "reason": reason}
+            self._save()
+
+    def is_blocked(self, model_id: str) -> bool:
+        with self.lock:
+            now = time.time()
+            return any(
+                self.entries.get(key, {}).get("expires_at", 0) > now
+                for key in {model_id, _base_quota_model(model_id)}
+            )
+
+
+_QUOTA_CB_CACHE = QuotaCircuitBreakerCache()
+
+
 def _parse_blocked_models(
-    text: str, now_utc: float | None = None, *,
-    parsed_rules: list[tuple[frozenset[str], frozenset[str], float | None]] | None = None,
+    text: str,
+    now_utc: float | None = None,
+    *,
+    parsed_rules: list[tuple[frozenset[str], frozenset[str], float | None]]
+    | None = None,
 ) -> frozenset[str]:
     """Только конкретные ID в статусных колонках; prose и запреты транспортов не модели."""
     from datetime import datetime, timedelta, timezone
@@ -1454,14 +1564,17 @@ def _parse_blocked_models(
             continue
         expiration = re.search(
             r"\(до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)",
-            line, re.I,
+            line,
+            re.I,
         )
         expires = None
         if expiration:
             try:
-                expires = datetime.strptime(
-                    expiration.group(1), "%Y-%m-%d %H:%M"
-                ).replace(tzinfo=timezone(timedelta(hours=3))).timestamp()
+                expires = (
+                    datetime.strptime(expiration.group(1), "%Y-%m-%d %H:%M")
+                    .replace(tzinfo=timezone(timedelta(hours=3)))
+                    .timestamp()
+                )
             except ValueError:
                 pass
         if "группа" in headers:
@@ -1500,9 +1613,18 @@ class ModelNotesFilter:
         self.lock = threading.Lock()
         self.loading: threading.Event | None = None
         self.signature: tuple[int, int] | None = None
-        self._parsed_rules: list[tuple[frozenset[str], frozenset[str], float | None]] | None = None
+        self._parsed_rules: (
+            list[tuple[frozenset[str], frozenset[str], float | None]] | None
+        ) = None
 
     def is_blocked(self, model: str) -> bool:
+        if _QUOTA_CB_CACHE.is_blocked(model):
+            return True
+        return self._notes_blocked(model) or self._notes_blocked(
+            _base_quota_model(model)
+        )
+
+    def _notes_blocked(self, model: str) -> bool:
         now = time.monotonic()
         if now < self.expires_at:
             return model in self.blocked
@@ -1538,7 +1660,10 @@ class ModelNotesFilter:
                         stat = self.path.stat()
                         signature = (stat.st_mtime_ns, stat.st_size)
                         now_utc = time.time()
-                        if signature == self.signature and self._parsed_rules is not None:
+                        if (
+                            signature == self.signature
+                            and self._parsed_rules is not None
+                        ):
                             rules = self._parsed_rules
                             models = frozenset(
                                 model
@@ -1550,7 +1675,8 @@ class ModelNotesFilter:
                             rules = []
                             models = _parse_blocked_models(
                                 self.path.read_text(encoding="utf-8"),
-                                now_utc, parsed_rules=rules,
+                                now_utc,
+                                parsed_rules=rules,
                             )
                     except (OSError, UnicodeError, ValueError):
                         signature, models, rules = None, frozenset(), None
@@ -7314,7 +7440,9 @@ class Handler(BaseHTTPRequestHandler):
         else:
             lease.record_failure()
             if model_id:
-                reason = str(out.get("error") or out.get("state") or "rc_non_zero").strip()[:120]
+                reason = str(
+                    out.get("error") or out.get("state") or "rc_non_zero"
+                ).strip()[:120]
                 _PENALTY_TRACKER.record_start_failure(
                     model_id,
                     reason,
@@ -7405,7 +7533,9 @@ class Handler(BaseHTTPRequestHandler):
             elif sink.status == 429 or sink.status in (402, 408):
                 # 429 / 402 / 408: модель исчерпала квоту/лимит/таймаут старта
                 lease.record_success()
-                _PENALTY_TRACKER.record_start_failure(canonical_model_id, f"http_{sink.status}")
+                _PENALTY_TRACKER.record_start_failure(
+                    canonical_model_id, f"http_{sink.status}"
+                )
             elif 200 <= sink.status < 300:
                 # 2xx: реальный успешный ответ модели
                 lease.record_success()
@@ -7415,7 +7545,9 @@ class Handler(BaseHTTPRequestHandler):
                 lease.record_success()
             else:
                 lease.record_failure()
-                _PENALTY_TRACKER.record_start_failure(canonical_model_id, f"http_{sink.status}")
+                _PENALTY_TRACKER.record_start_failure(
+                    canonical_model_id, f"http_{sink.status}"
+                )
         finally:
             _log(
                 f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
@@ -7445,9 +7577,7 @@ class Handler(BaseHTTPRequestHandler):
             if _resolve_model_alias(raw_m, fleet_models)
             else raw_m
         )
-        self._record_turn_outcome(
-            lease, out, backend_err, model_id=cli_canon_id
-        )
+        self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         if err is not None:
             self._send(err["code"], {"error": err})
@@ -7745,9 +7875,7 @@ class Handler(BaseHTTPRequestHandler):
             if _resolve_model_alias(raw_m, fleet_models)
             else raw_m
         )
-        self._record_turn_outcome(
-            lease, out, backend_err, model_id=cli_canon_id
-        )
+        self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
