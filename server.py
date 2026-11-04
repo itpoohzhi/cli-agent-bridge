@@ -384,6 +384,10 @@ IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
 SAFETY_CAP_S = float(
     os.environ.get("DROID_DSH_BRIDGE_SAFETY_CAP_S", str(int(DEFAULT_SAFETY_CAP_S)))
 )
+UI_RESERVED_SLOTS = int(_bridge_env("UI_RESERVED_SLOTS", "2"))
+SUBAGENT_MAX_CONCURRENT = int(_bridge_env("SUBAGENT_MAX_CONCURRENT", "4"))
+SUBAGENT_QUEUE_TIMEOUT_S = float(_bridge_env("SUBAGENT_QUEUE_TIMEOUT_S", "120.0"))
+SUBAGENT_WATCHDOG_CAP_S = float(_bridge_env("SUBAGENT_WATCHDOG_CAP_S", "300.0"))
 
 
 # RW-009 в живом ходе: запись живого куска клиенту ограничена этим таймаутом (а не 300с
@@ -525,6 +529,8 @@ _NOISE = re.compile(
 )
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+_subagent_slots = threading.BoundedSemaphore(SUBAGENT_MAX_CONCURRENT)
+_qos_lock = threading.Condition()
 _active = {}
 _active_lock = threading.Lock()
 _started = time.time()
@@ -5062,6 +5068,48 @@ class Handler(BaseHTTPRequestHandler):
         trace = self._trace if REQUEST_ATTRIBUTION_ENABLED else None
         return f"request_id={trace.request_id if trace else '-'} subagent_id={trace.subagent_id if trace and trace.subagent_id else '-'}"
 
+    def _is_subagent_request(self) -> bool:
+        if hasattr(self, "headers") and self.headers:
+            raw = self.headers.get(SUBAGENT_ID_HEADER)
+            if raw and raw.strip():
+                return True
+        trace = getattr(self, "_trace", None)
+        if trace is not None and getattr(trace, "subagent_id", None):
+            return True
+        return False
+
+    def _subagent_id(self) -> str | None:
+        if hasattr(self, "headers") and self.headers:
+            raw = self.headers.get(SUBAGENT_ID_HEADER)
+            if raw and raw.strip():
+                return raw.strip()
+        trace = getattr(self, "_trace", None)
+        if trace is not None and getattr(trace, "subagent_id", None):
+            return trace.subagent_id
+        return None
+
+    def _effective_turn_timeout_s(self) -> float:
+        raw_to = None
+        if hasattr(self, "headers") and self.headers:
+            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get("X-Subagent-Timeout")
+        client_to: float | None = None
+        if raw_to:
+            try:
+                val = float(raw_to.strip())
+                if val > 0:
+                    client_to = val
+            except ValueError:
+                client_to = None
+
+        if self._is_subagent_request():
+            if client_to is not None:
+                return min(client_to, SUBAGENT_WATCHDOG_CAP_S)
+            return SUBAGENT_WATCHDOG_CAP_S
+
+        if client_to is not None:
+            return min(client_to, TIMEOUT_S)
+        return TIMEOUT_S
+
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
 
@@ -5277,19 +5325,59 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _acquire_slot(self, keepalive):
-        """Ждём слот семафора до QUEUE_TIMEOUT_S, попутно keepalive и проверка клиента."""
+        """Ждём слот семафора с учётом QoS (резерв слотов для UI и квота сабагентов)."""
+        is_subagent = self._is_subagent_request()
         waited = time.monotonic()
         last_ka = 0.0
-        while not _slots.acquire(timeout=1.0):
-            if _client_gone(self.connection):
-                return "client_gone"
-            if time.monotonic() - waited > QUEUE_TIMEOUT_S:
-                return "queue_timeout"
-            if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
-                last_ka = time.monotonic()
-                if not keepalive():
+        subagent_slot_acquired = False
+        timeout_budget = SUBAGENT_QUEUE_TIMEOUT_S if is_subagent else QUEUE_TIMEOUT_S
+        effective_reserved = min(UI_RESERVED_SLOTS, max(0, MAX_CONCURRENT - 1))
+
+        try:
+            if is_subagent:
+                while not _subagent_slots.acquire(timeout=1.0):
+                    if _client_gone(self.connection):
+                        return "client_gone"
+                    if time.monotonic() - waited > timeout_budget:
+                        return "queue_timeout"
+                    if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                        last_ka = time.monotonic()
+                        if not keepalive():
+                            return "client_gone"
+                subagent_slot_acquired = True
+
+            while True:
+                with _qos_lock:
+                    if is_subagent and _slots._value <= effective_reserved:
+                        can_acquire = False
+                    else:
+                        can_acquire = _slots.acquire(blocking=False)
+
+                    if can_acquire:
+                        self._subagent_slot_held = is_subagent
+                        return ""
+
+                if _client_gone(self.connection):
+                    if subagent_slot_acquired:
+                        _subagent_slots.release()
                     return "client_gone"
-        return ""
+                if time.monotonic() - waited > timeout_budget:
+                    if subagent_slot_acquired:
+                        _subagent_slots.release()
+                    return "queue_timeout"
+                if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                    last_ka = time.monotonic()
+                    if not keepalive():
+                        if subagent_slot_acquired:
+                            _subagent_slots.release()
+                        return "client_gone"
+
+                with _qos_lock:
+                    _qos_lock.wait(timeout=0.2)
+        except Exception:
+            if subagent_slot_acquired:
+                _subagent_slots.release()
+            raise
 
     _FAIL_CLOSE_KINDS = ("stream_error", "pump_error", "live_invalidated")
 
@@ -5319,8 +5407,9 @@ class Handler(BaseHTTPRequestHandler):
         tool_calls: list = []
         usage = {}
         result_ev = {}
+        eff_timeout = self._effective_turn_timeout_s()
         last_ka = time.monotonic()
-        deadline = time.monotonic() + TIMEOUT_S
+        deadline = time.monotonic() + eff_timeout
         cur_mid = [
             None
         ]  # mid последнего content-куска в pieces (разделитель "\n\n" между сообщениями)
@@ -5346,6 +5435,7 @@ class Handler(BaseHTTPRequestHandler):
                 "num_turns": result_ev.get("num_turns"),
                 "tool_calls": tool_calls,
                 "events": events,
+                "timeout_s": eff_timeout,
             }
 
         # RW-009 в живом ходе: зависший (не читающий, но не закрытый) клиент — write()
@@ -5454,7 +5544,7 @@ class Handler(BaseHTTPRequestHandler):
                 run.cancel.set()
                 return state("client_gone", 1, "turn cancelled")
             if time.monotonic() > deadline:
-                return state("timeout", 124, f"proxy timeout after {TIMEOUT_S}s")
+                return state("timeout", 124, f"proxy timeout after {eff_timeout:.1f}s")
             if (
                 not run.got_event
                 and time.monotonic() - run.started > FIRST_TOKEN_TIMEOUT_S
@@ -5811,7 +5901,12 @@ class Handler(BaseHTTPRequestHandler):
                 def _release_turn_slot() -> None:
                     if t_held and not t_released[0]:
                         t_released[0] = True
-                        _slots.release()
+                        with _qos_lock:
+                            _slots.release()
+                            if getattr(self, "_subagent_slot_held", False):
+                                self._subagent_slot_held = False
+                                _subagent_slots.release()
+                            _qos_lock.notify_all()
 
                 managed_turn = getattr(self, "_active_managed_turn", None)
                 if managed_turn is not None:
@@ -6062,16 +6157,17 @@ class Handler(BaseHTTPRequestHandler):
     def _error_body(out: dict) -> Any:
         st = out.get("state")
         label = str(out.get("backend_kind") or "droid")  # имя бинарника в тексте ошибки
+        timeout_s = float(out.get("timeout_s") or TIMEOUT_S)
         if st == "timeout":
             return {
-                "message": f"{label} exec timed out after {TIMEOUT_S}s",
+                "message": out.get("err") or f"{label} exec timed out after {timeout_s:.1f}s",
                 "type": "timeout",
                 "code": 504,
             }
         if st in ("idle_timeout", "safety_cap"):
             return {
                 "message": str(
-                    out.get("err") or f"{label} exec timed out after {TIMEOUT_S}s"
+                    out.get("err") or f"{label} exec timed out after {timeout_s:.1f}s"
                 )[:500],
                 "type": "timeout",
                 "code": 504,
@@ -6460,6 +6556,24 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        m_cancel = (
+            re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
+            if _is_detached_enabled()
+            else None
+        )
+        if not m_cancel and (
+            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
+        ):
+            retry_after = "3" if self._is_subagent_request() else "5"
+            self._reject(
+                503,
+                "overloaded",
+                "bridge is shutting down",
+                extra_headers={"Retry-After": retry_after, "X-Bridge-Draining": "1"},
+            )
+            return
+
         hub_auth_ok = _auth_ok(self)
         deferred_passthrough_auth = False
         if not hub_auth_ok:
@@ -6502,22 +6616,6 @@ class Handler(BaseHTTPRequestHandler):
         self._context_pruned = None
         managed_turn: ManagedTurn | None = None
         attached_existing = False
-        path = self.path.split("?", 1)[0]
-        m_cancel = (
-            re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
-            if _is_detached_enabled()
-            else None
-        )
-        if not m_cancel and (
-            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
-        ):
-            self._reject(
-                503,
-                "overloaded",
-                "bridge is shutting down",
-                extra_headers={"Retry-After": "5", "X-Bridge-Draining": "1"},
-            )
-            return
         # (1) framing: Transfer-Encoding не поддерживаем, Content-Length строго числовой.
         if self.headers.get_all("Transfer-Encoding") is not None:
             self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
@@ -7043,7 +7141,7 @@ class Handler(BaseHTTPRequestHandler):
                                 if _is_watchdog_enabled()
                                 else TIMEOUT_S
                             ),
-                            safety_cap_s=TIMEOUT_S,
+                            safety_cap_s=self._effective_turn_timeout_s(),
                         )
                     )
                 except PermissionError:
@@ -7059,6 +7157,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._reject(400, "invalid_request", str(exc), model_id, model_len)
                     return
             self._active_managed_turn = managed_turn
+            if managed_turn is not None:
+                managed_turn.is_subagent = self._is_subagent_request()
+                managed_turn.subagent_id = self._subagent_id()
             ctx = {
                 "request_id": self._trace.request_id if self._trace else None,
                 "subagent_id": self._trace.subagent_id if self._trace else None,
@@ -7285,7 +7386,9 @@ class Handler(BaseHTTPRequestHandler):
             self, "_active_managed_turn", None
         )
         if ctx.get("attached_existing") and managed_turn is not None:
-            managed_turn.done_event.wait(timeout=TIMEOUT_S)
+            eff_fn = getattr(self, "_effective_turn_timeout_s", None)
+            eff_to = eff_fn() if callable(eff_fn) else TIMEOUT_S
+            managed_turn.done_event.wait(timeout=eff_to)
             if managed_turn.final_dict is not None:
                 return dict(managed_turn.final_dict)
         adapter = BACKENDS.get(ctx["backend"])
