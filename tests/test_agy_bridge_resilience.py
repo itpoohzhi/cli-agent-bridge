@@ -559,77 +559,7 @@ class ErrorContractTests(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "idle_timeout")
 
 
-@unittest.skipUnless(_POSIX, "нужны процессные группы POSIX")
-class KillGroupTests(unittest.TestCase):
-    def test_kill_group_cleans_descendants_and_reaps_zombie(self) -> None:
-        proc = _spawn(["sh", "-c", "sleep 100 & sleep 100 & wait"])
-        try:
-            out = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="", stderr=""
-            )
-            deadline = time.monotonic() + 3.0
-            while time.monotonic() < deadline:
-                out = subprocess.run(
-                    ["ps", "-o", "pid=", "-g", str(proc.pid)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if len(out.stdout.split()) >= 3:  # лидер + два sleep
-                    break
-                time.sleep(0.05)
-            self.assertGreaterEqual(len(out.stdout.split()), 3, "потомки не стартовали")
-            srv._kill_group(proc)
-            self.assertIsNotNone(proc.returncode)
-            self.assertTrue(
-                _group_gone(proc.pid), "потомки группы пережили _kill_group"
-            )
-            self.assertEqual(_ps_stat(proc.pid), "", "лидер остался зомби")
-        finally:
-            _hard_kill(proc)
-
-    def test_kill_group_reaps_when_group_already_gone(self) -> None:
-        proc = _spawn(["true"])
-        try:
-            deadline = time.monotonic() + 3.0
-            while _ps_stat(proc.pid) != "Z" and time.monotonic() < deadline:
-                time.sleep(0.05)  # лидер завершён и ещё не собран
-            with (
-                mock.patch.object(srv.os, "killpg", side_effect=ProcessLookupError),
-                mock.patch.object(proc, "wait", wraps=proc.wait) as wait,
-            ):
-                srv._kill_group(proc)  # не должен падать
-            wait.assert_called()
-            self.assertEqual(proc.returncode, 0)
-            self.assertEqual(_ps_stat(proc.pid), "", "зомби не собран")
-        finally:
-            _hard_kill(proc)
-
-    def test_kill_group_escalates_to_sigkill(self) -> None:
-        self.assertEqual(srv.KILL_TERM_GRACE_S, 2.0)
-        self.assertEqual(srv.KILL_WAIT_S, 5.0)
-        proc = _spawn(
-            ["sh", "-c", "trap '' TERM; echo ready; while :; do sleep 1; done"],
-            stdout=subprocess.PIPE,
-        )
-        try:
-            self.assertEqual(
-                proc.stdout.readline().strip(), b"ready"
-            )  # trap уже установлен
-            started = time.monotonic()
-            with mock.patch.object(srv, "KILL_TERM_GRACE_S", 0.4):
-                srv._kill_group(proc)
-            elapsed = time.monotonic() - started
-            self.assertEqual(proc.returncode, -signal.SIGKILL)
-            self.assertGreaterEqual(
-                elapsed, 0.35, "SIGKILL раньше окончания grace-периода"
-            )
-            self.assertLess(elapsed, 2.0 + 5.0)
-            self.assertTrue(_group_gone(proc.pid))
-        finally:
-            _hard_kill(proc)
-            if proc.stdout is not None:
-                proc.stdout.close()
+# KillGroupTests migrated to tests/resilience/test_process_lifecycle.py (M-MOD-I4)
 
 
 def _load_fetch_script() -> Any:

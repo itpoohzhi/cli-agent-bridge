@@ -598,7 +598,14 @@ def facade(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
-    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-facade.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
+    monkeypatch.setattr(
+        server,
+        "TOKEN_CACHE",
+        server.TokenCache(
+            path=tmp_path / "missing-facade.env",
+            environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"},
+        ),
+    )
     monkeypatch.setattr(server, "_log", lambda message: None)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
@@ -610,6 +617,11 @@ def facade(monkeypatch, tmp_path):
         server.get_penalty_tracker().__class__(
             storage_path=tmp_path / "facade_penalties.json", max_start_fails=999
         ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_QUOTA_CB_CACHE",
+        server.QuotaCircuitBreakerCache(tmp_path / "facade_quota.json"),
     )
     bridge = Srv(("127.0.0.1", 0), server.Handler)
     threading.Thread(

@@ -268,7 +268,8 @@ class _BridgeConfig:
     """
 
     port: int = 9887
-    max_concurrent: int = 4
+    max_concurrent: int = 4  # Дефолт датакласса=4 для обратной совместимости unit-тестов; runtime default=2 в _build_bridge_config (P0-3)
+    wal_max_bytes: int = 16 * 1024 * 1024
     queue_timeout_s: int = 900
     timeout_s: int = 1800
     keepalive_s: float = 15.0
@@ -343,7 +344,10 @@ def _build_bridge_config() -> _BridgeConfig:
     """Собрать снимок конфигурации из текущего окружения."""
     return _BridgeConfig(
         port=_env_int("AGY_BRIDGE_PORT", 9887, 1, 65535),
-        max_concurrent=_env_int("AGY_BRIDGE_MAX_CONCURRENT", 4, 1, 128),
+        max_concurrent=_env_int("AGY_BRIDGE_MAX_CONCURRENT", 2, 1, 128),
+        wal_max_bytes=_env_int(
+            "AGY_BRIDGE_WAL_MAX_BYTES", 16 * 1024 * 1024, 1, 2147483647
+        ),
         queue_timeout_s=_chain_int(
             ("AGY_BRIDGE_QUEUE_TIMEOUT_S", "AGY_BRIDGE_QUEUE_TIMEOUT"), 900, 1, 86400
         ),
@@ -514,6 +518,109 @@ def _build_steps_sql(config: _BridgeConfig) -> str:
     )
 
 
+class _FairSlotSemaphore:
+    """FIFO semaphore retaining each thread's position across polling timeouts.
+
+    A caller abandoning a timed-out acquisition must call cancel_wait().
+    """
+
+    def __init__(self, value: int) -> None:
+        from collections import deque
+
+        if value < 1:
+            raise ValueError("slot count must be positive")
+        self._capacity = value
+        self._active = 0
+        self._waiters = deque()
+        self._lock = threading.Lock()
+        self._local = threading.local()
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return self._active
+
+    @property
+    def waiters_count(self) -> int:
+        with self._lock:
+            return len(self._waiters)
+
+    def _wake_head(self) -> None:
+        if self._waiters and self._active < self._capacity:
+            self._waiters[0].set()
+
+    def cancel_wait(self) -> None:
+        """Remove the calling thread's pending acquisition, if any."""
+        waiter = getattr(self._local, "waiter", None)
+        if waiter is None:
+            return
+        with self._lock:
+            if waiter in self._waiters:
+                self._waiters.remove(waiter)
+            del self._local.waiter
+            self._wake_head()
+
+    def waiting(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def position():
+            if getattr(self._local, "waiter", None) is not None:
+                raise RuntimeError("nested slot wait")
+            waiter = threading.Event()
+            with self._lock:
+                self._local.waiter = waiter
+                self._waiters.append(waiter)
+                self._wake_head()
+            try:
+                yield
+            finally:
+                self.cancel_wait()
+
+        return position()
+
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        if timeout is not None and (timeout < 0 or not blocking):
+            raise ValueError("invalid semaphore timeout")
+        deadline = None if timeout is None else time.monotonic() + timeout
+        waiter = getattr(self._local, "waiter", None)
+        with self._lock:
+            if waiter is None:
+                if not self._waiters and self._active < self._capacity:
+                    self._active += 1
+                    return True
+                if not blocking:
+                    return False
+                waiter = threading.Event()
+                self._local.waiter = waiter
+                self._waiters.append(waiter)
+            self._wake_head()
+        try:
+            while True:
+                with self._lock:
+                    if self._waiters[0] is waiter and self._active < self._capacity:
+                        self._waiters.popleft()
+                        del self._local.waiter
+                        self._active += 1
+                        self._wake_head()
+                        return True
+                    waiter.clear()
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if not blocking or (remaining is not None and remaining <= 0):
+                    return False
+                waiter.wait(remaining)
+        except BaseException:
+            self.cancel_wait()
+            raise
+
+    def release(self) -> None:
+        with self._lock:
+            if self._active == 0:
+                raise ValueError("semaphore released too many times")
+            self._active -= 1
+            self._wake_head()
+
+
 def reload_bridge_config() -> _BridgeConfig:
     global _config, _slots, _account_pool
     """Перечитать окружение, обновить снимок и глобальные константы (для тестов)."""
@@ -578,7 +685,7 @@ def _apply_bridge_config(config: _BridgeConfig) -> None:
     if "STEP_TYPE_PLANNER" in g:
         g["_STEPS_SQL"] = _build_steps_sql(config)
     if "_slots" in g:
-        g["_slots"] = threading.BoundedSemaphore(config.max_concurrent)
+        g["_slots"] = _FairSlotSemaphore(config.max_concurrent)
 
 
 _apply_bridge_config(_config)
@@ -818,7 +925,7 @@ _started = time.time()
 _active: dict = {}
 _active_lock = threading.Lock()
 _account_pool = AccountPool(AccountPoolConfig(max_concurrent=MAX_CONCURRENT, n_floor=1))
-_slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+_slots = _FairSlotSemaphore(MAX_CONCURRENT)
 _budget = None
 _last_ok = [0.0]
 _session_store_lock = threading.Lock()
@@ -1783,12 +1890,12 @@ def _image_gate_universal(model_id: str, effort: str | None) -> ImageReject | No
 
 # [Refactored] Media normalization moved to agy_runtime.media_normalizer
 
+
 def _messages_to_stripped_prompt(messages: object) -> str:
     """Промпт всей истории без media: нет `[image N]`, `[attachments]`, путей и payload."""
     return _messages_to_prompt(
         cast("list[object]", _strip_media_from_messages(messages))
     )
-
 
 
 def _log_token(value: object, max_len: int = 64) -> str:
@@ -3516,6 +3623,59 @@ def _db_path_for(cid: str) -> Path | None:
     return path
 
 
+_WAL_CHECKPOINT_LOCK = threading.Lock()
+_last_wal_checkpoint_ts = 0.0
+
+
+def _maybe_checkpoint_sqlite_wal(
+    conv_dir: Path | None = None, max_wal_bytes: int | None = None
+) -> int:
+    """Best-effort WAL maintenance; busy databases never delay admission for long."""
+    global _last_wal_checkpoint_ts
+    if not _WAL_CHECKPOINT_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        now = time.monotonic()
+        if now - _last_wal_checkpoint_ts < 30.0:
+            return 0
+        _last_wal_checkpoint_ts = now
+        directory = CONV_DIR if conv_dir is None else conv_dir
+        limit = _config.wal_max_bytes if max_wal_bytes is None else max_wal_bytes
+        checkpointed = 0
+        attempted = 0
+        try:
+            paths = list(directory.glob("*.db-wal"))
+        except OSError:
+            return 0
+        for wal in paths:
+            if attempted >= 2:
+                break
+            conn = None
+            try:
+                if wal.stat().st_size <= limit:
+                    continue
+                database = wal.with_name(wal.name[:-4])
+                if not database.is_file():
+                    continue
+                attempted += 1
+                conn = sqlite3.connect(str(database), timeout=0.05)
+                conn.execute("PRAGMA busy_timeout = 50")
+                result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if result is not None and result[0] == 0:
+                    checkpointed += 1
+            except (sqlite3.Error, OSError):
+                pass
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except sqlite3.Error:
+                        pass
+        return checkpointed
+    finally:
+        _WAL_CHECKPOINT_LOCK.release()
+
+
 def _sqlite_ro_uri(path: Path) -> str:
     text = str(path).replace("%", "%25").replace("?", "%3f").replace("#", "%23")
     return f"file:{text}?mode=ro"
@@ -5032,7 +5192,10 @@ class _ToolTurn:
 
     def error_body(self) -> dict[str, Any]:
         err_msg = self.error or ""
-        if getattr(self, "_is_repetition_loop", False) or "upstream_repetition_loop" in err_msg:
+        if (
+            getattr(self, "_is_repetition_loop", False)
+            or "upstream_repetition_loop" in err_msg
+        ):
             return {
                 "message": "upstream repetition loop detected",
                 "detail": err_msg[:500],
@@ -6124,25 +6287,40 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, {"error": {"message": message, "type": reason, "code": code}})
 
     def _acquire_slot(self, keepalive) -> str:
-        """Занять слот исполнения; '' — успех, иначе причина отказа.
+        """Wait fairly using the semaphore interface and a separate queue deadline."""
+        slots = _slots
+        acquired = False
 
-        При extended_timeout_enabled ожидание не длиннее остатка бюджета запроса
-        за вычетом резерва drain + финального flush.
-        """
-        if self._registry_job is not None and self._registry_job.cancelled.is_set():
-            return "client_gone"
-        if _slots.acquire(blocking=False):
+        def admitted() -> str:
+            _maybe_checkpoint_sqlite_wal()
             return ""
-        deadline = time.monotonic() + QUEUE_TIMEOUT_S
-        t_req_start = self._t_req_start
-        if t_req_start is not None and _new_flag("extended_timeout_enabled"):
-            deadline = min(deadline, t_req_start + T_REQ_BUDGET_S - T_RESERVE_S)
-        while time.monotonic() < deadline:
-            if _slots.acquire(timeout=1.0):
-                return ""
-            if keepalive is not None and not keepalive():
+
+        try:
+            if self._registry_job is not None and self._registry_job.cancelled.is_set():
                 return "client_gone"
-        return "queue_timeout"
+            acquired = slots.acquire(blocking=False)
+            if acquired:
+                return admitted()
+            deadline = time.monotonic() + QUEUE_TIMEOUT_S
+            t_req_start = self._t_req_start
+            if t_req_start is not None and _new_flag("extended_timeout_enabled"):
+                deadline = min(deadline, t_req_start + T_REQ_BUDGET_S - T_RESERVE_S)
+            while time.monotonic() < deadline:
+                if (
+                    self._registry_job is not None
+                    and self._registry_job.cancelled.is_set()
+                ):
+                    return "client_gone"
+                wait_s = min(1.0, max(0.0, deadline - time.monotonic()))
+                acquired = slots.acquire(timeout=wait_s)
+                if acquired:
+                    return admitted()
+                if keepalive is not None and not keepalive():
+                    return "client_gone"
+            return "queue_timeout"
+        finally:
+            if not acquired:
+                getattr(slots, "cancel_wait", lambda: None)()
 
     def _execute(
         self,
@@ -8073,4 +8251,3 @@ __all__ = [
     "_strip_media_from_messages",
     "_universal_render_messages",
 ]
-
