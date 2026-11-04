@@ -5407,9 +5407,28 @@ class Handler(BaseHTTPRequestHandler):
         tool_calls: list = []
         usage = {}
         result_ev = {}
-        eff_timeout = self._effective_turn_timeout_s()
+        turn_start = time.monotonic()
         last_ka = time.monotonic()
-        deadline = time.monotonic() + eff_timeout
+        is_subagent = self._is_subagent_request()
+        # Safety cap is the absolute upper bound (watchdog against infinite loops)
+        safety_cap_s = SUBAGENT_WATCHDOG_CAP_S if is_subagent else TIMEOUT_S
+        safety_deadline = turn_start + safety_cap_s
+
+        # Sliding idle window: client X-Timeout-Seconds (or X-Subagent-Timeout) sets allowed silence timeout
+        raw_to = None
+        if hasattr(self, "headers") and self.headers:
+            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get("X-Subagent-Timeout")
+        client_to: float | None = None
+        if raw_to:
+            try:
+                val = float(raw_to.strip())
+                if val > 0:
+                    client_to = val
+            except ValueError:
+                client_to = None
+
+        idle_timeout_s = client_to if client_to is not None else IDLE_TIMEOUT_S
+        last_activity = turn_start
         cur_mid = [
             None
         ]  # mid последнего content-куска в pieces (разделитель "\n\n" между сообщениями)
@@ -5435,7 +5454,7 @@ class Handler(BaseHTTPRequestHandler):
                 "num_turns": result_ev.get("num_turns"),
                 "tool_calls": tool_calls,
                 "events": events,
-                "timeout_s": eff_timeout,
+                "timeout_s": safety_cap_s,
             }
 
         # RW-009 в живом ходе: зависший (не читающий, но не закрытый) клиент — write()
@@ -5543,36 +5562,35 @@ class Handler(BaseHTTPRequestHandler):
             if managed_turn is not None and managed_turn.cancel_event.is_set():
                 run.cancel.set()
                 return state("client_gone", 1, "turn cancelled")
-            if time.monotonic() > deadline:
-                return state("timeout", 124, f"proxy timeout after {eff_timeout:.1f}s")
+            now = time.monotonic()
+            if now > safety_deadline:
+                return state("safety_cap", 124, f"proxy safety cap timeout after {safety_cap_s:.1f}s")
             if (
                 not run.got_event
-                and time.monotonic() - run.started > FIRST_TOKEN_TIMEOUT_S
+                and now - run.started > FIRST_TOKEN_TIMEOUT_S
             ):
                 return state(
                     "first_token_timeout",
                     124,
                     f"no droid event within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 )
-            if (
-                run.got_event
-                and run.last_progress
-                and time.monotonic() - run.last_progress > SILENCE_WATCHDOG_S
-            ):
+            latest_progress = max(last_activity, getattr(run, "last_progress", 0.0) or 0.0)
+            effective_idle = max(idle_timeout_s, 1.0)
+            if run.got_event and (now - latest_progress > effective_idle):
                 if (
-                    SILENCE_WATCHDOG_S >= 10.0
+                    effective_idle >= 10.0
                     and proc_watchdog is not None
                     and rproc is not None
                     and getattr(rproc, "pid", 0)
                     and proc_watchdog.sample(rproc.pid).has_progress
                 ):
-                    run.last_progress = time.monotonic()
+                    last_activity = now
+                    run.last_progress = now
                 else:
-                    # Тишина: сбрасывают только события ТЕКУЩЕГО хода (не keepalive/чужие).
                     return state(
-                        "timeout",
+                        "idle_timeout",
                         124,
-                        f"no droid progress within {SILENCE_WATCHDOG_S:g}s",
+                        f"no droid progress within {effective_idle:.1f}s",
                     )
             if not self._client_write_dead and _client_gone(self.connection):
                 if detach_on_disconnect:
@@ -5583,6 +5601,7 @@ class Handler(BaseHTTPRequestHandler):
                     return state("client_gone", 1)
             try:
                 kind, payload = take()
+                last_activity = time.monotonic()
             except queue.Empty:
                 # RW-204/RW-203: страховка сверх проверки внутри text_delta/reasoning_delta
                 # ниже — overflow Run.q (RW-204) мог выбросить именно terminal-событие
@@ -6556,6 +6575,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._trace = None
+        self._response_status = 0
         path = self.path.split("?", 1)[0]
         m_cancel = (
             re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
@@ -6565,12 +6586,14 @@ class Handler(BaseHTTPRequestHandler):
         if not m_cancel and (
             _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
         ):
-            retry_after = "3" if self._is_subagent_request() else "5"
+            is_sub = self._is_subagent_request()
+            code, drain_headers, drain_body = LIFECYCLE.draining_response(is_subagent=is_sub)
+            err = drain_body.get("error", {})
             self._reject(
-                503,
-                "overloaded",
-                "bridge is shutting down",
-                extra_headers={"Retry-After": retry_after, "X-Bridge-Draining": "1"},
+                code,
+                err.get("type", "overloaded"),
+                err.get("message", "bridge is shutting down"),
+                extra_headers=drain_headers,
             )
             return
 

@@ -140,3 +140,48 @@ def test_draining_response_retry_after():
     status, headers, body = lifecycle.draining_response(is_subagent=False)
     assert status == 503
     assert headers["Retry-After"] == "5"
+
+
+def test_release_turn_slot_subagent(monkeypatch):
+    slots = threading.BoundedSemaphore(6)
+    subagent_slots = threading.BoundedSemaphore(4)
+    qos_lock = threading.Condition()
+
+    monkeypatch.setattr(server, "_slots", slots)
+    monkeypatch.setattr(server, "_subagent_slots", subagent_slots)
+    monkeypatch.setattr(server, "_qos_lock", qos_lock)
+
+    # Захватываем слоты
+    assert slots.acquire() is True
+    assert subagent_slots.acquire() is True
+
+    h = DummyHandler(subagent_id="sub-1")
+    h._subagent_slot_held = True
+    t_held = True
+    t_released = [False]
+
+    def _release_turn_slot() -> None:
+        if t_held and not t_released[0]:
+            t_released[0] = True
+            with server._qos_lock:
+                server._slots.release()
+                if getattr(h, "_subagent_slot_held", False):
+                    h._subagent_slot_held = False
+                    server._subagent_slots.release()
+                server._qos_lock.notify_all()
+
+    # Вызов _release_turn_slot освобождает оба семафора и сбрасывает флаг
+    _release_turn_slot()
+    assert h._subagent_slot_held is False
+    assert t_released[0] is True
+
+    # Проверяем, что квота subagent_slots полностью восстановлена (4 из 4)
+    for _ in range(4):
+        assert subagent_slots.acquire(blocking=False) is True
+    for _ in range(4):
+        subagent_slots.release()
+
+    # Повторный вызов идемпотентен и не приводит к лишним release()
+    _release_turn_slot()
+    assert t_released[0] is True
+

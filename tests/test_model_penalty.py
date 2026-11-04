@@ -498,7 +498,19 @@ def test_infrastructure_network_errors_neutral(tmp_path, clock):
     path = tmp_path / "penalties.json"
     tracker = model_penalty.ModelPenaltyTracker(storage_path=path, max_start_fails=3)
 
-    for err in ("http_502", "http_504", "Connection refused", "connect_error", "network_error"):
+    for err in (
+        "http_502",
+        "http_504",
+        "Connection refused",
+        "connect_error",
+        "network_error",
+        "connection reset",
+        "connectionreset",
+        "econnreset",
+        "Broken pipe",
+        "Bad Gateway",
+        "Gateway Timeout",
+    ):
         for _ in range(5):
             tripped, fails, until = tracker.record_start_failure(MODEL_ID, error_reason=err)
             assert not tripped
