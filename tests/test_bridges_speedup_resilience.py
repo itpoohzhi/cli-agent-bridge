@@ -211,6 +211,22 @@ def test_model_notes_msk_expiration() -> None:
     assert not server._parse_blocked_models(text, reset + 1)
 
 
+def test_model_notes_msk_expiration_without_parentheses() -> None:
+    from datetime import datetime, timezone
+    import server
+
+    text = """| Модель | Статус |
+|---|---|
+| `claude-sonnet-5-5` | LIMIT BLOCKED до 2030-01-01 12:00 MSK |
+"""
+    reset = datetime(2030, 1, 1, 9, tzinfo=timezone.utc).timestamp()
+    assert server._parse_blocked_models(text, reset - 1) == frozenset(
+        {"claude-sonnet-5-5"}
+    )
+    assert server._parse_blocked_models(text, reset) == frozenset({"claude-sonnet-5-5"})
+    assert not server._parse_blocked_models(text, reset + 1)
+
+
 def test_quota_cache_ttl_and_effort_suffix(tmp_path, monkeypatch) -> None:
     import server
 
