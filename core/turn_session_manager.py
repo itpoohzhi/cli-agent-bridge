@@ -35,6 +35,8 @@ from typing import Any
 import uuid
 
 from core.backend_adapter import ToolCall, TurnResult, Usage
+from core.stream_fsm.machine import StreamMachine
+from core.stream_fsm.types import EmitChunk, EmitSSE, EmitToolCall
 from core.watchdog import (
     FINISH_RESERVE_S,
     IDLE_TIMEOUT_S,
@@ -465,16 +467,28 @@ class TurnBuffer:
         }
         self.error: dict[str, Any] | None = None
         self._subscribers: dict[str, StreamSubscriber] = {}
+        self._fsm: StreamMachine = StreamMachine()
+
+    def feed_fsm_chunk(
+        self, chunk: str | bytes, epoch: int = 1
+    ) -> list[BufferedTurnEvent]:
+        """Обрабатывает входящий поток через StreamMachine (CD-002, M-MOD-I2)."""
+        events = []
+        for eff in self._fsm.feed(chunk, epoch=epoch):
+            if isinstance(eff, EmitChunk):
+                events.append(self.append("reasoning" if eff.is_reasoning else "content", eff.text))
+            elif isinstance(eff, EmitToolCall):
+                events.append(self.append("tool_call", {"function": {"name": eff.name, "arguments": eff.arguments}}))
+            elif isinstance(eff, EmitSSE) and eff.event == "error":
+                events.append(self.append("error", eff.data))
+        return events
 
     @staticmethod
     def _estimate_bytes(kind: str, payload: Any) -> int:
         if isinstance(payload, str):
             return max(1, len(payload.encode("utf-8", errors="replace")))
         try:
-            encoded = json.dumps(payload, ensure_ascii=False).encode(
-                "utf-8", errors="replace"
-            )
-            return max(1, len(encoded))
+            return max(1, len(json.dumps(payload, ensure_ascii=False).encode("utf-8", errors="replace")))
         except Exception:  # noqa: BLE001
             return max(1, len(str(payload).encode("utf-8", errors="replace")))
 
@@ -483,17 +497,14 @@ class TurnBuffer:
     ) -> int:
         if not piece:
             return current_bytes
-        piece_bytes = len(piece.encode("utf-8", errors="replace"))
-        if piece_bytes > self.max_bytes:
-            piece = piece.encode("utf-8", errors="replace")[-self.max_bytes :].decode(
-                "utf-8", errors="ignore"
-            )
-            piece_bytes = len(piece.encode("utf-8", errors="replace"))
+        b = piece.encode("utf-8", errors="replace")
+        if len(b) > self.max_bytes:
+            piece = b[-self.max_bytes :].decode("utf-8", errors="ignore")
+            b = piece.encode("utf-8", errors="replace")
         chunks.append(piece)
-        current_bytes += piece_bytes
+        current_bytes += len(b)
         while current_bytes > self.max_bytes and len(chunks) > 1:
-            removed = chunks.popleft()
-            current_bytes -= len(removed.encode("utf-8", errors="replace"))
+            current_bytes -= len(chunks.popleft().encode("utf-8", errors="replace"))
         return max(0, current_bytes)
 
     def append(self, kind: str, payload: Any) -> BufferedTurnEvent:
@@ -515,32 +526,16 @@ class TurnBuffer:
             self.total_bytes += byte_len
 
             if kind == "reasoning" and isinstance(payload, str):
-                self._reasoning_bytes = self._append_bounded_text(
-                    self._reasoning_chunks, self._reasoning_bytes, payload
-                )
+                self._reasoning_bytes = self._append_bounded_text(self._reasoning_chunks, self._reasoning_bytes, payload)
             elif kind == "content" and isinstance(payload, str):
-                self._content_bytes = self._append_bounded_text(
-                    self._content_chunks, self._content_bytes, payload
-                )
+                self._content_bytes = self._append_bounded_text(self._content_chunks, self._content_bytes, payload)
             elif kind == "tool_call":
-                call_dict = (
-                    dict(payload)
-                    if isinstance(payload, dict)
-                    else asdict(payload)
-                    if hasattr(payload, "__dataclass_fields__")
-                    else {"function": {"name": "unknown", "arguments": str(payload)}}
-                )
+                call_dict = dict(payload) if isinstance(payload, dict) else asdict(payload) if hasattr(payload, "__dataclass_fields__") else {"function": {"name": "unknown", "arguments": str(payload)}}
                 self.tool_calls.append(call_dict)
             elif kind == "error":
-                self.error = (
-                    dict(payload)
-                    if isinstance(payload, dict)
-                    else {"message": str(payload), "type": "stream_error"}
-                )
-            elif kind == "done" and isinstance(payload, dict):
-                raw_usage = payload.get("usage")
-                if isinstance(raw_usage, dict):
-                    self.set_usage(raw_usage)
+                self.error = dict(payload) if isinstance(payload, dict) else {"message": str(payload), "type": "stream_error"}
+            elif kind == "done" and isinstance(payload, dict) and isinstance(payload.get("usage"), dict):
+                self.set_usage(payload["usage"])
 
             # Вытеснение старых событий при превышении кольцевого лимита (RW-006).
             while self.total_bytes > self.max_bytes and self._events:
@@ -707,6 +702,8 @@ class ManagedTurn:
     result: TurnResult | None = None
     final_dict: dict[str, Any] | None = None
     state_dump_path: str = ""
+    is_subagent: bool = False
+    subagent_id: str | None = None
     _slot_release_fn: Callable[[], None] | None = None
     _slot_released: bool = False
     _cancel_callbacks: list[Callable[[], None]] = field(default_factory=list)
@@ -1490,31 +1487,21 @@ class TurnSessionManager:
             turn.result = final_res
             turn.buffer.set_usage(final_res.usage)
 
-            # Если адаптер не стримил события живьём, докладываем их в TurnBuffer.
-            had_content = bool(turn.buffer.get_content_text())
-            had_reasoning = bool(turn.buffer.get_reasoning_text())
-            had_tool_calls = bool(turn.buffer.tool_calls)
+            had_c, had_r, had_tc = bool(turn.buffer.get_content_text()), bool(turn.buffer.get_reasoning_text()), bool(turn.buffer.tool_calls)
             if not turn.buffer.sealed:
                 for ev in final_res.events or ():
-                    if ev.kind == "reasoning" and isinstance(ev.value, str):
-                        if not had_reasoning:
-                            turn.buffer.append("reasoning", ev.value)
-                    elif ev.kind == "content" and isinstance(ev.value, str):
-                        if not had_content:
-                            turn.buffer.append("content", ev.value)
-                    elif ev.kind == "tool_call" and not had_tool_calls:
-                        call_val = (
-                            asdict(ev.value)
-                            if isinstance(ev.value, ToolCall)
-                            else ev.value
-                        )
-                        turn.buffer.append("tool_call", call_val)
+                    if ev.kind == "reasoning" and isinstance(ev.value, str) and not had_r:
+                        turn.buffer.append("reasoning", ev.value)
+                    elif ev.kind == "content" and isinstance(ev.value, str) and not had_c:
+                        turn.buffer.append("content", ev.value)
+                    elif ev.kind == "tool_call" and not had_tc:
+                        turn.buffer.append("tool_call", asdict(ev.value) if isinstance(ev.value, ToolCall) else ev.value)
                 if not final_res.events:
-                    if final_res.reasoning and not had_reasoning:
+                    if final_res.reasoning and not had_r:
                         turn.buffer.append("reasoning", final_res.reasoning)
-                    if final_res.text and not had_content:
+                    if final_res.text and not had_c:
                         turn.buffer.append("content", final_res.text)
-                    if not had_tool_calls:
+                    if not had_tc:
                         for tc in final_res.tool_calls or ():
                             turn.buffer.append("tool_call", asdict(tc))
 

@@ -36,9 +36,18 @@ from core.turn_session_manager import (
 
 DRAIN_TIMEOUT_S: float = 110.0
 DEFAULT_DRAIN_SECONDS: float = DRAIN_TIMEOUT_S
-RETRY_AFTER_S: int = 5
-ORPHAN_SIGTERM_GRACE_S: float = 1.0
+RETRY_AFTER_S: int = int(os.environ.get("BRIDGE_RETRY_AFTER_S", "5"))
+ORPHAN_SIGTERM_GRACE_S: float = float(os.environ.get("BRIDGE_ORPHAN_SIGTERM_GRACE_S", "1.0"))
 MAX_KEEPALIVE_INTERVAL_S: float = 10.0
+DEFAULT_DRAIN_SUBAGENT_GRACE_S: float = float(
+    os.environ.get("BRIDGE_DRAIN_SUBAGENT_GRACE_S", "5.0")
+)
+DEFAULT_SUBAGENT_RETRY_AFTER_S: int = int(
+    os.environ.get("BRIDGE_SUBAGENT_RETRY_AFTER_S", "3")
+)
+KEEPALIVE_INTERVAL_S: float = 5.0
+RESERVED_INTERACTIVE_SLOTS: int = 2
+QUEUE_TIMEOUT_S: float = 15.0
 
 KNOWN_CHILD_BINARIES = frozenset(
     {
@@ -166,6 +175,202 @@ class KeepaliveController:
             ensure_ascii=False,
         )
         return f"data: {payload}\n\n"
+
+
+class QoSSlotManager:
+    """Ограниченная очередь ходов с резервом слотов для интерактивных запросов."""
+
+    def __init__(
+        self,
+        max_concurrent: int = 128,
+        reserved_interactive: int = 2,
+        queue_timeout_s: float = 15.0,
+        keepalive_interval_s: float = 5.0,
+        drain_event: threading.Event | None = None,
+        max_queue_size: int = 128,
+    ) -> None:
+        self.max_concurrent = max(1, int(max_concurrent))
+        self.reserved_interactive = (
+            min(max(0, int(reserved_interactive)), max(0, self.max_concurrent - 1))
+            if self.max_concurrent >= 2
+            else 0
+        )
+        self.queue_timeout_s = max(0.1, float(queue_timeout_s))
+        self.keepalive_interval_s = max(0.1, float(keepalive_interval_s))
+        self.max_queue_size = max(1, int(max_queue_size))
+        self.drain_event = drain_event or threading.Event()
+        self._cv = threading.Condition()
+        self.active_total = 0
+        self.active_background = 0
+        self.waiting_interactive = 0
+        self.waiting_background = 0
+
+    def reconfigure(
+        self,
+        max_concurrent: int | None = None,
+        reserved_interactive: int | None = None,
+        queue_timeout_s: float | None = None,
+        keepalive_interval_s: float | None = None,
+        max_queue_size: int | None = None,
+        drain_event: threading.Event | None = None,
+    ) -> None:
+        with self._cv:
+            if max_concurrent is not None:
+                self.max_concurrent = max(1, int(max_concurrent))
+            if reserved_interactive is not None:
+                self.reserved_interactive = (
+                    min(max(0, int(reserved_interactive)), max(0, self.max_concurrent - 1))
+                    if self.max_concurrent >= 2
+                    else 0
+                )
+            if queue_timeout_s is not None:
+                self.queue_timeout_s = max(0.1, float(queue_timeout_s))
+            if keepalive_interval_s is not None:
+                self.keepalive_interval_s = max(0.1, float(keepalive_interval_s))
+            if max_queue_size is not None:
+                self.max_queue_size = max(1, int(max_queue_size))
+            if drain_event is not None:
+                self.drain_event = drain_event
+            self._cv.notify_all()
+
+    def acquire_slot(
+        self,
+        is_interactive: bool,
+        keepalive_cb: Callable[[], bool] | None = None,
+        timeout: float | None = None,
+        client_gone_fn: Callable[[], bool] | None = None,
+    ) -> tuple[bool, str]:
+        """Занять слот; при занятости — ограниченное ожидание с keep-alive."""
+        subagent_limit = max(0, self.max_concurrent - self.reserved_interactive)
+        wait_timeout = (
+            self.queue_timeout_s if timeout is None else max(0.0, float(timeout))
+        )
+        deadline = time.monotonic() + wait_timeout
+        last_ka = time.monotonic()
+        counted_waiting = False
+        with self._cv:
+            try:
+                while True:
+                    if self.drain_event.is_set():
+                        return (False, "draining")
+                    if client_gone_fn is not None:
+                        try:
+                            if client_gone_fn():
+                                return (False, "client_gone")
+                        except Exception:  # noqa: BLE001
+                            return (False, "client_gone")
+                    if (self.waiting_interactive + self.waiting_background) >= self.max_queue_size and not counted_waiting:
+                        return (False, "queue_full")
+                    if is_interactive:
+                        allowed = self.active_total < self.max_concurrent
+                    else:
+                        # Фоновый запрос не может опередить ждущий интерактивный запрос
+                        allowed = (
+                            self.active_total < self.max_concurrent
+                            and self.active_background < subagent_limit
+                            and self.waiting_interactive == 0
+                        )
+                    if allowed:
+                        self.active_total += 1
+                        if not is_interactive:
+                            self.active_background += 1
+                        return (True, "")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return (False, "queue_timeout")
+                    if not counted_waiting:
+                        counted_waiting = True
+                        if is_interactive:
+                            self.waiting_interactive += 1
+                        else:
+                            self.waiting_background += 1
+                    now = time.monotonic()
+                    if (
+                        keepalive_cb is not None
+                        and (now - last_ka) >= self.keepalive_interval_s
+                    ):
+                        self._cv.release()
+                        try:
+                            ka_ok = keepalive_cb()
+                        except Exception:  # noqa: BLE001
+                            ka_ok = False
+                        finally:
+                            self._cv.acquire()
+                        last_ka = time.monotonic()
+                        if ka_ok is False:
+                            return (False, "client_gone")
+                        continue
+                    step = min(1.0, remaining)
+                    if keepalive_cb is not None:
+                        time_since_ka = now - last_ka
+                        time_until_ka = max(0.005, self.keepalive_interval_s - time_since_ka)
+                        step = min(step, time_until_ka)
+                    self._cv.wait(timeout=step)
+            finally:
+                if counted_waiting:
+                    if is_interactive:
+                        self.waiting_interactive = max(0, self.waiting_interactive - 1)
+                    else:
+                        self.waiting_background = max(0, self.waiting_background - 1)
+
+    def release_slot(self, is_interactive: bool) -> None:
+        """Освободить ранее занятый слот и разбудить ожидающих."""
+        with self._cv:
+            self.active_total = max(0, self.active_total - 1)
+            if not is_interactive:
+                self.active_background = max(0, self.active_background - 1)
+            self._cv.notify_all()
+
+    def snapshot(self) -> dict[str, Any]:
+        """Возвращает атомарный снимок счётчиков менеджера слотов."""
+        with self._cv:
+            return {
+                "active_total": self.active_total,
+                "active_background": self.active_background,
+                "waiting_interactive": self.waiting_interactive,
+                "waiting_background": self.waiting_background,
+                "max_concurrent": self.max_concurrent,
+                "reserved_interactive": self.reserved_interactive,
+            }
+
+
+_qos_manager: QoSSlotManager | None = None
+_qos_manager_lock = threading.Lock()
+
+
+def get_qos_manager(
+    max_concurrent: int = 128,
+    reserved_interactive: int = 2,
+    queue_timeout_s: float = 15.0,
+    keepalive_interval_s: float = 5.0,
+    drain_event: threading.Event | None = None,
+    max_queue_size: int = 128,
+) -> QoSSlotManager:
+    """Возвращает процессный синглтон `QoSSlotManager`, создавая его при необходимости."""
+    global _qos_manager
+    with _qos_manager_lock:
+        if _qos_manager is None:
+            _qos_manager = QoSSlotManager(
+                max_concurrent=max_concurrent,
+                reserved_interactive=reserved_interactive,
+                queue_timeout_s=queue_timeout_s,
+                keepalive_interval_s=keepalive_interval_s,
+                drain_event=drain_event,
+                max_queue_size=max_queue_size,
+            )
+        return _qos_manager
+
+
+def set_qos_manager(mgr: QoSSlotManager | None) -> None:
+    """Устанавливает процессный синглтон `QoSSlotManager` (для wiring/тестов)."""
+    global _qos_manager
+    with _qos_manager_lock:
+        _qos_manager = mgr
+
+
+def reset_qos_manager() -> None:
+    """Сбрасывает процессный синглтон `QoSSlotManager`."""
+    set_qos_manager(None)
 
 
 class HubLifecycleManager:
@@ -356,6 +561,34 @@ class HubLifecycleManager:
             remaining = []
             deadline = time.monotonic() + max(0.0, eff_timeout)
             if self.turn_manager is not None:
+                active_turns_fn = getattr(self.turn_manager, "active_turns", None)
+                active_now = active_turns_fn() if callable(active_turns_fn) else None
+                if isinstance(active_now, (list, tuple, set)) and eff_timeout > 0:
+                    subagents = [
+                        t for t in active_now
+                        if getattr(t, "is_subagent", False) or getattr(t, "subagent_id", None)
+                    ]
+                    if subagents:
+                        subagent_grace = min(DEFAULT_DRAIN_SUBAGENT_GRACE_S, max(0.0, deadline - time.monotonic()))
+                        self._log(
+                            f"drain_subagents_grace_start count={len(subagents)} grace_s={subagent_grace:.1f}"
+                        )
+                        deadline_grace = time.monotonic() + subagent_grace
+                        while time.monotonic() < deadline_grace:
+                            if all(getattr(t, "is_terminal", False) for t in subagents):
+                                break
+                            time.sleep(0.05)
+                        for st in subagents:
+                            if not getattr(st, "is_terminal", False):
+                                self._log(
+                                    f"drain_subagent_interrupt rid={st.rid} turn_id={st.turn_id} "
+                                    f"subagent_id={getattr(st, 'subagent_id', None)}"
+                                )
+                                self.turn_manager.interrupt_for_drain(
+                                    st,
+                                    message=f"bridge restart drain: subagent cancelled with Retry-After: {DEFAULT_SUBAGENT_RETRY_AFTER_S}",
+                                )
+
                 if eff_timeout > 0:
                     remaining = self.turn_manager.wait_for_active_turns(
                         timeout=max(0.0, deadline - time.monotonic())
@@ -406,10 +639,29 @@ class HubLifecycleManager:
             "state": self.state,
         }
 
-    def draining_response(self) -> tuple[int, dict[str, str], dict[str, Any]]:
+    def draining_response(
+        self,
+        is_subagent: bool = False,
+        retry_after_s: int | None = None,
+    ) -> tuple[int, dict[str, str], dict[str, Any]]:
         """Возвращает `(status_code, headers, body)` для отказа новым запросам при `DRAINING`."""
+        if retry_after_s is not None:
+            retry = int(retry_after_s)
+        else:
+            try:
+                retry = int(
+                    os.environ.get("BRIDGE_RETRY_AFTER_S", str(self.retry_after_s))
+                )
+            except (TypeError, ValueError):
+                retry = int(self.retry_after_s)
+        if (
+            retry_after_s is None
+            and is_subagent
+            and "BRIDGE_RETRY_AFTER_S" not in os.environ
+        ):
+            retry = DEFAULT_SUBAGENT_RETRY_AFTER_S
         headers = {
-            "Retry-After": str(self.retry_after_s),
+            "Retry-After": str(retry),
             "X-Bridge-Draining": "true",
         }
         body = {

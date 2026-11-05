@@ -115,6 +115,11 @@ from core.resilience import (  # noqa: E402
 from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
+    KEEPALIVE_INTERVAL_S,
+    QoSSlotManager,
+    QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
+    RESERVED_INTERACTIVE_SLOTS,
+    get_qos_manager,
     has_live_parent,
 )
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
@@ -157,6 +162,7 @@ from core.watchdog import (  # noqa: E402,F401
     AdaptiveTimeoutController,
     ProcessWatchdog,
 )
+from core.model_penalty import get_penalty_tracker  # noqa: E402
 
 
 HOME = Path.home()
@@ -383,6 +389,10 @@ IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
 SAFETY_CAP_S = float(
     os.environ.get("DROID_DSH_BRIDGE_SAFETY_CAP_S", str(int(DEFAULT_SAFETY_CAP_S)))
 )
+UI_RESERVED_SLOTS = int(_bridge_env("UI_RESERVED_SLOTS", "2"))
+SUBAGENT_MAX_CONCURRENT = int(_bridge_env("SUBAGENT_MAX_CONCURRENT", "4"))
+SUBAGENT_QUEUE_TIMEOUT_S = float(_bridge_env("SUBAGENT_QUEUE_TIMEOUT_S", "120.0"))
+SUBAGENT_WATCHDOG_CAP_S = float(_bridge_env("SUBAGENT_WATCHDOG_CAP_S", "300.0"))
 
 
 # RW-009 в живом ходе: запись живого куска клиенту ограничена этим таймаутом (а не 300с
@@ -524,6 +534,8 @@ _NOISE = re.compile(
 )
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+_subagent_slots = threading.BoundedSemaphore(SUBAGENT_MAX_CONCURRENT)
+_qos_lock = threading.Condition()
 _active = {}
 _active_lock = threading.Lock()
 _started = time.time()
@@ -659,6 +671,9 @@ def _build_models_list(
             if not isinstance(m, dict)
             else m.get("context_window", 200000)
         )
+        stat = _PENALTY_TRACKER.get_model_status(mid)
+        is_pen = stat["is_penalized"]
+        pen_until = int(stat["penalized_until"]) if is_pen else None
         card = {
             "id": mid,
             "object": "model",
@@ -671,7 +686,8 @@ def _build_models_list(
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
-            "available": True,
+            "available": not is_pen,
+            "penalized_until": pen_until,
         }
         data.append(card)
         listed.add(mid)
@@ -704,6 +720,10 @@ def _build_models_list(
             if not isinstance(m, dict)
             else m.get("context_window", 200000)
         )
+        target_id = base_id if base_id else alias_id
+        stat = _PENALTY_TRACKER.get_model_status(target_id)
+        is_pen = stat["is_penalized"]
+        pen_until = int(stat["penalized_until"]) if is_pen else None
         card = {
             "id": alias_id,
             "object": "model",
@@ -718,7 +738,8 @@ def _build_models_list(
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
-            "available": True,
+            "available": not is_pen,
+            "penalized_until": pen_until,
         }
         data.append(card)
         listed.add(alias_id)
@@ -898,6 +919,24 @@ def _env_limit(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Положительный вещественный параметр из окружения; нечисло/nan/<=0 -> безопасный дефолт."""
+    try:
+        val = float(os.environ.get(name, default))
+        return val if math.isfinite(val) and val > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int_nonneg(name: str, default: int) -> int:
+    """Неотрицательный целочисленный параметр из окружения; нечисло/<0 -> безопасный дефолт."""
+    try:
+        val = int(os.environ.get(name, default))
+        return val if val >= 0 else default
+    except (TypeError, ValueError):
+        return default
 
 
 FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
@@ -1415,8 +1454,124 @@ _MODEL_BLOCK_STATUSES = re.compile(
 )
 
 
-def _parse_blocked_models(text: str) -> frozenset[str]:
+def _base_quota_model(model: str) -> str:
+    return re.sub(r"-(?:minimal|low|medium|high|xhigh|max)$", "", model)
+
+
+class QuotaCircuitBreakerCache:
+    """Thread-safe quota deadlines, persisted best-effort using wall-clock time."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(
+            path
+            or os.environ.get(
+                "BRIDGE_QUOTA_CACHE_PATH", "/tmp/cli-agent-bridge-429-cache.json"
+            )
+        )
+        self.lock = threading.Lock()
+        self.entries: dict[str, dict] = {}
+        self._file_sig: tuple[int, int] | None = None
+        try:
+            self._load()
+        except (OSError, ValueError, UnicodeDecodeError):
+            pass
+
+    def _load(self) -> None:
+        try:
+            st = self.path.stat()
+            signature = (st.st_mtime_ns, st.st_size)
+            if signature == self._file_sig:
+                return
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            entries: dict[str, dict] = {}
+            now = time.time()
+            if isinstance(data, dict):
+                for model, entry in data.items():
+                    if isinstance(entry, dict):
+                        expires = float(entry.get("expires_at", 0))
+                        if math.isfinite(expires) and expires > now:
+                            entries[str(model)] = {
+                                "expires_at": expires,
+                                "reason": str(entry.get("reason", "429_quota")),
+                            }
+            self.entries, self._file_sig = entries, signature
+        except FileNotFoundError:
+            self.entries, self._file_sig = {}, None
+        except (OSError, ValueError, UnicodeDecodeError, TypeError):
+            pass
+
+    def _save(self) -> None:
+        now = time.time()
+        self.entries = {
+            key: entry
+            for key, entry in self.entries.items()
+            if entry["expires_at"] > now
+        }
+        temporary = None
+        try:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=self.path.name + ".",
+                delete=False,
+            ) as stream:
+                temporary = stream.name
+                json.dump(self.entries, stream)
+                stream.flush()
+                st = os.fstat(stream.fileno())
+            os.replace(temporary, self.path)
+            self._file_sig = (st.st_mtime_ns, st.st_size)
+        except (OSError, ValueError):
+            pass
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    def record_429(
+        self, model_id: str, ttl_s: float = 1800.0, reason: str = "429_quota"
+    ) -> None:
+        if not math.isfinite(ttl_s):
+            ttl_s = 1800.0
+        expires = time.time() + max(0.0, ttl_s)
+        with self.lock:
+            try:
+                self._load()
+            except (OSError, ValueError, UnicodeDecodeError):
+                pass
+            for key in {model_id, _base_quota_model(model_id)}:
+                old = self.entries.get(key, {}).get("expires_at", 0)
+                self.entries[key] = {"expires_at": max(old, expires), "reason": reason}
+            self._save()
+
+    def is_blocked(self, model_id: str) -> bool:
+        with self.lock:
+            now = time.time()
+            return any(
+                self.entries.get(key, {}).get("expires_at", 0) > now
+                for key in {model_id, _base_quota_model(model_id)}
+            )
+
+
+_QUOTA_CB_CACHE = QuotaCircuitBreakerCache()
+
+
+def _parse_blocked_models(
+    text: str,
+    now_utc: float | None = None,
+    *,
+    parsed_rules: list[tuple[frozenset[str], frozenset[str], float | None]]
+    | None = None,
+) -> frozenset[str]:
     """Только конкретные ID в статусных колонках; prose и запреты транспортов не модели."""
+    from datetime import datetime, timedelta, timezone
+
+    now_utc = time.time() if now_utc is None else now_utc
     blocked: set[str] = set()
     headers: list[str] = []
     for line in text.splitlines():
@@ -1436,6 +1591,23 @@ def _parse_blocked_models(text: str) -> frozenset[str]:
             cells[status_index]
         ):
             continue
+        expiration = re.search(
+            r"\b\(?до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)?",
+            line,
+            re.I,
+        )
+        expires = None
+        if expiration:
+            try:
+                expires = (
+                    datetime.strptime(expiration.group(1), "%Y-%m-%d %H:%M")
+                    .replace(tzinfo=timezone(timedelta(hours=3)))
+                    .timestamp()
+                )
+            except ValueError:
+                pass
+        elif re.search(r"\bдо\b.*MSK", line, re.I):
+            _log(f"warning: unparseable expiration date in model note: {line.strip()}")
         if "группа" in headers:
             group = cells[headers.index("группа")].lower()
             if group not in ("модели", "models"):
@@ -1445,8 +1617,12 @@ def _parse_blocked_models(text: str) -> frozenset[str]:
             model_cell = cells[0].split(" / ", 1)[0]
         else:
             continue
-        for model in re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._:-]*)`", model_cell):
-            blocked.add(model)
+        models = frozenset(re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._:-]*)`", model_cell))
+        if parsed_rules is not None:
+            parsed_rules.append((frozenset(), models, expires))
+        if expires is not None and now_utc > expires:
+            continue
+        blocked.update(models)
     return frozenset(blocked)
 
 
@@ -1468,8 +1644,18 @@ class ModelNotesFilter:
         self.lock = threading.Lock()
         self.loading: threading.Event | None = None
         self.signature: tuple[int, int] | None = None
+        self._parsed_rules: (
+            list[tuple[frozenset[str], frozenset[str], float | None]] | None
+        ) = None
 
     def is_blocked(self, model: str) -> bool:
+        if _QUOTA_CB_CACHE.is_blocked(model):
+            return True
+        return self._notes_blocked(model) or self._notes_blocked(
+            _base_quota_model(model)
+        )
+
+    def _notes_blocked(self, model: str) -> bool:
         now = time.monotonic()
         if now < self.expires_at:
             return model in self.blocked
@@ -1504,17 +1690,30 @@ class ModelNotesFilter:
                     try:
                         stat = self.path.stat()
                         signature = (stat.st_mtime_ns, stat.st_size)
-                        models = (
-                            self.blocked
-                            if signature == self.signature
-                            else _parse_blocked_models(
-                                self.path.read_text(encoding="utf-8")
+                        now_utc = time.time()
+                        if (
+                            signature == self.signature
+                            and self._parsed_rules is not None
+                        ):
+                            rules = self._parsed_rules
+                            models = frozenset(
+                                model
+                                for _, model_ids, expiry_ts in rules
+                                if expiry_ts is None or expiry_ts >= now_utc
+                                for model in model_ids
                             )
-                        )
+                        else:
+                            rules = []
+                            models = _parse_blocked_models(
+                                self.path.read_text(encoding="utf-8"),
+                                now_utc,
+                                parsed_rules=rules,
+                            )
                     except (OSError, UnicodeError, ValueError):
-                        signature, models = None, frozenset()
+                        signature, models, rules = None, frozenset(), None
                     with self.lock:
                         self.blocked, self.signature = models, signature
+                        self._parsed_rules = rules
                         self.expires_at = time.monotonic() + ttl
                         self.loading = None
                     done.set()
@@ -1533,6 +1732,7 @@ class ModelNotesFilter:
 
 
 _MODEL_NOTES_FILTER = ModelNotesFilter()
+_PENALTY_TRACKER = get_penalty_tracker()
 
 
 class _HandlerSink(ResponseSink):
@@ -1558,6 +1758,8 @@ class _HandlerSink(ResponseSink):
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
+        if getattr(self._handler, "_headers_already_sent", False):
+            return
         try:
             self._handler.send_response(int(status))
             for key, value in headers:
@@ -4784,7 +4986,9 @@ def _finish_attempt(
     return chat.turns
 
 
-def _client_gone(sock: socket.socket) -> bool:
+def _client_gone(sock: socket.socket | None) -> bool:
+    if sock is None or not hasattr(sock, "fileno"):
+        return False
     try:
         ready, _, _ = select.select([sock], [], [], 0)
         return bool(ready) and sock.recv(1, socket.MSG_PEEK) == b""
@@ -4853,6 +5057,18 @@ class _LiveBudgetExceeded(Exception):
     """RW-011 в живом ходе: очередной кусок live-доставки не влез в бюджет памяти."""
 
 
+def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> None:
+    """Освобождает слоты хода под _qos_lock с оповещением ожидающих запросов."""
+    if t_held and not t_released[0]:
+        t_released[0] = True
+        with _qos_lock:
+            _slots.release()
+            if getattr(handler, "_subagent_slot_held", False):
+                handler._subagent_slot_held = False
+                _subagent_slots.release()
+            _qos_lock.notify_all()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
@@ -4892,6 +5108,57 @@ class Handler(BaseHTTPRequestHandler):
         """Безопасные поля корреляции для журнала маршрута."""
         trace = self._trace if REQUEST_ATTRIBUTION_ENABLED else None
         return f"request_id={trace.request_id if trace else '-'} subagent_id={trace.subagent_id if trace and trace.subagent_id else '-'}"
+
+    def _is_subagent_request(self) -> bool:
+        if hasattr(self, "headers") and self.headers:
+            raw = self.headers.get(SUBAGENT_ID_HEADER)
+            if raw and raw.strip():
+                return True
+        trace = getattr(self, "_trace", None)
+        if trace is not None and getattr(trace, "subagent_id", None):
+            return True
+        return False
+
+    def _subagent_id(self) -> str | None:
+        if hasattr(self, "headers") and self.headers:
+            raw = self.headers.get(SUBAGENT_ID_HEADER)
+            if raw and raw.strip():
+                return raw.strip()
+        trace = getattr(self, "_trace", None)
+        if trace is not None and getattr(trace, "subagent_id", None):
+            return trace.subagent_id
+        return None
+
+    def _effective_safety_cap_s(self) -> float:
+        raw_cap = None
+        if hasattr(self, "headers") and self.headers:
+            raw_cap = self.headers.get("X-Watchdog-Cap-Seconds")
+        if raw_cap:
+            try:
+                val = float(raw_cap.strip())
+                if val > 0 and math.isfinite(val):
+                    return min(val, TIMEOUT_S)
+            except ValueError:
+                pass
+        if self._is_subagent_request():
+            return SUBAGENT_WATCHDOG_CAP_S
+        return TIMEOUT_S
+
+    def _effective_idle_timeout_s(self) -> float:
+        raw_to = None
+        if hasattr(self, "headers") and self.headers:
+            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get("X-Subagent-Timeout")
+        if raw_to:
+            try:
+                val = float(raw_to.strip())
+                if val > 0 and math.isfinite(val):
+                    return max(val, 1.0)
+            except ValueError:
+                pass
+        return IDLE_TIMEOUT_S
+
+    def _effective_turn_timeout_s(self) -> float:
+        return self._effective_idle_timeout_s()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
@@ -5108,19 +5375,59 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _acquire_slot(self, keepalive):
-        """Ждём слот семафора до QUEUE_TIMEOUT_S, попутно keepalive и проверка клиента."""
+        """Ждём слот семафора с учётом QoS (резерв слотов для UI и квота сабагентов)."""
+        is_subagent = self._is_subagent_request()
         waited = time.monotonic()
         last_ka = 0.0
-        while not _slots.acquire(timeout=1.0):
-            if _client_gone(self.connection):
-                return "client_gone"
-            if time.monotonic() - waited > QUEUE_TIMEOUT_S:
-                return "queue_timeout"
-            if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
-                last_ka = time.monotonic()
-                if not keepalive():
+        subagent_slot_acquired = False
+        timeout_budget = SUBAGENT_QUEUE_TIMEOUT_S if is_subagent else QUEUE_TIMEOUT_S
+        effective_reserved = min(UI_RESERVED_SLOTS, max(0, MAX_CONCURRENT - 1))
+
+        try:
+            if is_subagent:
+                while not _subagent_slots.acquire(timeout=1.0):
+                    if _client_gone(self.connection):
+                        return "client_gone"
+                    if time.monotonic() - waited > timeout_budget:
+                        return "queue_timeout"
+                    if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                        last_ka = time.monotonic()
+                        if not keepalive():
+                            return "client_gone"
+                subagent_slot_acquired = True
+
+            while True:
+                with _qos_lock:
+                    if is_subagent and _slots._value <= effective_reserved:
+                        can_acquire = False
+                    else:
+                        can_acquire = _slots.acquire(blocking=False)
+
+                    if can_acquire:
+                        self._subagent_slot_held = is_subagent
+                        return ""
+
+                if _client_gone(self.connection):
+                    if subagent_slot_acquired:
+                        _subagent_slots.release()
                     return "client_gone"
-        return ""
+                if time.monotonic() - waited > timeout_budget:
+                    if subagent_slot_acquired:
+                        _subagent_slots.release()
+                    return "queue_timeout"
+                if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                    last_ka = time.monotonic()
+                    if not keepalive():
+                        if subagent_slot_acquired:
+                            _subagent_slots.release()
+                        return "client_gone"
+
+                with _qos_lock:
+                    _qos_lock.wait(timeout=0.2)
+        except Exception:
+            if subagent_slot_acquired:
+                _subagent_slots.release()
+            raise
 
     _FAIL_CLOSE_KINDS = ("stream_error", "pump_error", "live_invalidated")
 
@@ -5150,8 +5457,15 @@ class Handler(BaseHTTPRequestHandler):
         tool_calls: list = []
         usage = {}
         result_ev = {}
+        turn_start = time.monotonic()
         last_ka = time.monotonic()
-        deadline = time.monotonic() + TIMEOUT_S
+        is_subagent = self._is_subagent_request()
+        # Safety cap is the absolute upper bound (watchdog against infinite loops)
+        safety_cap_s = self._effective_safety_cap_s()
+        safety_deadline = turn_start + safety_cap_s
+
+        idle_timeout_s = self._effective_idle_timeout_s()
+        last_activity = turn_start
         cur_mid = [
             None
         ]  # mid последнего content-куска в pieces (разделитель "\n\n" между сообщениями)
@@ -5177,6 +5491,7 @@ class Handler(BaseHTTPRequestHandler):
                 "num_turns": result_ev.get("num_turns"),
                 "tool_calls": tool_calls,
                 "events": events,
+                "timeout_s": safety_cap_s,
             }
 
         # RW-009 в живом ходе: зависший (не читающий, но не закрытый) клиент — write()
@@ -5284,36 +5599,35 @@ class Handler(BaseHTTPRequestHandler):
             if managed_turn is not None and managed_turn.cancel_event.is_set():
                 run.cancel.set()
                 return state("client_gone", 1, "turn cancelled")
-            if time.monotonic() > deadline:
-                return state("timeout", 124, f"proxy timeout after {TIMEOUT_S}s")
+            now = time.monotonic()
+            if now > safety_deadline:
+                return state("safety_cap", 124, f"proxy safety cap timeout after {safety_cap_s:.1f}s")
             if (
                 not run.got_event
-                and time.monotonic() - run.started > FIRST_TOKEN_TIMEOUT_S
+                and now - run.started > FIRST_TOKEN_TIMEOUT_S
             ):
                 return state(
                     "first_token_timeout",
                     124,
                     f"no droid event within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 )
-            if (
-                run.got_event
-                and run.last_progress
-                and time.monotonic() - run.last_progress > SILENCE_WATCHDOG_S
-            ):
+            latest_progress = max(last_activity, getattr(run, "last_progress", 0.0) or 0.0)
+            effective_idle = max(idle_timeout_s, 1.0)
+            if run.got_event and (now - latest_progress > effective_idle):
                 if (
-                    SILENCE_WATCHDOG_S >= 10.0
+                    effective_idle >= 10.0
                     and proc_watchdog is not None
                     and rproc is not None
                     and getattr(rproc, "pid", 0)
                     and proc_watchdog.sample(rproc.pid).has_progress
                 ):
-                    run.last_progress = time.monotonic()
+                    last_activity = now
+                    run.last_progress = now
                 else:
-                    # Тишина: сбрасывают только события ТЕКУЩЕГО хода (не keepalive/чужие).
                     return state(
-                        "timeout",
+                        "idle_timeout",
                         124,
-                        f"no droid progress within {SILENCE_WATCHDOG_S:g}s",
+                        f"no droid progress within {effective_idle:.1f}s",
                     )
             if not self._client_write_dead and _client_gone(self.connection):
                 if detach_on_disconnect:
@@ -5324,6 +5638,7 @@ class Handler(BaseHTTPRequestHandler):
                     return state("client_gone", 1)
             try:
                 kind, payload = take()
+                last_activity = time.monotonic()
             except queue.Empty:
                 # RW-204/RW-203: страховка сверх проверки внутри text_delta/reasoning_delta
                 # ниже — overflow Run.q (RW-204) мог выбросить именно terminal-событие
@@ -5640,9 +5955,7 @@ class Handler(BaseHTTPRequestHandler):
                 t_released = [False]
 
                 def _release_turn_slot() -> None:
-                    if t_held and not t_released[0]:
-                        t_released[0] = True
-                        _slots.release()
+                    release_turn_slot(self, t_held, t_released)
 
                 managed_turn = getattr(self, "_active_managed_turn", None)
                 if managed_turn is not None:
@@ -5893,16 +6206,17 @@ class Handler(BaseHTTPRequestHandler):
     def _error_body(out: dict) -> Any:
         st = out.get("state")
         label = str(out.get("backend_kind") or "droid")  # имя бинарника в тексте ошибки
+        timeout_s = float(out.get("timeout_s") or TIMEOUT_S)
         if st == "timeout":
             return {
-                "message": f"{label} exec timed out after {TIMEOUT_S}s",
+                "message": out.get("err") or f"{label} exec timed out after {timeout_s:.1f}s",
                 "type": "timeout",
                 "code": 504,
             }
         if st in ("idle_timeout", "safety_cap"):
             return {
                 "message": str(
-                    out.get("err") or f"{label} exec timed out after {TIMEOUT_S}s"
+                    out.get("err") or f"{label} exec timed out after {timeout_s:.1f}s"
                 )[:500],
                 "type": "timeout",
                 "code": 504,
@@ -6133,7 +6447,7 @@ class Handler(BaseHTTPRequestHandler):
                     "tool_emulation": True,
                     "uptime_s": int(time.time() - _started),
                 },
-                extra_headers={"X-Bridge-Draining": "1"} if draining else None,
+                extra_headers={"X-Bridge-Draining": "true"} if draining else None,
             )
             return
         if self._handle_models_get():
@@ -6291,6 +6605,28 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._headers_already_sent = False
+        self._trace = None
+        self._response_status = 0
+        path = self.path.split("?", 1)[0]
+        m_cancel = (
+            re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
+            if _is_detached_enabled()
+            else None
+        )
+        if not m_cancel and (
+            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
+        ):
+            is_sub = self._is_subagent_request()
+            code, drain_headers, drain_body = LIFECYCLE.draining_response(is_subagent=is_sub)
+            err = drain_body.get("error", {})
+            self._reject(
+                code,
+                err.get("type", "overloaded"),
+                err.get("message", "bridge is shutting down"),
+                extra_headers=drain_headers,
+            )
+            return
         hub_auth_ok = _auth_ok(self)
         deferred_passthrough_auth = False
         if not hub_auth_ok:
@@ -6333,22 +6669,7 @@ class Handler(BaseHTTPRequestHandler):
         self._context_pruned = None
         managed_turn: ManagedTurn | None = None
         attached_existing = False
-        path = self.path.split("?", 1)[0]
-        m_cancel = (
-            re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
-            if _is_detached_enabled()
-            else None
-        )
-        if not m_cancel and (
-            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
-        ):
-            self._reject(
-                503,
-                "overloaded",
-                "bridge is shutting down",
-                extra_headers={"Retry-After": "5", "X-Bridge-Draining": "1"},
-            )
-            return
+
         # (1) framing: Transfer-Encoding не поддерживаем, Content-Length строго числовой.
         if self.headers.get_all("Transfer-Encoding") is not None:
             self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
@@ -6431,8 +6752,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(req, dict):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
+            self._parsed_req = req
             if REQUEST_ATTRIBUTION_ENABLED:
                 self._trace = _resolve_trace(dict(self.headers.items()), req)
+            else:
+                self._trace = None
             # (7) путь.
             m_provider_chat = _PROVIDER_CHAT_RE.match(path)
             provider_id = m_provider_chat.group(1) if m_provider_chat else None
@@ -6541,6 +6865,29 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # Проверка штрафа модели (Fail-Fast 503) по каноническому идентификатору
+            canonical_pen_id = (resolved_id or model_id).strip().lower()
+            stat = _PENALTY_TRACKER.get_model_status(canonical_pen_id)
+            if stat["is_penalized"]:
+                retry_after_s = max(1, math.ceil(stat["remaining_cooldown"]))
+                pen_until = int(stat["penalized_until"])
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": (
+                                f"Model '{model_id}' is temporarily penalized due to start failures. "
+                                f"Cooldown active for {retry_after_s}s."
+                            ),
+                            "type": "model_penalized",
+                            "code": 503,
+                            "penalized_until": pen_until,
+                        }
+                    },
+                    extra_headers={"Retry-After": str(retry_after_s)},
+                )
+                return
+
             # Проверка скоупа провайдера для чата
             if provider_id is not None:
                 owner = PROVIDER_SCOPES[provider_id]
@@ -6628,9 +6975,12 @@ class Handler(BaseHTTPRequestHandler):
                         "passthrough requires an exact model id",
                     )
                     return
-                if alias is not None:
-                    req = {**req, "model": model_id}
-                    if req.get("reasoning_effort") is None:
+                upstream_model = model.get("upstream_model")
+                has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+                if has_upstream or alias is not None:
+                    target_model = upstream_model.strip() if has_upstream else model_id
+                    req = {**req, "model": target_model}
+                    if alias is not None and req.get("reasoning_effort") is None:
                         req["reasoning_effort"] = alias_effort
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
                 _log(
@@ -6846,12 +7196,8 @@ class Handler(BaseHTTPRequestHandler):
                             resume_turn_id=resume_turn_id or None,
                             stream=bool(req.get("stream")),
                             emulate_tools=emulate_tools,
-                            idle_timeout_s=(
-                                SILENCE_WATCHDOG_S
-                                if _is_watchdog_enabled()
-                                else TIMEOUT_S
-                            ),
-                            safety_cap_s=TIMEOUT_S,
+                            idle_timeout_s=self._effective_idle_timeout_s(),
+                            safety_cap_s=self._effective_safety_cap_s(),
                         )
                     )
                 except PermissionError:
@@ -6867,6 +7213,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._reject(400, "invalid_request", str(exc), model_id, model_len)
                     return
             self._active_managed_turn = managed_turn
+            if managed_turn is not None:
+                managed_turn.is_subagent = self._is_subagent_request()
+                managed_turn.subagent_id = self._subagent_id()
             ctx = {
                 "request_id": self._trace.request_id if self._trace else None,
                 "subagent_id": self._trace.subagent_id if self._trace else None,
@@ -7093,7 +7442,9 @@ class Handler(BaseHTTPRequestHandler):
             self, "_active_managed_turn", None
         )
         if ctx.get("attached_existing") and managed_turn is not None:
-            managed_turn.done_event.wait(timeout=TIMEOUT_S)
+            eff_fn = getattr(self, "_effective_turn_timeout_s", None)
+            eff_to = eff_fn() if callable(eff_fn) else TIMEOUT_S
+            managed_turn.done_event.wait(timeout=eff_to)
             if managed_turn.final_dict is not None:
                 return dict(managed_turn.final_dict)
         adapter = BACKENDS.get(ctx["backend"])
@@ -7235,55 +7586,196 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _record_turn_outcome(
-        lease: ResilienceLease, out: dict, backend_err: Any
+        lease: ResilienceLease, out: dict, backend_err: Any, model_id: str = ""
     ) -> None:
         """Явный исход хода CLI-бэкенда: успех — `rc == 0` и нет ошибки бэкенда (ADR-0020 §3.2)."""
         if backend_err is None and out.get("rc") == 0:
             lease.record_success()
+            if model_id:
+                _PENALTY_TRACKER.record_start_success(model_id)
         elif out.get("state") in _RESILIENCE_NEUTRAL_STATES:
             # Локальная перегрузка/хранилище моста — не вина бэкенда: брейкер не штрафуем.
             lease.record_discard(str(out.get("state")))
         else:
             lease.record_failure()
+            if model_id:
+                reason = str(
+                    out.get("error") or out.get("state") or "rc_non_zero"
+                ).strip()[:120]
+                _PENALTY_TRACKER.record_start_failure(
+                    model_id,
+                    reason,
+                )
 
     def _current_lease(self) -> ResilienceLease:
         """Lease текущего запроса; вне `_serve_resilient` (тесты, прямой вызов) — пустой (no-op)."""
         return getattr(self, "_resilience_lease", None) or ResilienceLease("")
 
     def _serve_resilient(self, backend_id: str, serve: Callable[[], None]) -> None:
-        """Допуск по брейкеру и отсеку ДО любых заголовков; отказ — честный 503 + Retry-After."""
-        try:
-            lease = RESILIENCE.acquire(backend_id)
-        except ResilienceError as exc:
-            _log(
-                f"reject reason=resilience code={exc.error_code} backend={backend_id} "
-                f"retry_after={exc.retry_after}"
-            )
+        """Допуск по QoS-квоте, брейкеру и отсеку ДО любых заголовков; отказ — честный 503."""
+        trace = getattr(self, "_trace", None)
+        subagent_id = (
+            getattr(trace, "subagent_id", None)
+            if trace
+            else self.headers.get("x-subagent-id")
+        )
+        is_interactive = subagent_id is None or str(subagent_id).strip() == ""
+
+        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", 15.0)
+        qos = get_qos_manager(
+            max_concurrent=MAX_CONCURRENT,
+            reserved_interactive=_env_int_nonneg(
+                "BRIDGE_RESERVED_INTERACTIVE_SLOTS",
+                RESERVED_INTERACTIVE_SLOTS,
+            ),
+            queue_timeout_s=qos_timeout,
+            keepalive_interval_s=_env_float(
+                "BRIDGE_KEEPALIVE_INTERVAL_S", KEEPALIVE_INTERVAL_S
+            ),
+            drain_event=getattr(LIFECYCLE, "drain_started", None),
+            max_queue_size=_env_int_nonneg("BRIDGE_MAX_QUEUE_SIZE", 128),
+        )
+
+        headers_sent = [False]
+        req = getattr(self, "_parsed_req", None)
+        is_stream = bool(isinstance(req, dict) and req.get("stream") is True)
+
+        def _keepalive_cb() -> bool:
+            if _client_gone(self.connection):
+                return False
+            if is_stream:
+                try:
+                    if not headers_sent[0]:
+                        headers_sent[0] = True
+                        self._headers_already_sent = True
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "text/event-stream; charset=utf-8"
+                        )
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "keep-alive")
+                        self.send_header("X-Accel-Buffering", "no")
+                        self.end_headers()
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    return True
+                except Exception:
+                    return False
+            return True
+
+        qos_ok, qos_reason = qos.acquire_slot(
+            is_interactive=is_interactive,
+            keepalive_cb=_keepalive_cb if is_stream else None,
+            timeout=qos_timeout,
+            client_gone_fn=lambda: _client_gone(getattr(self, "connection", None)),
+        )
+        if not qos_ok:
+            if qos_reason == "client_gone":
+                self.close_connection = True
+                return
+            if headers_sent[0]:
+                err_payload = json.dumps(
+                    {
+                        "error": {
+                            "message": (
+                                "bridge is draining for restart"
+                                if qos_reason == "draining"
+                                else (
+                                    "Request queue is full"
+                                    if qos_reason == "queue_full"
+                                    else "Queue timeout exceeded waiting for slot"
+                                )
+                            ),
+                            "type": "overloaded_error",
+                            "code": 503,
+                        }
+                    }
+                )
+                try:
+                    self.wfile.write(f"data: {err_payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                self.close_connection = True
+                return
+
             self.close_connection = True
+            retry_s = _env_int_nonneg("BRIDGE_RETRY_AFTER_S", 3)
+            extra_headers = {"Retry-After": str(retry_s)}
+            if qos_reason == "draining":
+                extra_headers["X-Bridge-Draining"] = "true"
             self._send(
                 503,
                 {
                     "error": {
-                        "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
-                        "type": exc.error_type,
-                        "code": exc.error_code,
-                        "retry_after": exc.retry_after,
+                        "message": (
+                            "bridge is draining for restart"
+                            if qos_reason == "draining"
+                            else (
+                                "Request queue is full"
+                                if qos_reason == "queue_full"
+                                else "Queue timeout exceeded waiting for slot"
+                            )
+                        ),
+                        "type": "overloaded",
+                        "code": 503,
                     }
                 },
-                extra_headers={"Retry-After": str(exc.retry_after)},
+                extra_headers=extra_headers,
             )
             return
-        # Handler живёт на соединение (keep-alive): lease привязан только к этому запросу.
-        self._resilience_lease = lease
+
         try:
-            with lease:
-                try:
-                    serve()
-                except (BrokenPipeError, ConnectionResetError):
-                    lease.record_discard("client_disconnected")
-                    raise
+            try:
+                lease = RESILIENCE.acquire(backend_id)
+            except ResilienceError as exc:
+                _log(
+                    f"reject reason=resilience code={exc.error_code} backend={backend_id} "
+                    f"retry_after={exc.retry_after}"
+                )
+                self.close_connection = True
+                if headers_sent[0]:
+                    err_payload = json.dumps(
+                        {
+                            "error": {
+                                "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
+                                "type": exc.error_type,
+                                "code": exc.error_code,
+                                "retry_after": exc.retry_after,
+                            }
+                        }
+                    )
+                    try:
+                        self.wfile.write(f"data: {err_payload}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    return
+                self._send(
+                    503,
+                    {
+                        "error": {
+                            "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
+                            "type": exc.error_type,
+                            "code": exc.error_code,
+                            "retry_after": exc.retry_after,
+                        }
+                    },
+                    extra_headers={"Retry-After": str(exc.retry_after)},
+                )
+                return
+            self._resilience_lease = lease
+            try:
+                with lease:
+                    try:
+                        serve()
+                    except (BrokenPipeError, ConnectionResetError):
+                        lease.record_discard("client_disconnected")
+                        raise
+            finally:
+                self._resilience_lease = None
         finally:
-            self._resilience_lease = None
+            qos.release_slot(is_interactive=is_interactive)
 
     def _serve_passthrough(
         self,
@@ -7319,13 +7811,33 @@ class Handler(BaseHTTPRequestHandler):
             adapter.handle(
                 path=self.path, raw_body=raw, request=req, headers=headers, sink=sink
             )
+            fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+            canonical_model_id = (
+                _resolve_model_alias(model_id, fleet_models)[0]
+                if _resolve_model_alias(model_id, fleet_models)
+                else model_id
+            )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
-            elif 0 < sink.status < 500:
+            elif sink.status == 429 or sink.status in (402, 408):
+                # 429 / 402 / 408: модель исчерпала квоту/лимит/таймаут старта
+                lease.record_success()
+                _PENALTY_TRACKER.record_start_failure(
+                    canonical_model_id, f"http_{sink.status}"
+                )
+            elif 200 <= sink.status < 300:
+                # 2xx: реальный успешный ответ модели
+                lease.record_success()
+                _PENALTY_TRACKER.record_start_success(canonical_model_id)
+            elif 400 <= sink.status < 500:
+                # Клиентские ошибки (400, 401, 403, 404, 422 и т.д.): нейтральны к здоровью модели
                 lease.record_success()
             else:
                 lease.record_failure()
+                _PENALTY_TRACKER.record_start_failure(
+                    canonical_model_id, f"http_{sink.status}"
+                )
         finally:
             _log(
                 f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
@@ -7348,7 +7860,14 @@ class Handler(BaseHTTPRequestHandler):
             lease.record_discard("client_disconnected")
             return
         backend_err = self._error_body(out)
-        self._record_turn_outcome(lease, out, backend_err)
+        raw_m = str(ctx.get("model") or "")
+        fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+        cli_canon_id = (
+            _resolve_model_alias(raw_m, fleet_models)[0]
+            if _resolve_model_alias(raw_m, fleet_models)
+            else raw_m
+        )
+        self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         if err is not None:
             self._send(err["code"], {"error": err})
@@ -7639,7 +8158,14 @@ class Handler(BaseHTTPRequestHandler):
             lease.record_discard("client_disconnected")
             return
         backend_err = self._error_body(out)
-        self._record_turn_outcome(lease, out, backend_err)
+        raw_m = str(ctx.get("model") or "")
+        fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
+        cli_canon_id = (
+            _resolve_model_alias(raw_m, fleet_models)[0]
+            if _resolve_model_alias(raw_m, fleet_models)
+            else raw_m
+        )
+        self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента

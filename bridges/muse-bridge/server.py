@@ -55,7 +55,90 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
+
+_BRIDGE_DIR = str(Path(__file__).resolve().parent)
+if _BRIDGE_DIR not in sys.path:
+    sys.path.insert(0, _BRIDGE_DIR)
+
+from muse_runtime.process_supervisor import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    ProcessSupervisor,
+    ProcessSupervisorConfig,
+)
+from muse_runtime.account_pool import AccountPool, AccountPoolConfig  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from muse_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+__all__ = [
+    "ProcessSupervisor",
+    "ProcessSupervisorConfig",
+    "AccountPool",
+    "AccountPoolConfig",
+    "StreamRelay",
+    "ToolCallParser",
+    "_loads_tolerant",
+    "_parse_tool_call_block",
+    "_recover_trailing_braces",
+    "_split_tool_call_inner",
+    "_split_tool_calls",
+    "_strip_code_fence",
+    "_split_tool_calls_impl",
+    "_flatten_content",
+    "_normalize_arguments",
+    "_normalize_tool_call",
+    "_render_tool_call",
+    "_tool_choice_none",
+    "_tool_choice_name",
+    "_tools_section",
+    "_render_turn",
+    "_messages_to_prompt",
+    "_assemble_prompt",
+    "_estimate_tokens",
+    "_estimate_usage_tokens",
+    "_context_limit",
+    "_context_target",
+    "_context_retry_target",
+    "PruneResult",
+    "_overhead_tokens_estimate",
+    "_partition_units",
+    "_compute_mandatory_est_only",
+    "_prune_messages",
+]
+
+from muse_runtime.tool_parser import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    ToolCallParser,
+    _loads_tolerant,
+    _parse_tool_call_block,
+    _recover_trailing_braces,
+    _split_tool_call_inner,
+    _split_tool_calls as _split_tool_calls_impl,
+    _strip_code_fence,
+)
+from muse_runtime.prompt_builder import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    _flatten_content,
+    _normalize_arguments,
+    _normalize_tool_call,
+    _render_tool_call,
+    _tool_choice_none,
+    _tool_choice_name,
+    _tools_section,
+    _render_turn,
+    _messages_to_prompt,
+    _assemble_prompt,
+)
+from muse_runtime.token_budget import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    _estimate_tokens,
+    _estimate_usage_tokens,
+    _context_limit as _rt_context_limit,
+    _context_target,
+    _context_retry_target,
+    _overhead_tokens_estimate,
+)
+from muse_runtime.context_pruner import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+    PruneResult,
+    _partition_units,
+    _compute_mandatory_est_only,
+    _prune_messages,
+    _log_context_prune as _rt_log_context_prune,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -380,6 +463,7 @@ _active: dict[str, float] = {}
 _active_lock = threading.Lock()
 # Слоты в карантине (по записи на слот: pgid не подтверждённых мёртвыми групп); под _active_lock.
 _quarantined_slots: list[list[int]] = []
+_account_pool = AccountPool(AccountPoolConfig(max_concurrent=MAX_CONCURRENT, n_floor=1))
 _slots = threading.Semaphore(MAX_CONCURRENT)
 _LOG_LOCK = threading.Lock()
 
@@ -649,612 +733,16 @@ def _format_err_log(
     )
 
 
-def _flatten_content(content: Any) -> str:
-    """OpenAI content (str | list[part]) -> plain text."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if "text" in item:
-                    parts.append(str(item["text"]))
-                elif item.get("type") == "image_url":
-                    parts.append("[image omitted]")
-        return "\n".join(p for p in parts if p)
-    return str(content)
+# [Refactored] Prompt building moved to muse_runtime.prompt_builder
 
-
-def _normalize_arguments(value: Any) -> dict | None:
-    """arguments -> JSON-объект; None, если значение задано, но объектом не является.
-
-    None отличает невалидные аргументы (строку-не-JSON, список, число, null) от
-    отсутствия ключа: вызывающий код не вправе молча подменять их на пустой словарь
-    и запускать инструмент с пустыми аргументами.
-    """
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if text:
-            try:
-                parsed = json.loads(text)
-            except ValueError:
-                return None
-            if isinstance(parsed, dict):
-                return parsed
-    return None
-
-
-def _normalize_tool_call(item: Any) -> dict:
-    """Один OpenAI tool_call -> {"id", "name", "arguments"}.
-
-    id сохраняется, чтобы результат [tool result <id>] однозначно сопоставлялся
-    с конкретным вызовом при нескольких одинаковых инструментах.
-    """
-    if not isinstance(item, dict):
-        return {"id": "", "name": "", "arguments": {}}
-    fn = item.get("function") if isinstance(item.get("function"), dict) else {}
-    name = fn.get("name") or item.get("name") or ""
-    args = fn.get("arguments")
-    if args is None:
-        args = item.get("arguments")
-    normalized = _normalize_arguments(args)
-    return {
-        "id": str(item.get("id") or ""),
-        "name": str(name),
-        "arguments": normalized if normalized is not None else {},
-    }
-
-
-def _render_tool_call(item: Any) -> str:
-    """Историю вызова рендерим тем же блоком, что просим от модели."""
-    payload = json.dumps(_normalize_tool_call(item), ensure_ascii=False)
-    return f"{TOOL_CALL_OPEN}{payload}{TOOL_CALL_CLOSE}"
-
-
-def _tool_choice_none(tool_choice: Any) -> bool:
-    """tool_choice:"none" — инструменты не предлагаем вовсе."""
-    return isinstance(tool_choice, str) and tool_choice.strip().lower() == "none"
-
-
-def _tool_choice_name(tool_choice: Any) -> str:
-    """Имя обязательного инструмента из tool_choice ("" — без принуждения)."""
-    if not isinstance(tool_choice, dict):
-        return ""
-    fn = (
-        tool_choice.get("function")
-        if isinstance(tool_choice.get("function"), dict)
-        else {}
+def _split_tool_calls(
+    chunks: list[str], tool_schemas: list[dict] | None = None
+) -> tuple[str, list[dict]]:
+    return _split_tool_calls_impl(
+        chunks,
+        tool_schemas,
+        sanitize_func=sanitize_tool_calls_list if BRIDGE_SANITIZE_TOOL_CALLS else None,
     )
-    name = fn.get("name") or tool_choice.get("name") or ""
-    return str(name) if name else ""
-
-
-def _tools_section(tools: list, tool_choice: Any) -> str:
-    """Английская секция протокола и схем инструментов для промпта."""
-    lines = [
-        "[system]",
-        "# Tool calling protocol",
-        "You may call the external tools listed below.",
-        "When you need a tool, output ONLY blocks exactly in this form:",
-        f'{TOOL_CALL_OPEN}{{"name": "<tool_name>", "arguments": {{<json>}}}}{TOOL_CALL_CLOSE}',
-        "You may output several such blocks in a row. Do not narrate around them.",
-        "Tool results arrive later as lines like [tool result <id>] with the result text.",
-        "If no tool is needed, reply normally in plain text.",
-        "Never attempt to use built-in tools; the only tools available are the ones listed here.",
-        "Do not run shell commands or edit files yourself: emit a tool_call block instead.",
-    ]
-    if tool_choice == "required":
-        lines.append("You MUST call at least one tool now.")
-    else:
-        forced = _tool_choice_name(tool_choice)
-        if forced:
-            lines.append(f'You MUST call the tool "{forced}" now.')
-    lines.append("")
-    lines.append("Available tools:")
-    for item in tools:
-        fn = item.get("function") if isinstance(item.get("function"), dict) else item
-        if not isinstance(fn, dict):
-            continue
-        name = str(fn.get("name") or "")
-        desc = str(fn.get("description") or "")
-        params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
-        lines.append(f"- {name}: {desc}")
-        lines.append("  parameters: " + json.dumps(params, ensure_ascii=False))
-    return "\n".join(lines)
-
-
-def _render_turn(msg: dict[str, Any]) -> tuple[str, str]:
-    """Одна реплика истории -> (role, текст); пустой текст = пропустить.
-
-    assistant.tool_calls и role:"tool" рендерятся в те же блоки, что протокол.
-    """
-    role = str(msg.get("role") or "user").strip().lower()
-    text = _flatten_content(msg.get("content"))
-    if role == "tool":
-        call_id = str(msg.get("tool_call_id") or msg.get("id") or "")
-        name = str(msg.get("name") or "")
-        header = f"[tool result {call_id}]"
-        if name:
-            header += f" ({name})"
-        return role, f"{header}\n{text}" if text.strip() else header
-    if role == "assistant":
-        parts = [text] if text.strip() else []
-        calls = msg.get("tool_calls")
-        if isinstance(calls, list):
-            parts.extend(_render_tool_call(tc) for tc in calls)
-        return role, "\n".join(parts)
-    return role, text
-
-
-def _messages_to_prompt(messages: list[dict[str, Any]]) -> tuple[str, str]:
-    """История OpenAI -> (system_text, размеченный текст реплик)."""
-    systems: list[str] = []
-    turns: list[str] = []
-    for msg in messages or []:
-        if not isinstance(msg, dict):
-            continue
-        role, text = _render_turn(msg)
-        if not text.strip():
-            continue
-        if role in ("system", "developer"):
-            systems.append(text)
-        elif role == "assistant":
-            turns.append(f"Assistant: {text}")
-        elif role in ("tool", _COMPACTION_MARKER_ROLE):
-            turns.append(text)
-        else:
-            turns.append(f"User: {text}")
-    return "\n\n".join(systems).strip(), "\n\n".join(turns)
-
-
-def _assemble_prompt(
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None = None,
-    tool_choice: Any = None,
-    raw_tools: Any = None,
-) -> tuple[str, str, str]:
-    """Собрать (system_text, turns_text, full_prompt) по единым правилам моста."""
-    clean_tools = (
-        [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
-    )
-    emulate_tools = bool(clean_tools) and not _tool_choice_none(tool_choice)
-    system_text, turns_text = _messages_to_prompt(messages)
-    if not turns_text:
-        return system_text, "", ""
-    head: list[str] = []
-    if system_text:
-        head.append(f"[system]\n{system_text}")
-    if emulate_tools:
-        head.append(_tools_section(clean_tools, tool_choice))
-    elif (raw_tools is not None and bool(raw_tools) or bool(tools)) and not system_text:
-        head.append(f"[system]\n{DEFAULT_SYSTEM_HINT}")
-    full_prompt = "\n\n".join(head) + f"\n\n{turns_text}" if head else turns_text
-    return system_text, turns_text, full_prompt
-
-
-def _strip_code_fence(text: str) -> str:
-    """Снять обёртку ```…``` или ~~~…~~~ (в т.ч. ```json) вокруг JSON внутри блока."""
-    body = text.strip()
-    if body.startswith(("```", "~~~")):
-        newline = body.find("\n")
-        body = body[newline + 1 :] if newline != -1 else body[3:]
-    if body.rstrip().endswith(("```", "~~~")):
-        body = body.rstrip()[:-3]
-    return body.strip()
-
-
-_MAX_EXTRA_BRACES = 16  # предел лишних `}` после полного объекта вызова
-
-
-def _recover_trailing_braces(text: str) -> dict | None:
-    """Первый JSON-объект, за которым идут только пробелы и 1..16 лишних `}`; иначе None (холодный путь)."""
-    body = text.lstrip()
-    try:
-        obj, end = json.JSONDecoder().raw_decode(body)
-    except (ValueError, RecursionError):
-        return None
-    tail = body[end:]
-    if (
-        isinstance(obj, dict)
-        and 1 <= tail.count("}") <= _MAX_EXTRA_BRACES
-        and not tail.strip(" \t\r\n}")
-    ):
-        return obj
-    return None
-
-
-def _loads_tolerant(text: str) -> Any:
-    """json.loads, допускающий лишние `}` после полного объекта (модель закрыла скобок больше нужного).
-
-    Слишком глубокая вложенность (RecursionError) — невалидный JSON (ValueError).
-    """
-    try:
-        return json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        recovered = _recover_trailing_braces(text)
-        if recovered is None:
-            if isinstance(exc, RecursionError):
-                raise ValueError("JSON is nested too deeply") from exc
-            raise
-        return recovered
-
-
-def _parse_tool_call_block(inner: str) -> dict | None:
-    """Содержимое блока -> {"name","arguments"}; None, если блок невалиден.
-
-    Отсутствие ключа arguments — допустимый вызов с {}; присутствующее, но
-    не-объектное значение (строка-не-JSON, список, число, null) — вызов
-    отклоняем, чтобы не запускать инструмент с пустыми аргументами.
-    """
-    try:
-        obj = _loads_tolerant(_strip_code_fence(inner))
-    except ValueError:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    if "name" not in obj and isinstance(obj.get("function"), dict):
-        # OpenAI tool_calls: {"id", "type", "function": {"name", "arguments"}}
-        obj = obj["function"]
-    name = obj.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    arguments: dict = {}
-    if "arguments" in obj:
-        normalized = _normalize_arguments(obj.get("arguments"))
-        if normalized is None:
-            return None
-        arguments = normalized
-    return {"name": name.strip(), "arguments": arguments}
-
-
-def _is_quoted_open(text: str, start: int) -> bool:
-    """`<tool_call>` в inline-коде markdown (`` `<tool_call>` ``) — не тег."""
-    if start > 0 and text[start - 1] == "`":
-        return True
-    tail = text[start + len(TOOL_CALL_OPEN) : start + len(TOOL_CALL_OPEN) + 3]
-    return bool(tail) and tail[0] == "`" and tail != "```"
-
-
-def _split_tool_call_inner(inner: str) -> list[str]:
-    """Разбить содержимое блока по вложенным `<tool_call>` вне строковых литералов JSON.
-
-    Модель иногда пропускает `</tool_call>` между соседними вызовами пачки и ставит
-    один общий закрывающий тег в конце. Литерал `<tool_call>` внутри JSON-строки
-    границей не считается (та же логика, что в `_find_close_outside_string`).
-    Пустые сегменты сохраняются: пустой элемент делает всю пачку невалидной.
-    """
-    segments: list[str] = []
-    seg_start = 0
-    index = 0
-    length = len(inner)
-    in_string = False
-    escaped = False
-    while index < length:
-        char = inner[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-        elif char == '"':
-            in_string = True
-        elif inner.startswith(TOOL_CALL_OPEN, index) and not _is_quoted_open(inner, index):
-            segments.append(inner[seg_start:index])
-            index += len(TOOL_CALL_OPEN)
-            seg_start = index
-            continue
-        index += 1
-    segments.append(inner[seg_start:])
-    return segments
-
-
-def _parse_tool_call_blocks(inner: str) -> list[dict] | None:
-    """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден.
-
-    Обычный блок даёт один вызов. Если он не разбирается, но внутри есть
-    несколько `<tool_call>` без промежуточных закрывающих тегов, блок делится на
-    сегменты; пачка принимается только целиком (все сегменты валидны).
-    """
-    single = _parse_tool_call_block(inner)
-    if single is not None:
-        return [single]
-    if TOOL_CALL_OPEN not in inner:
-        return None
-    segments = _split_tool_call_inner(inner)
-    if len(segments) < 2:
-        return None
-    calls: list[dict] = []
-    for segment in segments:
-        call = _parse_tool_call_block(segment)
-        if call is None:
-            return None
-        calls.append(call)
-    return calls
-
-
-_OPAQUE_BLOCK = "￼"  # в `_history` на месте разобранного блока вызова
-
-
-def _fence_run(line: str) -> tuple[str, int, str]:
-    """Строка -> (символ, длина серии, остаток), если это строка-забор fenced-блока.
-
-    Забор — серия от 3 одинаковых бэктиков или тильд после отступа до 3 пробелов;
-    ("", 0, "") — не забор.
-    """
-    stripped = line.lstrip(" ")
-    if len(line) - len(stripped) > 3 or stripped[:1] not in ("`", "~"):
-        return "", 0, ""
-    char = stripped[0]
-    rest = stripped.lstrip(char)
-    run = len(stripped) - len(rest)
-    return (char, run, rest) if run >= 3 else ("", 0, "")
-
-
-def _is_fence_open(char: str, run: int, rest: str) -> bool:
-    """Строка-забор открывает блок: в info-строке бэктик-забора нет бэктиков."""
-    return bool(run) and (char == "~" or "`" not in rest)
-
-
-def _find_closing_run(doc: str, start: int, end: int, ticks: int) -> int:
-    """Конец первой серии ровно из `ticks` бэктиков в `doc[start:end]`, или -1."""
-    index = start
-    while index < end:
-        if doc[index] != "`":
-            index += 1
-            continue
-        run_start = index
-        while index < end and doc[index] == "`":
-            index += 1
-        if index - run_start == ticks:
-            return index
-    return -1
-
-
-def _is_atx_heading(line: str) -> bool:
-    """Строка — ATX-заголовок: отступ до 3 пробелов, 1-6 `#`, затем пробел/таб/конец."""
-    stripped = line.lstrip(" ")
-    if len(line) - len(stripped) > 3:
-        return False
-    rest = stripped.lstrip("#")
-    return 1 <= len(stripped) - len(rest) <= 6 and (
-        not rest.rstrip("\r") or rest[0] in " \t"
-    )
-
-
-def _code_context(doc: str, pos: int, final: bool) -> str:
-    """Положение `pos` в `doc` относительно markdown-кода: "code" | "text" | "wait".
-
-    "code" — внутри fenced-блока (CommonMark: забор с отступом до 3 пробелов, закрывает
-    серия того же символа (``` или ~~~) не короче открывающей, без текста после неё) или парного inline-кода (серия из
-    k бэктиков и ближайшая серия ровно из k в том же абзаце; абзац обрывают пустая
-    строка, забор и ATX-заголовок — он сам отдельный блок). Непарная серия — обычный
-    текст. "wait" — ответ зависит от ещё не пришедшего текста (только при `final=False`).
-    Результат определяется одним `doc`, поэтому не зависит от нарезки потока на чанки.
-    """
-    line_start = doc.rfind("\n", 0, pos) + 1
-    fence_char, fence_len, para, index = "", 0, 0, 0
-    while index < line_start:
-        eol = doc.index("\n", index)
-        line = doc[index:eol]
-        char, run, rest = _fence_run(line)
-        if fence_len:
-            if char == fence_char and run >= fence_len and not rest.strip(" \t\r"):
-                fence_len, para = 0, eol + 1
-        elif _is_fence_open(char, run, rest):
-            fence_char, fence_len = char, run
-        elif not line.strip() or _is_atx_heading(line):
-            para = eol + 1
-        index = eol + 1
-    if fence_len:
-        return "code"
-    eol = doc.find("\n", pos)
-    char, run, rest = _fence_run(doc[line_start : len(doc) if eol == -1 else eol])
-    if _is_fence_open(char, run, rest):  # тег в info-строке забора
-        return "code" if eol != -1 or final else "wait"
-    para_end, decided = len(doc), final
-    index = len(doc) if eol == -1 else eol + 1
-    if _is_atx_heading(doc[line_start : len(doc) if eol == -1 else eol]):
-        para = line_start  # заголовок — отдельный однострочный блок
-        if eol != -1:
-            para_end, decided, index = eol, True, len(doc)
-    while index < len(doc):  # абзац кончается пустой строкой, забором или заголовком
-        nxt = doc.find("\n", index)
-        line = doc[index : len(doc) if nxt == -1 else nxt]
-        # заголовок с текстом после `#` решён по префиксу, не дожидаясь конца строки
-        if (
-            nxt == -1
-            and not final
-            and not (_is_atx_heading(line) and line.lstrip(" ").lstrip("#"))
-        ):
-            break
-        char, run, rest = _fence_run(line)
-        if not line.strip() or _is_fence_open(char, run, rest) or _is_atx_heading(line):
-            para_end, decided = index, True
-            break
-        if nxt == -1:
-            break
-        index = nxt + 1
-    index = para
-    while index < pos:
-        char = doc[index]
-        if char == "\\":
-            index += 2
-        elif char != "`":
-            index += 1
-        else:
-            open_start = index
-            while index < para_end and doc[index] == "`":
-                index += 1
-            close_end = _find_closing_run(doc, index, para_end, index - open_start)
-            if close_end == -1:
-                if not decided:  # пара может прийти позже
-                    return "wait"
-            elif close_end > pos:
-                return "wait" if close_end == len(doc) and not final else "code"
-            else:
-                index = close_end
-    return "text"
-
-
-class ToolCallParser:
-    """Поток текстовых дельт -> content и завершённые вызовы инструментов.
-
-    Тег <tool_call> может прийти разорванным между дельтами: хвост, который может
-    оказаться началом тега, удерживается и не уходит в content до разрешения.
-    """
-
-    def __init__(self, on_content, on_tool_call):
-        self._buf = ""
-        self._on_content = on_content
-        self._on_tool_call = on_tool_call
-        self._history = ""  # весь текст, ушедший в content
-
-    def feed(self, text: str) -> None:
-        self._buf += text
-        self._drain(final=False)
-
-    def finish(self) -> None:
-        self._drain(final=True)
-
-    def _classify_open(self, after: int, final: bool) -> str:
-        """`<tool_call>` в буфере: "real" | "quoted" (inline-код markdown) | "wait" (нужен следующий символ)."""
-        context = _code_context(
-            self._history + self._buf, len(self._history), final
-        )
-        if context != "text":
-            return "quoted" if context == "code" else "wait"
-        tail = self._buf[after : after + 3]
-        if not tail:
-            return "real" if final else "wait"
-        if tail[0] != "`" or tail == "```":  # ```json-обёртка внутри блока — настоящий вызов
-            return "real"
-        if not final and tail == "`" * len(tail) and len(tail) < 3:
-            return "wait"
-        return "quoted"
-
-    def _drain(self, final: bool) -> None:
-        while True:
-            start = self._buf.find(TOOL_CALL_OPEN)
-            if start == -1:
-                if final:
-                    self._flush_all()
-                    return
-                keep = self._pending_prefix()
-                if keep:
-                    self._emit(self._buf[:-keep])
-                    self._buf = self._buf[-keep:]
-                else:
-                    self._flush_all()
-                return
-            if start > 0:
-                # всё до тега завершено: текст уходит в content и в `_history`
-                self._emit(self._buf[:start])
-                self._buf = self._buf[start:]
-            after = len(TOOL_CALL_OPEN)
-            verdict = self._classify_open(after, final)
-            if verdict == "quoted":
-                self._emit(self._buf[:after])
-                self._buf = self._buf[after:]
-                continue
-            if verdict == "wait":
-                return
-            end = self._find_close_outside_string(len(TOOL_CALL_OPEN))
-            if end == -1:
-                if final:
-                    self._flush_all()  # незакрытый/невалидный блок отдаём текстом
-                return
-            inner = self._buf[len(TOOL_CALL_OPEN) : end]
-            self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
-            calls = _parse_tool_call_blocks(inner)
-            if calls is None:
-                self._emit(TOOL_CALL_OPEN + inner + TOOL_CALL_CLOSE)
-            else:
-                self._history += _OPAQUE_BLOCK
-                for call in calls:
-                    self._on_tool_call(call)
-
-    def _find_close_outside_string(self, start: int) -> int:
-        """Позиция `</tool_call>` вне строковых литералов JSON, или -1.
-
-        Закрывающий тег внутри JSON-строки (например, значение аргумента содержит
-        `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
-        строку не закрывают.
-        """
-        index = start
-        length = len(self._buf)
-        in_string = False
-        escaped = False
-        while index < length:
-            char = self._buf[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-            elif char == '"':
-                in_string = True
-            elif self._buf.startswith(TOOL_CALL_CLOSE, index):
-                return index
-            index += 1
-        return -1
-
-    def _pending_prefix(self) -> int:
-        """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
-        limit = min(len(TOOL_CALL_OPEN) - 1, len(self._buf))
-        for length in range(limit, 0, -1):
-            if self._buf[-length:] == TOOL_CALL_OPEN[:length]:
-                return length
-        return 0
-
-    def _emit(self, text: str) -> None:
-        if text:
-            self._history += text
-            self._on_content(text)
-
-    def _flush_all(self) -> None:
-        if self._buf:
-            text, self._buf = self._buf, ""
-            self._emit(text)
-
-
-def _split_tool_calls(chunks: list[str], tool_schemas: dict[str, Any] | None = None) -> tuple[str, list[dict]]:
-    """Дельты текста ответа -> (content, tool_calls в формате OpenAI).
-
-    Тот же ToolCallParser, что у droid-bridge; id вызовов — call_<hex24>.
-    """
-    pieces: list[str] = []
-    calls: list[dict] = []
-
-    def add_call(call: dict) -> None:
-        calls.append(
-            {
-                "index": len(calls),
-                "id": "call_" + uuid.uuid4().hex[:24],
-                "type": "function",
-                "function": {
-                    "name": call["name"],
-                    "arguments": json.dumps(call["arguments"], ensure_ascii=False),
-                },
-            }
-        )
-
-    parser = ToolCallParser(pieces.append, add_call)
-    for chunk in chunks:
-        parser.feed(chunk)
-    parser.finish()
-    if BRIDGE_SANITIZE_TOOL_CALLS:
-        calls = sanitize_tool_calls_list(calls, tool_schemas, **_SANITIZE_LIMITS)
-    return "".join(pieces), calls
 
 
 def _map_effort(req: dict[str, Any]) -> str:
@@ -1266,407 +754,10 @@ def _map_effort(req: dict[str, Any]) -> str:
     return EFFORT_MAP.get(key, DEFAULT_EFFORT)
 
 
-_TOKEN_RE = re.compile(r"\s+")
-
-
-def _estimate_tokens(text: str) -> int:
-    """Консервативная оценка токенов по UTF-8 байтам и символам (ADR-001.2 §2.5)."""
-    if not text:
-        return 0
-    return max(len(text) // 3, len(text.encode("utf-8")) // 3)
-
-
-def _estimate_usage_tokens(text: str) -> int:
-    """Оценка клиентских метрик usage по словам на exec-ветке (не бюджет прунинга)."""
-    if not text or not text.strip():
-        return 0
-    return max(1, int(len(_TOKEN_RE.split(text.strip())) * 1.3))
-
+# [Refactored] Token budgets and pruning moved to muse_runtime.token_budget and context_pruner
 
 def _context_limit(model: str) -> int:
-    """Единый источник лимита окна модели из ALLOWED_MODELS (ADR-001.1)."""
-    spec = ALLOWED_MODELS.get(model)
-    if isinstance(spec, dict):
-        val = spec.get("context_length")
-        if isinstance(val, int) and val > 0:
-            return val
-    return DEFAULT_CONTEXT_LIMIT
-
-
-def _context_target(limit: int) -> int:
-    """Целевой бюджет проактивного прунинга с гистерезисом 80% (ADR-001.1)."""
-    return (limit * 4) // 5
-
-
-def _context_retry_target(limit: int) -> int:
-    """Аварийный бюджет однократного retry 50% (ADR-001.1)."""
-    return limit // 2
-
-
-class PruneResult(NamedTuple):
-    status: str  # "pass_through" | "pruned" | "refused"
-    messages: list[dict[str, Any]]
-    prompt: str
-    est_before: int
-    est_after: int
-    msgs_total: int
-    msgs_kept: int
-    msgs_dropped: int
-    mandatory_est: int
-    overhead_est: int
-
-
-def _overhead_tokens_estimate(
-    has_system: bool,
-    tools: list[dict[str, Any]] | None,
-    tool_choice: Any,
-    raw_tools: Any,
-) -> int:
-    """Оценка фиксированной шапки промпта ([system], схемы инструментов, DEFAULT_SYSTEM_HINT)."""
-    clean_tools = (
-        [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
-    )
-    emulate_tools = bool(clean_tools) and not _tool_choice_none(tool_choice)
-    overhead = 0
-    if has_system:
-        overhead += _estimate_tokens("[system]\n") + 1
-    if emulate_tools:
-        overhead += _estimate_tokens(_tools_section(clean_tools, tool_choice)) + 1
-    elif (raw_tools is not None and bool(raw_tools) or bool(tools)) and not has_system:
-        overhead += _estimate_tokens(f"[system]\n{DEFAULT_SYSTEM_HINT}") + 1
-    return overhead
-
-
-def _prune_messages(
-    messages: list[dict[str, Any]],
-    limit: int,
-    target: int,
-    tools: list[dict[str, Any]] | None = None,
-    tool_choice: Any = None,
-    raw_tools: Any = None,
-) -> PruneResult:
-    """Чистая функция защитного прунинга истории диалога (ADR-001.2)."""
-    _, _, full_prompt = _assemble_prompt(
-        messages, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
-    )
-    est_before = _estimate_tokens(full_prompt)
-
-    valid_msgs: list[dict[str, Any]] = []
-    roles: list[str] = []
-    real_msgs_total = 0
-    for msg in messages or []:
-        if not isinstance(msg, dict):
-            continue
-        role, text = _render_turn(msg)
-        if not text.strip():
-            continue
-        valid_msgs.append(msg)
-        roles.append(role)
-        if role != _COMPACTION_MARKER_ROLE:
-            real_msgs_total += 1
-
-    has_system = any(r in ("system", "developer") for r in roles)
-    overhead_est = _overhead_tokens_estimate(has_system, tools, tool_choice, raw_tools)
-
-    if est_before <= limit:
-        mandatory_est = _compute_mandatory_est_only(
-            valid_msgs, roles, tools, tool_choice, raw_tools
-        )
-        return PruneResult(
-            status="pass_through",
-            messages=messages,
-            prompt=full_prompt,
-            est_before=est_before,
-            est_after=est_before,
-            msgs_total=real_msgs_total,
-            msgs_kept=real_msgs_total,
-            msgs_dropped=0,
-            mandatory_est=mandatory_est,
-            overhead_est=overhead_est,
-        )
-
-    units, mandatory_indices = _partition_units(valid_msgs, roles)
-    u_roles: list[str] = []
-    u_chars: list[int] = []
-    u_bytes: list[int] = []
-    for unit in units:
-        u_role = _render_turn(unit[0])[0]
-        u_roles.append(u_role)
-        if u_role in ("system", "developer", _COMPACTION_MARKER_ROLE):
-            u_chars.append(0)
-            u_bytes.append(0)
-            continue
-        rendered_turns: list[str] = []
-        for m in unit:
-            m_role, m_text = _render_turn(m)
-            if m_role == "assistant":
-                rendered_turns.append(f"Assistant: {m_text}")
-            elif m_role == "tool":
-                rendered_turns.append(m_text)
-            else:
-                rendered_turns.append(f"User: {m_text}")
-        unit_str = "\n\n".join(rendered_turns)
-        u_chars.append(len(unit_str))
-        u_bytes.append(len(unit_str.encode("utf-8")))
-
-    def build_candidate(kept_flags: list[bool]) -> list[dict[str, Any]]:
-        pruned: list[dict[str, Any]] = []
-        seen_kept_turn = False
-        in_dropped_gap = False
-        for u_idx, unit in enumerate(units):
-            u_role = u_roles[u_idx]
-            if u_role in ("system", "developer"):
-                pruned.extend(unit)
-                continue
-            if u_role == _COMPACTION_MARKER_ROLE:
-                if seen_kept_turn:
-                    in_dropped_gap = True
-                continue
-            if kept_flags[u_idx]:
-                if in_dropped_gap:
-                    pruned.append(
-                        {"role": _COMPACTION_MARKER_ROLE, "content": COMPACTION_MARKER}
-                    )
-                    in_dropped_gap = False
-                pruned.extend(unit)
-                seen_kept_turn = True
-            else:
-                if seen_kept_turn:
-                    in_dropped_gap = True
-        return pruned
-
-    kept = [i in mandatory_indices for i in range(len(units))]
-    mandatory_msgs = build_candidate(kept)
-    _, mandatory_turns_text, mandatory_prompt = _assemble_prompt(
-        mandatory_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
-    )
-    mandatory_est = _estimate_tokens(mandatory_prompt)
-    cap = max(limit, target)
-    if mandatory_est > cap:
-        kept_count = sum(
-            len(units[i])
-            for i in range(len(units))
-            if kept[i] and u_roles[i] != _COMPACTION_MARKER_ROLE
-        )
-        return PruneResult(
-            status="refused",
-            messages=mandatory_msgs,
-            prompt=mandatory_prompt,
-            est_before=est_before,
-            est_after=mandatory_est,
-            msgs_total=real_msgs_total,
-            msgs_kept=kept_count,
-            msgs_dropped=max(0, real_msgs_total - kept_count),
-            mandatory_est=mandatory_est,
-            overhead_est=overhead_est,
-        )
-
-    # Фаза C: линейный проход O(n) от новейшей к старейшей опциональной единице (FU-001).
-    head_prefix_chars = len(mandatory_prompt) - len(mandatory_turns_text)
-    head_prefix_bytes = len(mandatory_prompt.encode("utf-8")) - len(
-        mandatory_turns_text.encode("utf-8")
-    )
-    marker_chars = len(COMPACTION_MARKER)
-    marker_bytes = len(COMPACTION_MARKER.encode("utf-8"))
-    non_sys = [
-        i for i in range(len(units)) if u_roles[i] not in ("system", "developer")
-    ]
-    pos_in_non_sys = {u_idx: p for p, u_idx in enumerate(non_sys)}
-    is_kept = [
-        kept[u_idx] and u_roles[u_idx] != _COMPACTION_MARKER_ROLE for u_idx in non_sys
-    ]
-    m_non_sys = len(non_sys)
-    first_kept_p = next((p for p, flag in enumerate(is_kept) if flag), m_non_sys)
-    ft_transitions = sum(
-        1 for p in range(1, m_non_sys) if not is_kept[p - 1] and is_kept[p]
-    )
-    turns_count = sum(1 for flag in is_kept if flag)
-    turns_chars = sum(u_chars[non_sys[p]] for p in range(m_non_sys) if is_kept[p])
-    turns_bytes = sum(u_bytes[non_sys[p]] for p in range(m_non_sys) if is_kept[p])
-
-    for u_idx in range(len(units) - 1, -1, -1):
-        if u_idx in mandatory_indices or u_roles[u_idx] in (
-            "system",
-            "developer",
-            _COMPACTION_MARKER_ROLE,
-        ):
-            continue
-        p = pos_in_non_sys[u_idx]
-        before_ft = (1 if p > 0 and not is_kept[p - 1] and is_kept[p] else 0) + (
-            1 if p + 1 < m_non_sys and not is_kept[p] and is_kept[p + 1] else 0
-        )
-        after_ft = 1 if p > 0 and not is_kept[p - 1] else 0
-        new_ft = ft_transitions - before_ft + after_ft
-        new_first = min(first_kept_p, p)
-        new_markers = (
-            max(0, new_ft - (1 if new_first > 0 else 0)) if new_first < m_non_sys else 0
-        )
-        new_count = turns_count + 1
-        new_chars = turns_chars + u_chars[u_idx]
-        new_bytes = turns_bytes + u_bytes[u_idx]
-        total_items = new_count + new_markers
-        sep_cost = 2 * max(0, total_items - 1)
-        cand_chars = (
-            head_prefix_chars + new_chars + new_markers * marker_chars + sep_cost
-        )
-        cand_bytes = (
-            head_prefix_bytes + new_bytes + new_markers * marker_bytes + sep_cost
-        )
-        if max(cand_chars // 3, cand_bytes // 3) <= target:
-            kept[u_idx] = True
-            is_kept[p] = True
-            ft_transitions = new_ft
-            first_kept_p = new_first
-            turns_count = new_count
-            turns_chars = new_chars
-            turns_bytes = new_bytes
-            continue
-        break
-
-    pruned_msgs = build_candidate(kept)
-    _, _, pruned_prompt = _assemble_prompt(
-        pruned_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
-    )
-    est_after = _estimate_tokens(pruned_prompt)
-    while est_after > target:
-        opt_indices = [
-            i
-            for i in range(len(units))
-            if kept[i]
-            and i not in mandatory_indices
-            and u_roles[i] != _COMPACTION_MARKER_ROLE
-        ]
-        if not opt_indices:
-            break
-        kept[opt_indices[0]] = False
-        pruned_msgs = build_candidate(kept)
-        _, _, pruned_prompt = _assemble_prompt(
-            pruned_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
-        )
-        est_after = _estimate_tokens(pruned_prompt)
-
-    kept_count = sum(
-        len(units[i])
-        for i in range(len(units))
-        if kept[i] and u_roles[i] != _COMPACTION_MARKER_ROLE
-    )
-    dropped_count = max(0, real_msgs_total - kept_count)
-    if est_after > cap:
-        return PruneResult(
-            status="refused",
-            messages=pruned_msgs,
-            prompt=pruned_prompt,
-            est_before=est_before,
-            est_after=est_after,
-            msgs_total=real_msgs_total,
-            msgs_kept=kept_count,
-            msgs_dropped=dropped_count,
-            mandatory_est=mandatory_est,
-            overhead_est=overhead_est,
-        )
-    return PruneResult(
-        status="pruned",
-        messages=pruned_msgs,
-        prompt=pruned_prompt,
-        est_before=est_before,
-        est_after=est_after,
-        msgs_total=real_msgs_total,
-        msgs_kept=kept_count,
-        msgs_dropped=dropped_count,
-        mandatory_est=mandatory_est,
-        overhead_est=overhead_est,
-    )
-
-
-def _partition_units(
-    valid_msgs: list[dict[str, Any]], roles: list[str]
-) -> tuple[list[list[dict[str, Any]]], set[int]]:
-    """Разбить валидные сообщения на атомарные единицы и выделить обязательные индексы M."""
-    units: list[list[dict[str, Any]]] = []
-    consumed_tools: set[int] = set()
-
-    for idx, msg in enumerate(valid_msgs):
-        role = roles[idx]
-        if role == "tool":
-            # Осиротевшие tool не попадают в units при прунинге; связанные поглощаются assistant.
-            continue
-        if (
-            role == "assistant"
-            and isinstance(msg.get("tool_calls"), list)
-            and msg.get("tool_calls")
-        ):
-            call_ids = [
-                _normalize_tool_call(tc)["id"]
-                for tc in msg["tool_calls"]
-                if _normalize_tool_call(tc)["id"]
-            ]
-            if call_ids:
-                expected = set(call_ids)
-                matched_indices: list[int] = []
-                matched_ids: set[str] = set()
-                for j in range(idx + 1, len(valid_msgs)):
-                    if roles[j] != "tool":
-                        break
-                    if j in consumed_tools:
-                        continue
-                    tc_id = str(
-                        valid_msgs[j].get("tool_call_id")
-                        or valid_msgs[j].get("id")
-                        or ""
-                    )
-                    if tc_id in expected and tc_id not in matched_ids:
-                        matched_indices.append(j)
-                        matched_ids.add(tc_id)
-                if matched_ids == expected:
-                    consumed_tools.update(matched_indices)
-                    units.append([msg] + [valid_msgs[j] for j in matched_indices])
-                continue
-        units.append([msg])
-
-    mandatory_indices: set[int] = set()
-    user_unit_indices: list[int] = []
-    last_non_sys_idx: int | None = None
-    for u_idx, unit in enumerate(units):
-        u_role = _render_turn(unit[0])[0]
-        if u_role in ("system", "developer"):
-            mandatory_indices.add(u_idx)
-        elif u_role != _COMPACTION_MARKER_ROLE:
-            last_non_sys_idx = u_idx
-            if u_role not in ("assistant", "tool"):
-                user_unit_indices.append(u_idx)
-
-    if user_unit_indices:
-        mandatory_indices.add(user_unit_indices[0])
-        mandatory_indices.add(user_unit_indices[-1])
-        # Незавершённая единица ответа (assistant+tool после последнего user, ADR-001.2 §2.2 п.4).
-        if (
-            last_non_sys_idx is not None
-            and last_non_sys_idx > user_unit_indices[-1]
-            and len(units[last_non_sys_idx]) > 1
-        ):
-            mandatory_indices.add(last_non_sys_idx)
-
-    return units, mandatory_indices
-
-
-def _compute_mandatory_est_only(
-    valid_msgs: list[dict[str, Any]],
-    roles: list[str],
-    tools: list[dict[str, Any]] | None,
-    tool_choice: Any,
-    raw_tools: Any,
-) -> int:
-    units, mandatory_indices = _partition_units(valid_msgs, roles)
-    mandatory_msgs = [
-        m
-        for u_idx, unit in enumerate(units)
-        if u_idx in mandatory_indices
-        for m in unit
-    ]
-    _, _, mandatory_prompt = _assemble_prompt(
-        mandatory_msgs, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
-    )
-    return _estimate_tokens(mandatory_prompt)
+    return _rt_context_limit(model, ALLOWED_MODELS)
 
 
 def _log_context_prune(
@@ -1678,22 +769,7 @@ def _log_context_prune(
     target: int,
     res: PruneResult,
 ) -> None:
-    """Структурная запись прунинга без тел сообщений и секретов (ADR-001.4 §4.3)."""
-    logger.info(
-        "muse_context_pruned: model=%s initial=%d target=%d dropped=%d is_retry=%s",
-        model,
-        res.est_before,
-        target,
-        res.msgs_dropped,
-        attempt > 1,
-    )
-    _log(
-        f"context_prune rid={rid} model={model} reason={reason} attempt={attempt} "
-        f"limit={limit} target={target} est_before={res.est_before} est_after={res.est_after} "
-        f"msgs_total={res.msgs_total} msgs_kept={res.msgs_kept} msgs_dropped={res.msgs_dropped} "
-        f"mandatory_est={res.mandatory_est} overhead_est={res.overhead_est} method=bytes_div_3"
-    )
-
+    _rt_log_context_prune(rid, model, reason, attempt, limit, target, res, log_fn=_log)
 
 # Эмуляция SSE (OpenAI chat.completion.chunk): результат генерации уже целиком —
 # «стрим» = нарезка готового текста на чанки с минимальной задержкой между ними.
@@ -1724,93 +800,20 @@ def _cli_permission_flags() -> list[str]:
     ]
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
-    """Убить всю группу процессов хода: ребёнок — лидер группы (start_new_session).
-
-    Фолбэк proc.kill() — если killpg недоступен/запрещён (эталон
-    adapters/muse_adapter.py, RW-009).
-    """
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            proc.kill()
-        except OSError:
-            pass
-
-
-def _group_alive(pgid: int) -> bool:
-    """Жива ли группа pgid (killpg сигналом 0 ничего не убивает)."""
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
-
-
-def _wait_group_exit(pgid: int, timeout: float, leader_reaped: bool = False) -> bool:
-    """Короткое ожидание ухода группы после SIGKILL (обычно мгновенно).
-
-    Пока группа жива, SIGKILL повторяется: потомок, форкнувшийся в момент первого killpg,
-    остаётся в группе и иначе держал бы pipe (close() вешался бы на чтении stderr).
-    Лидер реапнут (leader_reaped) — его pid свободен для переиспользования, поэтому после
-    одного контрольного killpg по ещё живым потомкам сигналы прекращаются, остаётся опрос.
-    """
-    deadline = time.monotonic() + timeout
-    control_sent = False
-    while _group_alive(pgid) and time.monotonic() < deadline:
-        if not (leader_reaped and control_sent):
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except OSError:
-                pass
-            control_sent = True
-        time.sleep(0.05)
-    return not _group_alive(pgid)
-
-
-def _terminate_run(run: Any, streams: tuple) -> None:
-    """Убить группу хода и подтвердить её смерть; результат — run.dead_confirmed.
-
-    TimeoutExpired при ожидании после SIGKILL не считается смертью: SIGKILL группы повторяется
-    (в _wait_group_exit тоже), смерть группы проверяется по факту. Не подтверждена — трубы не
-    закрываются (close() ждал бы читателя), слот хендлера уйдёт в карантин.
-    """
-    proc = run.proc
-    if proc is None:
-        return
-    # Уборка идёт под замком: параллельный close() (таймер, надзор обрыва, finally
-    # execute) ждёт её конца и видит итоговый dead_confirmed, а не выходит по _closed.
-    with run._cleanup_lock:
-        if run._closed:
-            return
-        run._closed = True
-        # Пессимистично до подтверждения: оборванная уборка уйдёт в карантин слота.
-        run.dead_confirmed = False
-        _kill_group(proc)
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            _log(f"cleanup: wait after SIGKILL timed out pid={proc.pid}, escalating")
-            _kill_group(proc)
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                pass
-        run.dead_confirmed = _wait_group_exit(
-            proc.pid, 2.0, leader_reaped=proc.poll() is not None
-        )
-        if not run.dead_confirmed:
-            _log(f"cleanup: process group {proc.pid} not confirmed dead after SIGKILL")
-            return
-        for stream in streams:
-            try:
-                if stream is not None:
-                    stream.close()
-            except OSError:
-                pass
+# Delegated to muse_runtime.process_supervisor (AD-002, M-MOD-I1)
+_supervisor = ProcessSupervisor(
+    ProcessSupervisorConfig(
+        kill_term_grace_s=APPROVAL_CANCEL_GRACE_S,
+        kill_wait_s=5.0,
+        group_exit_wait_s=2.0,
+        quarantine_max_s=QUARANTINE_MAX_S,
+    )
+)
+_kill_group = _supervisor.kill_group
+_group_alive = _supervisor.group_alive
+_wait_group_exit = _supervisor.wait_group_exit
+def _terminate_run(run: Any, streams: tuple[Any, ...] = ()) -> None:
+    _supervisor.terminate_run(run, streams, kill_group_fn=_kill_group)
 
 
 def _quarantine_slot(runs: list) -> None:
@@ -3033,6 +2036,7 @@ class Handler(BaseHTTPRequestHandler):
         self._current_run = None
         self._active_managed_turn = None
         self._detach_on_disconnect = False
+        self._stream_relay = StreamRelay()
         self._sse_open = False
         self._content_started = False
         self._sse_id = ""

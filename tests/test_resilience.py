@@ -598,12 +598,31 @@ def facade(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
-    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-facade.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
+    monkeypatch.setattr(
+        server,
+        "TOKEN_CACHE",
+        server.TokenCache(
+            path=tmp_path / "missing-facade.env",
+            environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"},
+        ),
+    )
     monkeypatch.setattr(server, "_log", lambda message: None)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
     monkeypatch.setattr(server, "_is_detached_enabled", lambda: False)
     monkeypatch.setattr(server, "_budget", server._ByteBudget(1_000_000))
+    monkeypatch.setattr(
+        server,
+        "_PENALTY_TRACKER",
+        server.get_penalty_tracker().__class__(
+            storage_path=tmp_path / "facade_penalties.json", max_start_fails=999
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_QUOTA_CB_CACHE",
+        server.QuotaCircuitBreakerCache(tmp_path / "facade_quota.json"),
+    )
     bridge = Srv(("127.0.0.1", 0), server.Handler)
     threading.Thread(
         target=bridge.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
@@ -634,7 +653,7 @@ def facade(monkeypatch, tmp_path):
             conn.close()
 
     try:
-        yield SimpleNamespace(call=call, state=state, monkeypatch=monkeypatch)
+        yield SimpleNamespace(call=call, state=state, monkeypatch=monkeypatch, port=bridge.server_port)
     finally:
         bridge.shutdown()
         bridge.server_close()
@@ -739,3 +758,368 @@ def test_facade_resilience_endpoint_requires_auth_and_health_contract_is_frozen(
             "uptime_s",
         ]
     )
+# --------------------------------------------------------------------------- Волна 3: QoSSlotManager
+
+from core.lifecycle import (  # noqa: E402
+    KeepaliveController,
+    QoSSlotManager,
+    get_qos_manager,
+    reset_qos_manager,
+    set_qos_manager,
+)
+
+
+def _wait_until(predicate, timeout: float = 1.5) -> bool:
+    """Ждёт наблюдаемого состояния (синхронизация, а не тайминг): True — наступило."""
+    deadline = time.monotonic() + timeout
+    tick = threading.Event()
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return False
+        tick.wait(0.002)
+    return True
+
+
+def _acquire_async(mgr: QoSSlotManager, is_interactive: bool, **kw):
+    """acquire_slot в потоке: (поток, Event готовности, коробка результата)."""
+    done = threading.Event()
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["result"] = mgr.acquire_slot(is_interactive=is_interactive, **kw)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, done, box
+
+
+def test_reserved_slots_block_background_but_allow_interactive():
+    mgr = QoSSlotManager(max_concurrent=8, reserved_interactive=2, queue_timeout_s=5.0)
+    # Фоновый лимит = 8 - 2 = 6: шесть фоновых слотов занимаются сразу.
+    for _ in range(6):
+        assert mgr.acquire_slot(is_interactive=False) == (True, "")
+    # Седьмой фоновый не может занять зарезервированный слот и встаёт в очередь.
+    bg_thread, bg_done, bg_box = _acquire_async(mgr, is_interactive=False)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_background"] == 1)
+    assert not bg_done.is_set()
+    # Интерактивный в это же время проходит немедленно в резервный слот.
+    _, ui_done, ui_box = _acquire_async(mgr, is_interactive=True)
+    assert ui_done.wait(1.0)
+    assert ui_box["result"] == (True, "")
+    snap = mgr.snapshot()
+    assert (snap["active_total"], snap["active_background"]) == (7, 6)
+    assert (snap["max_concurrent"], snap["reserved_interactive"]) == (8, 2)
+    # Освобождение фонового слота будит ожидающего фонового (notify_all).
+    mgr.release_slot(is_interactive=False)
+    assert bg_done.wait(1.0)
+    assert bg_box["result"] == (True, "")
+    bg_thread.join(1.0)
+    # Потолок total действует и на интерактивных: 7 занято + 1 = 8, дальше — таймаут.
+    assert mgr.acquire_slot(is_interactive=True) == (True, "")
+    started = time.monotonic()
+    assert mgr.acquire_slot(is_interactive=True, timeout=0.15) == (
+        False,
+        "queue_timeout",
+    )
+    assert time.monotonic() - started < 1.0
+    assert mgr.snapshot()["waiting_interactive"] == 0
+    for _ in range(6):
+        mgr.release_slot(is_interactive=False)
+    mgr.release_slot(is_interactive=True)
+    mgr.release_slot(is_interactive=True)
+    snap = mgr.snapshot()
+    assert snap["active_total"] == 0 and snap["active_background"] == 0
+
+
+def test_draining_and_client_gone_and_keepalive_false():
+    # Draining: отказ мгновенный, даже при свободных слотах, для обоих классов.
+    drain = threading.Event()
+    drain.set()
+    draining = QoSSlotManager(max_concurrent=2, drain_event=drain)
+    assert draining.acquire_slot(is_interactive=True) == (False, "draining")
+    assert draining.acquire_slot(is_interactive=False) == (False, "draining")
+    assert draining.snapshot()["active_total"] == 0
+
+    # Ушедший клиент до ожидания: client_gone проверяется раньше выдачи слота.
+    mgr = QoSSlotManager(max_concurrent=1)
+    assert mgr.acquire_slot(is_interactive=True, client_gone_fn=lambda: True) == (
+        False,
+        "client_gone",
+    )
+
+    # Ушедший клиент ВО время ожидания: пробуждение release'ом не выдаёт слот.
+    assert mgr.acquire_slot(is_interactive=True) == (True, "")
+    gone = threading.Event()
+    _, done, box = _acquire_async(
+        mgr, is_interactive=False, client_gone_fn=gone.is_set, timeout=5.0
+    )
+    assert _wait_until(lambda: mgr.snapshot()["waiting_background"] == 1)
+    gone.set()
+    mgr.release_slot(is_interactive=True)  # слот свободен, но клиент уже ушёл
+    assert done.wait(1.0)
+    assert box["result"] == (False, "client_gone")
+    assert mgr.snapshot()["active_total"] == 0
+
+    # keepalive_cb -> False в очереди == клиент ушёл; счётчик ожидания не течёт.
+    mgr2 = QoSSlotManager(
+        max_concurrent=1, queue_timeout_s=0.3, keepalive_interval_s=0.1
+    )
+    assert mgr2.acquire_slot(is_interactive=True) == (True, "")
+    calls: list[int] = []
+    ok, reason = mgr2.acquire_slot(
+        is_interactive=True, keepalive_cb=lambda: calls.append(1) or False
+    )
+    assert (ok, reason) == (False, "client_gone")
+    assert calls  # keepalive реально вызывался до отказа
+    assert mgr2.snapshot()["waiting_interactive"] == 0
+    mgr2.release_slot(is_interactive=True)
+
+
+def test_singleton_helpers():
+    reset_qos_manager()
+    try:
+        first = get_qos_manager(max_concurrent=7, reserved_interactive=1)
+        assert (first.max_concurrent, first.reserved_interactive) == (7, 1)
+        # Повторный вызов игнорирует новые параметры и возвращает тот же объект.
+        assert get_qos_manager(max_concurrent=99) is first
+        # Гонка первого создания: все потоки получают один экземпляр.
+        reset_qos_manager()
+        barrier = threading.Barrier(8)
+        got: list = []
+
+        def grab() -> None:
+            barrier.wait()
+            got.append(get_qos_manager())
+
+        threads = [threading.Thread(target=grab) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(1.0)
+        assert len({id(m) for m in got}) == 1
+        # set_qos_manager подменяет синглтон; reset возвращает ленивое создание.
+        custom = QoSSlotManager(max_concurrent=2)
+        set_qos_manager(custom)
+        assert get_qos_manager() is custom
+        set_qos_manager(None)
+        fresh = get_qos_manager()
+        assert fresh is not custom and fresh.max_concurrent == 128
+    finally:
+        reset_qos_manager()
+
+
+def test_interactive_request_not_starved_by_background_subagents(facade):
+    # Ключевое требование: 8 фоновых сабагентов не голодают интерактивный DSH-запрос.
+    mgr = QoSSlotManager(max_concurrent=8, reserved_interactive=2, queue_timeout_s=5.0)
+    set_qos_manager(mgr)
+    release_upstream = threading.Event()
+    acquired = threading.Semaphore(0)
+    results: dict[str, tuple] = {}
+    lock = threading.Lock()
+
+    def background(idx: int) -> None:
+        result = mgr.acquire_slot(is_interactive=False)
+        with lock:
+            results[f"panel-judge-{idx}"] = result
+        if result[0]:
+            acquired.release()
+            release_upstream.wait(5.0)  # upstream «думает»: слот удерживается
+            mgr.release_slot(is_interactive=False)
+
+    threads = [
+        threading.Thread(target=background, args=(i,), daemon=True) for i in range(1, 9)
+    ]
+    try:
+        for t in threads:
+            t.start()
+        # Детерминированно: ровно 6 фоновых внутри (8 - резерв 2), 2 в очереди.
+        for _ in range(6):
+            assert acquired.acquire(timeout=1.5)
+        assert _wait_until(lambda: mgr.snapshot()["waiting_background"] == 2)
+        snap = mgr.snapshot()
+        assert (snap["active_total"], snap["active_background"]) == (6, 6)
+        # Интерактивный запрос из DSH (без subagent_id) — сразу 200, без 503.
+        # Фасадный HTTP-запрос занимает зарезервированный интерактивный слот, обходя очередь фоновых.
+        status, _, _ = facade.call({"model": "gemini-4-argon"})
+        assert status == 200
+    finally:
+        release_upstream.set()
+        for t in threads:
+            t.join(1.5)
+        assert _wait_until(lambda: mgr.snapshot()["active_total"] == 0, timeout=2.0)
+        reset_qos_manager()
+
+
+def test_bounded_queue_timeout_and_sse_keepalive(facade):
+    mgr = QoSSlotManager(
+        max_concurrent=1,
+        reserved_interactive=0,
+        queue_timeout_s=0.35,
+        keepalive_interval_s=0.1,
+    )
+    set_qos_manager(mgr)
+    try:
+        assert mgr.acquire_slot(is_interactive=False) == (True, "")
+        keepalives: list[float] = []
+
+        def keepalive_cb() -> bool:
+            keepalives.append(time.monotonic())
+            return True  # клиент жив: сервер на этом месте пишет ": keepalive\n\n"
+
+        assert KeepaliveController.sse_comment() == ": keepalive\n\n"
+        started = time.monotonic()
+        ok, reason = mgr.acquire_slot(is_interactive=True, keepalive_cb=keepalive_cb)
+        elapsed = time.monotonic() - started
+        # Очередь ограничена BRIDGE_QUEUE_TIMEOUT_S менеджера, а не бесконечна.
+        assert (ok, reason) == (False, "queue_timeout")
+        assert 0.3 <= elapsed < 1.5
+        assert keepalives  # SSE-keepalive уходил, пока запрос ждал слот
+        snap = mgr.snapshot()
+        assert snap["waiting_interactive"] == 0 and snap["active_total"] == 1
+        mgr.release_slot(is_interactive=False)
+        # После таймаута очереди мост здоров: интерактивный HTTP-запрос — 200.
+        status, _, _ = facade.call({"model": "gemini-4-argon"})
+        assert status == 200
+    finally:
+        if mgr.snapshot()["active_total"]:
+            mgr.release_slot(is_interactive=False)
+        reset_qos_manager()
+
+
+def test_graceful_drain_headers_and_rejection(facade):
+    # Unit-уровень: drain_event менеджера отклоняет ожидание как "draining".
+    drain = threading.Event()
+    mgr = QoSSlotManager(max_concurrent=1, drain_event=drain)
+    assert mgr.acquire_slot(is_interactive=True) == (True, "")
+    _, done, box = _acquire_async(mgr, is_interactive=True, timeout=5.0)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1)
+    drain.set()
+    mgr.release_slot(is_interactive=True)  # пробуждение: drain проверяется первым
+    assert done.wait(1.0)
+    assert box["result"] == (False, "draining")
+
+    # HTTP-уровень: настоящий Handler при shutdown — 503 + Retry-After + X-Bridge-Draining.
+    facade.monkeypatch.setattr(server, "_shutting_down", True)
+    status, headers, body = facade.call({"model": "gemini-4-argon"})
+    assert status == 503
+    assert headers["x-bridge-draining"] in ("1", "true")
+    assert headers["retry-after"] == "5"  # дефолт интерактивного клиента
+    assert body["error"]["message"] in ("bridge is shutting down", "bridge is draining for restart")
+    assert facade.state.hits == 0  # upstream не вызывался
+    # При переопределении BRIDGE_RETRY_AFTER_S через env заголовок меняется соответственно:
+    facade.monkeypatch.setenv("BRIDGE_RETRY_AFTER_S", "3")
+    status, headers, _ = facade.call({"model": "gemini-4-argon"})
+    assert status == 503
+    assert headers["retry-after"] == "3"
+    assert headers["x-bridge-draining"] in ("1", "true")
+    assert facade.state.hits == 0
+
+def test_malformed_env_resilience(facade):
+    """Защита от некорректных env: нечисло/отрицательные значения откатываются к дефолтам (RW-014)."""
+    facade.monkeypatch.setenv("BRIDGE_QUEUE_TIMEOUT_S", "invalid_float")
+    facade.monkeypatch.setenv("BRIDGE_RETRY_AFTER_S", "not_a_number")
+    facade.monkeypatch.setenv("BRIDGE_RESERVED_INTERACTIVE_SLOTS", "-5")
+    facade.monkeypatch.setenv("BRIDGE_KEEPALIVE_INTERVAL_S", "nan")
+    status, _, _ = facade.call({"model": "gemini-4-argon"})
+    assert status == 200
+
+
+def test_strict_interactive_priority_over_background_in_queue():
+    """Фоновые запросы не могут обойти ждущий интерактивный запрос при освобождении слота (F-002)."""
+    mgr = QoSSlotManager(max_concurrent=3, reserved_interactive=1, queue_timeout_s=5.0)
+    # Занимаем 2 фоновых слота (лимит фоновых = 3 - 1 = 2)
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+
+    # Запускаем фоновый запрос в ожидание
+    bg_t, bg_done, bg_box = _acquire_async(mgr, is_interactive=False)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_background"] == 1)
+
+    # Запускаем интерактивный запрос в ожидание (занимает последний 3-й слот)
+    assert mgr.acquire_slot(is_interactive=True) == (True, "")
+    # Теперь активных 3 из 3. Запускаем 2-й интерактивный в очередь:
+    ui_t, ui_done, ui_box = _acquire_async(mgr, is_interactive=True)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1)
+
+    # Освобождаем один фоновый слот. Слот ОБЯЗАН достаться интерактивному запросу, а не фоновому!
+    mgr.release_slot(is_interactive=False)
+    assert ui_done.wait(1.0)
+    assert ui_box["result"] == (True, "")
+    assert not bg_done.is_set()  # фоновый всё ещё ждёт в очереди
+
+    # Очистка
+    mgr.release_slot(is_interactive=False)
+    mgr.release_slot(is_interactive=True)
+    mgr.release_slot(is_interactive=True)
+    assert bg_done.wait(1.0)
+    mgr.release_slot(is_interactive=False)
+    assert mgr.snapshot()["active_total"] == 0
+
+
+def test_bounded_queue_size_limit():
+    """Очередь ограничена не только временем, но и числом ожидающих max_queue_size (F-003)."""
+    mgr = QoSSlotManager(max_concurrent=1, max_queue_size=2, queue_timeout_s=5.0)
+    assert mgr.acquire_slot(is_interactive=True) == (True, "")
+    # 2 запроса встают в очередь (достигая предела max_queue_size=2)
+    t1, d1, _ = _acquire_async(mgr, is_interactive=True)
+    t2, d2, _ = _acquire_async(mgr, is_interactive=True)
+    assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 2)
+
+    # 3-й запрос немедленно отбивается как queue_full
+    assert mgr.acquire_slot(is_interactive=True) == (False, "queue_full")
+
+    mgr.release_slot(is_interactive=True)
+    assert d1.wait(1.0) or d2.wait(1.0)
+    if d1.is_set():
+        mgr.release_slot(is_interactive=True)
+        assert d2.wait(1.0)
+    else:
+        mgr.release_slot(is_interactive=True)
+        assert d1.wait(1.0)
+    mgr.release_slot(is_interactive=True)
+    assert mgr.snapshot()["active_total"] == 0
+
+
+def test_http_sse_streaming_with_keepalive_no_duplicate_headers(facade):
+    """Сквозной HTTP SSE стрим: keepalive в очереди не дублирует HTTP заголовки при выдаче ответа (F-001/F-005)."""
+    facade.monkeypatch.setattr(server, "MAX_CONCURRENT", 1)
+    mgr = QoSSlotManager(
+        max_concurrent=1,
+        reserved_interactive=0,
+        queue_timeout_s=2.0,
+        keepalive_interval_s=0.08,
+    )
+    set_qos_manager(mgr)
+    # Занимаем единственный слот
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+
+    conn = http.client.HTTPConnection("127.0.0.1", facade.port, timeout=5)
+    try:
+        body = json.dumps({"model": "gemini-4-argon", "stream": True})
+        headers = {"Authorization": "Bearer hub-test-key", "Content-Type": "application/json"}
+        conn.request("POST", "/v1/chat/completions", body=body, headers=headers)
+        
+        # Ждем отправки keepalive
+        assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1 or mgr.snapshot()["waiting_background"] == 1)
+        # Получаем HTTP заголовки (200 OK + text/event-stream)
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert "text/event-stream" in resp.getheader("Content-Type", "")
+        # Читаем первый keepalive комментарий
+        first_chunk = resp.read(len(b": keepalive\n\n"))
+        assert first_chunk == b": keepalive\n\n"
+        
+        # Теперь освобождаем слот для выполнения запроса
+        mgr.release_slot(is_interactive=False)
+        
+        # Читаем полезные данные ответа (mock upstream возвращает JSON)
+        # Убеждаемся, что в сокете нет повторного заголовка HTTP/1.1
+        rest = resp.read(len(b"{\"id\": \"x\", \"choices\": []}"))
+        assert b"HTTP/1.1" not in rest
+        assert b"choices" in rest
+    finally:
+        conn.close()
+        reset_qos_manager()
