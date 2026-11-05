@@ -1592,7 +1592,7 @@ def _parse_blocked_models(
         ):
             continue
         expiration = re.search(
-            r"\(до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)",
+            r"\(?до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)?",
             line,
             re.I,
         )
@@ -4984,7 +4984,9 @@ def _finish_attempt(
     return chat.turns
 
 
-def _client_gone(sock: socket.socket) -> bool:
+def _client_gone(sock: socket.socket | None) -> bool:
+    if sock is None or not hasattr(sock, "fileno"):
+        return False
     try:
         ready, _, _ = select.select([sock], [], [], 0)
         return bool(ready) and sock.recv(1, socket.MSG_PEEK) == b""
@@ -6971,9 +6973,11 @@ class Handler(BaseHTTPRequestHandler):
                         "passthrough requires an exact model id",
                     )
                     return
-                if alias is not None:
-                    req = {**req, "model": model_id}
-                    if req.get("reasoning_effort") is None:
+                upstream_model = model.get("upstream_model")
+                if upstream_model or alias is not None:
+                    target_model = upstream_model or model_id
+                    req = {**req, "model": target_model}
+                    if alias is not None and req.get("reasoning_effort") is None:
                         req["reasoning_effort"] = alias_effort
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
                 _log(
@@ -7660,7 +7664,7 @@ class Handler(BaseHTTPRequestHandler):
             is_interactive=is_interactive,
             keepalive_cb=_keepalive_cb if is_stream else None,
             timeout=qos_timeout,
-            client_gone_fn=lambda: _client_gone(self.connection),
+            client_gone_fn=lambda: _client_gone(getattr(self, "connection", None)),
         )
         if not qos_ok:
             if qos_reason == "client_gone":
