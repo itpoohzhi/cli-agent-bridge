@@ -15,10 +15,13 @@ from scripts.smoke_models import (
     DEFAULT_MODEL_NOTES_MD,
     DEFAULT_MODELS_MD,
     ModelEntry,
+    ModelLimitException,
+    build_bridge_payload,
     deduplicate_models_for_parallel,
     parse_models_md,
     parse_temp_off_models,
     run_parallel_smoke,
+    smoke_test_model,
 )
 
 
@@ -97,7 +100,7 @@ class MockBridge(AbstractContextManager["MockBridge"]):
                     )
 
                 try:
-                    time.sleep(0.12)
+                    time.sleep(0.25)
                     response_status = state.behaviors.get(body.get("model", ""), 200)
                     if response_status == 429:
                         payload = {
@@ -209,6 +212,8 @@ def test_parallel_subprocesses_spawn_independent_pgids_via_bridge() -> None:
     worker_pids = [result["worker_pid"] for result in results]
     assert all(isinstance(pid, int) and pid > 0 for pid in worker_pids)
     assert len(worker_pids) == len(set(worker_pids))
+    assert all(result["worker_pgid"] == result["worker_pid"] for result in results)
+    assert all(result["worker_pgid"] != os.getpgrp() for result in results)
     assert bridge.state.max_in_flight >= min(6, len(batch))
 
     subagent_ids = [record["subagent_id"] for record in bridge.state.records]
@@ -217,7 +222,69 @@ def test_parallel_subprocesses_spawn_independent_pgids_via_bridge() -> None:
     assert len(subagent_ids) == len(set(subagent_ids))
 
 
-def test_model_limit_exceptions_temp_off_and_http_429_quota(
+def test_parse_models_effort_annotations_and_gemini_payload(tmp_path: Path) -> None:
+    models_md = tmp_path / "models.md"
+    models_md.write_text(
+        """# Models
+
+### Ревью ответа — лёгкий луп
+
+| Модель | Effort | Family |
+| --- | --- | --- |
+| `gemini-3.8-flash` + `deepseek-v4.1-flash` + `gpt-6.1-terra` | `off` (DeepSeek); `medium` (Google, OpenAI) | Google + DeepSeek + OpenAI |
+""",
+        encoding="utf-8",
+    )
+
+    entries = parse_models_md(models_md)
+    by_model = {entry.model_id: entry for entry in entries}
+    assert by_model["gemini-3.8-flash"].effort == "medium"
+    assert by_model["deepseek-v4.1-flash"].effort == "off"
+    assert by_model["gpt-6.1-terra"].effort == "medium"
+
+    payload = build_bridge_payload("gemini-3.8-flash", effort="off")
+    assert payload["model"] == "gemini-3.8-flash"
+    assert payload["reasoning_effort"] == "medium"
+
+
+def test_temp_off_empty_marker_and_same_line_extraction(tmp_path: Path) -> None:
+    empty_notes = tmp_path / "empty-notes.md"
+    empty_notes.write_text(
+        """# Model notes
+
+## TEMP OFF
+
+Список `TEMP OFF` пуст — все канонические модели активны.
+
+- `muse-wonder-full-1.0`
+""",
+        encoding="utf-8",
+    )
+    assert parse_temp_off_models(empty_notes) == set()
+
+    notes = tmp_path / "marked-notes.md"
+    notes.write_text(
+        """# Model notes
+
+## TEMP OFF
+
+- `limited-model` — TEMP OFF
+- `not-limited-model` — active
+| `another-limited-model` | TEMP OFF |
+
+## Other section
+
+- `outside-model` — TEMP OFF
+""",
+        encoding="utf-8",
+    )
+    assert parse_temp_off_models(notes) == {
+        "limited-model",
+        "another-limited-model",
+    }
+
+
+def test_model_limit_exception_handling_and_strict_mode(
     tmp_path: Path,
 ) -> None:
     notes = tmp_path / "model-notes.md"
@@ -226,12 +293,12 @@ def test_model_limit_exceptions_temp_off_and_http_429_quota(
 
 ## TEMP OFF
 
-- `limited-model`
-- `another-limited-model`
+- `limited-model` — TEMP OFF
+- `another-limited-model` — TEMP OFF
 
 ## Other section
 
-- `outside-model`
+- `outside-model` — TEMP OFF
 """,
         encoding="utf-8",
     )
@@ -269,6 +336,13 @@ def test_model_limit_exceptions_temp_off_and_http_429_quota(
             max_workers=1,
             strict_limits=True,
         )
+        with pytest.raises(ModelLimitException):
+            smoke_test_model(
+                bridge.hub_url,
+                "quota-model",
+                timeout_s=5.0,
+                raise_on_limit=True,
+            )
 
     by_model = {result["model_id"]: result for result in results}
     assert by_model["quota-model"]["status"] == "SKIPPED_LIMIT"

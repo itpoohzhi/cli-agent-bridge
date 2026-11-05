@@ -26,6 +26,9 @@ DEFAULT_MODEL_NOTES_MD = Path(
 ).expanduser()
 DEFAULT_HUB_URL = os.environ.get("HUB_BRIDGE_URL", "http://127.0.0.1:9882/v1")
 
+_LAST_WORKER_PGID: int | None = None
+_WORKER_PGIDS: dict[int, int] = {}
+
 
 class ModelEntry(NamedTuple):
     role: str
@@ -36,6 +39,17 @@ class ModelEntry(NamedTuple):
 
 class ModelLimitException(Exception):
     """Raised when a model cannot run because of a temporary usage limit."""
+
+    def __init__(
+        self,
+        detail: str,
+        model_id: str = "",
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.model_id = model_id
+        self.status_code = status_code
 
 
 def _clean_markdown_cell(value: str) -> str:
@@ -162,6 +176,19 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
             efforts = [match.group(1)] if match else [""]
         efforts = [effort.lower() for effort in efforts]
 
+        annotated_efforts: list[tuple[str, set[str]]] = []
+        for annotation in re.finditer(
+            r"`?(xhigh|high|medium|low|max|off)`?\s*\(([^)]*)\)",
+            effort_cell,
+            flags=re.IGNORECASE,
+        ):
+            providers = {
+                provider.strip().lower()
+                for provider in re.split(r"\s*,\s*|\s*;\s*", annotation.group(2))
+                if provider.strip()
+            }
+            annotated_efforts.append((annotation.group(1).lower(), providers))
+
         family_cell = cells[family_index] if 0 <= family_index < len(cells) else ""
         family_parts = [
             re.sub(r"[`*]", "", part).strip()
@@ -169,6 +196,7 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
             if re.sub(r"[`*]", "", part).strip()
         ]
         fallback_family = family_parts[0] if family_parts else family_cell.strip()
+        effort_values = {effort.lower() for effort in efforts}
 
         for idx, model_id in enumerate(model_ids):
             if model_id.lower() in {
@@ -185,6 +213,21 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
             effort = efforts[idx] if idx < len(efforts) else efforts[0]
             family_hint = family_parts[idx] if idx < len(family_parts) else fallback_family
             family = _family_for_model(model_id, family_hint)
+
+            family_lower = family.lower()
+            for annotated_effort, providers in annotated_efforts:
+                if family_lower in providers:
+                    effort = annotated_effort
+                    break
+
+            model_lower = model_id.lower()
+            if model_lower.startswith("deepseek-v4.1-flash") and "off" in effort_values:
+                effort = "off"
+            if model_lower == "gemini-3.8-flash" and (
+                effort in {"", "off"} or "medium" in effort_values
+            ):
+                effort = "medium"
+
             entries.append(ModelEntry(role, model_id, effort, family))
 
     seen: set[tuple[str, str]] = set()
@@ -198,7 +241,7 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
 
 
 def parse_temp_off_models(notes_path: Path = DEFAULT_MODEL_NOTES_MD) -> set[str]:
-    """Return backticked model IDs declared in the TEMP OFF markdown section."""
+    """Return model IDs explicitly marked TEMP OFF in bullet or table rows."""
     notes_path = Path(notes_path).expanduser()
     if not notes_path.is_file():
         return set()
@@ -222,7 +265,12 @@ def parse_temp_off_models(notes_path: Path = DEFAULT_MODEL_NOTES_MD) -> set[str]
         return set()
 
     section = "\n".join(section_lines)
-    if re.search(r"список\s+temp\s+off\s+пуст", section, flags=re.IGNORECASE):
+    section_clean = section.replace("`", "")
+    if re.search(
+        r"список\s+temp\s+off\s+пуст",
+        section_clean,
+        flags=re.IGNORECASE,
+    ):
         return set()
 
     excluded = {
@@ -234,18 +282,27 @@ def parse_temp_off_models(notes_path: Path = DEFAULT_MODEL_NOTES_MD) -> set[str]
         "run-id",
     }
     models: set[str] = set()
-    for candidate in re.findall(r"`([^`]+)`", section):
-        candidate = candidate.strip()
-        lowered = candidate.lower()
-        if lowered in excluded:
+    for line in section_lines:
+        line_clean = line.replace("`", "")
+        stripped = line.lstrip()
+        if not (stripped.startswith(("-", "*", "+")) or stripped.startswith("|")):
             continue
-        if lowered.endswith((".md", ".json", ".tsv", ".py")):
+        if not re.search(r"\btemp\s+off\b", line_clean, flags=re.IGNORECASE):
             continue
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]*", candidate):
-            continue
-        if "-" not in candidate and "/" not in candidate:
-            continue
-        models.add(candidate)
+        for candidate in re.findall(r"`([^`]+)`", line):
+            candidate = candidate.strip()
+            lowered = candidate.lower()
+            if re.fullmatch(r"temp\s+off", lowered, flags=re.IGNORECASE):
+                continue
+            if lowered in excluded:
+                continue
+            if lowered.endswith((".md", ".json", ".tsv", ".py")):
+                continue
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]*", candidate):
+                continue
+            if "-" not in candidate and "/" not in candidate:
+                continue
+            models.add(candidate)
     return models
 
 
@@ -289,6 +346,9 @@ def build_bridge_payload(
 ) -> dict[str, Any]:
     """Build the OpenAI-compatible bridge request for a canonical model ID."""
     normalized_effort = effort.lower().strip()
+    if model_id == "gemini-3.8-flash" and normalized_effort == "off":
+        normalized_effort = "medium"
+
     target_model = model_id
     target_effort = normalized_effort
     thinking_disabled = False
@@ -364,6 +424,8 @@ def smoke_test_model(
     effort: str = "",
     subagent_id: str = "",
     use_subprocess: bool = False,
+    strict_limits: bool = False,
+    raise_on_limit: bool = False,
 ) -> tuple[bool, str, float]:
     """Send one isolated OpenAI-compatible streaming smoke request."""
     if use_subprocess:
@@ -393,73 +455,94 @@ def smoke_test_model(
     ttft: float | None = None
     got_done = False
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            status_code = response.getcode()
-            if status_code != 200:
-                error_body = _read_error_body(response)
-                elapsed = time.monotonic() - started
-                if is_model_limit_error(status_code, error_body):
-                    return True, "SKIPPED_LIMIT", elapsed
-                detail = mask_secret(error_body.strip())
-                status = f"HTTP {status_code}"
-                if detail:
-                    status += f": {detail}"
-                return False, status, elapsed
-
-            for raw_line in response:
-                line = raw_line.decode("utf-8", "replace").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data_text = line[5:].strip()
-                if data_text == "[DONE]":
-                    got_done = True
-                    break
-                try:
-                    chunk = json.loads(data_text)
-                except ValueError:
-                    continue
-
-                if isinstance(chunk, dict) and (
-                    "error" in chunk or str(chunk.get("type", "")).lower() == "error"
-                ):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                status_code = response.getcode()
+                if status_code != 200:
+                    error_body = _read_error_body(response)
                     elapsed = time.monotonic() - started
-                    error_text = json.dumps(chunk, ensure_ascii=False)
-                    if is_model_limit_error(status_code, error_text):
-                        return True, "SKIPPED_LIMIT", elapsed
-                    return False, mask_secret(f"STREAM_ERROR: {error_text}"), elapsed
+                    if is_model_limit_error(status_code, error_body):
+                        detail = mask_secret(error_body.strip()) or f"HTTP {status_code}"
+                        raise ModelLimitException(
+                            detail,
+                            model_id=model_id,
+                            status_code=status_code,
+                        )
+                    detail = mask_secret(error_body.strip())
+                    status = f"HTTP {status_code}"
+                    if detail:
+                        status += f": {detail}"
+                    return False, status, elapsed
 
-                choices = chunk.get("choices") or [] if isinstance(chunk, dict) else []
-                if choices:
-                    delta = choices[0].get("delta") or {}
-                    if (
-                        delta.get("content")
-                        or delta.get("reasoning_content")
-                        or delta.get("thinking")
-                    ) and ttft is None:
-                        ttft = time.monotonic() - started
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", "replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_text = line[5:].strip()
+                    if data_text == "[DONE]":
+                        got_done = True
+                        break
+                    try:
+                        chunk = json.loads(data_text)
+                    except ValueError:
+                        continue
 
+                    if isinstance(chunk, dict) and (
+                        "error" in chunk or str(chunk.get("type", "")).lower() == "error"
+                    ):
+                        elapsed = time.monotonic() - started
+                        error_text = json.dumps(chunk, ensure_ascii=False)
+                        if is_model_limit_error(status_code, error_text):
+                            raise ModelLimitException(
+                                mask_secret(error_text),
+                                model_id=model_id,
+                                status_code=status_code,
+                            )
+                        return False, mask_secret(f"STREAM_ERROR: {error_text}"), elapsed
+
+                    choices = chunk.get("choices") or [] if isinstance(chunk, dict) else []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        if (
+                            delta.get("content")
+                            or delta.get("reasoning_content")
+                            or delta.get("thinking")
+                        ) and ttft is None:
+                            ttft = time.monotonic() - started
+
+                elapsed = time.monotonic() - started
+                if ttft is not None:
+                    return True, "STREAM_OK", ttft
+                if got_done:
+                    return True, "DONE_OK", elapsed
+                return False, "No stream chunks", elapsed
+        except ModelLimitException:
+            raise
+        except urllib.error.HTTPError as exc:
             elapsed = time.monotonic() - started
-            if ttft is not None:
-                return True, "STREAM_OK", ttft
-            if got_done:
-                return True, "DONE_OK", elapsed
-            return False, "No stream chunks", elapsed
-    except urllib.error.HTTPError as exc:
-        elapsed = time.monotonic() - started
-        error_body = _read_error_body(exc)
-        error_text = error_body or str(exc.reason)
-        if is_model_limit_error(exc.code, error_text):
-            return True, "SKIPPED_LIMIT", elapsed
-        status = f"HTTP {exc.code}"
-        if error_text:
-            status += f": {mask_secret(error_text.strip())}"
-        return False, status, elapsed
-    except Exception as exc:
-        elapsed = time.monotonic() - started
-        error_text = str(exc)
-        if is_model_limit_error(None, error_text):
-            return True, "SKIPPED_LIMIT", elapsed
-        return False, mask_secret(f"Error: {error_text}"), elapsed
+            error_body = _read_error_body(exc)
+            error_text = error_body or str(exc.reason)
+            if is_model_limit_error(exc.code, error_text):
+                raise ModelLimitException(
+                    mask_secret(error_text.strip()) or f"HTTP {exc.code}",
+                    model_id=model_id,
+                    status_code=exc.code,
+                )
+            status = f"HTTP {exc.code}"
+            if error_text:
+                status += f": {mask_secret(error_text.strip())}"
+            return False, status, elapsed
+        except Exception as exc:
+            detail = mask_secret(str(exc))
+            return False, "ERROR", detail  # type: ignore[return-value]
+    except ModelLimitException as exc:
+        if raise_on_limit:
+            raise
+        return (
+            not strict_limits,
+            "SKIPPED_LIMIT",
+            f"ModelLimitException: {exc}",
+        )  # type: ignore[return-value]
 
 
 def smoke_test_model_subprocess(
@@ -471,6 +554,8 @@ def smoke_test_model_subprocess(
     subagent_id: str = "",
 ) -> tuple[bool, str, float, int]:
     """Run one smoke check in a child process with its own process group."""
+    global _LAST_WORKER_PGID
+
     command = [
         sys.executable,
         __file__,
@@ -514,6 +599,8 @@ def smoke_test_model_subprocess(
             except (OSError, ProcessLookupError):
                 proc.kill()
             stdout, stderr = proc.communicate()
+        _LAST_WORKER_PGID = proc.pid
+        _WORKER_PGIDS[proc.pid] = proc.pid
         return False, "Timeout", time.monotonic() - started, proc.pid
 
     payload: dict[str, Any] | None = None
@@ -528,6 +615,8 @@ def smoke_test_model_subprocess(
 
     if payload is None:
         diagnostic = stderr.strip() or stdout.strip() or f"worker exited {proc.returncode}"
+        _LAST_WORKER_PGID = proc.pid
+        _WORKER_PGIDS[proc.pid] = proc.pid
         return (
             False,
             mask_secret(f"Worker error: {diagnostic}"),
@@ -535,10 +624,22 @@ def smoke_test_model_subprocess(
             proc.pid,
         )
 
+    worker_pgid = payload.get("pgid")
+    if not isinstance(worker_pgid, int):
+        worker_pgid = proc.pid
+    _LAST_WORKER_PGID = worker_pgid
+    _WORKER_PGIDS[proc.pid] = worker_pgid
+
+    latency_value = payload.get("latency", time.monotonic() - started)
+    try:
+        latency = float(latency_value)
+    except (TypeError, ValueError):
+        latency = 0.0
+
     return (
         bool(payload.get("ok")),
         str(payload.get("status", "Worker returned no status")),
-        float(payload.get("latency", time.monotonic() - started)),
+        latency,
         proc.pid,
     )
 
@@ -590,6 +691,13 @@ def run_parallel_smoke(
     def execute(index: int, entry: ModelEntry) -> dict[str, Any]:
         result = base_result(index, entry)
         try:
+            if entry.model_id in blocked_models:
+                raise ModelLimitException(
+                    "model is declared TEMP OFF",
+                    model_id=entry.model_id,
+                    status_code=None,
+                )
+
             if use_subprocesses:
                 ok, status, latency, worker_pid = smoke_test_model_subprocess(
                     hub_url,
@@ -600,18 +708,32 @@ def run_parallel_smoke(
                     subagent_id=result["subagent_id"],
                 )
                 result["worker_pid"] = worker_pid
+                result["worker_pgid"] = _WORKER_PGIDS.get(worker_pid, worker_pid)
             else:
-                ok, status, latency = smoke_test_model(
+                ok, status, latency_value = smoke_test_model(
                     hub_url,
                     entry.model_id,
                     timeout_s=timeout_s,
                     api_key=api_key,
                     effort=entry.effort,
                     subagent_id=result["subagent_id"],
+                    strict_limits=strict_limits,
                 )
+                if isinstance(latency_value, (int, float)):
+                    latency = float(latency_value)
+                else:
+                    latency = 0.0
+                    result["detail"] = str(latency_value)
             if status == "SKIPPED_LIMIT" and strict_limits:
                 ok = False
             result.update(ok=ok, status=status, latency=latency)
+        except ModelLimitException as exc:
+            result.update(
+                ok=not strict_limits,
+                status="SKIPPED_LIMIT",
+                detail=f"ModelLimitException: {exc}",
+                latency=0.0,
+            )
         except Exception as exc:
             result.update(
                 ok=False,
@@ -623,15 +745,6 @@ def run_parallel_smoke(
     futures: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         for index, entry in enumerate(entries):
-            if entry.model_id in blocked_models:
-                result = base_result(index, entry)
-                result.update(
-                    ok=not strict_limits,
-                    status="SKIPPED_LIMIT",
-                    latency=0.0,
-                )
-                results[index] = result
-                continue
             future = executor.submit(execute, index, entry)
             futures[future] = index
 
@@ -672,7 +785,12 @@ def main() -> int:
         )
         print(
             json.dumps(
-                {"ok": ok, "status": status, "latency": latency},
+                {
+                    "ok": ok,
+                    "status": status,
+                    "latency": latency,
+                    "pgid": os.getpgrp(),
+                },
                 ensure_ascii=False,
             ),
             flush=True,
@@ -695,7 +813,7 @@ def main() -> int:
     )
     print("-" * 112)
 
-    if args.live:
+    if args.live and not args.dry_run:
         temp_off_models = parse_temp_off_models(args.model_notes_md)
         results = run_parallel_smoke(
             models,
@@ -720,7 +838,11 @@ def main() -> int:
         ]
 
     for result in results:
-        latency = f"{result['latency']:.2f}s" if args.live else "-"
+        latency = (
+            f"{result['latency']:.2f}s"
+            if args.live and not args.dry_run
+            else "-"
+        )
         print(
             f"{result['role']:<24} | {result['model_id']:<32} | "
             f"{result['family']:<12} | {result['status']:<20} | {latency:<10}"
@@ -732,6 +854,19 @@ def main() -> int:
     if not args.live:
         print("\nNOTE: Run with --live to perform actual network requests.")
         return 0
+
+    stream_ok_count = sum(
+        1 for result in results if result.get("status") in ("STREAM_OK", "DONE_OK")
+    )
+    skipped_limit_count = sum(
+        1 for result in results if result.get("status") == "SKIPPED_LIMIT"
+    )
+    print(
+        f"\nSUMMARY: total={len(results)} stream_ok={stream_ok_count} "
+        f"skipped_limit={skipped_limit_count}"
+    )
+    if len(results) > 0 and stream_ok_count == 0:
+        return 1
     return 0 if all(bool(result["ok"]) for result in results) else 1
 
 
