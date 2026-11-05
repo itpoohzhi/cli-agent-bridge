@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+import scripts.smoke_models as smoke_models_module
 from scripts.smoke_models import (
     DEFAULT_MODEL_NOTES_MD,
     DEFAULT_MODELS_MD,
@@ -18,6 +19,7 @@ from scripts.smoke_models import (
     ModelLimitException,
     build_bridge_payload,
     deduplicate_models_for_parallel,
+    is_model_limit_error,
     parse_models_md,
     parse_temp_off_models,
     run_parallel_smoke,
@@ -37,20 +39,45 @@ FALLBACK_ENTRIES = [
 ]
 
 
-def _load_entries() -> list[ModelEntry]:
-    try:
-        entries = parse_models_md(DEFAULT_MODELS_MD)
-    except FileNotFoundError:
-        entries = list(FALLBACK_ENTRIES)
-    entries = deduplicate_models_for_parallel(entries)
+def _write_models_fixture(path: Path) -> Path:
+    path.write_text(
+        """# Models
 
-    existing = {(entry.model_id, entry.effort.lower()) for entry in entries}
-    for fallback in FALLBACK_ENTRIES:
-        key = (fallback.model_id, fallback.effort.lower())
-        if key not in existing:
-            entries.append(fallback)
-            existing.add(key)
-    return entries
+### Coder
+
+| Модель | Effort | Family |
+| --- | --- | --- |
+| `claude-sonnet-5-5` | `high` | Anthropic |
+| `gpt-6.1-sol` | `high` | OpenAI |
+| `gemini-4-argon-high` | `high` | Google |
+| `muse-wonder-full-1.0` | `high` | Meta |
+
+### Reviewer
+
+| Модель | Effort | Family |
+| --- | --- | --- |
+| `gpt-6.1-sol` | `medium` | OpenAI |
+
+### Brief-review
+
+| Модель | Effort | Family |
+| --- | --- | --- |
+| `gemini-3.8-flash-medium` | `medium` | Google |
+| `claude-haiku-5-5` | `medium` | Anthropic |
+
+### Answer review
+
+| Модель | Effort | Family |
+| --- | --- | --- |
+| `deepseek-v4.1-flash` | `off` | DeepSeek |
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _load_entries(path: Path) -> list[ModelEntry]:
+    return deduplicate_models_for_parallel(parse_models_md(path))
 
 
 class MockBridgeState:
@@ -101,7 +128,8 @@ class MockBridge(AbstractContextManager["MockBridge"]):
 
                 try:
                     time.sleep(0.25)
-                    response_status = state.behaviors.get(body.get("model", ""), 200)
+                    model = body.get("model", "")
+                    response_status = state.behaviors.get(model, 200)
                     if response_status == 429:
                         payload = {
                             "error": {
@@ -117,7 +145,12 @@ class MockBridge(AbstractContextManager["MockBridge"]):
                         self.wfile.write(encoded)
                         return
                     if response_status == 500:
-                        payload = {"error": {"message": "ordinary bridge failure"}}
+                        message = (
+                            "connection pool exhausted"
+                            if model == "pool-failure-model"
+                            else "ordinary bridge failure"
+                        )
+                        payload = {"error": {"message": message}}
                         encoded = json.dumps(payload).encode("utf-8")
                         self.send_response(500)
                         self.send_header("Content-Type", "application/json")
@@ -130,9 +163,9 @@ class MockBridge(AbstractContextManager["MockBridge"]):
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
                     self.end_headers()
-                    chunk = {
-                        "choices": [{"delta": {"content": "OK"}}],
-                    }
+                    if model == "null-error-model":
+                        self.wfile.write(b'data: {"error": null}\n\n')
+                    chunk = {"choices": [{"delta": {"content": "OK"}}]}
                     self.wfile.write(
                         ("data: " + json.dumps(chunk) + "\n\n").encode("utf-8")
                     )
@@ -157,14 +190,33 @@ class MockBridge(AbstractContextManager["MockBridge"]):
         self.thread.join(timeout=5.0)
 
 
-def test_all_orchestration_models_parallel_execution_and_headers() -> None:
-    entries = _load_entries()
+def test_all_orchestration_models_parallel_execution_and_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models_md = _write_models_fixture(tmp_path / "models.md")
+    entries = _load_entries(models_md)
+    monkeypatch.setattr(
+        smoke_models_module,
+        "_load_fleet_config",
+        lambda: (
+            frozenset(
+                {
+                    "claude-sonnet-5-5",
+                    "gpt-6.1-sol",
+                    "gemini-4-argon",
+                    "muse-wonder-full-1.0",
+                    "gemini-3.8-flash",
+                    "claude-haiku-5-5",
+                    "deepseek-v4.1-flash-free",
+                }
+            ),
+            {},
+        ),
+    )
+
     with MockBridge() as bridge:
         results = run_parallel_smoke(
-            entries,
-            bridge.hub_url,
-            timeout_s=10.0,
-            max_workers=32,
+            entries, bridge.hub_url, timeout_s=10.0, max_workers=32
         )
 
     assert len(results) == len(entries)
@@ -185,15 +237,18 @@ def test_all_orchestration_models_parallel_execution_and_headers() -> None:
         for record in bridge.state.records
         if "deepseek-v4.1-flash" in record["subagent_id"]
     ]
-    assert deepseek_records, "the canonical DeepSeek answer-review slot was not tested"
+    assert deepseek_records
     deepseek_body = deepseek_records[0]["body"]
     assert deepseek_body["model"] == "deepseek-v4.1-flash-free"
     assert deepseek_body["reasoning_effort"] == "off"
     assert deepseek_body["thinking"] == {"type": "disabled"}
 
 
-def test_parallel_subprocesses_spawn_independent_pgids_via_bridge() -> None:
-    entries = _load_entries()
+def test_parallel_subprocesses_spawn_independent_pgids_via_bridge(
+    tmp_path: Path,
+) -> None:
+    models_md = _write_models_fixture(tmp_path / "models.md")
+    entries = _load_entries(models_md)
     batch = entries[:6]
     assert len(batch) == 6
 
@@ -222,7 +277,9 @@ def test_parallel_subprocesses_spawn_independent_pgids_via_bridge() -> None:
     assert len(subagent_ids) == len(set(subagent_ids))
 
 
-def test_parse_models_effort_annotations_and_gemini_payload(tmp_path: Path) -> None:
+def test_parse_models_effort_annotations_and_gemini_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     models_md = tmp_path / "models.md"
     models_md.write_text(
         """# Models
@@ -242,9 +299,23 @@ def test_parse_models_effort_annotations_and_gemini_payload(tmp_path: Path) -> N
     assert by_model["deepseek-v4.1-flash"].effort == "off"
     assert by_model["gpt-6.1-terra"].effort == "medium"
 
+    monkeypatch.setattr(
+        smoke_models_module,
+        "_load_fleet_config",
+        lambda: (
+            frozenset({"gemini-3.8-flash", "deepseek-v4.1-flash-free"}),
+            {"canonical-alias": "wire-target"},
+        ),
+    )
     payload = build_bridge_payload("gemini-3.8-flash", effort="off")
     assert payload["model"] == "gemini-3.8-flash"
-    assert payload["reasoning_effort"] == "medium"
+    assert payload["reasoning_effort"] == "off"
+    assert payload["thinking"] == {"type": "disabled"}
+
+    alias_payload = build_bridge_payload("canonical-alias", effort="high")
+    assert alias_payload["model"] == "wire-target"
+    free_payload = build_bridge_payload("deepseek-v4.1-flash", effort="off")
+    assert free_payload["model"] == "deepseek-v4.1-flash-free"
 
 
 def test_temp_off_empty_marker_and_same_line_extraction(tmp_path: Path) -> None:
@@ -311,6 +382,12 @@ def test_model_limit_exception_handling_and_strict_mode(
     quota_entry = ModelEntry("Coder", "quota-model", "high", "Test")
     failure_entry = ModelEntry("Coder", "failure-model", "high", "Test")
 
+    assert is_model_limit_error(500, "connection pool exhausted") is False
+    assert is_model_limit_error(502, "upstream quota service down") is False
+    assert is_model_limit_error(
+        400, '{"error":{"type":"quota_exceeded"}}'
+    ) is True
+
     with MockBridge() as bridge:
         skipped = run_parallel_smoke(
             [limited_entry],
@@ -319,10 +396,12 @@ def test_model_limit_exception_handling_and_strict_mode(
         )
         assert skipped[0]["status"] == "SKIPPED_LIMIT"
         assert skipped[0]["ok"] is True
+        assert skipped[0]["detail"]
         assert bridge.state.records == []
 
         bridge.state.behaviors["quota-model"] = 429
         bridge.state.behaviors["failure-model"] = 500
+        bridge.state.behaviors["pool-failure-model"] = 500
         results = run_parallel_smoke(
             [quota_entry, failure_entry],
             bridge.hub_url,
@@ -343,10 +422,24 @@ def test_model_limit_exception_handling_and_strict_mode(
                 timeout_s=5.0,
                 raise_on_limit=True,
             )
+        ok, status, elapsed = smoke_test_model(
+            bridge.hub_url, "pool-failure-model", timeout_s=5.0
+        )
+        assert ok is False
+        assert status.startswith("HTTP 500")
+        assert isinstance(elapsed, float)
+
+        null_ok, null_status, null_elapsed = smoke_test_model(
+            bridge.hub_url, "null-error-model", timeout_s=5.0
+        )
+        assert null_ok is True
+        assert null_status == "STREAM_OK"
+        assert isinstance(null_elapsed, float)
 
     by_model = {result["model_id"]: result for result in results}
     assert by_model["quota-model"]["status"] == "SKIPPED_LIMIT"
     assert by_model["quota-model"]["ok"] is True
+    assert by_model["quota-model"]["detail"]
     assert by_model["failure-model"]["ok"] is False
     assert by_model["failure-model"]["status"].startswith("HTTP 500")
     assert strict_result[0]["status"] == "SKIPPED_LIMIT"
@@ -382,8 +475,14 @@ def test_live_bridge_9882_parallel_models_and_subprocesses() -> None:
         temp_off_models=temp_off,
     )
 
+    results = parallel_results + subprocess_results
     allowed_statuses = {"STREAM_OK", "DONE_OK", "SKIPPED_LIMIT"}
-    for result in parallel_results + subprocess_results:
+    for result in results:
         assert result["ok"] is True, result
         assert result["status"] in allowed_statuses, result
+    assert sum(
+        1
+        for result in results
+        if str(result["status"]).startswith(("STREAM_OK", "DONE_OK"))
+    ) >= 1
 
