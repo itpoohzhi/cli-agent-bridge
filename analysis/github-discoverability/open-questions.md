@@ -1,0 +1,6 @@
+# Открытые вопросы и допущения (Open Questions) — GitHub About & Repository Discoverability
+
+Формат: `OPEN-NN | статус | вопрос | что мешает закрыть | кто нужен | риск | допущение`
+
+OPEN-01 | МОЖНО ПРОДОЛЖИТЬ | Как применить метаданные About (description, homepage, topics) в живом GitHub при просроченном GITHUB_TOKEN в окружении | Текущий токен в ~/.zshrc возвращает HTTP 401 на api.github.com | Владелец репозитория или сессия браузера / GitHub Actions workflow | Метаданные в репозитории (.github/repo-metadata.json и scripts/sync_github_about.py) будут доставлены по SSH в git, но прямой REST PATCH потребует валидного токена или браузерной сессии | Поставляем канонический .github/repo-metadata.json и идемпотентный скрипт scripts/sync_github_about.py с режимами --validate, --check, --dry-run и --apply, а на этапе сдачи проверяем применение через доступные каналы (браузерная сессия / токен)
+OPEN-02 | МОЖНО ПРОДОЛЖИТЬ | Какой URL указывать в поле homepage секции About при отсутствии отдельного сайта документации | У проекта нет отдельного домена документации вне GitHub | Владелец продукта | Поле homepage может остаться пустым или вести на документацию в репозитории | Принимаем в качестве рабочего допущения канонический якорный URL https://github.com/itpoohzhi/cli-agent-bridge#readme до появления отдельного сайта документации

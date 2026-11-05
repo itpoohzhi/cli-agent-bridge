@@ -1,0 +1,19 @@
+# Реестр фактов (Evidence Ledger) — GitHub About & Repository Discoverability
+
+Формат: `[F-NN] утверждение | источник | YYYY-MM-DD`
+
+[F-01] В публичном репозитории itpoohzhi/cli-agent-bridge поле description в GitHub API имеет значение null | GET https://api.github.com/repos/itpoohzhi/cli-agent-bridge | 2026-11-05
+[F-02] В публичном репозитории itpoohzhi/cli-agent-bridge поле homepage в GitHub API имеет значение null | GET https://api.github.com/repos/itpoohzhi/cli-agent-bridge | 2026-11-05
+[F-03] В публичном репозитории itpoohzhi/cli-agent-bridge массив topics в GitHub API пуст ([]) | GET https://api.github.com/repos/itpoohzhi/cli-agent-bridge | 2026-11-05
+[F-04] Репозиторий itpoohzhi/cli-agent-bridge имеет лицензию MIT, ветку по умолчанию main и базовый коммит 88cc8fb1e5bd00875f05573cd066e3345d3ddb54 | GET https://api.github.com/repos/itpoohzhi/cli-agent-bridge | 2026-11-05
+[F-05] Файл README.md состоит из 544 строк на английском языке и описывает OpenAI-совместимый HTTP-шлюз для CLI-агентов | README.md:L1-L544 | 2026-11-05
+[F-06] Модуль server.py реализует эндпоинты POST /v1/chat/completions, GET /v1/models, GET /health, API управления сессиями /v1/turns и планировщик QoS fair-share | server.py:L1-L200 | 2026-11-05
+[F-07] Пакет core/ содержит 12 модулей и пакетов: backend_adapter.py, context_resilience.py, image_attachment.py, model_penalty.py, qos.py, request_queue.py, runtime_flags.py, session_store.py, stream_fsm/, tool_emulation.py, turn_session_manager.py, watchdog.py | core/ directory listing | 2026-11-05
+[F-08] Пакет adapters/ содержит 4 модуля (droid_adapter.py, muse_adapter.py, muse_msp.py, passthrough_adapter.py), а каталог bridges/ содержит 4 встроенных моста (agy-bridge, claude-p-bridge, muse-bridge, opencode-zen-bridge), вопреки строке 280 README.md об отсутствии sibling bridges в репозитории | adapters/ and bridges/ directory listing, README.md:L280 | 2026-11-05
+[F-09] Каталог docs/adr/ содержит 23 архитектурных решения (ADR 0001..0023), тогда как в README.md перечислены только ADR 0001..0010 | docs/adr/ directory listing, README.md:L510-L532 | 2026-11-05
+[F-10] Каталог tests/ содержит 76 тестовых модулей pytest, а каталог scripts/ содержит гейты qa_product_gate.py и smoke_models.py, тогда как в README.md указано 476 unittest тестов | tests/ and scripts/ directory listing, README.md:L18,L503 | 2026-11-05
+[F-11] Проверка bash ~/Мой диск/skils/anti-neuromarkers/scripts/check.sh README.md завершается с кодом 1 из-за 46 длинных тире (emdash=46), 3 символов стрелок (строки 87, 272, 418) и 9 относительных путей к файлам без полного URL https://github.com/itpoohzhi/cli-agent-bridge/blob/main/... (строки 116, 124, 174, 175, 322, 325, 511, 513, 530) | anti-neuromarkers/scripts/check.sh output | 2026-11-05
+[F-12] В дереве репозитория отсутствуют каталог .github/, файл .github/repo-metadata.json и скрипт синхронизации scripts/sync_github_about.py | repository root listing | 2026-11-05
+[F-13] SSH-доступ к git@github.com авторизован для пользователя itpoohzhi (ssh -T git@github.com), тогда как переменная GITHUB_TOKEN в ~/.zshrc возвращает HTTP 401 Bad credentials при обращении к api.github.com | ssh -T git@github.com and curl api.github.com | 2026-11-05
+[F-14] В README.md (строки 16, 54, 242) и fleet.json зафиксирована маршрутизация моделей OpenAI Codex (gpt-*), требование Python 3.10+ и регламент трёхуровневого контроля качества L1/L2/L3 в AGENTS.md (строки 50-82) | README.md:L16,L54,L242, fleet.json, AGENTS.md:L50-L82 | 2026-11-05
+[F-15] В таблице архитектуры README.md (строки 90-127) перечислены только server.py, session_store.py, tool_emulation.py, backend_adapter.py и отсутствуют модули core/stream_fsm/, core/model_penalty.py, core/context_resilience.py, core/turn_session_manager.py, core/watchdog.py, core/qos.py и adapters/passthrough_adapter.py | README.md:L90-L127 | 2026-11-05
