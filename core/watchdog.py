@@ -35,9 +35,7 @@ DEFAULT_SAFETY_CAP_S: float = SAFETY_CAP_S
 DEFAULT_FINISH_RESERVE_S: float = FINISH_RESERVE_S
 
 
-_PS_LINE_RE = re.compile(
-    r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s*(.*)$"
-)
+_PS_LINE_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s*(.*)$")
 
 
 def parse_cputime(raw: str) -> float:
@@ -187,9 +185,7 @@ class ProcessWatchdog:
         descendants.sort()
         return descendants, cpu_by_pid, any_alive_proc
 
-    def seed(
-        self, pgid: int, *, rid: str = "", turn_id: str = ""
-    ) -> WatchdogMetrics:
+    def seed(self, pgid: int, *, rid: str = "", turn_id: str = "") -> WatchdogMetrics:
         """Фиксирует базовый срез PID и cputime группы при старте хода без сброса таймера."""
         metrics = self.sample(pgid, rid=rid, turn_id=turn_id, _seed_only=True)
         return metrics
@@ -343,10 +339,14 @@ class AdaptiveTimeoutController:
         rid: str = "",
         turn_id: str = "",
         log_fn: Callable[[str], None] | None = None,
+        io_wait_cap_s: float | None = None,
+        watchdog_interval_s: float = WATCHDOG_INTERVAL_S,
     ) -> None:
         self.idle_timeout_s = float(idle_timeout_s)
         self.safety_cap_s = float(safety_cap_s)
         self.finish_reserve_s = float(finish_reserve_s)
+        self.io_wait_cap_s = io_wait_cap_s
+        self.watchdog_interval_s = watchdog_interval_s
         self.watchdog_enabled = bool(watchdog_enabled)
         self._clock = clock
         self.rid = rid
