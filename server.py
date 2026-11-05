@@ -1592,7 +1592,7 @@ def _parse_blocked_models(
         ):
             continue
         expiration = re.search(
-            r"\(?до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)?",
+            r"\b\(?до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)?",
             line,
             re.I,
         )
@@ -1606,6 +1606,8 @@ def _parse_blocked_models(
                 )
             except ValueError:
                 pass
+        elif re.search(r"\bдо\b.*MSK", line, re.I):
+            _log(f"warning: unparseable expiration date in model note: {line.strip()}")
         if "группа" in headers:
             group = cells[headers.index("группа")].lower()
             if group not in ("модели", "models"):
@@ -6974,8 +6976,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 upstream_model = model.get("upstream_model")
-                if upstream_model or alias is not None:
-                    target_model = upstream_model or model_id
+                has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+                if has_upstream or alias is not None:
+                    target_model = upstream_model.strip() if has_upstream else model_id
                     req = {**req, "model": target_model}
                     if alias is not None and req.get("reasoning_effort") is None:
                         req["reasoning_effort"] = alias_effort
