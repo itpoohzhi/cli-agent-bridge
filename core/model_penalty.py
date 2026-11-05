@@ -33,10 +33,11 @@ DEFAULT_STORAGE_PATH = Path(
 _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _State = dict[str, dict[str, Any]]
+_DISABLED_MAX_START_FAILS = 999999999
 
 
 def _is_infrastructure_network_error(error_reason: str | None) -> bool:
-    """Return True if error is caused by proxy, bridge socket or gateway issues, not model startup."""
+    """Identify infrastructure failures that must not penalize a model."""
     if not error_reason:
         return False
     lower = str(error_reason).strip().lower()
@@ -70,7 +71,8 @@ def _is_finite_nonnegative(value: Any) -> bool:
 
 def _configured_max_start_fails(value: int | None) -> int:
     candidate = (
-        value if value is not None
+        value
+        if value is not None
         else os.environ.get("BRIDGE_MAX_START_FAILS", DEFAULT_MAX_START_FAILS)
     )
     try:
@@ -93,7 +95,8 @@ def _configured_max_start_fails(value: int | None) -> int:
 
 def _configured_cooldown(value: float | None) -> float:
     candidate = (
-        value if value is not None
+        value
+        if value is not None
         else os.environ.get("BRIDGE_COOLDOWN_SECONDS", DEFAULT_COOLDOWN_SECONDS)
     )
     try:
@@ -125,9 +128,8 @@ def _empty_entry() -> dict[str, Any]:
 class ModelPenaltyTracker:
     """Track failures using a JSON file and a separate, stable flock file.
 
-    Every operation reloads persisted state while holding the process lock,
-    preventing lost updates between cooperating processes. If persistence is
-    unavailable, operations continue against the last known in-memory state.
+    Every operation reloads persisted state while holding the process lock.
+    If persistence is unavailable, operations use the last in-memory state.
     """
 
     def __init__(
@@ -145,7 +147,15 @@ class ModelPenaltyTracker:
         )
         self.storage_path = Path(configured_path).expanduser()
         self.lock_path = self.storage_path.with_suffix(".json.lock")
-        self.max_start_fails = _configured_max_start_fails(max_start_fails)
+        self._has_custom_max_start_fails = (
+            max_start_fails is not None
+            or bool(os.environ.get("BRIDGE_MAX_START_FAILS", "").strip())
+        )
+        self.configured_max_start_fails = _configured_max_start_fails(
+            max_start_fails
+        )
+        self.max_start_fails = self.configured_max_start_fails
+        self.enabled = True
         self._has_custom_cooldown = (
             cooldown_seconds is not None
             or bool(os.environ.get("BRIDGE_COOLDOWN_SECONDS", "").strip())
@@ -156,7 +166,7 @@ class ModelPenaltyTracker:
         self._run(lambda: (None, False))
 
     def _load_state(self) -> _State | None:
-        """Return None on I/O errors so a live in-memory state is preserved."""
+        """Return None on I/O errors to preserve live in-memory state."""
         try:
             with self.storage_path.open("r", encoding="utf-8") as stream:
                 raw = json.load(stream)
@@ -179,9 +189,36 @@ class ModelPenaltyTracker:
             )
             return {}
 
+        meta = raw.get("_meta")
+        if isinstance(meta, dict):
+            enabled = meta.get("quarantine_enabled", True)
+            if not isinstance(enabled, bool):
+                enabled = True
+
+            configured = meta.get(
+                "configured_max_start_fails",
+                self.configured_max_start_fails,
+            )
+            if (
+                isinstance(configured, bool)
+                or not isinstance(configured, int)
+                or configured < 1
+            ):
+                configured = self.configured_max_start_fails
+            self.configured_max_start_fails = configured
+
+            self.enabled = enabled
+            self.max_start_fails = (
+                self.configured_max_start_fails
+                if self.enabled
+                else _DISABLED_MAX_START_FAILS
+            )
+
         state: _State = {}
         invalid_entries = False
         for model_id, entry in raw.items():
+            if model_id == "_meta":
+                continue
             if not isinstance(model_id, str) or not isinstance(entry, dict):
                 invalid_entries = True
                 continue
@@ -201,10 +238,20 @@ class ModelPenaltyTracker:
                 invalid_entries = True
                 continue
 
+            norm_id = model_id.strip().lower()
+            if norm_id == "_meta":
+                invalid_entries = True
+                continue
+
             trips = entry.get("penalty_trips", 0)
-            if not isinstance(trips, int) or trips < 0:
+            if (
+                isinstance(trips, bool)
+                or not isinstance(trips, int)
+                or trips < 0
+            ):
                 trips = 0
-            state[model_id.strip().lower()] = {
+
+            state[norm_id] = {
                 "fails": fails,
                 "penalized_until": float(until),
                 "last_fail_at": float(last_fail),
@@ -221,9 +268,12 @@ class ModelPenaltyTracker:
 
     def _save_state(self) -> None:
         """Atomically replace the JSON file; caller must hold both locks."""
+        self._state["_meta"] = {
+            "quarantine_enabled": self.enabled,
+            "configured_max_start_fails": self.configured_max_start_fails,
+        }
         temporary_path: Path | None = None
         try:
-            # O_EXCL prevents collisions and avoids following existing symlinks.
             for _ in range(10):
                 candidate = self.storage_path.parent / (
                     f".{self.storage_path.name}.{os.getpid()}."
@@ -283,7 +333,7 @@ class ModelPenaltyTracker:
                     )
 
     def _run(self, operation: Callable[[], tuple[_T, bool]]) -> _T:
-        """Reload, execute, and optionally save within one locked transaction."""
+        """Reload, execute, and optionally save in one locked transaction."""
         with self._lock:
             lock_fd: int | None = None
             locked = False
@@ -329,6 +379,13 @@ class ModelPenaltyTracker:
                         )
 
     @staticmethod
+    def _normalize_model_id(model_id: str) -> str:
+        norm_id = model_id.strip().lower()
+        if norm_id == "_meta":
+            raise ValueError("'_meta' is reserved for quarantine metadata")
+        return norm_id
+
+    @staticmethod
     def _expire(entry: dict[str, Any], now: float) -> bool:
         until = entry["penalized_until"]
         if until > 0.0 and now >= until:
@@ -337,57 +394,66 @@ class ModelPenaltyTracker:
             return True
         return False
 
-    @staticmethod
     def _status(
-        model_id: str, entry: dict[str, Any], now: float
+        self, model: str, item: dict[str, Any], now: float | None = None
     ) -> dict[str, Any]:
-        until = entry["penalized_until"]
+        if now is None:
+            now = time.time()
+        fails = item["fails"]
+        until = item["penalized_until"]
+        last_fail = item["last_fail_at"]
+        last_error = item["last_error"]
+        if not self.enabled:
+            is_penalized = False
+            remaining_cooldown = 0.0
+        else:
+            is_penalized = now < until
+            remaining_cooldown = max(0.0, until - now)
         return {
-            "model": model_id,
-            "fails": entry["fails"],
-            "is_penalized": now < until,
-            "remaining_cooldown": max(0.0, until - now),
+            "model": model,
+            "fails": fails,
+            "is_penalized": is_penalized,
+            "remaining_cooldown": remaining_cooldown,
             "penalized_until": until,
-            "last_fail_at": entry["last_fail_at"],
-            "last_error": entry["last_error"],
+            "last_fail_at": last_fail,
+            "last_error": last_error,
         }
 
     def record_start_failure(
         self, model_id: str, error_reason: str = ""
     ) -> tuple[bool, int, float]:
-        """Record a failure unless a cooldown is already active.
-
-        Calls during cooldown leave all entry fields unchanged and do not
-        rewrite persisted state. Expired penalties are cleared before counting
-        a new failure.
-        """
-        norm_id = model_id.strip().lower()
+        """Record a failure unless a cooldown is already active."""
+        norm_id = self._normalize_model_id(model_id)
 
         def operation() -> tuple[tuple[bool, int, float], bool]:
             now = time.time()
             entry = self._state.setdefault(norm_id, _empty_entry())
 
-            # Check within the locked transaction so concurrent calls cannot
-            # increase the failure count or extend an active cooldown.
             if now < entry["penalized_until"]:
                 return (
                     (True, entry["fails"], entry["penalized_until"]),
                     False,
                 )
 
-            # Do not penalize models for infrastructure or network proxy errors (502, connection refused).
             if _is_infrastructure_network_error(error_reason):
                 _LOGGER.info(
-                    "Skipping model failure penalty for infrastructure/network error: %s (model=%s)",
+                    "Skipping model failure penalty for "
+                    "infrastructure/network error: %s (model=%s)",
                     error_reason,
                     norm_id,
                 )
-                return (False, entry["fails"], entry["penalized_until"]), False
+                return (
+                    False,
+                    entry["fails"],
+                    entry["penalized_until"],
+                ), False
 
             self._expire(entry, now)
             entry["fails"] += 1
             entry["last_fail_at"] = now
-            entry["last_error"] = str(error_reason).strip()[:120] if error_reason else None
+            entry["last_error"] = (
+                str(error_reason).strip()[:120] if error_reason else None
+            )
 
             threshold_reached = entry["fails"] >= self.max_start_fails
             if threshold_reached:
@@ -395,39 +461,34 @@ class ModelPenaltyTracker:
                 entry["penalty_trips"] = trips
                 if self._has_custom_cooldown:
                     eff_cooldown = self.cooldown_seconds
+                elif trips == 1:
+                    eff_cooldown = DEFAULT_INITIAL_COOLDOWN_SECONDS
+                elif trips == 2:
+                    eff_cooldown = DEFAULT_STEP2_COOLDOWN_SECONDS
+                elif trips == 3:
+                    eff_cooldown = DEFAULT_STEP3_COOLDOWN_SECONDS
                 else:
-                    if trips == 1:
-                        eff_cooldown = DEFAULT_INITIAL_COOLDOWN_SECONDS
-                    elif trips == 2:
-                        eff_cooldown = DEFAULT_STEP2_COOLDOWN_SECONDS
-                    elif trips == 3:
-                        eff_cooldown = DEFAULT_STEP3_COOLDOWN_SECONDS
-                    else:
-                        base = DEFAULT_STEP3_COOLDOWN_SECONDS
-                        eff_cooldown = min(base * (2 ** min(trips - 3, 20)), DEFAULT_MAX_COOLDOWN_SECONDS)
+                    eff_cooldown = min(
+                        DEFAULT_STEP3_COOLDOWN_SECONDS
+                        * (2 ** min(trips - 3, 20)),
+                        DEFAULT_MAX_COOLDOWN_SECONDS,
+                    )
                 until = now + eff_cooldown
                 if not _is_finite_nonnegative(until):
                     until = float.fromhex("0x1.fffffffffffffp+1023")
                 entry["penalized_until"] = until
 
             return (
-                (
-                    threshold_reached,
-                    entry["fails"],
-                    entry["penalized_until"],
-                ),
-                True,
-            )
+                threshold_reached,
+                entry["fails"],
+                entry["penalized_until"],
+            ), True
 
         return self._run(operation)
 
     def record_start_success(self, model_id: str) -> None:
-        """Clear the failure count, error, and cooldown after a successful start.
-
-        If the model is already in the default zero-failure state, this operation
-        is a no-op that avoids modifying or fsyncing persisted state.
-        """
-        norm_id = model_id.strip().lower()
+        """Clear failures, error, cooldown, and escalation after success."""
+        norm_id = self._normalize_model_id(model_id)
 
         def operation() -> tuple[None, bool]:
             entry = self._state.get(norm_id)
@@ -447,10 +508,13 @@ class ModelPenaltyTracker:
         self._run(operation)
 
     def is_penalized(self, model_id: str) -> tuple[bool, float]:
-        """Return penalty state and remaining seconds, clearing expired penalties."""
-        norm_id = model_id.strip().lower()
+        """Return effective penalty state, clearing expired penalties."""
+        norm_id = self._normalize_model_id(model_id)
 
         def operation() -> tuple[tuple[bool, float], bool]:
+            if not self.enabled:
+                return (False, 0.0), False
+
             now = time.time()
             entry = self._state.get(norm_id)
             if entry is None:
@@ -462,24 +526,28 @@ class ModelPenaltyTracker:
         return self._run(operation)
 
     def get_model_status(self, model_id: str) -> dict[str, Any]:
-        """Atomically retrieve status snapshot under a single locked transaction."""
-        norm_id = model_id.strip().lower()
+        """Atomically retrieve the stored model status."""
+        norm_id = self._normalize_model_id(model_id)
 
         def operation() -> tuple[dict[str, Any], bool]:
             now = time.time()
             entry = self._state.get(norm_id)
             if entry is None:
-                return {
-                    "model": norm_id,
-                    "fails": 0,
-                    "is_penalized": False,
-                    "remaining_cooldown": 0.0,
-                    "penalized_until": 0.0,
-                    "last_fail_at": 0.0,
-                    "last_error": None,
-                }, False
+                status = self._status(norm_id, _empty_entry(), now)
+                if not self.enabled:
+                    status["is_penalized"] = False
+                    status["remaining_cooldown"] = 0.0
+                    status["remaining_s"] = 0
+                    status["remaining_seconds"] = 0
+                return status, False
             changed = self._expire(entry, now)
-            return self._status(norm_id, entry, now), changed
+            status = self._status(norm_id, entry, now)
+            if not self.enabled:
+                status["is_penalized"] = False
+                status["remaining_cooldown"] = 0.0
+                status["remaining_s"] = 0
+                status["remaining_seconds"] = 0
+            return status, changed
 
         return self._run(operation)
 
@@ -490,6 +558,8 @@ class ModelPenaltyTracker:
             changed = False
             result = {}
             for model_id, entry in self._state.items():
+                if model_id == "_meta":
+                    continue
                 if self._expire(entry, now):
                     changed = True
                 result[model_id] = self._status(model_id, entry, now)
@@ -497,8 +567,90 @@ class ModelPenaltyTracker:
 
         return self._run(operation)
 
+    def set_enabled(self, enabled: bool) -> bool:
+        """Persist whether quarantine enforcement is enabled."""
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+
+        def operation() -> tuple[bool, bool]:
+            if not enabled:
+                self.enabled = False
+                self.max_start_fails = _DISABLED_MAX_START_FAILS
+            else:
+                self.enabled = True
+                self.max_start_fails = self.configured_max_start_fails
+            return self.enabled, True
+
+        return self._run(operation)
+
+    def manually_penalize(
+        self, model_id: str, duration_s: float = 300.0
+    ) -> dict[str, Any]:
+        """Apply a manual cooldown without changing escalation history."""
+        norm_id = self._normalize_model_id(model_id)
+        if not norm_id:
+            raise ValueError("model must not be empty")
+        if not _is_finite_nonnegative(duration_s):
+            raise ValueError("duration_s must be finite and nonnegative")
+        duration_s = float(duration_s)
+
+        if not self.enabled:
+            self.set_enabled(True)
+
+        def operation() -> tuple[dict[str, Any], bool]:
+            now = time.time()
+            until = now + duration_s
+            if not _is_finite_nonnegative(until):
+                raise ValueError("resulting penalty timestamp must be finite")
+
+            if not self.enabled:
+                self.enabled = True
+                self.max_start_fails = self.configured_max_start_fails
+
+            entry = self._state.setdefault(norm_id, _empty_entry())
+            entry["penalized_until"] = until
+            entry["fails"] = max(entry.get("fails", 0), 1)
+            entry["last_fail_at"] = now
+            entry["last_error"] = "manually penalized by user"
+            return self._status(norm_id, entry, now), True
+
+        return self._run(operation)
+
+    def unpenalize_model(self, model_id: str) -> None:
+        """Clear a model's penalty and failure history."""
+        self.record_start_success(model_id)
+
+    def get_quarantine_payload(
+        self, all_catalog_models: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Return quarantine configuration and active stored penalties."""
+        def operation() -> tuple[dict[str, Any], bool]:
+            now = time.time()
+            penalized_models = []
+            changed = False
+            for model_id, entry in list(self._state.items()):
+                if model_id == "_meta":
+                    continue
+                if self._expire(entry, now):
+                    changed = True
+                if entry.get("penalized_until", 0.0) > now:
+                    penalized_models.append(
+                        self._status(model_id, entry, now)
+                    )
+
+            return {
+                "enabled": self.enabled,
+                "max_start_fails": self.max_start_fails,
+                "cooldown_seconds": self.cooldown_seconds,
+                "penalized_count": len(penalized_models),
+                "penalized_models": penalized_models,
+                "available_models": all_catalog_models or [],
+            }, changed
+
+        return self._run(operation)
+
     def reset_all(self) -> None:
-        """Remove all model states and persist the empty state."""
+        """Remove all model states while preserving quarantine configuration."""
         def operation() -> tuple[None, bool]:
             self._state.clear()
             return None, True

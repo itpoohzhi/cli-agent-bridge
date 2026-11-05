@@ -343,6 +343,8 @@ class AdaptiveTimeoutController:
         rid: str = "",
         turn_id: str = "",
         log_fn: Callable[[str], None] | None = None,
+        io_wait_cap_s: float | None = None,
+        watchdog_interval_s: float = WATCHDOG_INTERVAL_S,
     ) -> None:
         self.idle_timeout_s = float(idle_timeout_s)
         self.safety_cap_s = float(safety_cap_s)
@@ -352,6 +354,8 @@ class AdaptiveTimeoutController:
         self.rid = rid
         self.turn_id = turn_id
         self._log_fn = log_fn
+        self.io_wait_cap_s = None if io_wait_cap_s is None else float(io_wait_cap_s)
+        self.watchdog_interval_s = float(watchdog_interval_s)
         self.watchdog = watchdog or ProcessWatchdog(
             log_fn=log_fn, rid=rid, turn_id=turn_id
         )

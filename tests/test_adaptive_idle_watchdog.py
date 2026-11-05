@@ -130,6 +130,14 @@ class AdaptiveIdleWatchdogTests(unittest.TestCase):
         self.assertTrue(should_stop)
         self.assertEqual(reason, "absolute_cap")
 
+    def test_adaptive_controller_accepts_legacy_claude_p_kwargs(self):
+        ctrl = AdaptiveTimeoutController(
+            io_wait_cap_s=120.0,
+            watchdog_interval_s=0.25,
+        )
+        self.assertEqual(ctrl.io_wait_cap_s, 120.0)
+        self.assertEqual(ctrl.watchdog_interval_s, 0.25)
+
 
 if __name__ == "__main__":
     unittest.main()
