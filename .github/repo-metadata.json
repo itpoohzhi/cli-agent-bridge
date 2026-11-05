@@ -1,0 +1,26 @@
+{
+  "description": "OpenAI-compatible HTTP gateway and proxy for CLI coding agents: Claude Code, Codex, Gemini Antigravity, Factory Droid, Meta Muse, OpenCode Zen. SSE streaming, XML tool-call emulation, session persistence, QoS routing.",
+  "homepage": "https://github.com/itpoohzhi/cli-agent-bridge#readme",
+  "topics": [
+    "ai-coding-agent",
+    "antigravity",
+    "api-gateway",
+    "claude-code",
+    "cli-coding-agents",
+    "codex",
+    "factory-droid",
+    "gemini",
+    "http-proxy",
+    "llm-gateway",
+    "meta-muse",
+    "openai-api",
+    "openai-compatible",
+    "opencode",
+    "python",
+    "qos-routing",
+    "server-sent-events",
+    "session-persistence",
+    "sse-streaming",
+    "tool-calling"
+  ]
+}
