@@ -166,7 +166,7 @@ class TestSwitchSequence(unittest.TestCase):
         self.assertEqual(statuses, {400, 503})
 
     def test_route_specific_body_caps_are_not_touched(self):
-        self.assertEqual(server.FLEET["image_limits"]["max_body_bytes"], 33_554_432)
+        self.assertEqual(server.FLEET["image_limits"]["max_body_bytes"], 67_108_864)
 
 
 class TestSwitchProtocolsAcrossTargets(unittest.TestCase):

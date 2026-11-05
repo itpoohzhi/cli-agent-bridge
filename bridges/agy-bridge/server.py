@@ -153,6 +153,15 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.stream_interruption_recovery import (  # noqa: E402
+    InterruptionTailState,
+    evaluate_graceful_interruption,
+    is_transient_stream_interruption,
+    resolve_done_turn_outcome,
+    settle_error,
+    tail_turn_facts,
+    trusted_final_text,
+)
 from core.tool_emulation import (  # noqa: E402
     LiveParserError,
     RepetitionLoopDetected,
@@ -450,15 +459,9 @@ def _build_bridge_config() -> _BridgeConfig:
         usage_step_cap=_env_int("AGY_BRIDGE_USAGE_STEP_CAP", 16384, 128, 1048576),
         sqlite_row_limit=_env_int("AGY_BRIDGE_SQLITE_ROW_LIMIT", 16, 1, 1024),
         breaker_failures=_env_int("AGY_BRIDGE_BREAKER_FAILURES", 3, 1, 100),
-        breaker_cooldown_s=_env_float(
-            "AGY_BRIDGE_BREAKER_COOLDOWN_S", 30.0, 1.0, 3600.0
-        ),
-        breaker_probe_lease_s=_env_float(
-            "AGY_BRIDGE_BREAKER_PROBE_LEASE_S", 60.0, 1.0, 3600.0
-        ),
-        retry_capacity_tenths=_env_int(
-            "AGY_BRIDGE_RETRY_CAPACITY_TENTHS", 30, 10, 1000
-        ),
+        breaker_cooldown_s=_env_float("AGY_BRIDGE_BREAKER_COOLDOWN_S", 30.0, 1.0, 3600.0),
+        breaker_probe_lease_s=_env_float("AGY_BRIDGE_BREAKER_PROBE_LEASE_S", 60.0, 1.0, 3600.0),
+        retry_capacity_tenths=_env_int("AGY_BRIDGE_RETRY_CAPACITY_TENTHS", 30, 10, 1000),
         retry_credit_tenths=_chain_int(
             (
                 "AGY_BRIDGE_RETRY_REFILL_PER_SEC_TENTHS",
@@ -1267,6 +1270,8 @@ KILL_WAIT_S = 5.0
 RESULT_EXIT_GRACE_S = 5.0
 # События очереди, считающиеся активностью агента (result/done/pump_error — терминальные).
 _ACTIVITY_KINDS = frozenset({"init", "text", "reasoning", "tool_trace"})
+# Записи транскрипта, для которых хвост вообще разбирает JSON (остальное — быстрый отсев).
+_TAIL_MARKER_RE = re.compile(rb"PLANNER_RESPONSE|ERROR_MESSAGE|END_TURN|TURN_COMPLETE")
 
 
 # Zero-Canon: файлы канона/хуков пользователя, которых не должно быть в <clean-home>.
@@ -1993,11 +1998,7 @@ def _collect_images(
     )
     if not parts:
         return []
-    gate = (
-        _image_gate_universal(model_id, effort)
-        if universal
-        else _image_gate(model_id, effort)
-    )
+    gate = _image_gate_universal(model_id, effort) if universal else _image_gate(model_id, effort)
     if gate is not None:
         raise gate
     max_images = _limit("max_images", 16)
@@ -2741,9 +2742,7 @@ def _get_resumed_turn_prompt(
             break
     if last_asst >= 0 and last_asst + 1 < len(messages):
         new_msgs = messages[last_asst + 1 :]
-        skipped = len(
-            _collect_image_parts(cast("list[object]", messages[: last_asst + 1]))
-        )
+        skipped = len(_collect_image_parts(cast("list[object]", messages[: last_asst + 1])))
         delta = [
             img
             for img in (images or [])
@@ -3016,7 +3015,7 @@ def _is_transient_upstream_error(err: object) -> bool:
     if not err:
         return False
     text = err if isinstance(err, str) else str(err)
-    return _TRANSIENT_UPSTREAM_RE.search(text) is not None
+    return any((_TRANSIENT_UPSTREAM_RE.search(text), is_transient_stream_interruption(text)))
 
 
 def _ndjson_bytes(prompt: str) -> int:
@@ -3058,12 +3057,7 @@ def _reset_sqlite_guards_for_tests() -> None:
     global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
     global _sqlite_divergence_count, _sqlite_drain_deadline_count
     global _sqlite_open_connections, _sqlite_max_open_connections, _rng
-    global \
-        _cfg_snapshot, \
-        _cfg_key, \
-        _cfg_checked_at, \
-        _image_flag_cache, \
-        _image_fallback_flag_cache
+    global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache, _image_fallback_flag_cache
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
         _cfg_key = None
@@ -3165,6 +3159,8 @@ class _RuntimeFlags(NamedTuple):
     stream_resilience_enabled: bool = True
     isolate_tool_preambles_to_reasoning: bool = True
     tool_emulation_enabled: bool = True
+    self_heal_interrupted_turn: bool = True
+    graceful_interruption_on_partial: bool = True
     graceful_timeout_finish_reason: str = "stop"
 
 
@@ -3177,6 +3173,8 @@ _NEW_FLAG_ENV = {
     "stream_resilience_enabled": "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED",
     "isolate_tool_preambles_to_reasoning": "AGY_ISOLATE_TOOL_PREAMBLES_TO_REASONING",
     "tool_emulation_enabled": "AGY_TOOL_EMULATION_ENABLED",
+    "self_heal_interrupted_turn": "AGY_SELF_HEAL_INTERRUPTED_TURN",
+    "graceful_interruption_on_partial": "AGY_GRACEFUL_INTERRUPTION_ON_PARTIAL",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
@@ -4045,7 +4043,7 @@ def _add_preamble_bounded(target: set[int], item: int, cap: int | None = None) -
 
 
 @final
-class _TranscriptTail:
+class _TranscriptTail(InterruptionTailState):
     """Источник мышления шагов agy: транскрипт разговора и SQLite `conversations/<cid>.db`.
 
     Один daemon-поток на ход — единственный писатель состояния шагов (без замков).
@@ -4416,11 +4414,7 @@ class _TranscriptTail:
         line = raw.strip()
         if not line:
             return
-        if (
-            b"PLANNER_RESPONSE" not in line
-            and b"END_TURN" not in line
-            and b"TURN_COMPLETE" not in line
-        ):
+        if not _TAIL_MARKER_RE.search(line):
             return  # быстрый отсев служебных записей без разбора JSON
         try:
             parsed = cast(object, json.loads(line.decode("utf-8", "replace")))
@@ -4439,6 +4433,7 @@ class _TranscriptTail:
             self.end_marker = True
             return
         if rtype != "PLANNER_RESPONSE":
+            self.note_error_record(rtype, rec, idx)
             return
         if self.usage_enabled:
             self._record_usage(rec)
@@ -4473,8 +4468,7 @@ class _TranscriptTail:
                 )  # live planner-текст, независимо от tool_calls
         if idx is None:
             return
-        if isinstance(content, str) and content.strip() and not rec.get("tool_calls"):
-            self.final_planner = True
+        self.note_planner_record(rec, idx)
         thinking = rec.get("thinking")
         self._apply_final(idx, thinking if isinstance(thinking, str) else "")
 
@@ -5686,11 +5680,7 @@ class Run:
                 if etype == "init":
                     init = ev.get("init") if isinstance(ev.get("init"), dict) else {}
                     tools_raw = cast(object, init.get("tools"))
-                    tools = (
-                        cast("list[object]", tools_raw)
-                        if isinstance(tools_raw, list)
-                        else []
-                    )
+                    tools = cast("list[object]", tools_raw) if isinstance(tools_raw, list) else []
                     self.q.put(
                         (
                             "init",
@@ -5703,11 +5693,7 @@ class Run:
                     )
                     self._tail.bind(str(ev.get("conversation_id") or ""))
                 elif etype == "step_update":
-                    step = (
-                        ev.get("step_update")
-                        if isinstance(ev.get("step_update"), dict)
-                        else {}
-                    )
+                    step = ev.get("step_update") if isinstance(ev.get("step_update"), dict) else {}
                     kind = step.get("step_type")
                     if kind == "tool":
                         t_idx = _as_int(step.get("step_index"))
@@ -5798,11 +5784,7 @@ class Run:
                                 or step.get("tool_call_id")
                                 or step.get("id")
                             )
-                            call_id = (
-                                str(raw_id).strip()
-                                if isinstance(raw_id, (str, int))
-                                else ""
-                            )
+                            call_id = str(raw_id).strip() if isinstance(raw_id, (str, int)) else ""
                             if call_id:
                                 # Повтор события с тем же call_id получает тот же ordinal.
                                 ord_val = tool_ordinal_by_id.get(call_id)
@@ -6020,11 +6002,7 @@ def _resolve_step_usage(
             )
     else:
         result_obj = out.get("result")
-        result = (
-            cast("dict[str, object]", result_obj)
-            if isinstance(result_obj, dict)
-            else {}
-        )
+        result = cast("dict[str, object]", result_obj) if isinstance(result_obj, dict) else {}
         success = (
             out.get("rc") == 0
             and out.get("state") == "done"
@@ -6349,7 +6327,7 @@ class Handler(BaseHTTPRequestHandler):
         usage = {}
         result_ev = {}
         conversation_id = ""
-        result_error = ""
+        result_error = cleared_error = ""
         result_error_at = 0.0
         tool_events = 0
         last_ka = time.monotonic()
@@ -6410,9 +6388,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not on_tool_trace(payload):
                         gone[0] = True
 
-        def finish(
-            name: str, rc: int, err: str = "", limit: float | None = None
-        ) -> dict:
+        def finish(name: str, rc: int, err: str = "", limit: float | None = None) -> dict:
             """Терминальное состояние с bounded drain (<= T_DRAIN_MAX_S) остатка источников.
 
             timeout/idle_timeout при graceful: остаток откладывается в `retained_events`
@@ -6543,6 +6519,9 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if kind in _ACTIVITY_KINDS:
                 run.controller.on_activity(kind)
+                if result_error:
+                    if is_transient_stream_interruption(result_error):
+                        cleared_error, result_error, result_error_at = result_error, "", 0.0
             if kind == "init":
                 conversation_id = str(payload.get("conversation_id") or "")
                 _log(
@@ -6577,10 +6556,11 @@ class Handler(BaseHTTPRequestHandler):
                 return finish("pump_error", 1, str(payload))
             elif kind == "done":
                 rc, final_text, raw_result = payload
-                if result_error:
-                    return state("agy_error", 1, result_error)
                 if not result_ev and raw_result:
                     result_ev = raw_result
+                status = str(result_ev.get("status", "")).upper()
+                tail = getattr(run, "_tail", None)
+                result_error = settle_error(result_error, cleared_error, status)
                 if content_streaming or usage_enabled:
                     # Хвост транскрипта, записанный прямо перед done, дренируется
                     # ДО reconcile: result.response — агрегат, досылается лишь недостающее.
@@ -6589,6 +6569,7 @@ class Handler(BaseHTTPRequestHandler):
                     drain = getattr(run, "terminal_drain", None)
                     if callable(drain):
                         deliver(list(drain(T_DRAIN_MAX_S)))
+                final_text = trusted_final_text(final_text, result_error, tail)
                 if content_streaming:
                     delta = run.reconcile_result(final_text)
                     if delta:
@@ -6614,11 +6595,22 @@ class Handler(BaseHTTPRequestHandler):
                         add_content(sep + final_text if full_emitted else final_text)
                 elif not pieces and final_text:
                     add_content(final_text)
+                res = resolve_done_turn_outcome(
+                    rc=rc,
+                    result_error=result_error,
+                    result_status=status,
+                    final_text=final_text,
+                    emitted_text="".join(pieces),
+                    self_heal_enabled=_new_flag("self_heal_interrupted_turn", True),
+                    **tail_turn_facts(tail, cleared_error),
+                )
+                if res.final:
+                    _log(f"turn-resolved reason={res.reason} state={res.state}")
+                    return state(res.state, res.rc, res.error)
                 if gone[0]:
                     return state("client_gone", 1)
                 time.sleep(0.05)
                 err = "".join(run.err_box).strip()
-                status = str(result_ev.get("status") or "").upper()
                 if rc != 0 and (status == "ERROR" or not pieces):
                     return state(
                         "agy_error",
@@ -6641,13 +6633,9 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(snap, _UsageSnapshot):
             snap = _EMPTY_USAGE_SNAPSHOT
         resume = bool(getattr(run, "run_cid", ""))
-        out["usage_resolved"] = _resolve_step_usage(
-            out, snap, _model_context_window(model), resume
-        )
+        out["usage_resolved"] = _resolve_step_usage(out, snap, _model_context_window(model), resume)
 
-    def _log_done(
-        self, model: str, out: dict[str, object], t0: float, tag: str
-    ) -> None:
+    def _log_done(self, model: str, out: dict[str, object], t0: float, tag: str) -> None:
         """Одна строка done на каждом выходе _run_once (O-EXIT)."""
         conversation = str(out.get("conversation_id") or "-")[:8]
         out_bytes = len(str(out.get("text") or "").encode())
@@ -6829,11 +6817,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     # Флаг и proof могли смениться, пока ход ждал слот: повторная
                     # проверка до mkdir и spawn (universal — только флаг, выше).
-                    gate = (
-                        None
-                        if universal
-                        else _image_gate(cast(str, model), cast(str, effort))
-                    )
+                    gate = None if universal else _image_gate(cast(str, model), cast(str, effort))
                     if gate is not None:
                         self._log_reject(
                             gate.code, cast(str, model), cast(int, ctx["model_len"])
@@ -6979,6 +6963,8 @@ class Handler(BaseHTTPRequestHandler):
                     if finalize is not None and out.get("state") in (
                         "timeout",
                         "idle_timeout",
+                        "agy_error",
+                        "pump_error",
                     ):
                         # Graceful-финал пишется ДО зачистки процесса: kill/reap не
                         # съедает окно финальной записи. Внутренний state/rc не меняются.
@@ -7445,11 +7431,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             messages_raw = cast(object, req.get("messages"))
-            messages = (
-                cast("list[object]", messages_raw)
-                if isinstance(messages_raw, list)
-                else []
-            )
+            messages = cast("list[object]", messages_raw) if isinstance(messages_raw, list) else []
             # Универсальная политика фиксируется один раз на принятый запрос.
             universal = _is_image_fallback_enabled()
             images: list[dict[str, object]] = []
@@ -7731,9 +7713,7 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": ctx["model"],
-                "choices": [
-                    {"index": 0, "message": message, "finish_reason": finish_reason}
-                ],
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
                 "usage": self._usage_payload(
                     out.get("usage") or {}, out.get("usage_resolved")
                 ),
@@ -7844,7 +7824,7 @@ class Handler(BaseHTTPRequestHandler):
         ctx["stream_resilience_enabled"] = resilience
         ctx["stream_committed"] = False
         disconnected = False
-        self._stream_relay = StreamRelay(self.wfile)
+        self._stream_relay = StreamRelay(getattr(self, "wfile", None))
 
         def chunk(
             delta: dict,
@@ -7901,6 +7881,7 @@ class Handler(BaseHTTPRequestHandler):
         # (role-chunk, keepalive и пустые/whitespace-дельты не в счёт).
         emitted_content = [0]
         emitted_reasoning_or_tool = [0]
+        emitted_tool_calls = [0]
         progress = _ToolProgress(
             str(ctx.get("turn_id") or ""), str(ctx.get("conversation_id") or "")
         )
@@ -7946,6 +7927,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok = commit() and emit(chunk({"tool_calls": calls}))
                 if ok:
                     emitted_reasoning_or_tool[0] += 1
+                    emitted_tool_calls[0] += 1
                 return ok
 
             tool_turn = _ToolTurn(
@@ -7960,6 +7942,25 @@ class Handler(BaseHTTPRequestHandler):
                     return commit() and emit(": keepalive\n\n")
                 return not disconnected
             return emit(": keepalive\n\n")
+
+        def close_interrupted(out: dict) -> None:
+            """Мягко закрывает транзиентный обрыв после частичной выдачи (agent-agnostic)."""
+            open_call = tool_turn._normalizer.has_open_tool_call() if tool_turn else False
+            dec = evaluate_graceful_interruption(
+                error_text=out.get("err"),
+                delivered_content=bool(emitted_content[0]),
+                delivered_reasoning=bool(emitted_reasoning_or_tool[0] - emitted_tool_calls[0]),
+                delivered_tool_calls=any((emitted_tool_calls[0], out.get("tool_calls"))),
+                has_unclosed_tool_call=open_call,
+                graceful_enabled=_new_flag("graceful_interruption_on_partial", True),
+            )
+            if dec.should_gracefully_close:
+                self._arm_flush_window(ctx)
+                if tool_turn:
+                    tool_turn.finish()
+                _ = {"content": on_text}.get(dec.target_channel, on_reasoning)(dec.notice_text)
+                out.update(state="done", rc=0, err="", graceful_interruption_closed=True)
+                _log(f"stream-graceful-interruption target={dec.target_channel}")
 
         def finalize_timeout(out: dict) -> None:
             """Graceful-финал timeout/idle_timeout после полезной выдачи (идемпотентно).
@@ -8002,13 +8003,7 @@ class Handler(BaseHTTPRequestHandler):
             conv_id = str(out.get("conversation_id") or "")
             if ok:
                 ok = commit() and emit(
-                    chunk(
-                        {
-                            "content": self._graceful_notice(
-                                reason, out.get("timeout_limit_s")
-                            )
-                        }
-                    )
+                    chunk({"content": self._graceful_notice(reason, out.get("timeout_limit_s"))})
                 )
             if ok:
                 ok = emit(chunk({}, _graceful_finish_reason(), conversation_id=conv_id))
@@ -8017,7 +8012,12 @@ class Handler(BaseHTTPRequestHandler):
             out["graceful_done"] = True
             _log(f"graceful-timeout state={reason} mode=sse ok={int(bool(ok))}")
 
-        ctx["finalize_timeout"] = finalize_timeout
+        def finalize_stream(out: dict) -> None:
+            """Graceful-финал по state: обрыв транспорта либо timeout/idle_timeout."""
+            closers = dict.fromkeys(("agy_error", "pump_error"), close_interrupted)
+            closers.get(str(out.get("state")), finalize_timeout)(out)
+
+        ctx["finalize_timeout"] = finalize_stream
         if not resilience and not ctx.get("step_job_id") and not commit():
             return
 
@@ -8035,7 +8035,7 @@ class Handler(BaseHTTPRequestHandler):
         if disconnected or out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return
-        finalize_timeout(out)  # страховка, если _run_once не вызвал hook
+        finalize_stream(out)  # страховка, если _run_once не вызвал hook
         if out.get("graceful_done"):
             return
         err = self._error_body(out, resilience)

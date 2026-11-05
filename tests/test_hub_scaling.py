@@ -38,8 +38,9 @@ class TestHubScalingDefaults(unittest.TestCase):
         data = json.loads(
             (Path(server.ROOT) / "fleet.json").read_text(encoding="utf-8")
         )
+        self.assertEqual(server.SUBAGENT_MAX_CONCURRENT, 128)
         self.assertEqual(data["admission"]["max_http_connections"], 128)
-        self.assertEqual(data["admission"]["max_inflight_body_bytes"], 268435456)
+        self.assertEqual(data["admission"]["max_inflight_body_bytes"], 536870912)
         for name in ("codex", "agy", "opencode-zen", "claude-p"):
             self.assertEqual(data["backends"][name]["max_concurrent"], 128, name)
         # Muse сериализован инвариантом адаптера (max_concurrent == 1).
