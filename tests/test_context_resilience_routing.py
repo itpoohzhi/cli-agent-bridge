@@ -112,8 +112,8 @@ class TestNoEarly413(HubContextCase):
         self.assertNotIn(ctx.MARKER_TEXT, self.sent_all())
 
     def test_body_cap_of_hub_is_preserved(self):
-        self.assertEqual(server.FLEET["image_limits"]["max_body_bytes"], 33554432)
-        raw = self._raw_request(b"", cl=33554433)
+        self.assertEqual(server.FLEET["image_limits"]["max_body_bytes"], 67108864)
+        raw = self._raw_request(b"", cl=67108865)
         buf, _closed = self._raw_exchange(raw)
         code, typ, _ = self._raw_parse(buf)
         self.assertEqual((code, typ), (413, "payload_too_large"))

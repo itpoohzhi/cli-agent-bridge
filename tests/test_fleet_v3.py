@@ -135,7 +135,7 @@ class TestLiveFleetV3(unittest.TestCase):
         catalog = server._build_catalog(raw_v3())
         self.assertTrue(catalog["technical_ref"]["droid_binary_path"])
         self.assertEqual(catalog["admission"]["max_http_connections"], 128)
-        self.assertEqual(catalog["admission"]["max_inflight_body_bytes"], 268435456)
+        self.assertEqual(catalog["admission"]["max_inflight_body_bytes"], 536870912)
 
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())

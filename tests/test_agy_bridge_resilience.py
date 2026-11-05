@@ -6999,7 +6999,7 @@ class ImageValidationTests(unittest.TestCase):
             bridge = _HttpBridge()
             try:
                 limit = _int(_dict(_bval("IMAGE_LIMITS"))["max_body_bytes"])
-                self.assertEqual(limit, 33554432)
+                self.assertEqual(limit, 67108864)
                 self.assertEqual(_post_raw_headers(bridge.port, limit + 1), 413)
             finally:
                 bridge.close()
@@ -8559,7 +8559,7 @@ class AcceptanceOracleTests(unittest.TestCase):
                     limits["max_total_image_bytes"],
                     limits["max_body_bytes"],
                 ),
-                (16, _IMG_CAP, _IMG_CAP, 33554432),
+                (16, _IMG_CAP, _IMG_CAP, 67108864),
             )
             self.assertEqual(limits["types"], list(_IMG_MIMES))
             models = _dict(catalog["models"])

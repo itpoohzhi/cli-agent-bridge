@@ -390,7 +390,7 @@ SAFETY_CAP_S = float(
     os.environ.get("DROID_DSH_BRIDGE_SAFETY_CAP_S", str(int(DEFAULT_SAFETY_CAP_S)))
 )
 UI_RESERVED_SLOTS = int(_bridge_env("UI_RESERVED_SLOTS", "2"))
-SUBAGENT_MAX_CONCURRENT = int(_bridge_env("SUBAGENT_MAX_CONCURRENT", "4"))
+SUBAGENT_MAX_CONCURRENT = int(_bridge_env("SUBAGENT_MAX_CONCURRENT", "128"))
 SUBAGENT_QUEUE_TIMEOUT_S = float(_bridge_env("SUBAGENT_QUEUE_TIMEOUT_S", "120.0"))
 SUBAGENT_WATCHDOG_CAP_S = float(_bridge_env("SUBAGENT_WATCHDOG_CAP_S", "300.0"))
 
@@ -5257,6 +5257,151 @@ class Handler(BaseHTTPRequestHandler):
         )
         return True
 
+    def _handle_quarantine_post(self):
+        import math
+
+        # Ограничиваем административный JSON-запрос до чтения тела.
+        max_body_bytes = 64 * 1024
+
+        if self.headers.get("Transfer-Encoding") is not None:
+            self.close_connection = True
+            self._reject(
+                400, "invalid_request", "Transfer-Encoding is not supported"
+            )
+            return
+
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1:
+            self.close_connection = True
+            self._reject(
+                400, "invalid_request", "A single Content-Length is required"
+            )
+            return
+
+        raw_length = lengths[0].strip()
+        if not raw_length.isascii() or not raw_length.isdecimal():
+            self.close_connection = True
+            self._reject(400, "invalid_request", "Invalid Content-Length")
+            return
+
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self.close_connection = True
+            self._reject(400, "invalid_request", "Invalid Content-Length")
+            return
+
+        if length > max_body_bytes:
+            self.close_connection = True
+            self._reject(413, "invalid_request", "Request body is too large")
+            return
+
+        raw_body = self.rfile.read(length)
+        if len(raw_body) != length:
+            self.close_connection = True
+            self._reject(400, "invalid_request", "Incomplete request body")
+            return
+
+        try:
+            body = json.loads(raw_body)
+        except (ValueError, UnicodeError, RecursionError):
+            self._reject(400, "invalid_request", "Invalid JSON body")
+            return
+
+        if not isinstance(body, dict):
+            self._reject(400, "invalid_request", "JSON body must be an object")
+            return
+
+        action = body.get("action")
+
+        if action == "set_enabled":
+            enabled = body.get("enabled", True)
+            if not isinstance(enabled, bool):
+                self._reject(
+                    400, "invalid_request", "enabled must be a boolean"
+                )
+                return
+
+            res = _PENALTY_TRACKER.set_enabled(enabled)
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "action": "set_enabled",
+                    "enabled": res,
+                    "max_start_fails": _PENALTY_TRACKER.max_start_fails,
+                },
+            )
+            return
+
+        if action in ("unban", "ban"):
+            model = body.get("model")
+            if (
+                not isinstance(model, str)
+                or not model.strip()
+                or model.strip().lower() == "_meta"
+            ):
+                self._reject(
+                    400,
+                    "invalid_request",
+                    "model must be a nonempty string other than '_meta'",
+                )
+                return
+
+            if action == "unban":
+                _PENALTY_TRACKER.unpenalize_model(model)
+                self._send(
+                    200, {"ok": True, "action": "unban", "model": model}
+                )
+                return
+
+            raw_duration = body.get("duration_s", 300.0)
+            try:
+                if isinstance(raw_duration, bool):
+                    raise ValueError("boolean duration")
+                duration_s = float(raw_duration)
+                if not math.isfinite(duration_s) or duration_s < 0:
+                    raise ValueError("invalid duration")
+            except (TypeError, ValueError, OverflowError):
+                self._reject(
+                    400,
+                    "invalid_request",
+                    "duration_s must be finite and nonnegative",
+                )
+                return
+
+            try:
+                st = _PENALTY_TRACKER.manually_penalize(model, duration_s)
+            except ValueError as exc:
+                self._reject(400, "invalid_request", str(exc))
+                return
+
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "action": "ban",
+                    "model": model,
+                    "status": st,
+                },
+            )
+            return
+
+        if action == "clear_all":
+            _PENALTY_TRACKER.reset_all()
+            self._send(200, {"ok": True, "action": "clear_all"})
+            return
+
+        self._send(
+            400,
+            {
+                "error": {
+                    "message": f"unknown action: {action}",
+                    "type": "invalid_request",
+                }
+            },
+        )
+
     def _handle_models_refresh(self) -> None:
         """POST /v1/models/refresh: Auth-First, rate-limit, single-flight, stale-while-revalidate."""
         if not _auth_ok(self):
@@ -6470,6 +6615,31 @@ class Handler(BaseHTTPRequestHandler):
                 RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()),
             )
             return
+        if path == "/v1/quarantine":
+            if not _auth_ok(self):
+                self._send(
+                    401,
+                    {
+                        "error": {
+                            "message": "unauthorized",
+                            "type": "auth_error",
+                            "code": 401,
+                        }
+                    },
+                )
+                return
+            catalog_models = []
+            models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
+            for item in models_source:
+                m = item[1] if isinstance(item, tuple) and len(item) >= 2 else item
+                mid = getattr(m, "id", None) or getattr(m, "name", None) or str(m)
+                if mid and mid not in catalog_models:
+                    catalog_models.append(mid)
+            self._send(
+                200,
+                _PENALTY_TRACKER.get_quarantine_payload(catalog_models),
+            )
+            return
         if _is_detached_enabled() and path.startswith("/v1/turns/"):
             m_stream = re.fullmatch(r"/v1/turns/([^/]+)/stream", path)
             if m_stream:
@@ -6661,6 +6831,21 @@ class Handler(BaseHTTPRequestHandler):
             r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path
         ):
             self._handle_models_refresh()
+            return
+        if path == "/v1/quarantine":
+            if not _auth_ok(self):
+                self._send(
+                    401,
+                    {
+                        "error": {
+                            "message": "unauthorized",
+                            "type": "auth_error",
+                            "code": 401,
+                        }
+                    },
+                )
+                return
+            self._handle_quarantine_post()
             return
         self._trace = None
         self._response_status = 0

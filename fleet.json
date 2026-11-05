@@ -31,14 +31,14 @@
     "max_images": 16,
     "max_image_bytes": 20971520,
     "max_total_image_bytes": 20971520,
-    "max_body_bytes": 33554432,
+    "max_body_bytes": 67108864,
     "types": [
       "image/png"
     ]
   },
   "admission": {
     "max_http_connections": 128,
-    "max_inflight_body_bytes": 268435456,
+    "max_inflight_body_bytes": 536870912,
     "overload_error": {
       "http": 503,
       "type": "overloaded"
