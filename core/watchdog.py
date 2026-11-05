@@ -345,18 +345,16 @@ class AdaptiveTimeoutController:
         self.idle_timeout_s = float(idle_timeout_s)
         self.safety_cap_s = float(safety_cap_s)
         self.finish_reserve_s = float(finish_reserve_s)
-        self.io_wait_cap_s = io_wait_cap_s
-        self.watchdog_interval_s = watchdog_interval_s
+        self.io_wait_cap_s: float | None = None if io_wait_cap_s is None else float(io_wait_cap_s)
+        self.watchdog_interval_s: float = float(watchdog_interval_s)
+        if self.io_wait_cap_s is not None and log_fn is not None:
+            log_fn(f"watchdog: io_wait_cap_s={self.io_wait_cap_s} ignored by 2-contour check()")
         self.watchdog_enabled = bool(watchdog_enabled)
         self._clock = clock
         self.rid = rid
         self.turn_id = turn_id
         self._log_fn = log_fn
-        self.io_wait_cap_s = None if io_wait_cap_s is None else float(io_wait_cap_s)
-        self.watchdog_interval_s = float(watchdog_interval_s)
-        self.watchdog = watchdog or ProcessWatchdog(
-            log_fn=log_fn, rid=rid, turn_id=turn_id
-        )
+        self.watchdog = watchdog or ProcessWatchdog(log_fn=log_fn, rid=rid, turn_id=turn_id)
         self._lock = threading.Lock()
         now = self._clock()
         self.started_at: float = now
