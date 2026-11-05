@@ -138,6 +138,38 @@ class AdaptiveIdleWatchdogTests(unittest.TestCase):
         self.assertEqual(ctrl.io_wait_cap_s, 120.0)
         self.assertEqual(ctrl.watchdog_interval_s, 0.25)
 
+    def test_controller_accepts_bridge_timing_options(self) -> None:
+        default = AdaptiveTimeoutController()
+        self.assertIsNone(default.io_wait_cap_s)
+        self.assertEqual(default.watchdog_interval_s, 5.0)
+
+        logs: list[str] = []
+        ctrl = AdaptiveTimeoutController(
+            idle_timeout_s=300.0,
+            safety_cap_s=3600.0,
+            io_wait_cap_s=900.0,
+            watchdog_interval_s=2.5,
+            log_fn=logs.append,
+        )
+        self.assertEqual(ctrl.io_wait_cap_s, 900.0)
+        self.assertEqual(ctrl.watchdog_interval_s, 2.5)
+        self.assertTrue(any("ignored by 2-contour check()" in line for line in logs))
+
+        clock = _FakeClock(100.0)
+        ctrl = AdaptiveTimeoutController(
+            idle_timeout_s=300.0,
+            safety_cap_s=3600.0,
+            io_wait_cap_s=10.0,
+            watchdog_enabled=False,
+            clock=clock,
+        )
+        clock.advance(8.0)
+        ctrl.record_activity("protocol")
+        clock.advance(8.0)  # 16s since start (> io_wait_cap_s), but only 8s idle
+        self.assertFalse(ctrl.check()[0])
+        clock.advance(301.0)
+        self.assertEqual(ctrl.check(), (True, "idle_timeout", None))
+
 
 if __name__ == "__main__":
     unittest.main()
