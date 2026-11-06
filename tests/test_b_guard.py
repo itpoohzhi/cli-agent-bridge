@@ -414,29 +414,33 @@ class TestRw004StrictCli(unittest.TestCase):
     def test_rw004_block_boundary_reason_basis_block(self):
         """RW-004: причина basis=block - при блоке KB предел + 1 (strict: exit 2), но не при ровно пределе
         (строка журнала при этом всё равно длиннее блока на обёртку - её граница проверяется в CLI-тесте ниже).
-        Проверяется и умолчание 100 000, и явный прежний предел 60 000."""
-        marker = bg.marker_text(106496, [bg.UG_DISPLAY], None)
-        fixed = (
-            bg.FRAME_BASE
-            + bg.section_bytes("AGENTS.md", 0)
-            + len(marker.encode("utf-8"))
-            + bg.MARKER_TAIL_BYTES
-        )
-
-        def run(block, limit=None):
+        Проверяется и умолчание 500 000, и явный прежний предел 60 000."""
+        def run(block, limit=None, maxb=106496):
+            marker = bg.marker_text(maxb, [bg.UG_DISPLAY], None)
+            fixed = (
+                bg.FRAME_BASE
+                + bg.section_bytes("AGENTS.md", 0)
+                + len(marker.encode("utf-8"))
+                + bg.MARKER_TAIL_BYTES
+            )
             size = block - fixed
             files = {"KB": [bg.FileEntry("AGENTS.md", size, True, "/k", "h", False)]}
             res = bg.evaluate(
-                size, files, 106496, ("KB",), strict_req003=True, limit=limit
+                size, files, maxb, ("KB",), strict_req003=True, limit=limit
             )
             self.assertEqual(res.renders["KB"].block_bytes, block)
             return res
 
-        for limit, bound in ((None, bg.BLOCK_LIMIT), (LEGACY_LIMIT, LEGACY_LIMIT)):
+        # maxBytes < 2·предел: иначе канон вернётся дублем и блок станет вдвое больше.
+        cases = (
+            (None, bg.BLOCK_LIMIT, 700000),
+            (LEGACY_LIMIT, LEGACY_LIMIT, 106496),
+        )
+        for limit, bound, maxb in cases:
             self.assertEqual(
-                [r for r in run(bound, limit).reasons if "basis=block" in r], []
+                [r for r in run(bound, limit, maxb).reasons if "basis=block" in r], []
             )
-            over = run(bound + 1, limit)
+            over = run(bound + 1, limit, maxb)
             self.assertTrue(
                 [r for r in over.reasons if "basis=block" in r], over.reasons
             )
@@ -466,9 +470,10 @@ class TestRw004StrictCli(unittest.TestCase):
             self.assertIn("REQ003_SIZE_EXCEEDED cwd=KB", text)
             self.assertEqual(code, 2, text)
 
-    def test_rw004_cli_line_boundary_default_100000(self):
-        """RW-004/ADR 0015: без переменных окружения граница строки журнала - 100 000 / 100 001."""
-        self._line_boundary(bg.BLOCK_LIMIT, None, 170000)  # канон ~99 КБ: окно [137 316..198 288]
+    def test_rw004_cli_line_boundary_default_500000(self):
+        """RW-004: без переменных окружения граница строки журнала - BLOCK_LIMIT (500 000 / 500 001)."""
+        self.assertEqual(bg.BLOCK_LIMIT, 500000)
+        self._line_boundary(bg.BLOCK_LIMIT, None, 700000)  # окно без дубля канона
 
     def test_rw004_cli_line_boundary_legacy_60000_via_env(self):
         """RW-004: BRIDGE_INSTR_LIMIT=60000 возвращает прежнюю границу 60 000 / 60 001 (предел не зашит)."""
@@ -594,7 +599,9 @@ class TestRw002Profiles(unittest.TestCase):
         )
         self.assertEqual(
             bg.WA_CWD,
-            os.path.expanduser("~/src/saluteeye/gigabus/gigawebaccess/webaccess"),
+            os.path.expanduser(
+                "~/Мой диск/src/saluteeye/gigabus/gigawebaccess/webaccess"
+            ),
         )
         self.assertEqual(
             bg.DW_CWD,
@@ -608,12 +615,12 @@ class TestTm018Guard(unittest.TestCase):
     def run_eval(self, canon=CANON, maxbytes=106496, files=None):
         return bg.evaluate(canon, files or snapshot_files(canon), maxbytes, ("KB",))
 
-    def test_tm018_limit_boundary_default_100000(self):
-        """TM-018/ADR 0015: умолчание 100 000 Б строгое - 99 999 и 100 000 проходят, 100 001 нет."""
-        self.assertEqual(bg.BLOCK_LIMIT, 100000)
-        self.assertTrue(bg.block_within_limit(99999))
-        self.assertTrue(bg.block_within_limit(100000))
-        self.assertFalse(bg.block_within_limit(100001))
+    def test_tm018_limit_boundary_default_500000(self):
+        """TM-018: умолчание 500 000 Б строгое - 499 999 и 500 000 проходят, 500 001 нет."""
+        self.assertEqual(bg.BLOCK_LIMIT, 500000)
+        self.assertTrue(bg.block_within_limit(499999))
+        self.assertTrue(bg.block_within_limit(500000))
+        self.assertFalse(bg.block_within_limit(500001))
 
     def test_tm018_limit_boundary_explicit_limit(self):
         """TM-018: явный предел перекрывает умолчание: 60 000 проходит, 60 001 нет."""
@@ -680,7 +687,7 @@ class TestTm018Guard(unittest.TestCase):
             fs = build_snapshot_fs(Path(tmp), canon=CANON_NOW_CEILING)
             code, text = run_cli_snapshot(fs, ["--check", "--maxbytes", "106496"])
             self.assertNotIn("REQ003_SIZE_EXCEEDED", text)
-            self.assertIn("block_limit=100000", text)
+            self.assertIn("block_limit=500000", text)
 
     def test_tm018_canon_out_of_window_exit2(self):
         """TM-018: канон вне окна - слишком большой (CANON_LOST в AB) и слишком малый (DUPLICATE_RETURNED в KB) дают exit 2."""
@@ -746,16 +753,19 @@ class TestTm018Guard(unittest.TestCase):
             env=dict(clean_env(), PYTHONDONTWRITEBYTECODE="1"),
         )
         text = proc.stdout.decode("utf-8", "replace")
-        self.assertLessEqual(proc.returncode, 1, text)
+        # Живые размеры файлов на машине меняются (окно maxBytes может быть пустым, exit 2 - сигнал гарда,
+        # а не дефект теста): проверяем, что CLI отработал штатно (exit 0..2, не аварийный) и отчитался.
+        self.assertIn(proc.returncode, (0, 1, 2), text)
+        self.assertIn("block_limit=%d" % bg.BLOCK_LIMIT, text)
         self.assertIn("lower_margin=", text)
         self.assertIn("mode=PLANNED", text)
 
 
 class TestBlockLimitConfig(unittest.TestCase):
-    """ADR 0015: предел блока не зашит - BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 100 000, валидация."""
+    """ADR 0015: предел блока не зашит - BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 500 000, валидация."""
 
     def test_default_without_env(self):
-        self.assertEqual(bg.resolve_block_limit({}), 100000)
+        self.assertEqual(bg.resolve_block_limit({}), 500000)
 
     def test_new_name_has_priority_over_legacy(self):
         env = {"BRIDGE_INSTR_LIMIT": "120000", "DROID_DSH_BRIDGE_INSTR_LIMIT": "70000"}
@@ -768,23 +778,23 @@ class TestBlockLimitConfig(unittest.TestCase):
         for bad in ("", "   ", "abc", "12.5", "1e5", "-1", "-100000", "0", "+", "٣٠٠٠٠"):
             with self.subTest(value=bad):
                 self.assertEqual(
-                    bg.resolve_block_limit({"BRIDGE_INSTR_LIMIT": bad}), 100000
+                    bg.resolve_block_limit({"BRIDGE_INSTR_LIMIT": bad}), 500000
                 )
 
     def test_malformed_new_name_falls_through_to_legacy_then_default(self):
         env = {"BRIDGE_INSTR_LIMIT": "oops", "DROID_DSH_BRIDGE_INSTR_LIMIT": "80000"}
         self.assertEqual(bg.resolve_block_limit(env), 80000)
         env["DROID_DSH_BRIDGE_INSTR_LIMIT"] = "-3"
-        self.assertEqual(bg.resolve_block_limit(env), 100000)
+        self.assertEqual(bg.resolve_block_limit(env), 500000)
 
     def test_range_bounds_inclusive_and_out_of_range_clamped(self):
         for raw, want in (
             ("10000", 10000),
-            ("500000", 500000),
+            ("1000000", 1000000),
             ("9999", 10000),
             ("1", 10000),
-            ("500001", 500000),
-            ("99999999999", 500000),
+            ("1000001", 1000000),
+            ("99999999999", 1000000),
             (" 65000 ", 65000),
         ):
             with self.subTest(value=raw):
@@ -796,7 +806,7 @@ class TestBlockLimitConfig(unittest.TestCase):
         with mock.patch.dict(os.environ, clean_env(BRIDGE_INSTR_LIMIT="90000"), clear=True):
             self.assertEqual(bg.resolve_block_limit(), 90000)
         with mock.patch.dict(os.environ, clean_env(), clear=True):
-            self.assertEqual(bg.resolve_block_limit(), 100000)
+            self.assertEqual(bg.resolve_block_limit(), 500000)
 
     def test_check_installed_limit_param_and_env(self):
         """`check_installed(..., limit=None)`: None - из окружения; явный `limit` перекрывает его.
