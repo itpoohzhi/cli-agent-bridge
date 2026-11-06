@@ -8,8 +8,8 @@ import pytest
 
 from core import quarantine_gate as qg
 
-GATED_ROLES = ["coder", "reviewer", "judge", "answer-review", "council"]
-OPEN_ROLES = ["worker", "explorer", "adhoc", "probe"]
+GATED_ROLES = ["coder", "reviewer", "judge", "answer-review", "council", "probe", "adhoc"]
+OPEN_ROLES = ["worker", "explorer"]
 UNCONFIRMED = ["quarantine", "quarantine_failed", "stale", "probing"]
 
 
@@ -68,13 +68,13 @@ def test_missing_header_is_adhoc() -> None:
             qg.RoleClasses(),
             strict_anonymous=False,
         ),
-        qg.Allow,
+        qg.Deny,
     )
     assert isinstance(
         qg.gate(
             "m-x",
             "",
-            _sidecar("quarantine"),
+            _sidecar("confirmed"),
             qg.RoleClasses(),
             strict_anonymous=False,
         ),
@@ -104,7 +104,7 @@ def test_strict_anonymous_denies_missing_header_by_default(
     monkeypatch.setenv(qg.ENV_STRICT_ANONYMOUS, "false")
     assert isinstance(
         qg.gate("m-x", subagent_id, _sidecar(status), qg.RoleClasses()),
-        qg.Allow,
+        qg.Deny,
     )
 
 

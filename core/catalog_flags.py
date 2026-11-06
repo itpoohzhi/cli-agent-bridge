@@ -65,7 +65,7 @@ def state_dir(env: Optional[Mapping[str, str]] = None) -> Path:
 
 
 def quarantine_gate_enabled(reader: Callable[[str], bool] = flag_enabled) -> bool:
-    """Флаг ролевого карантинного гейта; сбой чтения — `false` (прежнее поведение)."""
+    """Флаг ролевого карантинного гейта; сбой чтения — `false` (безопасный rollout, ADR-0015)."""
     try:
         return bool(reader(FLAG_QUARANTINE_GATE))
     except Exception:  # noqa: BLE001 - флаг не должен ронять обработку запроса

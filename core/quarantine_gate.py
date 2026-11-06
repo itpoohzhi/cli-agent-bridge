@@ -67,7 +67,7 @@ def _env_flag(name: str, default: bool, environ: Optional[Mapping[str, str]] = N
     return default
 
 DEFAULT_OPEN_ROLES: FrozenSet[str] = frozenset(
-    {"worker", "explorer", ROLE_ADHOC, "probe"}
+    {"worker", "explorer"}
 )
 DEFAULT_QUORUM_ROLES: FrozenSet[str] = frozenset(
     {"judge", "hats", "answer-review", "council"}
