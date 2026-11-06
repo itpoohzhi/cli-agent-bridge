@@ -60,6 +60,8 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
+
 try:
     from core.watchdog import AdaptiveTimeoutController
 except ImportError:
@@ -441,26 +443,17 @@ def _kill_group(proc: subprocess.Popen) -> None:
             continue
 
 
-def _kill_all(*_: Any) -> None:
+def _cleanup_active_img_dirs() -> None:
+    """Зачистка каталогов картинок убитых ходов; вызывается вне обработчика сигнала."""
     with _active_lock:
-        procs = list(_active.values())
         img_dirs = list(_active_img_dirs)
-    reaped = True
-    for proc in procs:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    for proc in procs:
-        try:
-            proc.wait(timeout=PROCESS_WAIT_S)
-        except subprocess.TimeoutExpired:
-            reaped = False
-    if reaped:
-        for img_dir in img_dirs:  # только свои сессионные каталоги картинок
-            _cleanup_img_dir(img_dir)
-    _log(f"shutdown: killed {len(procs)} child process group(s)")
-    os._exit(0)
+    for img_dir in img_dirs:  # только свои сессионные каталоги картинок
+        _cleanup_img_dir(img_dir)
+
+
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(
+    procs_fn=lambda: list(_active.copy().values()), cleanup_fn=_cleanup_active_img_dirs, log_fn=_log
+), workspace=WORKSPACE)
 
 
 class Run:
@@ -579,6 +572,7 @@ def _client_gone(sock: socket.socket) -> bool:
         return True
 
 
+@_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = HTTP_TIMEOUT_S
@@ -1012,13 +1006,11 @@ def main() -> None:
         sys.stderr.write("CLAUDE_P_BRIDGE_KEY is required; refusing to start\n")
         raise SystemExit(1)
     WORKSPACE.mkdir(parents=True, exist_ok=True)
-    signal.signal(signal.SIGTERM, _kill_all)
-    signal.signal(signal.SIGINT, _kill_all)
     server = Server((HOST, PORT), Handler)
     _log(f"listen {HOST}:{PORT} model={MODEL_ID} max_concurrent={MAX_CONCURRENT} "
          f"queue_timeout={QUEUE_TIMEOUT_S}s keepalive={KEEPALIVE_S}s")
     print(f"[claude-p-bridge] listening on http://{HOST}:{PORT}/v1", flush=True)
-    server.serve_forever()
+    raise SystemExit(_LIFECYCLE.serve_forever(server))
 
 
 if __name__ == "__main__":

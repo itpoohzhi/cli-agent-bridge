@@ -95,7 +95,6 @@ import random
 import re
 import select
 import shutil
-import signal
 import socket
 import sqlite3
 import subprocess
@@ -153,6 +152,7 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.stream_interruption_recovery import (  # noqa: E402
     InterruptionTailState,
     evaluate_graceful_interruption,
@@ -3045,7 +3045,7 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
-_kill_all = _supervisor.kill_all
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=lambda: list(_active.copy().values()), log_fn=_log), workspace=WORKSPACE)
 
 
 # ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
@@ -6167,6 +6167,7 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
+@_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _registry_job: _Job | None = None
     protocol_version = "HTTP/1.1"
@@ -8227,8 +8228,6 @@ def main() -> None:
         _launcher()
     except LauncherUnavailable:
         _log(f"launcher_missing path={LAUNCHER} (requests will fail with 503)")
-    signal.signal(signal.SIGTERM, _kill_all)
-    signal.signal(signal.SIGINT, _kill_all)
     api_key_present = "yes" if AUTH_KEY else "no"
     server = Server((HOST, PORT), Handler)
     _log(
@@ -8237,7 +8236,7 @@ def main() -> None:
         f"api_key={api_key_present}"
     )
     print(f"[agy-bridge] listening on http://{HOST}:{PORT}/v1", flush=True)
-    server.serve_forever()
+    raise SystemExit(_LIFECYCLE.serve_forever(server))
 
 
 if __name__ == "__main__":

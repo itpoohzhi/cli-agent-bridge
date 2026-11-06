@@ -190,8 +190,9 @@ class LivenessWindow:
 class SseProgress:
     """SSE frame S/T tracker; legacy `last_progress` semantics when flags are off."""
 
-    def __init__(self, window: LivenessWindow | None, enforce: bool) -> None:
-        self.window, self.enforce, self.last_progress = window, enforce, None
+    def __init__(self, window: LivenessWindow | None, enforce: bool, cell: Any = None) -> None:
+        self.window, self.enforce, self.last_progress, self.cell = window, enforce, None, cell
+        self.useful = False  # последний кадр был полезным (S либо легаси-прогресс)
         self.strict = enforce or flag_enabled(FLAG_SOFT_LIVENESS)
 
     def remaining(self, default: float) -> float:
@@ -203,8 +204,11 @@ class SseProgress:
         if self.window is not None:
             self.window.record_signal(kind, keys)
         legacy = chunk is None and not self.strict and (data or "").strip() not in ("", "[DONE]", "null")
-        if kind == SIGNAL_S or legacy:
+        self.useful = kind == SIGNAL_S or legacy
+        if self.useful:
             self.last_progress = time.monotonic()
+        if self.cell is not None:  # скользящее окно: полезный кадр сдвигает дедлайн стрима
+            self.cell.advance(time.monotonic(), self.useful)
         return chunk
 
 

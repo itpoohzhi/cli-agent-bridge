@@ -111,10 +111,12 @@ class DynamicFlagSource:
     """GigaRC dynamic flag; env fallback, default false."""
 
     _flag_name = ""
+    _default = "false"
 
-    def __init__(self, flag_name: str | None = None) -> None:
+    def __init__(self, flag_name: str | None = None, default: bool = False) -> None:
         if flag_name:
             self._flag_name = flag_name
+        self._default = "true" if default else "false"
 
     @staticmethod
     def _truthy(raw: Any) -> bool:
@@ -125,9 +127,9 @@ class DynamicFlagSource:
         try:
             data = read_config_snapshot(path)
         except ConfigSnapshotError:
-            return False
+            return False  # fail-closed: битый снимок GigaRC не обходится env/default
         if data is None or self._flag_name not in data:
-            return self._truthy(os.environ.get(self._flag_name, "false"))
+            return self._truthy(os.environ.get(self._flag_name, self._default))
         return self._truthy(data[self._flag_name])
 
 
