@@ -61,18 +61,117 @@ def test_missing_header_is_adhoc() -> None:
     assert qg.role_from_subagent_id("-weird") == "adhoc"
     assert qg.role_from_subagent_id("coder-abc-def") == "coder"
     assert isinstance(
-        qg.gate("m-x", None, _sidecar("quarantine"), qg.RoleClasses()), qg.Allow
+        qg.gate(
+            "m-x",
+            None,
+            _sidecar("quarantine"),
+            qg.RoleClasses(),
+            strict_anonymous=False,
+        ),
+        qg.Allow,
     )
     assert isinstance(
-        qg.gate("m-x", "", _sidecar("quarantine"), qg.RoleClasses()), qg.Allow
+        qg.gate(
+            "m-x",
+            "",
+            _sidecar("quarantine"),
+            qg.RoleClasses(),
+            strict_anonymous=False,
+        ),
+        qg.Allow,
+    )
+
+
+@pytest.mark.parametrize("status", UNCONFIRMED)
+@pytest.mark.parametrize("subagent_id", [None, "", "   ", "-weird"])
+def test_strict_anonymous_denies_missing_header_by_default(
+    subagent_id: str | None, status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(qg.ENV_STRICT_ANONYMOUS, raising=False)
+    assert (
+        qg.role_from_subagent_id(subagent_id, strict_anonymous=True)
+        == qg.ROLE_ANONYMOUS_GATED
+    )
+    decision = qg.gate("m-x", subagent_id, _sidecar(status), qg.RoleClasses())
+    assert isinstance(decision, qg.Deny)
+    assert decision.http == 403
+    assert decision.status == status
+
+    assert isinstance(
+        qg.gate("m-x", subagent_id, _sidecar("confirmed"), qg.RoleClasses()),
+        qg.Allow,
+    )
+    monkeypatch.setenv(qg.ENV_STRICT_ANONYMOUS, "false")
+    assert isinstance(
+        qg.gate("m-x", subagent_id, _sidecar(status), qg.RoleClasses()),
+        qg.Allow,
     )
 
 
 def test_absent_model_allowed_legacy() -> None:
-    decision = qg.gate("not-there", "coder-1", _sidecar("quarantine"), qg.RoleClasses())
+    decision = qg.gate(
+        "not-there",
+        "coder-1",
+        _sidecar("quarantine"),
+        qg.RoleClasses(),
+        strict_mode=False,
+    )
     assert isinstance(decision, qg.Allow)
     assert isinstance(
-        qg.gate("x", "coder-1", qg.SidecarView(), qg.RoleClasses()), qg.Allow
+        qg.gate(
+            "x",
+            "coder-1",
+            qg.SidecarView(),
+            qg.RoleClasses(),
+            strict_mode=False,
+        ),
+        qg.Allow,
+    )
+
+
+@pytest.mark.parametrize("role", GATED_ROLES)
+def test_strict_mode_denies_absent_model_and_missing_sidecar(
+    role: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decision = qg.gate(
+        "not-there",
+        role + "-1",
+        _sidecar("confirmed"),
+        qg.RoleClasses(),
+        strict_mode=True,
+    )
+    assert isinstance(decision, qg.Deny)
+    assert decision.http == 403
+    assert decision.model == "not-there"
+    assert decision.status == "unregistered_model"
+
+    missing_view = qg.SidecarView.from_path(tmp_path / "missing-catalog.lock.json")
+    missing_decision = qg.gate(
+        "m-x",
+        role + "-1",
+        missing_view,
+        qg.RoleClasses(),
+        strict_mode=True,
+    )
+    assert isinstance(missing_decision, qg.Deny)
+    assert missing_decision.http == 403
+    assert missing_decision.model == "m-x"
+    assert missing_decision.status == "catalog_lock_missing"
+
+    monkeypatch.setenv(qg.ENV_STRICT_MODE, "true")
+    env_decision = qg.gate("not-there", role + "-1", _sidecar("confirmed"), qg.RoleClasses())
+    assert isinstance(env_decision, qg.Deny)
+    assert env_decision.status == "unregistered_model"
+
+    assert isinstance(
+        qg.gate(
+            "not-there",
+            "worker-1",
+            _sidecar("confirmed"),
+            qg.RoleClasses(),
+            strict_mode=True,
+        ),
+        qg.Allow,
     )
 
 
@@ -243,3 +342,9 @@ class QuarantineGateHttpTests(BridgeCase):
         _write_sidecar(self.lock, "confirmed")
         status, _ = self._post_as("coder-1")
         self.assertEqual(status, 200)
+
+    def test_quarantined_model_rejected_for_anonymous_403(self) -> None:
+        _write_sidecar(self.lock, "quarantine")
+        status, body = self._post_as(None)
+        self.assertEqual(status, 403)
+        self.assertEqual(body, qg.deny_body(STAND_MODEL, "quarantine"))

@@ -44,8 +44,27 @@ CLASS_QUORUM = "quorum"
 CLASS_GATED = "gated"
 
 ROLE_ADHOC = "adhoc"
+ROLE_ANONYMOUS_GATED = "anonymous-gated"
+
+STATUS_UNREGISTERED_MODEL = "unregistered_model"
+STATUS_CATALOG_LOCK_MISSING = "catalog_lock_missing"
 
 ENV_ROLE_CLASSES = "POL_ROLE_CLASSES"
+ENV_STRICT_ANONYMOUS = "BRIDGE_QUARANTINE_STRICT_ANONYMOUS"
+ENV_STRICT_MODE = "BRIDGE_QUARANTINE_STRICT_MODE"
+
+
+def _env_flag(name: str, default: bool, environ: Optional[Mapping[str, str]] = None) -> bool:
+    env = os.environ if environ is None else environ
+    raw = env.get(name)
+    if raw is None:
+        return default
+    norm = raw.strip().lower()
+    if norm in {"1", "true", "yes", "on"}:
+        return True
+    if norm in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 DEFAULT_OPEN_ROLES: FrozenSet[str] = frozenset(
     {"worker", "explorer", ROLE_ADHOC, "probe"}
@@ -108,13 +127,20 @@ class RoleClasses:
         return self.class_of(role) == CLASS_OPEN
 
 
-def role_from_subagent_id(subagent_id: Optional[str]) -> str:
-    """Роль = часть ``X-Subagent-Id`` до первого ``-``; пусто/None => ``adhoc``."""
+def role_from_subagent_id(
+    subagent_id: Optional[str], *, strict_anonymous: bool = False
+) -> str:
+    """Роль = часть ``X-Subagent-Id`` до первого ``-``.
+
+    При ``strict_anonymous=True`` пустой/отсутствующий заголовок возвращает
+    закрытую роль ``anonymous-gated`` (CLASS_GATED, default-deny).
+    """
+    fallback = ROLE_ANONYMOUS_GATED if strict_anonymous else ROLE_ADHOC
     value = (subagent_id or "").strip()
     if not value:
-        return ROLE_ADHOC
+        return fallback
     head = value.split("-", 1)[0].strip().lower()
-    return head or ROLE_ADHOC
+    return head or fallback
 
 
 def status_permitted(status: Optional[str], role_class: str) -> bool:
@@ -129,27 +155,34 @@ def status_permitted(status: Optional[str], role_class: str) -> bool:
 class SidecarView:
     """Read-only представление сайдкара ``catalog-lock/1``."""
 
-    def __init__(self, data: Optional[Mapping[str, Any]] = None) -> None:
+    def __init__(
+        self, data: Optional[Mapping[str, Any]] = None, *, missing: bool = False
+    ) -> None:
         self._data: Dict[str, Any] = dict(data or {})
         models = self._data.get("models")
         self._models: Dict[str, Any] = dict(models) if isinstance(models, dict) else {}
+        self._missing: bool = missing or ("models" not in self._data)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "SidecarView":
-        return cls(data)
+        return cls(data, missing=("models" not in data))
 
     @classmethod
     def from_path(cls, path: Union[str, "os.PathLike[str]"]) -> "SidecarView":
-        """Читает сайдкар. Файла нет — пустое представление (legacy: всё разрешено)."""
+        """Читает сайдкар. Файла нет — пустое представление с флагом ``is_missing``."""
         try:
             with open(os.fspath(path), "rb") as fh:
                 raw = fh.read()
         except FileNotFoundError:
-            return cls({})
+            return cls({}, missing=True)
         data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
             raise ValueError("catalog lock must be a JSON object")
-        return cls(data)
+        return cls(data, missing=("models" not in data))
+
+    @property
+    def is_missing(self) -> bool:
+        return self._missing
 
     @property
     def raw(self) -> Dict[str, Any]:
@@ -202,15 +235,38 @@ def deny_body(model: str, status: str) -> Dict[str, Any]:
 def gate(
     model_id: str,
     subagent_id: Optional[str],
-    sidecar: SidecarView,
+    sidecar: Optional[SidecarView],
     role_classes: Optional[RoleClasses] = None,
+    *,
+    strict_anonymous: Optional[bool] = None,
+    strict_mode: Optional[bool] = None,
 ) -> GateDecision:
     """Решение гейта: ``Allow`` или ``Deny`` (403 ``model_quarantined``)."""
     classes = role_classes if role_classes is not None else RoleClasses.from_env()
+    use_strict_anon = (
+        _env_flag(ENV_STRICT_ANONYMOUS, True)
+        if strict_anonymous is None
+        else strict_anonymous
+    )
+    use_strict_mode = (
+        _env_flag(ENV_STRICT_MODE, False) if strict_mode is None else strict_mode
+    )
+    role = role_from_subagent_id(subagent_id, strict_anonymous=use_strict_anon)
+    role_class = classes.class_of(role)
+    is_closed_role = role_class in (CLASS_GATED, CLASS_QUORUM)
+
+    if sidecar is None or sidecar.is_missing:
+        if use_strict_mode and is_closed_role:
+            return Deny(model=model_id, status=STATUS_CATALOG_LOCK_MISSING)
+        if sidecar is None:
+            return Allow()
+
     if not sidecar.has(model_id):
+        if use_strict_mode and is_closed_role:
+            return Deny(model=model_id, status=STATUS_UNREGISTERED_MODEL)
         return Allow()
+
     status = sidecar.status_of(model_id) or ""
-    role_class = classes.class_of(role_from_subagent_id(subagent_id))
     if status_permitted(status, role_class):
         return Allow()
     return Deny(model=model_id, status=status)
