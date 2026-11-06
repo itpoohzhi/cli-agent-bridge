@@ -12826,12 +12826,28 @@ class SessionFailClosedTests(unittest.TestCase):
                         extra["chat_id"] = value
                     else:
                         req[source] = value
-                    self.assertEqual(chat_id_for(headers, extra, req), expected)
+                    self.assertEqual(
+                        chat_id_for(headers, extra, req), (expected, False)
+                    )
 
     def test_request_chat_id_rejects_invalid_values(self) -> None:
         """Пустые, длинные ID и все ASCII control-символы не образуют ключ."""
         chat_id_for = _bfn("_request_chat_id")
-        invalid = (None, False, True, 0, 123, 1.5, {}, [], "", " \t ", "a" * 257) + tuple(
+        invalid = (
+            False,
+            True,
+            0,
+            123,
+            1.5,
+            {},
+            [],
+            "",
+            " \t ",
+            "a" * 257,
+            "\nchat",
+            "chat\t",
+            " " * 257 + "a",
+        ) + tuple(
             "chat" + chr(code) + "id"
             for code in (*range(32), 127, 0xD800, 0xDBFF, 0xDC00, 0xDFFF)
         )
@@ -12852,24 +12868,157 @@ class SessionFailClosedTests(unittest.TestCase):
                         extra["chat_id"] = value
                     else:
                         req[source] = value
-                    self.assertEqual(chat_id_for(headers, extra, req), "")
+                    self.assertEqual(chat_id_for(headers, extra, req), ("", True))
 
-    def test_request_chat_id_uses_first_valid_source(self) -> None:
-        """Невалидный приоритетный источник не скрывает следующий валидный."""
+    def test_request_chat_id_uses_first_provided_source(self) -> None:
+        """Приоритетный невалидный источник запрещает fallback на другой чат."""
         headers = {"x-dsh-chat-id": "header-A", "x-session-id": "header-B"}
         extra: dict[str, object] = {"chat_id": "extra"}
         req: dict[str, object] = {"chat_id": "body", "prompt_cache_key": "cache"}
         chat_id_for = _bfn("_request_chat_id")
-        self.assertEqual(chat_id_for(headers, extra, req), "header-A")
+        self.assertEqual(chat_id_for(headers, extra, req), ("header-A", False))
         headers["x-dsh-chat-id"] = "bad\x00id"
-        self.assertEqual(chat_id_for(headers, extra, req), "header-B")
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        del headers["x-dsh-chat-id"]
+        self.assertEqual(chat_id_for(headers, extra, req), ("header-B", False))
         headers["x-session-id"] = "x" * 257
-        self.assertEqual(chat_id_for(headers, extra, req), "extra")
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        del headers["x-session-id"]
+        self.assertEqual(chat_id_for(headers, extra, req), ("extra", False))
         extra["chat_id"] = "\x7f"
-        self.assertEqual(chat_id_for(headers, extra, req), "body")
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        extra["chat_id"] = None
+        self.assertEqual(chat_id_for(headers, extra, req), ("body", False))
         req["chat_id"] = ""
-        self.assertEqual(chat_id_for(headers, extra, req), "")
-        self.assertEqual(chat_id_for({}, {}), "")
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        req["chat_id"] = None
+        self.assertEqual(chat_id_for(headers, extra, req), ("", False))
+        self.assertEqual(chat_id_for({}, {}), ("", False))
+        self.assertEqual(
+            chat_id_for(
+                {"x-dsh-chat-id": None, "x-session-id": None}, {"chat_id": None}
+            ),
+            ("", False),
+        )
+
+    def test_empty_conversation_id_preserves_hot_session(self) -> None:
+        """Пустой или null CID не мешает возобновить сессию валидного chat ID."""
+        for source in ("extra", "body"):
+            for raw in ("", "   ", None):
+                with self.subTest(source=source, raw=raw), _Fixture() as fx:
+                    _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID)])
+                    bridge = _HttpBridge()
+                    try:
+                        self.assertEqual(bridge.post(_agentic_body("первый"))[0], 200)
+                        body = _agentic_body("продолжение", True)
+                        target = (
+                            _dict(body["extra_body"]) if source == "extra" else body
+                        )
+                        target["conversation_id"] = raw
+                        if source == "extra":
+                            body["conversation_id"] = _CID_B
+                        with mock.patch.object(
+                            _bridge(), "_session_claim", wraps=_bfn("_session_claim")
+                        ) as claim:
+                            code, payload = bridge.post(body)
+                            claim.assert_called_once()
+                    finally:
+                        bridge.close()
+                    self.assertEqual(code, 200)
+                    self.assertEqual(payload["conversation_id"], _CID)
+                    argv = fx.spawns()[1]
+                    self.assertEqual(argv[argv.index("--conversation") + 1], _CID)
+                    self.assertEqual(_bval("_in_flight_cids"), set())
+                    self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_invalid_chat_id_forces_cold_without_cwd_fallback(self) -> None:
+        """Испорченный chat ID не читает и не изменяет существующий cwd-бакет."""
+        with _Fixture() as fx:
+            model = _str(_bval("MODEL_ID"))
+            effort = _dict(_dict(_bval("FLEET_MODELS"))[model])["default_effort"]
+            key = (model, str(fx.tmp), effort)
+            _ = _bfn("_session_commit")(key, _CID)
+            store = cast("dict[object, object]", _bval("_session_store"))
+            before = {
+                stored_key: dict(cast(dict, entry))
+                for stored_key, entry in store.items()
+            }
+            captured: list[dict[str, object]] = []
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                for source in ("extra", "body"):
+                    for raw in (
+                        "x" * 257,
+                        False,
+                        123,
+                        {},
+                        [],
+                        "bad\x00id",
+                        "\nchat",
+                        "chat\t",
+                        "\ud800",
+                    ):
+                        with self.subTest(source=source, raw=raw):
+                            body = _agentic_body(
+                                "безопасный холодный ход", True, chat_id=""
+                            )
+                            body["extra_body"] = {"cwd": str(fx.tmp)}
+                            target = (
+                                _dict(body["extra_body"]) if source == "extra" else body
+                            )
+                            target["chat_id"] = raw
+                            with (
+                                mock.patch.object(
+                                    _bval("Handler"), "_serve_json", capture
+                                ),
+                                mock.patch.object(_bridge(), "_session_claim") as claim,
+                                mock.patch.object(
+                                    _bridge(), "_session_commit"
+                                ) as commit,
+                                mock.patch.object(
+                                    _bridge(), "_session_invalidate"
+                                ) as invalidate,
+                                mock.patch.object(_bridge(), "_log") as log,
+                            ):
+                                self.assertEqual(bridge.post(body)[0], 200)
+                                claim.assert_not_called()
+                                commit.assert_not_called()
+                                invalidate.assert_not_called()
+                                log.assert_any_call("chat-id-invalid-rejected")
+                            ctx = captured[-1]
+                            self.assertIsNone(ctx["sess_key"])
+                            self.assertEqual(ctx["conversation_id"], "")
+                            self.assertIs(ctx["hot_resumed"], False)
+                            self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+                            self.assertIn("начало диалога", _str(ctx["prompt"]))
+                            self.assertEqual(store, before)
+            finally:
+                bridge.close()
+            self.assertEqual(_bval("_in_flight_cids"), set())
+            self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_session_isolation_flag_accepts_text_values(self) -> None:
+        """Строковый выключатель безопасен и по умолчанию сохраняет изоляцию."""
+        for raw, expected in (
+            (None, True),
+            ("0", False),
+            ("false", False),
+            ("no", False),
+            ("off", False),
+            (" FALSE ", False),
+            ("1", True),
+            ("true", True),
+            ("", True),
+            ("unexpected", True),
+        ):
+            with self.subTest(raw=raw), _Fixture() as fx:
+                fx.set_env("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", raw)
+                self.assertIs(_bfn("_is_session_isolation_enabled")(), expected)
 
     def test_plain_explicit_cid_does_not_touch_session_store(self) -> None:
         """Без tools явный CID запрещён, стор не читается и не меняется."""
@@ -13035,7 +13184,7 @@ class SessionFailClosedTests(unittest.TestCase):
         for source, raw in (
             (source, raw)
             for source in ("extra", "body")
-            for raw in ("invalid/chars", 123, True, False, 0, {}, [], "", "   ")
+            for raw in ("invalid/chars", 123, True, False, 0, {}, [])
         ):
             with self.subTest(source=source, raw=raw), _Fixture() as fx:
                 _ = fx.write_scenario(
@@ -13068,6 +13217,10 @@ class SessionFailClosedTests(unittest.TestCase):
                         claim.assert_not_called()
                         if raw == "invalid/chars":
                             log.assert_any_call("cid-malformed-rejected cid='invalid/chars'")
+                        else:
+                            log.assert_any_call(
+                                f"cid-nonstring-rejected type={type(raw).__name__}"
+                            )
                 finally:
                     bridge.close()
                 self.assertEqual(code, 200)
@@ -13191,6 +13344,10 @@ class SessionFailClosedTests(unittest.TestCase):
             ("m", "/w", "low"),
         ):
             self.assertEqual(decode(list(valid)), valid)
+        self.assertEqual(
+            decode(["0123456789abcdef", "m", "/w/../abs/./path", "low"]),
+            ("0123456789abcdef", "m", "/abs/path", "low"),
+        )
 
     def test_session_key_requires_chat_token_or_cwd(self) -> None:
         """Оба допустимых формата валидны; пустые и пробельные ключи отвергаются."""
@@ -13199,6 +13356,8 @@ class SessionFailClosedTests(unittest.TestCase):
         token = hashlib.sha256(b"chat-A").hexdigest()[:16]
         for chat, cwd, expected in (
             (" chat-A ", "", (token, "m", "", "low")),
+            ("chat-A", " /w/../abs/./path ", (token, "m", "/abs/path", "low")),
+            ("chat-A", "rel/path", (token, "m", "", "low")),
             ("", " /w ", ("m", "/w", "low")),
             ("", "/w/../abs/./path", ("m", "/abs/path", "low")),
             (" \t ", "/w", ("m", "/w", "low")),

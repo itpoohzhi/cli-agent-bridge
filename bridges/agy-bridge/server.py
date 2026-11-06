@@ -917,9 +917,15 @@ SWEEP_INTERVAL_S = 600.0
 SWEEP_CUTOFF_S = get_bridge_config().sweep_cutoff_s
 
 CWD_MAX_LEN = 4096
-AGY_BRIDGE_SESSION_ISOLATION_ENABLED = bool(
-    int(os.environ.get("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", "1"))
-)
+
+
+def _is_session_isolation_enabled() -> bool:
+    """Изоляция включена, пока окружение явно не задаёт выключатель."""
+    val = os.environ.get("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", "1").strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
+AGY_BRIDGE_SESSION_ISOLATION_ENABLED = _is_session_isolation_enabled()
 
 # Ленивые горячие сессии: следующий запрос с тем же (модель, cwd, effort) продолжает
 # разговор agy через --conversation и шлёт только новые сообщения, а не всю историю.
@@ -2768,7 +2774,10 @@ def _session_key_for(
     chat = raw_chat_id.strip()
     if chat:
         chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
-        return (chat_token, model, cwd, effort)
+        cwd_norm = (
+            os.path.normpath(cwd.strip()) if cwd and os.path.isabs(cwd.strip()) else ""
+        )
+        return (chat_token, model, cwd_norm, effort)
     cwd_clean = cwd.strip() if isinstance(cwd, str) else ""
     if cwd_clean and os.path.isabs(cwd_clean):
         return (model, os.path.normpath(cwd_clean), effort)
@@ -2777,22 +2786,24 @@ def _session_key_for(
 
 def _request_chat_id(
     headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
-) -> str:
-    """Первый валидный chat ID из заголовков, extra_body или тела."""
+) -> tuple[str, bool]:
+    """Первый переданный chat ID и признак невалидного идентификатора."""
     for value in (
         headers.get("x-dsh-chat-id"),
         headers.get("x-session-id"),
         extra.get("chat_id"),
         (req or {}).get("chat_id"),
     ):
-        if isinstance(value, str):
-            val = value.strip()
-            if 0 < len(val) <= 256 and all(
-                (31 < ord(c) != 127) and not (0xD800 <= ord(c) <= 0xDFFF)
-                for c in val
-            ):
-                return val
-    return ""
+        if value is None:
+            continue
+        if not isinstance(value, str) or len(value) > 256 or any(
+            ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+            for c in value
+        ):
+            return "", True
+        val = value.strip()
+        return val, not bool(val)
+    return "", False
 
 
 def _session_key_valid(sess_key: tuple[str, ...]) -> bool:
@@ -2900,6 +2911,12 @@ def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
         if parts[2].strip() and os.path.isabs(parts[2].strip()):
             return (parts[1], os.path.normpath(parts[2].strip()), parts[3])
         return None
+    if len(parts) == 4:
+        parts[2] = (
+            os.path.normpath(parts[2])
+            if parts[2] and os.path.isabs(parts[2])
+            else parts[2]
+        )
     key = tuple(parts)
     if not _session_key_valid(key):
         return None
@@ -7598,7 +7615,7 @@ class Handler(BaseHTTPRequestHandler):
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
-            chat_id = _request_chat_id(
+            chat_id, chat_id_invalid = _request_chat_id(
                 self.headers, cast(dict, extra), req if isinstance(req, dict) else None
             )
             sess_key: tuple[str, ...] | None = (
@@ -7611,6 +7628,10 @@ class Handler(BaseHTTPRequestHandler):
                 if tools_count > 0
                 else None
             )
+            if chat_id_invalid:
+                _log("chat-id-invalid-rejected")
+                sess_key = None
+                force_cold = True
             if sess_key is not None and not _session_key_valid(sess_key):
                 sess_key = None
             use_session_store = tools_count > 0 and sess_key is not None
@@ -7621,14 +7642,16 @@ class Handler(BaseHTTPRequestHandler):
             )
             cid_clean = ""
             if raw_cid is not None:
-                if isinstance(raw_cid, str) and raw_cid.strip():
+                if isinstance(raw_cid, str):
                     val = raw_cid.strip()
-                    if _CID_RE.fullmatch(val):
-                        cid_clean = val
-                    else:
-                        _log(f"cid-malformed-rejected cid={val[:16]!r}")
-                        force_cold = True
+                    if val:
+                        if _CID_RE.fullmatch(val):
+                            cid_clean = val
+                        else:
+                            _log(f"cid-malformed-rejected cid={val[:16]!r}")
+                            force_cold = True
                 else:
+                    _log(f"cid-nonstring-rejected type={type(raw_cid).__name__}")
                     force_cold = True
 
             # Явный CID разрешён только при доказанном владении ключом этого чата.
