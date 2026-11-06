@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
-"""DEP-09: квалифицированный неизменяемый образ droid и receipt допуска (AD-010, RW-007, RW-009).
+"""DEP-09: неизменяемый образ droid и receipt допуска всех моделей fleet.
 
-Копирует исполняемый файл droid в `workspace/runtime/droid-image/<sha256>/droid`
-(каталоги 0700, файл 0500; sha256 считается по КОПИИ после fsync), глобальный бинарь не
-меняет. Затем ЗАПУСКАЕТ копию по stream-jsonrpc и проверяет три пробы (spawn, update, load):
-только после их успеха атомарно пишется `workspace/state/droid-binary-receipt.json` (schema 2).
-
-Receipt фиксирует четвёрку допуска: образ (sha256) + протокол (`api_version` и
-`factoryProtocolVersion` из кадров живого droid) + политика tools (id отключаемых tools и отпечаток)
-+ профиль настроек сессии (отпечаток). Мост на каждом spawn перечитывает receipt, сверяет все четыре
-компонента и запускает droid только как DROID_BIN=<образ>; любое расхождение запрещает spawn.
-Предыдущие образы остаются на диске (откат — вернуть прежний receipt).
-
-Квалификация на стенде (malicious-tool probe) выполняется отдельным шагом ДО запуска этого
-инструмента; боевой профиль DSH инструмент не трогает (probe идёт в изолированном Factory home).
+Копия runtime/droid-image/<sha256>/droid (0500, каталоги 0700) проходит spawn/update/load
+в изолированном Factory home. Только после всех проб атомарно пишется schema-2 receipt
+с протоколом, точными каталогами моделей и профилем настроек. Глобальный бинарь не меняется.
 """
 
 from __future__ import annotations
@@ -34,10 +24,10 @@ from typing import IO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import receipt_schema as schema  # noqa: E402  - единственная общая с мостом зависимость: без server.py и fleet.json
+import receipt_schema as schema  # noqa: E402  - общая схема без импорта server.py
+from droid_probe_config import ProbeError, probe_models as _probe_models  # noqa: E402
 
-PROBE_TIMEOUT_S = 30.0
-PROBE_MODEL_EFFORT = ("claude-sonnet-5-5", "high")
+PROBE_TIMEOUT_S = float(os.environ.get("DROID_PROBE_TIMEOUT_S", "30.0"))
 PROBE_AUTONOMY = "high"
 READBACK_KEYS = (
     "modelId",
@@ -47,10 +37,6 @@ READBACK_KEYS = (
     "disableBuiltinSkills",
     "autoRejectPermissionRequests",
 )
-
-
-class ProbeError(Exception):
-    """Проба квалификации не пройдена: receipt не пишется."""
 
 
 def _settings_from_notes(notes: list) -> dict | None:
@@ -275,87 +261,74 @@ class _Rpc:
                 self._close_quietly(self.proc.stdout)
 
 
-def run_probes(image: Path, workspace: Path) -> dict:
-    """Пробы spawn/update/load на КОПИИ образа; -> протокол, id отключаемых tools и итог проб.
+def _initialize_probe(rpc: _Rpc, cwd: Path, expected: dict) -> tuple[str, set]:
+    """Открыть сессию и подтвердить обязательные настройки."""
+    result, _ = rpc.call(
+        "droid.initialize_session",
+        {
+            **expected,
+            "machineId": "droid-image-probe",
+            "cwd": str(cwd),
+            "title": "droid-image-probe",
+        },
+    )
+    sid, settings = result.get("sessionId"), result.get("settings")
+    if not isinstance(sid, str) or not sid or not isinstance(settings, dict):
+        raise ProbeError(
+            "spawn: initialize_session без sessionId или с подменой модели"
+        )
+    confirmed = _verify_settings(
+        "spawn",
+        settings,
+        expected,
+        required=("modelId", "reasoningEffort", "autonomyLevel"),
+    )
+    return sid, confirmed
 
-    spawn:  initialize_session отвечает sessionId, read-back настроек совпадает с запрошенными,
-            протокольная версия присутствует в кадрах;
-    update: list_tools -> update_session_settings(disabledToolIds=все) -> settings_updated подтверждает;
-    load:   новый процесс образа load_session того же SID и видит сессию.
-    """
-    runtime = workspace / "runtime"
-    home, cwd = runtime / "probe-home", runtime / "probe-cwd"
-    _ensure_private_chain(home, workspace)
-    _ensure_private_chain(cwd, workspace)
-    model, effort = PROBE_MODEL_EFFORT
+
+def _probe_tool_ids(rpc: _Rpc) -> set[str]:
+    """Проверить непустой каталог инструментов одной модели."""
+    tools, _ = rpc.call("droid.list_tools", {})
+    listed = tools.get("tools")
+    if not isinstance(listed, list) or not listed:
+        raise ProbeError("update: list_tools вернул некорректный каталог")
+    if not all(
+        isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"] for t in listed
+    ):
+        raise ProbeError("update: list_tools вернул некорректный каталог")
+    return {t["id"] for t in listed}
+
+
+def _disable_probe_tools(rpc: _Rpc, ids: set[str], expected: dict) -> set:
+    """Подтвердить отключение каждого инструмента текущей модели."""
+    _, stash = rpc.call(
+        "droid.update_session_settings", {"disabledToolIds": sorted(ids)}
+    )
+    updated = _settings_from_notes(stash)
+    if updated is None:
+        updated = rpc.wait_settings()
+    disabled = updated.get("disabledToolIds")
+    if not isinstance(disabled, list) or not ids.issubset(set(map(str, disabled))):
+        raise ProbeError("update: read-back не подтвердил отключение tools")
+    return _verify_settings("update", updated, expected)
+
+
+def _probe_model(image: Path, cwd: Path, home: Path, model: str, effort: str) -> tuple:
+    """Пройти spawn/update/load одной модели с безусловным закрытием процессов."""
     expected = {
         "modelId": model,
         "reasoningEffort": effort,
         "autonomyLevel": PROBE_AUTONOMY,
         **schema.SETTINGS_PROFILE,
     }
-    confirmed: set = set()
     rpc = _Rpc(image, cwd, home)
     try:
-        result, _ = rpc.call(
-            "droid.initialize_session",
-            {
-                "machineId": "droid-image-probe",
-                "cwd": str(cwd),
-                "modelId": model,
-                "reasoningEffort": effort,
-                "autonomyLevel": PROBE_AUTONOMY,
-                "interactionMode": "auto",
-                "title": "droid-image-probe",
-                **{
-                    k: v
-                    for k, v in schema.SETTINGS_PROFILE.items()
-                    if k != "interactionMode"
-                },
-            },
-        )
-        sid = result.get("sessionId")
-        settings = result.get("settings")
-        if (
-            not isinstance(sid, str)
-            or not sid
-            or not isinstance(settings, dict)
-            or settings.get("modelId") != model
-        ):
-            raise ProbeError(
-                "spawn: initialize_session без sessionId или с подменой модели"
-            )
-        confirmed |= _verify_settings(
-            "spawn",
-            settings,
-            expected,
-            required=("modelId", "reasoningEffort", "autonomyLevel"),
-        )
+        sid, confirmed = _initialize_probe(rpc, cwd, expected)
         protocol = rpc.protocol
         if not protocol:
             raise ProbeError("spawn: в кадрах droid нет factoryProtocolVersion")
-        tools, _ = rpc.call("droid.list_tools", {})
-        listed = tools.get("tools")
-        if (
-            not isinstance(listed, list)
-            or not listed
-            or not all(
-                isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"]
-                for t in listed
-            )
-        ):
-            raise ProbeError("update: list_tools вернул некорректный каталог")
-        ids = sorted(t["id"] for t in listed)
-        _, stash = rpc.call("droid.update_session_settings", {"disabledToolIds": ids})
-        updated = _settings_from_notes(stash)
-        if updated is None:
-            updated = rpc.wait_settings()
-        disabled = updated.get("disabledToolIds")
-        if not isinstance(disabled, list) or not set(ids).issubset(
-            set(map(str, disabled))
-        ):
-            raise ProbeError("update: read-back не подтвердил отключение tools")
-        confirmed |= _verify_settings("update", updated, expected)
+        ids = _probe_tool_ids(rpc)
+        confirmed |= _disable_probe_tools(rpc, ids, expected)
     finally:
         rpc.close()
     second = _Rpc(image, cwd, home)
@@ -371,9 +344,26 @@ def run_probes(image: Path, workspace: Path) -> dict:
         confirmed |= _verify_settings("load", loaded.get("settings"), expected)
     finally:
         second.close()
+    return protocol, ids, confirmed
+
+
+def run_probes(image: Path, workspace: Path) -> dict:
+    """Квалифицировать модели и объединить только подтверждённо отключённые tools."""
+    runtime = workspace / "runtime"
+    home, cwd = runtime / "probe-home", runtime / "probe-cwd"
+    _ensure_private_chain(home, workspace)
+    _ensure_private_chain(cwd, workspace)
+    models = _probe_models()
+    facts = [
+        _probe_model(image, cwd, home, mid, effort) for mid, effort in models.items()
+    ]
+    if len({fact[0] for fact in facts}) != 1:
+        raise ProbeError("spawn: модели сообщили разные factoryProtocolVersion")
+    confirmed = set.intersection(*(fact[2] for fact in facts))
     return {
-        "protocol_version": protocol,
-        "disabled_tool_ids": ids,
+        "protocol_version": facts[0][0],
+        "disabled_tool_ids": sorted(set.union(*(fact[1] for fact in facts))),
+        "qualified_models": {mid: sorted(fact[1]) for mid, fact in zip(models, facts)},
         "probes": {name: "ok" for name in schema.RECEIPT_PROBES},
         "readback": {
             "confirmed": sorted(confirmed),
@@ -420,6 +410,7 @@ def install_image(source: Path, workspace: Path) -> dict:
             "readback": facts["readback"],
         },
         "probes": facts["probes"],
+        "qualified_models": facts["qualified_models"],
         "source": {
             "path": str(source),
             "mtime_ns": snapshot.st_mtime_ns,

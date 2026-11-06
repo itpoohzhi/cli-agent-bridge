@@ -1981,7 +1981,7 @@ class TestFleetPassthroughKind(unittest.TestCase):
         registry = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog)
         adapter = registry.get("codex")
         self.assertIsInstance(adapter, PassthroughAdapter)
-        self.assertEqual({m.id for m in adapter.get_models()}, {"gpt-6.1-terra", "gpt-6.1-sol"})
+        self.assertEqual({m.id for m in adapter.get_models()}, {"gpt-6.1-terra"})
         self.assertTrue(adapter.is_healthy())
         self.assertIs(registry.adapter_for_model("gpt-6.1-terra"), adapter)
 

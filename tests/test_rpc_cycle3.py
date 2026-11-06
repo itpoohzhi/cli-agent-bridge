@@ -119,18 +119,18 @@ class TestGuardLoop(GuardCase):
     def test_rw003_maxbytes_drift_detected_by_background_loop_without_cli(self):
         """RW-003: профиль изменён уже после старта -> фоновый поток находит дрейф и пишет alert сам."""
         self.write_profile(106496)
+        self.addCleanup(setattr, server, "GUARD_TICK_S", server.GUARD_TICK_S)
         server.GUARD_TICK_S = 0.1
-        self.addCleanup(setattr, server, "GUARD_TICK_S", 30)
+        self.addCleanup(setattr, server, "_shutting_down", server._shutting_down)
         with self.capture_logs() as lines:
             server.GUARD.check_once()
             self.assertEqual(server.GUARD.snapshot()[0], "ok")
             server.GUARD.start()
+            self.addCleanup(server.GUARD._thread.join, 1)
+            self.addCleanup(setattr, server, "_shutting_down", True)
             self.write_profile(262144)
-            self.assertTrue(
-                wait_until(lambda: server.GUARD.snapshot()[0] == "unsafe", timeout=5)
-            )
+            self.assertTrue(wait_until(lambda: server.GUARD.snapshot()[0] == "unsafe", timeout=5))
         self.assertTrue(any(ln.startswith("instr_guard_alert ") for ln in lines))
-
     def test_rw003_unreadable_maxbytes_is_unsafe(self):
         """RW-003: профиль без читаемого maxBytes -> unsafe (fail-closed), а не молчаливый ok."""
         self.write_profile(106496)
@@ -441,7 +441,7 @@ class TestTurnIsolation(RpcCase):
 
     def test_rw006_foreign_events_do_not_reset_silence_watchdog(self):
         """RW-006: поток чужих событий не продлевает watchdog тишины: ход, не дающий своего прогресса, -> 504."""
-        server.SILENCE_WATCHDOG_S = 0.8
+        server.IDLE_TIMEOUT_S = 0.8
         steps = []
         for _ in range(8):
             steps += [
@@ -1013,14 +1013,14 @@ class TestStartup(GuardCase):
     class _NoServe:
         def __init__(self, *args, **kwargs):
             pass
-
         def serve_forever(self):
             return None
+        server_close = serve_forever
 
     def _run_main(self):
         with (
             mock.patch.object(server, "Server", self._NoServe),
-            mock.patch.object(server.signal, "signal"),
+            mock.patch.object(server.signal, "signal"), mock.patch.object(server.threading.Thread, "start"),
             mock.patch.object(server.GUARD, "start") as started,
         ):
             server.main()

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from bridge_testlib import TOOLS, wait_until  # noqa: E402
-from rpc_testlib import RpcCase, USAGE_LINE  # noqa: E402
+from rpc_testlib import Conv, RpcCase, USAGE_LINE  # noqa: E402
 
 
 def title_body(key="chat-title", filler="", max_tokens=64):
@@ -416,29 +416,26 @@ class TestDeltaAndIsolation(RpcCase):
         ]
         self.assertEqual(disabled, [["Read", "Execute", "Edit", "web_search"]])
         # Смена effort и autonomy на горячем чате: update_session_settings, без нового spawn/init.
-        chat.extra.update(reasoning_effort="max", autonomy="off")
+        chat.extra.update(reasoning_effort="off", autonomy="off")
         self.assertEqual(chat.ask("q1")[0], 200)
         updates = [
             r["params"]
             for r in self.hub.rpcs("droid.update_session_settings")
             if "reasoningEffort" in r["params"]
         ]
-        self.assertEqual(
-            updates,
-            [
-                {
-                    "modelId": "deepseek-v4.1-flash",
-                    "reasoningEffort": "max",
-                    "autonomyLevel": "off",
-                }
-            ],
-        )
+        self.assertEqual(updates, [
+            {"modelId": "deepseek-v4.1-flash", "reasoningEffort": "off", "autonomyLevel": "off"}
+        ])
         self.assertEqual(len(self.hub.spawns()), 1)
         self.assertEqual(len(self.hub.inits()), 1)
         self.assertEqual(
             self.chat_of("chat-settings").settings,
-            ("deepseek-v4.1-flash", "max", "off"),
+            ("deepseek-v4.1-flash", "off", "off"),
         )
+        self._assert_settings_substitution_rejected(chat)
+        self._assert_system_prompt_rebases()
+
+    def _assert_settings_substitution_rejected(self, chat: Conv) -> None:
         # Молчаливая подмена модели при update: read-back не совпал -> 502 droid_error.
         self.hub.configure(substitute_model="some-default-model")
         chat.extra.update(reasoning_effort="high")
@@ -459,6 +456,8 @@ class TestDeltaAndIsolation(RpcCase):
         self.assertEqual(body["error"]["type"], "droid_error")
         self.assertEqual(len(self.hub.admissions()), admissions)  # LLM-ход не начат
         self.hub.configure(substitute_model=None)
+
+    def _assert_system_prompt_rebases(self) -> None:
         # Смена systemPrompt (tools) -> rebase, а не update.
         other = self.conv("chat-system")
         other.ask("s0")

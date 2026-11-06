@@ -271,6 +271,7 @@ class TestSettingsFailClosed(RpcCase):
         """RW-005: 7 сценариев -> 502 proxy_error/droid_error и ни одного add_user_message."""
         for name, config in self.SCENARIOS.items():
             with self.subTest(name):
+                server._PENALTY_TRACKER.reset_all()
                 self.hub.config.clear()
                 self.hub.configure(**config)
                 before = len(self.hub.rpcs("droid.add_user_message"))
@@ -278,7 +279,6 @@ class TestSettingsFailClosed(RpcCase):
                 self.assertEqual(status, 502, body)
                 self.assertEqual(len(self.hub.rpcs("droid.add_user_message")), before)
                 self.assertTrue(no_leaks(self))
-
     def test_rw005_positive_control_with_echoed_flags(self):
         """RW-005: корректный read-back (включая эхо флагов) ход пропускает."""
         self.hub.configure(echo_flags=True)
@@ -357,7 +357,8 @@ class TestDroidImageTool(RpcCase):
             self.hub.launcher.read_bytes()
         )  # fake_droid отвечает на пробы как настоящий
         source.chmod(0o755)
-        receipt = droid_image.install_image(source, server.WORKSPACE)
+        with unittest.mock.patch.dict(os.environ, {"DROID_EXTRA_PROBE_MODELS": ""}):
+            receipt = droid_image.install_image(source, server.WORKSPACE)
         image = Path(receipt["image_path"])
         self.assertEqual(oct(image.stat().st_mode & 0o777), "0o500")
         self.assertEqual(oct(image.parent.stat().st_mode & 0o777), "0o700")
@@ -373,7 +374,6 @@ class TestDroidImageTool(RpcCase):
         self.assertEqual(
             self.hub.spawns()[-1]["droid_bin"], os.path.realpath(str(image))
         )  # [0] — зонд квалификации
-
 
 class TestByteBudgets(RpcCase):
     """RW-008: байтовые лимиты и предусмотренные отказы с возвратом ресурсов."""
@@ -601,9 +601,8 @@ class TestRpcWriteDeadline(RpcCase):
     def _stalled_request(self, results):
         self.hub.configure(stall_after=0)
         body = dict(BODY, messages=[msg(self.BIG, "system"), msg("hi")])
-        thread = threading.Thread(
-            target=lambda: results.update(r=post_safely(self, body, 60)), daemon=True
-        )
+        thread = threading.Thread(target=lambda: results.update(r=post_safely(self, body, 5)), daemon=True)
+        self.addCleanup(thread.join, 30)
         thread.start()
         self.assertTrue(wait_until(lambda: len(self.hub.spawns()) == 1, timeout=15))
         time.sleep(0.5)

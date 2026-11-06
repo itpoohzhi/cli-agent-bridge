@@ -1,13 +1,7 @@
 {
   "schema_version": 3,
   "catalogue": "droid-bridge-fleet",
-  "aliases": {
-    "deepseek-v4.1-flash": {
-      "backend_id": "deepseek-v4.1-flash-free",
-      "backend": "opencode-zen",
-      "effort": "high"
-    }
-  },
+  "aliases": {},
   "default_model": "muse-wonder-full-1.0",
   "policy_ref": {
     "path": "~/Мой диск/Context/models.md",
@@ -59,7 +53,7 @@
   "backends": {
     "droid": {
       "kind": "droid",
-      "enabled": false,
+      "enabled": true,
       "required": false,
       "owned_by": "factory-droid",
       "max_concurrent": 4
@@ -120,11 +114,9 @@
   "models": [
     {
       "id": "claude-sonnet-5-5",
-      "backend": "claude-p",
-      "name": "Claude Sonnet 5.5 (Claude-p bridge)",
-      "efforts": [
-        "high"
-      ],
+      "backend": "droid",
+      "name": "Claude Sonnet 5.5 (Droid bridge)",
+      "efforts": ["low", "medium", "high", "max"],
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 128000,
@@ -147,13 +139,9 @@
     },
     {
       "id": "gemini-3.8-flash",
-      "backend": "agy",
-      "name": "Gemini 3.8 Flash (AGY bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
+      "backend": "droid",
+      "name": "Gemini 3.8 Flash (Droid bridge)",
+      "efforts": ["low", "medium", "high"],
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
@@ -176,11 +164,8 @@
     {
       "id": "deepseek-v4.1-flash",
       "backend": "droid",
-      "name": "DeepSeek V4.1 Flash (Droid legacy, неактивна)",
-      "efforts": [
-        "high",
-        "max"
-      ],
+      "name": "DeepSeek V4.1 Flash (Droid bridge)",
+      "efforts": ["off", "low", "medium", "high"],
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 384000,
@@ -201,11 +186,9 @@
     },
     {
       "id": "gpt-6.1-sol",
-      "backend": "codex",
-      "name": "GPT-6.1 Sol (Codex passthrough)",
-      "efforts": [
-        "high"
-      ],
+      "backend": "droid",
+      "name": "GPT-6.1 Sol (Droid bridge)",
+      "efforts": ["low", "medium", "high"],
       "default_effort": "high",
       "context_window": 272000,
       "max_tokens": 128000,
@@ -224,6 +207,22 @@
         406,
         436
       ]
+    },
+    {
+      "id": "kimi-k3.1-pro",
+      "backend": "droid",
+      "name": "Kimi K3.1 Pro (Droid bridge)",
+      "efforts": ["low", "medium", "high"],
+      "default_effort": "high",
+      "context_window": 262144,
+      "max_tokens": 16384,
+      "input": ["text"],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
     },
     {
       "id": "muse-spark-1.3",

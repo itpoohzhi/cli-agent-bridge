@@ -1,10 +1,6 @@
-"""Регрессионные тесты cycle-4 для tools/b_guard.py, tools/droid_image.py и tools/receipt_schema.py.
-
-RW-010 (F-B05) - охранник проверяет настоящий user-global файл, а не его синтезированную копию;
-RW-020 (F-B14) - разбор профиля DSH отвергает дубли и «чужой» maxBytes;
-RW-011 (F-B06) - read-back update берётся и из нотификаций, уже вернувшихся из call();
-RW-012 (F-B07) - receipt не подтверждает подменённый профиль, а непроверяемые поля помечает явно;
-RW-013 (F-C05) - droid_image зависит только от receipt_schema и не импортирует мост (server.py).
+"""Регрессии cycle-4: канон, read-back квалификации Droid и схема receipt.
+RW-010/RW-020: user-global канон и однозначность maxBytes профиля DSH.
+RW-011/RW-012/RW-013: read-back и автономные пробы с явным fleet без server.py.
 Реальный droid, ~/.dsh и боевые каталоги владельца не используются.
 """
 
@@ -28,7 +24,7 @@ import droid_image  # noqa: E402
 from rpc_testlib import RpcCase  # noqa: E402
 from test_b_guard import PROFILE_YML, build_snapshot_fs  # noqa: E402
 
-MODEL, EFFORT = droid_image.PROBE_MODEL_EFFORT
+MODEL, EFFORT = next(iter(droid_image._probe_models().items()))
 IDS = ["Execute", "Read"]
 DROP = object()
 
@@ -263,6 +259,9 @@ class ProbeCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
         self.workspace = self.tmp / "workspace"
+        extra_models = mock.patch.object(droid_image, "_probe_models", lambda: {MODEL: EFFORT})
+        extra_models.start()
+        self.addCleanup(extra_models.stop)
 
     def probes(self, rpc):
         with mock.patch.object(droid_image, "_Rpc", lambda image, cwd, home: rpc):
@@ -531,7 +530,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
         self.assertEqual(proc.stdout.decode("utf-8", "replace").strip(), "clean")
 
     def test_rw013_qualification_runs_without_fleet_json_or_server(self):
-        """RW-013: пробы и receipt работают в раскладке без server.py; fleet.json отсутствует либо повреждён."""
+        """RW-013: явный fleet работает без server.py при отсутствующем или повреждённом локальном fleet."""
         from bridge_testlib import FakeDroidHub
 
         for fleet in (None, "{broken json"):
@@ -539,7 +538,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                 base = Path(tmp)
                 tools = base / "tools"
                 tools.mkdir()
-                for name in ("droid_image.py", "receipt_schema.py"):
+                for name in ("droid_image.py", "receipt_schema.py", "droid_probe_config.py"):
                     shutil.copy(ROOT / "tools" / name, tools / name)
                 if fleet is not None:
                     (base / "fleet.json").write_text(fleet, encoding="utf-8")
@@ -562,6 +561,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                         os.environ,
                         PYTHONDONTWRITEBYTECODE="1",
                         FAKE_DROID_DIR=str(hub.base),
+                        DROID_DSH_BRIDGE_FLEET=str(ROOT / "fleet.json"),
                     ),
                 )
                 text = proc.stdout.decode("utf-8", "replace")

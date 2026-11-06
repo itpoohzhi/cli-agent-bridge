@@ -44,6 +44,7 @@ class TestFraming(BridgeCase):
         )
 
     def test_body_over_limit_413_and_leftover_not_parsed(self):
+        self.stand(lambda data: data["image_limits"].update(max_body_bytes=33554432))
         raw = self._raw_request(b"", cl=33554433) + self._raw_request(VALID)
         self._case(raw, 413, "payload_too_large")
 

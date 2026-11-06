@@ -116,8 +116,6 @@ from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
     KEEPALIVE_INTERVAL_S,
-    QoSSlotManager,
-    QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
     RESERVED_INTERACTIVE_SLOTS,
     get_qos_manager,
     has_live_parent,
@@ -151,7 +149,6 @@ from core.turn_session_manager import (  # noqa: E402
     TurnSessionManager,
     _is_detached_enabled,
     _is_drain_enabled,
-    _is_watchdog_enabled,
     hash_token,
     validate_turn_id,
 )
@@ -216,7 +213,7 @@ BRIDGE_SANITIZE_TOOL_CALLS = os.getenv(
 # ADR 0011 AD-005: лимиты читаются здесь (не в ядре, BND-001) и передаются в ядро аргументами:
 # BRIDGE_MAX_PARALLEL_CALLS (по умолчанию 64), BRIDGE_MAX_PARALLEL_DEPTH, лимиты passthrough.
 # Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 # Полная шкала reasoning для клампа запрошенного effort к каталогу модели.
 EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
@@ -4317,16 +4314,17 @@ class Run:
                 f"droid protocol {proc.protocol_version or '-'} differs from qualified {expected}"
             )
 
-    @staticmethod
-    def _check_tools_policy(listed: list) -> None:
-        """Каталог tools живого droid обязан совпасть с квалифицированным набором из receipt (RW-009)."""
+    def _check_tools_policy(self, listed: list) -> None:
+        """Точный каталог текущей модели обязан быть квалифицирован в receipt."""
         if not RECEIPT_REQUIRED:
             return
         try:
             _, rec = _load_receipt()
         except LauncherUnavailable as exc:
             raise RpcError(f"droid receipt changed during spawn: {exc}")
-        if sorted(listed) != sorted(rec["tools_policy"]["disabled_tool_ids"]):
+        qualified = rec.get("qualified_models") or {}
+        expected = qualified.get(self.plan["settings"][0])
+        if not listed or not isinstance(expected, list) or sorted(listed) != sorted(expected):
             raise RpcError(
                 "native tool catalogue differs from the qualified tools policy"
             )
@@ -5652,7 +5650,6 @@ class Handler(BaseHTTPRequestHandler):
         result_ev = {}
         turn_start = time.monotonic()
         last_ka = time.monotonic()
-        is_subagent = self._is_subagent_request()
         # Safety cap is the absolute upper bound (watchdog against infinite loops)
         safety_cap_s = self._effective_safety_cap_s()
         safety_deadline = turn_start + safety_cap_s

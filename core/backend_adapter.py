@@ -384,7 +384,7 @@ FLEET_MODEL_KEYS = frozenset(
         "alias_of",
     }
 )
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 IMPLEMENTED_METHODS = {"workspace-read": 1}
 IMPLICIT_DROID_BACKEND = {

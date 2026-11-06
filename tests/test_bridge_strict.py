@@ -629,8 +629,8 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
-        # 5 droid + 4 muse + 2 codex; passthrough-мосты agy/opencode-zen/claude-p выключены (моделей нет)
-        self.assertEqual(len(catalog["order"]), 18)
+        # 5 подписочных droid и 15 моделей прежних бэкендов.
+        self.assertEqual(len(catalog["order"]), 20)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -648,11 +648,11 @@ class TestCatalogClassI(unittest.TestCase):
         self._expect("duplicate_id", "claude-sonnet-5-5")
 
     def test_efforts_off_invalid(self):
-        find_model(self.data, "claude-sonnet-5-5")["efforts"] = ["off", "high"]
+        find_model(self.data, "claude-sonnet-5-5")["efforts"] = ["bogus", "high"]
         self._expect("efforts_invalid", "claude-sonnet-5-5")
 
     def test_default_effort_outside_efforts(self):
-        find_model(self.data, "claude-sonnet-5-5")["default_effort"] = "low"
+        find_model(self.data, "claude-sonnet-5-5")["default_effort"] = "xhigh"
         self._expect("default_effort_invalid", "claude-sonnet-5-5")
 
     def test_default_model_outside_roster(self):
@@ -822,12 +822,12 @@ class TestEffortAndModel(BridgeCase):
             self.assertEqual(source, "default")
 
     def test_allowed_efforts_accepted(self):
-        # Уровни — строго из fleet.json (sonnet-5-5: только high; xhigh в каталоге нет).
+        # Уровни подписочных моделей — строго из согласованного каталога.
         wanted = {
-            "claude-sonnet-5-5": ["high"],
+            "claude-sonnet-5-5": ["low", "medium", "high", "max"],
             "gemini-3.8-flash": ["low", "medium", "high"],
             "gemini-4-argon": ["low", "medium", "high"],
-            "deepseek-v4.1-flash": ["high", "max"],
+            "deepseek-v4.1-flash": ["off", "low", "medium", "high"],
         }
         for model, efforts in wanted.items():
             self.assertEqual(server.FLEET["models"][model]["efforts"], efforts, model)
@@ -851,17 +851,17 @@ class TestEffortAndModel(BridgeCase):
         # (model, запрошенный effort, ожидаемый effective effort)
         cases = [
             ("claude-sonnet-5-5", "xhigh", "high"),  # nearest lower
-            ("claude-sonnet-5-5", "max", "high"),  # AC1: max у high-only
-            ("claude-sonnet-5-5", "max\n", "high"),  # strip до клампа
+            ("claude-sonnet-5-5", "max", "max"),  # exact allowed
+            ("claude-sonnet-5-5", "max\n", "max"),  # strip до проверки
             ("gemini-3.8-flash", "medium", "medium"),  # exact allowed effort
             ("gemini-4-argon", "minimal", "low"),
             ("gemini-4-argon", "xhigh", "high"),
             ("claude-sonnet-5-5", "HIGH", "high"),  # case-insensitive exact
-            ("claude-sonnet-5-5", "off", "high"),  # нет нижнего -> upward
+            ("claude-sonnet-5-5", "off", "low"),  # нет нижнего -> upward
             ("claude-sonnet-5-5", "none", "high"),  # unknown -> default (high)
-            ("deepseek-v4.1-flash", "low", "high"),  # нет нижнего -> upward
+            ("deepseek-v4.1-flash", "off", "off"),  # отключённый reasoning допустим
             ("deepseek-v4.1-flash", "xhigh", "high"),  # lower high, не upper max
-            ("deepseek-v4.1-flash", "ultra", "max"),  # nearest lower
+            ("deepseek-v4.1-flash", "ultra", "high"),  # nearest lower
         ]
         for model, effort, expected in cases:
             before_inits = len(self.hub.inits())
@@ -875,21 +875,17 @@ class TestEffortAndModel(BridgeCase):
             self.assertGreater(len(self.hub.inits()), before_inits)
         # Кламп пишется в лог только при фактическом клампе.
         status, init, source, _ = self._post_logged(
-            chat_body(model="claude-sonnet-5-5", effort="max")
+            chat_body(model="claude-sonnet-5-5", effort="xhigh")
         )
         self.assertEqual(status, 200)
         self.assertIn(
-            "clamp reasoning_effort 'max' -> 'high' for model claude-sonnet-5-5",
+            "clamp reasoning_effort 'xhigh' -> 'high' for model claude-sonnet-5-5",
             self._last_lines,
         )
-        status, init, source, _ = self._post_logged(
-            chat_body(model="claude-sonnet-5-5", effort="HIGH")
-        )
+        status, init, source, _ = self._post_logged(chat_body(model="claude-sonnet-5-5", effort="HIGH"))
         self.assertEqual(status, 200)
         self.assertEqual(init["reasoningEffort"], "high")
-        self.assertFalse(
-            any(ln.startswith("clamp reasoning_effort") for ln in self._last_lines)
-        )
+        self.assertFalse(any(ln.startswith("clamp reasoning_effort") for ln in self._last_lines))
 
     def test_nonstring_effort_rejected(self):
         for bad in (5, ["high"], {"level": "high"}, True):
@@ -996,7 +992,7 @@ class TestEffortAndModel(BridgeCase):
 
     def test_stream_with_clamped_effort_succeeds(self):
         status, init, source, _ = self._post_logged(
-            chat_body(model="claude-sonnet-5-5", effort="max", stream=True)
+            chat_body(model="claude-sonnet-5-5", effort="xhigh", stream=True)
         )
         self.assertEqual(status, 200)
         self.assertEqual(init["reasoningEffort"], "high")
@@ -1036,8 +1032,8 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 18 моделей боевого каталога + deepseek-v4.1-flash стенда FakeDroid + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
-        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS))
+        # 20 моделей каталога + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3).
+        self.assertEqual(len(body["data"]), 20 + len(_DROID_LEGACY_MODELS))
         self.assertTrue(
             {"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]}
         )
@@ -1058,12 +1054,12 @@ class TestHealthAndModels(BridgeCase):
                 "modalities",
                 "object",
                 "owned_by",
+                "penalized_until",
                 "supported_reasoning_efforts",
                 "supports_thinking",
             ]
         )
-        for entry in body["data"]:
-            self.assertEqual(sorted(entry), expected_keys)
+        self.assertTrue(all(sorted(entry) == expected_keys for entry in body["data"]))
         self.assertNotIn("nonexistent-model-xyz", [e["id"] for e in body["data"]])
         status, _ = self._get("/v1/models", auth=False)
         self.assertEqual(status, 401)
@@ -1072,14 +1068,14 @@ class TestHealthAndModels(BridgeCase):
 class TestJournal(BridgeCase):
     def test_exec_and_done_lines_bound_by_tag(self):
         with self.capture_logs() as lines:
-            status, _ = self._post(chat_body(model="deepseek-v4.1-flash", effort="max"))
+            status, _ = self._post(chat_body(model="deepseek-v4.1-flash", effort="off"))
         self.assertEqual(status, 200)
         execs = [m for m in (EXEC_LINE.match(ln) for ln in lines) if m]
         dones = [ln for ln in lines if DONE_LINE.match(ln)]
         self.assertEqual(len(execs), 1)
         self.assertEqual(len(dones), 1)
         self.assertEqual(execs[0].group("model"), "deepseek-v4.1-flash")
-        self.assertEqual(execs[0].group("effort"), "max")
+        self.assertEqual(execs[0].group("effort"), "off")
         self.assertEqual(execs[0].group("source"), "request")
         self.assertNotIn("--auto", "\n".join(lines))
         joined = "\n".join(lines)

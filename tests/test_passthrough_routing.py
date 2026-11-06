@@ -71,7 +71,7 @@ def route(monkeypatch, tmp_path):
     return post
 
 
-@pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6.1-terra"])
+@pytest.mark.parametrize("model", ["gpt-6.1-terra"])
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("auth", ["hub-test-key", "Bearer hub-test-key"])
@@ -128,7 +128,7 @@ def test_missing_model_cannot_open_default_passthrough(route, monkeypatch):
 def test_exhausted_body_budget_rejects_before_read(route):
     budget = server._budget
     assert budget.reserve(budget.total - 1)
-    handler, reserve = route({"model": "gpt-6.1-sol"})
+    handler, reserve = route({"model": "gpt-6.1-terra"})
     assert handler._send.call_args.args[0] == 503
     assert handler._send.call_args.args[1]["error"]["type"] == "overloaded"
     handler.rfile.read.assert_not_called()
@@ -148,4 +148,4 @@ def test_invalid_json_releases_body_budget(route, auth):
 @pytest.mark.parametrize("error", [RuntimeError("upstream"), BrokenPipeError("client disconnected")])
 def test_upstream_failure_and_disconnect_release_body_budget(route, error):
     with pytest.raises(type(error)):
-        route({"model": "gpt-6.1-sol"}, error=error)
+        route({"model": "gpt-6.1-terra"}, error=error)
