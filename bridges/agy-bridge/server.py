@@ -2758,36 +2758,44 @@ def _get_resumed_turn_prompt(
 def _session_key_for(
     model: str, cwd: str, effort: str, raw_chat_id: str = ""
 ) -> tuple[str, ...]:
-    """Ключ горячей сессии: 4-кортеж с токеном чата при chat id, иначе 3-кортеж.
+    """Ключ горячей сессии: токен чата, иначе cwd; без обоих ключ пуст.
 
     Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
     """
     chat = raw_chat_id.strip()
-    if not chat:
+    if chat:
+        chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
+        return (chat_token, model, cwd, effort)
+    cwd_clean = cwd.strip()
+    if cwd_clean:
         return (model, cwd, effort)
-    chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
-    return (chat_token, model, cwd, effort)
+    return ()
 
 
-def _request_chat_id(headers: Any, extra: dict[str, object], req: dict[str, object] | None = None) -> str:
-    """Первый валидный chat ID из заголовков, extra_body, тела или prompt_cache_key."""
+def _request_chat_id(
+    headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
+) -> str:
+    """Первый валидный chat ID из заголовков, extra_body или тела."""
     for value in (
         headers.get("x-dsh-chat-id"),
         headers.get("x-session-id"),
         extra.get("chat_id"),
         (req or {}).get("chat_id"),
-        (req or {}).get("prompt_cache_key"),
     ):
-        if value is not None:
-            val = str(value).strip()
+        if isinstance(value, str):
+            val = value.strip()
             if 0 < len(val) <= 256 and all(ord(c) > 31 and ord(c) != 127 for c in val):
                 return val
     return ""
 
 
-def _session_key_has_token(sess_key: tuple[str, ...]) -> bool:
-    """Fail-closed: сессией можно владеть только при непустом токене чата."""
-    return len(sess_key) == 4 and bool(sess_key[0].strip())
+def _session_key_valid(sess_key: tuple[str, ...]) -> bool:
+    """Стор принимает только ключ с непустым токеном чата или cwd."""
+    if len(sess_key) == 4:
+        return bool(sess_key[0].strip())
+    if len(sess_key) == 3:
+        return bool(sess_key[1].strip())
+    return False
 
 
 def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
@@ -2797,7 +2805,7 @@ def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
     получат один и тот же conversation_id. При непустом `turn_id` владение cid
     регистрируется в `_active_cid_owners` в той же критической секции.
     """
-    if not _session_key_has_token(sess_key):
+    if not _session_key_valid(sess_key):
         return ""
     now = time.time()
     evicted = False
@@ -2845,7 +2853,7 @@ def _session_invalidate(sess_key: tuple, cid: str) -> None:
 
 
 def _session_commit(sess_key: tuple[str, ...], cid: str) -> None:
-    if not _session_key_has_token(sess_key):
+    if not _session_key_valid(sess_key):
         return
     now = time.time()
     with _session_store_lock:
@@ -2871,21 +2879,21 @@ def _sessions_file_path() -> Path:
 
 
 def _session_key_to_json(key: tuple) -> list[str]:
-    parts = [str(part) for part in key]
-    return [""] + parts if len(parts) == 3 else parts
+    return [str(part) for part in key]
 
 
 def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
-    """4-кортеж (chat_token, model, cwd, effort); пустой chat_token -> None."""
-    if not isinstance(raw, list) or len(raw) != 4:
+    """Строковый ключ с токеном чата или cwd; вырожденный ключ -> None."""
+    if not isinstance(raw, list) or len(raw) not in (3, 4):
         return None
     items = cast("list[object]", raw)
     if not all(isinstance(part, str) for part in items):
         return None
     parts = cast("list[str]", items)
-    if not parts[0].strip():
+    key = tuple(parts)
+    if not _session_key_valid(key):
         return None
-    return tuple(parts)
+    return key
 
 
 def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
@@ -7570,20 +7578,12 @@ class Handler(BaseHTTPRequestHandler):
             cwd = str(extra.get("cwd") or "")
             if len(cwd) > CWD_MAX_LEN:
                 cwd = ""
-            conversation_id = (
-                extra.get("conversation_id") or req.get("conversation_id") or ""
-            )
-            cid_clean = conversation_id.strip() if isinstance(conversation_id, str) else ""
-            if cid_clean and not _CID_RE.fullmatch(cid_clean):
-                _log(f"cid-malformed-rejected cid={cid_clean[:16]!r}")
-                conversation_id = ""
-            else:
-                conversation_id = cid_clean
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
-            chat_id = _request_chat_id(self.headers, cast(dict, extra), req if isinstance(req, dict) else None)
-            use_session_store = tools_count > 0 and bool(chat_id)
+            chat_id = _request_chat_id(
+                self.headers, cast(dict, extra), req if isinstance(req, dict) else None
+            )
             sess_key: tuple[str, ...] | None = (
                 _session_key_for(
                     cast(str, model_id),
@@ -7591,31 +7591,51 @@ class Handler(BaseHTTPRequestHandler):
                     cast(str, effort),
                     chat_id,
                 )
-                if use_session_store
+                if tools_count > 0
                 else None
             )
+            if sess_key is not None and not _session_key_valid(sess_key):
+                sess_key = None
+            use_session_store = tools_count > 0 and sess_key is not None
+            conversation_id = (
+                extra.get("conversation_id")
+                or (req.get("conversation_id") if isinstance(req, dict) else "")
+                or ""
+            )
+            cid_clean = conversation_id.strip() if isinstance(conversation_id, str) else ""
+            if cid_clean:
+                if not _CID_RE.fullmatch(cid_clean):
+                    _log(f"cid-malformed-rejected cid={cid_clean[:16]!r}")
+                    conversation_id = ""
+                    force_cold = True
+                else:
+                    conversation_id = cid_clean
+                    if use_session_store and sess_key is not None:
+                        with _session_store_lock:
+                            entry = _session_store.get(sess_key)
+                            is_owned = (
+                                entry is not None and entry.get("cid") == conversation_id
+                            )
+                        if not is_owned:
+                            _log(f"cid-unowned-blocked cid={conversation_id[:8]}")
+                            conversation_id = ""
+                            force_cold = True
+            else:
+                conversation_id = ""
             is_resumed = False
             prompt = full_prompt
-            if force_cold or not use_session_store:
-                # Media убраны из истории, нет tools или валидного chat_id:
-                # явный или кэшированный CID не возобновляем, ход идёт холодным text-only с полной историей.
+            if force_cold:
+                # Media убраны из истории, либо malformed/unowned CID:
+                # ход идёт холодным text-only с полной историей.
                 conversation_id = ""
             elif conversation_id:
-                with _session_store_lock:
-                    foreign_cid = any(
-                        key != sess_key and entry.get("cid") == conversation_id
-                        for key, entry in _session_store.items()
-                    )
-                if foreign_cid:
-                    _log(f"cid-foreign-blocked cid={conversation_id[:8]}")
-                    conversation_id = ""
-                elif _cid_acquire(conversation_id, turn_id):
+                if _cid_acquire(conversation_id, turn_id):
                     owned_cid = conversation_id
                 else:
                     # cid занят другим активным ходом: два хода не делят один разговор.
                     _log(f"cid-busy-fresh cid={conversation_id[:8]}")
                     conversation_id = ""
-            elif sess_key is not None:
+            elif use_session_store and sess_key is not None:
                 use_cid = _session_claim(sess_key, turn_id)
                 if use_cid:
                     conversation_id = use_cid
