@@ -1601,6 +1601,7 @@ def _launch_env() -> dict:
     значения, уже заданные в окружении моста, сохраняются (`setdefault`).
     """
     env = os.environ.copy()
+    env.setdefault("AGY_SKIP_PREFLIGHT", "1")
     env.pop("AGY_BRIDGE_KEY", None)
     clean_home = str(_prepare_agy_home())
     # Per-launch Zero-Canon: канон, появившийся после инициализации, удаляется
@@ -5008,6 +5009,15 @@ def resolve_agy_mode(req: dict) -> str:
     )
 
 
+def _with_pure_text_protocol(prompt: str) -> str:
+    """Инструкция подавления нативных инструментов agy CLI для чисто текстового хода."""
+    suppress = (
+        "[CRITICAL: DO NOT USE ANY TOOLS (no read_file, no grep, no bash, no agent tools). "
+        "Provide your analysis and answer directly as pure text.]"
+    )
+    return f"{suppress}\n\n{prompt}" if prompt else suppress
+
+
 def _with_tools_protocol(prompt: str, tools: list, tool_choice: object) -> str:
     """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
     section = _core_messages_to_prompt([], tools, tool_choice)
@@ -7535,6 +7545,10 @@ class Handler(BaseHTTPRequestHandler):
                     stripped_full_prompt = _with_tools_protocol(
                         stripped_full_prompt, tools, tool_choice
                     )
+            else:
+                full_prompt = _with_pure_text_protocol(full_prompt)
+                if stripped_full_prompt:
+                    stripped_full_prompt = _with_pure_text_protocol(stripped_full_prompt)
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -7579,6 +7593,8 @@ class Handler(BaseHTTPRequestHandler):
                     prompt = _get_resumed_turn_prompt(render_messages, images)
                     if emulate_tools:
                         prompt = _with_tools_protocol(prompt, tools, tool_choice)
+                    else:
+                        prompt = _with_pure_text_protocol(prompt)
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
