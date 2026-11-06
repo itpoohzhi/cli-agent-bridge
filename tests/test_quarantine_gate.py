@@ -8,8 +8,8 @@ import pytest
 
 from core import quarantine_gate as qg
 
-GATED_ROLES = ["coder", "reviewer", "judge", "answer-review", "council", "probe", "adhoc"]
-OPEN_ROLES = ["worker", "explorer"]
+GATED_ROLES = ["coder", "reviewer", "judge", "answer-review", "council", "adhoc"]
+OPEN_ROLES = ["worker", "explorer", "probe"]
 UNCONFIRMED = ["quarantine", "quarantine_failed", "stale", "probing"]
 
 
@@ -60,22 +60,24 @@ def test_missing_header_is_adhoc() -> None:
     assert qg.role_from_subagent_id("   ") == "adhoc"
     assert qg.role_from_subagent_id("-weird") == "adhoc"
     assert qg.role_from_subagent_id("coder-abc-def") == "coder"
-    assert isinstance(
-        qg.gate(
-            "m-x",
-            None,
-            _sidecar("quarantine"),
-            qg.RoleClasses(),
-            strict_anonymous=False,
-        ),
-        qg.Deny,
+    classes = qg.RoleClasses()
+    assert classes.class_of("adhoc") == qg.CLASS_GATED
+    deny = qg.gate(
+        "m-x",
+        None,
+        _sidecar("quarantine"),
+        classes,
+        strict_anonymous=False,
     )
+    assert isinstance(deny, qg.Deny)
+    assert deny.http == 403
+    assert deny.reason == "model_quarantined"
     assert isinstance(
         qg.gate(
             "m-x",
             "",
             _sidecar("confirmed"),
-            qg.RoleClasses(),
+            classes,
             strict_anonymous=False,
         ),
         qg.Allow,
