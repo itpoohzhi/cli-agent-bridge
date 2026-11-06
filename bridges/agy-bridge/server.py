@@ -2769,25 +2769,33 @@ def _session_key_for(
     return (chat_token, model, cwd, effort)
 
 
-def _request_chat_id(headers: Any, extra: dict) -> str:
-    """Идентификатор чата клиента: x-dsh-chat-id, x-session-id или extra_body.chat_id."""
+def _request_chat_id(headers: Any, extra: dict[str, object], req: dict[str, object] | None = None) -> str:
+    """Идентификатор чата клиента: x-dsh-chat-id, x-session-id, extra_body.chat_id или chat_id в теле запроса."""
     for value in (
         headers.get("x-dsh-chat-id"),
         headers.get("x-session-id"),
         extra.get("chat_id"),
+        (req or {}).get("chat_id"),
     ):
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
 
 
-def _session_claim(sess_key: tuple, turn_id: str = "") -> str:
+def _session_key_has_token(sess_key: tuple[str, ...]) -> bool:
+    """Fail-closed: сессией можно владеть только при непустом токене чата."""
+    return len(sess_key) == 4 and bool(sess_key[0].strip())
+
+
+def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
     """Найти живую свободную сессию и занять её; '' — сессии нет.
 
     Проверка и занятие идут под одним замком: два параллельных запроса не
     получат один и тот же conversation_id. При непустом `turn_id` владение cid
     регистрируется в `_active_cid_owners` в той же критической секции.
     """
+    if not _session_key_has_token(sess_key):
+        return ""
     now = time.time()
     evicted = False
     try:
@@ -2833,7 +2841,9 @@ def _session_invalidate(sess_key: tuple, cid: str) -> None:
         _persist_sessions()
 
 
-def _session_commit(sess_key: tuple, cid: str) -> None:
+def _session_commit(sess_key: tuple[str, ...], cid: str) -> None:
+    if not _session_key_has_token(sess_key):
+        return
     now = time.time()
     with _session_store_lock:
         entry = _session_store.get(sess_key)
@@ -2863,14 +2873,16 @@ def _session_key_to_json(key: tuple) -> list[str]:
 
 
 def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
-    """Пустой chat_token -> 3-кортеж (model, cwd, effort), иначе 4-кортеж."""
+    """4-кортеж (chat_token, model, cwd, effort); пустой chat_token -> None."""
     if not isinstance(raw, list) or len(raw) != 4:
         return None
     items = cast("list[object]", raw)
     if not all(isinstance(part, str) for part in items):
         return None
     parts = cast("list[str]", items)
-    return tuple(parts[1:]) if parts[0] == "" else tuple(parts)
+    if not parts[0].strip():
+        return None
+    return tuple(parts)
 
 
 def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
@@ -7561,22 +7573,23 @@ class Handler(BaseHTTPRequestHandler):
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
-            use_session_store = tools_count > 0
+            chat_id = _request_chat_id(self.headers, cast(dict, extra), req if isinstance(req, dict) else None)
+            use_session_store = tools_count > 0 and bool(chat_id)
             sess_key: tuple[str, ...] | None = (
                 _session_key_for(
                     cast(str, model_id),
                     cwd,
                     cast(str, effort),
-                    _request_chat_id(self.headers, cast(dict, extra)),
+                    chat_id,
                 )
                 if use_session_store
                 else None
             )
             is_resumed = False
             prompt = full_prompt
-            if force_cold:
-                # Media убраны из истории: «грязный» явный или кэшированный CID
-                # не возобновляем, ход идёт холодным text-only с полной историей.
+            if force_cold or not chat_id:
+                # Media убраны из истории или отсутствует chat_id:
+                # явный или кэшированный CID не возобновляем, ход идёт холодным text-only с полной историей.
                 conversation_id = ""
             elif conversation_id:
                 if _cid_acquire(conversation_id, turn_id):
