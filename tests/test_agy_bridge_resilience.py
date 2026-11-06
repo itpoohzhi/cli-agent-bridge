@@ -2985,7 +2985,7 @@ class ReadOnlyAndAnchorTests(unittest.TestCase):
             try:
 
                 def first() -> None:
-                    body = _plain_body("долгий")
+                    body = _agentic_body("долгий")
                     body.update(explicit)
                     holders.append(http_bridge.post(body))
 
@@ -2994,7 +2994,7 @@ class ReadOnlyAndAnchorTests(unittest.TestCase):
                 deadline = time.monotonic() + 10
                 while len(fx.spawns()) < 1 and time.monotonic() < deadline:
                     time.sleep(0.02)
-                body2 = _plain_body("одновременный")
+                body2 = _agentic_body("одновременный")
                 body2.update(explicit)
                 code2, _payload2 = http_bridge.post(body2)
                 worker.join(30)
@@ -12784,6 +12784,229 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
 
 class SessionFailClosedTests(unittest.TestCase):
     """Без идентификатора чата нельзя получить или сохранить чужую сессию."""
+
+    def test_request_chat_id_sources_and_length_boundary(self) -> None:
+        """Все источники поддерживают trim, строковое приведение и предел 256."""
+        chat_id_for = _bfn("_request_chat_id")
+        for source in (
+            "x-dsh-chat-id",
+            "x-session-id",
+            "extra",
+            "chat_id",
+            "prompt_cache_key",
+        ):
+            for value, expected in (
+                (" chat-A ", "chat-A"),
+                ("a" * 256, "a" * 256),
+                (123, "123"),
+            ):
+                with self.subTest(source=source, value=value):
+                    headers: dict[str, object] = {}
+                    extra: dict[str, object] = {}
+                    req: dict[str, object] = {}
+                    if source.startswith("x-"):
+                        headers[source] = value
+                    elif source == "extra":
+                        extra["chat_id"] = value
+                    else:
+                        req[source] = value
+                    self.assertEqual(chat_id_for(headers, extra, req), expected)
+
+    def test_request_chat_id_rejects_invalid_values(self) -> None:
+        """Пустые, длинные ID и все ASCII control-символы не образуют ключ."""
+        chat_id_for = _bfn("_request_chat_id")
+        invalid = (None, "", " \t ", "a" * 257) + tuple(
+            "chat" + chr(code) + "id" for code in (*range(32), 127)
+        )
+        for source in (
+            "x-dsh-chat-id",
+            "x-session-id",
+            "extra",
+            "chat_id",
+            "prompt_cache_key",
+        ):
+            for value in invalid:
+                with self.subTest(source=source, value=value):
+                    headers: dict[str, object] = {}
+                    extra: dict[str, object] = {}
+                    req: dict[str, object] = {}
+                    if source.startswith("x-"):
+                        headers[source] = value
+                    elif source == "extra":
+                        extra["chat_id"] = value
+                    else:
+                        req[source] = value
+                    self.assertEqual(chat_id_for(headers, extra, req), "")
+
+    def test_request_chat_id_uses_first_valid_source(self) -> None:
+        """Невалидный приоритетный источник не скрывает следующий валидный."""
+        headers = {"x-dsh-chat-id": "header-A", "x-session-id": "header-B"}
+        extra: dict[str, object] = {"chat_id": "extra"}
+        req: dict[str, object] = {"chat_id": "body", "prompt_cache_key": "cache"}
+        chat_id_for = _bfn("_request_chat_id")
+        self.assertEqual(chat_id_for(headers, extra, req), "header-A")
+        headers["x-dsh-chat-id"] = "bad\x00id"
+        self.assertEqual(chat_id_for(headers, extra, req), "header-B")
+        headers["x-session-id"] = "x" * 257
+        self.assertEqual(chat_id_for(headers, extra, req), "extra")
+        extra["chat_id"] = "\x7f"
+        self.assertEqual(chat_id_for(headers, extra, req), "body")
+        req["chat_id"] = ""
+        self.assertEqual(chat_id_for(headers, extra, req), "cache")
+        self.assertEqual(chat_id_for({}, {}), "")
+
+    def test_plain_explicit_cid_does_not_touch_hot_session(self) -> None:
+        """Фоновый запрос с chat ID и явным CID не получает горячий разговор."""
+        for source in ("extra", "body"):
+            with self.subTest(source=source), _Fixture() as fx:
+                _ = fx.write_scenario(
+                    [], spawns=[_quick(_CID), _quick(_CID_B), _quick(_CID)]
+                )
+                bridge = _HttpBridge()
+                try:
+                    first = bridge.post(_agentic_body("первый ход"))
+                    store = cast(
+                        "dict[tuple[str, ...], dict[str, object]]",
+                        _bval("_session_store"),
+                    )
+                    before = {key: dict(entry) for key, entry in store.items()}
+                    body = _plain_body("фоновый заголовок", True)
+                    target = _dict(body["extra_body"]) if source == "extra" else body
+                    target["conversation_id"] = _CID
+                    captured: list[dict[str, object]] = []
+                    handler_cls = _bval("Handler")
+                    serve_json = _ofn(handler_cls, "_serve_json")
+
+                    def capture(handler: object, ctx: dict[str, object]) -> None:
+                        captured.append(dict(ctx))
+                        _ = serve_json(handler, ctx)
+
+                    with (
+                        mock.patch.object(handler_cls, "_serve_json", capture),
+                        mock.patch.object(_bridge(), "_session_claim") as claim,
+                        mock.patch.object(_bridge(), "_session_commit") as commit,
+                        mock.patch.object(
+                            _bridge(), "_session_invalidate"
+                        ) as invalidate,
+                        mock.patch.object(_bridge(), "_cid_acquire") as acquire,
+                    ):
+                        background = bridge.post(body)
+                        claim.assert_not_called()
+                        commit.assert_not_called()
+                        invalidate.assert_not_called()
+                        acquire.assert_not_called()
+                    self.assertEqual(store, before)
+                    self.assertEqual(captured[0]["conversation_id"], "")
+                    self.assertIsNone(captured[0]["sess_key"])
+                    resumed = bridge.post(_agentic_body("второй ход", True))
+                finally:
+                    bridge.close()
+                self.assertEqual(
+                    [result[0] for result in (first, background, resumed)], [200] * 3
+                )
+                spawns = fx.spawns()
+                self.assertNotIn("--conversation", spawns[1])
+                self.assertEqual(spawns[2][spawns[2].index("--conversation") + 1], _CID)
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_explicit_cid_is_validated_before_resume(self) -> None:
+        """Невалидный CID сбрасывается, валидный с пробелами нормализуется."""
+        cases: tuple[tuple[object, str], ...] = (
+            ("invalid/chars", ""),
+            (" \t ", ""),
+            ("abcdef0", ""),
+            ("a" * 65, ""),
+            (12345678, ""),
+            ({"cid": _CID}, ""),
+            (" \t" + _CID + " \n", _CID),
+            (_CID, _CID),
+        )
+        for source in ("extra", "body"):
+            for raw, expected in cases:
+                with self.subTest(source=source, raw=raw), _Fixture() as fx:
+                    _ = fx.write_scenario(_quick(_CID_B))
+                    body = _agentic_body("явный CID", True)
+                    target = _dict(body["extra_body"]) if source == "extra" else body
+                    target["conversation_id"] = raw
+                    captured: list[dict[str, object]] = []
+                    handler_cls = _bval("Handler")
+                    serve_json = _ofn(handler_cls, "_serve_json")
+
+                    def capture(handler: object, ctx: dict[str, object]) -> None:
+                        captured.append(dict(ctx))
+                        _ = serve_json(handler, ctx)
+
+                    bridge = _HttpBridge()
+                    try:
+                        with mock.patch.object(handler_cls, "_serve_json", capture):
+                            code, _payload = bridge.post(body)
+                    finally:
+                        bridge.close()
+                    self.assertEqual(code, 200)
+                    self.assertEqual(captured[0]["conversation_id"], expected)
+                    argv = fx.spawns()[0]
+                    if expected:
+                        self.assertEqual(
+                            argv[argv.index("--conversation") + 1], expected
+                        )
+                    else:
+                        self.assertNotIn("--conversation", argv)
+                    self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_explicit_foreign_cid_is_forced_cold(self) -> None:
+        """Явный CID другого чата не выдаётся и остаётся у исходного владельца."""
+        for source in ("extra", "body"):
+            with self.subTest(source=source), _Fixture() as fx:
+                _ = fx.write_scenario(
+                    [], spawns=[_quick(_CID), _quick(_CID_B), _quick(_CID)]
+                )
+                bridge = _HttpBridge()
+                try:
+                    first = bridge.post(_agentic_body("чат А", chat_id="chat-A"))
+                    store = cast(
+                        "dict[tuple[str, ...], dict[str, object]]",
+                        _bval("_session_store"),
+                    )
+                    owner_key = next(iter(store))
+                    owner_before = dict(store[owner_key])
+                    body = _agentic_body("чужой CID", True, chat_id="chat-B")
+                    target = _dict(body["extra_body"]) if source == "extra" else body
+                    target["conversation_id"] = " " + _CID + " "
+                    captured: list[dict[str, object]] = []
+                    handler_cls = _bval("Handler")
+                    serve_json = _ofn(handler_cls, "_serve_json")
+
+                    def capture(handler: object, ctx: dict[str, object]) -> None:
+                        captured.append(dict(ctx))
+                        _ = serve_json(handler, ctx)
+
+                    with (
+                        mock.patch.object(handler_cls, "_serve_json", capture),
+                        mock.patch.object(
+                            _bridge(), "_cid_acquire", wraps=_bfn("_cid_acquire")
+                        ) as acquire,
+                    ):
+                        foreign = bridge.post(body)
+                        self.assertNotIn(
+                            mock.call(_CID, mock.ANY), acquire.call_args_list
+                        )
+                    self.assertEqual(captured[0]["conversation_id"], "")
+                    self.assertEqual(store[owner_key], owner_before)
+                    own_body = _agentic_body("чат А снова", True, chat_id="chat-A")
+                    own_body["conversation_id"] = _CID
+                    resumed = bridge.post(own_body)
+                finally:
+                    bridge.close()
+                self.assertEqual(
+                    [result[0] for result in (first, foreign, resumed)], [200] * 3
+                )
+                spawns = fx.spawns()
+                self.assertNotIn("--conversation", spawns[1])
+                self.assertEqual(spawns[2][spawns[2].index("--conversation") + 1], _CID)
+                self.assertEqual(len(store), 2)
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
 
     def test_request_without_chat_id_does_not_use_session_store(self) -> None:
         """Агентные запросы без chat ID остаются холодными на каждом ходу."""

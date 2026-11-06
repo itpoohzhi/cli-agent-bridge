@@ -2770,15 +2770,18 @@ def _session_key_for(
 
 
 def _request_chat_id(headers: Any, extra: dict[str, object], req: dict[str, object] | None = None) -> str:
-    """Идентификатор чата клиента: x-dsh-chat-id, x-session-id, extra_body.chat_id или chat_id в теле запроса."""
+    """Первый валидный chat ID из заголовков, extra_body, тела или prompt_cache_key."""
     for value in (
         headers.get("x-dsh-chat-id"),
         headers.get("x-session-id"),
         extra.get("chat_id"),
         (req or {}).get("chat_id"),
+        (req or {}).get("prompt_cache_key"),
     ):
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        if value is not None:
+            val = str(value).strip()
+            if 0 < len(val) <= 256 and all(ord(c) > 31 and ord(c) != 127 for c in val):
+                return val
     return ""
 
 
@@ -7567,9 +7570,15 @@ class Handler(BaseHTTPRequestHandler):
             cwd = str(extra.get("cwd") or "")
             if len(cwd) > CWD_MAX_LEN:
                 cwd = ""
-            conversation_id = str(
+            conversation_id = (
                 extra.get("conversation_id") or req.get("conversation_id") or ""
             )
+            cid_clean = conversation_id.strip() if isinstance(conversation_id, str) else ""
+            if cid_clean and not _CID_RE.fullmatch(cid_clean):
+                _log(f"cid-malformed-rejected cid={cid_clean[:16]!r}")
+                conversation_id = ""
+            else:
+                conversation_id = cid_clean
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
@@ -7587,12 +7596,20 @@ class Handler(BaseHTTPRequestHandler):
             )
             is_resumed = False
             prompt = full_prompt
-            if force_cold or not chat_id:
-                # Media убраны из истории или отсутствует chat_id:
+            if force_cold or not use_session_store:
+                # Media убраны из истории, нет tools или валидного chat_id:
                 # явный или кэшированный CID не возобновляем, ход идёт холодным text-only с полной историей.
                 conversation_id = ""
             elif conversation_id:
-                if _cid_acquire(conversation_id, turn_id):
+                with _session_store_lock:
+                    foreign_cid = any(
+                        key != sess_key and entry.get("cid") == conversation_id
+                        for key, entry in _session_store.items()
+                    )
+                if foreign_cid:
+                    _log(f"cid-foreign-blocked cid={conversation_id[:8]}")
+                    conversation_id = ""
+                elif _cid_acquire(conversation_id, turn_id):
                     owned_cid = conversation_id
                 else:
                     # cid занят другим активным ходом: два хода не делят один разговор.
