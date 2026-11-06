@@ -67,7 +67,7 @@ journal_line_bytes - длина JSON-строки события в session.v4.j
 нестрогой и даёт 1). Граница предела строгая: ровно предел проходит, предел + 1 нет.
 
 Предел блока (ADR 0015) не зашит: `resolve_block_limit` читает `BRIDGE_INSTR_LIMIT`, затем
-`DROID_DSH_BRIDGE_INSTR_LIMIT`; по умолчанию `BLOCK_LIMIT` = 100 000 Б. Значение - целое;
+`DROID_DSH_BRIDGE_INSTR_LIMIT`; по умолчанию `BLOCK_LIMIT` = 500 000 Б. Значение - целое;
 пустое, нечисловое и неположительное игнорируется (берётся следующее имя, затем умолчание),
 положительное вне [INSTR_LIMIT_MIN..INSTR_LIMIT_MAX] зажимается в границы. Чистая `evaluate`
 берёт предел параметром `limit` (None - `BLOCK_LIMIT`) и от окружения не зависит; окружение
@@ -93,7 +93,7 @@ from typing import Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 CANON_PATH = os.path.expanduser("~/Мой диск/Context/AGENTS.md")
 KB_CWD = os.path.expanduser("~/Мой диск/Работа/Sber/knowledge-base")
-WA_CWD = os.path.expanduser("~/src/saluteeye/gigabus/gigawebaccess/webaccess")
+WA_CWD = os.path.expanduser("~/Мой диск/src/saluteeye/gigabus/gigawebaccess/webaccess")
 AB_CWD = os.path.expanduser("~/Мой диск/Workshop/aibunker-workshop")
 DW_CWD = os.path.expanduser("~/Documents/deepseek-harness/default-workspace")
 UG_PATH = os.path.expanduser("~/.dsh/AGENTS.md")
@@ -116,14 +116,14 @@ FORMULA_BASE = (
 )
 FORMULA_PER_SECTION = 32
 
-BLOCK_LIMIT = 100000  # REQ-003, умолчание предела блока; граница строгая: <= предела проходит
+BLOCK_LIMIT = 500000  # REQ-003, умолчание предела блока; граница строгая: <= предела проходит
 INSTR_LIMIT_ENV_NAMES: Tuple[str, ...] = (
     "BRIDGE_INSTR_LIMIT",
     "DROID_DSH_BRIDGE_INSTR_LIMIT",
 )  # порядок приоритета: новое имя, затем прежнее
 INSTR_LIMIT_MIN = 10000
-INSTR_LIMIT_MAX = 500000
-DEFAULT_MAXBYTES = 118784  # maxBytes установленных профилей DSH (116 КиБ) при каноне ~62,9 КБ
+INSTR_LIMIT_MAX = 1000000
+DEFAULT_MAXBYTES = 500000  # умолчание maxBytes, согласовано с BLOCK_LIMIT
 SNAPSHOT_MAXBYTES = 106496  # maxBytes снимка zone-F (F-709): калибровка модели и self-test
 MARGIN_MIN = 4096
 LINE_MARGIN_MIN = 2048

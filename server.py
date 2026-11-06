@@ -819,8 +819,9 @@ DELIVERY_CHUNK_BYTES = 64 << 10
 # моменту свободны, а медленные клиенты держат `out`. Исчерпан — 502 proxy_error.
 MAX_DELIVERY_BYTES = CLI_CFG.max_delivery_bytes
 MAX_CHATS = CLI_CFG.max_chats
-# Предел блока agent-instructions (REQ-003): больше — отказ до spawn/add (строгая граница).
-# BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 100000, диапазон и валидация — в b_guard (ADR 0015).
+# Предел блока agent-instructions (REQ-003): больше — усечение проектных секций; канон сверх предела — отказ до spawn/add.
+# BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 500000, диапазон и валидация — в b_guard (ADR 0015).
+# Сверх предела блок не отклоняется, а мягко усекается (хвостовые проектные секции, канон защищён).
 INSTR_BLOCK_LIMIT = b_guard.resolve_block_limit()
 # Не-KB формы cwd (WA/AB/DW): допустимый блок = maxBytes профиля минус запас (матрица b_guard);
 # жёсткие 60 000 Б относятся только к блокам, целиком состоящим из копий канона (KB, REQ-003).
@@ -3788,10 +3789,119 @@ def _instr_scan(messages: list, kb_cwd: bool = False) -> tuple:
 
 
 def _instr_limit(block: dict, max_bytes: int | None) -> int:
-    """Применимый предел блока: KB-форма (только канон) — INSTR_BLOCK_LIMIT, прочие — maxBytes минус запас."""
+    """Применимый предел блока: KB-форма (только канон) — INSTR_BLOCK_LIMIT, прочие — бюджет минус запас.
+
+    Бюджет non-KB — не меньше INSTR_BLOCK_LIMIT: устаревший maxBytes клиентского профиля DSH
+    (cordis.patch.yml, 118k) предел моста не занижает; больший maxBytes клиента допустим.
+    """
     if block["canon_only"]:
         return INSTR_BLOCK_LIMIT
-    return (max_bytes or b_guard.DEFAULT_MAXBYTES) - INSTR_NONKB_MARGIN
+    return max(INSTR_BLOCK_LIMIT, max_bytes or 0) - INSTR_NONKB_MARGIN
+
+
+_UG_CANON_SUFFIX = "/.dsh/AGENTS.md"
+_REMINDER_CLOSE = "</system-reminder>"
+
+
+def _truncation_marker(limit: int) -> str:
+    return f"\n\n[... agent-instructions truncated by bridge to limit {limit} bytes ...]\n"
+
+
+def _truncate_instr_text(text: str, limit: int) -> str:
+    """Мягкое усечение блока agent-instructions до `limit` байт UTF-8 (LIFO по секциям, канон защищён).
+
+    Секции-копии канона и глобальный `~/.dsh/AGENTS.md` не усекаются. Прочие секции режутся с конца:
+    хвост тела обрезается по границе символа, секция, не вмещающаяся даже с заголовком, удаляется
+    целиком. Вставляется маркер усечения; закрывающий `</system-reminder>` сохраняется. Если
+    защищённая часть сама превышает предел, возвращается максимально усечённый текст (вызывающий
+    повторно проверит предел и откажет).
+    """
+    heads = list(_SECTION_RE.finditer(text))
+    total = len(text.encode("utf-8"))
+    if not heads or total <= limit:
+        return text
+    tail = ""
+    last_end = len(text)
+    close = text.find(_REMINDER_CLOSE, heads[-1].end())
+    if close != -1:
+        tail, last_end = text[close:], close
+    canon = {_canon_digest(), *_canon_seen} - {""}
+    spans = []
+    for index, head in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else last_end
+        body = text[head.end() : end]
+        path = head.group(1).strip()
+        protected = (
+            path == b_guard.UG_DISPLAY
+            or path.endswith(_UG_CANON_SUFFIX)
+            or hashlib.sha256(body.strip().encode("utf-8")).hexdigest() in canon
+        )
+        spans.append([head.start(), head.end(), end, protected])
+    marker = _truncation_marker(limit)
+    need = total - limit + len(marker.encode("utf-8"))
+    # Результат по сегментам: (текст секции целиком | её усечённая версия), порядок документа сохраняется.
+    pieces: dict[int, str] = {}
+    marker_at = None
+    for index in range(len(spans) - 1, -1, -1):
+        if need <= 0:
+            break
+        start, body_start, end, protected = spans[index]
+        if protected:
+            continue
+        header_bytes = len(text[start:body_start].encode("utf-8"))
+        body_b = text[body_start:end].encode("utf-8")
+        if need >= len(body_b):  # от тела ничего не остаётся: заголовок без тела не нужен
+            pieces[index] = ""
+            need -= len(body_b) + header_bytes
+        else:
+            keep = max(0, len(body_b) - need)
+            kept = body_b[:keep].decode("utf-8", "ignore")
+            pieces[index] = text[start:body_start] + kept
+            need = 0  # срезано не меньше нужного (граница символа округляет вверх)
+        marker_at = index
+    if marker_at is None:
+        return text
+    out = [text[: spans[0][0]]]
+    for index, (start, _body_start, end, _protected) in enumerate(spans):
+        if index in pieces:
+            out.append(pieces[index])
+            if index == marker_at:
+                out.append(marker)
+        else:
+            out.append(text[start:end])
+    out.append(tail)
+    return "".join(out)
+
+
+def _soft_truncate_instructions(
+    messages: list, kb_cwd: bool, max_bytes: int | None
+) -> int:
+    """Усекает блоки agent-instructions сверх применимого предела прямо в `messages`; число усечённых блоков."""
+    changed = 0
+    for msg in messages:
+        found = _instr_blocks([msg], kb_cwd)
+        if not found:
+            continue
+        limit = _instr_limit(found[0], max_bytes)
+        if found[0]["bytes"] <= limit:
+            continue
+        content = msg.get("content")
+        text = _flatten_content(content)
+        new_text = _truncate_instr_text(text, limit)
+        if new_text == text:
+            continue
+        if isinstance(content, list):
+            # Нетекстовые части (изображения) сохраняются, текстовые заменяются одной усечённой.
+            rest = [
+                part
+                for part in content
+                if not (isinstance(part, str) or (isinstance(part, dict) and "text" in part))
+            ]
+            msg["content"] = [{"type": "text", "text": new_text}, *rest]
+        else:
+            msg["content"] = new_text
+        changed += 1
+    return changed
 
 
 def _instr_violation(blocks: list, max_bytes: int | None) -> tuple | None:
@@ -7286,11 +7396,24 @@ class Handler(BaseHTTPRequestHandler):
                 route = "keyed"
             else:
                 route = "nokey"
+            self._instr_truncated = False
             instr = self._prompt_guard(
                 messages, route, raw_key, cwd, model_id, model_len, adapter
             )
             if instr is None:
                 return
+            if self._instr_truncated:
+                # Блок инструкций усечён на месте: prompt и транскрипт строятся заново из обновлённых messages.
+                prompt = _messages_to_prompt(messages, tools, tool_choice, images)
+                transcript = _transcribe(messages, tools, tool_choice, images)
+                if route == "fallback" or not transcript["runnable"]:
+                    transcript = {
+                        "system": None,
+                        "runnable": True,
+                        "items": [
+                            {"role": "user", "text": prompt, "digest": _digest(prompt)}
+                        ],
+                    }
             is_legacy_muse_sleep = (
                 model["backend"] == "muse"
                 and not req_turn_id
@@ -7545,18 +7668,36 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return None
         elif over is not None:
-            # REQ-003: блок agent-instructions сверх применимого предела не доходит ни до spawn, ни до add.
-            _log(
-                f"instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes={over[0]} limit={over[1]}"
-            )
-            self._reject(
-                503,
-                "launcher_unavailable",
-                f"agent-instructions block {over[0]} bytes exceeds {over[1]}: request refused before launch",
-                model_id,
-                model_len,
-            )
-            return None
+            # Сверх предела: мягкое усечение хвостовых проектных секций (канон защищён) вместо отказа.
+            _log(f"instr_gate_truncated bytes={over[0]} limit={over[1]}")
+            try:
+                _soft_truncate_instructions(messages, in_kb, guard_max)
+                blocks = _instr_blocks(messages, in_kb)
+                instr = _instr_scan(messages, in_kb) if blocks else (0, "-", 0)
+            except CanonPersistError:
+                self._reject(
+                    503,
+                    "launcher_unavailable",
+                    "canon history is not persisted: request refused before launch",
+                    model_id,
+                    model_len,
+                )
+                return None
+            self._instr_truncated = True
+            over = _instr_violation(blocks, guard_max)
+            if over is not None:
+                # Усекать нечего (сам канон больше предела): REQ-003 — отказ до spawn/add.
+                _log(
+                    f"instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes={over[0]} limit={over[1]}"
+                )
+                self._reject(
+                    503,
+                    "launcher_unavailable",
+                    f"agent-instructions block {over[0]} bytes exceeds {over[1]}: request refused before launch",
+                    model_id,
+                    model_len,
+                )
+                return None
         return instr
 
     def _dispatch(

@@ -692,29 +692,34 @@ class TestInstructionBudget(RpcCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(self.hub.spawns()), 1)
 
-    def test_rw002_non_canon_block_is_limited_by_maxbytes_minus_margin(self):
-        """RW-001: блок не из канона: предел maxBytes(106496) − запас; 60 001 Б проходит, на 1 Б больше предела — 503."""
-        limit = server.b_guard.DEFAULT_MAXBYTES - server.INSTR_NONKB_MARGIN
-        self.assertEqual(self._ask(self.other_block(60001))[0], 200)
-        status, body = self._post_json(
-            dict(
-                BODY,
-                prompt_cache_key="chat-instr-2",
-                messages=[msg("hello"), msg(self.other_block(limit + 1))],
-            )
-        )
-        self.assertEqual(status, 503, body)
-        self.assertEqual(body["error"]["type"], "launcher_unavailable")
-        self.assertEqual(
-            self._post_json(
+    def test_rw002_non_canon_block_is_limited_by_budget_minus_margin(self):
+        """RW-001: блок не из канона: бюджет max(предел моста, maxBytes) − запас; блок под пределом и ровно предел проходят
+        без усечения, на 1 Б больше предела — мягкое усечение (200, instr_gate_truncated), а не 503."""
+        # Профили DSH в тесте пусты (maxBytes нет): бюджет = предел моста − запас (в бою 500 000 − 2048).
+        limit = server.INSTR_BLOCK_LIMIT - server.INSTR_NONKB_MARGIN
+        self.assertEqual(self._ask(self.other_block(limit - 1000))[0], 200)
+        with self.capture_logs() as lines:
+            status, body = self._post_json(
                 dict(
                     BODY,
-                    prompt_cache_key="chat-instr-3",
-                    messages=[msg("hello"), msg(self.other_block(limit))],
+                    prompt_cache_key="chat-instr-2",
+                    messages=[msg("hello"), msg(self.other_block(limit + 1))],
                 )
-            )[0],
-            200,
-        )
+            )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(any(ln.startswith("instr_gate_truncated ") for ln in lines))
+        with self.capture_logs() as lines:
+            self.assertEqual(
+                self._post_json(
+                    dict(
+                        BODY,
+                        prompt_cache_key="chat-instr-3",
+                        messages=[msg("hello"), msg(self.other_block(limit))],
+                    )
+                )[0],
+                200,
+            )
+        self.assertFalse(any(ln.startswith("instr_gate_truncated ") for ln in lines))
 
     def test_rw002_small_first_block_does_not_hide_oversized_second(self):
         """RW-002: маленький первый блок и второй 60 001 Б: проверяются ВСЕ блоки, а не первый."""
