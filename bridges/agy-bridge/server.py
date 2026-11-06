@@ -917,6 +917,9 @@ SWEEP_INTERVAL_S = 600.0
 SWEEP_CUTOFF_S = get_bridge_config().sweep_cutoff_s
 
 CWD_MAX_LEN = 4096
+AGY_BRIDGE_SESSION_ISOLATION_ENABLED = bool(
+    int(os.environ.get("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", "1"))
+)
 
 # Ленивые горячие сессии: следующий запрос с тем же (модель, cwd, effort) продолжает
 # разговор agy через --conversation и шлёт только новые сообщения, а не всю историю.
@@ -2766,9 +2769,9 @@ def _session_key_for(
     if chat:
         chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
         return (chat_token, model, cwd, effort)
-    cwd_clean = cwd.strip()
-    if cwd_clean:
-        return (model, cwd, effort)
+    cwd_clean = cwd.strip() if isinstance(cwd, str) else ""
+    if cwd_clean and os.path.isabs(cwd_clean):
+        return (model, os.path.normpath(cwd_clean), effort)
     return ()
 
 
@@ -2784,7 +2787,10 @@ def _request_chat_id(
     ):
         if isinstance(value, str):
             val = value.strip()
-            if 0 < len(val) <= 256 and all(ord(c) > 31 and ord(c) != 127 for c in val):
+            if 0 < len(val) <= 256 and all(
+                (31 < ord(c) != 127) and not (0xD800 <= ord(c) <= 0xDFFF)
+                for c in val
+            ):
                 return val
     return ""
 
@@ -2890,6 +2896,10 @@ def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
     if not all(isinstance(part, str) for part in items):
         return None
     parts = cast("list[str]", items)
+    if len(parts) == 4 and parts[0] == "":
+        if parts[2].strip() and os.path.isabs(parts[2].strip()):
+            return (parts[1], os.path.normpath(parts[2].strip()), parts[3])
+        return None
     key = tuple(parts)
     if not _session_key_valid(key):
         return None
@@ -7575,9 +7585,16 @@ class Handler(BaseHTTPRequestHandler):
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
-            cwd = str(extra.get("cwd") or "")
-            if len(cwd) > CWD_MAX_LEN:
-                cwd = ""
+            raw_cwd = extra.get("cwd")
+            cwd = ""
+            if (
+                isinstance(raw_cwd, str)
+                and raw_cwd.strip()
+                and os.path.isabs(raw_cwd.strip())
+            ):
+                cwd = os.path.normpath(raw_cwd.strip())
+                if len(cwd) > CWD_MAX_LEN:
+                    cwd = ""
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
@@ -7597,29 +7614,36 @@ class Handler(BaseHTTPRequestHandler):
             if sess_key is not None and not _session_key_valid(sess_key):
                 sess_key = None
             use_session_store = tools_count > 0 and sess_key is not None
-            conversation_id = (
+            raw_cid = (
                 extra.get("conversation_id")
-                or (req.get("conversation_id") if isinstance(req, dict) else "")
-                or ""
+                if "conversation_id" in extra
+                else (req.get("conversation_id") if isinstance(req, dict) else None)
             )
-            cid_clean = conversation_id.strip() if isinstance(conversation_id, str) else ""
+            cid_clean = ""
+            if raw_cid is not None:
+                if isinstance(raw_cid, str) and raw_cid.strip():
+                    val = raw_cid.strip()
+                    if _CID_RE.fullmatch(val):
+                        cid_clean = val
+                    else:
+                        _log(f"cid-malformed-rejected cid={val[:16]!r}")
+                        force_cold = True
+                else:
+                    force_cold = True
+
+            # Явный CID разрешён только при доказанном владении ключом этого чата.
             if cid_clean:
-                if not _CID_RE.fullmatch(cid_clean):
-                    _log(f"cid-malformed-rejected cid={cid_clean[:16]!r}")
+                is_owned = False
+                if use_session_store and sess_key is not None:
+                    with _session_store_lock:
+                        entry = _session_store.get(sess_key)
+                        is_owned = entry is not None and entry.get("cid") == cid_clean
+                if not is_owned:
+                    _log(f"cid-unowned-blocked cid={cid_clean[:8]}")
                     conversation_id = ""
                     force_cold = True
                 else:
                     conversation_id = cid_clean
-                    if use_session_store and sess_key is not None:
-                        with _session_store_lock:
-                            entry = _session_store.get(sess_key)
-                            is_owned = (
-                                entry is not None and entry.get("cid") == conversation_id
-                            )
-                        if not is_owned:
-                            _log(f"cid-unowned-blocked cid={conversation_id[:8]}")
-                            conversation_id = ""
-                            force_cold = True
             else:
                 conversation_id = ""
             is_resumed = False

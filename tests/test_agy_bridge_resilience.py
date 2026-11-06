@@ -7374,12 +7374,18 @@ class ImageHistoryTests(unittest.TestCase):
                 _img_msg(_img_part("image/jpeg", _IMG_RAW_B)),
             ]
             explicit_cid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            model_id = _str(_bval("MODEL_ID"))
+            effort = _dict(_dict(_bval("FLEET_MODELS"))[model_id])["default_effort"]
+            key = _bfn("_session_key_for")(model_id, "", effort, "test-image-chat")
+            _ = _bfn("_session_commit")(key, explicit_cid)
             bridge = _HttpBridge()
             try:
-                code, _b = bridge.post(_img_body(history, conv=explicit_cid))
+                code, _b = bridge.post(
+                    _img_body(history, tools=True, conv=explicit_cid, model=model_id)
+                )
                 self.assertEqual(code, 200)
-                _ = bridge.post(_img_body(history[:1], tools=True))
-                code2, _b2 = bridge.post(_img_body(history, tools=True))
+                _ = bridge.post(_img_body(history[:1], tools=True, model=model_id))
+                code2, _b2 = bridge.post(_img_body(history, tools=True, model=model_id))
                 self.assertEqual(code2, 200)
             finally:
                 bridge.close()
@@ -12826,7 +12832,8 @@ class SessionFailClosedTests(unittest.TestCase):
         """Пустые, длинные ID и все ASCII control-символы не образуют ключ."""
         chat_id_for = _bfn("_request_chat_id")
         invalid = (None, False, True, 0, 123, 1.5, {}, [], "", " \t ", "a" * 257) + tuple(
-            "chat" + chr(code) + "id" for code in (*range(32), 127)
+            "chat" + chr(code) + "id"
+            for code in (*range(32), 127, 0xD800, 0xDBFF, 0xDC00, 0xDFFF)
         )
         for source in (
             "x-dsh-chat-id",
@@ -12865,7 +12872,7 @@ class SessionFailClosedTests(unittest.TestCase):
         self.assertEqual(chat_id_for({}, {}), "")
 
     def test_plain_explicit_cid_does_not_touch_session_store(self) -> None:
-        """Явный CID разрешён без tools, но стор не читается и не меняется."""
+        """Без tools явный CID запрещён, стор не читается и не меняется."""
         for source in ("extra", "body"):
             with self.subTest(source=source), _Fixture() as fx:
                 _ = fx.write_scenario(
@@ -12903,7 +12910,7 @@ class SessionFailClosedTests(unittest.TestCase):
                         commit.assert_not_called()
                         invalidate.assert_not_called()
                     self.assertEqual(store, before)
-                    self.assertEqual(captured[0]["conversation_id"], _CID)
+                    self.assertEqual(captured[0]["conversation_id"], "")
                     self.assertIsNone(captured[0]["sess_key"])
                     resumed = bridge.post(_agentic_body("второй ход", True))
                 finally:
@@ -12912,7 +12919,7 @@ class SessionFailClosedTests(unittest.TestCase):
                     [result[0] for result in (first, background, resumed)], [200] * 3
                 )
                 spawns = fx.spawns()
-                self.assertEqual(spawns[1][spawns[1].index("--conversation") + 1], _CID)
+                self.assertNotIn("--conversation", spawns[1])
                 self.assertEqual(spawns[2][spawns[2].index("--conversation") + 1], _CID)
                 self.assertEqual(_bval("_in_flight_cids"), set())
                 self.assertEqual(_bval("_active_cid_owners"), {})
@@ -13025,8 +13032,12 @@ class SessionFailClosedTests(unittest.TestCase):
 
     def test_malformed_explicit_cid_does_not_claim_cached_session(self) -> None:
         """Битый CID принудительно выбирает полную историю, а не кешированный CID."""
-        for source in ("extra", "body"):
-            with self.subTest(source=source), _Fixture() as fx:
+        for source, raw in (
+            (source, raw)
+            for source in ("extra", "body")
+            for raw in ("invalid/chars", 123, True, False, 0, {}, [], "", "   ")
+        ):
+            with self.subTest(source=source, raw=raw), _Fixture() as fx:
                 _ = fx.write_scenario(
                     [], spawns=[_quick(_CID), _quick(_CID_B)]
                 )
@@ -13043,7 +13054,9 @@ class SessionFailClosedTests(unittest.TestCase):
                     self.assertEqual(bridge.post(_agentic_body("первый ход"))[0], 200)
                     body = _agentic_body("битый CID", True)
                     target = _dict(body["extra_body"]) if source == "extra" else body
-                    target["conversation_id"] = "invalid/chars"
+                    target["conversation_id"] = raw
+                    if source == "extra":
+                        body["conversation_id"] = _CID
                     with (
                         mock.patch.object(handler_cls, "_serve_json", capture),
                         mock.patch.object(
@@ -13053,7 +13066,8 @@ class SessionFailClosedTests(unittest.TestCase):
                     ):
                         code, _ = bridge.post(body)
                         claim.assert_not_called()
-                        log.assert_any_call("cid-malformed-rejected cid='invalid/chars'")
+                        if raw == "invalid/chars":
+                            log.assert_any_call("cid-malformed-rejected cid='invalid/chars'")
                 finally:
                     bridge.close()
                 self.assertEqual(code, 200)
@@ -13065,7 +13079,10 @@ class SessionFailClosedTests(unittest.TestCase):
 
     def test_request_without_chat_id_does_not_use_session_store(self) -> None:
         """Без chat ID и cwd каждый ход холодный, даже с prompt_cache_key."""
-        for chat_id, cwd in (("", ""), (" \t ", " \t ")):
+        for chat_id, cwd in (
+            ("", ""), (" \t ", " \t "), ("", "."), ("", ".."), ("", "~"),
+            ("", "rel/path"), ("", True), ("", 1), ("", []), ("", {}),
+        ):
             with _Fixture() as fx:
                 _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID_B)])
                 bridge = _HttpBridge()
@@ -13086,6 +13103,7 @@ class SessionFailClosedTests(unittest.TestCase):
                             _agentic_body("первый", chat_id=chat_id),
                             _agentic_body("второй", True, chat_id=chat_id),
                         ]
+                        bodies[1]["conversation_id"] = _CID
                         for body in bodies:
                             body["extra_body"] = {"chat_id": chat_id, "cwd": cwd}
                             body["prompt_cache_key"] = "shared-prefix-cache"
@@ -13159,7 +13177,9 @@ class SessionFailClosedTests(unittest.TestCase):
         decode = _bfn("_session_key_from_json")
         invalid: tuple[object, ...] = (
             None, "not-a-key", {}, [], ["m", "", "low"], ["m", " \t ", "low"],
-            ["", "m", "/w", "low"], [" \t ", "m", "/w", "low"],
+            ["", "m", "", "low"], ["", "m", ".", "low"],
+            ["", "m", "..", "low"], ["", "m", "~", "low"],
+            ["", "m", "rel/path", "low"], [" \t ", "m", "/w", "low"],
             ["m", "/w", 1],
             ["0123456789abcdef", "m", "/w", 1],
             ["0123456789abcdef", "m", "/w", "low", "extra"],
@@ -13179,7 +13199,8 @@ class SessionFailClosedTests(unittest.TestCase):
         token = hashlib.sha256(b"chat-A").hexdigest()[:16]
         for chat, cwd, expected in (
             (" chat-A ", "", (token, "m", "", "low")),
-            ("", " /w ", ("m", " /w ", "low")),
+            ("", " /w ", ("m", "/w", "low")),
+            ("", "/w/../abs/./path", ("m", "/abs/path", "low")),
             (" \t ", "/w", ("m", "/w", "low")),
             ("", "", ()),
             (" \t ", " \t ", ()),
@@ -13191,6 +13212,61 @@ class SessionFailClosedTests(unittest.TestCase):
         for key in ((), ("m",), ("m", "", "low"), ("m", " \t ", "low"),
                     ("", "m", "/w", "low"), (" \t ", "m", "/w", "low")):
             self.assertFalse(valid(key), repr(key))
+
+    def test_session_key_rejects_relative_and_non_string_cwd(self) -> None:
+        """Относительный путь или нестроковый cwd не создаёт общий ключ."""
+        for cwd in (".", "..", "~", "rel/path", " . ", True, 1, [], {}):
+            with self.subTest(cwd=cwd):
+                self.assertEqual(_bfn("_session_key_for")("m", cwd, "low"), ())
+
+    def test_request_cwd_is_normalized_before_length_limit(self) -> None:
+        """HTTP-вход нормализует абсолютный cwd и проверяет длину результата."""
+        limit = _int(_bval("CWD_MAX_LEN"))
+        cases = (
+            (" /w/../abs/./path ", "/abs/path"),
+            ("/" + "a" * (limit - 1), "/" + "a" * (limit - 1)),
+            ("/" + "a" * limit, ""),
+            ("/w/.." * limit, "/"),
+        )
+        with _Fixture():
+            captured: list[dict[str, object]] = []
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with mock.patch.object(_bval("Handler"), "_serve_json", capture):
+                    for raw, expected in cases:
+                        with self.subTest(raw_len=len(raw)):
+                            body = _agentic_body("cwd", chat_id="")
+                            body["extra_body"] = {"cwd": raw}
+                            self.assertEqual(bridge.post(body)[0], 200)
+                            ctx = captured[-1]
+                            self.assertEqual(ctx["cwd"], expected)
+                            self.assertEqual(
+                                ctx["sess_key"],
+                                (ctx["model"], expected, ctx["effort"]) if expected else None,
+                            )
+            finally:
+                bridge.close()
+
+    def test_legacy_cwd_session_key_loads_as_three_tuple(self) -> None:
+        """Старый четырёхкомпонентный ключ нормализуется при загрузке с диска."""
+        with _Fixture() as fx:
+            fx.patch("_sessions_persist_ready", True)
+            fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
+            key = ("m", "/abs/path", "low")
+            _ = _bfn("_session_commit")(key, _CID)
+            path = fx.tmp / "ws" / "state" / "sessions.json"
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            saved["sessions"][0]["key"] = ["", "m", " /abs/./path ", "low"]
+            _ = path.write_text(json.dumps(saved), encoding="utf-8")
+            cast("dict[object, object]", _bval("_session_store")).clear()
+            self.assertEqual(_bfn("_load_persisted_sessions")(), 1)
+            self.assertEqual(list(cast(dict, _bval("_session_store"))), [key])
+            self.assertEqual(_bfn("_session_claim")(key, "legacy-turn"), _CID)
 
     def test_cwd_session_persistence_roundtrip(self) -> None:
         """Трёхкомпонентный ключ сохраняет cwd и восстанавливает доступный CID."""
