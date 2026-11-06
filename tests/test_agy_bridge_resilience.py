@@ -13333,20 +13333,28 @@ class SessionFailClosedTests(unittest.TestCase):
             ["", "m", "", "low"], ["", "m", ".", "low"],
             ["", "m", "..", "low"], ["", "m", "~", "low"],
             ["", "m", "rel/path", "low"], [" \t ", "m", "/w", "low"],
+            ["", "m", "/legacy", "low"],
             ["m", "/w", 1],
             ["0123456789abcdef", "m", "/w", 1],
             ["0123456789abcdef", "m", "/w", "low", "extra"],
         )
         for raw in invalid:
             self.assertIsNone(decode(raw), repr(raw))
+        for cwd in ("", " \t ", ".", "..", "~", "rel/path"):
+            for raw in (["m", cwd, "low"], ["0123456789abcdef", "m", cwd, "low"]):
+                self.assertIsNone(decode(raw), repr(raw))
         for valid in (
             ("0123456789abcdef", "m", "/w", "low"),
             ("m", "/w", "low"),
         ):
             self.assertEqual(decode(list(valid)), valid)
         self.assertEqual(
-            decode(["0123456789abcdef", "m", "/w/../abs/./path", "low"]),
+            decode(["0123456789abcdef", "m", " /w/../abs/./path ", "low"]),
             ("0123456789abcdef", "m", "/abs/path", "low"),
+        )
+        self.assertEqual(
+            decode(["m", " /w/../abs/./path ", "low"]),
+            ("m", "/abs/path", "low"),
         )
 
     def test_session_key_requires_chat_token_or_cwd(self) -> None:
@@ -13411,8 +13419,8 @@ class SessionFailClosedTests(unittest.TestCase):
             finally:
                 bridge.close()
 
-    def test_legacy_cwd_session_key_loads_as_three_tuple(self) -> None:
-        """Старый четырёхкомпонентный ключ нормализуется при загрузке с диска."""
+    def test_legacy_cwd_session_key_with_empty_chat_id_is_rejected(self) -> None:
+        """Ключ с пустым chat_id отбрасывается, а не превращается в общий cwd."""
         with _Fixture() as fx:
             fx.patch("_sessions_persist_ready", True)
             fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
@@ -13423,9 +13431,11 @@ class SessionFailClosedTests(unittest.TestCase):
             saved["sessions"][0]["key"] = ["", "m", " /abs/./path ", "low"]
             _ = path.write_text(json.dumps(saved), encoding="utf-8")
             cast("dict[object, object]", _bval("_session_store")).clear()
-            self.assertEqual(_bfn("_load_persisted_sessions")(), 1)
-            self.assertEqual(list(cast(dict, _bval("_session_store"))), [key])
-            self.assertEqual(_bfn("_session_claim")(key, "legacy-turn"), _CID)
+            self.assertEqual(_bfn("_load_persisted_sessions")(), 0)
+            self.assertEqual(list(cast(dict, _bval("_session_store"))), [])
+            self.assertEqual(_bfn("_session_claim")(key, "legacy-turn"), "")
+            cleaned = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(cleaned["sessions"], [])
 
     def test_cwd_session_persistence_roundtrip(self) -> None:
         """Трёхкомпонентный ключ сохраняет cwd и восстанавливает доступный CID."""

@@ -2907,16 +2907,13 @@ def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
     if not all(isinstance(part, str) for part in items):
         return None
     parts = cast("list[str]", items)
-    if len(parts) == 4 and parts[0] == "":
-        if parts[2].strip() and os.path.isabs(parts[2].strip()):
-            return (parts[1], os.path.normpath(parts[2].strip()), parts[3])
+    if len(parts) == 4 and not parts[0].strip():
         return None
-    if len(parts) == 4:
-        parts[2] = (
-            os.path.normpath(parts[2])
-            if parts[2] and os.path.isabs(parts[2])
-            else parts[2]
-        )
+    cwd_index = 2 if len(parts) == 4 else 1
+    cwd = parts[cwd_index].strip()
+    if not cwd or not os.path.isabs(cwd):
+        return None
+    parts[cwd_index] = os.path.normpath(cwd)
     key = tuple(parts)
     if not _session_key_valid(key):
         return None
