@@ -363,6 +363,7 @@ FLEET_TOP_KEYS = frozenset(
         "admission",
         "backends",
         "models",
+        "aliases",
     }
 )
 FLEET_MODEL_KEYS = frozenset(
@@ -377,6 +378,10 @@ FLEET_MODEL_KEYS = frozenset(
         "input",
         "images",
         "policy_lines",
+        "upstream_model",
+        "resident",
+        "pool_size",
+        "alias_of",
     }
 )
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
@@ -610,6 +615,7 @@ def build_catalog(
         "backend_order": list(backends),
         "order": order,
         "models": models,
+        "aliases": data.get("aliases", {}),
         "image_limits": {**limits, "max_types": [t.lower() for t in limits["types"]]},
         "admission": {
             key: int(admission[key])

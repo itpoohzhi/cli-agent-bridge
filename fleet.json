@@ -1,6 +1,13 @@
 {
   "schema_version": 3,
   "catalogue": "droid-bridge-fleet",
+  "aliases": {
+    "deepseek-v4.1-flash": {
+      "backend_id": "deepseek-v4.1-flash-free",
+      "backend": "opencode-zen",
+      "effort": "high"
+    }
+  },
   "default_model": "muse-wonder-full-1.0",
   "policy_ref": {
     "path": "~/Мой диск/Context/models.md",
