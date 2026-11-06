@@ -11,8 +11,7 @@ system/tools/cwd) = новая generation с replay. Idle-процесс гас�
 `DROID_DSH_BRIDGE_IDLE_SECONDS` (по умолчанию 2700 с), SID и файлы остаются, следующий
 ход восстанавливается `load_session` того же SID. Без ключа, для title-запросов и для
 запросов с изображениями — эфемерная чистая сессия с replay истории запроса.
-Автономность даунстрим-исполнителя задаётся top-level полем `autonomy`
-(`low|medium|high|off`, DROID_DEFAULT_AUTONOMY, безопасный дефолт `off`).
+Поле `autonomy`: `low|medium|high|off`, DROID_DEFAULT_AUTONOMY, безопасный дефолт `off`.
 `high` требует DROID_ALLOW_HIGH_AUTONOMY=1; иное = 400 `unsupported_autonomy`.
 `--skip-permissions-unsafe` не используется никогда; нативные tools droid отключены,
 запросы разрешений отклоняются (`autoRejectPermissionRequests`).
@@ -78,14 +77,15 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     is_loopback_cdp_url,
 )
 from receipt_schema import (  # noqa: E402
-    RECEIPT_PROBES,
+    RECEIPT_PROBES as RECEIPT_PROBES,
     RECEIPT_SCHEMA,
     RPC_API_VERSION,
-    SETTINGS_PROFILE,
-    TOOLS_POLICY,
-    settings_profile_digest,
-    tools_policy_digest,
-    validate_qualified_models,
+    SETTINGS_PROFILE as SETTINGS_PROFILE,
+    TOOLS_POLICY as TOOLS_POLICY,
+    settings_profile_digest as settings_profile_digest,
+    tools_policy_digest as tools_policy_digest,
+    validate_receipt_components,
+    validate_model_catalog,
 )
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
@@ -175,6 +175,21 @@ from core.cli_runtime_config import (  # noqa: E402 - импорт после н
 from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa: E402
 from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
+from core.gateway_execution_policy import (  # noqa: E402
+    AUTONOMY_LEVELS as AUTONOMY_LEVELS,
+    AUTONOMY_OFF as AUTONOMY_OFF,
+    AutonomyViolation,
+    RpcError as RpcError,
+    RpcPermissionDenied as RpcPermissionDenied,
+    allow_high_autonomy,
+    default_autonomy,
+    denied_subagent,
+    permission_event,
+    permission_frame,
+    require,
+    resolve_autonomy,
+    validate_boolean_flags,
+)
 
 CLI_CFG = CliRuntimeConfig.from_env()
 
@@ -450,32 +465,9 @@ def clamp_effort_downward(
     return default, True
 
 
-# Уровни автономности даунстрим-исполнителя: передаются в `autonomyLevel` RPC
-# (`initialize_session`/`update_session_settings`) и сверяются read-back; дефолт off,
-# `off` — read-only режим droid (Reviewer-пути).
-AUTONOMY_LEVELS = ("low", "medium", "high")
-AUTONOMY_OFF = "off"
-
-
-def _allow_high_autonomy() -> bool:
-    """Высокая автономность разрешена только явным булевым opt-in."""
-    return os.environ.get("DROID_ALLOW_HIGH_AUTONOMY", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-
-
-def _default_autonomy() -> str:
-    """Невалидный или неразрешённый дефолт всегда понижает права."""
-    value = os.environ.get("DROID_DEFAULT_AUTONOMY", "off").strip()
-    if value not in (*AUTONOMY_LEVELS, AUTONOMY_OFF) or (
-        value == "high" and not _allow_high_autonomy()
-    ):
-        return AUTONOMY_OFF
-    return value
-
-
+# Автономность RPC сверяется read-back; безопасный дефолт off — read-only.
+_allow_high_autonomy = functools.partial(allow_high_autonomy, "DROID")
+_default_autonomy = functools.partial(default_autonomy, "DROID")
 AUTONOMY_DEFAULT = _default_autonomy()
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 # Известные сигнатуры изображений: нужны, чтобы отличить image_type_mismatch
@@ -1148,44 +1140,10 @@ def _receipt_path() -> Path:
 # Константы и отпечатки живут в tools/receipt_schema.py: их делят мост и установщик (RW-013).
 def _check_receipt_quad(rec: dict) -> None:
     """Проверка протокола, политики tools и профиля настроек receipt; расхождение — LauncherUnavailable."""
-    protocol = rec.get("protocol")
-    if (
-        not isinstance(protocol, dict)
-        or protocol.get("api_version") != RPC_API_VERSION
-        or not isinstance(protocol.get("protocol_version"), str)
-        or not protocol["protocol_version"]
-    ):
-        raise LauncherUnavailable(
-            "droid receipt: stream-jsonrpc protocol version mismatch"
-        )
-    policy = rec.get("tools_policy")
-    ids = policy.get("disabled_tool_ids") if isinstance(policy, dict) else None
     try:
-        qualified = validate_qualified_models(rec.get("qualified_models"), ids or [])
+        validate_receipt_components(rec)
     except (ValueError, TypeError) as exc:
-        raise LauncherUnavailable(
-            "receipt missing or invalid qualified_models, re-run droid_image.py"
-        ) from exc
-    if (
-        not isinstance(policy, dict)
-        or policy.get("policy") != TOOLS_POLICY
-        or not isinstance(ids, list)
-        or not ids
-        or policy.get("digest") != tools_policy_digest(ids, qualified)
-    ):
-        raise LauncherUnavailable("droid receipt: tools policy mismatch")
-    profile = rec.get("settings_profile")
-    if (
-        not isinstance(profile, dict)
-        or profile.get("profile") != SETTINGS_PROFILE
-        or profile.get("digest") != settings_profile_digest()
-    ):
-        raise LauncherUnavailable("droid receipt: settings profile mismatch")
-    probes = rec.get("probes")
-    if not isinstance(probes, dict) or any(
-        probes.get(name) != "ok" for name in RECEIPT_PROBES
-    ):
-        raise LauncherUnavailable("droid receipt: qualification probes are not all ok")
+        raise LauncherUnavailable(str(exc)) from exc
 
 
 def _load_receipt() -> tuple:
@@ -1973,14 +1931,6 @@ def _kill_all(*_: Any) -> None:
     os._exit(0)
 
 
-class RpcError(Exception):
-    """Ошибка протокола droid: JSON-RPC error, невалидный обязательный ответ."""
-
-
-class RpcPermissionDenied(RpcError):
-    """Нарушение политики разрешений: восстановление с replay запрещено."""
-
-
 class RpcEof(RpcError):
     """stdout droid закрыт (процесс умер) раньше ожидаемого ответа или terminal."""
 
@@ -2530,16 +2480,11 @@ class RpcProcess:
             if "id" in msg and ("result" in msg or "error" in msg):
                 self._put("resp", msg, size)
             return
-        params = msg.get("params")
-        note = params.get("notification") if isinstance(params, dict) else None
-        event_type = note.get("type") if isinstance(note, dict) else ""
-        if (
-            "permission" in str(method).lower()
-            or "permission" in str(event_type).lower()
-        ):
+        if permission_frame(msg):
             self.server_requests += 1
-            self._put("permission", "permission request forbidden by bridge", size)
-            return
+            return self._put(
+                "permission", "permission request forbidden by bridge", size
+            )
         if msg.get("id") is not None:
             # Запрос разрешения — нарушение безопасного профиля, ход прерывается.
             self.server_requests += 1
@@ -2580,8 +2525,8 @@ class RpcProcess:
         except queue.Empty:
             return None
         self._taken(event)
-        if event[0] == "permission":
-            raise RpcPermissionDenied(str(event[1]))
+        kind, payload, *_ = event
+        require(kind != "permission", RpcPermissionDenied(str(payload)))
         if event[0] == "eof":
             self.eof_rc = event[1]
             self.inbox.put(event)
@@ -4310,18 +4255,7 @@ class Run:
             )
         self._check_flags(settings)
 
-    @staticmethod
-    def _check_flags(settings: dict) -> None:
-        """disableBuiltinSkills/autoRejectPermissionRequests: если droid их сообщает, они обязаны быть true.
-
-        Реальный droid (протокол 1.248) эти поля в settings не возвращает, поэтому отсутствие
-        не отказ; присутствующее расхождение — fail-closed.
-        """
-        for flag in ("disableBuiltinSkills", "autoRejectPermissionRequests"):
-            if flag in settings and settings[flag] is not True:
-                raise RpcError(
-                    f"settings read-back: {flag} is {settings[flag]!r}, expected true"
-                )
+    _check_flags = staticmethod(validate_boolean_flags)
 
     def _initialize(self, proc: RpcProcess) -> None:
         plan = self.plan
@@ -4377,20 +4311,9 @@ class Run:
             _, rec = _load_receipt()
         except LauncherUnavailable as exc:
             raise RpcError(f"droid receipt changed during spawn: {exc}")
-        qualified = rec.get("qualified_models")
-        if not isinstance(qualified, dict) or not qualified:
-            raise RpcError(
-                "receipt missing or invalid qualified_models, re-run droid_image.py"
-            )
-        expected = qualified.get(self.plan["settings"][0])
-        if (
-            not listed
-            or not isinstance(expected, list)
-            or sorted(listed) != sorted(expected)
-        ):
-            raise RpcError(
-                "native tool catalogue differs from the qualified tools policy"
-            )
+        validate_model_catalog(
+            rec.get("qualified_models"), self.plan["settings"][0], listed, RpcError
+        )
 
     def _disable_native_tools(self, proc: RpcProcess) -> None:
         """Нативные tools отключаются по АКТУАЛЬНОМУ list_tools (новые id тоже); сбой — fail-closed."""
@@ -4676,8 +4599,10 @@ class Run:
             self._quarantined += 1  # чужая/устаревшая сессия в карантин
             return False
         ntype = note.get("type")
-        if "permission" in str(ntype).lower():
-            raise RpcPermissionDenied("permission request forbidden by bridge")
+        require(
+            not permission_event(ntype),
+            RpcPermissionDenied("permission request forbidden by bridge"),
+        )
         mid = str(note.get("messageId") or "")
         if ntype == "create_message":
             self._on_create(note, mid)
@@ -7254,23 +7179,22 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             model = fleet_models[model_id]
-            denied_prefixes = tuple(
-                prefix.strip().lower()
-                for prefix in os.environ.get(
-                    "DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-"
-                ).split(",")
-                if prefix.strip()
-            )
-            subagent_id = self.headers.get("X-Subagent-Id", "").strip().lower()
-            if model["backend"] == "droid" and subagent_id.startswith(denied_prefixes):
-                self._reject(
+            denied_role = {
+                "droid": denied_subagent(
+                    self.headers.get("X-Subagent-Id", ""),
+                    os.environ.get(
+                        "DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-"
+                    ),
+                )
+            }.get(model["backend"], False)
+            if denied_role:
+                return self._reject(
                     403,
                     "droid_forbidden_for_role",
                     "droid route is forbidden for this subagent role",
                     model_id,
                     model_len,
                 )
-                return
             if deferred_passthrough_auth:
                 selected = BACKENDS.get(model["backend"])
                 if not isinstance(
@@ -7352,44 +7276,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # (9a) autonomy: low|medium|high|off -> `autonomyLevel` RPC
             # (off — read-only droid); дефолт конфигурируемый, fail-closed off.
-            raw_autonomy = req.get("autonomy")
-            if raw_autonomy is None:
-                autonomy = _default_autonomy()
-                autonomy_source = "default"
-            elif isinstance(raw_autonomy, str):
-                candidate = raw_autonomy.strip()
-                if not candidate:
-                    autonomy = _default_autonomy()
-                    autonomy_source = "default"
-                elif candidate in AUTONOMY_LEVELS or candidate == AUTONOMY_OFF:
-                    autonomy = candidate
-                    autonomy_source = "request"
-                else:
-                    self._reject(
-                        400,
-                        "unsupported_autonomy",
-                        "autonomy is not allowed (low|medium|high|off)",
-                        model_id,
-                        model_len,
-                    )
-                    return
-            else:
-                self._reject(
-                    400,
-                    "unsupported_autonomy",
-                    "autonomy must be a string",
-                    model_id,
-                    model_len,
+            try:
+                autonomy, autonomy_source = resolve_autonomy(
+                    req.get("autonomy"), "DROID"
                 )
-                return
-            if autonomy == "high" and not _allow_high_autonomy():
-                self._reject(
-                    400,
-                    "autonomy_forbidden",
-                    "high autonomy requires DROID_ALLOW_HIGH_AUTONOMY",
-                    model_id,
-                    model_len,
-                )
+            except AutonomyViolation as exc:
+                self._reject(400, exc.reason, str(exc), model_id, model_len)
                 return
             # (10) reasoning-объект не поддерживаем.
             if "reasoning" in req and req.get("reasoning") is not None:

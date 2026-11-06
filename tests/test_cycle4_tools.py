@@ -1,8 +1,5 @@
-"""Регрессии cycle-4: канон, read-back квалификации Droid и схема receipt.
-RW-010/RW-020: user-global канон и однозначность maxBytes профиля DSH.
-RW-011/RW-012/RW-013: read-back и автономные пробы с явным fleet без server.py.
-Реальный droid, ~/.dsh и боевые каталоги владельца не используются.
-"""
+"""Регрессии cycle-4: канон, read-back и автономная квалификация Droid.
+Без реального droid и боевых каталогов владельца."""
 
 import json
 import os
@@ -21,6 +18,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import b_guard as bg  # noqa: E402
 import droid_image  # noqa: E402
+from tests.gateway_policy_testlib import restrict_probe_models  # noqa: E402
 from rpc_testlib import RpcCase  # noqa: E402
 from test_b_guard import PROFILE_YML, build_snapshot_fs  # noqa: E402
 
@@ -259,9 +257,7 @@ class ProbeCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
         self.workspace = self.tmp / "workspace"
-        extra_models = mock.patch.object(droid_image, "_probe_models", lambda: {MODEL: EFFORT})
-        extra_models.start()
-        self.addCleanup(extra_models.stop)
+        restrict_probe_models(self, droid_image, MODEL, EFFORT)
 
     def probes(self, rpc):
         with mock.patch.object(droid_image, "_Rpc", lambda image, cwd, home: rpc):
@@ -538,7 +534,11 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                 base = Path(tmp)
                 tools = base / "tools"
                 tools.mkdir()
-                for name in ("droid_image.py", "receipt_schema.py", "droid_probe_config.py"):
+                for name in (
+                    "droid_image.py",
+                    "receipt_schema.py",
+                    "droid_probe_config.py",
+                ):
                     shutil.copy(ROOT / "tools" / name, tools / name)
                 if fleet is not None:
                     (base / "fleet.json").write_text(fleet, encoding="utf-8")

@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import queue
 import shutil
@@ -21,13 +20,21 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import IO
+from typing import IO, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import receipt_schema as schema  # noqa: E402  - общая схема без импорта server.py
-from tools.droid_probe_config import ProbeError, probe_models as _probe_models  # noqa: E402
+from tools.droid_probe_config import (  # noqa: E402
+    ProbeError,
+    get_probe_timeout_s as _get_probe_timeout_s,
+    initialize_probe,
+    probe_directories,
+    probe_models as _probe_models,
+    verify_disk_profile,
+)
+from core.gateway_execution_policy import permission_frame, require  # noqa: E402
 
 PROBE_AUTONOMY = "high"
 READBACK_KEYS = (
@@ -38,19 +45,6 @@ READBACK_KEYS = (
     "disableBuiltinSkills",
     "autoRejectPermissionRequests",
 )
-
-
-def _get_probe_timeout_s() -> float:
-    """Таймаут одного RPC; пять последовательных моделей умножают бюджет проб."""
-    try:
-        value = float(os.environ.get("DROID_PROBE_TIMEOUT_S", "").strip() or "30.0")
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError("non-positive or non-finite")
-    except ValueError as exc:
-        raise ProbeError(
-            "DROID_PROBE_TIMEOUT_S должен быть конечным числом > 0"
-        ) from exc
-    return value
 
 
 def _settings_from_notes(notes: list) -> dict | None:
@@ -207,14 +201,10 @@ class _Rpc:
                 raise ProbeError(f"{method}: нет ответа за {timeout:g} с")
             if msg is None:
                 raise ProbeError(f"{method}: образ завершился до ответа")
-            params = msg.get("params")
-            note = params.get("notification") if isinstance(params, dict) else None
-            event_type = note.get("type") if isinstance(note, dict) else ""
-            if (
-                "permission" in str(msg.get("method", "")).lower()
-                or "permission" in str(event_type).lower()
-            ):
-                raise ProbeError("permission request during qualification")
+            require(
+                not permission_frame(msg),
+                ProbeError("permission request during qualification"),
+            )
             if msg.get("id") == rid and ("result" in msg or "error" in msg):
                 if msg.get("error") is not None:
                     raise ProbeError(f"{method}: {str(msg['error'])[:200]}")
@@ -284,39 +274,20 @@ class _Rpc:
 
 def _initialize_probe(rpc: _Rpc, cwd: Path, expected: dict) -> tuple[str, set]:
     """Открыть сессию и подтвердить обязательные настройки."""
-    result, _ = rpc.call(
-        "droid.initialize_session",
-        {
-            **expected,
-            "machineId": "droid-image-probe",
-            "cwd": str(cwd),
-            "title": "droid-image-probe",
-        },
-    )
-    sid, settings = result.get("sessionId"), result.get("settings")
-    if not isinstance(sid, str) or not sid or not isinstance(settings, dict):
-        raise ProbeError(
-            "spawn: initialize_session без sessionId или с подменой модели"
-        )
-    confirmed = _verify_settings(
-        "spawn",
-        settings,
-        expected,
-        required=("modelId", "reasoningEffort", "autonomyLevel"),
-    )
-    return sid, confirmed
+    return initialize_probe(rpc.call, cwd, expected, _verify_settings)
 
 
 def _probe_tool_ids(rpc: _Rpc) -> set[str]:
     """Проверить непустой каталог инструментов одной модели."""
     tools, _ = rpc.call("droid.list_tools", {})
     listed = tools.get("tools")
-    if not isinstance(listed, list) or not listed:
-        raise ProbeError("update: list_tools вернул некорректный каталог")
-    if not all(
-        isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"] for t in listed
-    ):
-        raise ProbeError("update: list_tools вернул некорректный каталог")
+    error = ProbeError("update: list_tools вернул некорректный каталог")
+    require(all((isinstance(listed, list), bool(listed))), error)
+    listed = cast(list[dict], listed)
+    for tool in listed:
+        require(isinstance(tool, dict), error)
+        require(isinstance(tool.get("id"), str), error)
+        require(bool(tool["id"]), error)
     return {t["id"] for t in listed}
 
 
@@ -329,8 +300,9 @@ def _disable_probe_tools(rpc: _Rpc, ids: set[str], expected: dict) -> set:
     if updated is None:
         updated = rpc.wait_settings()
     disabled = updated.get("disabledToolIds")
-    if not isinstance(disabled, list) or not ids.issubset(set(map(str, disabled))):
-        raise ProbeError("update: read-back не подтвердил отключение tools")
+    error = ProbeError("update: read-back не подтвердил отключение tools")
+    require(isinstance(disabled, list), error)
+    require(ids.issubset(set(map(str, cast(list, disabled)))), error)
     return _verify_settings("update", updated, expected)
 
 
@@ -375,38 +347,16 @@ def run_probes(image: Path, workspace: Path) -> dict:
     models = _probe_models()
     facts = []
     for mid, effort in models.items():
-        # Только каталоги этого прогона; состояние модели не переносится в следующую.
-        try:
-            for directory in (home, cwd):
-                if directory.exists():
-                    shutil.rmtree(directory)
-                _ensure_private_chain(directory, workspace)
-            settings_dir = home / ".factory"
-            _ensure_private_chain(settings_dir, workspace)
-            settings_path = settings_dir / "settings.json"
-            settings_path.write_text(
-                json.dumps(schema.SETTINGS_PROFILE), encoding="utf-8"
-            )
-            settings_path.chmod(0o600)
+        with probe_directories(
+            home, cwd, workspace, _ensure_private_chain
+        ) as settings_path:
             facts.append(_probe_model(image, cwd, home, mid, effort))
-            try:
-                written = json.loads(settings_path.read_text(encoding="utf-8"))
-                _verify_settings(
-                    "settings.json",
-                    written,
-                    schema.SETTINGS_PROFILE,
-                    required=tuple(schema.SETTINGS_PROFILE),
-                )
-            except (OSError, ValueError) as exc:
-                raise ProbeError(
-                    "settings.json: профиль на диске не подтверждён"
-                ) from exc
-        finally:
-            for directory in (home, cwd):
-                if directory.exists():
-                    shutil.rmtree(directory)
-    if len({fact[0] for fact in facts}) != 1:
-        raise ProbeError("spawn: модели сообщили разные factoryProtocolVersion")
+            verify_disk_profile(settings_path, _verify_settings)
+    protocol, *_ = facts[0]
+    require(
+        not {fact[0] for fact in facts}.difference((protocol,)),
+        ProbeError("spawn: модели сообщили разные factoryProtocolVersion"),
+    )
     confirmed = set.intersection(*(fact[2] for fact in facts))
     return {
         "protocol_version": facts[0][0],

@@ -82,59 +82,6 @@ def test_token_cache_rejects_stale_global_keys(tmp_path, monkeypatch):
     assert not server.TOKEN_CACHE.is_valid("revoked-global-key")
 
 
-def test_auth_ok_rejects_patched_module_keys_with_isolated_cache(tmp_path, monkeypatch):
-    """Модульные ключи не принимаются; без файла действует только _env."""
-    from email.message import Message
-
-    monkeypatch.setattr(server, "AUTH_KEY", "module-auth-key")
-    monkeypatch.setattr(server, "BRIDGE_KEY", "module-bridge-key")
-    cache = server.TokenCache(
-        path=tmp_path / "missing", environ={"BRIDGE_KEY": "cache-key"}
-    )
-    monkeypatch.setattr(server, "TOKEN_CACHE", cache)
-    assert not cache.is_valid("module-auth-key")
-    assert not cache.is_valid("module-bridge-key")
-
-    def make_handler(headers: dict[str, str]) -> server.Handler:
-        message = Message()
-        for name, value in headers.items():
-            message[name] = value
-        handler = object.__new__(server.Handler)
-        handler.headers = message
-        return handler
-
-    assert not server._auth_ok(
-        make_handler({"Authorization": "Bearer module-auth-key"})
-    )
-    assert not server._auth_ok(make_handler({"Authorization": "module-bridge-key"}))
-    assert not server._auth_ok(make_handler({"x-api-key": "module-auth-key"}))
-    assert server._auth_ok(make_handler({"Authorization": "Bearer cache-key"}))
-    assert not server._auth_ok(make_handler({"Authorization": "Bearer wrong-key"}))
-    assert not server._auth_ok(make_handler({}))
-
-
-def test_auth_ok_revokes_stale_module_keys_when_file_key_present(tmp_path, monkeypatch):
-    """Файловый ключ исключителен: устаревший модульный ключ через _auth_ok отозван."""
-    from email.message import Message
-
-    path = tmp_path / ".env"
-    path.write_text("BRIDGE_KEY=current-file-key\n")
-    monkeypatch.setattr(server, "AUTH_KEY", "revoked-global-key")
-    monkeypatch.setattr(server, "BRIDGE_KEY", "revoked-global-key")
-    cache = server.TokenCache(path=path, environ={})
-    monkeypatch.setattr(server, "TOKEN_CACHE", cache)
-
-    def make_handler(token: str) -> server.Handler:
-        message = Message()
-        message["Authorization"] = f"Bearer {token}"
-        handler = object.__new__(server.Handler)
-        handler.headers = message
-        return handler
-
-    assert server._auth_ok(make_handler("current-file-key"))
-    assert not server._auth_ok(make_handler("revoked-global-key"))
-
-
 def test_token_cache_rejects_module_keys_without_file_keys(tmp_path, monkeypatch):
     """Без файловых ключей TokenCache не принимает модульные ключи monkeypatch."""
     monkeypatch.setattr(server, "AUTH_KEY", "module-auth-key")

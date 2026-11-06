@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import NoServe, prepare_guard_drift  # noqa: E402
 from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402
 from rpc_testlib import FakeClock, RpcCase  # noqa: E402
 from test_images_strict import ImageCase  # noqa: E402
@@ -118,10 +119,7 @@ class TestGuardLoop(GuardCase):
 
     def test_rw003_maxbytes_drift_detected_by_background_loop_without_cli(self):
         """RW-003: профиль изменён уже после старта -> фоновый поток находит дрейф и пишет alert сам."""
-        self.write_profile(106496)
-        self.addCleanup(setattr, server, "GUARD_TICK_S", server.GUARD_TICK_S)
-        server.GUARD_TICK_S = 0.1
-        self.addCleanup(setattr, server, "_shutting_down", server._shutting_down)
+        prepare_guard_drift(self)
         with self.capture_logs() as lines:
             server.GUARD.check_once()
             self.assertEqual(server.GUARD.snapshot()[0], "ok")
@@ -129,8 +127,11 @@ class TestGuardLoop(GuardCase):
             self.addCleanup(server.GUARD._thread.join, 1)
             self.addCleanup(setattr, server, "_shutting_down", True)
             self.write_profile(262144)
-            self.assertTrue(wait_until(lambda: server.GUARD.snapshot()[0] == "unsafe", timeout=5))
+            self.assertTrue(
+                wait_until(lambda: server.GUARD.snapshot()[0] == "unsafe", timeout=5)
+            )
         self.assertTrue(any(ln.startswith("instr_guard_alert ") for ln in lines))
+
     def test_rw003_unreadable_maxbytes_is_unsafe(self):
         """RW-003: профиль без читаемого maxBytes -> unsafe (fail-closed), а не молчаливый ok."""
         self.write_profile(106496)
@@ -986,7 +987,9 @@ class TestHealthReceipt(RpcCase):
             self.assertEqual(set(health), keys)
             self.assertEqual(len(health), 7)
             self.assertFalse(health["ok"])
-        self.assertTrue(self.health()["ok"])  # droid не обязателен - receipt не валит ok
+        self.assertTrue(
+            self.health()["ok"]
+        )  # droid не обязателен - receipt не валит ok
 
     def test_rw015_receipt_state_values(self):
         """RW-015: _receipt_state: not_required / invalid / ok."""
@@ -1010,17 +1013,13 @@ class TestHealthReceipt(RpcCase):
 class TestStartup(GuardCase):
     """RW-003/RW-014/RW-015: старт моста — alert по профилю и receipt без трассировок."""
 
-    class _NoServe:
-        def __init__(self, *args, **kwargs):
-            pass
-        def serve_forever(self):
-            return None
-        server_close = serve_forever
+    _NoServe = NoServe
 
     def _run_main(self):
         with (
             mock.patch.object(server, "Server", self._NoServe),
-            mock.patch.object(server.signal, "signal"), mock.patch.object(server.threading.Thread, "start"),
+            mock.patch.object(server.signal, "signal"),
+            mock.patch.object(server.threading.Thread, "start"),
             mock.patch.object(server.GUARD, "start") as started,
         ):
             server.main()

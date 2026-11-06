@@ -106,10 +106,14 @@ def test_empty_droid_fleet_cannot_be_qualified(
         droid_image._probe_models()
 
 
-def test_probe_rejects_disk_profile_tampering(monkeypatch, tmp_path):
+def test_probe_rejects_disk_profile_tampering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(droid_image, "_probe_models", lambda: {"one": "off"})
 
-    def probe(image, cwd, home, mid, effort):
+    def probe(
+        image: Path, cwd: Path, home: Path, mid: str, effort: str
+    ) -> tuple[str, set[str], set[str]]:
         (home / ".factory/settings.json").write_text("{}")
         return "protocol", {"tool"}, set()
 
@@ -119,7 +123,7 @@ def test_probe_rejects_disk_profile_tampering(monkeypatch, tmp_path):
     assert not (tmp_path / "runtime/probe-home").exists()
 
 
-def test_probe_timeout_read_at_call_time(monkeypatch):
+def test_probe_timeout_read_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DROID_PROBE_TIMEOUT_S", "2.75")
     assert droid_image._get_probe_timeout_s() == 2.75
     monkeypatch.setenv("DROID_PROBE_TIMEOUT_S", "")

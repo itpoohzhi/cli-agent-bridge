@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import child_identity_entries  # noqa: E402
 from bridge_testlib import BridgeCase, TOOLS, wait_until  # noqa: E402
 
 
@@ -339,19 +340,16 @@ class TestSweepWorkspace(unittest.TestCase):
 
     def test_restart_reconciles_own_muse_orphans_keeps_foreign(self):
         """RW-010: после аварии хаба restart добивает свои orphan-группы muse; чужой PID цел."""
-        self.enterContext(mock.patch.object(server, "has_live_parent", return_value=False))
+        self.enterContext(
+            mock.patch.object(server, "has_live_parent", return_value=False)
+        )
         own = subprocess.Popen(["sleep", "60"], start_new_session=True)
         foreign = subprocess.Popen(["sleep", "60"], start_new_session=True)
         real_ws = server.WORKSPACE
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 server.WORKSPACE = Path(tmp)
-                entries = [
-                    dict(pid=own.pid, pgid=own.pid, start=server._proc_start_sig(own.pid),
-                         bridge_pid=1, kind="muse"),
-                    dict(pid=foreign.pid, pgid=foreign.pid, start="Mon Jan  1 00:00:00 1990",
-                         bridge_pid=1, kind="muse"),
-                ]
+                entries = child_identity_entries(own, foreign)
                 server._atomic_write(
                     server._children_path(), json.dumps(entries).encode("utf-8")
                 )
@@ -368,6 +366,7 @@ class TestSweepWorkspace(unittest.TestCase):
                 if proc.poll() is None:
                     proc.kill()
                 proc.wait()
+
     def test_reconcile_dead_leader_uses_signed_member_not_reused_identity(self):
         """RW-009: вышедший лидер не мешает проверке подписанного члена своей группы."""
         with tempfile.TemporaryDirectory() as tmp:

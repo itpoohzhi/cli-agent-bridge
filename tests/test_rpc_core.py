@@ -10,13 +10,14 @@ import tempfile
 import threading
 import time
 import unittest
-import pytest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import HIGH_SETTINGS, OFF_SETTINGS  # noqa: E402
 from bridge_testlib import TOOLS, wait_until  # noqa: E402
 from rpc_testlib import Conv, RpcCase, USAGE_LINE  # noqa: E402
 
@@ -400,17 +401,10 @@ class TestDeltaAndIsolation(RpcCase):
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
 
+    @mock.patch.dict("os.environ", DROID_ALLOW_HIGH_AUTONOMY="1")
     def test_tm007_settings_update_readback_and_no_silent_substitution(self):
         """TM-007: смена model/effort/autonomy на границе хода: update+read-back; подмена модели отвергается."""
-        changes = pytest.MonkeyPatch()
-        changes.setenv("DROID_ALLOW_HIGH_AUTONOMY", "1")
-        self.addCleanup(changes.undo)
-        chat = self.conv(
-            "chat-settings",
-            model="deepseek-v4.1-flash",
-            reasoning_effort="high",
-            autonomy="high",
-        )
+        chat = self.conv("chat-settings", **HIGH_SETTINGS)
         self.assertEqual(chat.ask("q0")[0], 200)
         init = self.hub.inits()[0]["params"]
         self.assertEqual(init["autonomyLevel"], "high")
@@ -430,16 +424,7 @@ class TestDeltaAndIsolation(RpcCase):
             for r in self.hub.rpcs("droid.update_session_settings")
             if "reasoningEffort" in r["params"]
         ]
-        self.assertEqual(
-            updates,
-            [
-                {
-                    "modelId": "deepseek-v4.1-flash",
-                    "reasoningEffort": "off",
-                    "autonomyLevel": "off",
-                }
-            ],
-        )
+        self.assertEqual(updates, [OFF_SETTINGS])
         self.assertEqual(len(self.hub.spawns()), 1)
         self.assertEqual(len(self.hub.inits()), 1)
         self.assertEqual(

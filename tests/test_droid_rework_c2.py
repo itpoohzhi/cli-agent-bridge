@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import queue
-import threading
-from types import SimpleNamespace
-from typing import cast
+from typing import Any
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -18,12 +16,14 @@ from tools import droid_image, droid_probe_config, receipt_schema
 
 
 @pytest.fixture(autouse=True)
-def available_test_backend(monkeypatch):
+def available_test_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server.BACKENDS.get("droid"), "preflight", lambda: (True, ""))
 
 
 @pytest.mark.parametrize("autonomy", [None, "", " ", "off", "low", "medium"])
-def test_safe_autonomy_at_http_boundary(route, monkeypatch, autonomy):
+def test_safe_autonomy_at_http_boundary(
+    route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, autonomy: str | None
+) -> None:
     monkeypatch.delenv("DROID_DEFAULT_AUTONOMY", raising=False)
     monkeypatch.delenv("DROID_ALLOW_HIGH_AUTONOMY", raising=False)
     monkeypatch.setattr(server.Handler, "_serve_json", Mock())
@@ -48,7 +48,9 @@ def test_safe_autonomy_at_http_boundary(route, monkeypatch, autonomy):
 
 
 @pytest.mark.parametrize("permission", [None, "0", "false", "garbage"])
-def test_high_autonomy_is_rejected_before_spawn(route, monkeypatch, permission):
+def test_high_autonomy_is_rejected_before_spawn(
+    route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, permission: str | None
+) -> None:
     if permission is None:
         monkeypatch.delenv("DROID_ALLOW_HIGH_AUTONOMY", raising=False)
     else:
@@ -75,7 +77,9 @@ def test_high_autonomy_is_rejected_before_spawn(route, monkeypatch, permission):
         ("off", "", "off"),
     ],
 )
-def test_configured_autonomy_default(monkeypatch, default, allow, want):
+def test_configured_autonomy_default(
+    monkeypatch: pytest.MonkeyPatch, default: str, allow: str, want: str
+) -> None:
     monkeypatch.setenv("DROID_DEFAULT_AUTONOMY", default)
     monkeypatch.setenv("DROID_ALLOW_HIGH_AUTONOMY", allow)
     assert server._default_autonomy() == want
@@ -84,7 +88,9 @@ def test_configured_autonomy_default(monkeypatch, default, allow, want):
 @pytest.mark.parametrize(
     "sid", ["panel-judge-k1", "JUDGE-k1", "seat-k1", "PANEL-JUDGE-K1"]
 )
-def test_judges_cannot_spawn_droid(route, monkeypatch, sid):
+def test_judges_cannot_spawn_droid(
+    route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, sid: str
+) -> None:
     monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
     spawn = Mock(side_effect=AssertionError("Процесс судьи не должен запускаться"))
     monkeypatch.setattr(server.subprocess, "Popen", spawn)
@@ -94,71 +100,12 @@ def test_judges_cannot_spawn_droid(route, monkeypatch, sid):
     spawn.assert_not_called()
 
 
-def test_custom_judge_prefixes(route, monkeypatch):
+def test_custom_judge_prefixes(
+    route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", " custom-, other- ")
     h = route({"model": "deepseek-v4.1-flash"}, {"X-Subagent-Id": "CUSTOM-1"})
     assert h._send.call_args.args[0] == 403
-
-
-@pytest.mark.parametrize(
-    "flag", ["autoRejectPermissionRequests", "disableBuiltinSkills"]
-)
-@pytest.mark.parametrize("value", [False, 0, 1, None, "true"])
-def test_security_flag_readback_fails_closed(flag, value):
-    with pytest.raises(server.RpcError, match=flag):
-        server.Run._check_flags({flag: value})
-
-
-@pytest.mark.parametrize(
-    "method",
-    [
-        "droid.request_permission",
-        "permission_request",
-        "request_permission",
-        "droid.session_notification",
-    ],
-)
-def test_incoming_permission_request_aborts_rpc(method):
-    proc = object.__new__(server.RpcProcess)
-    proc.protocol_version = ""
-    proc.server_requests = 0
-    proc.inbox = queue.Queue()
-    proc.inbox_bytes = 0
-    proc._inbox_lock = threading.Lock()
-    proc.overflowed = False
-    proc._respond = Mock()
-    proc.notify = Mock(return_value="r1")
-    frame = {
-        "method": method,
-        "params": {"notification": {"type": "permission_request"}},
-    }
-    if method != "droid.session_notification":
-        frame["id"] = "permission-1"
-    proc._on_message(frame)
-    proc._respond.assert_not_called()
-    with pytest.raises(server.RpcError, match="permission"):
-        proc.call("droid.add_user_message", {}, timeout=0.05)
-
-
-@pytest.mark.parametrize("kind", ["permission_request", "request_permission"])
-def test_permission_notification_aborts_run(kind):
-    run = object.__new__(server.Run)
-    run.sid = "sid"
-    run.armed = True
-    with pytest.raises(server.RpcError, match="permission"):
-        run._on_notif({"sessionId": "sid", "notification": {"type": kind}})
-
-
-def test_permission_during_restore_never_falls_back_to_replay():
-    run = object.__new__(server.Run)
-    run.plan = {"sid": "sid", "hash8": "hash"}
-    run.cancel = threading.Event()
-
-    def denied(*args):
-        raise server.RpcPermissionDenied("permission request forbidden")
-
-    with pytest.raises(server.RpcError, match="permission"):
-        run._load(cast(server.RpcProcess, cast(object, SimpleNamespace(call=denied))))
 
 
 @pytest.mark.parametrize(
@@ -175,12 +122,12 @@ def test_permission_during_restore_never_falls_back_to_replay():
         {"model": ["evil"]},
     ],
 )
-def test_receipt_qualified_models_strict_validation(qualified):
+def test_receipt_qualified_models_strict_validation(qualified: object) -> None:
     with pytest.raises(ValueError, match="qualified_models"):
         receipt_schema.validate_qualified_models(qualified, ["tool"])
 
 
-def test_qualified_models_are_in_policy_fingerprint():
+def test_qualified_models_are_in_policy_fingerprint() -> None:
     a = {"a": ["tool"], "b": ["tool", "second"]}
     b = {"a": ["tool", "second"], "b": ["tool"]}
     assert receipt_schema.tools_policy_digest(
@@ -194,7 +141,9 @@ def test_qualified_models_are_in_policy_fingerprint():
 
 
 @pytest.mark.parametrize("qualified", [None, [], ["tool"], "tool", 1])
-def test_invalid_qualified_models_raise_rpc_error(monkeypatch, qualified):
+def test_invalid_qualified_models_raise_rpc_error(
+    monkeypatch: pytest.MonkeyPatch, qualified: object
+) -> None:
     monkeypatch.setattr(server, "RECEIPT_REQUIRED", True)
     monkeypatch.setattr(
         server, "_load_receipt", lambda: ("", {"qualified_models": qualified})
@@ -209,18 +158,22 @@ def test_invalid_qualified_models_raise_rpc_error(monkeypatch, qualified):
 
 
 @pytest.mark.parametrize("extra", ["future:bogus", " :low", "future:nan"])
-def test_extra_model_invalid_effort_or_id(monkeypatch, extra):
+def test_extra_model_invalid_effort_or_id(
+    monkeypatch: pytest.MonkeyPatch, extra: str
+) -> None:
     monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", extra)
     with pytest.raises(droid_image.ProbeError):
         droid_probe_config.probe_models()
 
 
-def test_extra_model_strips_spaces(monkeypatch):
+def test_extra_model_strips_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", " future : low ")
     assert droid_probe_config.probe_models()["future"] == "low"
 
 
-def test_probe_uses_enabled_models_and_fleet_defaults(monkeypatch, tmp_path):
+def test_probe_uses_enabled_models_and_fleet_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     fleet = tmp_path / "fleet.json"
     fleet.write_text(
         json.dumps(
@@ -249,7 +202,9 @@ def test_probe_uses_enabled_models_and_fleet_defaults(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("data", ["{", "{}", '{"models": [{"backend":"droid"}]}'])
-def test_invalid_probe_fleet_is_probe_error(monkeypatch, tmp_path, data):
+def test_invalid_probe_fleet_is_probe_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, data: str
+) -> None:
     fleet = tmp_path / "fleet.json"
     fleet.write_text(data)
     monkeypatch.setenv("DROID_DSH_BRIDGE_FLEET", str(fleet))
@@ -258,18 +213,24 @@ def test_invalid_probe_fleet_is_probe_error(monkeypatch, tmp_path, data):
 
 
 @pytest.mark.parametrize("value", ["garbage", "nan", "inf", "-inf", "0", "-1"])
-def test_probe_timeout_validation_at_runtime(monkeypatch, value):
+def test_probe_timeout_validation_at_runtime(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
     monkeypatch.setenv("DROID_PROBE_TIMEOUT_S", value)
     with pytest.raises(droid_image.ProbeError, match="DROID_PROBE_TIMEOUT_S"):
         droid_image._get_probe_timeout_s()
 
 
-def test_probe_disk_profile_cleanup_and_per_model_readback(monkeypatch, tmp_path):
+def test_probe_disk_profile_cleanup_and_per_model_readback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(
         droid_image, "_probe_models", lambda: {"one": "off", "two": "high"}
     )
 
-    def probe(image, cwd, home, mid, effort):
+    def probe(
+        image: Path, cwd: Path, home: Path, mid: str, effort: str
+    ) -> tuple[str, set[str], set[str]]:
         assert not (cwd / "stale").exists()
         settings = home / ".factory/settings.json"
         assert json.loads(settings.read_text()) == receipt_schema.SETTINGS_PROFILE

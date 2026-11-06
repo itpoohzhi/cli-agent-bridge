@@ -243,9 +243,12 @@ def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
     import json
     from email.message import Message
     import server
+
     captured = []
+
     def _fake_passthrough(self, a, raw, req, model_id, _hub_auth_ok=False):
         captured.append((raw, req, model_id))
+
     monkeypatch.setattr(server.Handler, "_serve_passthrough", _fake_passthrough)
     monkeypatch.setattr(server, "_auth_ok", lambda _h: True)
     monkeypatch.setattr(server, "_enforce_forward_kill_switch", lambda: None)
@@ -258,10 +261,14 @@ def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
     }
     monkeypatch.setitem(server.FLEET["models"], "gpt-6.1-sol", model_cfg)
     adapter = object.__new__(server.PassthroughAdapter)
-    monkeypatch.setattr(server.BACKENDS, "get", lambda bid: adapter if bid == "codex-lb" else None)
+    monkeypatch.setattr(
+        server.BACKENDS, "get", lambda bid: adapter if bid == "codex-lb" else None
+    )
     instance = object.__new__(server.Handler)
     instance.headers = Message()
-    body = json.dumps({"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "hi"}]}).encode()
+    body = json.dumps(
+        {"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "hi"}]}
+    ).encode()
     instance.headers["Content-Length"] = str(len(body))
     instance.rfile = io.BytesIO(body)
     instance.wfile = io.BytesIO()
@@ -729,46 +736,31 @@ def test_preflight_ttl_failopen_and_budget(
         slow_read_done.set()
 
 
-def _preflight_handler(bypass: bool, model: str) -> Any:
-    from email.message import Message
-    import server
-    instance: Any = object.__new__(server.Handler)
-    instance.headers = Message()
-    body = json.dumps(
-        {"model": model, "messages": [{"role": "user", "content": "test"}]}
-    ).encode()
-    instance.headers["Content-Length"] = str(len(body))
-    instance.headers["X-Idempotency-Key"] = "idempotent-step"
-    if bypass:
-        instance.headers["X-Bypass-Model-Filter"] = "1"
-    instance.rfile = io.BytesIO(body)
-    instance.wfile = io.BytesIO()
-    instance.path = "/v1/chat/completions"
-    instance.client_address = ("127.0.0.1", 1)
-    instance.statuses = []
-    instance.send_response = instance.statuses.append
-    instance.send_header = lambda *_args: None
-    instance.end_headers = lambda: None
-    return instance
+from tests.gateway_policy_testlib import preflight_handler as _preflight_handler  # noqa: E402
 
 
 def test_gateway_preflight_bypass_and_idempotency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import server
+
     captured: list[tuple[bytes, dict]] = []
     hub_auth_ok: list[bool] = []
     checks: list[str] = []
+
     class Filter:
         def is_blocked(self, model: str) -> bool:
             checks.append(model)
             return True
+
     monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", Filter())
     monkeypatch.setattr(server, "_auth_ok", lambda _h: True)
     monkeypatch.setattr(server, "_enforce_forward_kill_switch", lambda: None)
+
     def _fake_passthrough(self, a, raw, req, model, _hub_auth_ok=False):
         hub_auth_ok.append(_hub_auth_ok)
         captured.append((raw, req))
+
     monkeypatch.setattr(server.Handler, "_serve_passthrough", _fake_passthrough)
     model = "gpt-6.1-terra"
     first = _preflight_handler(False, model)
@@ -782,8 +774,10 @@ def test_gateway_preflight_bypass_and_idempotency(
     assert captured[0][1]["step_job_id"] == "idempotent-step"
     assert json.loads(captured[0][0])["step_job_id"] == "idempotent-step"
     second = _preflight_handler(True, model)
+
     def resolve(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("routing reached")
+
     monkeypatch.setattr(server, "_resolve_model_alias", resolve)
     with pytest.raises(RuntimeError, match="routing reached"):
         second.do_POST()

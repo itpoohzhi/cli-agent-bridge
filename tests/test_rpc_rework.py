@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import no_leaks as no_leaks  # noqa: E402
 from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402
 from rpc_testlib import FakeClock, RpcCase  # noqa: E402
 from test_images_strict import ImageCase  # noqa: E402
@@ -37,13 +38,6 @@ def post_safely(case, body, timeout=60.0):
         return case._post_json(body, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - диагностический разбор теста
         return repr(exc), None
-
-
-def no_leaks(case):
-    """Процессы/слоты/билеты возвращены: P == число живых процессов."""
-    return wait_until(
-        lambda: server.POOL.used == len(server._rpc_procs) and not server.POOL.queue
-    )
 
 
 class TestTagsSchema(RpcCase):
