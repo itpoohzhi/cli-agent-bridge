@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -24,7 +25,9 @@ EXPECTED = {"modelId": "test", "reasoningEffort": "high", "autonomyLevel": "high
 def test_initialize_requires_nonempty_sid_and_settings(result: dict) -> None:
     rpc = SimpleNamespace(call=lambda *_: (result, []))
     with pytest.raises(droid_image.ProbeError, match="initialize_session"):
-        droid_image._initialize_probe(rpc, Path("/fake"), EXPECTED)
+        droid_image._initialize_probe(
+            cast(droid_image._Rpc, cast(object, rpc)), Path("/fake"), EXPECTED
+        )
 
 
 @pytest.mark.parametrize(
@@ -33,7 +36,7 @@ def test_initialize_requires_nonempty_sid_and_settings(result: dict) -> None:
 def test_tool_registry_requires_nonempty_string_ids(listed: object) -> None:
     rpc = SimpleNamespace(call=lambda *_: ({"tools": listed}, []))
     with pytest.raises(droid_image.ProbeError, match="list_tools"):
-        droid_image._probe_tool_ids(rpc)
+        droid_image._probe_tool_ids(cast(droid_image._Rpc, cast(object, rpc)))
 
 
 def test_missing_inline_readback_waits_for_notification() -> None:
@@ -44,7 +47,9 @@ def test_missing_inline_readback_waits_for_notification() -> None:
             calls.append("wait") or {"disabledToolIds": ["Read"], **EXPECTED}
         ),
     )
-    confirmed = droid_image._disable_probe_tools(rpc, {"Read"}, EXPECTED)
+    confirmed = droid_image._disable_probe_tools(
+        cast(droid_image._Rpc, cast(object, rpc)), {"Read"}, EXPECTED
+    )
     assert calls == ["wait"]
     assert confirmed == {"modelId", "reasoningEffort", "autonomyLevel"}
 
@@ -52,6 +57,7 @@ def test_missing_inline_readback_waits_for_notification() -> None:
 def test_different_model_protocols_reject_qualification(
     monkeypatch: pytest.MonkeyPatch,
     fake_probes: type[FakeRpc],
+    tmp_path: Path,
 ) -> None:
     def rpc(image: Path, cwd: Path, home: Path) -> FakeRpc:
         instance = fake_probes(image, cwd, home)
@@ -63,7 +69,7 @@ def test_different_model_protocols_reject_qualification(
     monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", "gpt-6.1-sol")
     monkeypatch.setattr(droid_image, "_Rpc", rpc)
     with pytest.raises(droid_image.ProbeError, match="разные factoryProtocolVersion"):
-        droid_image.run_probes(Path("/fake/droid"), Path("/fake/workspace"))
+        droid_image.run_probes(Path("/fake/droid"), tmp_path)
     assert all(instance.closed for instance in fake_probes.instances)
 
 
@@ -98,3 +104,23 @@ def test_empty_droid_fleet_cannot_be_qualified(
     monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", "")
     with pytest.raises(droid_image.ProbeError, match="отсутствуют модели droid"):
         droid_image._probe_models()
+
+
+def test_probe_rejects_disk_profile_tampering(monkeypatch, tmp_path):
+    monkeypatch.setattr(droid_image, "_probe_models", lambda: {"one": "off"})
+
+    def probe(image, cwd, home, mid, effort):
+        (home / ".factory/settings.json").write_text("{}")
+        return "protocol", {"tool"}, set()
+
+    monkeypatch.setattr(droid_image, "_probe_model", probe)
+    with pytest.raises(droid_image.ProbeError, match="settings.json"):
+        droid_image.run_probes(Path("/fake/droid"), tmp_path)
+    assert not (tmp_path / "runtime/probe-home").exists()
+
+
+def test_probe_timeout_read_at_call_time(monkeypatch):
+    monkeypatch.setenv("DROID_PROBE_TIMEOUT_S", "2.75")
+    assert droid_image._get_probe_timeout_s() == 2.75
+    monkeypatch.setenv("DROID_PROBE_TIMEOUT_S", "")
+    assert droid_image._get_probe_timeout_s() == 30.0

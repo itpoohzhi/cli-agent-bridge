@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -401,8 +402,14 @@ class TestDeltaAndIsolation(RpcCase):
 
     def test_tm007_settings_update_readback_and_no_silent_substitution(self):
         """TM-007: смена model/effort/autonomy на границе хода: update+read-back; подмена модели отвергается."""
+        changes = pytest.MonkeyPatch()
+        changes.setenv("DROID_ALLOW_HIGH_AUTONOMY", "1")
+        self.addCleanup(changes.undo)
         chat = self.conv(
-            "chat-settings", model="deepseek-v4.1-flash", reasoning_effort="high"
+            "chat-settings",
+            model="deepseek-v4.1-flash",
+            reasoning_effort="high",
+            autonomy="high",
         )
         self.assertEqual(chat.ask("q0")[0], 200)
         init = self.hub.inits()[0]["params"]
@@ -423,9 +430,16 @@ class TestDeltaAndIsolation(RpcCase):
             for r in self.hub.rpcs("droid.update_session_settings")
             if "reasoningEffort" in r["params"]
         ]
-        self.assertEqual(updates, [
-            {"modelId": "deepseek-v4.1-flash", "reasoningEffort": "off", "autonomyLevel": "off"}
-        ])
+        self.assertEqual(
+            updates,
+            [
+                {
+                    "modelId": "deepseek-v4.1-flash",
+                    "reasoningEffort": "off",
+                    "autonomyLevel": "off",
+                }
+            ],
+        )
         self.assertEqual(len(self.hub.spawns()), 1)
         self.assertEqual(len(self.hub.inits()), 1)
         self.assertEqual(

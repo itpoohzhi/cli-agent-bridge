@@ -30,11 +30,44 @@ def json_digest(obj: Any) -> str:
     ).hexdigest()
 
 
-def tools_policy_digest(disabled_ids: list) -> str:
-    """Отпечаток политики tools: идентификатор политики + набор отключённых id (читают мост и установщик)."""
-    return json_digest(
-        {"policy": TOOLS_POLICY, "disabled_tool_ids": sorted(map(str, disabled_ids))}
-    )
+def validate_qualified_models(
+    qualified: object, disabled_ids: list
+) -> dict[str, list[str]]:
+    """Строгая проверка каталогов моделей, без приведения неверных типов."""
+    if not isinstance(qualified, dict) or not qualified:
+        raise ValueError(
+            "receipt missing or invalid qualified_models, re-run droid_image.py"
+        )
+    allowed = set(disabled_ids)
+    for model, tools in qualified.items():
+        if (
+            not isinstance(model, str)
+            or not model
+            or not isinstance(tools, list)
+            or not tools
+            or any(not isinstance(tool, str) or tool not in allowed for tool in tools)
+        ):
+            raise ValueError(
+                "receipt missing or invalid qualified_models, re-run droid_image.py"
+            )
+    return qualified
+
+
+def tools_policy_digest(disabled_ids: list, qualified_models: object = None) -> str:
+    """Schema-2 расширение: отпечаток включает канонические каталоги моделей.
+
+    Старые receipt без каталогов должны быть перевыпущены, а не приняты молча.
+    """
+    policy: dict[str, Any] = {
+        "policy": TOOLS_POLICY,
+        "disabled_tool_ids": sorted(map(str, disabled_ids)),
+    }
+    if qualified_models is not None:
+        qualified = validate_qualified_models(qualified_models, disabled_ids)
+        policy["qualified_models"] = {
+            mid: sorted(tools) for mid, tools in qualified.items()
+        }
+    return json_digest(policy)
 
 
 def settings_profile_digest() -> str:

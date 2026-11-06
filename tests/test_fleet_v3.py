@@ -116,6 +116,9 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "droid")
         self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "droid")
         self.assertIn("deepseek-v4.1-flash", catalog["models"])
+        self.assertEqual(
+            catalog["models"]["deepseek-v4.1-flash"]["default_effort"], "off"
+        )
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")

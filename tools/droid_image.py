@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import queue
 import shutil
@@ -23,11 +24,11 @@ from pathlib import Path
 from typing import IO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import receipt_schema as schema  # noqa: E402  - общая схема без импорта server.py
-from droid_probe_config import ProbeError, probe_models as _probe_models  # noqa: E402
+from tools.droid_probe_config import ProbeError, probe_models as _probe_models  # noqa: E402
 
-PROBE_TIMEOUT_S = float(os.environ.get("DROID_PROBE_TIMEOUT_S", "30.0"))
 PROBE_AUTONOMY = "high"
 READBACK_KEYS = (
     "modelId",
@@ -37,6 +38,19 @@ READBACK_KEYS = (
     "disableBuiltinSkills",
     "autoRejectPermissionRequests",
 )
+
+
+def _get_probe_timeout_s() -> float:
+    """Таймаут одного RPC; пять последовательных моделей умножают бюджет проб."""
+    try:
+        value = float(os.environ.get("DROID_PROBE_TIMEOUT_S", "").strip() or "30.0")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("non-positive or non-finite")
+    except ValueError as exc:
+        raise ProbeError(
+            "DROID_PROBE_TIMEOUT_S должен быть конечным числом > 0"
+        ) from exc
+    return value
 
 
 def _settings_from_notes(notes: list) -> dict | None:
@@ -163,10 +177,9 @@ class _Rpc:
                 self.inbox.put(msg)
         self.inbox.put(None)
 
-    def call(
-        self, method: str, params: dict, timeout: float = PROBE_TIMEOUT_S
-    ) -> tuple:
+    def call(self, method: str, params: dict, timeout: float | None = None) -> tuple:
         """-> (result, нотификации за время ожидания)."""
+        timeout = _get_probe_timeout_s() if timeout is None else timeout
         self._next += 1
         rid = f"p{self._next}"
         frame = {
@@ -194,6 +207,14 @@ class _Rpc:
                 raise ProbeError(f"{method}: нет ответа за {timeout:g} с")
             if msg is None:
                 raise ProbeError(f"{method}: образ завершился до ответа")
+            params = msg.get("params")
+            note = params.get("notification") if isinstance(params, dict) else None
+            event_type = note.get("type") if isinstance(note, dict) else ""
+            if (
+                "permission" in str(msg.get("method", "")).lower()
+                or "permission" in str(event_type).lower()
+            ):
+                raise ProbeError("permission request during qualification")
             if msg.get("id") == rid and ("result" in msg or "error" in msg):
                 if msg.get("error") is not None:
                     raise ProbeError(f"{method}: {str(msg['error'])[:200]}")
@@ -351,12 +372,39 @@ def run_probes(image: Path, workspace: Path) -> dict:
     """Квалифицировать модели и объединить только подтверждённо отключённые tools."""
     runtime = workspace / "runtime"
     home, cwd = runtime / "probe-home", runtime / "probe-cwd"
-    _ensure_private_chain(home, workspace)
-    _ensure_private_chain(cwd, workspace)
     models = _probe_models()
-    facts = [
-        _probe_model(image, cwd, home, mid, effort) for mid, effort in models.items()
-    ]
+    facts = []
+    for mid, effort in models.items():
+        # Только каталоги этого прогона; состояние модели не переносится в следующую.
+        try:
+            for directory in (home, cwd):
+                if directory.exists():
+                    shutil.rmtree(directory)
+                _ensure_private_chain(directory, workspace)
+            settings_dir = home / ".factory"
+            _ensure_private_chain(settings_dir, workspace)
+            settings_path = settings_dir / "settings.json"
+            settings_path.write_text(
+                json.dumps(schema.SETTINGS_PROFILE), encoding="utf-8"
+            )
+            settings_path.chmod(0o600)
+            facts.append(_probe_model(image, cwd, home, mid, effort))
+            try:
+                written = json.loads(settings_path.read_text(encoding="utf-8"))
+                _verify_settings(
+                    "settings.json",
+                    written,
+                    schema.SETTINGS_PROFILE,
+                    required=tuple(schema.SETTINGS_PROFILE),
+                )
+            except (OSError, ValueError) as exc:
+                raise ProbeError(
+                    "settings.json: профиль на диске не подтверждён"
+                ) from exc
+        finally:
+            for directory in (home, cwd):
+                if directory.exists():
+                    shutil.rmtree(directory)
     if len({fact[0] for fact in facts}) != 1:
         raise ProbeError("spawn: модели сообщили разные factoryProtocolVersion")
     confirmed = set.intersection(*(fact[2] for fact in facts))
@@ -364,6 +412,10 @@ def run_probes(image: Path, workspace: Path) -> dict:
         "protocol_version": facts[0][0],
         "disabled_tool_ids": sorted(set.union(*(fact[1] for fact in facts))),
         "qualified_models": {mid: sorted(fact[1]) for mid, fact in zip(models, facts)},
+        "not_confirmed_readback_by_model": {
+            mid: sorted(set(schema.SETTINGS_PROFILE) - fact[2])
+            for mid, fact in zip(models, facts)
+        },
         "probes": {name: "ok" for name in schema.RECEIPT_PROBES},
         "readback": {
             "confirmed": sorted(confirmed),
@@ -402,7 +454,9 @@ def install_image(source: Path, workspace: Path) -> dict:
         "tools_policy": {
             "policy": schema.TOOLS_POLICY,
             "disabled_tool_ids": facts["disabled_tool_ids"],
-            "digest": schema.tools_policy_digest(facts["disabled_tool_ids"]),
+            "digest": schema.tools_policy_digest(
+                facts["disabled_tool_ids"], facts["qualified_models"]
+            ),
         },
         "settings_profile": {
             "profile": schema.SETTINGS_PROFILE,
@@ -411,6 +465,7 @@ def install_image(source: Path, workspace: Path) -> dict:
         },
         "probes": facts["probes"],
         "qualified_models": facts["qualified_models"],
+        "not_confirmed_readback_by_model": facts["not_confirmed_readback_by_model"],
         "source": {
             "path": str(source),
             "mtime_ns": snapshot.st_mtime_ns,

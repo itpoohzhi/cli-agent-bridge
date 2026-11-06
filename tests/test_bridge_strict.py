@@ -88,7 +88,9 @@ def test_auth_ok_rejects_patched_module_keys_with_isolated_cache(tmp_path, monke
 
     monkeypatch.setattr(server, "AUTH_KEY", "module-auth-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "module-bridge-key")
-    cache = server.TokenCache(path=tmp_path / "missing", environ={"BRIDGE_KEY": "cache-key"})
+    cache = server.TokenCache(
+        path=tmp_path / "missing", environ={"BRIDGE_KEY": "cache-key"}
+    )
     monkeypatch.setattr(server, "TOKEN_CACHE", cache)
     assert not cache.is_valid("module-auth-key")
     assert not cache.is_valid("module-bridge-key")
@@ -101,7 +103,9 @@ def test_auth_ok_rejects_patched_module_keys_with_isolated_cache(tmp_path, monke
         handler.headers = message
         return handler
 
-    assert not server._auth_ok(make_handler({"Authorization": "Bearer module-auth-key"}))
+    assert not server._auth_ok(
+        make_handler({"Authorization": "Bearer module-auth-key"})
+    )
     assert not server._auth_ok(make_handler({"Authorization": "module-bridge-key"}))
     assert not server._auth_ok(make_handler({"x-api-key": "module-auth-key"}))
     assert server._auth_ok(make_handler({"Authorization": "Bearer cache-key"}))
@@ -217,8 +221,11 @@ def test_token_cache_missing_or_unreadable_file_fails_closed(tmp_path):
     cache = server.TokenCache(path=tmp_path, environ={})
     assert not cache.is_valid("anything")
 
+
 def test_token_cache_missing_from_start_accepts_env_key(tmp_path):
-    cache = server.TokenCache(path=tmp_path / "missing", environ={"BRIDGE_KEY": "env-only"})
+    cache = server.TokenCache(
+        path=tmp_path / "missing", environ={"BRIDGE_KEY": "env-only"}
+    )
     assert cache.is_valid("env-only")
     assert not cache.is_valid("anything")
 
@@ -243,7 +250,9 @@ def test_token_cache_utf8_after_rotation_rejects_old_and_new(tmp_path, monkeypat
         handler = _make_bearer_handler(token)
         handler.path = "/v1/models"
 
-        def _fake_send(code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
+        def _fake_send(
+            code: int, payload: dict, extra_headers: dict[str, str] | None = None
+        ) -> None:
             seen.append(code)
 
         handler._send = _fake_send
@@ -280,7 +289,9 @@ def test_token_cache_unlink_after_seen_rejects_env_old_key(tmp_path, monkeypatch
     http_handler = _make_bearer_handler("old-key")
     http_handler.path = "/v1/models"
 
-    def _fake_send(code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
+    def _fake_send(
+        code: int, payload: dict, extra_headers: dict[str, str] | None = None
+    ) -> None:
         seen.append(code)
 
     http_handler._send = _fake_send
@@ -344,10 +355,10 @@ def test_passthrough_strips_hub_credentials_with_captured_decision_after_rotatio
 ):
     path = tmp_path / ".env"
     path.write_text("BRIDGE_KEY=old-key\n")
-    monkeypatch.setattr(
-        server, "TOKEN_CACHE", server.TokenCache(path=path, environ={})
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=path, environ={}))
+    handler = _make_bearer_handler(
+        "old-key", {"X-Api-Key": "old-key", "X-Other": "keep"}
     )
-    handler = _make_bearer_handler("old-key", {"X-Api-Key": "old-key", "X-Other": "keep"})
     hub_auth_ok = server._auth_ok(handler)
     assert hub_auth_ok
     path.write_text("BRIDGE_KEY=new-key-longer\n")
@@ -362,13 +373,13 @@ def test_passthrough_retains_credentials_for_deferred_or_upstream_key(
 ):
     path = tmp_path / ".env"
     path.write_text("BRIDGE_KEY=hub-key\n")
-    monkeypatch.setattr(
-        server, "TOKEN_CACHE", server.TokenCache(path=path, environ={})
-    )
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=path, environ={}))
     deferred = _make_bearer_handler("provider-key", {"X-Api-Key": "provider-key"})
     hub_auth_ok = server._auth_ok(deferred)
     assert not hub_auth_ok
-    headers = _capture_passthrough(monkeypatch, deferred, _CaptureAdapter(), hub_auth_ok)
+    headers = _capture_passthrough(
+        monkeypatch, deferred, _CaptureAdapter(), hub_auth_ok
+    )
     lowered = {k.lower(): v for k, v in headers.items()}
     assert lowered["authorization"] == "Bearer provider-key"
     assert lowered["x-api-key"] == "provider-key"
@@ -377,7 +388,10 @@ def test_passthrough_retains_credentials_for_deferred_or_upstream_key(
     headers = _capture_passthrough(
         monkeypatch, hubbed, _CaptureAdapter(upstream="upstream-key"), True
     )
-    assert {k.lower(): v for k, v in headers.items()}["authorization"] == "Bearer hub-key"
+    assert {k.lower(): v for k, v in headers.items()}[
+        "authorization"
+    ] == "Bearer hub-key"
+
 
 def test_token_cache_existing_file_without_bridge_keys_fails_closed(tmp_path):
     path = tmp_path / ".env"
@@ -387,7 +401,10 @@ def test_token_cache_existing_file_without_bridge_keys_fails_closed(tmp_path):
     assert not cache.is_valid("value")
     assert not cache.is_valid("anything")
 
-def test_token_cache_unreadable_path_without_file_keys_fails_closed(tmp_path, monkeypatch):
+
+def test_token_cache_unreadable_path_without_file_keys_fails_closed(
+    tmp_path, monkeypatch
+):
     """Unreadable path после наблюдения файла -> fail-closed без env/module."""
     monkeypatch.setattr(server, "AUTH_KEY", "module-auth-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "module-bridge-key")
@@ -400,6 +417,7 @@ def test_token_cache_unreadable_path_without_file_keys_fails_closed(tmp_path, mo
     assert cache._file_seen is True
     assert cache._signature is None
 
+
 def test_token_cache_utf8_corruption_rejects_file_key_and_fails_closed(tmp_path):
     path = tmp_path / ".env"
     path.write_text("BRIDGE_KEY=file-key\n")
@@ -408,6 +426,7 @@ def test_token_cache_utf8_corruption_rejects_file_key_and_fails_closed(tmp_path)
     path.write_bytes(b"\xff")
     assert not cache.is_valid("file-key")
     assert not cache.is_valid("env-key")
+
 
 def test_token_cache_permission_denied_rejects_file_keys_and_fails_closed(tmp_path):
     from unittest.mock import patch
@@ -425,7 +444,9 @@ def test_token_cache_permission_denied_rejects_file_keys_and_fails_closed(tmp_pa
 
 @pytest.mark.parametrize("fail_at", ["stat", "read_text"])
 @pytest.mark.parametrize(
-    "exc", [PermissionError("denied"), OSError("io error")], ids=["permission", "oserror"]
+    "exc",
+    [PermissionError("denied"), OSError("io error")],
+    ids=["permission", "oserror"],
 )
 def test_token_cache_stat_or_read_error_clears_state_immediately(
     tmp_path, monkeypatch, fail_at, exc
@@ -450,7 +471,9 @@ def test_token_cache_stat_or_read_error_clears_state_immediately(
         assert cache._file_seen is True
 
 
-def test_token_cache_chmod_only_change_bypasses_signature_fast_path(tmp_path, monkeypatch):
+def test_token_cache_chmod_only_change_bypasses_signature_fast_path(
+    tmp_path, monkeypatch
+):
     import os
     from unittest.mock import patch
 
@@ -882,10 +905,14 @@ class TestEffortAndModel(BridgeCase):
             "clamp reasoning_effort 'xhigh' -> 'high' for model claude-sonnet-5-5",
             self._last_lines,
         )
-        status, init, source, _ = self._post_logged(chat_body(model="claude-sonnet-5-5", effort="HIGH"))
+        status, init, source, _ = self._post_logged(
+            chat_body(model="claude-sonnet-5-5", effort="HIGH")
+        )
         self.assertEqual(status, 200)
         self.assertEqual(init["reasoningEffort"], "high")
-        self.assertFalse(any(ln.startswith("clamp reasoning_effort") for ln in self._last_lines))
+        self.assertFalse(
+            any(ln.startswith("clamp reasoning_effort") for ln in self._last_lines)
+        )
 
     def test_nonstring_effort_rejected(self):
         for bad in (5, ["high"], {"level": "high"}, True):
@@ -929,15 +956,18 @@ class TestEffortAndModel(BridgeCase):
         self.assertEqual(init["reasoningEffort"], "high")
         self.assertEqual(source, "request")
 
-    def test_autonomy_default_is_high(self):
+    def test_autonomy_default_is_off(self):
         status, init, _, autonomy_source = self._post_logged(
             chat_body(model="claude-sonnet-5-5")
         )
         self.assertEqual(status, 200)
-        self.assertEqual(init["autonomyLevel"], "high")
+        self.assertEqual(init["autonomyLevel"], "off")
         self.assertEqual(autonomy_source, "default")
 
     def test_autonomy_levels_accepted(self):
+        changes = pytest.MonkeyPatch()
+        changes.setenv("DROID_ALLOW_HIGH_AUTONOMY", "1")
+        self.addCleanup(changes.undo)
         for level in ("low", "medium", "high", "off"):
             status, init, _, autonomy_source = self._post_logged(
                 chat_body(model="deepseek-v4.1-flash", effort="max", autonomy=level)

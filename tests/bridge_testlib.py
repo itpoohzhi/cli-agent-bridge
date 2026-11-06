@@ -241,6 +241,11 @@ def make_receipt(image_path, digest, **override):
     import fake_droid
 
     ids = list(fake_droid.DEFAULT_TOOLS)
+    qualified = {
+        mid: sorted(ids)
+        for mid, model in server.FLEET["models"].items()
+        if model.get("backend") == "droid"
+    }
     receipt = {
         "schema": server.RECEIPT_SCHEMA,
         "image_path": str(image_path),
@@ -252,15 +257,14 @@ def make_receipt(image_path, digest, **override):
         "tools_policy": {
             "policy": server.TOOLS_POLICY,
             "disabled_tool_ids": sorted(ids),
-            "digest": server.tools_policy_digest(ids),
+            "digest": server.tools_policy_digest(ids, qualified),
         },
         "settings_profile": {
             "profile": dict(server.SETTINGS_PROFILE),
             "digest": server.settings_profile_digest(),
         },
         "probes": {name: "ok" for name in server.RECEIPT_PROBES},
-        "qualified_models": {mid: sorted(ids) for mid, model in server.FLEET["models"].items()
-                             if model.get("backend") == "droid"},
+        "qualified_models": qualified,
     }
     receipt.update(override)
     return receipt
@@ -369,6 +373,8 @@ def pid_alive(pid):
 class BridgeCase(unittest.TestCase):
     """Сервер на свободном порту с подменённым Run и временным workspace."""
 
+    _http_thread: threading.Thread | None = None
+
     def setUp(self) -> None:
         self._save_server()
         self.addCleanup(self._restore_server)
@@ -379,7 +385,9 @@ class BridgeCase(unittest.TestCase):
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
-        self._http_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._http_thread = threading.Thread(
+            target=self.httpd.serve_forever, daemon=True
+        )
         self._http_thread.start()
 
     def _save_server(self) -> None:
@@ -419,7 +427,8 @@ class BridgeCase(unittest.TestCase):
         server.LAUNCHER = str(self.hub.launcher)
         server.AUTH_KEY = "test-key"
         server.TOKEN_CACHE = server.TokenCache(
-            path=base / ".env", environ={"BRIDGE_KEY": "test-key"},
+            path=base / ".env",
+            environ={"BRIDGE_KEY": "test-key"},
         )
         server.WORKSPACE = base / "workspace"
         server.WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -440,6 +449,7 @@ class BridgeCase(unittest.TestCase):
         server.RECEIPT_REQUIRED = False
         server._sleep = lambda _seconds: None
         server.INTERRUPT_GRACE_S = 1.0
+
     def tearDown(self):
         self.httpd.shutdown()
         self._http_thread.join()

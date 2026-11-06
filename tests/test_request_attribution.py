@@ -41,7 +41,14 @@ def route(monkeypatch, tmp_path):
     """Выполнить do_POST без сокета, сохранив наблюдаемую границу адаптера."""
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
-    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-route.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
+    monkeypatch.setattr(
+        server,
+        "TOKEN_CACHE",
+        server.TokenCache(
+            path=tmp_path / "missing-route.env",
+            environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"},
+        ),
+    )
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
     monkeypatch.setattr(server, "_budget", server._ByteBudget(1_000_000))
@@ -135,7 +142,14 @@ def wire(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
-    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-wire.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
+    monkeypatch.setattr(
+        server,
+        "TOKEN_CACHE",
+        server.TokenCache(
+            path=tmp_path / "missing-wire.env",
+            environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"},
+        ),
+    )
     monkeypatch.setattr(server, "_log", logs.append)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
@@ -392,6 +406,21 @@ def test_log_lines_contain_ids(wire, monkeypatch, tmp_path):
             and "request_id=req_cli_alias" in line
             for line in wire.logs
         )
+        status, _, body = wire.call(
+            {
+                "model": "deepseek-v4.1-flash",
+                "messages": [{"role": "user", "content": "default"}],
+            },
+            {"X-Request-Id": "req_deepseek_default"},
+        )
+        assert status == 200, body
+        assert any(
+            line.startswith(
+                "exec model=deepseek-v4.1-flash effort=off effort_source=default autonomy=off autonomy_source=default"
+            )
+            and "request_id=req_deepseek_default" in line
+            for line in wire.logs
+        )
     finally:
         server._reset_rpc_state()
 
@@ -419,8 +448,7 @@ def test_effort_alias_resolves_passthrough(wire, alias):
 
 def test_effort_alias_keeps_explicit_effort(wire):
     assert (
-        wire.call({"model": "gpt-6.1-terra-high", "reasoning_effort": "low"})[0]
-        == 200
+        wire.call({"model": "gpt-6.1-terra-high", "reasoning_effort": "low"})[0] == 200
     )
     assert json.loads(wire.records[-1][1])["reasoning_effort"] == "low"
 

@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -279,6 +280,7 @@ class TestSettingsFailClosed(RpcCase):
                 self.assertEqual(status, 502, body)
                 self.assertEqual(len(self.hub.rpcs("droid.add_user_message")), before)
                 self.assertTrue(no_leaks(self))
+
     def test_rw005_positive_control_with_echoed_flags(self):
         """RW-005: корректный read-back (включая эхо флагов) ход пропускает."""
         self.hub.configure(echo_flags=True)
@@ -374,6 +376,7 @@ class TestDroidImageTool(RpcCase):
         self.assertEqual(
             self.hub.spawns()[-1]["droid_bin"], os.path.realpath(str(image))
         )  # [0] — зонд квалификации
+
 
 class TestByteBudgets(RpcCase):
     """RW-008: байтовые лимиты и предусмотренные отказы с возвратом ресурсов."""
@@ -601,7 +604,9 @@ class TestRpcWriteDeadline(RpcCase):
     def _stalled_request(self, results):
         self.hub.configure(stall_after=0)
         body = dict(BODY, messages=[msg(self.BIG, "system"), msg("hi")])
-        thread = threading.Thread(target=lambda: results.update(r=post_safely(self, body, 5)), daemon=True)
+        thread = threading.Thread(
+            target=lambda: results.update(r=post_safely(self, body, 5)), daemon=True
+        )
         self.addCleanup(thread.join, 30)
         thread.start()
         self.assertTrue(wait_until(lambda: len(self.hub.spawns()) == 1, timeout=15))

@@ -42,7 +42,9 @@ def test_subscription_catalog(model_id: str, efforts: tuple[str, ...]) -> None:
     model = catalog["models"][model_id]
     assert model["backend"] == "droid"
     assert model["efforts"] == list(efforts)
-    assert model["default_effort"] == "high"
+    assert model["default_effort"] == (
+        "off" if model_id == "deepseek-v4.1-flash" else "high"
+    )
     assert model["name"].endswith("(Droid bridge)")
     assert server.BACKENDS.adapter_for_model(model_id).id == "droid"
 
@@ -180,7 +182,6 @@ def fake_probes(monkeypatch: pytest.MonkeyPatch) -> type[FakeRpc]:
 
     monkeypatch.setattr(FakeRpc, "instances", [])
     monkeypatch.setattr(droid_image, "_Rpc", FakeRpc)
-    monkeypatch.setattr(droid_image, "_ensure_private_chain", lambda *args: None)
     monkeypatch.setattr(droid_image.subprocess, "Popen", forbidden)
     monkeypatch.setattr(socket, "socket", forbidden)
     monkeypatch.setattr(droid_image.time, "sleep", forbidden)
@@ -197,16 +198,14 @@ def started_models(rpc_type: type[FakeRpc]) -> list[str]:
 
 
 def test_probes_union_all_model_tools(
-    monkeypatch: pytest.MonkeyPatch, fake_probes: type[FakeRpc]
+    monkeypatch: pytest.MonkeyPatch, fake_probes: type[FakeRpc], tmp_path: Path
 ) -> None:
     monkeypatch.delenv("DROID_EXTRA_PROBE_MODELS", raising=False)
-    facts = droid_image.run_probes(Path("/fake/droid"), Path("/fake/workspace"))
+    facts = droid_image.run_probes(Path("/fake/droid"), tmp_path)
     assert facts["disabled_tool_ids"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
     assert started_models(fake_probes) == list(DROID_MODEL_IDS)
     assert set(facts["qualified_models"]) == set(DROID_MODEL_IDS)
-    assert facts["qualified_models"]["gpt-6.1-sol"] == sorted(
-        [*BASE_TOOLS, EXTRA_TOOL]
-    )
+    assert facts["qualified_models"]["gpt-6.1-sol"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
     initializes = [
         params
         for rpc in fake_probes.instances
@@ -249,30 +248,31 @@ def test_configured_probe_models_are_deduplicated(
     fake_probes: type[FakeRpc],
     extra_models: str,
     expected: list[str],
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", extra_models)
-    facts = droid_image.run_probes(Path("/fake/droid"), Path("/fake/workspace"))
+    facts = droid_image.run_probes(Path("/fake/droid"), tmp_path)
     assert started_models(fake_probes) == [*DROID_MODEL_IDS, *expected]
     assert facts["disabled_tool_ids"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
     assert all(rpc.closed for rpc in fake_probes.instances)
 
 
 def test_bad_extra_probe_fails_closed(
-    monkeypatch: pytest.MonkeyPatch, fake_probes: type[FakeRpc]
+    monkeypatch: pytest.MonkeyPatch, fake_probes: type[FakeRpc], tmp_path: Path
 ) -> None:
     monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", "gpt-6.1-sol")
     monkeypatch.setattr(fake_probes, "invalid_model", "gpt-6.1-sol")
     with pytest.raises(droid_image.ProbeError, match="list_tools"):
-        droid_image.run_probes(Path("/fake/droid"), Path("/fake/workspace"))
+        droid_image.run_probes(Path("/fake/droid"), tmp_path)
     assert all(rpc.closed for rpc in fake_probes.instances)
 
 
 def test_tools_must_be_confirmed_disabled(
-    monkeypatch: pytest.MonkeyPatch, fake_probes: type[FakeRpc]
+    monkeypatch: pytest.MonkeyPatch, fake_probes: type[FakeRpc], tmp_path: Path
 ) -> None:
     monkeypatch.setattr(fake_probes, "omit_disabled", True)
     with pytest.raises(droid_image.ProbeError, match="отключение tools"):
-        droid_image.run_probes(Path("/fake/droid"), Path("/fake/workspace"))
+        droid_image.run_probes(Path("/fake/droid"), tmp_path)
     assert all(rpc.closed for rpc in fake_probes.instances)
 
 
@@ -284,4 +284,4 @@ def test_probe_timeout_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.PROBE_TIMEOUT_S == 2.75
+    assert module._get_probe_timeout_s() == 2.75
