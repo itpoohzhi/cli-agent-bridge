@@ -28,6 +28,7 @@ import server  # noqa: E402
 from core.backend_adapter import TurnResult  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
 from adapters.passthrough_adapter import (  # noqa: E402
+    _TimedSseReader,
     AccumulatorOverflow,
     ClientGone,
     PassthroughAdapter,
@@ -2509,3 +2510,336 @@ class TestDirectLoopbackValidation(unittest.TestCase):
         for host in ("127.0.0.1", "localhost"):
             adapter = PassthroughAdapter("codex", {"base_url": f"http://{host}:2455/v1"}, dict)
             self.assertEqual((adapter._host, adapter._port), (host, 2455))
+
+
+# ---- ADR-0015 / VER-001: non-stream liveness, конфигурация и окна relay_sse ---------------
+import time  # noqa: E402
+
+from core.cli_runtime_config import NonstreamConfig  # noqa: E402
+from core.liveness_signals import LivenessWindow, WindowSpec  # noqa: E402
+from core.runtime_env import ConfigError  # noqa: E402
+
+NONSTREAM_FLAGS = (
+    "BRIDGE_NONSTREAM_VIA_STREAM_ENABLED",
+    "BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED",
+    "BRIDGE_NONSTREAM_TELEMETRY_ENABLED",
+)
+
+
+@pytest.fixture
+def ns_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
+    """Изоляция флагов ADR-0015: реальный dynamic_config недоступен, флаги выключены."""
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "missing-dynamic-config.json"))
+    for name in NONSTREAM_FLAGS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False))
+    return monkeypatch
+
+
+class TestNonstreamLimitsFromEnv(unittest.TestCase):
+    def test_defaults_build_default_nonstream_config(self):
+        limits = PassthroughLimits.from_env({})
+        self.assertEqual(limits.nonstream, NonstreamConfig())
+        self.assertEqual(limits.poll_interval_s, 0.1)
+
+    def test_nonstream_field_is_built_from_canonical_env(self):
+        limits = PassthroughLimits.from_env({
+            "BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S": "7",
+            "BRIDGE_NONSTREAM_IDLE_TIMEOUT_S": "11",
+            "BRIDGE_NONSTREAM_SOFT_LIVENESS_BUDGET_S": "5",
+            "BRIDGE_NONSTREAM_SOFT_LIVENESS_MIN_CPU_DELTA_S": "0.2",
+            "BRIDGE_NONSTREAM_SAFETY_CAP_S": "13",
+            "BRIDGE_NONSTREAM_POLL_INTERVAL_S": "0.5",
+        })
+        self.assertEqual(
+            limits.nonstream,
+            NonstreamConfig(
+                first_progress_timeout_s=7.0, idle_timeout_s=11.0, soft_budget_s=5.0,
+                min_cpu_delta_s=0.2, safety_cap_s=13.0, poll_interval_s=0.5,
+            ),
+        )
+
+    def test_poll_interval_canonical_wins_over_legacy_alias(self):
+        both = PassthroughLimits.from_env({
+            "BRIDGE_NONSTREAM_POLL_INTERVAL_S": "0.5",
+            "BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "0.2",
+        })
+        self.assertEqual((both.poll_interval_s, both.nonstream.poll_interval_s), (0.5, 0.5))
+        legacy = PassthroughLimits.from_env({"BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "0.2"})
+        self.assertEqual((legacy.poll_interval_s, legacy.nonstream.poll_interval_s), (0.2, 0.2))
+        empty = PassthroughLimits.from_env({
+            "BRIDGE_NONSTREAM_POLL_INTERVAL_S": "  ",
+            "BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "0.3",
+        })
+        self.assertEqual(empty.poll_interval_s, 0.3)
+
+    def test_idle_timeout_legacy_alias_and_priority(self):
+        legacy = PassthroughLimits.from_env({"BRIDGE_IDLE_TIMEOUT_S": "42"})
+        self.assertEqual(legacy.nonstream.idle_timeout_s, 42.0)
+        both = PassthroughLimits.from_env({
+            "BRIDGE_NONSTREAM_IDLE_TIMEOUT_S": "17", "BRIDGE_IDLE_TIMEOUT_S": "42",
+        })
+        self.assertEqual(both.nonstream.idle_timeout_s, 17.0)
+
+    def test_invalid_nonstream_value_raises_config_error_without_value(self):
+        secret = "sk-secret-123"
+        cases = [
+            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", secret),
+            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "nan"),
+            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "inf"),
+            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "0"),
+            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "99999"),
+            ("BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S", "0.5"),
+            ("BRIDGE_NONSTREAM_SAFETY_CAP_S", "-" + secret),
+            ("BRIDGE_NONSTREAM_POLL_INTERVAL_S", "0.001"),
+            ("BRIDGE_NONSTREAM_POLL_INTERVAL_S", "11"),
+            ("BRIDGE_NONSTREAM_SOFT_LIVENESS_MIN_CPU_DELTA_S", "0"),
+            ("BRIDGE_NONSTREAM_SOFT_LIVENESS_BUDGET_S", "-1"),
+        ]
+        for name, value in cases:
+            with self.subTest(name=name, value=value):
+                with self.assertRaises(ConfigError) as ctx:
+                    PassthroughLimits.from_env({name: value})
+                message = str(ctx.exception)
+                self.assertIn(name, message)
+                self.assertNotIn(value, message)
+
+    def test_invalid_legacy_alias_is_also_fail_fast(self):
+        with self.assertRaises(ConfigError) as ctx:
+            PassthroughLimits.from_env({"BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "sk-secret-123"})
+        self.assertNotIn("sk-secret-123", str(ctx.exception))
+
+    def test_soft_budget_zero_is_valid(self):
+        limits = PassthroughLimits.from_env({"BRIDGE_NONSTREAM_SOFT_LIVENESS_BUDGET_S": "0"})
+        self.assertEqual(limits.nonstream.soft_budget_s, 0.0)
+
+
+class ScriptedReader:
+    """`readline` над расписанием [(пауза_c, байты_кадра)]; после конца ждёт `tail_s` и отдаёт EOF."""
+
+    def __init__(self, script, tail_s: float = 0.0):
+        self.stop = threading.Event()
+        self.tail_s = tail_s
+        self.lines: list = []
+        for delay, frame_bytes in script:
+            for number, line in enumerate(frame_bytes.splitlines(keepends=True)):
+                self.lines.append((delay if number == 0 else 0.0, line))
+
+    def readline(self, _limit: int = -1) -> bytes:
+        if not self.lines:
+            if self.tail_s:
+                self.stop.wait(self.tail_s)
+            return b""
+        delay, line = self.lines.pop(0)
+        if delay:
+            self.stop.wait(delay)
+        return line
+
+
+def relay_scripted(script, *, idle: float = 0.3, window=None, tail_s: float = 0.0):
+    """relay_sse поверх расписания; heartbeat клиенту отключён, окна мелкие и детерминированные."""
+    reader = ScriptedReader(script, tail_s)
+    limits = PassthroughLimits(
+        idle_timeout_s=idle, total_timeout_s=10.0, heartbeat_interval_s=30.0,
+        poll_interval_s=0.01, reader_join_timeout_s=0.05,
+    )
+    out: list = []
+    started = time.monotonic()
+    try:
+        outcome = relay_sse(
+            reader.readline, out.append, tool_schemas=SCHEMAS, limits=limits, window=window,
+        )
+    finally:
+        reader.stop.set()
+    return outcome, out, time.monotonic() - started
+
+
+T_FRAMES = [  # всегда транспортный пульс (T): ни при каких флагах не двигает окно простоя
+    b": keepalive\n\n",
+    b"data: {}\n\n",
+    b'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+]
+NON_JSON_FRAMES = [b"data: keepalive\n\n", b"data: ping\n\n", b"data: {not json\n\n"]
+
+
+@pytest.mark.parametrize("t_frame", T_FRAMES)
+def test_relay_transport_pulse_does_not_shift_idle_window(ns_env, t_frame) -> None:
+    script = [(0.0, content("a"))] + [(0.1, t_frame)] * 12 + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    with pytest.raises(TimeoutError):
+        relay_scripted(script, idle=0.3)
+
+
+@pytest.mark.parametrize("frame", NON_JSON_FRAMES)
+def test_relay_non_json_data_is_t_when_soft_liveness_enabled(ns_env, frame) -> None:
+    ns_env.setenv("BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED", "true")  # строгая семантика: прогресс только S
+    script = [(0.0, content("a"))] + [(0.1, frame)] * 12 + [(0.0, DONE)]
+    with pytest.raises(TimeoutError):
+        relay_scripted(script, idle=0.3)
+
+
+@pytest.mark.parametrize(
+    "data, shifts",
+    [  # F-002: все флаги выключены — семантика `last_progress` идентична базовой ревизии 1d8e96c
+        ("{not json", True), ("ping", True), ("keepalive", True), ("  x  ", True),  # непустой не-JSON
+        ("", False), (None, False), ("[DONE]", False),
+        ("{}", False), ("null", False), ('{"choices":[{"index":0,"delta":{"role":"assistant"}}]}', False),
+        ('{"usage":{"total_tokens":1}}', False),  # кадры без choices/без полезной дельты
+        ('{"choices":[{"index":0,"delta":{"content":"a"}}]}', True),
+        ('{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0}]}}]}', True),
+    ],
+)
+def test_legacy_flags_off_progress_matches_baseline(ns_env, data, shifts) -> None:
+    reader = _TimedSseReader(lambda _n: b"", lambda _f: None, PassthroughLimits(), time.monotonic() + 5)
+    try:
+        reader.progress.note(data)
+        assert (reader.progress.last_progress is not None) is shifts
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("data", ["{not json", "ping", "keepalive", "  x  "])
+def test_strict_mode_non_json_does_not_shift_progress(ns_env, data) -> None:
+    ns_env.setenv("BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED", "true")
+    reader = _TimedSseReader(lambda _n: b"", lambda _f: None, PassthroughLimits(), time.monotonic() + 5)
+    try:
+        reader.progress.note(data)
+        assert reader.progress.last_progress is None
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("frame", NON_JSON_FRAMES)
+def test_relay_legacy_non_json_data_shifts_idle_window_as_baseline(ns_env, frame) -> None:
+    script = [(0.0, content("a"))] + [(0.1, frame)] * 8 + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    outcome, _, elapsed = relay_scripted(script, idle=0.3)
+    assert outcome.done and elapsed > 0.3  # окно скользило, как в базовой ревизии
+
+
+def test_relay_useful_chunk_shifts_idle_window(ns_env) -> None:
+    script = [(0.0, content("a"))] + [(0.1, content("b"))] * 8 + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    outcome, out, elapsed = relay_scripted(script, idle=0.3)
+    assert outcome.done and not outcome.incomplete
+    assert elapsed > 0.3  # суммарное время больше idle: окно скользило
+    assert b"".join(out).count(b'"content"') == 9
+
+
+def test_relay_pre_progress_pulses_do_not_arm_idle_window(ns_env) -> None:
+    # До первого S скользящее idle-окно не действует: действует лишь общий дедлайн запроса.
+    script = [(0.1, b": keepalive\n\n")] * 5 + [(0.0, content("a")), (0.0, finish(0, "stop")), (0.0, DONE)]
+    outcome, _, _ = relay_scripted(script, idle=0.3)
+    assert outcome.done
+
+
+def test_relay_window_receives_signals_s_and_t(ns_env) -> None:
+    window = LivenessWindow(WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0))
+    events = b": keepalive\n\n" + content("a") + finish(0, "stop") + DONE
+    outcome, _ = run_stream(events, window=window)
+    snap = window.snapshot()
+    assert outcome.done
+    assert snap.last_progress_kind == "S"
+    assert snap.last_token_age_s is not None
+    assert snap.last_keepalive_age_s is not None
+
+
+def test_relay_window_transport_only_keeps_progress_none(ns_env) -> None:
+    window = LivenessWindow(WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0))
+    run_stream(b": keepalive\n\n" + b"data: ping\n\n", window=window)
+    snap = window.snapshot()
+    assert snap.last_progress_kind == "none"
+    assert snap.last_token_age_s is None and snap.last_reasoning_age_s is None
+    assert snap.last_keepalive_age_s is not None
+
+
+def test_relay_window_reasoning_only_marks_reasoning_age(ns_env) -> None:
+    window = LivenessWindow(WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0))
+    reasoning = frame(chunk([{"index": 0, "delta": {"reasoning_content": "hm"}, "finish_reason": None}]))
+    run_stream(reasoning + finish(0, "stop") + DONE, window=window)
+    snap = window.snapshot()
+    assert snap.last_progress_kind == "S"
+    assert snap.last_reasoning_age_s is not None
+    assert snap.last_token_age_s is None
+
+
+def test_relay_without_window_and_flags_off_stays_verbatim(ns_env) -> None:
+    events = b": keepalive\n\n" + content("a") + b"data: {broken\n\n" + finish(0, "stop") + DONE
+    outcome, out = run_stream(events)
+    assert b"".join(out) == events
+    assert outcome.done
+
+
+class TestNonstreamFlagOffRegression(SeamCase):
+    """VIA_STREAM=false: байты запроса и ответ статического non-stream пути прежние."""
+
+    def completion(self, args):
+        return {"id": "x", "object": "chat.completion", "choices": [{"index": 0, "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "subagent", "arguments": json.dumps(args)}}]}}]}
+
+    def run_case(self, flag_value):
+        patcher = unittest.mock.patch.dict(os.environ, {
+            "BRIDGE_DYNAMIC_CONFIG_PATH": os.path.join(tempfile.mkdtemp(), "missing.json"),
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in NONSTREAM_FLAGS:
+            os.environ.pop(name, None)
+        if flag_value is not None:
+            os.environ["BRIDGE_NONSTREAM_VIA_STREAM_ENABLED"] = flag_value
+        self.upstream.respond = lambda h, b: FakeUpstream.json(h, self.completion({"prompt": "p", "provider": ""}))
+        request = {"model": "m", "stream": False, "tools": TOOLS, "messages": [{"role": "user", "content": "hi"}]}
+        raw = json.dumps(request, indent=2).encode("utf-8")
+        return raw, self.call(request, raw=raw)
+
+    def test_request_bytes_and_response_unchanged_when_flag_is_off(self):
+        for value in (None, "false", "0", "off", ""):
+            with self.subTest(flag=value):
+                self.upstream.requests.clear()
+                raw, sink = self.run_case(value)
+                sent = self.upstream.requests[0]
+                self.assertEqual(sent["body"], raw)
+                self.assertIs(json.loads(sent["body"])["stream"], False)
+                self.assertEqual(sink.status, 200)
+                self.assertTrue(sink.header("Content-Type").startswith("application/json"))
+                self.assertEqual(sink.header("Content-Length"), str(len(sink.body)))
+                self.assertIsNone(sink.header("X-Turn-Id"))
+                data = json.loads(sink.body)
+                self.assertEqual(args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"})
+
+
+class TestOwnerTokenNotForwardedUpstream(SeamCase):
+    """`X-Turn-Owner-Token` — внутренний заголовок моста: upstream его не получает (ADR-0015 / AD-003)."""
+
+    def test_owner_token_header_is_dropped_before_upstream(self):
+        self.upstream.respond = lambda h, b: FakeUpstream.json(h, {"ok": True})
+        headers = {
+            "Authorization": "Bearer upstream-key",
+            "X-Turn-Owner-Token": "owner-secret-NOT-REAL",
+            "X-Custom": "1",
+        }
+        sink = self.call({"model": "m"}, headers=headers)
+        self.assertEqual(sink.status, 200)
+        sent = {k.lower(): v for k, v in self.upstream.requests[0]["headers"].items()}
+        self.assertNotIn("x-turn-owner-token", sent)
+        self.assertEqual(sent["x-custom"], "1")
+
+
+class TestNeutralTimeoutLabel(unittest.TestCase):
+    """Подпись таймаута в `Handler._error_body`: прежняя по умолчанию, нейтральная под флагом."""
+
+    def _message(self, flag: str | None) -> str:
+        env = {"BRIDGE_DYNAMIC_CONFIG_PATH": os.path.join(tempfile.mkdtemp(), "missing.json")}
+        if flag is not None:
+            env["BRIDGE_CLI_NEUTRAL_NAMES_ENABLED"] = flag
+        with unittest.mock.patch.dict(os.environ, env):
+            if flag is None:
+                os.environ.pop("BRIDGE_CLI_NEUTRAL_NAMES_ENABLED", None)
+            body = server.Handler._error_body({"state": "timeout", "timeout_s": 5})
+        return body["message"]
+
+    def test_default_keeps_vendor_label(self):
+        self.assertIn("droid exec timed out", self._message(None))
+
+    def test_neutral_flag_removes_vendor_name_but_keeps_shape(self):
+        message = self._message("true")
+        self.assertIn("cli exec timed out", message)
+        self.assertNotIn("droid", message)

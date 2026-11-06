@@ -185,3 +185,14 @@ def verify_and_reset_bridge_state(
 ) -> Generator[None, None, None]:
     """Autouse fixture ensuring pristine state before and after each test."""
     yield from _execute_bridge_isolation(request)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_config_snapshots(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Снимки динамического конфига: пустой кэш и TTL=0 — тест меняет файл и сразу видит значение."""
+    from core import runtime_env
+
+    runtime_env._SNAPSHOTS.clear()
+    monkeypatch.setattr(runtime_env, "_SNAP_TTL_S", 0.0)
+    yield
+    runtime_env._SNAPSHOTS.clear()

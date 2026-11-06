@@ -6183,11 +6183,12 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
     def test_silent_rw002_marker_cap_is_32_and_anonymous_events_are_capped(
         self,
     ) -> None:
-        self.assertEqual(_bval("MAX_TOOL_MARKERS_PER_TURN"), 32)
-        anon = _bfn("_ToolProgress")("turn-1", _CID)
+        cap = cast("int", _bval("MAX_TOOL_MARKERS_PER_TURN"))
+        self.assertEqual(cap, 32)  # server.py (AGY_BRIDGE_MAX_TOOL_MARKERS), не default tool_progress.py (128)
+        anon = _bfn("_ToolProgress")("turn-1", _CID, cap)
         got = [_ofn(anon, "marker")({"name": "run_command"}) for _ in range(40)]
         self.assertEqual(sum(1 for m in got if m is not None), 32)
-        indexed = _bfn("_ToolProgress")("turn-1", _CID)
+        indexed = _bfn("_ToolProgress")("turn-1", _CID, cap)
         got = [
             _ofn(indexed, "marker")({"name": "run_command", "step_index": i})
             for i in range(40)
@@ -13565,3 +13566,368 @@ class DialogueStreamResilienceTests(unittest.TestCase):
             _write_cfg(fx, {"stream_resilience_enabled": True}, 3_000)
             clock.advance(2)
             self.assertTrue(flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True))
+
+
+# ---------------------------------------------------------------------------------------
+# ADR-0015 (VER-005): устойчивость non-stream/liveness слоя core (без поднятия agy-моста).
+# ---------------------------------------------------------------------------------------
+import ast  # noqa: E402
+import http.client as _nsl_http_client  # noqa: E402
+import itertools as _nsl_itertools  # noqa: E402
+import random as _nsl_random  # noqa: E402
+
+from core.liveness_signals import (  # noqa: E402
+    REASON_CAP,
+    REASON_FIRST,
+    REASON_IDLE,
+    SIGNAL_P,
+    SIGNAL_S,
+    SIGNAL_T,
+    LivenessWindow,
+    WindowSpec,
+    classify_sse_data,
+)
+from core.nonstream_aggregator import (  # noqa: E402
+    NonstreamAggregator,
+    NonstreamError,
+    aggregate_events,
+)
+
+_NSL_NEW_MODULES = (
+    "core.liveness_signals",
+    "core.nonstream_aggregator",
+    "core.liveness_registry",
+    "core.cli_runtime_config",
+    "core.runtime_env",
+)
+_NSL_FORBIDDEN_IMPORT_ROOTS = ("server", "adapters", "bridges")
+
+
+def _nsl_frame(payload: dict[str, Any]) -> bytes:
+    return b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
+
+
+def _nsl_chunk(delta: dict[str, Any], finish: str | None = None, **extra: Any) -> bytes:
+    body: dict[str, Any] = {
+        "id": "chatcmpl-nsl",
+        "object": "chat.completion.chunk",
+        "created": 1700000000,
+        "model": "m",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+    body.update(extra)
+    return _nsl_frame(body)
+
+
+def _nsl_stream_frames() -> list[bytes]:
+    """Смешанный поток: role-only, reasoning, content (кириллица), tool_calls, finish, usage, DONE."""
+    call = {"index": 0, "id": "call_1", "type": "function",
+            "function": {"name": "invoke_subagent", "arguments": '{"Role":"Coder"'}}
+    return [
+        b": comment\n\n",
+        _nsl_chunk({"role": "assistant"}),
+        _nsl_chunk({"reasoning_content": "Думаю над шагом."}),
+        _nsl_chunk({"content": "Шаг один.\n\n"}),
+        _nsl_chunk({"content": "Шаг два — ёжик."}),
+        b"data: ping\n\n",
+        _nsl_chunk({"tool_calls": [call]}),
+        _nsl_chunk({"tool_calls": [{"index": 0, "function": {"arguments": ',"Prompt":"x"}'}}]}),
+        _nsl_chunk({}, "tool_calls"),
+        _nsl_frame({"id": "chatcmpl-nsl", "choices": [], "usage": {"total_tokens": 5}}),
+        b"data: [DONE]\n\n",
+    ]
+
+
+class _NslChunkedReader:
+    """Эмуляция сокета: источник отдаётся кусками заданных размеров, `readline` — построчно."""
+
+    def __init__(self, data: bytes, sizes: Any) -> None:
+        self._data, self._pos, self._buf = data, 0, b""
+        self._sizes = _nsl_itertools.cycle(sizes)
+
+    def _fill(self) -> bool:
+        if self._pos >= len(self._data):
+            return False
+        size = max(1, next(self._sizes))
+        self._buf += self._data[self._pos : self._pos + size]
+        self._pos += size
+        return True
+
+    def readline(self, _limit: int = -1) -> bytes:
+        while b"\n" not in self._buf:
+            if not self._fill():
+                line, self._buf = self._buf, b""
+                return line
+        line, _, self._buf = self._buf.partition(b"\n")
+        return line + b"\n"
+
+
+def _nsl_events(readline: Any) -> Any:
+    from adapters.passthrough_adapter import iter_sse_events
+
+    return iter_sse_events(readline, 1 << 20)
+
+
+def _nsl_kinds(readline: Any) -> list[str]:
+    return [classify_sse_data(data)[0] for _raw, data in _nsl_events(readline)]
+
+
+class _NslClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestNonstreamLivenessResilience(unittest.TestCase):
+    """VER-005: core-уровень non-stream агрегации и окон живости без agy-моста."""
+
+    # -- (a) изоляция слоя и инвариант _scan --------------------------------------------
+    def test_new_core_modules_do_not_import_server_or_adapters(self) -> None:
+        for name in _NSL_NEW_MODULES:
+            path = _REPO_ROOT / (name.replace(".", "/") + ".py")
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported: list[str] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported += [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    self.assertEqual(node.level, 0, f"{name}: относительный импорт")
+                    imported.append(node.module or "")
+            for target in imported:
+                self.assertNotIn(
+                    target.split(".")[0], _NSL_FORBIDDEN_IMPORT_ROOTS, f"{name} -> {target}"
+                )
+
+    def test_new_core_modules_import_without_side_effects(self) -> None:
+        script = (
+            "import json, os, sys, threading\n"
+            f"sys.path.insert(0, {str(_REPO_ROOT)!r})\n"
+            "env = dict(os.environ)\n"
+            f"mods = {list(_NSL_NEW_MODULES)!r}\n"
+            "for m in mods:\n"
+            "    __import__(m)\n"
+            "print(json.dumps({'server': 'server' in sys.modules,\n"
+            "  'adapters': any(k == 'adapters' or k.startswith('adapters.') for k in sys.modules),\n"
+            "  'threads': threading.active_count(), 'env_same': env == dict(os.environ)}))\n"
+        )
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BRIDGE_")}
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            capture_output=True, text=True, timeout=60, env=env, cwd=tempfile.gettempdir(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(report, {"server": False, "adapters": False, "threads": 1, "env_same": True})
+
+    def test_scan_prefix_alias_invariant_unchanged_after_importing_new_modules(self) -> None:
+        for name in _NSL_NEW_MODULES:
+            __import__(name)
+        arb = _arb()
+        old_text, short_text = "[статус: чтение канона AGENTS.md]", "[статус: "
+        self.assertEqual(_offer(arb, "stdout", 1, old_text), old_text)
+        # короткий префикс нового шага с валидным индексом не становится алиасом длинного старого
+        self.assertEqual(_offer(arb, "transcript", 2, short_text), short_text)
+        self.assertEqual(_offer(arb, "transcript", 2, "[статус: дочитывание]"), "дочитывание]")
+        self.assertEqual(_oval(arb, "divergences"), 0)
+
+    # -- (b) fault-matrix агрегатора ----------------------------------------------------
+    def _aggregate(self, events: Any) -> bytes:
+        return aggregate_events(events, None, 1 << 20)
+
+    def test_full_stream_aggregates_to_single_completion(self) -> None:
+        wire = b"".join(_nsl_stream_frames())
+        body = json.loads(self._aggregate(_nsl_events(_NslChunkedReader(wire, [1 << 20]).readline)))
+        message = body["choices"][0]["message"]
+        self.assertEqual(message["content"], "Шаг один.\n\nШаг два — ёжик.")
+        self.assertEqual(message["reasoning_content"], "Думаю над шагом.")
+        self.assertEqual(message["tool_calls"][0]["function"]["arguments"], '{"Role":"Coder","Prompt":"x"}')
+        self.assertEqual(body["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(body["usage"], {"total_tokens": 5})
+
+    def test_truncation_at_every_event_position_never_yields_partial_200(self) -> None:
+        frames = _nsl_stream_frames()
+        for cut in range(len(frames)):  # cut == len(frames) — полный поток
+            with self.subTest(cut=cut):
+                events = _nsl_events(_NslChunkedReader(b"".join(frames[:cut]), [1 << 20]).readline)
+                with self.assertRaises(NonstreamError) as ctx:
+                    self._aggregate(events)
+                self.assertEqual(ctx.exception.status, 502)
+
+    def test_truncation_at_every_byte_offset_never_yields_partial_200(self) -> None:
+        wire = b"".join(_nsl_stream_frames())
+        done_line_end = len(wire) - len(b"\n")  # `data: [DONE]\n` уже полная строка события
+        for cut in range(done_line_end):
+            with self.subTest(cut=cut):
+                events = _nsl_events(_NslChunkedReader(wire[:cut], [7]).readline)
+                with self.assertRaises(NonstreamError) as ctx:
+                    self._aggregate(events)
+                self.assertEqual(ctx.exception.status, 502)
+
+    def test_upstream_errors_after_each_position_map_to_502_and_timeouts_to_504(self) -> None:
+        frames = _nsl_stream_frames()
+        events = [(raw, data) for raw, data in _nsl_events(_NslChunkedReader(b"".join(frames), [64]).readline)]
+        cases: list[tuple[type[BaseException], int]] = [
+            (ConnectionResetError, 502),
+            (_nsl_http_client.IncompleteRead, 502),
+            (BrokenPipeError, 502),
+            (TimeoutError, 504),
+        ]
+        for exc_type, expected in cases:
+            for cut in range(len(events)):
+                with self.subTest(exc=exc_type.__name__, cut=cut):
+                    def gen(limit: int = cut, kind: Any = exc_type) -> Any:
+                        yield from events[:limit]
+                        raise kind(b"") if kind is _nsl_http_client.IncompleteRead else kind()
+
+                    with self.assertRaises(NonstreamError) as ctx:
+                        self._aggregate(gen())
+                    self.assertEqual(ctx.exception.status, expected)
+
+    def test_protocol_violations_are_502_without_partial_response(self) -> None:
+        done = b"data: [DONE]\n\n"
+        text = _nsl_chunk({"content": "x"})
+        cases = {
+            "done_without_signal": [_nsl_chunk({"role": "assistant"}), _nsl_chunk({}, "stop"), done],
+            "missing_finish_reason": [text, done],
+            "malformed_json": [text, b"data: {not json\n\n", _nsl_chunk({}, "stop"), done],
+            "non_object_chunk": [text, b"data: [1,2]\n\n", _nsl_chunk({}, "stop"), done],
+            "metadata_conflict": [text, _nsl_frame({"id": "OTHER", "choices": [
+                {"index": 0, "delta": {"content": "y"}, "finish_reason": None}]}), _nsl_chunk({}, "stop"), done],
+            "role_conflict": [_nsl_chunk({"role": "assistant", "content": "a"}),
+                              _nsl_chunk({"role": "user"}), _nsl_chunk({}, "stop"), done],
+            "upstream_error_chunk": [text, _nsl_frame({"error": {"message": "boom"}}), done],
+            "empty_stream": [done],
+        }
+        for name, frames in cases.items():
+            with self.subTest(case=name):
+                events = _nsl_events(_NslChunkedReader(b"".join(frames), [5]).readline)
+                with self.assertRaises(NonstreamError) as ctx:
+                    self._aggregate(events)
+                self.assertEqual(ctx.exception.status, 502, name)
+
+    def test_raw_byte_and_result_size_limits_are_502(self) -> None:
+        frames = [_nsl_chunk({"content": "я" * 200}) for _ in range(5)]
+        wire = b"".join(frames + [_nsl_chunk({}, "stop"), b"data: [DONE]\n\n"])
+        for limit in (64, 500, len(wire) - 1):
+            with self.subTest(limit=limit):
+                events = _nsl_events(_NslChunkedReader(wire, [11]).readline)
+                with self.assertRaises(NonstreamError) as ctx:
+                    aggregate_events(events, None, limit)
+                self.assertEqual((ctx.exception.status, ctx.exception.code), (502, "upstream_response_too_large"))
+        agg = NonstreamAggregator(1 << 20)
+        for raw, data in _nsl_events(_NslChunkedReader(wire, [11]).readline):
+            agg.add_event(raw, data)
+        self.assertGreater(len(agg.encode()), 1000)  # агрегат > лимита ниже
+        small = NonstreamAggregator(600)  # итоговый JSON больше лимита -> 502 до публикации
+        small._choices = agg._choices  # noqa: SLF001
+        small._signals, small.done = 1, True  # noqa: SLF001
+        with self.assertRaises(NonstreamError) as ctx:
+            small.encode()
+        self.assertEqual(ctx.exception.status, 502)
+
+    # -- (c) chunk-boundary invariance --------------------------------------------------
+    def test_classifier_and_aggregate_are_invariant_to_one_to_seven_byte_slicing(self) -> None:
+        wire = b"".join(_nsl_stream_frames())
+        baseline_kinds = _nsl_kinds(_NslChunkedReader(wire, [1 << 20]).readline)
+        baseline_body = self._aggregate(_nsl_events(_NslChunkedReader(wire, [1 << 20]).readline))
+        self.assertIn(SIGNAL_S, baseline_kinds)
+        self.assertIn(SIGNAL_T, baseline_kinds)
+        for size in range(1, 8):
+            with self.subTest(size=size):
+                self.assertEqual(_nsl_kinds(_NslChunkedReader(wire, [size] * len(wire)).readline), baseline_kinds)
+                body = self._aggregate(_nsl_events(_NslChunkedReader(wire, [size] * len(wire)).readline))
+                self.assertEqual(body, baseline_body)
+
+    def test_classifier_and_aggregate_are_invariant_to_seeded_random_slicing(self) -> None:
+        wire = b"".join(_nsl_stream_frames())
+        baseline_kinds = _nsl_kinds(_NslChunkedReader(wire, [1 << 20]).readline)
+        baseline_body = self._aggregate(_nsl_events(_NslChunkedReader(wire, [1 << 20]).readline))
+        for seed in range(25):
+            rng = _nsl_random.Random(seed)
+            sizes = [rng.randint(1, 7) for _ in range(len(wire))]
+            with self.subTest(seed=seed):
+                self.assertEqual(_nsl_kinds(_NslChunkedReader(wire, sizes).readline), baseline_kinds)
+                self.assertEqual(self._aggregate(_nsl_events(_NslChunkedReader(wire, sizes).readline)), baseline_body)
+
+    def test_classifier_order_comments_literals_and_json_shapes(self) -> None:
+        t_cases: list[str | None] = [None, "", "  ", "ping", " keepalive ", "[DONE]", "{}", "[]", "null",
+                                     "{not json", json.dumps({"choices": [{"delta": {"role": "assistant"}}]}),
+                                     json.dumps({"choices": [], "usage": {"total_tokens": 1}}),
+                                     json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+                                     json.dumps({"choices": [{"delta": {"content": ""}}]})]
+        for data in t_cases:
+            with self.subTest(data=data):
+                self.assertEqual(classify_sse_data(data)[0], SIGNAL_T)
+        for key in ("content", "reasoning_content", "reasoning", "reasoning_text", "tool_calls", "function_call"):
+            value: Any = [{"index": 0}] if key == "tool_calls" else {"name": "f"} if key == "function_call" else "x"
+            with self.subTest(key=key):
+                kind, keys = classify_sse_data(json.dumps({"choices": [{"delta": {key: value}}]}))
+                self.assertEqual((kind, set(keys)), (SIGNAL_S, {key}))
+
+    # -- (d) graceful-timeout / safety cap ----------------------------------------------
+    def _window(self, clock: _NslClock, **spec: Any) -> LivenessWindow:
+        params: dict[str, Any] = {"first_timeout_s": 5.0, "idle_timeout_s": 10.0, "safety_cap_s": 100.0}
+        params.update(spec)
+        return LivenessWindow(WindowSpec(**params), clock=clock, soft_enabled=lambda: True)
+
+    def test_safety_cap_is_absolute_for_infinite_useful_stream(self) -> None:
+        clock = _NslClock()
+        window = self._window(clock)
+        started, ticks = clock.now, 0
+        while not window.expired():
+            self.assertLess(ticks, 10_000, "потолок не сработал на бесконечном потоке S")
+            clock.now += 1.0
+            if window.expired():
+                break
+            window.record_signal(SIGNAL_S, frozenset({"content"}))
+            snap = window.snapshot()
+            self.assertLessEqual(clock.now + window.remaining_s(), started + 100.0 + 1e-9)
+            self.assertLessEqual(snap.idle_remaining_s, snap.safety_cap_remaining_s + 1e-9)
+            ticks += 1
+        self.assertEqual(window.expired(), REASON_CAP)
+        self.assertEqual(clock.now, started + 100.0)
+        window.record_signal(SIGNAL_S, frozenset({"content"}))  # поздний S не воскрешает ход
+        self.assertEqual(window.expired(), REASON_CAP)
+        self.assertEqual(window.snapshot().safety_cap_remaining_s, 0.0)
+
+    def test_safety_cap_is_absolute_for_cli_process_progress_spam(self) -> None:
+        clock = _NslClock()
+        window = self._window(clock, process_progress=True, soft_budget_s=1000.0, min_cpu_delta_s=0.01)
+        started = clock.now
+        for _ in range(10_000):
+            clock.now += 2.0
+            if window.expired():
+                break
+            window.record_process(cpu_delta_s=1.0, new_children=0, alive=True)
+        self.assertEqual(window.expired(), REASON_CAP)
+        self.assertLessEqual(clock.now, started + 102.0)
+
+    def test_transport_keepalive_never_shifts_first_or_idle_deadline(self) -> None:
+        clock = _NslClock()
+        window = self._window(clock)
+        for _ in range(4):
+            clock.now += 1.0
+            window.record_signal(SIGNAL_T)
+        clock.now += 1.0  # 5.0 с без S: first-дедлайн истёк, несмотря на T
+        self.assertEqual(window.expired(), REASON_FIRST)
+        fresh_clock = _NslClock()
+        window = self._window(fresh_clock)
+        window.record_signal(SIGNAL_S, frozenset({"content"}))
+        for _ in range(9):
+            fresh_clock.now += 1.0
+            window.record_signal(SIGNAL_T)
+            self.assertEqual(window.expired(), "")
+        fresh_clock.now += 1.0
+        window.record_signal(SIGNAL_T)
+        self.assertEqual(window.expired(), REASON_IDLE)
+
+    def test_passthrough_window_ignores_process_progress(self) -> None:
+        clock = _NslClock()
+        window = self._window(clock)  # process_progress=False
+        clock.now += 4.0
+        window.record_signal(SIGNAL_P)
+        window.record_process(cpu_delta_s=5.0, new_children=3, alive=True)
+        clock.now += 1.0
+        self.assertEqual(window.expired(), REASON_FIRST)
