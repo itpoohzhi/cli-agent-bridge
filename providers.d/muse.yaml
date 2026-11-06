@@ -1,0 +1,57 @@
+# Провайдер muse: CLI-бинарник Meta Muse (serve-режим), pin технического образа обязателен.
+manifest_version: 1
+provider_id: muse
+kind: muse
+enabled: true
+required: false
+owned_by: meta-muse
+transport:
+  bridge:
+    wrapper: ~/.config/muse-launch/muse-cli.sh
+    options: {streaming_mode: serve}
+limits: {max_concurrent: 1, quota_group: meta-muse, pin_required: true, timeout_s: 180}
+fingerprint: {binary_path: ~/.local/bin/muse, binary_sha256: c6db294799a190ca380da274beb3b9c0e160e0da9681a3d364ce8b0e5fa3a4bc, version: 1.4.3}
+discovery: {method: static}
+family_rule:
+  type: exact_map
+  exact_map: {muse-spark-1.3: Meta, muse-spark-1.3-contributor: Meta, muse-wonder-1.0: Meta, muse-wonder-full-1.0: Meta}
+models_overrides:
+  muse-spark-1.3:
+    name: Muse Spark 1.3 (Muse Meta bridge)
+    efforts: [max]
+    default_effort: max
+    context_window: 1048576
+    max_tokens: 131072
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [321]
+  muse-spark-1.3-contributor:
+    name: Muse Spark 1.3 Contributor (Muse Meta bridge)
+    efforts: [max]
+    default_effort: max
+    context_window: 1048576
+    max_tokens: 131072
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [321]
+  muse-wonder-1.0:
+    name: Muse Wonder 1.0 (Muse Meta bridge)
+    efforts: [minimal, low, medium, high, max]
+    default_effort: high
+    context_window: 1048576
+    max_tokens: 131072
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [321]
+  muse-wonder-full-1.0:
+    name: Muse Wonder Full 1.0 (Muse Meta bridge)
+    efforts: [minimal, low, medium, high, max]
+    default_effort: high
+    context_window: 1048576
+    max_tokens: 131072
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [321]
+params:
+  effort_field: reasoning_effort
+  adaptive_whitelist: [reasoning_effort]

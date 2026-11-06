@@ -1,0 +1,54 @@
+# Провайдер agy: локальный мост AGY (Google Gemini), passthrough к :9887.
+manifest_version: 1
+provider_id: agy
+kind: passthrough
+enabled: true
+required: false
+owned_by: agy-bridge
+transport:
+  bridge: {base_url: 'http://127.0.0.1:9887/v1', api_key_env: AGY_BRIDGE_KEY}
+  direct:
+    type: cli
+    cli:
+      executables: [~/.config/agy-launch/agy-cli.sh, ~/.local/bin/agy.real]
+      argv_by_executable:
+        ~/.config/agy-launch/agy-cli.sh: [-p, '{prompt}', --model, '{slot}', --output-format, text]
+        ~/.local/bin/agy.real: [--model, '{slot}', --effort, '{effort}', --disable-slash-commands, --output-format, text]
+      prompt_via: argv
+      output: {format: text}
+allow_base_url:
+- {scheme: http, host: 127.0.0.1, port: 9887, path_prefix: /v1}
+limits: {max_concurrent: 128, quota_group: google-agy, timeout_s: 180}
+fingerprint: {binary_path: ~/.local/bin/agy.real}
+discovery:
+  method: http
+  http: {path: /models, id_field: 'data[].id'}
+  include: [gemini-*]
+  exclude: ['*-free']
+  refresh_interval_s: 900
+family_rule:
+  type: prefix
+  prefix:
+    verified: true
+    map: {gemini-: Google}
+models_overrides:
+  gemini-3.8-flash:
+    name: Gemini 3.8 Flash (AGY bridge)
+    efforts: [low, medium, high]
+    default_effort: high
+    context_window: 1048576
+    max_tokens: 65536
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [100, 142, 174, 431]
+  gemini-4-argon:
+    name: Gemini 4 Argon (AGY bridge)
+    efforts: [low, medium, high]
+    default_effort: high
+    context_window: 1048576
+    max_tokens: 65536
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+params:
+  effort_field: reasoning_effort
+  adaptive_whitelist: [reasoning_effort, thinking, temperature, top_p]

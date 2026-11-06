@@ -55,6 +55,7 @@ from core.backend_adapter import (
     BackendNotSupported,
     BackendModel,
     Capabilities,
+    KindConstraints,
     Qualification,
     StreamSink,
     TurnContext,
@@ -339,6 +340,11 @@ class _LiveSink:
 class MuseAdapter(BackendAdapter):
     kind = "muse"
     capabilities = Capabilities(SESSIONS_NONE, STREAMING_EMULATED, False, "estimated")
+    CONSTRAINTS = KindConstraints(
+        max_concurrent_max=1,
+        pin_required=True,
+        options_schema={"streaming_mode": ("exec", "serve")},
+    )
 
     def __init__(
         self,
