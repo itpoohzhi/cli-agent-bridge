@@ -24,6 +24,9 @@ import subprocess
 import threading
 import time
 
+from core.cli_runtime_config import NonstreamConfig, WatchdogConfig
+from core.liveness_signals import LivenessSnapshot, classify_cli_activity
+
 IDLE_TIMEOUT_S: float = 300.0
 SAFETY_CAP_S: float = 3600.0
 FINISH_RESERVE_S: float = 35.0
@@ -94,18 +97,22 @@ class WatchdogMetrics:
 
     has_activity = has_progress
 
+    @classmethod
+    def empty(cls, pgid: int, now: float, *, alive: bool, degraded: bool = False) -> "WatchdogMetrics":
+        return cls(pgid, alive, (), (), 0.0, 0.0, degraded, now)
+
 
 class ProcessWatchdog:
     """Мониторинг процессной группы `pgid` на macOS/POSIX через `os.killpg` и `ps`."""
 
     def __init__(
         self,
-        ps_timeout_s: float = PS_TIMEOUT_S,
+        ps_timeout_s: float | None = None,
         log_fn: Callable[[str], None] | None = None,
         rid: str = "",
         turn_id: str = "",
     ) -> None:
-        self.ps_timeout_s = float(ps_timeout_s)
+        self.ps_timeout_s = float(WatchdogConfig.from_env().ps_timeout_s if ps_timeout_s is None else ps_timeout_s)
         self._log_fn = log_fn
         self.rid = rid
         self.turn_id = turn_id
@@ -203,31 +210,13 @@ class ProcessWatchdog:
         eff_rid = rid or self.rid or "-"
         eff_turn = turn_id or self.turn_id or "-"
         if not self.is_group_alive(pgid):
-            return WatchdogMetrics(
-                pgid=pgid,
-                alive=False,
-                descendant_pids=(),
-                new_descendants=(),
-                cpu_time_s=0.0,
-                cpu_delta_s=0.0,
-                ps_degraded=False,
-                sample_ts=now,
-            )
+            return WatchdogMetrics.empty(pgid, now, alive=False)
 
         try:
             proc = self._run_ps(pgid)
         except (subprocess.TimeoutExpired, OSError) as exc:
             if not self.is_group_alive(pgid):
-                return WatchdogMetrics(
-                    pgid=pgid,
-                    alive=False,
-                    descendant_pids=(),
-                    new_descendants=(),
-                    cpu_time_s=0.0,
-                    cpu_delta_s=0.0,
-                    ps_degraded=False,
-                    sample_ts=now,
-                )
+                return WatchdogMetrics.empty(pgid, now, alive=False)
             self._log(
                 f"watchdog_ps_degraded rid={eff_rid} turn_id={eff_turn} "
                 f"pgid={pgid} reason={exc.__class__.__name__}"
@@ -245,16 +234,7 @@ class ProcessWatchdog:
 
         if proc.returncode != 0:
             if not self.is_group_alive(pgid):
-                return WatchdogMetrics(
-                    pgid=pgid,
-                    alive=False,
-                    descendant_pids=(),
-                    new_descendants=(),
-                    cpu_time_s=0.0,
-                    cpu_delta_s=0.0,
-                    ps_degraded=False,
-                    sample_ts=now,
-                )
+                return WatchdogMetrics.empty(pgid, now, alive=False)
             self._log(
                 f"watchdog_ps_degraded rid={eff_rid} turn_id={eff_turn} "
                 f"pgid={pgid} reason=rc_{proc.returncode}"
@@ -330,9 +310,9 @@ class AdaptiveTimeoutController:
 
     def __init__(
         self,
-        idle_timeout_s: float = IDLE_TIMEOUT_S,
-        safety_cap_s: float = SAFETY_CAP_S,
-        finish_reserve_s: float = FINISH_RESERVE_S,
+        idle_timeout_s: float | None = None,
+        safety_cap_s: float | None = None,
+        finish_reserve_s: float | None = None,
         watchdog: ProcessWatchdog | None = None,
         watchdog_enabled: bool = True,
         clock: Callable[[], float] = time.monotonic,
@@ -340,13 +320,15 @@ class AdaptiveTimeoutController:
         turn_id: str = "",
         log_fn: Callable[[str], None] | None = None,
         io_wait_cap_s: float | None = None,
-        watchdog_interval_s: float = WATCHDOG_INTERVAL_S,
+        watchdog_interval_s: float | None = None,
+        first_token_timeout_s: float | None = None,
     ) -> None:
-        self.idle_timeout_s = float(idle_timeout_s)
-        self.safety_cap_s = float(safety_cap_s)
-        self.finish_reserve_s = float(finish_reserve_s)
+        cfg = WatchdogConfig.from_env()
+        self.idle_timeout_s = float(cfg.idle_timeout_s if idle_timeout_s is None else idle_timeout_s)
+        self.safety_cap_s = float(cfg.safety_cap_s if safety_cap_s is None else safety_cap_s)
+        self.finish_reserve_s = float(cfg.finish_reserve_s if finish_reserve_s is None else finish_reserve_s)
         self.io_wait_cap_s: float | None = None if io_wait_cap_s is None else float(io_wait_cap_s)
-        self.watchdog_interval_s: float = float(watchdog_interval_s)
+        self.watchdog_interval_s: float = float(cfg.interval_s if watchdog_interval_s is None else watchdog_interval_s)
         if self.io_wait_cap_s is not None and log_fn is not None:
             log_fn(f"watchdog: io_wait_cap_s={self.io_wait_cap_s} ignored by 2-contour check()")
         self.watchdog_enabled = bool(watchdog_enabled)
@@ -362,6 +344,10 @@ class AdaptiveTimeoutController:
         self.last_activity_kind: str = "start"
         self.pgid: int | None = None
         self.terminated_reason: str = ""
+        self.liveness = NonstreamConfig.from_env().cli_window(self.idle_timeout_s, self.effective_cap_s(), first_token_timeout_s, clock)
+
+    def liveness_snapshot(self) -> LivenessSnapshot:
+        return self.liveness.snapshot()
 
     def effective_cap_s(self) -> float:
         """Эффективный бюджет времени до срабатывания `absolute_cap`."""
@@ -375,6 +361,7 @@ class AdaptiveTimeoutController:
         with self._lock:
             self.last_activity_ts = now
             self.last_activity_kind = kind or "protocol"
+        self.liveness.record_signal(classify_cli_activity(kind))
 
     def on_activity(self, kind: str = "protocol") -> None:
         """Синоним `record_activity` для прямой передачи в `TurnContext.on_activity`."""
@@ -432,12 +419,14 @@ class AdaptiveTimeoutController:
                         if metrics.new_descendants
                         else "cpu_delta"
                     )
+            self.liveness.record_process(metrics.cpu_delta_s, len(metrics.new_descendants), metrics.alive)
 
         with self._lock:
-            idle_elapsed = now - self.last_activity_ts
-            if idle_elapsed >= self.idle_timeout_s:
-                self.terminated_reason = "idle_timeout"
-                return True, "idle_timeout", metrics
+            idle = now - self.last_activity_ts >= self.idle_timeout_s
+            reason = self.liveness.stop_reason() if self.liveness.soft else "idle_timeout" if idle else ""
+            if reason:
+                self.terminated_reason = reason
+                return True, reason, metrics
 
         return False, "", metrics
 

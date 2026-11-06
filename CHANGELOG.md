@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- **ADR-0015:** non-stream через внутренний SSE, живость S/P/T, `BRIDGE_CLI_*` (fallback `DROID_*`) за флагами GigaRC; неверный конфиг — `ConfigError`, `start.sh` exit 78.
 - **Проброс `extra_body.env` и CLI `agent-browser` (ADR-0016):** за флагом GigaRC
   `BRIDGE_BROWSER_FORWARDING_ENABLED` (дефолт `false`, kill-switch без рестарта) мост передаёт санитизированное
   окружение запроса в процесс droid (строгий денилист, loopback-only `AGENT_BROWSER_CDP`, перезапуск процесса при
