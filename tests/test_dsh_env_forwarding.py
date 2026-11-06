@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import server  # noqa: E402
+from core import runtime_env  # noqa: E402
 from bridge_testlib import pid_alive, wait_until  # noqa: E402
 from rpc_testlib import RpcCase  # noqa: E402
 
@@ -158,6 +159,10 @@ class TestForwardingOracles(FwdCase):
 
     def test_o3_denylist_not_overridable_by_request(self):
         """O3: денилист macOS/Linux не подменяется запросом (юнит + через живой spawn)."""
+        ambient = mock.patch.dict(os.environ)  # внешний PYTHONPATH родителя не должен влиять на probe
+        ambient.start()
+        self.addCleanup(ambient.stop)
+        os.environ.pop("PYTHONPATH", None)
         evil = {
             "PATH": "/evil/bin",
             "HOME": "/evil/home",
@@ -500,7 +505,8 @@ class TestFlagSourceAndPath(FwdCase):
         """O11: файл перечитывается только при смене сигнатуры; не на каждый вызов."""
         source = server._ForwardFlagSource()
         self.set_flag(True)
-        with mock.patch.object(source, "_load", wraps=source._load) as load:
+        real = runtime_env._load_snapshot
+        with mock.patch.object(runtime_env, "_load_snapshot", wraps=real) as load:
             for _ in range(200):
                 self.assertTrue(source.enabled())
             self.assertEqual(load.call_count, 1)
@@ -804,6 +810,258 @@ class TestReworkCycle1(FwdCase):
                 server.sanitize_forwarded_env({"A": "1234", "B": "12345"}),
                 {"A": "1234"},
             )
+
+
+# ---- ADR-0015 / AD-004: canonical и legacy имена не пробрасываются потомку (VER-003) ------
+BASE_DENIED_PREFIXES = (
+    "DYLD_",
+    "LD_",
+    "PYTHON",
+    "NODE_",
+    "BASH_",
+    "DROID_",
+    "FACTORY_",
+    "GIT_",
+    "PERL",
+    "RUBY",
+)
+NEW_DENIED_PREFIXES = ("BRIDGE_CLI_", "BRIDGE_NONSTREAM_", "BRIDGE_WATCHDOG_")
+# Исчерпывающий список legacy-алиасов из таблиц AD-002/AD-004 (DROID_* семейства).
+LEGACY_DROID_ALIASES = (
+    "DROID_BRIDGE_FIRST_TOKEN_TIMEOUT_S",
+    "DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S",
+    "DROID_BRIDGE_SILENCE_WATCHDOG_S",
+    "DROID_BRIDGE_RPC_CALL_TIMEOUT_S",
+    "DROID_DSH_BRIDGE_IDLE_SECONDS",
+    "DROID_BRIDGE_MAX_RPC_LINE_BYTES",
+    "DROID_BRIDGE_MAX_STDERR_BYTES",
+    "DROID_BRIDGE_MAX_INBOX_BYTES",
+    "DROID_BRIDGE_MAX_TURN_TEXT_BYTES",
+    "DROID_BRIDGE_RUN_QUEUE_MAXSIZE",
+    "DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS",
+    "DROID_BRIDGE_MAX_DELIVERY_BYTES",
+    "DROID_BRIDGE_MAX_CHATS",
+    "DROID_DSH_BRIDGE_SAFETY_CAP_S",
+    "DROID_LAUNCHER",
+    "DROID_BIN",
+)
+CANONICAL_RUNTIME_NAMES = (
+    "BRIDGE_CLI_FIRST_TOKEN_TIMEOUT_S",
+    "BRIDGE_CLI_LIVE_WRITE_TIMEOUT_S",
+    "BRIDGE_CLI_SILENCE_WATCHDOG_S",
+    "BRIDGE_CLI_RPC_CALL_TIMEOUT_S",
+    "BRIDGE_CLI_IDLE_SECONDS",
+    "BRIDGE_CLI_LAUNCHER",
+    "BRIDGE_CLI_MAX_RPC_LINE_BYTES",
+    "BRIDGE_CLI_MAX_STDERR_BYTES",
+    "BRIDGE_CLI_MAX_INBOX_BYTES",
+    "BRIDGE_CLI_MAX_TURN_TEXT_BYTES",
+    "BRIDGE_CLI_RUN_QUEUE_MAXSIZE",
+    "BRIDGE_CLI_MAX_JSON_STRUCT_TOKENS",
+    "BRIDGE_CLI_MAX_DELIVERY_BYTES",
+    "BRIDGE_CLI_MAX_CHATS",
+    "BRIDGE_CLI_NEUTRAL_NAMES_ENABLED",
+    "BRIDGE_NONSTREAM_VIA_STREAM_ENABLED",
+    "BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S",
+    "BRIDGE_NONSTREAM_IDLE_TIMEOUT_S",
+    "BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED",
+    "BRIDGE_NONSTREAM_SOFT_LIVENESS_BUDGET_S",
+    "BRIDGE_NONSTREAM_SOFT_LIVENESS_MIN_CPU_DELTA_S",
+    "BRIDGE_NONSTREAM_SAFETY_CAP_S",
+    "BRIDGE_NONSTREAM_POLL_INTERVAL_S",
+    "BRIDGE_NONSTREAM_TELEMETRY_ENABLED",
+    "BRIDGE_WATCHDOG_IDLE_TIMEOUT_S",
+    "BRIDGE_WATCHDOG_SAFETY_CAP_S",
+    "BRIDGE_WATCHDOG_FINISH_RESERVE_S",
+    "BRIDGE_WATCHDOG_INTERVAL_S",
+    "BRIDGE_WATCHDOG_PS_TIMEOUT_S",
+)
+
+
+def _case_variants(name: str) -> list[str]:
+    """Имя в верхнем, нижнем и «змеином» смешанном регистре."""
+    mixed = "".join(c.lower() if i % 2 else c.upper() for i, c in enumerate(name))
+    return [name, name.lower(), mixed]
+
+
+class TestAd004DeniedForwardPrefixes(unittest.TestCase):
+    def test_denied_prefixes_contain_new_families(self):
+        for prefix in NEW_DENIED_PREFIXES:
+            self.assertIn(prefix, server.DENIED_FORWARD_PREFIXES)
+
+    def test_old_denied_prefixes_are_preserved(self):
+        for prefix in BASE_DENIED_PREFIXES:
+            self.assertIn(prefix, server.DENIED_FORWARD_PREFIXES)
+        self.assertEqual(
+            set(server.DENIED_FORWARD_PREFIXES),
+            set(BASE_DENIED_PREFIXES) | set(NEW_DENIED_PREFIXES),
+        )
+
+    def test_old_denied_names_are_preserved(self):
+        for name in ("BRIDGE_KEY", "DROID_DSH_BRIDGE_KEY", "DROID_BIN", "DROID_AUTO"):
+            self.assertIn(name, server.DENIED_FORWARD_ENV)
+        # DROID_BIN по-прежнему закрыт и как имя, и как префикс DROID_
+        self.assertEqual(server.sanitize_forwarded_env({"DROID_BIN": "/evil"}), {})
+
+    def test_new_canonical_names_are_dropped_in_any_case(self):
+        for name in CANONICAL_RUNTIME_NAMES:
+            for variant in _case_variants(name):
+                with self.subTest(name=variant):
+                    self.assertEqual(
+                        server.sanitize_forwarded_env({variant: "1", "GOOD_VAR": "ok"}),
+                        {"GOOD_VAR": "ok"},
+                    )
+
+    def test_legacy_aliases_are_dropped_in_any_case(self):
+        for name in LEGACY_DROID_ALIASES:
+            for variant in _case_variants(name):
+                with self.subTest(name=variant):
+                    self.assertEqual(server.sanitize_forwarded_env({variant: "1"}), {})
+
+    def test_safety_cap_alias_and_canonical_dropped_together(self):
+        env = {
+            "DROID_DSH_BRIDGE_SAFETY_CAP_S": "1",
+            "BRIDGE_WATCHDOG_SAFETY_CAP_S": "1",
+            "DROID_BRIDGE_FIRST_TOKEN_TIMEOUT_S": "1",
+            "BRIDGE_CLI_FIRST_TOKEN_TIMEOUT_S": "1",
+            "BRIDGE_NONSTREAM_IDLE_TIMEOUT_S": "1",
+        }
+        self.assertEqual(server.sanitize_forwarded_env(env), {})
+        self.assertEqual(
+            server.sanitize_forwarded_env({**env, "GOOD_VAR": "ok"}),
+            {"GOOD_VAR": "ok"},
+        )
+
+    def test_every_name_in_runtime_config_tables_is_denied_or_known_exception(self):
+        """Имена из таблиц конфигурации не должны тихо стать пробрасываемыми."""
+        from core import cli_runtime_config, liveness_signals
+
+        names = set(cli_runtime_config.LAUNCHER_NAMES)
+        specs = [
+            *cli_runtime_config._SPECS.values(),
+            *cli_runtime_config._NS_SPECS.values(),
+            *cli_runtime_config._WD_SPECS.values(),
+        ]
+        for spec in specs:
+            names.update(spec.names)
+        names |= {
+            liveness_signals.FLAG_VIA_STREAM,
+            liveness_signals.FLAG_SOFT_LIVENESS,
+            liveness_signals.FLAG_TELEMETRY,
+            cli_runtime_config.FLAG_NEUTRAL_NAMES,
+        }
+        # Без префикса семейств: читаются только самим мостом, потомку не нужны.
+        bridge_only = {"BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_PASSTHROUGH_POLL_INTERVAL_S"}
+        self.assertTrue(set(CANONICAL_RUNTIME_NAMES) <= names)
+        self.assertTrue(set(LEGACY_DROID_ALIASES) - {"DROID_BIN"} <= names)
+        for name in sorted(names - bridge_only):
+            with self.subTest(name=name):
+                self.assertEqual(server.sanitize_forwarded_env({name: "1"}), {})
+
+    def test_harmless_names_still_pass(self):
+        env = {
+            "GOOD_VAR": "ok",
+            "MY_BRIDGE_SETTING": "1",  # не начинается с BRIDGE_CLI_/NONSTREAM_/WATCHDOG_
+            "CLI_BRIDGE_X": "2",
+            "NONSTREAM_FLAG": "3",
+            "WATCHDOG_X": "4",
+            "XBRIDGE_CLI_X": "5",
+        }
+        self.assertEqual(server.sanitize_forwarded_env(env), env)
+
+    def test_prefix_match_is_by_prefix_not_substring(self):
+        self.assertEqual(
+            server.sanitize_forwarded_env({"BRIDGE_CLI_": "1", "BRIDGE_WATCHDOG_": "1"}),
+            {},
+        )
+        self.assertEqual(
+            server.sanitize_forwarded_env({"BRIDGE_CLIENT_X": "1"}),
+            {"BRIDGE_CLIENT_X": "1"},
+        )
+
+
+class TestAd004FlagSourceHierarchy(unittest.TestCase):
+    def test_forward_flag_source_extends_shared_dynamic_flag_source(self):
+        from core.runtime_env import DynamicFlagSource
+
+        self.assertTrue(issubclass(server._ForwardFlagSource, DynamicFlagSource))
+        self.assertTrue(issubclass(server._PassthroughAuthFlagSource, DynamicFlagSource))
+        self.assertTrue(
+            issubclass(server._PassthroughAuthFlagSource, server._ForwardFlagSource)
+        )
+
+    def test_flag_names_are_unchanged(self):
+        self.assertEqual(
+            server._ForwardFlagSource._flag_name, "BRIDGE_BROWSER_FORWARDING_ENABLED"
+        )
+        self.assertEqual(
+            server._PassthroughAuthFlagSource._flag_name,
+            "BRIDGE_PASSTHROUGH_UPSTREAM_KEY_AUTH_ENABLED",
+        )
+        self.assertEqual(server._ForwardFlagSource._flag_name, server.FORWARD_FLAG)
+        self.assertEqual(
+            server._PassthroughAuthFlagSource._flag_name, server.PASSTHROUGH_AUTH_FLAG
+        )
+        self.assertEqual(server._FORWARD_FLAG_SOURCE._flag_name, server.FORWARD_FLAG)
+        self.assertEqual(
+            server.PASSTHROUGH_AUTH_FLAG_SOURCE._flag_name, server.PASSTHROUGH_AUTH_FLAG
+        )
+
+    def test_subclasses_do_not_share_state_or_flag_names(self):
+        forward = server._ForwardFlagSource()
+        passthrough = server._PassthroughAuthFlagSource()
+        self.assertNotEqual(forward._flag_name, passthrough._flag_name)  # общий снимок файла, разные ключи
+        self.assertIsInstance(forward, runtime_env.DynamicFlagSource)
+        self.assertIsInstance(passthrough, runtime_env.DynamicFlagSource)
+
+    def test_default_false_snapshot_override_and_fail_closed(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = Path(directory) / "dynamic_config.json"
+            with mock.patch.dict(
+                os.environ, {"BRIDGE_DYNAMIC_CONFIG_PATH": str(cfg)}, clear=False
+            ):
+                os.environ.pop(server.FORWARD_FLAG, None)
+                os.environ.pop(server.PASSTHROUGH_AUTH_FLAG, None)
+                forward = server._ForwardFlagSource()
+                passthrough = server._PassthroughAuthFlagSource()
+                self.assertFalse(forward.enabled())
+                self.assertFalse(passthrough.enabled())
+                cfg.write_text(
+                    json.dumps({server.FORWARD_FLAG: True}), encoding="utf-8"
+                )
+                self.assertTrue(forward.enabled())
+                self.assertFalse(passthrough.enabled())  # свой ключ, чужой не действует
+                cfg.write_text("{broken", encoding="utf-8")
+                self.assertFalse(forward.enabled())
+                self.assertFalse(passthrough.enabled())
+
+
+class TestAd004DeniedNamesNeverReachChild(FwdCase):
+    """Сквозная проверка: имена семейств не доезжают до реального дочернего процесса."""
+
+    NAMES = (
+        "BRIDGE_CLI_FIRST_TOKEN_TIMEOUT_S",
+        "BRIDGE_NONSTREAM_IDLE_TIMEOUT_S",
+        "BRIDGE_WATCHDOG_SAFETY_CAP_S",
+        "DROID_BRIDGE_MAX_CHATS",
+        "DROID_DSH_BRIDGE_SAFETY_CAP_S",
+        "DROID_DSH_BRIDGE_IDLE_SECONDS",
+    )
+
+    def test_denied_runtime_names_do_not_reach_child_process(self):
+        self.hub.configure(log_env=[*PROBE, *self.NAMES])
+        self.set_flag(True)
+        evil = {name: "777" for name in self.NAMES}
+        status, _ = self.conv(
+            "c-ad004", extra_body=env_body(**evil, GOOD_VAR="ok")
+        ).ask("hello")
+        self.assertEqual(status, 200)
+        probe = self.probes()[0]
+        self.assertEqual(probe["GOOD_VAR"], "ok")
+        for name in self.NAMES:
+            self.assertNotEqual(probe[name], "777", name)
 
 
 if __name__ == "__main__":

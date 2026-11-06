@@ -163,6 +163,11 @@ from core.watchdog import (  # noqa: E402,F401
     ProcessWatchdog,
 )
 from core.model_penalty import get_penalty_tracker  # noqa: E402
+from core.cli_runtime_config import CliRuntimeConfig, WatchdogConfig, cli_label, cli_number  # noqa: E402
+from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa: E402
+from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
+from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
+CLI_CFG = CliRuntimeConfig.from_env()
 
 
 HOME = Path.home()
@@ -198,9 +203,7 @@ HOST = _bridge_env("HOST", "127.0.0.1")
 PORT = int(_bridge_env("PORT", "9882"))
 AUTH_KEY = _bridge_env("KEY")
 BRIDGE_KEY = AUTH_KEY
-LAUNCHER = os.environ.get(
-    "DROID_LAUNCHER", str(HOME / ".config" / "factory-launch" / "droid-cli.sh")
-)
+LAUNCHER = CLI_CFG.launcher or str(HOME / ".config" / "factory-launch" / "droid-cli.sh")
 FLEET_PATH = Path(
     os.environ.get("DROID_DSH_BRIDGE_FLEET", "") or str(ROOT / "fleet.json")
 )
@@ -386,9 +389,7 @@ QUEUE_TIMEOUT_S = float(_bridge_env("QUEUE_TIMEOUT_S", "900.0"))
 TIMEOUT_S = float(_bridge_env("TIMEOUT_S", "1800.0"))
 KEEPALIVE_S = float(_bridge_env("KEEPALIVE_S", "10.0"))
 IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
-SAFETY_CAP_S = float(
-    os.environ.get("DROID_DSH_BRIDGE_SAFETY_CAP_S", str(int(DEFAULT_SAFETY_CAP_S)))
-)
+SAFETY_CAP_S = WatchdogConfig.from_env().safety_cap_s
 UI_RESERVED_SLOTS = int(_bridge_env("UI_RESERVED_SLOTS", "2"))
 SUBAGENT_MAX_CONCURRENT = int(_bridge_env("SUBAGENT_MAX_CONCURRENT", "128"))
 SUBAGENT_QUEUE_TIMEOUT_S = float(_bridge_env("SUBAGENT_QUEUE_TIMEOUT_S", "120.0"))
@@ -399,24 +400,13 @@ SUBAGENT_WATCHDOG_CAP_S = float(_bridge_env("SUBAGENT_WATCHDOG_CAP_S", "300.0"))
 # socket-таймаута соединения) — зависший/нечитающий клиент не держит T/L (см. sse_writer в
 # _serve_sse и add_content/add_reasoning в Handler._execute).
 def parse_live_write_timeout(default: float = 30.0) -> float:
-    """Читает таймаут записи, возвращая default при неверном значении ENV."""
-    raw = os.environ.get("DROID_BRIDGE_LIVE_WRITE_TIMEOUT_S", "").strip()
-    if not raw:
-        return default
-    try:
-        val = float(raw)
-        if not (1.0 <= val <= 300.0):
-            return default
-        return val
-    except (ValueError, TypeError):
-        return default
+    """Write timeout from env; invalid -> ConfigError."""
+    return cli_number("live_write_timeout_s", default)
 
 
 LIVE_WRITE_TIMEOUT_S: float = parse_live_write_timeout(30.0)
 # Таймаут первого события stream-json от `droid exec` (с момента старта процесса).
-FIRST_TOKEN_TIMEOUT_S = float(
-    os.environ.get("DROID_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "90")
-)
+FIRST_TOKEN_TIMEOUT_S = CLI_CFG.first_token_timeout_s
 # Окно после успешного хода, в котором лончеру передаётся DROID_SKIP_PREFLIGHT=1.
 PREFLIGHT_SKIP_WINDOW_S = 120.0
 
@@ -767,12 +757,12 @@ def _etag_matches(header: str | None, etag: str) -> bool:
 # должны замедлять набор.
 RPC_NAMESPACE = "droid-bridge/v1"
 # Idle-гашение процесса чата (по monotonic времени последнего terminal/release).
-IDLE_SECONDS = float(os.environ.get("DROID_DSH_BRIDGE_IDLE_SECONDS", "2700"))
+IDLE_SECONDS = CLI_CFG.idle_seconds
 REAPER_TICK_S = 1.0
 # Тишина без событий ТЕКУЩЕГО хода после первого события (сбрасывают только они).
-SILENCE_WATCHDOG_S = float(os.environ.get("DROID_BRIDGE_SILENCE_WATCHDOG_S", "120"))
+SILENCE_WATCHDOG_S = CLI_CFG.silence_watchdog_s
 # Ожидание ответа на служебный запрос (initialize/load/update/list_tools/add).
-RPC_CALL_TIMEOUT_S = float(os.environ.get("DROID_BRIDGE_RPC_CALL_TIMEOUT_S", "60"))
+RPC_CALL_TIMEOUT_S = CLI_CFG.rpc_call_timeout_s
 # После interrupt ждём terminal столько, затем процесс закрывается принудительно.
 INTERRUPT_GRACE_S = 3.0
 # Не больше пяти restore на один SID: шестой — свежая generation (вторичный предел).
@@ -804,27 +794,21 @@ TITLE_MAX_TOKENS = 64
 RECEIPT_REQUIRED = os.environ.get("DROID_DSH_BRIDGE_RECEIPT_REQUIRED", "1") != "0"
 # Байтовые бюджеты (AD-011/TM-020, RW-008): превышение — предусмотренная ошибка, процесс и
 # слот возвращаются. Значения подбираются env; в тестах подменяются малыми.
-MAX_RPC_LINE_BYTES = int(
-    os.environ.get("DROID_BRIDGE_MAX_RPC_LINE_BYTES", str(8 << 20))
-)
-MAX_STDERR_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_STDERR_BYTES", str(64 << 10)))
+MAX_RPC_LINE_BYTES = CLI_CFG.max_rpc_line_bytes
+MAX_STDERR_BYTES = CLI_CFG.max_stderr_bytes
 # Бюджет очереди событий; одна строка до MAX_RPC_LINE_BYTES принимается в пустую очередь (иначе
 # легитимный ответ load_session крупнее 4 МиБ был бы недоставим), поэтому память очереди
 # ограничена MAX_INBOX_BYTES + одной строкой.
-MAX_INBOX_BYTES = int(os.environ.get("DROID_BRIDGE_MAX_INBOX_BYTES", str(4 << 20)))
-MAX_TURN_TEXT_BYTES = int(
-    os.environ.get("DROID_BRIDGE_MAX_TURN_TEXT_BYTES", str(10 << 20))
-)
+MAX_INBOX_BYTES = CLI_CFG.max_inbox_bytes
+MAX_TURN_TEXT_BYTES = CLI_CFG.max_turn_text_bytes
 # Промежуточная очередь Run.q (RW-204, F-103 Архитектурной панели): ограничена, чтобы
 # медленный потребитель (_execute) не давал producer (RPC-поток Run) копить события
 # без предела. Переполнение — не блокировка producer, а явный fail-close (Run._publish).
-RUN_QUEUE_MAXSIZE = int(os.environ.get("DROID_BRIDGE_RUN_QUEUE_MAXSIZE", "1024"))
+RUN_QUEUE_MAXSIZE = CLI_CFG.run_queue_maxsize
 # Структурный предел строки RPC: число `{`/`[`/`,`/`:` вне строк. Строка из миллионов пустых объектов или
 # чисел укладывается в MAX_RPC_LINE_BYTES, но json.loads раздул бы её в сотни МиБ объектов (RW-014, RW-010):
 # отклоняется до разбора.
-MAX_JSON_STRUCT_TOKENS = int(
-    os.environ.get("DROID_BRIDGE_MAX_JSON_STRUCT_TOKENS", str(50_000))
-)
+MAX_JSON_STRUCT_TOKENS = CLI_CFG.max_json_struct_tokens
 # Условная стоимость записи/слота в бюджетах: поток пустых сообщений тоже упирается в лимит.
 ENTRY_OVERHEAD_BYTES = 64
 # Предел длины id сообщения в карантине событий (RW-009): длиннее — ошибка хода (id удерживается в памяти).
@@ -833,10 +817,8 @@ MAX_HELD_MID_CHARS = 1024
 DELIVERY_CHUNK_BYTES = 64 << 10
 # Общий бюджет памяти готовых ответов, удерживаемых до конца выдачи клиенту (RW-011): T/L к этому
 # моменту свободны, а медленные клиенты держат `out`. Исчерпан — 502 proxy_error.
-MAX_DELIVERY_BYTES = int(
-    os.environ.get("DROID_BRIDGE_MAX_DELIVERY_BYTES", str(256 << 20))
-)
-MAX_CHATS = int(os.environ.get("DROID_BRIDGE_MAX_CHATS", "4096"))
+MAX_DELIVERY_BYTES = CLI_CFG.max_delivery_bytes
+MAX_CHATS = CLI_CFG.max_chats
 # Предел блока agent-instructions (REQ-003): больше — отказ до spawn/add (строгая граница).
 # BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 100000, диапазон и валидация — в b_guard (ADR 0015).
 INSTR_BLOCK_LIMIT = b_guard.resolve_block_limit()
@@ -983,62 +965,16 @@ DENIED_FORWARD_PREFIXES = (
     "GIT_",
     "PERL",
     "RUBY",
+    "BRIDGE_CLI_",
+    "BRIDGE_NONSTREAM_",
+    "BRIDGE_WATCHDOG_",
 )
 _MASK_NAME = re.compile(r"TOKEN|KEY|SECRET|AUTH|PASS", re.IGNORECASE)
 
 
-class _ForwardFlagSource:
-    """Динамический флаг GigaRC: JSON-снимок с кэшем по (inode, size, mtime_ns), O(1) на вызов.
-
-    Файл — `BRIDGE_DYNAMIC_CONFIG_PATH` либо `~/.config/cli-agent-bridge/dynamic_config.json`.
-    Файла нет или в нём нет ключа — env `BRIDGE_BROWSER_FORWARDING_ENABLED` (дефолт false).
-    Файл нечитаем/повреждён — fail-closed (false): kill-switch не должен «залипать» во включённом.
-    Перечитывание — только при смене сигнатуры файла, рестарт моста не нужен.
-    """
+class _ForwardFlagSource(DynamicFlagSource):
 
     _flag_name = FORWARD_FLAG
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._path = ""
-        self._sig: tuple | None = None
-        self._value: bool | None = None  # None = ключа нет в файле
-
-    @staticmethod
-    def _truthy(raw: Any) -> bool:
-        if isinstance(raw, bool):
-            return raw
-        return str(raw).strip().lower() in ("1", "true", "yes", "on")
-
-    def enabled(self) -> bool:
-        path = os.environ.get("BRIDGE_DYNAMIC_CONFIG_PATH") or os.path.expanduser(
-            "~/.config/cli-agent-bridge/dynamic_config.json"
-        )
-        try:
-            st = os.stat(path)
-            sig = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
-        except OSError:
-            sig = None
-        with self._lock:
-            if path != self._path or sig != self._sig:
-                self._path, self._sig = path, sig
-                self._value = self._load(path) if sig is not None else None
-            value = self._value
-        if value is None:
-            return self._truthy(os.environ.get(self._flag_name, "false"))
-        return value
-
-    def _load(self, path: str) -> bool | None:
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                data = json.loads(handle.read(1 << 20))
-        except (OSError, ValueError):
-            return False  # повреждённый снимок: fail-closed
-        if not isinstance(data, dict):
-            return False
-        if self._flag_name not in data:
-            return None
-        return self._truthy(data[self._flag_name])
 
 
 _FORWARD_FLAG_SOURCE = _ForwardFlagSource()
@@ -1790,7 +1726,8 @@ class _HandlerSink(ResponseSink):
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
-    return hash_token(_extract_auth_token(handler) or AUTH_KEY)
+    explicit = handler.headers.get("X-Turn-Owner-Token", "").strip()
+    return hash_token(explicit or _extract_auth_token(handler) or AUTH_KEY)
 
 
 class ImageReject(Exception):
@@ -3476,6 +3413,7 @@ TURN_MANAGER = TurnSessionManager(
     finalize_fn=finalize_turn,
     log_fn=_log,
     persist_children_file=False,
+    first_token_timeout_s=FIRST_TOKEN_TIMEOUT_S,
 )
 LIFECYCLE = HubLifecycleManager(
     state_dir=_state_dir,
@@ -5754,7 +5692,7 @@ class Handler(BaseHTTPRequestHandler):
                 return state(
                     "first_token_timeout",
                     124,
-                    f"no droid event within {FIRST_TOKEN_TIMEOUT_S:g}s",
+                    f"{cli_label('no_event')} within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 )
             latest_progress = max(last_activity, getattr(run, "last_progress", 0.0) or 0.0)
             effective_idle = max(idle_timeout_s, 1.0)
@@ -5772,7 +5710,7 @@ class Handler(BaseHTTPRequestHandler):
                     return state(
                         "idle_timeout",
                         124,
-                        f"no droid progress within {effective_idle:.1f}s",
+                        f"{cli_label('no_progress')} within {effective_idle:.1f}s",
                     )
             if not self._client_write_dead and _client_gone(self.connection):
                 if detach_on_disconnect:
@@ -6350,7 +6288,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _error_body(out: dict) -> Any:
         st = out.get("state")
-        label = str(out.get("backend_kind") or "droid")  # имя бинарника в тексте ошибки
+        label = str(out.get("backend_kind") or cli_label("binary"))
         timeout_s = float(out.get("timeout_s") or TIMEOUT_S)
         if st == "timeout":
             return {
@@ -6368,8 +6306,8 @@ class Handler(BaseHTTPRequestHandler):
             }
         if st == "first_token_timeout":
             return {
-                "message": f"first_token_timeout: droid exec gave no event within "
-                f"{FIRST_TOKEN_TIMEOUT_S:g}s",
+                "message": f"first_token_timeout: {cli_label('exec')} gave no event "
+                f"within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 "type": "first_token_timeout",
                 "code": 504,
             }
@@ -6409,7 +6347,7 @@ class Handler(BaseHTTPRequestHandler):
             }
         if st == "droid_error":
             return {
-                "message": str(out.get("err") or "droid exec reported an error")[:500],
+                "message": str(out.get("err") or f"{cli_label('exec')} reported an error")[:500],
                 "type": "droid_error",
                 "code": 502,
             }
@@ -6485,6 +6423,15 @@ class Handler(BaseHTTPRequestHandler):
         if not re.fullmatch(r"[0-9]+", str(raw_seq).strip()):
             return None
         return int(str(raw_seq).strip())
+
+    def _turn_snapshot(self, turn_id: str) -> dict[str, Any]:
+        owner = _owner_token_hash(self)
+        try:
+            return TURN_MANAGER.get_turn_snapshot(turn_id, owner_token_hash=owner)
+        except KeyError:
+            if not flag_enabled(FLAG_TELEMETRY):
+                raise
+        return get_registry().turn_snapshot(turn_id, owner)
 
     def _serve_turn_stream(self, turn_id: str) -> None:
         if not validate_turn_id(turn_id):
@@ -6661,9 +6608,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    snap = TURN_MANAGER.get_turn_snapshot(
-                        turn_id, owner_token_hash=_owner_token_hash(self)
-                    )
+                    snap = self._turn_snapshot(turn_id)
                 except KeyError:
                     self._send(
                         404,
@@ -7989,13 +7934,16 @@ class Handler(BaseHTTPRequestHandler):
             headers = {
                 key: value
                 for key, value in headers.items()
-                if key.lower() not in {"authorization", "x-api-key"}
+                if key.lower() not in {"authorization", "x-api-key", "x-turn-owner-token"}
             }
-        sink = _HandlerSink(self, extra_headers=trace_headers)
+        live_id = new_passthrough_turn_id() if flag_enabled(FLAG_TELEMETRY) else ""
+        window = passthrough_window(adapter.limits, self.path, req) if live_id else None
+        sink = _HandlerSink(self, extra_headers=[*trace_headers, ("X-Turn-Id", live_id)] if live_id else trace_headers)
         try:
-            adapter.handle(
-                path=self.path, raw_body=raw, request=req, headers=headers, sink=sink
-            )
+            extra = {"window": window} if live_id else {}
+            if live_id:
+                get_registry().register(live_id, _owner_token_hash(self), window)
+            adapter.handle(path=self.path, raw_body=raw, request=req, headers=headers, sink=sink, **extra)
             fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
             canonical_model_id = (
                 _resolve_model_alias(model_id, fleet_models)[0]
@@ -8024,6 +7972,7 @@ class Handler(BaseHTTPRequestHandler):
                     canonical_model_id, f"http_{sink.status}"
                 )
         finally:
+            get_registry().finish(live_id)
             _log(
                 f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
             )
@@ -8089,7 +8038,7 @@ class Handler(BaseHTTPRequestHandler):
             finish = "tool_calls"
         shell = json.dumps(
             {
-                "id": f"chatcmpl-droid-{uuid.uuid4().hex[:12]}",
+                "id": f"{cli_label('completion_prefix')}{uuid.uuid4().hex[:12]}",
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": ctx["model"],
@@ -8166,7 +8115,7 @@ class Handler(BaseHTTPRequestHandler):
         lease = self._current_lease()
         # RW-203: состояние отказа живой записи не наследуется следующим запросом.
         self._client_write_dead = False
-        completion_id = f"chatcmpl-droid-{uuid.uuid4().hex[:12]}"
+        completion_id = f"{cli_label('completion_prefix')}{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         shown_model = ctx["model"]
         managed_turn: ManagedTurn | None = ctx.get("managed_turn") or getattr(
@@ -8643,7 +8592,7 @@ def main() -> None:
         f"listen {HOST}:{PORT} model={MODEL_ID} max_concurrent={MAX_CONCURRENT} "
         f"queue_timeout={QUEUE_TIMEOUT_S}s timeout={TIMEOUT_S}s keepalive={KEEPALIVE_S}s"
     )
-    print(f"[droid-bridge] listening on http://{HOST}:{PORT}/v1", flush=True)
+    print(f"[{cli_label('bridge')}] listening on http://{HOST}:{PORT}/v1", flush=True)
     try:
         server.serve_forever()
     finally:

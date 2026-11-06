@@ -83,4 +83,6 @@ fi
 unset _fk 2>/dev/null || true
 mkdir -p "$ROOT/logs" "$ROOT/workspace"
 cd "$ROOT"
+# ADR-0015: invalid BRIDGE_CLI_*/BRIDGE_NONSTREAM_*/BRIDGE_WATCHDOG_* config -> exit 78
+"${PYTHON_BIN:-/usr/bin/python3}" -c 'from core.cli_runtime_config import CliRuntimeConfig as C, NonstreamConfig as N, WatchdogConfig as W; C.from_env(); N.from_env(); W.from_env()' || exit 78
 exec /usr/bin/python3 server.py

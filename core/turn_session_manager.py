@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import hmac
 import json
@@ -35,16 +35,12 @@ from typing import Any
 import uuid
 
 from core.backend_adapter import ToolCall, TurnResult, Usage
+from core.liveness_signals import FLAG_TELEMETRY, LivenessSnapshot
+from core.runtime_env import flag_enabled
 from core.stream_fsm.machine import StreamMachine
 from core.stream_fsm.types import EmitChunk, EmitSSE, EmitToolCall
-from core.watchdog import (
-    FINISH_RESERVE_S,
-    IDLE_TIMEOUT_S,
-    SAFETY_CAP_S,
-    WATCHDOG_INTERVAL_S,
-    AdaptiveTimeoutController,
-    ProcessWatchdog,
-)
+from core.cli_runtime_config import WatchdogConfig
+from core.watchdog import AdaptiveTimeoutController, ProcessWatchdog
 
 SNAPSHOT_SCHEMA_VERSION = "1.0"
 
@@ -134,6 +130,10 @@ _SECRET_PATTERNS = (
 def validate_turn_id(turn_id: Any) -> bool:
     """Проверяет идентификатор хода по строгому шаблону `^[a-zA-Z0-9_-]{1,64}$`."""
     return isinstance(turn_id, str) and bool(TURN_ID_RE.fullmatch(turn_id))
+
+
+def _owner_mismatch(supplied: str | None, saved: str | None) -> bool:
+    return supplied is not None and bool(saved) and saved != supplied
 
 
 def hash_owner_token(token_or_peer: str | None) -> str:
@@ -708,6 +708,7 @@ class ManagedTurn:
     _slot_released: bool = False
     _cancel_callbacks: list[Callable[[], None]] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock)
+    _liveness_snapshot: LivenessSnapshot | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -739,7 +740,12 @@ class ManagedTurn:
             self.updated_at = time.time()
             ctrl = self.timeout_controller
         if ctrl is not None:
-            ctrl.record_activity(kind or "protocol")
+            ctrl.on_activity(kind)
+            if flag_enabled(FLAG_TELEMETRY):
+                self.update_liveness(ctrl.liveness_snapshot())
+
+    def update_liveness(self, snapshot: LivenessSnapshot) -> None:
+        self._liveness_snapshot = replace(snapshot, stream_requested=self.stream)
 
     def bind_process(
         self,
@@ -812,6 +818,7 @@ class ManagedTurn:
                 "usage": dict(self.buffer.usage),
                 "error": err_obj,
                 "owner_token_hash": self.owner_token_hash,
+                **({"liveness": self._liveness_snapshot.to_wire()} if self._liveness_snapshot else {}),
             }
 
 
@@ -859,10 +866,11 @@ class TurnSessionManager:
         max_buffered_turns: int = MAX_BUFFERED_TURNS,
         max_total_buffer_bytes: int = MAX_TURN_BUFFER_TOTAL_BYTES,
         turn_retention_s: float = TURN_RETENTION_S,
-        idle_timeout_s: float = IDLE_TIMEOUT_S,
-        safety_cap_s: float = SAFETY_CAP_S,
-        finish_reserve_s: float = FINISH_RESERVE_S,
-        watchdog_interval_s: float = WATCHDOG_INTERVAL_S,
+        idle_timeout_s: float | None = None,
+        safety_cap_s: float | None = None,
+        finish_reserve_s: float | None = None,
+        watchdog_interval_s: float | None = None,
+        first_token_timeout_s: float | None = None,
         cancel_grace_s: float = CANCEL_SIGTERM_GRACE_S,
         detached_enabled_fn: Callable[[], bool] | None = None,
         watchdog_enabled_fn: Callable[[], bool] | None = None,
@@ -891,10 +899,12 @@ class TurnSessionManager:
         self.max_buffered_turns = int(max_buffered_turns)
         self.max_total_buffer_bytes = int(max_total_buffer_bytes)
         self.turn_retention_s = float(turn_retention_s)
-        self.idle_timeout_s = float(idle_timeout_s)
-        self.safety_cap_s = float(safety_cap_s)
-        self.finish_reserve_s = float(finish_reserve_s)
-        self.watchdog_interval_s = float(watchdog_interval_s)
+        cfg = WatchdogConfig.from_env()
+        self.idle_timeout_s = float(cfg.idle_timeout_s if idle_timeout_s is None else idle_timeout_s)
+        self.safety_cap_s = float(cfg.safety_cap_s if safety_cap_s is None else safety_cap_s)
+        self.finish_reserve_s = float(cfg.finish_reserve_s if finish_reserve_s is None else finish_reserve_s)
+        self.watchdog_interval_s = float(cfg.interval_s if watchdog_interval_s is None else watchdog_interval_s)
+        self.first_token_timeout_s = first_token_timeout_s
         self.cancel_grace_s = float(cancel_grace_s)
         self.persist_children_file = bool(persist_children_file)
         self._detached_enabled_fn = detached_enabled_fn or _is_detached_enabled
@@ -1110,11 +1120,7 @@ class TurnSessionManager:
             if turn is None or not turn.is_active:
                 self._active_by_key.pop(turn_key, None)
                 return None
-            if (
-                owner_token_hash is not None
-                and turn.owner_token_hash
-                and turn.owner_token_hash != owner_token_hash
-            ):
+            if _owner_mismatch(owner_token_hash, turn.owner_token_hash):
                 return None
             return turn
 
@@ -1131,11 +1137,7 @@ class TurnSessionManager:
             turn = self._turns_by_id.get(turn_id)
         if turn is None:
             raise TurnNotFoundError(turn_id)
-        if (
-            owner_token_hash is not None
-            and turn.owner_token_hash
-            and turn.owner_token_hash != owner_token_hash
-        ):
+        if _owner_mismatch(owner_token_hash, turn.owner_token_hash):
             raise TurnForbiddenError(turn_id)
         return turn
 
@@ -1151,11 +1153,7 @@ class TurnSessionManager:
         with self._lock:
             turn = self._turns_by_id.get(turn_id)
         if turn is not None:
-            if (
-                owner_token_hash is not None
-                and turn.owner_token_hash
-                and turn.owner_token_hash != owner_token_hash
-            ):
+            if _owner_mismatch(owner_token_hash, turn.owner_token_hash):
                 raise TurnForbiddenError(turn_id)
             return turn.to_snapshot_dict(scrub_secrets=True)
 
@@ -1166,12 +1164,7 @@ class TurnSessionManager:
             data = json.loads(disk_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise TurnNotFoundError(turn_id) from exc
-        saved_owner = data.get("owner_token_hash")
-        if (
-            owner_token_hash is not None
-            and saved_owner
-            and saved_owner != owner_token_hash
-        ):
+        if _owner_mismatch(owner_token_hash, data.get("owner_token_hash")):
             raise TurnForbiddenError(turn_id)
         return data
 
@@ -1277,6 +1270,7 @@ class TurnSessionManager:
                 idle_timeout_s=eff_idle,
                 safety_cap_s=eff_cap,
                 finish_reserve_s=self.finish_reserve_s,
+                first_token_timeout_s=self.first_token_timeout_s,
                 watchdog_enabled=self.is_watchdog_enabled(),
                 clock=self._clock,
                 rid=eff_rid,
@@ -1611,6 +1605,8 @@ class TurnSessionManager:
                     if ctrl is None:
                         continue
                     should_stop, reason, _metrics = ctrl.check(turn.pgid)
+                    if flag_enabled(FLAG_TELEMETRY):
+                        turn.update_liveness(ctrl.liveness_snapshot())
                     if should_stop and reason in ("idle_timeout", "absolute_cap"):
                         self._log(
                             f"watchdog_triggered rid={turn.rid} turn_id={turn.turn_id} "

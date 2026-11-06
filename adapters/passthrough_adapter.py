@@ -70,6 +70,10 @@ except ImportError:
     DEFAULT_MAX_REPETITION_REPEATS = 20
     DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
     RepetitionGuard = None  # type: ignore[assignment,misc]
+from core.cli_runtime_config import NonstreamConfig
+from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
+from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, relax_socket_timeout, request_deadlines
+from core.runtime_env import bounded_int as _bounded_int, env_bool, positive_int as _positive_int
 from core.stream_framing import (
     build_stream_error_chunk,
     format_sse_event,
@@ -126,17 +130,10 @@ _REQUEST_DROP = _HOP_BY_HOP | {
     "host",
     "content-length",
     "accept-encoding",
+    "x-turn-owner-token",
     _TOOL_SANITIZED_HEADER,
 }
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
-
-
-def _positive_int(environ: Mapping[str, str], name: str, default: int) -> int:
-    try:
-        value = int(str(environ.get(name, "")).strip())
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
@@ -145,25 +142,6 @@ def _positive_float(environ: Mapping[str, str], name: str, default: float) -> fl
     except ValueError:
         return default
     return value if math.isfinite(value) and value > 0 else default
-
-
-def _bounded_int(
-    environ: Mapping[str, str], name: str, default: int, low: int, high: int
-) -> int:
-    try:
-        value = int(str(environ.get(name, "")).strip())
-    except ValueError:
-        return default
-    return value if low <= value <= high else default
-
-
-def _env_bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
-    raw = str(environ.get(name, "")).strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    return default
 
 
 @dataclass(frozen=True)
@@ -190,6 +168,7 @@ class PassthroughLimits:
     invoke_normalization_enabled: bool = False
     max_keepalive_connections: int = 32
     keepalive_expiry_s: float = 30.0
+    nonstream: NonstreamConfig = field(default_factory=NonstreamConfig)
 
     @classmethod
     def from_env(
@@ -197,6 +176,7 @@ class PassthroughLimits:
     ) -> "PassthroughLimits":
         """Лимиты из окружения; нечисловое и неположительное значение -> default."""
         env = os.environ if environ is None else environ
+        ns = NonstreamConfig.from_env(env)
         return cls(
             max_keepalive_connections=_positive_int(
                 env, "BRIDGE_MAX_KEEPALIVE_CONNECTIONS", 32
@@ -237,9 +217,7 @@ class PassthroughLimits:
             heartbeat_interval_s=_positive_float(
                 env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
             ),
-            poll_interval_s=_positive_float(
-                env, "BRIDGE_PASSTHROUGH_POLL_INTERVAL_S", 0.1
-            ),
+            poll_interval_s=ns.poll_interval_s,
             reader_join_timeout_s=_positive_float(
                 env, "BRIDGE_PASSTHROUGH_READER_JOIN_TIMEOUT_S", 0.2
             ),
@@ -256,12 +234,9 @@ class PassthroughLimits:
                 8,
                 512,
             ),
-            repetition_guard_enabled=_env_bool(
-                env, ENV_REPETITION_GUARD_ENABLED, False
-            ),
-            invoke_normalization_enabled=_env_bool(
-                env, ENV_INVOKE_NORMALIZATION_ENABLED, False
-            ),
+            repetition_guard_enabled=env_bool(env, (ENV_REPETITION_GUARD_ENABLED,), False),
+            invoke_normalization_enabled=env_bool(env, (ENV_INVOKE_NORMALIZATION_ENABLED,), False),
+            nonstream=ns,
         )
 
 
@@ -731,17 +706,19 @@ class _TimedSseReader:
         write: Callable[[bytes], None],
         limits: PassthroughLimits,
         deadline: float,
+        window: LivenessWindow | None = None,
+        enforce: bool = False,
     ) -> None:
         self.limits = limits
         self.deadline = deadline
         self.write = write
+        self.progress = SseProgress(window, enforce)
         self.items: queue.Queue[bytes | Exception] = queue.Queue(
             maxsize=limits.read_queue_max_entries
         )
         self.stop = threading.Event()
         self.request_read: threading.Semaphore = threading.Semaphore(0)
         self.last_input = time.monotonic()
-        self.last_progress: float | None = None
 
         def read() -> None:
             try:
@@ -776,10 +753,10 @@ class _TimedSseReader:
         self.request_read.release()
         while True:
             now = time.monotonic()
-            remaining = self.deadline - now
-            if self.last_progress is not None:
+            remaining = self.progress.remaining(self.deadline - now)
+            if self.progress.last_progress is not None:
                 remaining = min(
-                    remaining, self.last_progress + self.limits.idle_timeout_s - now
+                    remaining, self.progress.last_progress + self.limits.idle_timeout_s - now
                 )
             if remaining <= 0:
                 raise TimeoutError("upstream stream deadline exceeded")
@@ -819,6 +796,7 @@ def relay_sse(
     trusted_tools: bool = False,
     state: StreamOutcome | None = None,
     deadline: float | None = None,
+    window: LivenessWindow | None = None,
 ) -> StreamOutcome:
     """Пробросить SSE-поток upstream клиенту с санитизацией `tool_calls` (AD-005).
 
@@ -830,6 +808,7 @@ def relay_sse(
         write,
         limits,
         deadline if deadline is not None else time.monotonic() + limits.total_timeout_s,
+        window,
     )
     outcome = state if state is not None else StreamOutcome()
     client_write = write
@@ -940,6 +919,7 @@ def relay_sse(
 
     try:
         for raw, data in iter_sse_events(reader.readline, limits.max_body_bytes):
+            chunk = reader.progress.note(data)
             if data is None:
                 write(raw)  # комментарий/keepalive/event без data — дословно
                 continue
@@ -962,31 +942,10 @@ def relay_sse(
                 outcome.done = True
                 write(raw)
                 return outcome
-            try:
-                chunk = json.loads(data)
-            except ValueError:
-                if data.strip():
-                    reader.last_progress = time.monotonic()
+            if chunk is None:
                 write(raw)
                 continue
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
-            if isinstance(choices, list):
-                # Role/usage — служебные кадры: TTFT защищён до первого полезного токена.
-                for choice in choices:
-                    delta = choice.get("delta") if isinstance(choice, dict) else None
-                    if isinstance(delta, dict) and any(
-                        delta.get(key)
-                        for key in (
-                            "content",
-                            "reasoning_content",
-                            "reasoning",
-                            "reasoning_text",
-                            "tool_calls",
-                            "function_call",
-                        )
-                    ):
-                        reader.last_progress = time.monotonic()
-                        break
             if not isinstance(choices, list):
                 if isinstance(chunk, dict):
                     meta = {
@@ -1004,13 +963,7 @@ def relay_sse(
                 }
                 for choice in choices:
                     if isinstance(choice, dict):
-                        raw_index = choice.get("index")
-                        idx = (
-                            raw_index
-                            if isinstance(raw_index, int)
-                            and not isinstance(raw_index, bool)
-                            else 0
-                        )
+                        idx = choice_index(choice.get("index"))
                         seen.add(idx)
                         if choice.get("finish_reason"):
                             finished.add(idx)
@@ -1036,12 +989,7 @@ def relay_sse(
             for choice in choices:
                 if not isinstance(choice, dict):
                     continue
-                raw_index = choice.get("index")
-                index = (
-                    raw_index
-                    if isinstance(raw_index, int) and not isinstance(raw_index, bool)
-                    else 0
-                )
+                index = choice_index(choice.get("index"))
                 seen.add(index)
                 delta = choice.get("delta")
                 if isinstance(delta, dict) and "tool_calls" in delta:
@@ -1326,9 +1274,13 @@ class PassthroughAdapter(BackendAdapter):
         request: Mapping[str, Any],
         headers: Mapping[str, str],
         sink: ResponseSink,
+        window: LivenessWindow | None = None,
     ) -> None:
-        """Один запрос: байты тела уходят upstream без мутаций, ответ пишется в `sink`."""
-        deadline = time.monotonic() + self.limits.total_timeout_s
+        """One request: body goes upstream unmodified (AD-001: internal stream=true), response goes to `sink`."""
+        internal = internal_stream_body(path, request, raw_body)
+        if internal is not None:
+            raw_body, window = internal, window or passthrough_window(self.limits, path, request)
+        deadline, open_deadline = request_deadlines(self.limits, internal is not None)
         queue_timeout = min(
             float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)),
             self.limits.total_timeout_s,
@@ -1391,7 +1343,7 @@ class PassthroughAdapter(BackendAdapter):
                     path,
                     raw_body,
                     headers,
-                    deadline=deadline,
+                    deadline=open_deadline,
                     on_socket=on_socket,
                     presend_deadline=getattr(sink, "presend_deadline", None),
                     on_pooling=opened_pooling.append,
@@ -1403,6 +1355,8 @@ class PassthroughAdapter(BackendAdapter):
                 resp = conn.getresponse()
                 if time.monotonic() >= deadline:
                     raise TimeoutError()
+                if internal is not None:
+                    relax_socket_timeout(conn.sock, deadline, self.limits.read_timeout_s)
                 if resp.status in (502, 503) and getattr(
                     sink, "accepts_presend_errors", False
                 ):
@@ -1458,7 +1412,7 @@ class PassthroughAdapter(BackendAdapter):
                         sink, 502, "upstream_unavailable", "upstream is unavailable"
                     )
                 return
-            successful = self._respond(resp, request, sink, deadline, on_timeout=abort)
+            successful = self._respond(resp, request, sink, deadline, on_timeout=abort, window=window)
         except ClientGone:
             abort()
             self._log("passthrough client_gone")
@@ -1647,6 +1601,7 @@ class PassthroughAdapter(BackendAdapter):
         deadline: float | None = None,
         *,
         on_timeout: Callable[[], None] | None = None,
+        window: LivenessWindow | None = None,
     ) -> bool:
         content_type = (resp.getheader("Content-Type") or "").lower()
         encoded = (
@@ -1654,14 +1609,23 @@ class PassthroughAdapter(BackendAdapter):
         ).lower() != "identity"
         sanitize = self._sanitize_enabled()
         schemas = build_tool_schemas(request.get("tools")) if sanitize else None
-        if resp.status == 200 and "text/event-stream" in content_type:
+        sse = resp.status == 200 and "text/event-stream" in content_type
+        agg = window if sse and window and window.internal_stream else None
+        if sse and agg is None:
             return self._relay_stream(
-                resp, schemas, sink, sanitize, deadline, on_timeout=on_timeout
+                resp, schemas, sink, sanitize, deadline, on_timeout, window
             )
         try:
-            body = _read_bounded(resp, self.limits.max_body_bytes)
+            if agg is not None:
+                body = self._aggregate_sse(resp, agg)
+                content_type = "application/json"
+            else:
+                body = _read_bounded(resp, self.limits.max_body_bytes)
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("upstream total deadline exceeded")
+        except NonstreamError as exc:
+            self._fail(sink, exc.status, exc.code, exc.message)
+            return False
         except UpstreamBodyTooLarge:
             self._fail(
                 sink,
@@ -1686,9 +1650,21 @@ class PassthroughAdapter(BackendAdapter):
         if sanitize and resp.status == 200 and "json" in content_type and not encoded:
             body = sanitize_completion_body(body, schemas, self.limits)
         headers = self._response_headers(resp) + [("Content-Length", str(len(body)))]
+        if agg is not None:
+            headers = [h for h in headers if h[0].lower() != "content-type"]
+            headers.append(("Content-Type", "application/json; charset=utf-8"))
         sink.start(resp.status, headers)
         sink.write(body)
         return True
+
+    def _aggregate_sse(self, resp: http.client.HTTPResponse, window: LivenessWindow) -> bytes:
+        lim = self.limits
+        reader = _TimedSseReader(resp.readline, lambda _f: None, lim, math.inf, window, True)
+        try:
+            events = iter_sse_events(reader.readline, lim.max_body_bytes)
+            return aggregate_events(events, window.record_signal, lim.max_body_bytes, window.expired)
+        finally:
+            reader.close()
 
     def _relay_stream(
         self,
@@ -1697,8 +1673,8 @@ class PassthroughAdapter(BackendAdapter):
         sink: ResponseSink,
         sanitize: bool,
         deadline: float | None = None,
-        *,
         on_timeout: Callable[[], None] | None = None,
+        window: LivenessWindow | None = None,
     ) -> bool:
         # Выбор доверия фиксируется до sink.start (первой записи клиенту).
         # Маркер допустим только от настроенного аутентифицированного loopback peer.
@@ -1735,6 +1711,7 @@ class PassthroughAdapter(BackendAdapter):
                 trusted_tools=trusted,
                 state=outcome,
                 deadline=deadline,
+                window=window,
             )
         except (socket.timeout, OSError, http.client.HTTPException) as exc:
             if (
