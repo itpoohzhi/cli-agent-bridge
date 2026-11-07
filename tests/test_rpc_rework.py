@@ -4,7 +4,6 @@
 (tests/fake_droid.py), говорящий stream-jsonrpc. Реальный droid и сеть не используются;
 значения ключей в тестах фиктивные. Идентификаторы RW-NNN — в имени метода и docstring.
 """
-
 import hashlib
 import json
 import os
@@ -14,14 +13,15 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402
-from rpc_testlib import FakeClock, RpcCase  # noqa: E402
-from test_images_strict import ImageCase  # noqa: E402
+from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402  # tests/ — корень импорта pytest
+from rpc_testlib import FakeClock, RpcCase  # noqa: E402  # tests/ — корень импорта pytest
+from test_images_strict import ImageCase  # noqa: E402  # tests/ — корень импорта pytest
 
 BODY = {"model": "claude-sonnet-5-5"}
 
@@ -30,7 +30,7 @@ def msg(text, role="user"):
     return {"role": role, "content": text}
 
 
-def post_safely(case, body, timeout=60.0):
+def post_safely(case, body, timeout=60.0) -> tuple[Any, Any]:
     """(status, json) либо (repr(исключения), None): обрыв соединения — провал теста, а не ошибка."""
     try:
         return case._post_json(body, timeout=timeout)
@@ -83,7 +83,7 @@ class TestSecretsScrub(RpcCase):
     CANARY = "CANARY-REAL-FACTORY-KEY-0123456789abcdef"
 
     def setUp(self):
-        self._pre = os.environ.get("FACTORY_API_KEY")
+        self._pre = os.environ.get("FACTORY_API_KEY")  # состояние создаётся в setUp
         os.environ["FACTORY_API_KEY"] = self.CANARY
         self.addCleanup(self._restore)
         self.addCleanup(
@@ -169,9 +169,8 @@ class TestRetractionCounter(RpcCase):
         self.assertEqual(body["choices"][0]["message"]["content"], "final")
         state = self.chat_of("chat-retract")
         sid = state.sid
-        saved = json.loads(
-            (self.hub.base / "sessions" / f"{sid}.json").read_text(encoding="utf-8")
-        )
+        session_path = self.hub.base / "sessions" / f"{sid}.json"
+        saved = json.loads(session_path.read_text(encoding="utf-8"))
         real_in_droid = sum(
             1 for m in saved["messages"] if not server._is_service_message(m)
         )
@@ -292,7 +291,7 @@ class TestDroidReceipt(RpcCase):
     def setUp(self):
         super().setUp()
         server.RECEIPT_REQUIRED = True
-        self._env_bin = os.environ.get("DROID_BIN")
+        self._env_bin = os.environ.get("DROID_BIN")  # состояние создаётся в setUp
         self.addCleanup(self._restore_bin)
 
     def _restore_bin(self):
@@ -339,9 +338,8 @@ class TestDroidReceipt(RpcCase):
         os.environ["DROID_BIN"] = "/usr/local/bin/droid-global-updated"
         status, _ = self._ask()
         self.assertEqual(status, 200)
-        self.assertEqual(
-            self.hub.spawns()[0]["droid_bin"], os.path.realpath(str(image))
-        )
+        spawn = self.hub.spawns()[0]
+        self.assertEqual(spawn["droid_bin"], os.path.realpath(str(image)))
 
 
 class TestDroidImageTool(RpcCase):
@@ -479,7 +477,7 @@ class TestSpoolEnospc(ImageCase):
         self,
     ):
         """RW-008/RW-004: write_bytes картинки -> OSError(ENOSPC): 502 proxy_error (новых кодов нет), lease/слот/каталог свободны."""
-        from bridge_testlib import image_part, make_png, text_part
+        from bridge_testlib import image_part, make_png, text_part  # tests/ — корень импорта pytest
 
         server.IMAGE_PROBE = True
         self.probe_stand()
@@ -490,7 +488,7 @@ class TestSpoolEnospc(ImageCase):
                 raise OSError(28, "No space left on device")
             return real(self_path, data)
 
-        Path.write_bytes = full_disk
+        setattr(Path, "write_bytes", full_disk)
         try:
             status, body = post_safely(
                 self,
@@ -506,7 +504,7 @@ class TestSpoolEnospc(ImageCase):
                 },
             )
         finally:
-            Path.write_bytes = real
+            setattr(Path, "write_bytes", real)
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
         self.assertEqual(self.hub.spawns(), [])
@@ -626,12 +624,14 @@ class TestRpcWriteDeadline(RpcCase):
         """RW-011: interrupt_quietly при зависшей записи возвращается сразу (пишущий лок не удерживает interrupt)."""
         server.RPC_CALL_TIMEOUT_S = 20.0
         results = {}
-        self._stalled_request(results)
+        req_thread = self._stalled_request(results)
         proc = next(iter(server._rpc_procs.values()))
         thread = threading.Thread(target=proc.interrupt_quietly, daemon=True)
         thread.start()
         thread.join(1.5)
         self.assertFalse(thread.is_alive())
+        server.shutdown_all()
+        req_thread.join(15)
 
     def test_rw011_shutdown_all_within_budget_with_stuck_child(self):
         """RW-011: SIGTERM-путь при зависшей записи: shutdown_all быстро, ребёнок убит (бюджет 4,5 с)."""

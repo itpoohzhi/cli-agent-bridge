@@ -3,12 +3,11 @@
 Проверяется на фейковом адаптере и на реальных DroidAdapter/MuseAdapter: набор методов,
 маппинг модель -> адаптер, отказ от загрузки кода из конфигурации, изоляция сбоя shutdown.
 """
-
 from __future__ import annotations
 
 import sys
 import unittest
-from typing import Optional
+from typing import Any, Optional
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,7 +41,7 @@ CONTRACT_METHODS = (
 )
 
 
-def catalog():
+def catalog() -> dict[str, Any]:
     models = {
         "a-1": {"id": "a-1", "backend": "alpha", "context_window": 1},
         "a-2": {"id": "a-2", "backend": "alpha", "context_window": 2},
@@ -96,8 +95,9 @@ class ExplodingAdapter(FakeAdapter):
 
 class TestInterface(unittest.TestCase):
     def test_interface_is_abstract(self):
+        abstract: Any = BackendAdapter
         with self.assertRaises(TypeError):
-            BackendAdapter("x", {}, dict)  # type: ignore[abstract]
+            abstract("x", {}, dict)
 
     def test_missing_method_keeps_class_abstract(self):
         for name in CONTRACT_METHODS:
@@ -180,8 +180,8 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(FakeAdapter.stopped, ["beta"])
 
     def test_incompatible_adapter_is_rejected_at_registration(self):
-        class LegacyAdapter(FakeAdapter):
-            capabilities = {}
+        incomplete = {"capabilities": {}}  # заведомо неполные capabilities
+        LegacyAdapter = type("LegacyAdapter", (FakeAdapter,), incomplete)
 
         registry = AdapterRegistry()
         with self.assertRaisesRegex(ValueError, "adapter_contract"):
@@ -193,15 +193,23 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_server_registry_has_enabled_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        # ADR 0017: droid выключен, passthrough-мосты agy/opencode-zen/claude-p включены
-        self.assertEqual(set(ids), {"muse", "codex", "agy", "opencode-zen", "claude-p"})
-        self.assertNotIn("droid", ids)
-        self.assertIn("muse", ids)
+        # droid включён первичным (priority 10), passthrough-мосты остаются для alternates
+        expected = {"droid", "muse", "codex", "agy", "opencode-zen", "claude-p"}
+        self.assertEqual(set(ids), expected)
 
     def test_model_routing(self):
         reg = server.BACKENDS
+        droid_first = {
+            "gpt-6.1-sol",
+            "deepseek-v4.1-flash",
+            "kimi-k3.1-pro",
+            "claude-sonnet-5-5",
+            "gemini-3.8-flash",
+        }
         for mid in server.FLEET["order"]:
-            if mid.startswith("gpt-"):
+            if mid in droid_first:
+                expected = "droid"
+            elif mid.startswith("gpt-"):
                 expected = "codex"
             elif mid.startswith("muse-"):
                 expected = "muse"

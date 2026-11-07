@@ -4,7 +4,6 @@
 его хаб, базовый HTTP-класс на свободном порту и сборщики запросов к image-пути.
 Сеть — только петлевой сокет тестового сервера; реальный droid не вызывается.
 """
-
 import base64
 import copy
 import http.client
@@ -17,6 +16,7 @@ import threading
 import time
 import unittest
 
+from typing import Any, cast
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from core.model_penalty import ModelPenaltyTracker  # noqa: E402
+from droid_test_helpers import apply_stand_efforts, make_receipt  # noqa: E402,F401  # tests/ — корень импорта pytest
 
 TOOLS = [
     {
@@ -135,7 +137,7 @@ def _stand_context_max_output(model_id: str) -> int:
     """max_tokens стендовых legacy-моделей (в боевом fleet.json их уже нет)."""
     for legacy in _DROID_LEGACY_MODELS:
         if legacy["id"] == model_id:
-            return legacy["max_tokens"]
+            return cast(int, legacy["max_tokens"])
     return _ORIG_CONTEXT_MAX_OUTPUT(model_id)
 
 
@@ -146,6 +148,7 @@ def droidify_raw_fleet(data):
     for m in data["models"]:
         if m["id"] in _DROID_STAND_MODELS:
             m["backend"] = "droid"
+        apply_stand_efforts(m)
     for legacy in _DROID_LEGACY_MODELS:
         if legacy["id"] not in present:
             data["models"].append(copy.deepcopy(legacy))
@@ -204,6 +207,8 @@ TEST_FACTORY_KEY = (
     "bridge-test-factory-key-not-real"  # то же значение, что ждёт fake_droid
 )
 _MISSING = object()
+# Сценарии отказа внутри одного теста копят провалы старта: карантин 503 в стенде не включается.
+TEST_MAX_START_FAILS = 1_000_000
 
 
 def legacy_scenario(events):
@@ -234,34 +239,6 @@ def legacy_scenario(events):
     if silent:
         steps.append({"op": "hang"})
     return {"steps": steps, "usage": usage}
-
-
-def make_receipt(image_path, digest, **override):
-    """Receipt schema 2 для fake_droid (протокол по умолчанию fake): тесты ломают по одному компоненту."""
-    import fake_droid
-
-    ids = list(fake_droid.DEFAULT_TOOLS)
-    receipt = {
-        "schema": server.RECEIPT_SCHEMA,
-        "image_path": str(image_path),
-        "image_sha256": digest,
-        "protocol": {
-            "api_version": server.RPC_API_VERSION,
-            "protocol_version": fake_droid.PROTOCOL,
-        },
-        "tools_policy": {
-            "policy": server.TOOLS_POLICY,
-            "disabled_tool_ids": sorted(ids),
-            "digest": server.tools_policy_digest(ids),
-        },
-        "settings_profile": {
-            "profile": dict(server.SETTINGS_PROFILE),
-            "digest": server.settings_profile_digest(),
-        },
-        "probes": {name: "ok" for name in server.RECEIPT_PROBES},
-    }
-    receipt.update(override)
-    return receipt
 
 
 class FakeDroidHub:
@@ -367,56 +344,42 @@ def pid_alive(pid):
 class BridgeCase(unittest.TestCase):
     """Сервер на свободном порту с подменённым Run и временным workspace."""
 
+    _saved: dict[str, Any] = {}
+    _env_factory_key: str | None = None
+    _env_fake: str | None = None
+    _tmp: Any = None
+    hub: Any = None
+    upstream: Any = None  # стенд fake-upstream подклассов
+    httpd: Any = None
+    port = 0
+
     def setUp(self):
         self._saved = {
             name: getattr(server, name, _MISSING)
             for name in (
-                "AUTH_KEY",
-                "TOKEN_CACHE",
-                "WORKSPACE",
-                "FLEET",
-                "IMAGE_PROBE",
-                "LAUNCHER",
-                "_budget",
-                "MODEL_ID",
-                "_sleep",
-                "INTERRUPT_GRACE_S",
-                "RPC_CALL_TIMEOUT_S",
-                "SILENCE_WATCHDOG_S",
-                "FIRST_TOKEN_TIMEOUT_S",
-                "TIMEOUT_S",
-                "_clock",
-                "IDLE_SECONDS",
-                "RECEIPT_REQUIRED",
-                "MAX_RPC_LINE_BYTES",
-                "MAX_STDERR_BYTES",
-                "MAX_INBOX_BYTES",
-                "MAX_TURN_TEXT_BYTES",
-                "MAX_CHATS",
-                "MAX_CONCURRENT",
-                "INSTR_BLOCK_LIMIT",
-                "FINISHED_TURNS_KEEP",
-                "DELIVERY_CHUNK_BYTES",
-                "ENTRY_OVERHEAD_BYTES",
-                "GUARD",
-                "GUARD_PROFILES_DIR",
-                "GUARD_CANON",
-                "INSTR_NONKB_MARGIN",
-                "MAX_JSON_STRUCT_TOKENS",
-                "BACKENDS",
-                "_context_max_output",
+                "AUTH_KEY", "TOKEN_CACHE", "WORKSPACE", "FLEET", "IMAGE_PROBE", "LAUNCHER",
+                "_budget", "MODEL_ID", "_sleep", "INTERRUPT_GRACE_S", "RPC_CALL_TIMEOUT_S",
+                "SILENCE_WATCHDOG_S", "FIRST_TOKEN_TIMEOUT_S", "TIMEOUT_S", "_clock",
+                "IDLE_SECONDS", "RECEIPT_REQUIRED", "MAX_RPC_LINE_BYTES", "MAX_STDERR_BYTES",
+                "MAX_INBOX_BYTES", "MAX_TURN_TEXT_BYTES", "MAX_CHATS", "MAX_CONCURRENT",
+                "INSTR_BLOCK_LIMIT", "FINISHED_TURNS_KEEP", "DELIVERY_CHUNK_BYTES",
+                "ENTRY_OVERHEAD_BYTES", "GUARD", "GUARD_PROFILES_DIR", "GUARD_CANON",
+                "INSTR_NONKB_MARGIN", "MAX_JSON_STRUCT_TOKENS", "BACKENDS",
+                "_context_max_output", "_PENALTY_TRACKER", "_MODEL_NOTES_FILTER",
             )
         }
         server._canon_seen.clear()
         # Реальный FACTORY_API_KEY рабочего окружения в тестах не используется: подставляем
         # фиктивный sentinel; восстановление через addCleanup срабатывает и при падении теста.
         self._env_factory_key = os.environ.get("FACTORY_API_KEY")
-        self.addCleanup(self._restore_factory_key)
+        self.addCleanup(self._restore_env, "FACTORY_API_KEY", self._env_factory_key)
         os.environ["FACTORY_API_KEY"] = TEST_FACTORY_KEY
         self._env_fake = os.environ.get("FAKE_DROID_DIR")
         self._tmp = tempfile.TemporaryDirectory()
         self.hub = FakeDroidHub(Path(self._tmp.name) / "fake")
+        self.addCleanup(self._restore_env, "FAKE_DROID_DIR", self._env_fake)
         os.environ["FAKE_DROID_DIR"] = str(self.hub.base)
+        self._isolate_runtime()
         server.LAUNCHER = str(self.hub.launcher)
         server.AUTH_KEY = "test-key"
         server.TOKEN_CACHE = server.TokenCache(
@@ -457,20 +420,37 @@ class BridgeCase(unittest.TestCase):
                     delattr(server, name)
             else:
                 setattr(server, name, value)
-        if self._env_fake is None:
-            os.environ.pop("FAKE_DROID_DIR", None)
-        else:
-            os.environ["FAKE_DROID_DIR"] = self._env_fake
         self._tmp.cleanup()
 
-    def _restore_factory_key(self):
-        if self._env_factory_key is None:
-            os.environ.pop("FACTORY_API_KEY", None)
+    def _isolate_runtime(self) -> None:
+        """Штрафы старта, model-notes и динамический конфиг — только в границах теста.
+
+        Иначе инъекция сбоя старта штрафует модель следующим тестам и пишет боевой
+        model_penalties.json, а флаги GigaRC меняют поведение запросов.
+        """
+        tmp = Path(self._tmp.name)
+        self.addCleanup(
+            self._restore_env,
+            "BRIDGE_DYNAMIC_CONFIG_PATH",
+            os.environ.get("BRIDGE_DYNAMIC_CONFIG_PATH"),
+        )
+        os.environ["BRIDGE_DYNAMIC_CONFIG_PATH"] = str(tmp / "dynamic-config-none.json")
+        server._PENALTY_TRACKER = ModelPenaltyTracker(
+            storage_path=tmp / "model_penalties.json",
+            max_start_fails=TEST_MAX_START_FAILS,
+        )
+        server._MODEL_NOTES_FILTER = server.ModelNotesFilter(tmp / "notes.md")
+
+    @staticmethod
+    def _restore_env(name: str, value: str | None) -> None:
+        """Вернуть переменную окружения к значению до setUp (None — удалить)."""
+        if value is None:
+            os.environ.pop(name, None)
         else:
-            os.environ["FACTORY_API_KEY"] = self._env_factory_key
+            os.environ[name] = value
 
     # -- helpers ----------------------------------------------------------------
-    def _post(self, body: dict, timeout: float = 60.0):
+    def _post(self, body: dict, timeout: float = 60.0) -> tuple[int, str]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             conn.request(
@@ -488,11 +468,11 @@ class BridgeCase(unittest.TestCase):
         finally:
             conn.close()
 
-    def _post_json(self, body: dict, timeout: float = 60.0):
+    def _post_json(self, body: dict, timeout: float = 60.0) -> tuple[int, Any]:
         status, raw = self._post(body, timeout=timeout)
         return status, (json.loads(raw) if raw else None)
 
-    def _get(self, path: str, auth: bool = True):
+    def _get(self, path: str, auth: bool = True) -> tuple[int, Any]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
             headers = {"Authorization": "Bearer test-key"} if auth else {}
@@ -532,7 +512,7 @@ class BridgeCase(unittest.TestCase):
 
     @staticmethod
     def _raw_request(
-        body: bytes = b"", cl="auto", extra=(), auth=True, path="/v1/chat/completions"
+        body: bytes = b"", cl: str | int | None = "auto", extra=(), auth=True, path="/v1/chat/completions"
     ):
         headers = [
             f"POST {path} HTTP/1.1",

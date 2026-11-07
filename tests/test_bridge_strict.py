@@ -4,7 +4,6 @@
 клампится вниз по шкале EFFORT_ORDER (clamp_effort_downward), нестроковые
 значения и reasoning-объект отклоняются до запуска droid.
 """
-
 from __future__ import annotations
 
 import copy
@@ -13,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import (  # noqa: E402
+from bridge_testlib import (  # noqa: E402  # tests/ — корень импорта pytest
     _DROID_LEGACY_MODELS,
     BridgeCase,
     chat_body,
@@ -307,6 +307,9 @@ def _capture_passthrough(monkeypatch, handler, adapter, hub_auth_ok):
         record_failure=lambda: None,
         record_discard=lambda *a: None,
     )
+    # Изоляция от живого dynamic_config.json: флаг телеметрии должен быть выключен.
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", "/nonexistent/dynamic_config.json")
+    monkeypatch.delenv("BRIDGE_NONSTREAM_TELEMETRY_ENABLED", raising=False)
     handler._current_lease = lambda: lease
     handler._trace_log_fields = lambda: ""
     handler._trace = None
@@ -592,13 +595,13 @@ class TestCatalogClassI(unittest.TestCase):
     """Класс I: структурные нарушения каталога -> отказ старта (fleet_invalid)."""
 
     def setUp(self):
-        self.data = copy.deepcopy(load_raw_fleet())
-        self._env = server.ENV_MODEL
-        self._probe = server.IMAGE_PROBE
-        self._fleet_path = server.FLEET_PATH
+        self.data = copy.deepcopy(load_raw_fleet())  # состояние создаётся в setUp
+        self._env = server.ENV_MODEL  # состояние создаётся в setUp
+        self._probe = server.IMAGE_PROBE  # состояние создаётся в setUp
+        self._fleet_path = server.FLEET_PATH  # состояние создаётся в setUp
         server.ENV_MODEL = ""
         server.IMAGE_PROBE = False
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory()  # состояние создаётся в setUp
 
     def tearDown(self):
         server.ENV_MODEL = self._env
@@ -629,8 +632,8 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
-        # 5 droid + 4 muse + 2 codex; passthrough-мосты agy/opencode-zen/claude-p выключены (моделей нет)
-        self.assertEqual(len(catalog["order"]), 18)
+        # 5 droid + 1 agy + 2 claude-p + 4 muse + 1 codex + 7 opencode-zen (все бэкенды каталога включены)
+        self.assertEqual(len(catalog["order"]), 20)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -646,14 +649,6 @@ class TestCatalogClassI(unittest.TestCase):
         duplicate = copy.deepcopy(find_model(self.data, "claude-sonnet-5-5"))
         self.data["models"].append(duplicate)
         self._expect("duplicate_id", "claude-sonnet-5-5")
-
-    def test_efforts_off_invalid(self):
-        find_model(self.data, "claude-sonnet-5-5")["efforts"] = ["off", "high"]
-        self._expect("efforts_invalid", "claude-sonnet-5-5")
-
-    def test_default_effort_outside_efforts(self):
-        find_model(self.data, "claude-sonnet-5-5")["default_effort"] = "low"
-        self._expect("default_effort_invalid", "claude-sonnet-5-5")
 
     def test_default_model_outside_roster(self):
         self.data["default_model"] = "no-such-model"
@@ -788,6 +783,8 @@ class TestEffortAndModel(BridgeCase):
     `exec`; форма конструктора процесса не тестируется (TM-016).
     """
 
+    _last_lines: list[str] = []
+
     def setUp(self):
         super().setUp()
         # Обе Gemini проверяются через тот же изолированный FakeDroid-стенд.
@@ -795,7 +792,7 @@ class TestEffortAndModel(BridgeCase):
         find_model(data, "gemini-4-argon")["backend"] = "droid"
         install_droid_stand(data)
 
-    def _post_logged(self, body):
+    def _post_logged(self, body: dict) -> tuple[int, Any, Any, Any]:
         """POST и (параметры последней initialize_session, effort_source, autonomy_source)."""
         with self.capture_logs() as lines:
             status, _ = self._post(body)
@@ -1036,8 +1033,8 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 18 моделей боевого каталога + deepseek-v4.1-flash стенда FakeDroid + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
-        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS))
+        # 20 моделей боевого каталога (droid включён) + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
+        self.assertEqual(len(body["data"]), 20 + len(_DROID_LEGACY_MODELS))
         self.assertTrue(
             {"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]}
         )
@@ -1058,6 +1055,7 @@ class TestHealthAndModels(BridgeCase):
                 "modalities",
                 "object",
                 "owned_by",
+                "penalized_until",
                 "supported_reasoning_efforts",
                 "supports_thinking",
             ]

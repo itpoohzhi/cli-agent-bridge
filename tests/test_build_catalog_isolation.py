@@ -1,11 +1,10 @@
 """build_catalog(mode="isolate"): дефект одной записи не ломает каталог (AC (а), спека §4.4.3)."""
-
 from __future__ import annotations
 
 import copy
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 import pytest
 
@@ -19,8 +18,8 @@ def raw_fleet() -> Dict[str, Any]:
     return copy.deepcopy(json.loads(FLEET_FILE.read_text(encoding="utf-8")))
 
 
-def build(data: Dict[str, Any], mode: str = "isolate", **kwargs: Any) -> Dict[str, Any]:
-    return build_catalog(data, ADAPTER_KINDS, mode=mode, **kwargs)  # type: ignore[arg-type]
+def build(data: Dict[str, Any], mode: Literal["strict", "isolate"] = "isolate", **kwargs: Any) -> Dict[str, Any]:
+    return build_catalog(data, ADAPTER_KINDS, mode=mode, **kwargs)
 
 
 def model(data: Dict[str, Any], mid: str) -> Dict[str, Any]:
@@ -170,12 +169,17 @@ def test_global_class_one_defects_fatal_in_both_modes(
 
 
 def test_not_a_dict_is_fatal_in_isolate() -> None:
+    invalid: Any = []
     with pytest.raises(FleetViolation) as exc:
-        build([], "isolate")  # type: ignore[arg-type]
+        build(invalid, "isolate")
     assert exc.value.reason == "fleet_unreadable"
 
 
 def test_models_of_disabled_backend_are_skipped_not_rejected() -> None:
-    catalog = build(raw_fleet(), "isolate")
+    data = raw_fleet()
+    data["backends"]["droid"]["enabled"] = (
+        False  # droid первичен для deepseek в боевом каталоге
+    )
+    catalog = build(data, "isolate")
     assert "deepseek-v4.1-flash" not in catalog["models"]
     assert "deepseek-v4.1-flash" not in catalog["rejected"]

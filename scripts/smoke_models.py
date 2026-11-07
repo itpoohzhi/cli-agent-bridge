@@ -16,12 +16,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Any, NamedTuple, overload
-
+from typing import Any, Literal, NamedTuple, overload
 
 DEFAULT_MODELS_MD = Path(
     os.environ.get("MODELS_MD_PATH") or "~/Мой диск/Context/models.md"
 ).expanduser()
+SMOKE_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "off"})
 DEFAULT_MODEL_NOTES_MD = Path(
     os.environ.get("MODEL_NOTES_MD_PATH") or "~/Мой диск/Context/model-notes.md"
 ).expanduser()
@@ -423,9 +423,8 @@ def _load_fleet_config() -> tuple[frozenset[str], dict[str, str]]:
             if isinstance(target, str):
                 aliases[str(alias)] = target
             elif isinstance(target, dict):
-                target_id = target.get("model") or target.get("target") or target.get("id")
-                if target_id:
-                    aliases[str(alias)] = str(target_id)
+                target_id = next((target[k] for k in ("model", "target", "id", "backend_id") if target.get(k)), None)
+                aliases.update({str(alias): str(target_id)} if target_id else {})
     return frozenset(models), aliases
 
 
@@ -437,13 +436,14 @@ def build_bridge_payload(
     stream: bool = True,
 ) -> dict[str, Any]:
     """Build a bridge request using fleet.json as the wire-model authority."""
-    effort_norm = effort.lower().strip()
     models, aliases = _load_fleet_config()
     wire_model = model_id
-    target_effort = effort_norm
+    target_effort = effort.lower().strip()
 
     if model_id in aliases:
         wire_model = aliases[model_id]
+        suffix = model_id.rpartition("-")[2].lower()
+        target_effort = target_effort or (suffix if suffix in SMOKE_EFFORT_LEVELS else "")
     elif model_id not in models and f"{model_id}-free" in models:
         wire_model = f"{model_id}-free"
     elif model_id not in models:
@@ -461,7 +461,7 @@ def build_bridge_payload(
         "max_tokens": max_tokens,
         "stream": stream,
     }
-    if target_effort in {"minimal", "low", "medium", "high", "xhigh", "max", "off"}:
+    if target_effort in SMOKE_EFFORT_LEVELS:
         payload["reasoning_effort"] = target_effort
     if target_effort == "off":
         payload["thinking"] = {"type": "disabled"}
@@ -616,7 +616,7 @@ def smoke_test_model_subprocess(
     api_key: str | None = None,
     effort: str = "",
     subagent_id: str = "",
-    return_pgid: bool = False,
+    return_pgid: Literal[False] = False,
 ) -> tuple[bool, str, float, int]: ...
 
 
@@ -629,7 +629,7 @@ def smoke_test_model_subprocess(
     effort: str = "",
     subagent_id: str = "",
     *,
-    return_pgid: bool,
+    return_pgid: Literal[True],
 ) -> tuple[bool, str, float, int, int]: ...
 
 

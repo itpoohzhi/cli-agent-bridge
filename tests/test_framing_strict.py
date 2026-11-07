@@ -1,5 +1,4 @@
 """Framing-отказы моста (raw-сокеты): CL, короткое тело, 413, JSON, TE (C-02)."""
-
 import json
 import sys
 import unittest
@@ -8,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bridge_testlib import BridgeCase  # noqa: E402
+from bridge_testlib import BridgeCase  # noqa: E402  # tests/ — корень импорта pytest
+import server  # noqa: E402
 
 VALID = json.dumps(
     {
@@ -44,7 +44,9 @@ class TestFraming(BridgeCase):
         )
 
     def test_body_over_limit_413_and_leftover_not_parsed(self):
-        raw = self._raw_request(b"", cl=33554433) + self._raw_request(VALID)
+        # Политика каталога: предел тела 67108864 Б (64 MiB); литерал фиксирует значение независимо от прода.
+        self.assertEqual(int(server.FLEET["image_limits"]["max_body_bytes"]), 67108864)
+        raw = self._raw_request(b"", cl=67108865) + self._raw_request(VALID)
         self._case(raw, 413, "payload_too_large")
 
     def test_json_not_object(self):

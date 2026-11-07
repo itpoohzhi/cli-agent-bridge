@@ -5,7 +5,6 @@
 fake stream-jsonrpc subprocess (tests/fake_droid.py). Идентификаторы TM-NNN — в имени
 метода и docstring.
 """
-
 import json
 import os
 import signal
@@ -22,8 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import pid_alive, wait_until  # noqa: E402
-from rpc_testlib import (  # noqa: E402
+from bridge_testlib import pid_alive, wait_until  # noqa: E402  # tests/ — корень импорта pytest
+from droid_test_helpers import spawn_detached_orphan  # noqa: E402
+from rpc_testlib import (  # noqa: E402  # tests/ — корень импорта pytest
     DONE_LINE,
     EXEC_LINE,
     REJECT_LINE,
@@ -38,7 +38,7 @@ SLOW = {"steps": [{"op": "sleep", "s": 1.0}, {"op": "text", "text": "slow"}]}
 class TestIdleAndRestore(RpcCase):
     def setUp(self):
         super().setUp()
-        self.clock = FakeClock(1000.0)
+        self.clock = FakeClock(1000.0)  # состояние создаётся в setUp
         server._clock = self.clock
 
     def _reap(self):
@@ -201,10 +201,10 @@ class TestIdleAndRestore(RpcCase):
 class TestCapAndQueue(RpcCase):
     def setUp(self):
         super().setUp()
-        self.saved_cap = server.MAX_CONCURRENT
-        self.saved_queue = server.QUEUE_TIMEOUT_S
-        self.saved_ka = server.KEEPALIVE_S
-        self.clock = FakeClock(1000.0)
+        self.saved_cap = server.MAX_CONCURRENT  # состояние создаётся в setUp
+        self.saved_queue = server.QUEUE_TIMEOUT_S  # состояние создаётся в setUp
+        self.saved_ka = server.KEEPALIVE_S  # состояние создаётся в setUp
+        self.clock = FakeClock(1000.0)  # состояние создаётся в setUp
         server._clock = self.clock
 
     def tearDown(self):
@@ -376,7 +376,7 @@ class TestCapAndQueue(RpcCase):
 class TestTimeoutsAndCancel(RpcCase):
     def setUp(self):
         super().setUp()
-        self.saved_ka = server.KEEPALIVE_S
+        self.saved_ka = server.KEEPALIVE_S  # состояние создаётся в setUp
 
     def tearDown(self):
         server.KEEPALIVE_S = self.saved_ka
@@ -384,7 +384,8 @@ class TestTimeoutsAndCancel(RpcCase):
 
     def test_tm010_silence_watchdog_interrupts_and_invalidates_chat(self):
         """TM-010: watchdog без прогресса -> interrupt, 504 timeout; чат DIRTY, следующий ход — replay."""
-        server.SILENCE_WATCHDOG_S = 0.6
+        self.addCleanup(setattr, server, "IDLE_TIMEOUT_S", server.IDLE_TIMEOUT_S)
+        server.IDLE_TIMEOUT_S = 0.6  # порог молчания хода читается из IDLE_TIMEOUT_S
         self.hub.script(
             [{"steps": [{"op": "text", "text": "partial"}, {"op": "hang"}]}]
         )
@@ -662,34 +663,32 @@ class TestPersistenceAndShutdown(RpcCase):
 
     def test_tm013_reconcile_kills_only_own_orphans_by_start_signature(self):
         """TM-013: на старте проверка PID/PGID/start-signature; чужой PID не убивается; EOF у детей при смерти родителя."""
-        own = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        own_pid, bridge_pid = spawn_detached_orphan()
         foreign = subprocess.Popen(["sleep", "60"], start_new_session=True)
         reused = subprocess.Popen(["sleep", "60"], start_new_session=True)
+
+        def known(pid, start):
+            return {"pid": pid, "start": start, "bridge_pid": bridge_pid}
+
         try:
-            entries = [
-                {
-                    "pid": own.pid,
-                    "start": server._proc_start_sig(own.pid),
-                    "bridge_pid": 1,
-                },
-                {
-                    "pid": reused.pid,
-                    "start": "Mon Jan  1 00:00:00 1990",
-                    "bridge_pid": 1,
-                },  # подпись не совпала
-                {"pid": foreign.pid, "start": "", "bridge_pid": 1},  # без подписи
+            entries = [  # own_pid — настоящая сирота: её родитель-посредник уже завершён
+                known(own_pid, server._proc_start_sig(own_pid)),
+                known(reused.pid, "Mon Jan  1 00:00:00 1990"),  # подпись не совпала
+                known(foreign.pid, ""),  # без подписи
             ]
             server._atomic_write(server._children_path(), json.dumps(entries).encode())
             self.assertEqual(server.reconcile_children(), 1)
-            self.assertTrue(wait_until(lambda: own.poll() is not None))
+            self.assertTrue(wait_until(lambda: not pid_alive(own_pid)))
             self.assertIsNone(foreign.poll())
             self.assertIsNone(reused.poll())
             self.assertEqual(json.loads(server._children_path().read_text()), [])
         finally:
-            for proc in (own, foreign, reused):
+            for proc in (foreign, reused):
                 if proc.poll() is None:
                     proc.kill()
                 proc.wait()
+            if pid_alive(own_pid):
+                os.kill(own_pid, signal.SIGKILL)
         # SIGKILL родителя -> EOF stdin у детей -> самозавершение (без участия моста).
         parent_code = (
             "import subprocess,sys,os,time\n"
@@ -933,7 +932,7 @@ class TestBaselineInventory(unittest.TestCase):
         renamed = {
             old: t for old, t in data["baseline_to_current"].items() if t != [old]
         }
-        self.assertEqual(len(renamed), 6)  # 4 RPC + 2 effort-clamp oracle_change
+        self.assertEqual(len(renamed), 8)  # 4 RPC + 2 effort-clamp oracle_change + 2 перенесены (off)
 
 
 if __name__ == "__main__":

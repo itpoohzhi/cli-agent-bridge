@@ -598,14 +598,8 @@ def facade(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
-    monkeypatch.setattr(
-        server,
-        "TOKEN_CACHE",
-        server.TokenCache(
-            path=tmp_path / "missing-facade.env",
-            environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"},
-        ),
-    )
+    keys = {"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-facade.env", environ=keys))
     monkeypatch.setattr(server, "_log", lambda message: None)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
@@ -760,6 +754,7 @@ def test_facade_resilience_endpoint_requires_auth_and_health_contract_is_frozen(
     )
 # --------------------------------------------------------------------------- Волна 3: QoSSlotManager
 
+from core import lifecycle  # noqa: E402
 from core.lifecycle import (  # noqa: E402
     KeepaliveController,
     QoSSlotManager,
@@ -767,6 +762,14 @@ from core.lifecycle import (  # noqa: E402
     reset_qos_manager,
     set_qos_manager,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_qos_singleton():
+    """Синглтон QoS не переживает тест: иначе пересоздание течёт в соседние файлы."""
+    saved = lifecycle._qos_manager
+    yield
+    set_qos_manager(saved)
 
 
 def _wait_until(predicate, timeout: float = 1.5) -> bool:
@@ -1101,7 +1104,6 @@ def test_http_sse_streaming_with_keepalive_no_duplicate_headers(facade):
         body = json.dumps({"model": "gemini-4-argon", "stream": True})
         headers = {"Authorization": "Bearer hub-test-key", "Content-Type": "application/json"}
         conn.request("POST", "/v1/chat/completions", body=body, headers=headers)
-        
         # Ждем отправки keepalive
         assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1 or mgr.snapshot()["waiting_background"] == 1)
         # Получаем HTTP заголовки (200 OK + text/event-stream)
@@ -1111,10 +1113,8 @@ def test_http_sse_streaming_with_keepalive_no_duplicate_headers(facade):
         # Читаем первый keepalive комментарий
         first_chunk = resp.read(len(b": keepalive\n\n"))
         assert first_chunk == b": keepalive\n\n"
-        
         # Теперь освобождаем слот для выполнения запроса
         mgr.release_slot(is_interactive=False)
-        
         # Читаем полезные данные ответа (mock upstream возвращает JSON)
         # Убеждаемся, что в сокете нет повторного заголовка HTTP/1.1
         rest = resp.read(len(b"{\"id\": \"x\", \"choices\": []}"))

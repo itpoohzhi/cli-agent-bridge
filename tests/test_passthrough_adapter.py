@@ -1,5 +1,4 @@
 """Passthrough-шов (ADR 0011 AD-003/AD-005/AD-007): стриминг, составной ключ, EOF, лимиты, маршрут."""
-
 from __future__ import annotations
 
 import copy
@@ -13,7 +12,7 @@ import sys
 import tempfile
 import threading
 from types import SimpleNamespace
-from typing import Any, Mapping, cast
+from typing import Any, Callable, Mapping, cast
 import unittest
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,7 +38,7 @@ from adapters.passthrough_adapter import (  # noqa: E402
     relay_sse,
     sanitize_completion_body,
 )
-from bridge_testlib import BridgeCase, load_raw_fleet  # noqa: E402
+from bridge_testlib import BridgeCase, load_raw_fleet  # noqa: E402  # tests/ — корень импорта pytest
 from core.backend_adapter import (
     AdapterRegistry,
     FleetViolation,
@@ -63,6 +62,8 @@ SCHEMAS = {
     }
 }
 TOOLS = list(SCHEMAS.values())
+@pytest.fixture(autouse=True)  # боевой dynamic_config.json не читается: флаги GigaRC не меняют поведение шва
+def _no_dynamic_config(monkeypatch: pytest.MonkeyPatch) -> None: monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", "/nonexistent/dynamic-config.json")
 
 
 # ---- SSE-помощники ------------------------------------------------------------------
@@ -473,7 +474,7 @@ class TestCliRouteToolSchemas(unittest.TestCase):
         ctx = {"backend": "droid", "model": model, "effort": "high", "prompt": "p", "rpc": {"system": "", "runnable": "", "items": []}, "images": [], "emulate_tools": True, "tool_schemas": schemas, "stream": stream, "managed_turn": managed_turn}
         adapter = SimpleNamespace(kind="droid", execute_turn=lambda turn, writer: raw)
         with unittest.mock.patch.object(server, "BRIDGE_SANITIZE_TOOL_CALLS", sanitize), unittest.mock.patch.object(server.BACKENDS, "get", return_value=adapter):
-            return server.Handler._dispatch(SimpleNamespace(connection=None), ctx, None)
+            return server.Handler._dispatch(cast(Any, SimpleNamespace(connection=None)), ctx, None)
 
     def test_dispatch_sanitizes_once_after_finalize_and_matches_events(self):
         schemas = server.build_tool_schemas(self.TOOLS)
@@ -519,7 +520,7 @@ class TestCliRouteToolSchemas(unittest.TestCase):
         managed = SimpleNamespace(done_event=threading.Event(), final_dict=final)
         managed.done_event.set()
         with unittest.mock.patch.object(server, "sanitize_tool_call") as spy:
-            replay = server.Handler._dispatch(SimpleNamespace(), {"attached_existing": True, "managed_turn": managed}, None)
+            replay = server.Handler._dispatch(cast(Any, SimpleNamespace()), {"attached_existing": True, "managed_turn": managed}, None)
         spy.assert_not_called()
         self.assertEqual(replay, final)
 
@@ -587,13 +588,13 @@ class FakeUpstream:
 
     def __init__(self, keep_alive=False):
         self.requests: list = []
-        self.respond = lambda handler, body: None
+        self.respond: Callable[[Any, bytes], Any] = lambda handler, body: None
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1" if keep_alive else "HTTP/1.0"
 
-            def log_message(self, *args):  # noqa: D401
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: D401
                 return
 
             def do_POST(self):  # noqa: N802
@@ -636,7 +637,7 @@ class CollectSink(ResponseSink):
         self.status = None
         self.headers = []
         self.chunks: list = []
-        self.fail_after = None
+        self.fail_after: int | None = None
 
     def start(self, status, headers):
         self.status, self.headers = status, headers
@@ -1126,22 +1127,22 @@ def test_pool_lifo_expiry_capacity_and_shutdown(monkeypatch) -> None:
         pool.release_connection("localhost", 1234, first)
         pool.release_connection("localhost", 1234, second)
         pool.release_connection("localhost", 1234, third)
-        third.close.assert_called_once()
+        cast(Any, third).close.assert_called_once()
         current, reused = pool.get_connection("localhost", 1234, 5)
         assert current is second and reused
-        current.sock.settimeout.assert_called_with(5)
+        cast(Any, current).sock.settimeout.assert_called_with(5)
         pool.release_connection("localhost", 1234, current)
         clock[0] += 11
         current, reused = pool.get_connection("localhost", 1234, 1)
         assert current is connections[3] and not reused
-        first.close.assert_called_once()
-        second.close.assert_called_once()
+        cast(Any, first).close.assert_called_once()
+        cast(Any, second).close.assert_called_once()
         assert factory.call_count == 4
         pool.release_connection("localhost", 1234, current)
         pool.close_all()
-        current.close.assert_called_once()
+        cast(Any, current).close.assert_called_once()
         pool.release_connection("localhost", 1234, third)
-        assert third.close.call_count == 2
+        assert cast(Any, third).close.call_count == 2
 
 
 @pytest.mark.parametrize("peek", [b"", b"unexpected", OSError("reset")])
@@ -1411,6 +1412,7 @@ def test_stream_cleanup_does_not_wait_for_next_http_chunk(send_done) -> None:
 
 
 class SeamCase(unittest.TestCase):
+    upstream: Any = None
     def setUp(self):
         self.upstream = FakeUpstream()
         self.addCleanup(self.upstream.close)
@@ -1551,9 +1553,7 @@ class TestSeamNonStream(SeamCase):
             self.upstream.requests[-1]["headers"]["Authorization"], "Bearer config-key"
         )
 
-    def test_upstream_auth_unconfigured_preserves_own_client_authorization(
-        self,
-    ) -> None:
+    def test_upstream_auth_unconfigured_preserves_own_client_authorization(self) -> None:
         self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
         cases = (
             ({}, {}),
@@ -1981,7 +1981,7 @@ class TestFleetPassthroughKind(unittest.TestCase):
         registry = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog)
         adapter = registry.get("codex")
         self.assertIsInstance(adapter, PassthroughAdapter)
-        self.assertEqual({m.id for m in adapter.get_models()}, {"gpt-6.1-terra", "gpt-6.1-sol"})
+        self.assertEqual({m.id for m in adapter.get_models()}, {"gpt-6.1-terra"})
         self.assertTrue(adapter.is_healthy())
         self.assertIs(registry.adapter_for_model("gpt-6.1-terra"), adapter)
 

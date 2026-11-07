@@ -1,24 +1,74 @@
-# Провайдер droid: legacy Factory Droid, выключен (enabled: false, как в fleet.json).
+# Провайдер droid: Factory Droid (подписка), первичный для 5 моделей Таблицы A/B model-invocation.md.
+# priority=10 — директива владельца `~/Мой диск/Context/model-notes.md:38` от 06.11.2026 r2: Droid
+# возвращён приоритетным бэкендом 5 моделей подписки и перекрывает ранний черновик
+# `pre-action-verdict.md` (там droid: 20, agy/claude-p: 10). При коллизии model_id побеждает
+# минимальный (priority, provider_id) — droid первичнее codex/agy/claude-p/opencode-go,
+# которые остаются в alternates сайдкара.
 manifest_version: 1
 provider_id: droid
 kind: droid
-enabled: false
+enabled: true
 required: false
+priority: 10
 owned_by: factory-droid
 transport:
   bridge: {}
-limits: {max_concurrent: 4, quota_group: factory-droid, timeout_s: 180}
+limits: {max_concurrent: 5, quota_group: factory-droid, timeout_s: 780}
 discovery: {method: static}
 family_rule:
   type: exact_map
-  exact_map: {}
+  exact_map:
+    gpt-6.1-sol: OpenAI
+    deepseek-v4.1-flash: DeepSeek
+    kimi-k3.1-pro: Moonshot
+    claude-sonnet-5-5: Anthropic
+    gemini-3.8-flash: Google
 models_overrides:
-  deepseek-v4.1-flash:
-    name: DeepSeek V4.1 Flash (Droid legacy, неактивна)
-    efforts: [high, max]
+  gpt-6.1-sol:
+    name: GPT-6.1 Sol (Factory Droid)
+    efforts: [low, medium, high]
+    efforts_pin: [low, medium, high]
     default_effort: high
+    context_window: 272000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [111, 398, 406, 436]
+  deepseek-v4.1-flash:
+    name: DeepSeek V4.1 Flash (Factory Droid)
+    efforts: [low, medium, high]
+    efforts_pin: [low, medium, high]
+    default_effort: low
     context_window: 1000000
     max_tokens: 384000
     input: [text]
     images: {cli_registry: explicit_supported, status: unverified, method: null, proof: null}
     policy_lines: [106, 394, 432]
+  # kimi-k3.1-pro: context_window/max_tokens не подтверждены (дефолты models_defaults) до пробы.
+  kimi-k3.1-pro:
+    name: Kimi K3.1 Pro (Factory Droid)
+    efforts: [low, medium, high]
+    efforts_pin: [low, medium, high]
+    default_effort: high
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  claude-sonnet-5-5:
+    name: Claude Sonnet 5.5 (Factory Droid)
+    efforts: [low, medium, high]
+    efforts_pin: [low, medium, high]
+    default_effort: high
+    context_window: 1000000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [26, 88, 390, 407, 435]
+  gemini-3.8-flash:
+    name: Gemini 3.8 Flash (Factory Droid)
+    efforts: [low, medium, high]
+    efforts_pin: [low, medium, high]
+    default_effort: high
+    context_window: 1048576
+    max_tokens: 65536
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+    policy_lines: [100, 142, 174, 431]

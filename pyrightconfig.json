@@ -1,5 +1,13 @@
 {
   "extraPaths": ["tools"],
   "reportMissingTypeArgument": false,
-  "reportOptionalMemberAccess": false
+  "reportOptionalMemberAccess": false,
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "extraPaths": [".", "tools"],
+      "reportImplicitRelativeImport": false,
+      "reportUninitializedInstanceVariable": false
+    }
+  ]
 }

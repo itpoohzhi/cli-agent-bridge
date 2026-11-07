@@ -1,5 +1,4 @@
 """Поведенческие регрессии ADR-0021: дедлайны, replay и честные ошибки."""
-
 from __future__ import annotations
 
 import importlib.util
@@ -9,7 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -235,14 +234,14 @@ def test_client_gone_safely_handles_none_and_socketless_objects() -> None:
     class DummyObj:
         pass
 
-    assert server._client_gone(DummyObj()) is False
+    assert server._client_gone(cast(Any, DummyObj())) is False
 
 
-def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
-    import io, json
+def test_passthrough_upstream_model_rewriting(monkeypatch, tmp_path) -> None:
+    from core.model_penalty import ModelPenaltyTracker
     from email.message import Message
     import server
-
+    monkeypatch.setattr(server, "_PENALTY_TRACKER", ModelPenaltyTracker(tmp_path / "penalties.json"))
     captured = []
 
     def _fake_passthrough(self, a, raw, req, model_id, _hub_auth_ok=False):
@@ -264,7 +263,7 @@ def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
     adapter = object.__new__(server.PassthroughAdapter)
     monkeypatch.setattr(server.BACKENDS, "get", lambda bid: adapter if bid == "codex-lb" else None)
 
-    instance = object.__new__(server.Handler)
+    instance = cast(Any, object.__new__(server.Handler))
     instance.headers = Message()
     body = json.dumps({"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "hi"}]}).encode()
     instance.headers["Content-Length"] = str(len(body))
@@ -759,7 +758,7 @@ def test_gateway_preflight_bypass_and_idempotency(
         captured.append((raw, req))
 
     monkeypatch.setattr(server.Handler, "_serve_passthrough", _fake_passthrough)
-    model = "gpt-6.1-sol"
+    model = "gpt-6.1-terra"
 
     def handler(bypass: bool) -> Any:
         instance: Any = object.__new__(server.Handler)

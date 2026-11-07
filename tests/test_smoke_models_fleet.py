@@ -137,3 +137,52 @@ def test_family_from_catalog_sidecar_wins(sm, tmp_path, monkeypatch):
     entries = {e.model_id: e for e in sm.parse_models_md(path)}
     assert entries["custom-x"].family == "FromCatalog"
     assert entries["gemini-3.8-flash"].family == "Google"
+
+
+def _fleet_aliases():
+    return json.loads((REPO / "fleet.json").read_text())["aliases"]
+
+
+@pytest.mark.parametrize("alias", sorted(_fleet_aliases()))
+def test_build_bridge_payload_keeps_fleet_alias_effort(sm, alias):
+    entry = _fleet_aliases()[alias]
+    payload = sm.build_bridge_payload(alias, effort="")
+    assert payload["model"] == entry["backend_id"]
+    assert payload["reasoning_effort"] == entry["effort"]
+
+
+def test_build_bridge_payload_gpt_sol_low_on_real_fleet(sm):
+    payload = sm.build_bridge_payload("gpt-6.1-sol-low", effort="")
+    assert (payload["model"], payload["reasoning_effort"]) == ("gpt-6.1-sol", "low")
+
+
+def test_alias_without_effort_suffix_gets_no_reasoning_effort(sm, tmp_path, monkeypatch):
+    fleet = tmp_path / "fleet.json"
+    fleet.write_text(
+        json.dumps(
+            {"models": [{"id": "real-1"}], "aliases": {"short-name": {"model": "real-1"}}}
+        )
+    )
+    monkeypatch.setenv("BRIDGE_FLEET_PATH", str(fleet))
+    sm._load_fleet_config.cache_clear()
+    payload = sm.build_bridge_payload("short-name")
+    assert payload["model"] == "real-1"
+    assert "reasoning_effort" not in payload
+
+
+def test_alias_with_effort_suffix_keeps_alias_effort(sm, tmp_path, monkeypatch):
+    fleet = tmp_path / "fleet.json"
+    fleet.write_text(
+        json.dumps(
+            {"models": [{"id": "real-1"}], "aliases": {"short-high": {"model": "real-1"}}}
+        )
+    )
+    monkeypatch.setenv("BRIDGE_FLEET_PATH", str(fleet))
+    sm._load_fleet_config.cache_clear()
+    assert sm.build_bridge_payload("short-high")["reasoning_effort"] == "high"
+
+
+def test_model_name_suffix_is_not_treated_as_effort(sm):
+    payload = sm.build_bridge_payload("deepseek-v4.1-flash")
+    assert payload["model"] == "deepseek-v4.1-flash"
+    assert "reasoning_effort" not in payload

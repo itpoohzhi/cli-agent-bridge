@@ -28,6 +28,7 @@ from typing import (
     get_type_hints,
 )
 from urllib.parse import urlsplit
+from core.effort_policy import EFFORT_LEVELS as EFFORT_LEVELS
 
 # Версия контракта: адаптер обязан подтверждать её в qualify() (несовпадение = модели недоступны).
 ADAPTER_API = 1
@@ -511,7 +512,6 @@ FLEET_MODEL_KEYS = frozenset(
         "alias_of",
     }
 )
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 IMPLEMENTED_METHODS = {"workspace-read": 1}
 IMPLICIT_DROID_BACKEND = {
