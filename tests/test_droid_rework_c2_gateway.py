@@ -13,6 +13,10 @@ from unittest.mock import Mock
 import pytest
 
 import server
+from adapters import ADAPTER_KINDS
+from core.discovery import DiscoveryResult, normalize_models
+from core.fleet_compiler import compile_from_disk
+from core.provider_manifest import load_manifests
 from tests.bridge_testlib import make_receipt
 from tests.test_request_attribution import route as route
 from tools.receipt_schema import validate_model_catalog, validate_receipt_components
@@ -154,3 +158,25 @@ def test_execute_deadlines_and_sliding_progress(
     now, got_event, progress, safety, expected = case
     options = dict(now=now, got_event=got_event, progress=progress, safety=safety)
     assert execute_case(monkeypatch, options)["state"] == expected
+
+
+def test_gpt_6_1_sol_has_zero_codex_fallback_in_compiled_fleet() -> None:
+    """gpt-6.1-sol обслуживается только Droid: codex discovery его исключает."""
+    root = server.ROOT / "providers.d"
+    loaded = load_manifests(root, ADAPTER_KINDS)
+    codex_manifest = next(m for m in loaded.manifests if m.provider_id == "codex")
+    assert "gpt-6.1-sol" in codex_manifest.discovery.exclude
+    overridden = [r.model_id for r in codex_manifest.models_overrides]
+    assert "gpt-6.1-sol" not in overridden
+    ids, meta = normalize_models(
+        [("gpt-6.1-sol", {}), ("gpt-6.1-terra", {})], codex_manifest, {}
+    )
+    assert ids == ("gpt-6.1-terra",), meta
+    found = DiscoveryResult(
+        provider_id="codex", fingerprint_sha256="", model_ids=ids, meta=meta
+    )
+    result = compile_from_disk(root, root / "_fleet.yaml", discovery={"codex": found})
+    assert result.sidecar["models"]["gpt-6.1-sol"]["provider"] == "droid"
+    assert result.sidecar["models"]["gpt-6.1-sol"]["alternates"] == []
+    models = cast(list[dict[str, str]], result.fleet["models"])
+    assert next(m["backend"] for m in models if m["id"] == "gpt-6.1-sol") == "droid"
