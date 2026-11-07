@@ -35,7 +35,8 @@ def test_safe_autonomy_at_http_boundary(
             "model": "deepseek-v4.1-flash",
             "autonomy": autonomy,
             "messages": [{"role": "user", "content": "hello"}],
-        }
+        },
+        {"X-Subagent-Id": "coder-c2"},
     )
     ctx = h._serve_json.call_args.args[0]
     assert ctx["autonomy"] == (
@@ -225,7 +226,12 @@ def test_probe_disk_profile_cleanup_and_per_model_readback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        droid_image, "_probe_models", lambda: {"one": "off", "two": "high"}
+        droid_image,
+        "load_droid_probe_targets",
+        lambda *_: (
+            droid_probe_config.ProbeTarget("one", "off"),
+            droid_probe_config.ProbeTarget("two", "high"),
+        ),
     )
 
     def probe(

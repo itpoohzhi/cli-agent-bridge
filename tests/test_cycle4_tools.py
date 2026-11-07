@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import b_guard as bg  # noqa: E402
-import droid_image  # noqa: E402
+from tools import droid_image  # noqa: E402
 from tests.gateway_policy_testlib import restrict_probe_models  # noqa: E402
 from rpc_testlib import RpcCase  # noqa: E402
 from test_b_guard import PROFILE_YML, build_snapshot_fs  # noqa: E402
@@ -477,7 +477,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
 
     def test_rw013_schema_values_and_digests_equal_server(self):
         """RW-013: константы и отпечатки receipt_schema те же объекты, что видит server.py."""
-        import receipt_schema as schema
+        from tools import receipt_schema as schema
         import server
 
         self.assertEqual(schema.RPC_API_VERSION, server.RPC_API_VERSION)
@@ -500,7 +500,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
 
     def test_rw013_exported_names(self):
         """RW-013: модуль экспортирует согласованный набор имён."""
-        import receipt_schema as schema
+        from tools import receipt_schema as schema
 
         for name in (
             "RPC_API_VERSION",

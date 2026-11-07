@@ -28,6 +28,13 @@ MODEL_EFFORTS = (
     ("low", "medium", "high"),
     ("low", "medium", "high"),
 )
+PROBE_PAIRS = [
+    (mid, effort)
+    for mid, efforts in zip(DROID_MODEL_IDS, MODEL_EFFORTS)
+    for effort in dict.fromkeys(
+        [("off" if mid == "deepseek-v4.1-flash" else "high"), *efforts]
+    )
+]
 
 
 def fleet_data() -> dict:
@@ -203,7 +210,7 @@ def test_probes_union_all_model_tools(
     monkeypatch.delenv("DROID_EXTRA_PROBE_MODELS", raising=False)
     facts = droid_image.run_probes(Path("/fake/droid"), tmp_path)
     assert facts["disabled_tool_ids"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
-    assert started_models(fake_probes) == list(DROID_MODEL_IDS)
+    assert started_models(fake_probes) == [mid for mid, _ in PROBE_PAIRS]
     assert set(facts["qualified_models"]) == set(DROID_MODEL_IDS)
     assert facts["qualified_models"]["gpt-6.1-sol"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
     initializes = [
@@ -212,6 +219,7 @@ def test_probes_union_all_model_tools(
         for method, params in rpc.calls
         if method == "droid.initialize_session"
     ]
+    assert [(p["modelId"], p["reasoningEffort"]) for p in initializes] == PROBE_PAIRS
     assert (
         next(
             p["reasoningEffort"]
@@ -231,7 +239,7 @@ def test_probes_union_all_model_tools(
     ]
     assert updates == [
         sorted([*BASE_TOOLS, EXTRA_TOOL] if mid == "gpt-6.1-sol" else BASE_TOOLS)
-        for mid in DROID_MODEL_IDS
+        for mid, _ in PROBE_PAIRS
     ]
 
 
@@ -252,7 +260,7 @@ def test_configured_probe_models_are_deduplicated(
 ) -> None:
     monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", extra_models)
     facts = droid_image.run_probes(Path("/fake/droid"), tmp_path)
-    assert started_models(fake_probes) == [*DROID_MODEL_IDS, *expected]
+    assert started_models(fake_probes) == [*[mid for mid, _ in PROBE_PAIRS], *expected]
     assert facts["disabled_tool_ids"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
     assert all(rpc.closed for rpc in fake_probes.instances)
 

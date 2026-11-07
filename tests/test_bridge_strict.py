@@ -768,7 +768,7 @@ class TestEffortAndModel(BridgeCase):
     def _post_logged(self, body):
         """POST и (параметры последней initialize_session, effort_source, autonomy_source)."""
         with self.capture_logs() as lines:
-            status, _ = self._post(body)
+            status, _ = self._post(body, headers={"X-Subagent-Id": "coder-strict"})
         self._last_lines = lines
         execs = [m for m in (EXEC_LINE.match(ln) for ln in lines) if m]
         init = self.hub.inits()[-1]["params"] if self.hub.inits() else None

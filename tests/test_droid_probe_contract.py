@@ -10,8 +10,13 @@ import pytest
 
 from tests.test_droid_integration import FakeRpc, fake_probes as fake_probes
 from tools import droid_image
+from tools.droid_probe_config import ProbeTarget
 
-EXPECTED = {"modelId": "test", "reasoningEffort": "high", "autonomyLevel": "high"}
+EXPECTED: dict[str, object] = {
+    "modelId": "test",
+    "reasoningEffort": "high",
+    "autonomyLevel": "high",
+}
 
 
 @pytest.mark.parametrize(
@@ -109,7 +114,9 @@ def test_empty_droid_fleet_cannot_be_qualified(
 def test_probe_rejects_disk_profile_tampering(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(droid_image, "_probe_models", lambda: {"one": "off"})
+    monkeypatch.setattr(
+        droid_image, "load_droid_probe_targets", lambda *_: (ProbeTarget("one", "off"),)
+    )
 
     def probe(
         image: Path, cwd: Path, home: Path, mid: str, effort: str

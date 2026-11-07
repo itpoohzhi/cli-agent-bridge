@@ -76,7 +76,7 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     discover_local_cdp_url,
     is_loopback_cdp_url,
 )
-from receipt_schema import (  # noqa: E402
+from tools.receipt_schema import (  # noqa: E402
     RECEIPT_PROBES as RECEIPT_PROBES,
     RECEIPT_SCHEMA,
     RPC_API_VERSION,
@@ -187,7 +187,7 @@ from core.gateway_execution_policy import (  # noqa: E402
     permission_event,
     permission_frame,
     require,
-    resolve_autonomy,
+    resolve_autonomy_decision,
     validate_boolean_flags,
 )
 
@@ -1138,7 +1138,7 @@ def _receipt_path() -> Path:
 # Квалификационный receipt (RW-009): четвёрка «образ + протокол + политика tools + профиль настроек».
 # Любое расхождение с ожиданиями моста запрещает spawn до новой квалификации (tools/droid_image.py).
 # Константы и отпечатки живут в tools/receipt_schema.py: их делят мост и установщик (RW-013).
-def _check_receipt_quad(rec: dict) -> None:
+def _check_receipt_quad(rec: Mapping[str, object]) -> None:
     """Проверка протокола, политики tools и профиля настроек receipt; расхождение — LauncherUnavailable."""
     try:
         validate_receipt_components(rec)
@@ -7179,14 +7179,14 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             model = fleet_models[model_id]
-            denied_role = {
-                "droid": denied_subagent(
-                    self.headers.get("X-Subagent-Id", ""),
-                    os.environ.get(
-                        "DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-"
-                    ),
-                )
-            }.get(model["backend"], False)
+            is_droid = str(model.get("backend") or "").strip().lower() == "droid"
+            subagent_id = str(self.headers.get("X-Subagent-Id") or "")
+            denied_role = is_droid and denied_subagent(
+                subagent_id,
+                os.environ.get(
+                    "DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-"
+                ),
+            )
             if denied_role:
                 return self._reject(
                     403,
@@ -7276,13 +7276,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # (9a) autonomy: low|medium|high|off -> `autonomyLevel` RPC
             # (off — read-only droid); дефолт конфигурируемый, fail-closed off.
-            try:
-                autonomy, autonomy_source = resolve_autonomy(
-                    req.get("autonomy"), "DROID"
-                )
-            except AutonomyViolation as exc:
-                self._reject(400, exc.reason, str(exc), model_id, model_len)
-                return
+            autonomy, autonomy_source = req.get("autonomy"), "request"
+            if is_droid:
+                try:
+                    decision = resolve_autonomy_decision(
+                        req.get("autonomy"),
+                        "DROID",
+                        subagent_id=subagent_id,
+                        require_subagent=True,
+                    )
+                    autonomy, autonomy_source = decision.value, decision.source
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
+                    return
             # (10) reasoning-объект не поддерживаем.
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(

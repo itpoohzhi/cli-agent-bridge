@@ -133,7 +133,8 @@ class TestRealRun(BridgeCase):
                 "reasoning_effort": "high",
                 "autonomy": "low",
                 "messages": [{"role": "user", "content": "hi"}],
-            }
+            },
+            headers={"X-Subagent-Id": "coder-run"},
         )
         self.assertEqual(status, 200)
         inits = self.hub.inits()

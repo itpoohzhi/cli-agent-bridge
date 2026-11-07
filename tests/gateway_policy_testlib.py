@@ -110,7 +110,11 @@ def prepare_guard_drift(case: Any) -> None:
 def restrict_probe_models(case: Any, module: Any, model: str, effort: str) -> None:
     """Оставить одну модель в существующих изолированных cycle-4 пробах."""
     case.enterContext(
-        mock.patch.object(module, "_probe_models", lambda: {model: effort})
+        mock.patch.object(
+            module,
+            "load_droid_probe_targets",
+            lambda *_: (module.ProbeTarget(model, effort),),
+        )
     )
 
 

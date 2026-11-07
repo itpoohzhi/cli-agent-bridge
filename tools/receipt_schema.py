@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, cast
+from collections.abc import Mapping
+from typing import TypedDict, cast
 
 from core.gateway_execution_policy import require
 
 RPC_API_VERSION = "1.0.0"
 RECEIPT_SCHEMA = 2
 TOOLS_POLICY = "disable-all-listed-keep-read-for-images"
-SETTINGS_PROFILE = {
+SETTINGS_PROFILE: dict[str, object] = {
     "disableBuiltinSkills": True,
     "autoRejectPermissionRequests": True,
     "interactionMode": "auto",
@@ -24,7 +25,39 @@ SETTINGS_PROFILE = {
 RECEIPT_PROBES = ("spawn", "update", "load")
 
 
-def json_digest(obj: Any) -> str:
+class ReceiptToolsPolicy(TypedDict):
+    """JSON-конверт проверенной политики инструментов."""
+
+    policy: str
+    disabled_tool_ids: list[str]
+    digest: str
+
+
+class ReceiptSettings(TypedDict):
+    """Профиль и фактически подтверждённый read-back."""
+
+    profile: dict[str, object]
+    digest: str
+    readback: dict[str, list[str]]
+
+
+class DroidReceipt(TypedDict):
+    """Типизированный JSON receipt, совместимый с прежними словарными читателями."""
+
+    schema: int
+    image_path: str
+    image_sha256: str
+    protocol: dict[str, str]
+    tools_policy: ReceiptToolsPolicy
+    settings_profile: ReceiptSettings
+    probes: dict[str, str]
+    qualified_models: dict[str, list[str]]
+    not_confirmed_readback_by_model: dict[str, list[str]]
+    source: dict[str, str | int]
+    created_at: int
+
+
+def json_digest(obj: object) -> str:
     return hashlib.sha256(
         json.dumps(
             obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -45,7 +78,7 @@ def _validate_model_tools(tools: object, allowed: set[str]) -> None:
 
 
 def validate_qualified_models(
-    qualified: object, disabled_ids: list
+    qualified: object, disabled_ids: list[str]
 ) -> dict[str, list[str]]:
     """Строгая проверка каталогов моделей, без приведения неверных типов."""
     error = ValueError(
@@ -61,15 +94,17 @@ def validate_qualified_models(
     return cast(dict[str, list[str]], catalog)
 
 
-def _receipt_section(rec: dict, name: str, message: str) -> dict:
+def _receipt_section(
+    rec: Mapping[str, object], name: str, message: str
+) -> dict[str, object]:
     """Получить обязательную секцию receipt без неявных преобразований."""
     section = rec.get(name)
     require(isinstance(section, dict), ValueError(message))
-    return cast(dict, section)
+    return cast(dict[str, object], section)
 
 
 def validate_model_catalog(
-    qualified: object, model: str, listed: list, error_type: type[Exception]
+    qualified: object, model: str, listed: list[str], error_type: type[Exception]
 ) -> None:
     """Сверить фактический каталог модели после уже проверенного receipt."""
     require(
@@ -78,13 +113,13 @@ def validate_model_catalog(
             "receipt missing or invalid qualified_models, re-run droid_image.py"
         ),
     )
-    expected = cast(dict, qualified).get(model)
+    expected = cast(dict[str, object], qualified).get(model)
     error = error_type("native tool catalogue differs from the qualified tools policy")
     require(all((bool(listed), isinstance(expected, list))), error)
-    require(sorted(listed) == sorted(cast(list, expected)), error)
+    require(sorted(listed) == sorted(cast(list[str], expected)), error)
 
 
-def validate_receipt_components(rec: dict) -> None:
+def validate_receipt_components(rec: Mapping[str, object]) -> None:
     """Проверить протокол, квалификацию и профиль общей схемы receipt."""
     message = "droid receipt: stream-jsonrpc protocol version mismatch"
     protocol = _receipt_section(rec, "protocol", message)
@@ -117,13 +152,13 @@ def validate_receipt_components(rec: dict) -> None:
     )
 
 
-def _validate_receipt_policy(rec: dict) -> None:
+def _validate_receipt_policy(rec: Mapping[str, object]) -> None:
     """Сверить строгие каталоги и их канонический отпечаток."""
     message = "droid receipt: tools policy mismatch"
     policy = _receipt_section(rec, "tools_policy", message)
     ids = policy.get("disabled_tool_ids")
     require(all((isinstance(ids, list), bool(ids))), ValueError(message))
-    listed = cast(list, ids)
+    listed = cast(list[str], ids)
     qualified = validate_qualified_models(rec.get("qualified_models"), listed)
     require(
         all(
@@ -136,12 +171,14 @@ def _validate_receipt_policy(rec: dict) -> None:
     )
 
 
-def tools_policy_digest(disabled_ids: list, qualified_models: object = None) -> str:
+def tools_policy_digest(
+    disabled_ids: list[str], qualified_models: object = None
+) -> str:
     """Schema-2 расширение: отпечаток включает канонические каталоги моделей.
 
     Старые receipt без каталогов должны быть перевыпущены, а не приняты молча.
     """
-    policy: dict[str, Any] = {
+    policy: dict[str, object] = {
         "policy": TOOLS_POLICY,
         "disabled_tool_ids": sorted(map(str, disabled_ids)),
     }

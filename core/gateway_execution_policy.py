@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
@@ -35,7 +36,7 @@ def require(condition: bool, error: Exception) -> None:
 
 
 def validate_boolean_flags(
-    settings: dict,
+    settings: dict[str, object],
     flags: Iterable[str] = ("disableBuiltinSkills", "autoRejectPermissionRequests"),
     error_type: type[Exception] = RpcError,
 ) -> None:
@@ -53,7 +54,7 @@ class AutonomyViolation(ValueError):
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
-        self.reason = reason
+        self.reason: str = reason
 
 
 def allow_high_autonomy(namespace: str) -> bool:
@@ -76,7 +77,55 @@ def default_autonomy(namespace: str) -> str:
     return value
 
 
-def resolve_autonomy(raw: object, namespace: str) -> tuple[str, str]:
+@dataclass(frozen=True)
+class AutonomyDecision:
+    """Проверенный уровень прав и источник его значения."""
+
+    value: str
+    source: str
+
+
+def _csv_env(name: str, default: str) -> tuple[str, ...]:
+    """Нормализовать конфигурируемые префиксы; пустой список никого не допускает."""
+    return tuple(
+        item.strip().lower()
+        for item in os.environ.get(name, default).split(",")
+        if item.strip()
+    )
+
+
+def _check_mutating_role(
+    value: str, namespace: str, subagent_id: str | None, require_subagent: bool
+) -> None:
+    """Мутации Droid требуют разрешённую роль; HTTP не допускает opt-out."""
+    if namespace.upper() != "DROID" or value not in ("low", "medium"):
+        return
+    enforced = (
+        os.environ.get("DROID_REQUIRE_SUBAGENT_FOR_MUTATION", "1").strip().lower()
+    )
+    if not (
+        require_subagent
+        or subagent_id is not None
+        or enforced not in ("0", "false", "no")
+    ):
+        return
+    prefixes = _csv_env("DROID_MUTATING_SUBAGENT_PREFIXES", "coder-")
+    require(
+        (subagent_id or "").strip().lower().startswith(prefixes),
+        AutonomyViolation(
+            "autonomy_role_forbidden",
+            f"autonomy={value!r} requires mutating subagent prefix {prefixes}",
+        ),
+    )
+
+
+def resolve_autonomy_decision(
+    raw: object,
+    namespace: str = "DROID",
+    subagent_id: str | None = None,
+    *,
+    require_subagent: bool = False,
+) -> AutonomyDecision:
     """Проверить запрос до запуска процесса и сохранить источник значения."""
     if raw is None:
         raw = ""
@@ -106,7 +155,21 @@ def resolve_autonomy(raw: object, namespace: str) -> tuple[str, str]:
             f"high autonomy requires {namespace}_ALLOW_HIGH_AUTONOMY",
         ),
     )
-    return value, source
+    _check_mutating_role(value, namespace, subagent_id, require_subagent)
+    return AutonomyDecision(value, source)
+
+
+def resolve_autonomy(
+    raw: object,
+    namespace: str = "DROID",
+    subagent_id: str | None = None,
+    *,
+    require_subagent: bool = False,
+) -> str:
+    """Совместимый строковый интерфейс без потери проверок политики."""
+    return resolve_autonomy_decision(
+        raw, namespace, subagent_id, require_subagent=require_subagent
+    ).value
 
 
 def denied_subagent(subagent_id: str, prefixes: str) -> bool:
@@ -122,9 +185,15 @@ def permission_event(*names: object) -> bool:
     return any("permission" in str(name).lower() for name in names)
 
 
-def permission_frame(frame: dict) -> bool:
+def permission_frame(frame: dict[str, object]) -> bool:
     """Проверить метод и вложенную нотификацию входящего кадра."""
     params = frame.get("params")
-    note = params.get("notification") if isinstance(params, dict) else None
-    event_type = note.get("type") if isinstance(note, dict) else ""
+    note = (
+        cast(dict[str, object], params).get("notification")
+        if isinstance(params, dict)
+        else None
+    )
+    event_type = (
+        cast(dict[str, object], note).get("type") if isinstance(note, dict) else ""
+    )
     return permission_event(frame.get("method", ""), event_type)

@@ -467,7 +467,9 @@ class BridgeCase(unittest.TestCase):
             os.environ["FACTORY_API_KEY"] = self._env_factory_key
 
     # -- helpers ----------------------------------------------------------------
-    def _post(self, body: dict, timeout: float = 60.0):
+    def _post(
+        self, body: dict, timeout: float = 60.0, headers: dict[str, str] | None = None
+    ):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             conn.request(
@@ -477,6 +479,7 @@ class BridgeCase(unittest.TestCase):
                 headers={
                     "Authorization": "Bearer test-key",
                     "Content-Type": "application/json",
+                    **(headers or {}),
                 },
             )
             resp = conn.getresponse()
@@ -485,8 +488,10 @@ class BridgeCase(unittest.TestCase):
         finally:
             conn.close()
 
-    def _post_json(self, body: dict, timeout: float = 60.0):
-        status, raw = self._post(body, timeout=timeout)
+    def _post_json(
+        self, body: dict, timeout: float = 60.0, headers: dict[str, str] | None = None
+    ):
+        status, raw = self._post(body, timeout=timeout, headers=headers)
         return status, (json.loads(raw) if raw else None)
 
     def _get(self, path: str, auth: bool = True):
