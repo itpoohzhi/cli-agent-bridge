@@ -198,6 +198,13 @@ def test_note_without_bytes_changes_nothing():
     assert (h._req_bytes, h._req_stream_chunks) == (0, 0)
 
 
+def test_missing_facade_keeps_legacy_accounting(monkeypatch):
+    """Нет модуля-фасада с REQUEST_TELEMETRY → учёт остаётся включённым (не теряем события молча)."""
+    monkeypatch.delattr(sys.modules[__name__], "REQUEST_TELEMETRY")
+    handler = _Handler()
+    assert handler._tracking() is True
+
+
 def test_fresh_handler_collects_nothing_before_begin():
     """Состояние класса: без _telemetry_begin ни хвост usage, ни событие не собираются."""
     fresh = _Handler()
