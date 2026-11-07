@@ -213,6 +213,22 @@ def test_configuration_from_env(tmp_path, monkeypatch):
         st.close()
 
 
+def test_quantile_aggregate_matches_linear_interpolation():
+    """quantile_cont для sqlite3: пустая выборка — NULL, значения — линейная интерполяция как в duckdb."""
+    from core.telemetry_sql import Quantile
+
+    empty = Quantile()
+    assert empty.finalize() is None
+    high = Quantile()
+    for value in (10.0, 20.0, 30.0, 40.0):
+        high.step(value, 0.95)
+    assert round(high.finalize(), 4) == 38.5
+    median = Quantile()
+    for value in (5.0, None, 15.0):
+        median.step(value, 0.5)
+    assert median.finalize() == 10.0  # None в выборку не попадает
+
+
 def test_prune_batches_and_writer_loop(telemetry_make_store, telemetry_event, monkeypatch):
     st = telemetry_make_store(retention_days=1, max_rows=3, batch_size=2, name="prune")
     try:
