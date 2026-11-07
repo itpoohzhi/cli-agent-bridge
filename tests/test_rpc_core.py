@@ -10,14 +10,16 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import HIGH_SETTINGS, OFF_SETTINGS  # noqa: E402
 from bridge_testlib import TOOLS, wait_until  # noqa: E402
-from rpc_testlib import RpcCase, USAGE_LINE  # noqa: E402
+from rpc_testlib import Conv, RpcCase, USAGE_LINE  # noqa: E402
 
 
 def title_body(key="chat-title", filler="", max_tokens=64):
@@ -399,11 +401,10 @@ class TestDeltaAndIsolation(RpcCase):
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
 
+    @mock.patch.dict("os.environ", DROID_ALLOW_HIGH_AUTONOMY="1")
     def test_tm007_settings_update_readback_and_no_silent_substitution(self):
         """TM-007: смена model/effort/autonomy на границе хода: update+read-back; подмена модели отвергается."""
-        chat = self.conv(
-            "chat-settings", model="deepseek-v4.1-flash", reasoning_effort="high"
-        )
+        chat = self.conv("chat-settings", **HIGH_SETTINGS)
         self.assertEqual(chat.ask("q0")[0], 200)
         init = self.hub.inits()[0]["params"]
         self.assertEqual(init["autonomyLevel"], "high")
@@ -416,29 +417,24 @@ class TestDeltaAndIsolation(RpcCase):
         ]
         self.assertEqual(disabled, [["Read", "Execute", "Edit", "web_search"]])
         # Смена effort и autonomy на горячем чате: update_session_settings, без нового spawn/init.
-        chat.extra.update(reasoning_effort="max", autonomy="off")
+        chat.extra.update(reasoning_effort="off", autonomy="off")
         self.assertEqual(chat.ask("q1")[0], 200)
         updates = [
             r["params"]
             for r in self.hub.rpcs("droid.update_session_settings")
             if "reasoningEffort" in r["params"]
         ]
-        self.assertEqual(
-            updates,
-            [
-                {
-                    "modelId": "deepseek-v4.1-flash",
-                    "reasoningEffort": "max",
-                    "autonomyLevel": "off",
-                }
-            ],
-        )
+        self.assertEqual(updates, [OFF_SETTINGS])
         self.assertEqual(len(self.hub.spawns()), 1)
         self.assertEqual(len(self.hub.inits()), 1)
         self.assertEqual(
             self.chat_of("chat-settings").settings,
-            ("deepseek-v4.1-flash", "max", "off"),
+            ("deepseek-v4.1-flash", "off", "off"),
         )
+        self._assert_settings_substitution_rejected(chat)
+        self._assert_system_prompt_rebases()
+
+    def _assert_settings_substitution_rejected(self, chat: Conv) -> None:
         # Молчаливая подмена модели при update: read-back не совпал -> 502 droid_error.
         self.hub.configure(substitute_model="some-default-model")
         chat.extra.update(reasoning_effort="high")
@@ -459,6 +455,8 @@ class TestDeltaAndIsolation(RpcCase):
         self.assertEqual(body["error"]["type"], "droid_error")
         self.assertEqual(len(self.hub.admissions()), admissions)  # LLM-ход не начат
         self.hub.configure(substitute_model=None)
+
+    def _assert_system_prompt_rebases(self) -> None:
         # Смена systemPrompt (tools) -> rebase, а не update.
         other = self.conv("chat-system")
         other.ask("s0")

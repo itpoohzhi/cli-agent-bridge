@@ -14,11 +14,13 @@ import tempfile
 import unittest
 import time
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import child_identity_entries  # noqa: E402
 from bridge_testlib import BridgeCase, TOOLS, wait_until  # noqa: E402
 
 
@@ -250,7 +252,7 @@ class TestOverallTimeout(BridgeCase):
         finally:
             server.TIMEOUT_S = real_timeout
         self.assertEqual(status, 504)
-        self.assertIn("timed out", body["error"]["message"])
+        self.assertIn("timeout", body["error"]["message"])
 
     def test_slot_released_after_timeout(self):
         self.hub.legacy([[]])
@@ -338,34 +340,23 @@ class TestSweepWorkspace(unittest.TestCase):
 
     def test_restart_reconciles_own_muse_orphans_keeps_foreign(self):
         """RW-010: после аварии хаба restart добивает свои orphan-группы muse; чужой PID цел."""
+        self.enterContext(
+            mock.patch.object(server, "has_live_parent", return_value=False)
+        )
         own = subprocess.Popen(["sleep", "60"], start_new_session=True)
         foreign = subprocess.Popen(["sleep", "60"], start_new_session=True)
         real_ws = server.WORKSPACE
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 server.WORKSPACE = Path(tmp)
-                entries = [
-                    {
-                        "pid": own.pid,
-                        "pgid": own.pid,
-                        "start": server._proc_start_sig(own.pid),
-                        "bridge_pid": 1,
-                        "kind": "muse",
-                    },
-                    {
-                        "pid": foreign.pid,
-                        "pgid": foreign.pid,
-                        "start": "Mon Jan  1 00:00:00 1990",
-                        "bridge_pid": 1,
-                        "kind": "muse",
-                    },
-                ]
+                entries = child_identity_entries(own, foreign)
                 server._atomic_write(
                     server._children_path(), json.dumps(entries).encode("utf-8")
                 )
                 self.assertEqual(server.reconcile_children(), 1)
                 self.assertTrue(wait_until(lambda: own.poll() is not None))
                 self.assertIsNone(foreign.poll())
+                self.assertEqual(server.reconcile_children(), 0)
                 self.assertEqual(
                     json.loads(server._children_path().read_text(encoding="utf-8")), []
                 )

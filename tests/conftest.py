@@ -14,6 +14,7 @@ import asyncio
 import os
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Generator
 
 import pytest
@@ -168,9 +169,8 @@ def _execute_bridge_isolation(
 
     # 5. Fail-fast if strict leak checking is active (canary diversion / T-ISO-I2)
     node = getattr(request, "node", None)
-    is_strict = (
-        os.environ.get("BRIDGE_STRICT_ISOLATION_ASSERT") == "1"
-        or (node is not None and node.get_closest_marker("strict_leak_check") is not None)
+    is_strict = os.environ.get("BRIDGE_STRICT_ISOLATION_ASSERT") == "1" or (
+        node is not None and node.get_closest_marker("strict_leak_check") is not None
     )
     if is_strict and dirty_reasons:
         test_name = getattr(node, "nodeid", "unknown_test")
@@ -188,7 +188,34 @@ def verify_and_reset_bridge_state(
 
 
 @pytest.fixture(autouse=True)
-def _fresh_config_snapshots(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+def isolated_gateway_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Generator[None, None, None]:
+    """Не читать и не изменять карантин, квоты и runtime-флаги рабочего стенда."""
+    from core.model_penalty import ModelPenaltyTracker
+
+    srv = _get_server_mod()
+    if srv is not None:
+        monkeypatch.setattr(
+            srv, "_PENALTY_TRACKER", ModelPenaltyTracker(tmp_path / "penalties.json")
+        )
+        monkeypatch.setattr(
+            srv,
+            "_QUOTA_CB_CACHE",
+            srv.QuotaCircuitBreakerCache(tmp_path / "quota.json"),
+        )
+        monkeypatch.setattr(
+            srv, "_MODEL_NOTES_FILTER", srv.ModelNotesFilter(tmp_path / "notes.md")
+        )
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_config_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None, None, None]:
     """Снимки динамического конфига: пустой кэш и TTL=0 — тест меняет файл и сразу видит значение."""
     from core import runtime_env
 
