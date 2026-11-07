@@ -40,6 +40,7 @@ from core.backend_adapter import (
     BackendModel,
     BackendNotSupported,
     Capabilities,
+    KindConstraints,
     Qualification,
     PreSendTransientError,
     StreamSink,
@@ -1165,6 +1166,7 @@ class PassthroughAdapter(BackendAdapter):
     capabilities = Capabilities(
         sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact"
     )
+    CONSTRAINTS = KindConstraints(base_url_allowed=True, api_key_env_allowed=True)
 
     def __init__(
         self,

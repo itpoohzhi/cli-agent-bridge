@@ -523,7 +523,7 @@ class TestProofFailClosed(ImageCase):
         status, _ = self.request("deepseek-v4.1-flash", "high")
         self.assertEqual(status, 200)
         with self.capture_logs() as lines:
-            status, body = self.request("deepseek-v4.1-flash", "max")
+            status, body = self.request("deepseek-v4.1-flash", "off")
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "image_input_not_supported")
         self.assertTrue(any("reason=effort" in ln for ln in lines))

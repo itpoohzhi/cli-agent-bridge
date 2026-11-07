@@ -218,7 +218,34 @@ def verify_and_reset_bridge_state(async_leak_guard: None, request: pytest.Fixtur
 
 
 @pytest.fixture(autouse=True)
-def _fresh_config_snapshots(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+def isolated_gateway_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Generator[None, None, None]:
+    """Не читать и не изменять карантин, квоты и runtime-флаги рабочего стенда."""
+    from core.model_penalty import ModelPenaltyTracker
+
+    srv = sys.modules.get("server")
+    if srv is not None:
+        monkeypatch.setattr(
+            srv, "_PENALTY_TRACKER", ModelPenaltyTracker(tmp_path / "penalties.json")
+        )
+        monkeypatch.setattr(
+            srv,
+            "_QUOTA_CB_CACHE",
+            srv.QuotaCircuitBreakerCache(tmp_path / "quota.json"),
+        )
+        monkeypatch.setattr(
+            srv, "_MODEL_NOTES_FILTER", srv.ModelNotesFilter(tmp_path / "notes.md")
+        )
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_config_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None, None, None]:
     """Снимки динамического конфига: пустой кэш и TTL=0 — тест меняет файл и сразу видит значение."""
     from core import runtime_env
 

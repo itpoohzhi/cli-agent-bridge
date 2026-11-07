@@ -193,26 +193,40 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_server_registry_has_enabled_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        # ADR 0017: droid выключен, passthrough-мосты agy/opencode-zen/claude-p включены
-        self.assertEqual(set(ids), {"muse", "codex", "agy", "opencode-zen", "claude-p"})
-        self.assertNotIn("droid", ids)
+        self.assertEqual(
+            set(ids), {"droid", "muse", "codex", "agy", "opencode-zen", "claude-p"}
+        )
+        self.assertIn("droid", ids)
         self.assertIn("muse", ids)
 
     def test_model_routing(self):
         reg = server.BACKENDS
-        for mid in server.FLEET["order"]:
-            if mid.startswith("gpt-"):
-                expected = "codex"
-            elif mid.startswith("muse-"):
-                expected = "muse"
-            elif mid.startswith("claude-"):
-                expected = "claude-p"
-            elif mid.startswith("gemini-"):
-                expected = "agy"
-            else:
-                expected = "opencode-zen"
-            self.assertEqual(reg.adapter_for_model(mid).id, expected, mid)
-            self.assertEqual(server.FLEET["models"][mid]["backend"], expected)
+        expected = {
+            "claude-sonnet-5-5": "droid",
+            "gemini-3.8-flash": "droid",
+            "deepseek-v4.1-flash": "droid",
+            "gpt-6.1-sol": "droid",
+            "kimi-k3.1-pro": "droid",
+            "muse-spark-1.3": "muse",
+            "muse-spark-1.3-contributor": "muse",
+            "muse-wonder-1.0": "muse",
+            "muse-wonder-full-1.0": "muse",
+            "gpt-6.1-terra": "codex",
+            "claude-opus-5-5": "claude-p",
+            "claude-haiku-5-5": "claude-p",
+            "gemini-4-argon": "agy",
+            "deepseek-v4.1-flash-free": "opencode-zen",
+            "flint-40b-free": "opencode-zen",
+            "mimo-v2.6-flash-free": "opencode-zen",
+            "nemotron-3.5-lightning-free": "opencode-zen",
+            "nemotron-3.5-super-vl-free": "opencode-zen",
+            "beam-free": "opencode-zen",
+            "big-pickle": "opencode-zen",
+        }
+        self.assertEqual(set(server.FLEET["order"]), set(expected))
+        for mid, backend in expected.items():
+            self.assertEqual(reg.adapter_for_model(mid).id, backend, mid)
+            self.assertEqual(server.FLEET["models"][mid]["backend"], backend)
 
     def test_each_adapter_exposes_contract_and_capabilities(self):
         for adapter in server.BACKENDS.adapters():
@@ -231,7 +245,12 @@ class TestRealAdapters(unittest.TestCase):
             adapter.close_session("no-such-sid")
 
     def test_droid_health_follows_receipt_state(self):
-        droid = DroidAdapter("droid", {"enabled": True, "max_concurrent": 4}, lambda: server.FLEET, server)
+        droid = DroidAdapter(
+            "droid",
+            {"enabled": True, "max_concurrent": 4},
+            lambda: server.FLEET,
+            server,
+        )
         saved = server._receipt_state
         try:
             server._receipt_state = lambda: "invalid"
@@ -244,7 +263,12 @@ class TestRealAdapters(unittest.TestCase):
             server._receipt_state = saved
 
     def test_droid_capacity_is_host_pool_cap(self):
-        droid = DroidAdapter("droid", {"enabled": True, "max_concurrent": server.MAX_CONCURRENT}, lambda: server.FLEET, server)
+        droid = DroidAdapter(
+            "droid",
+            {"enabled": True, "max_concurrent": server.MAX_CONCURRENT},
+            lambda: server.FLEET,
+            server,
+        )
         self.assertEqual(droid.max_concurrent, server.MAX_CONCURRENT)
 
 

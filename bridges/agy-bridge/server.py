@@ -2770,17 +2770,41 @@ def _session_key_for(
     """Ключ горячей сессии: токен чата, иначе cwd; без обоих ключ пуст.
 
     Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
+    Переданный, но невалидный cwd (не строка, относительный, длиннее
+    CWD_MAX_LEN, с NUL/контролами/суррогатами) — fail-closed: ключа нет.
+    Пустой cwd допустим только при штатном отсутствии cwd (None или "").
     """
-    chat = raw_chat_id.strip()
+    chat = raw_chat_id.strip() if isinstance(raw_chat_id, str) else ""
+    # Суррогаты и контролы в chat id не должны доходить до encode("utf-8").
+    if any(
+        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in chat
+    ):
+        return ()
+
+    cwd_norm = ""
+    if cwd is not None:
+        if isinstance(cwd, str):
+            val = cwd.strip()
+            if val:
+                if (
+                    len(val) > CWD_MAX_LEN
+                    or not os.path.isabs(val)
+                    or "\x00" in val
+                    or any(
+                        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                        for c in val
+                    )
+                ):
+                    return ()
+                cwd_norm = os.path.normpath(val)
+        else:
+            return ()
+
     if chat:
         chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
-        cwd_norm = (
-            os.path.normpath(cwd.strip()) if cwd and os.path.isabs(cwd.strip()) else ""
-        )
         return (chat_token, model, cwd_norm, effort)
-    cwd_clean = cwd.strip() if isinstance(cwd, str) else ""
-    if cwd_clean and os.path.isabs(cwd_clean):
-        return (model, os.path.normpath(cwd_clean), effort)
+    if cwd_norm:
+        return (model, cwd_norm, effort)
     return ()
 
 
@@ -2907,16 +2931,18 @@ def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
     if not all(isinstance(part, str) for part in items):
         return None
     parts = cast("list[str]", items)
-    if len(parts) == 4 and parts[0] == "":
-        if parts[2].strip() and os.path.isabs(parts[2].strip()):
-            return (parts[1], os.path.normpath(parts[2].strip()), parts[3])
+    if len(parts) == 4 and not parts[0].strip():
         return None
-    if len(parts) == 4:
-        parts[2] = (
-            os.path.normpath(parts[2])
-            if parts[2] and os.path.isabs(parts[2])
-            else parts[2]
-        )
+    cwd_index = 2 if len(parts) == 4 else 1
+    cwd = parts[cwd_index].strip()
+    if cwd:
+        if not os.path.isabs(cwd):
+            return None
+        parts[cwd_index] = os.path.normpath(cwd)
+    elif len(parts) == 4:
+        parts[cwd_index] = ""
+    else:
+        return None
     key = tuple(parts)
     if not _session_key_valid(key):
         return None
@@ -7604,14 +7630,35 @@ class Handler(BaseHTTPRequestHandler):
             )
             raw_cwd = extra.get("cwd")
             cwd = ""
-            if (
-                isinstance(raw_cwd, str)
-                and raw_cwd.strip()
-                and os.path.isabs(raw_cwd.strip())
-            ):
-                cwd = os.path.normpath(raw_cwd.strip())
-                if len(cwd) > CWD_MAX_LEN:
-                    cwd = ""
+            cwd_invalid = False
+            # Штатное отсутствие cwd (None/"") и явно невалидный cwd различаются:
+            # невалидный деградирует не молча в "", а в fail-closed холодный ход.
+            # Длина и запрещённые символы проверяются на сырой строке ДО normpath:
+            # иначе "/"*N + "tmp" схлопывается в "/tmp", обходя лимит и аллоцируя O(N).
+            if raw_cwd is not None:
+                if isinstance(raw_cwd, str):
+                    val = raw_cwd.strip()
+                    if val:
+                        if (
+                            len(val) > CWD_MAX_LEN
+                            or not os.path.isabs(val)
+                            or "\x00" in val
+                            or any(
+                                ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                                for c in val
+                            )
+                        ):
+                            _log(f"cwd-invalid-rejected cwd={val[:32]!r}")
+                            cwd_invalid = True
+                            force_cold = True
+                        else:
+                            cwd = os.path.normpath(val)
+                else:
+                    _log(f"cwd-nonstring-rejected type={type(raw_cwd).__name__}")
+                    cwd_invalid = True
+                    force_cold = True
+            # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
+            isolation_enabled = _is_session_isolation_enabled()
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
@@ -7625,16 +7672,21 @@ class Handler(BaseHTTPRequestHandler):
                     cast(str, effort),
                     chat_id,
                 )
-                if tools_count > 0
+                if tools_count > 0 and isolation_enabled and not cwd_invalid
                 else None
             )
             if chat_id_invalid:
                 _log("chat-id-invalid-rejected")
                 sess_key = None
                 force_cold = True
+            if cwd_invalid or not isolation_enabled:
+                sess_key = None
+                force_cold = True
             if sess_key is not None and not _session_key_valid(sess_key):
                 sess_key = None
-            use_session_store = tools_count > 0 and sess_key is not None
+            use_session_store = (
+                tools_count > 0 and sess_key is not None and isolation_enabled
+            )
             raw_cid = (
                 extra.get("conversation_id")
                 if "conversation_id" in extra

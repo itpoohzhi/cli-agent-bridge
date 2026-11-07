@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cli-agent-bridge.local/schemas/provider-manifest.schema.json",
+  "title": "cli-agent-bridge provider manifest (manifest_version 1)",
+  "description": "Закрытая схема манифеста провайдера providers.d/<provider_id>.yaml. Только данные: исполняемого кода, shell-шаблонов и ссылок на Python-модули нет. Единственный источник набора допустимых ключей: core/provider_manifest.py обходит эту схему и отклоняет неизвестные ключи (provider_key_unknown).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_version", "provider_id", "kind", "owned_by"],
+  "properties": {
+    "manifest_version": {"type": "integer", "const": 1},
+    "provider_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
+    "kind": {"type": "string", "minLength": 1},
+    "enabled": {"type": "boolean", "default": true},
+    "required": {"type": "boolean", "default": false},
+    "owned_by": {"type": "string", "minLength": 1},
+    "priority": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 100},
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bridge": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "base_url": {"type": ["string", "null"]},
+            "api_key_env": {"type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]*$"},
+            "wrapper": {"type": ["string", "null"]},
+            "proxy_port": {"type": ["integer", "null"], "minimum": 1, "maximum": 65535},
+            "options": {"type": "object"},
+            "idle_timeout_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+            "safety_cap_s": {"type": ["number", "null"], "exclusiveMinimum": 0}
+          }
+        },
+        "direct": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {"type": "string", "enum": ["cli", "http"]},
+            "cli": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "executables": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "argv_by_executable": {
+                  "type": "object",
+                  "additionalProperties": {"type": "array", "items": {"type": "string"}}
+                },
+                "prompt_via": {"type": "string", "enum": ["argv", "stdin"]},
+                "output": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "format": {"type": "string", "enum": ["text", "jsonl_last", "json"]},
+                    "jsonl_select": {"type": ["object", "null"]}
+                  }
+                }
+              }
+            },
+            "http": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "base_url": {"type": "string"},
+                "path": {"type": "string"},
+                "api_key_ref": {"type": "object"},
+                "headers_from_json": {"type": "object"},
+                "per_request_headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                "stream": {"type": "boolean"},
+                "response": {"type": "object"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "allow_base_url": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scheme", "host", "port"],
+        "properties": {
+          "scheme": {"type": "string", "enum": ["http", "https"]},
+          "host": {"type": "string", "minLength": 1},
+          "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+          "path_prefix": {"type": "string", "pattern": "^/"}
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrent": {"type": "integer", "minimum": 1, "default": 1},
+        "quota_group": {"type": "string", "pattern": "^[a-z0-9-]{1,48}$"},
+        "pin_required": {"type": "boolean", "default": false},
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0, "default": 180}
+      }
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "binary_path": {"type": ["string", "null"]},
+        "binary_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "version": {"type": ["string", "null"]},
+        "version_cmd": {"type": ["array", "null"], "items": {"type": "string"}},
+        "http_version_path": {"type": ["string", "null"]}
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {"type": "string", "enum": ["http", "cli", "static"]},
+        "http": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "path": {"type": "string", "pattern": "^/"},
+            "id_field": {"type": "string"},
+            "meta_fields": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        },
+        "cli": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "parse": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "format": {"type": "string", "enum": ["json", "lines"]},
+                "id_field": {"type": ["string", "null"]},
+                "line_regex": {"type": ["string", "null"]}
+              }
+            }
+          }
+        },
+        "static": {"type": ["array", "null"], "items": {"type": "string"}},
+        "include": {"type": "array", "items": {"type": "string"}},
+        "exclude": {"type": "array", "items": {"type": "string"}},
+        "canonical_id": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "strip_suffixes": {"type": "array", "items": {"type": "string"}},
+            "map": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        },
+        "refresh_interval_s": {"type": "number", "minimum": 60},
+        "ondemand_timeout_s": {"type": "number", "exclusiveMinimum": 0},
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "family_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "enum": ["exact_map", "owned_by", "prefix"]},
+        "exact_map": {"type": "object", "additionalProperties": {"type": "string"}},
+        "owned_by": {"type": ["string", "null"]},
+        "prefix": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "verified": {"type": "boolean"},
+            "map": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        }
+      }
+    },
+    "models_defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "efforts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "default_effort": {"type": "string"},
+        "context_window": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": "integer", "minimum": 1},
+        "probe_effort_ladder": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      }
+    },
+    "models_overrides": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "efforts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "default_effort": {"type": "string"},
+          "context_window": {"type": "integer", "minimum": 1},
+          "max_tokens": {"type": "integer", "minimum": 1},
+          "input": {"type": "array", "items": {"type": "string"}},
+          "images": {"type": "object"},
+          "policy_lines": {"type": "array", "items": {"type": "integer"}},
+          "upstream_model": {"type": ["string", "null"]},
+          "efforts_pin": {"type": ["array", "null"], "items": {"type": "string"}},
+          "resident": {"type": "boolean"},
+          "pool_size": {"type": "integer", "minimum": 1},
+          "alias_of": {"type": "string"},
+          "quorum_eligible": {"type": "boolean", "description": "Игнорируется: значение вычисляет только компилятор (QT-3)."}
+        }
+      }
+    },
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "effort_field": {"type": "string", "enum": ["reasoning_effort", "effort", "none"]},
+        "effort_map": {"type": "object"},
+        "adaptive_whitelist": {"type": "array", "items": {"type": "string"}},
+        "strip_always": {"type": "array", "items": {"type": "string"}},
+        "tool_emulation": {"type": "boolean", "default": true}
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "max_parallel": {"type": "integer", "minimum": 1},
+        "retry_backoff_s": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0}, "minItems": 1},
+        "rate_limited_backoff_s": {"type": "number", "exclusiveMinimum": 0}
+      }
+    }
+  }
+}

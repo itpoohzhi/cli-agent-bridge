@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import http.client
 import io
 import json
@@ -29,91 +28,61 @@ from core.backend_adapter import TurnResult  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
 from adapters.passthrough_adapter import (  # noqa: E402
     _TimedSseReader,
-    AccumulatorOverflow,
     ClientGone,
     PassthroughAdapter,
     PassthroughLimits,
-    ProcessBudget,
     ResponseSink,
-    ToolCallAccumulator,
     relay_sse,
-    sanitize_completion_body,
 )
 from bridge_testlib import BridgeCase, load_raw_fleet  # noqa: E402
 from core.backend_adapter import (
     AdapterRegistry,
-    FleetViolation,
-    backend_entry_error,
-    build_catalog,
-    strip_bridge_secrets,
 )  # noqa: E402
 
-STR = {"type": "string"}
-SCHEMAS = {
-    "subagent": {
-        "type": "function",
-        "function": {
-            "name": "subagent",
-            "parameters": {
-                "type": "object",
-                "properties": {"prompt": STR, "provider": STR, "note": STR},
-                "required": ["prompt"],
-            },
-        },
-    }
-}
-TOOLS = list(SCHEMAS.values())
 
+from tests.passthrough_stream_testlib import (
+    STR as STR,
+    SCHEMAS as SCHEMAS,
+    TOOLS as TOOLS,
+    DONE as DONE,
+    frame as frame,
+    chunk as chunk,
+    content as content,
+    tool_delta as tool_delta,
+    finish as finish,
+    run_stream as run_stream,
+    payloads as payloads,
+    published_calls as published_calls,
+    args_of as args_of,
+)  # noqa: E402 - сохраняем прежние точки обнаружения тестов
 
+from tests.passthrough_stream_cases import (
+    TestStreamRelay as TestStreamRelay,
+)  # noqa: E402 - сохраняем прежние точки обнаружения тестов
+
+from tests.passthrough_limits_cases import (
+    TestAccumulatorLimits as TestAccumulatorLimits,
+    TestLimitsFromEnv as TestLimitsFromEnv,
+    TestNonStreamBody as TestNonStreamBody,
+)  # noqa: E402 - сохраняем прежние точки обнаружения тестов
+
+from tests.passthrough_catalog_cases import (
+    TestFleetPassthroughKind as TestFleetPassthroughKind,
+    TestBridgeSecrets as TestBridgeSecrets,
+    TestClientTokenValidation as TestClientTokenValidation,
+    TestDirectLoopbackValidation as TestDirectLoopbackValidation,
+    TestNeutralTimeoutLabel as TestNeutralTimeoutLabel,
+)  # noqa: E402 - сохраняем прежние точки обнаружения тестов
+
+from tests.passthrough_nonstream_cases import (
+    TestNonstreamLimitsFromEnv as TestNonstreamLimitsFromEnv,
+)  # noqa: E402 - сохраняем прежние точки обнаружения тестов
 # ---- SSE-помощники ------------------------------------------------------------------
-def frame(payload) -> bytes:
-    return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
 
 
-DONE = b"data: [DONE]\n\n"
-
-
-def chunk(choices, **extra) -> dict:
-    return {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "m",
-            "choices": choices, **extra}
-
-
-def content(text: str, index: int = 0) -> bytes:
-    return frame(chunk([{"index": index, "delta": {"content": text}, "finish_reason": None}]))
-
-
-def tool_delta(index: int, tc_index: int, *, call_id=None, name=None, args=None) -> bytes:
-    delta: dict = {"index": tc_index}
-    if call_id is not None:
-        delta["id"] = call_id
-        delta["type"] = "function"
-    function: dict = {}
-    if name is not None:
-        function["name"] = name
-    if args is not None:
-        function["arguments"] = args
-    if function:
-        delta["function"] = function
-    return frame(chunk([{"index": index, "delta": {"tool_calls": [delta]}, "finish_reason": None}]))
-
-
-def finish(index: int, reason: str = "tool_calls", **extra) -> bytes:
-    return frame(chunk([{"index": index, "delta": {}, "finish_reason": reason}], **extra))
-
-
-def run_stream(events: bytes, limits=None, schemas=None, **kwargs):
-    out: list = []
-    outcome = relay_sse(
-        io.BytesIO(events).readline,
-        out.append,
-        tool_schemas=schemas if schemas is not None else SCHEMAS,
-        limits=limits or PassthroughLimits(),
-        **kwargs,
-    )
-    return outcome, out
-
-
-def test_stream_upstream_failure_has_stop_and_done(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stream_upstream_failure_has_stop_and_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("BRIDGE_GRACEFUL_ERROR_FRAMING_ENABLED", "true")
     outcome, out = run_stream(content("partial"))
     assert outcome.incomplete
@@ -125,314 +94,14 @@ def test_stream_upstream_failure_has_stop_and_done(monkeypatch: pytest.MonkeyPat
     assert b"".join(out).count(DONE) == 1
 
 
-def test_stream_upstream_failure_preserves_legacy_framing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stream_upstream_failure_preserves_legacy_framing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("BRIDGE_GRACEFUL_ERROR_FRAMING_ENABLED", "false")
     outcome, out = run_stream(content("partial"))
     assert outcome.incomplete
     assert payloads(out)[-1]["choices"][0]["finish_reason"] is None
     assert b"".join(out).endswith(DONE)
-
-
-def payloads(frames) -> list:
-    """Разобранные data-кадры (без [DONE])."""
-    parsed = []
-    for raw in b"".join(frames).split(b"\n\n"):
-        text = raw.decode("utf-8").strip()
-        if text.startswith("data:") and text[5:].strip() != "[DONE]":
-            parsed.append(json.loads(text[5:]))
-    return parsed
-
-
-def published_calls(frames, choice: int = 0) -> list:
-    calls = []
-    for item in payloads(frames):
-        for ch in item.get("choices") or ():
-            if ch.get("index") == choice:
-                calls.extend((ch.get("delta") or {}).get("tool_calls") or ())
-    return calls
-
-
-def args_of(call) -> dict:
-    return json.loads(call["function"]["arguments"])
-
-
-class TestStreamRelay(unittest.TestCase):
-    def test_stream_content_passes_verbatim_in_order(self):
-        events = content("a") + content("b") + finish(0, "stop") + DONE
-        outcome, out = run_stream(events)
-        self.assertEqual(b"".join(out), events)
-        self.assertTrue(outcome.done)
-        self.assertFalse(outcome.incomplete)
-
-    def test_stream_non_data_events_and_comments_are_forwarded(self):
-        events = b": keepalive\n\n" + content("a") + finish(0, "stop") + DONE
-        _, out = run_stream(events)
-        self.assertEqual(b"".join(out), events)
-
-    def test_stream_tool_calls_buffered_sanitized_published_before_terminal(self):
-        events = (
-            content("x")
-            + tool_delta(0, 0, call_id="call_a", name="subagent", args='{"prompt":"p",')
-            + tool_delta(0, 0, args='"provider":"","note":" "}')
-            + finish(0, usage={"total_tokens": 3})
-            + DONE
-        )
-        outcome, out = run_stream(events)
-        frames = payloads(out)
-        # tool_call-дельты сами по себе клиенту не уходят: вызов приходит одним кадром перед финалом
-        self.assertEqual(len(published_calls(out)), 1)
-        call = published_calls(out)[0]
-        self.assertEqual((call["id"], call["index"], call["function"]["name"]), ("call_a", 0, "subagent"))
-        self.assertEqual(args_of(call), {"prompt": "p"})
-        order = [
-            "content" if (f["choices"][0]["delta"].get("content")) else
-            "calls" if (f["choices"][0]["delta"].get("tool_calls")) else
-            "terminal" if f["choices"][0].get("finish_reason") else "other"
-            for f in frames
-        ]
-        self.assertEqual(order, ["content", "calls", "terminal"])
-        self.assertEqual(frames[-1]["usage"], {"total_tokens": 3})
-        self.assertEqual(out[-1], DONE)
-        self.assertEqual(outcome.tool_calls_published, 1)
-
-    def test_stream_terminal_chunk_carrying_tool_calls_is_handled(self):
-        terminal = frame(chunk([{
-            "index": 0,
-            "delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function",
-                                       "function": {"name": "subagent", "arguments": '{"prompt":"p","provider":""}'}}]},
-            "finish_reason": "tool_calls",
-        }]))
-        _, out = run_stream(terminal + DONE)
-        self.assertEqual(args_of(published_calls(out)[0]), {"prompt": "p"})
-        self.assertEqual(payloads(out)[-1]["choices"][0]["finish_reason"], "tool_calls")
-
-    def test_stream_choices_composite_key_keeps_calls_apart(self):
-        events = (
-            tool_delta(0, 0, call_id="c0", name="subagent", args='{"prompt":"zero"')
-            + tool_delta(1, 0, call_id="c1", name="other", args='{"k":"one"')
-            + tool_delta(0, 0, args=',"provider":""}')
-            + tool_delta(1, 0, args=',"z":1}')
-            + finish(0)
-            + finish(1)
-            + DONE
-        )
-        outcome, out = run_stream(events)
-        zero, one = published_calls(out, 0), published_calls(out, 1)
-        self.assertEqual([(c["id"], c["function"]["name"]) for c in zero], [("c0", "subagent")])
-        self.assertEqual([(c["id"], c["function"]["name"]) for c in one], [("c1", "other")])
-        self.assertEqual(args_of(zero[0]), {"prompt": "zero"})
-        self.assertEqual(args_of(one[0]), {"k": "one", "z": 1})
-        self.assertEqual(outcome.tool_calls_published, 2)
-
-    def test_stream_choices_finish_independently_without_flushing_others(self):
-        events = (
-            tool_delta(0, 0, call_id="c0", name="subagent", args='{"prompt":"a"}')
-            + tool_delta(1, 0, call_id="c1", name="subagent", args='{"prompt":"b"}')
-            + finish(0)
-        )
-        outcome, out = run_stream(events)  # EOF: choice 1 без finish_reason
-        self.assertEqual(len(published_calls(out, 0)), 1)
-        self.assertEqual(published_calls(out, 1), [])
-        self.assertTrue(outcome.incomplete)
-
-    def test_stream_tool_call_indexes_within_choice_keep_order_and_values(self):
-        events = (
-            tool_delta(0, 0, call_id="c0", name="subagent", args='{"prompt":"a"}')
-            + tool_delta(0, 2, call_id="c2", name="subagent", args='{"prompt":"b"}')
-            + finish(0)
-            + DONE
-        )
-        _, out = run_stream(events)
-        self.assertEqual([(c["index"], c["id"]) for c in published_calls(out)], [(0, "c0"), (2, "c2")])
-
-    def test_stream_parallel_unpacked_reindexed_and_limited(self):
-        parallel = {"tool_uses": [{"recipient_name": "t%d" % i, "parameters": {}} for i in range(5)]}
-        events = (
-            tool_delta(0, 0, call_id="cp", name="parallel", args=json.dumps(parallel))
-            + finish(0)
-            + DONE
-        )
-        _, out = run_stream(events, limits=PassthroughLimits(max_parallel_calls=3))
-        calls = published_calls(out)
-        self.assertEqual([c["function"]["name"] for c in calls], ["t0", "t1", "t2"])
-        self.assertEqual([c["index"] for c in calls], [0, 1, 2])
-        _, out = run_stream(events)
-        self.assertEqual(len(published_calls(out)), 5)
-
-    def test_stream_eof_without_finish_reason_drops_buffer(self):
-        events = content("x") + tool_delta(0, 0, call_id="c", name="subagent", args='{"prompt":"p"')
-        outcome, out = run_stream(events)
-        self.assertEqual(published_calls(out), [])
-        self.assertTrue(outcome.incomplete)
-        self.assertFalse(outcome.done)
-        last = payloads(out)[-1]
-        self.assertEqual(last["error"]["code"], "upstream_incomplete_stream")
-        self.assertTrue(b"".join(out).endswith(DONE))
-
-    def test_stream_eof_after_done_with_unfinished_calls_is_failure_not_success(self):
-        events = tool_delta(0, 0, call_id="c", name="subagent", args="{}") + DONE
-        outcome, out = run_stream(events)
-        self.assertEqual(published_calls(out), [])
-        self.assertTrue(outcome.incomplete)
-        self.assertTrue(b"".join(out).endswith(DONE))
-
-    def test_stream_eof_mid_event_line_does_not_publish_calls(self):
-        events = (
-            tool_delta(0, 0, call_id="c", name="subagent", args='{"prompt":"p"}')
-            + b'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_re'
-        )
-        outcome, out = run_stream(events)
-        self.assertEqual(published_calls(out), [])
-        self.assertTrue(outcome.incomplete)
-
-    def test_stream_eof_after_all_choices_finished_is_clean(self):
-        events = (
-            tool_delta(0, 0, call_id="c", name="subagent", args='{"prompt":"p"}') + finish(0)
-        )  # апстрим закрылся без [DONE], но финал был
-        outcome, out = run_stream(events)
-        self.assertEqual(len(published_calls(out)), 1)
-        self.assertFalse(outcome.incomplete)
-        self.assertNotIn("error", payloads(out)[-1])
-
-    def test_stream_eof_content_only_without_finish_is_reported(self):
-        outcome, out = run_stream(content("partial"))
-        self.assertTrue(outcome.incomplete)
-        self.assertEqual(payloads(out)[-1]["error"]["code"], "upstream_incomplete_stream")
-
-    def test_stream_buffer_is_released_after_eof_drop(self):
-        process = ProcessBudget(10_000)
-        run_stream(tool_delta(0, 0, call_id="c", name="subagent", args="x" * 500), process=process)
-        self.assertEqual(process.used, 0)
-
-    def test_stream_sanitize_disabled_is_verbatim(self):
-        events = tool_delta(0, 0, call_id="c", name="subagent", args='{"provider":""}') + finish(0) + DONE
-        _, out = run_stream(events, sanitize=False)
-        self.assertEqual(b"".join(out), events)
-
-    def test_stream_upstream_error_chunk_is_forwarded_verbatim(self):
-        events = frame({"error": {"message": "boom", "type": "server_error"}})
-        outcome, out = run_stream(events)
-        self.assertEqual(out[0], events)
-        self.assertFalse(outcome.incomplete)  # choices не было: терминал не требуется
-
-    def test_stream_no_schema_keeps_unknown_fields(self):
-        events = tool_delta(0, 0, call_id="c", name="unknown", args='{"note":"","provider":""}') + finish(0)
-        _, out = run_stream(events, schemas={})
-        self.assertEqual(args_of(published_calls(out)[0]), {"note": "", "provider": ""})
-
-    def test_stream_usage_only_chunk_without_choices_is_forwarded(self):
-        usage = frame(chunk([], usage={"total_tokens": 1}))
-        _, out = run_stream(finish(0, "stop") + usage + DONE)
-        self.assertEqual(out[1], usage)
-
-
-class TestAccumulatorLimits(unittest.TestCase):
-    def acc(self, **kw):
-        return ToolCallAccumulator(PassthroughLimits(**kw))
-
-    def test_accumulator_bytes_boundary_minus_equal_plus(self):
-        # лимит считает UTF-8 байты id + name + arguments
-        base = len(b"c") + len(b"n")
-        for extra, ok in ((-1, True), (0, True), (1, False)):
-            with self.subTest(extra=extra):
-                limit = base + 10
-                acc = self.acc(accumulator_max_bytes=limit)
-                args = "x" * (10 + extra)
-                delta = [{"index": 0, "id": "c", "function": {"name": "n", "arguments": args}}]
-                if ok:
-                    acc.add(0, delta)
-                    self.assertLessEqual(acc.size_bytes, limit)
-                else:
-                    with self.assertRaises(AccumulatorOverflow):
-                        acc.add(0, delta)
-
-    def test_accumulator_keys_limit(self):
-        acc = self.acc(accumulator_max_keys=2)
-        acc.add(0, [{"index": 0, "id": "a"}, {"index": 1, "id": "b"}])
-        acc.add(0, [{"index": 1, "function": {"arguments": "x"}}])  # существующий ключ не растёт
-        with self.assertRaises(AccumulatorOverflow):
-            acc.add(1, [{"index": 0, "id": "c"}])  # третий ключ (choice, index)
-
-    def test_accumulator_process_budget_is_shared_and_released(self):
-        process = ProcessBudget(10)
-        first = ToolCallAccumulator(PassthroughLimits(), process)
-        second = ToolCallAccumulator(PassthroughLimits(), process)
-        first.add(0, [{"index": 0, "function": {"arguments": "x" * 8}}])
-        with self.assertRaises(AccumulatorOverflow):
-            second.add(0, [{"index": 0, "function": {"arguments": "y" * 3}}])
-        first.close()
-        self.assertEqual(process.used, 0)
-        second.add(0, [{"index": 0, "function": {"arguments": "y" * 3}}])  # после освобождения влезает
-        second.close()
-        self.assertEqual(process.used, 0)
-
-    def test_accumulator_env_override_both_directions(self):
-        small = PassthroughLimits.from_env({"BRIDGE_ACCUMULATOR_MAX_BYTES": "4"})
-        large = PassthroughLimits.from_env({"BRIDGE_ACCUMULATOR_MAX_BYTES": str(64 * 1024 * 1024)})
-        payload = [{"index": 0, "function": {"arguments": "x" * 100}}]
-        with self.assertRaises(AccumulatorOverflow):
-            ToolCallAccumulator(small).add(0, payload)
-        ToolCallAccumulator(large).add(0, payload)
-
-    def test_stream_overflow_emits_error_frame_and_done_without_partial_calls(self):
-        events = (
-            tool_delta(0, 0, call_id="c", name="subagent", args="{" + "x" * 100)
-            + finish(0)
-            + DONE
-        )
-        process = ProcessBudget(10_000)
-        outcome, out = run_stream(events, limits=PassthroughLimits(accumulator_max_bytes=50), process=process)
-        self.assertTrue(outcome.overflow)
-        self.assertEqual(published_calls(out), [])
-        self.assertEqual(payloads(out)[-1]["error"]["code"], "upstream_response_too_large")
-        self.assertTrue(b"".join(out).endswith(DONE))
-        self.assertEqual(process.used, 0)
-
-    def test_accumulator_composite_key_pop_orders_by_tool_index(self):
-        acc = self.acc()
-        acc.add(1, [{"index": 0, "id": "b0", "function": {"name": "n"}}])
-        acc.add(0, [{"index": 1, "id": "a1", "function": {"name": "n"}}, {"index": 0, "id": "a0"}])
-        self.assertEqual([c["id"] for c in acc.pop_choice(0)], ["a0", "a1"])
-        self.assertEqual(acc.pending_choices(), [1])
-
-
-class TestLimitsFromEnv(unittest.TestCase):
-    def test_defaults(self):
-        limits = PassthroughLimits.from_env({})
-        self.assertEqual(limits.max_parallel_calls, 64)
-        self.assertEqual(limits.max_parallel_depth, 8)
-        self.assertEqual(limits.max_body_bytes, 16777216)
-        self.assertEqual(limits.accumulator_max_bytes, 8388608)
-        self.assertEqual(limits.accumulator_max_keys, 64)
-        self.assertEqual(limits.accumulator_max_process_bytes, 33554432)
-
-    def test_every_limit_is_overridable_from_env(self):
-        limits = PassthroughLimits.from_env({
-            "BRIDGE_MAX_PARALLEL_CALLS": "3",
-            "BRIDGE_MAX_PARALLEL_DEPTH": "2",
-            "BRIDGE_PASSTHROUGH_MAX_BODY_BYTES": "100",
-            "BRIDGE_ACCUMULATOR_MAX_BYTES": "200",
-            "BRIDGE_ACCUMULATOR_MAX_KEYS": "5",
-            "BRIDGE_ACCUMULATOR_MAX_PROCESS_BYTES": "300",
-            "BRIDGE_PASSTHROUGH_CONNECT_TIMEOUT_S": "1.5",
-            "BRIDGE_PASSTHROUGH_READ_TIMEOUT_S": "7",
-        })
-        self.assertEqual(
-            (limits.max_parallel_calls, limits.max_parallel_depth, limits.max_body_bytes,
-             limits.accumulator_max_bytes, limits.accumulator_max_keys,
-             limits.accumulator_max_process_bytes, limits.connect_timeout_s, limits.read_timeout_s),
-            (3, 2, 100, 200, 5, 300, 1.5, 7.0),
-        )
-
-    def test_invalid_values_fall_back_to_defaults(self):
-        for bad in ("", "abc", "0", "-5", "1.5"):
-            with self.subTest(bad=bad):
-                self.assertEqual(
-                    PassthroughLimits.from_env({"BRIDGE_MAX_PARALLEL_CALLS": bad}).max_parallel_calls, 64
-                )
-
-    def test_server_passes_env_limits_to_core(self):
-        self.assertEqual(server._SANITIZE_LIMITS["max_parallel_calls"], server.BRIDGE_LIMITS.max_parallel_calls)
 
 
 class TestCliRouteToolSchemas(unittest.TestCase):
@@ -454,7 +123,10 @@ class TestCliRouteToolSchemas(unittest.TestCase):
             "type": "function",
             "function": {
                 "name": "drop_empty",
-                "parameters": {"type": "object", "properties": {"note": {"type": "string"}}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"note": {"type": "string"}},
+                },
             },
         },
     ]
@@ -467,12 +139,31 @@ class TestCliRouteToolSchemas(unittest.TestCase):
         return TurnResult(state="done", rc=0, text=text)
 
     def finalized_args(self, tool_schemas):
-        return [json.loads(call["function"]["arguments"]) for call in self.dispatch(self.raw_turn(), tool_schemas)["tool_calls"]]
+        return [
+            json.loads(call["function"]["arguments"])
+            for call in self.dispatch(self.raw_turn(), tool_schemas)["tool_calls"]
+        ]
 
-    def dispatch(self, raw, schemas, stream=False, managed_turn=None, model="m", sanitize=True):
-        ctx = {"backend": "droid", "model": model, "effort": "high", "prompt": "p", "rpc": {"system": "", "runnable": "", "items": []}, "images": [], "emulate_tools": True, "tool_schemas": schemas, "stream": stream, "managed_turn": managed_turn}
+    def dispatch(
+        self, raw, schemas, stream=False, managed_turn=None, model="m", sanitize=True
+    ):
+        ctx = {
+            "backend": "droid",
+            "model": model,
+            "effort": "high",
+            "prompt": "p",
+            "rpc": {"system": "", "runnable": "", "items": []},
+            "images": [],
+            "emulate_tools": True,
+            "tool_schemas": schemas,
+            "stream": stream,
+            "managed_turn": managed_turn,
+        }
         adapter = SimpleNamespace(kind="droid", execute_turn=lambda turn, writer: raw)
-        with unittest.mock.patch.object(server, "BRIDGE_SANITIZE_TOOL_CALLS", sanitize), unittest.mock.patch.object(server.BACKENDS, "get", return_value=adapter):
+        with (
+            unittest.mock.patch.object(server, "BRIDGE_SANITIZE_TOOL_CALLS", sanitize),
+            unittest.mock.patch.object(server.BACKENDS, "get", return_value=adapter),
+        ):
             return server.Handler._dispatch(SimpleNamespace(connection=None), ctx, None)
 
     def test_dispatch_sanitizes_once_after_finalize_and_matches_events(self):
@@ -485,41 +176,80 @@ class TestCliRouteToolSchemas(unittest.TestCase):
                 order = []
                 original_finalize = server.finalize_turn
                 original_sanitize = server.sanitize_tool_call
+
                 def finalize(*args, **kwargs):
                     order.append("finalize")
                     return original_finalize(*args, **kwargs)
+
                 def sanitize(*args, **kwargs):
                     order.append("sanitize")
                     return original_sanitize(*args, **kwargs)
-                with unittest.mock.patch.object(server, "finalize_turn", side_effect=finalize), unittest.mock.patch.object(server, "sanitize_tool_call", side_effect=sanitize) as spy:
+
+                with (
+                    unittest.mock.patch.object(
+                        server, "finalize_turn", side_effect=finalize
+                    ),
+                    unittest.mock.patch.object(
+                        server, "sanitize_tool_call", side_effect=sanitize
+                    ) as spy,
+                ):
                     out = self.dispatch(raw, schemas, stream)
                 self.assertEqual(spy.call_count, 2)
                 self.assertEqual(order, ["finalize", "sanitize", "sanitize"])
-                self.assertEqual(out["tool_calls"], [value for kind, value in out["events"] if kind == "tool_call"])
-                self.assertEqual([json.loads(call["function"]["arguments"]) for call in out["tool_calls"]], [{}, {"note": ""}])
+                self.assertEqual(
+                    out["tool_calls"],
+                    [value for kind, value in out["events"] if kind == "tool_call"],
+                )
+                self.assertEqual(
+                    [
+                        json.loads(call["function"]["arguments"])
+                        for call in out["tool_calls"]
+                    ],
+                    [{}, {"note": ""}],
+                )
 
     def test_dispatch_kill_switch_skips_sanitizer(self):
         with unittest.mock.patch.object(server, "sanitize_tool_call") as spy:
-            out = self.dispatch(self.raw_turn(), server.build_tool_schemas(self.TOOLS), sanitize=False)
+            out = self.dispatch(
+                self.raw_turn(), server.build_tool_schemas(self.TOOLS), sanitize=False
+            )
         spy.assert_not_called()
-        self.assertEqual(json.loads(out["tool_calls"][0]["function"]["arguments"]), {"note": ""})
+        self.assertEqual(
+            json.loads(out["tool_calls"][0]["function"]["arguments"]), {"note": ""}
+        )
 
     def test_managed_completion_receives_sanitized_result(self):
         managed = object()
-        with unittest.mock.patch.object(server.TURN_MANAGER, "complete_turn_from_result") as complete:
-            out = self.dispatch(self.raw_turn(), server.build_tool_schemas(self.TOOLS), managed_turn=managed)
+        with unittest.mock.patch.object(
+            server.TURN_MANAGER, "complete_turn_from_result"
+        ) as complete:
+            out = self.dispatch(
+                self.raw_turn(),
+                server.build_tool_schemas(self.TOOLS),
+                managed_turn=managed,
+            )
         self.assertIs(complete.call_args.args[0], managed)
         result = complete.call_args.args[1]
         self.assertEqual(json.loads(result.tool_calls[0].function.arguments), {})
-        self.assertEqual([event.value for event in result.events if event.kind == "tool_call"], list(result.tool_calls))
-        self.assertEqual(out["tool_calls"][0]["function"]["arguments"], result.tool_calls[0].function.arguments)
+        self.assertEqual(
+            [event.value for event in result.events if event.kind == "tool_call"],
+            list(result.tool_calls),
+        )
+        self.assertEqual(
+            out["tool_calls"][0]["function"]["arguments"],
+            result.tool_calls[0].function.arguments,
+        )
 
     def test_managed_replay_returns_finalized_calls_without_sanitizing(self):
         final = self.dispatch(self.raw_turn(), server.build_tool_schemas(self.TOOLS))
         managed = SimpleNamespace(done_event=threading.Event(), final_dict=final)
         managed.done_event.set()
         with unittest.mock.patch.object(server, "sanitize_tool_call") as spy:
-            replay = server.Handler._dispatch(SimpleNamespace(), {"attached_existing": True, "managed_turn": managed}, None)
+            replay = server.Handler._dispatch(
+                SimpleNamespace(),
+                {"attached_existing": True, "managed_turn": managed},
+                None,
+            )
         spy.assert_not_called()
         self.assertEqual(replay, final)
 
@@ -532,53 +262,10 @@ class TestCliRouteToolSchemas(unittest.TestCase):
 
     def test_turn_context_carries_tool_schemas(self):
         schemas = server.build_tool_schemas(self.TOOLS)
-        self.assertIs(server.TurnContext("m", "high", "p", tool_schemas=schemas).tool_schemas, schemas)
-
-
-class TestNonStreamBody(unittest.TestCase):
-    def body(self, calls, **extra):
-        return json.dumps(
-            {"id": "x", "object": "chat.completion", "choices": [
-                {"index": 0, "message": {"role": "assistant", "content": None, "tool_calls": calls},
-                 "finish_reason": "tool_calls"}], "usage": {"total_tokens": 1}, **extra}
-        ).encode("utf-8")
-
-    def call(self, args, name="subagent", call_id="c1"):
-        return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
-
-    def test_empty_optional_strings_removed(self):
-        out = sanitize_completion_body(
-            self.body([self.call({"prompt": "p", "provider": "", "note": ""})]),
-            SCHEMAS, PassthroughLimits())
-        data = json.loads(out)
-        self.assertEqual(args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"})
-        self.assertEqual(data["usage"], {"total_tokens": 1})
-
-    def test_unchanged_body_is_byte_identical(self):
-        raw = self.body([self.call({"prompt": "p"})])
-        self.assertIs(sanitize_completion_body(raw, SCHEMAS, PassthroughLimits()), raw)
-
-    def test_invalid_json_and_foreign_shapes_untouched(self):
-        for raw in (b"not json", b"[]", b'{"choices": 5}', b'{"error": {"message": "x"}}'):
-            with self.subTest(raw=raw):
-                self.assertIs(sanitize_completion_body(raw, SCHEMAS, PassthroughLimits()), raw)
-
-    def test_parallel_unpacked_without_index_key(self):
-        parallel = {"tool_uses": [{"recipient_name": "subagent", "parameters": {"prompt": "p", "provider": ""}}]}
-        out = json.loads(sanitize_completion_body(
-            self.body([self.call(parallel, name="parallel")]), SCHEMAS, PassthroughLimits()))
-        calls = out["choices"][0]["message"]["tool_calls"]
-        self.assertEqual([c["function"]["name"] for c in calls], ["subagent"])
-        self.assertNotIn("index", calls[0])
-        self.assertEqual(args_of(calls[0]), {"prompt": "p"})
-
-    def test_parallel_limit_applied(self):
-        parallel = {"tool_uses": [{"recipient_name": "t%d" % i, "parameters": {}} for i in range(70)]}
-        raw = self.body([self.call(parallel, name="parallel")])
-        calls = json.loads(sanitize_completion_body(raw, {}, PassthroughLimits()))["choices"][0]["message"]["tool_calls"]
-        self.assertEqual(len(calls), 64)
-        calls = json.loads(sanitize_completion_body(raw, {}, PassthroughLimits(max_parallel_calls=70)))["choices"][0]["message"]["tool_calls"]
-        self.assertEqual(len(calls), 70)
+        self.assertIs(
+            server.TurnContext("m", "high", "p", tool_schemas=schemas).tool_schemas,
+            schemas,
+        )
 
 
 # ---- реальный upstream и шов ------------------------------------------------------
@@ -599,7 +286,9 @@ class FakeUpstream:
             def do_POST(self):  # noqa: N802
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length)
-                outer.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
+                outer.requests.append(
+                    {"path": self.path, "headers": dict(self.headers), "body": body}
+                )
                 outer.respond(self, body)
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -613,7 +302,11 @@ class FakeUpstream:
 
     @staticmethod
     def json(handler, payload, status=200, extra=()):
-        data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        data = (
+            payload
+            if isinstance(payload, bytes)
+            else json.dumps(payload).encode("utf-8")
+        )
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(data)))
@@ -654,34 +347,58 @@ class CollectSink(ResponseSink):
         return next((v for k, v in self.headers if k.lower() == name.lower()), None)
 
 
-def make_adapter(port: int, limits: PassthroughLimits | None = None, **kw: Any) -> PassthroughAdapter:
-    config = {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % port, "max_concurrent": 4}
+def make_adapter(
+    port: int, limits: PassthroughLimits | None = None, **kw: Any
+) -> PassthroughAdapter:
+    config = {
+        "kind": "passthrough",
+        "base_url": "http://127.0.0.1:%d/v1" % port,
+        "max_concurrent": 4,
+    }
     kw.setdefault("is_hub_key", server.is_hub_key)
-    return PassthroughAdapter("codex", config, lambda: {}, None, limits=limits or PassthroughLimits(), **kw)
+    return PassthroughAdapter(
+        "codex", config, lambda: {}, None, limits=limits or PassthroughLimits(), **kw
+    )
 
 
-def _call_passthrough(adapter: PassthroughAdapter, headers: Mapping[str, str]) -> CollectSink:
+def _call_passthrough(
+    adapter: PassthroughAdapter, headers: Mapping[str, str]
+) -> CollectSink:
     sink = CollectSink()
-    adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers=headers, sink=sink)
+    adapter.handle(
+        path="/v1/chat/completions",
+        raw_body=b"{}",
+        request={},
+        headers=headers,
+        sink=sink,
+    )
     assert sink.status == 200
     return sink
 
 
 def _credential_values(sent_headers: Mapping[str, str]) -> list[str]:
-    return [v for k, v in sent_headers.items() if k.lower() in ("authorization", "x-api-key")]
+    return [
+        v
+        for k, v in sent_headers.items()
+        if k.lower() in ("authorization", "x-api-key")
+    ]
 
 
 def test_adapter_module_has_no_server_import() -> None:
     import ast
 
-    source = (Path(__file__).resolve().parent.parent / "adapters" / "passthrough_adapter.py").read_text(encoding="utf-8")
+    source = (
+        Path(__file__).resolve().parent.parent / "adapters" / "passthrough_adapter.py"
+    ).read_text(encoding="utf-8")
     imported: list[str] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             imported.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.append(node.module)
-    assert not [name for name in imported if name == "server" or name.startswith("server.")]
+    assert not [
+        name for name in imported if name == "server" or name.startswith("server.")
+    ]
 
 
 def test_injected_is_hub_key_strips_both_credentials_and_keeps_request_drop() -> None:
@@ -689,7 +406,15 @@ def test_injected_is_hub_key_strips_both_credentials_and_keeps_request_drop() ->
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
     adapter = make_adapter(upstream.port, is_hub_key=lambda tok: tok == "hub-key")
     try:
-        _call_passthrough(adapter, {"Authorization": "Bearer own-key", "X-Api-Key": "hub-key", "X-Custom": "keep", "Proxy-Authorization": "secret"})
+        _call_passthrough(
+            adapter,
+            {
+                "Authorization": "Bearer own-key",
+                "X-Api-Key": "hub-key",
+                "X-Custom": "keep",
+                "Proxy-Authorization": "secret",
+            },
+        )
         sent = upstream.requests[-1]["headers"]
         assert _credential_values(sent) == []
         assert sent["X-Custom"] == "keep"
@@ -702,11 +427,20 @@ def test_injected_is_hub_key_strips_both_credentials_and_keeps_request_drop() ->
 def test_injected_is_hub_key_false_and_missing_forward_credentials() -> None:
     upstream = FakeUpstream()
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
-    adapters = [make_adapter(upstream.port, is_hub_key=lambda tok: False), make_adapter(upstream.port, is_hub_key=None)]
+    adapters = [
+        make_adapter(upstream.port, is_hub_key=lambda tok: False),
+        make_adapter(upstream.port, is_hub_key=None),
+    ]
     try:
         for adapter in adapters:
-            _call_passthrough(adapter, {"authorization": "bearer client-key", "x-api-key": "client-x-api-key"})
-            assert sorted(_credential_values(upstream.requests[-1]["headers"])) == ["bearer client-key", "client-x-api-key"]
+            _call_passthrough(
+                adapter,
+                {"authorization": "bearer client-key", "x-api-key": "client-x-api-key"},
+            )
+            assert sorted(_credential_values(upstream.requests[-1]["headers"])) == [
+                "bearer client-key",
+                "client-x-api-key",
+            ]
     finally:
         for adapter in adapters:
             adapter.shutdown()
@@ -714,12 +448,27 @@ def test_injected_is_hub_key_false_and_missing_forward_credentials() -> None:
 
 
 def test_host_is_hub_key_callback_strips_mixed_credentials(monkeypatch) -> None:
-    monkeypatch.setattr(server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False))
+    monkeypatch.setattr(
+        server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False)
+    )
     upstream = FakeUpstream()
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
-    adapter = PassthroughAdapter("codex", {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % upstream.port, "max_concurrent": 4}, lambda: {}, SimpleNamespace(is_hub_key=lambda tok: tok == "hub-key"), limits=PassthroughLimits(), sanitize=True)
+    adapter = PassthroughAdapter(
+        "codex",
+        {
+            "kind": "passthrough",
+            "base_url": "http://127.0.0.1:%d/v1" % upstream.port,
+            "max_concurrent": 4,
+        },
+        lambda: {},
+        SimpleNamespace(is_hub_key=lambda tok: tok == "hub-key"),
+        limits=PassthroughLimits(),
+        sanitize=True,
+    )
     try:
-        _call_passthrough(adapter, {"Authorization": "Bearer own-key", "x-api-key": "hub-key"})
+        _call_passthrough(
+            adapter, {"Authorization": "Bearer own-key", "x-api-key": "hub-key"}
+        )
         assert _credential_values(upstream.requests[-1]["headers"]) == []
     finally:
         adapter.shutdown()
@@ -729,12 +478,39 @@ def test_host_is_hub_key_callback_strips_mixed_credentials(monkeypatch) -> None:
 def test_constructor_is_hub_key_overrides_host_callback() -> None:
     upstream = FakeUpstream()
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
-    config = {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % upstream.port, "max_concurrent": 4}
-    adapters = [PassthroughAdapter("codex", config, lambda: {}, SimpleNamespace(is_hub_key=lambda tok: True), limits=PassthroughLimits(), sanitize=True, is_hub_key=lambda tok: False), PassthroughAdapter("codex", config, lambda: {}, SimpleNamespace(is_hub_key=lambda tok: False), limits=PassthroughLimits(), sanitize=True, is_hub_key=lambda tok: tok == "hub-key")]
+    config = {
+        "kind": "passthrough",
+        "base_url": "http://127.0.0.1:%d/v1" % upstream.port,
+        "max_concurrent": 4,
+    }
+    adapters = [
+        PassthroughAdapter(
+            "codex",
+            config,
+            lambda: {},
+            SimpleNamespace(is_hub_key=lambda tok: True),
+            limits=PassthroughLimits(),
+            sanitize=True,
+            is_hub_key=lambda tok: False,
+        ),
+        PassthroughAdapter(
+            "codex",
+            config,
+            lambda: {},
+            SimpleNamespace(is_hub_key=lambda tok: False),
+            limits=PassthroughLimits(),
+            sanitize=True,
+            is_hub_key=lambda tok: tok == "hub-key",
+        ),
+    ]
     try:
         _call_passthrough(adapters[0], {"Authorization": "Bearer hub-key"})
-        assert _credential_values(upstream.requests[-1]["headers"]) == ["Bearer hub-key"]
-        _call_passthrough(adapters[1], {"Authorization": "Bearer hub-key", "x-api-key": "own-key"})
+        assert _credential_values(upstream.requests[-1]["headers"]) == [
+            "Bearer hub-key"
+        ]
+        _call_passthrough(
+            adapters[1], {"Authorization": "Bearer hub-key", "x-api-key": "own-key"}
+        )
         assert _credential_values(upstream.requests[-1]["headers"]) == []
     finally:
         for adapter in adapters:
@@ -742,15 +518,32 @@ def test_constructor_is_hub_key_overrides_host_callback() -> None:
         upstream.close()
 
 
-def test_server_is_hub_key_delegates_to_token_cache_and_host_integration(monkeypatch) -> None:
-    monkeypatch.setattr(server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: tok == "hub-key"))
+def test_server_is_hub_key_delegates_to_token_cache_and_host_integration(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: tok == "hub-key")
+    )
     assert server.is_hub_key("hub-key") is True
     assert server.is_hub_key("own-key") is False
     upstream = FakeUpstream()
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
-    adapter = PassthroughAdapter("codex", {"kind": "passthrough", "base_url": "http://127.0.0.1:%d/v1" % upstream.port, "max_concurrent": 4}, lambda: {}, server, limits=PassthroughLimits(), sanitize=True)
+    adapter = PassthroughAdapter(
+        "codex",
+        {
+            "kind": "passthrough",
+            "base_url": "http://127.0.0.1:%d/v1" % upstream.port,
+            "max_concurrent": 4,
+        },
+        lambda: {},
+        server,
+        limits=PassthroughLimits(),
+        sanitize=True,
+    )
     try:
-        _call_passthrough(adapter, {"authorization": "bearer hub-key", "X-API-KEY": "own-key"})
+        _call_passthrough(
+            adapter, {"authorization": "bearer hub-key", "X-API-KEY": "own-key"}
+        )
         assert _credential_values(upstream.requests[-1]["headers"]) == []
     finally:
         adapter.shutdown()
@@ -796,7 +589,9 @@ def test_connection_pool_reuses_socket_and_isolates_headers(monkeypatch) -> None
         upstream.close()
 
 
-def test_parallel_requests_do_not_share_inflight_connection_or_headers(monkeypatch) -> None:
+def test_parallel_requests_do_not_share_inflight_connection_or_headers(
+    monkeypatch,
+) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     monkeypatch.setattr(
@@ -870,7 +665,10 @@ def test_connection_close_response_is_never_pooled() -> None:
         upstream.close()
 
 
-@pytest.mark.parametrize("value", ["0", "false", "no", "FALSE", "No", "off", " Off ", " 0 ", "unexpected", "", "   "])
+@pytest.mark.parametrize(
+    "value",
+    ["0", "false", "no", "FALSE", "No", "off", " Off ", " 0 ", "unexpected", "", "   "],
+)
 def test_pooling_kill_switch_closes_and_never_reuses(value, monkeypatch) -> None:
     monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", value)
     upstream = FakeUpstream(keep_alive=True)
@@ -885,7 +683,13 @@ def test_pooling_kill_switch_closes_and_never_reuses(value, monkeypatch) -> None
     try:
         for _ in range(2):
             sink = CollectSink()
-            adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers={},
+                sink=sink,
+            )
             assert sink.status == 200
         assert sockets[0] is not sockets[1]
         for req in upstream.requests:
@@ -897,7 +701,9 @@ def test_pooling_kill_switch_closes_and_never_reuses(value, monkeypatch) -> None
         upstream.close()
 
 
-@pytest.mark.parametrize("value", ["1", "true", "yes", "on", " On ", " TRUE ", " 1 ", "YES"])
+@pytest.mark.parametrize(
+    "value", ["1", "true", "yes", "on", " On ", " TRUE ", " 1 ", "YES"]
+)
 def test_pooling_enabled_keeps_alive_and_reuses(value, monkeypatch) -> None:
     monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", value)
     upstream = FakeUpstream(keep_alive=True)
@@ -912,7 +718,13 @@ def test_pooling_enabled_keeps_alive_and_reuses(value, monkeypatch) -> None:
     try:
         for _ in range(2):
             sink = CollectSink()
-            adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={},
+                headers={},
+                sink=sink,
+            )
             assert sink.status == 200
         assert sockets[0] is sockets[1]
         for req in upstream.requests:
@@ -936,12 +748,24 @@ def test_pooling_disabled_after_idle_does_not_take_pooled_socket(monkeypatch) ->
     adapter = make_adapter(upstream.port)
     try:
         sink = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink,
+        )
         assert sink.status == 200
         assert adapter._pool._idle
         monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "0")
         sink = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink,
+        )
         assert sink.status == 200
         assert sockets[0] is not sockets[1]
         headers = {k.lower(): v for k, v in upstream.requests[-1]["headers"].items()}
@@ -964,7 +788,13 @@ def test_pooling_disabled_drains_idle_before_next_open(monkeypatch) -> None:
     adapter = make_adapter(upstream.port)
     try:
         sink = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink,
+        )
         assert sink.status == 200
         assert adapter._pool._idle
         idle_conn, _ = next(iter(adapter._pool._idle.values()))[0]
@@ -987,7 +817,13 @@ def test_pooling_disabled_drains_idle_before_next_open(monkeypatch) -> None:
         monkeypatch.setattr(adapter._pool, "get_connection", track_get)
         monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "off")
         sink = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink,
+        )
         assert sink.status == 200
         assert events[0] == "close_all"
         assert events[1] == ("get", -1)
@@ -997,6 +833,7 @@ def test_pooling_disabled_drains_idle_before_next_open(monkeypatch) -> None:
     finally:
         adapter.shutdown()
         upstream.close()
+
 
 def test_pooling_disabled_during_request_does_not_pool(monkeypatch) -> None:
     monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
@@ -1010,7 +847,13 @@ def test_pooling_disabled_during_request_does_not_pool(monkeypatch) -> None:
     adapter = make_adapter(upstream.port)
     try:
         sink = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={}, headers={}, sink=sink)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={},
+            headers={},
+            sink=sink,
+        )
         assert sink.status == 200
         assert adapter._pool._idle == {}
     finally:
@@ -1423,26 +1266,67 @@ class SeamCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def call(self, request: dict, adapter=None, headers=None, raw=None, path="/v1/chat/completions"):
+    def call(
+        self,
+        request: dict,
+        adapter=None,
+        headers=None,
+        raw=None,
+        path="/v1/chat/completions",
+    ):
         adapter = adapter or make_adapter(self.upstream.port, sanitize=True)
         raw = raw if raw is not None else json.dumps(request).encode("utf-8")
         sink = CollectSink()
-        adapter.handle(path=path, raw_body=raw, request=request,
-                       headers=headers or {"Authorization": "Bearer upstream-key"}, sink=sink)
+        adapter.handle(
+            path=path,
+            raw_body=raw,
+            request=request,
+            headers=headers or {"Authorization": "Bearer upstream-key"},
+            sink=sink,
+        )
         return sink
 
 
 class TestSeamNonStream(SeamCase):
     def completion(self, args):
-        return {"id": "x", "object": "chat.completion", "choices": [{"index": 0, "finish_reason": "tool_calls",
-                "message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "c1", "type": "function", "function": {"name": "subagent", "arguments": json.dumps(args)}}]}}]}
+        return {
+            "id": "x",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "type": "function",
+                                "function": {
+                                    "name": "subagent",
+                                    "arguments": json.dumps(args),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
 
     def test_request_forwarded_verbatim_and_response_sanitized(self):
-        self.upstream.respond = lambda h, b: FakeUpstream.json(h, self.completion({"prompt": "p", "provider": ""}))
-        request = {"model": "gpt-6.1-terra", "reasoning_effort": "xhigh", "tools": TOOLS,
-                   "messages": [{"role": "user", "content": "hi"}]}
-        raw = json.dumps(request, indent=2).encode("utf-8")  # нестандартная сериализация: байты не пересобираются
+        self.upstream.respond = lambda h, b: FakeUpstream.json(
+            h, self.completion({"prompt": "p", "provider": ""})
+        )
+        request = {
+            "model": "gpt-6.1-terra",
+            "reasoning_effort": "xhigh",
+            "tools": TOOLS,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        raw = json.dumps(request, indent=2).encode(
+            "utf-8"
+        )  # нестандартная сериализация: байты не пересобираются
         sink = self.call(request, raw=raw)
         sent = self.upstream.requests[0]
         self.assertEqual(sent["body"], raw)
@@ -1450,21 +1334,34 @@ class TestSeamNonStream(SeamCase):
         self.assertEqual(sent["headers"]["Authorization"], "Bearer upstream-key")
         self.assertEqual(sink.status, 200)
         data = json.loads(sink.body)
-        self.assertEqual(args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"})
+        self.assertEqual(
+            args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"}
+        )
         self.assertEqual(sink.header("Content-Length"), str(len(sink.body)))
 
     def test_missing_authorization_stays_missing_and_hop_by_hop_dropped(self):
         self.upstream.respond = lambda h, b: FakeUpstream.json(h, {"ok": True})
-        self.call({"model": "m"}, headers={"X-Custom": "1", "Connection": "keep-alive",
-                                           "Accept-Encoding": "gzip", "Proxy-Authorization": "secret"})
-        headers = {k.lower(): v for k, v in self.upstream.requests[0]["headers"].items()}
+        self.call(
+            {"model": "m"},
+            headers={
+                "X-Custom": "1",
+                "Connection": "keep-alive",
+                "Accept-Encoding": "gzip",
+                "Proxy-Authorization": "secret",
+            },
+        )
+        headers = {
+            k.lower(): v for k, v in self.upstream.requests[0]["headers"].items()
+        }
         self.assertNotIn("authorization", headers)
         self.assertNotIn("proxy-authorization", headers)
         self.assertEqual(headers["x-custom"], "1")
         self.assertEqual(headers["accept-encoding"], "identity")
 
     def test_upstream_auth_override(self) -> None:
-        self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(
+            handler, {"ok": True}
+        )
         cases = (
             (
                 {"api_key_env": "TEST_UPSTREAM_KEY"},
@@ -1554,7 +1451,9 @@ class TestSeamNonStream(SeamCase):
     def test_upstream_auth_unconfigured_preserves_own_client_authorization(
         self,
     ) -> None:
-        self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(
+            handler, {"ok": True}
+        )
         cases = (
             ({}, {}),
             ({"api_key_env": "TEST_UPSTREAM_KEY"}, {}),
@@ -1595,7 +1494,9 @@ class TestSeamNonStream(SeamCase):
                     )
 
     def test_unconfigured_hub_credential_is_hidden_from_upstream(self) -> None:
-        self.upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
+        self.upstream.respond = lambda handler, body: FakeUpstream.json(
+            handler, {"ok": True}
+        )
         for headers in (
             {"Authorization": "Bearer hub-key", "X-Api-Key": "own-key"},
             {"Authorization": "Bearer own-key", "x-api-key": "hub-key"},
@@ -1609,7 +1510,11 @@ class TestSeamNonStream(SeamCase):
                 self.assertEqual(sink.status, 200)
                 sent = self.upstream.requests[-1]["headers"]
                 self.assertEqual(
-                    [v for k, v in sent.items() if k.lower() in ("authorization", "x-api-key")],
+                    [
+                        v
+                        for k, v in sent.items()
+                        if k.lower() in ("authorization", "x-api-key")
+                    ],
                     [],
                 )
 
@@ -1690,7 +1595,9 @@ class TestSeamNonStream(SeamCase):
         connect_entered = threading.Event()
         orig_get_conn = adapter._pool.get_connection
 
-        def delayed_get_conn(host: str, port: int, timeout: float, *, fresh: bool = False):
+        def delayed_get_conn(
+            host: str, port: int, timeout: float, *, fresh: bool = False
+        ):
             conn, reused = orig_get_conn(host, port, timeout, fresh=fresh)
             assert conn.sock is not None
             late_sockets.append(conn.sock)
@@ -1747,15 +1654,15 @@ class TestSeamNonStream(SeamCase):
                 side_effect=LegacySocketTimeout("read timed out"),
             ),
         ):
-            ok = adapter._relay_stream(
-                resp, None, sink, False, on_timeout=on_timeout
-            )
+            ok = adapter._relay_stream(resp, None, sink, False, on_timeout=on_timeout)
         self.assertFalse(ok)
         self.assertTrue(timed_out)
 
     def test_non_200_status_and_body_verbatim(self):
         error = b'{"error": {"message": "rate limited", "type": "rate"}}'
-        self.upstream.respond = lambda h, b: FakeUpstream.json(h, error, status=429, extra=[("Retry-After", "7")])
+        self.upstream.respond = lambda h, b: FakeUpstream.json(
+            h, error, status=429, extra=[("Retry-After", "7")]
+        )
         sink = self.call({"model": "m", "tools": TOOLS})
         self.assertEqual((sink.status, sink.body), (429, error))
         self.assertEqual(sink.header("Retry-After"), "7")
@@ -1767,6 +1674,7 @@ class TestSeamNonStream(SeamCase):
             h.send_header("Content-Length", "5")
             h.end_headers()
             h.wfile.write(b"hello")
+
         self.upstream.respond = respond
         sink = self.call({"model": "m"})
         self.assertEqual((sink.status, sink.body), (200, b"hello"))
@@ -1777,10 +1685,16 @@ class TestSeamNonStream(SeamCase):
             with self.subTest(delta=delta):
                 limits = PassthroughLimits(max_body_bytes=len(payload) - delta)
                 self.upstream.respond = lambda h, b: FakeUpstream.json(h, payload)
-                sink = self.call({"model": "m"}, adapter=make_adapter(self.upstream.port, limits, sanitize=True))
+                sink = self.call(
+                    {"model": "m"},
+                    adapter=make_adapter(self.upstream.port, limits, sanitize=True),
+                )
                 self.assertEqual(sink.status, expected)
                 if expected == 502:
-                    self.assertEqual(json.loads(sink.body)["error"]["type"], "upstream_response_too_large")
+                    self.assertEqual(
+                        json.loads(sink.body)["error"]["type"],
+                        "upstream_response_too_large",
+                    )
 
     def test_huge_non_tool_body_rejected_without_chunked_length(self):
         def respond(h, b):
@@ -1788,8 +1702,16 @@ class TestSeamNonStream(SeamCase):
             h.send_header("Content-Type", "application/json")
             h.end_headers()  # без Content-Length: читаем до закрытия
             h.wfile.write(b" " * 4096)
+
         self.upstream.respond = respond
-        sink = self.call({"model": "m"}, adapter=make_adapter(self.upstream.port, PassthroughLimits(max_body_bytes=1024), sanitize=True))
+        sink = self.call(
+            {"model": "m"},
+            adapter=make_adapter(
+                self.upstream.port,
+                PassthroughLimits(max_body_bytes=1024),
+                sanitize=True,
+            ),
+        )
         self.assertEqual(sink.status, 502)
 
     def test_upstream_unavailable_is_502_and_not_retried(self):
@@ -1806,24 +1728,37 @@ class TestSeamNonStream(SeamCase):
         self.addCleanup(gate.set)
         self.upstream.respond = lambda h, b: gate.wait(5)
         limits = PassthroughLimits(read_timeout_s=0.3)
-        sink = self.call({"model": "m"}, adapter=make_adapter(self.upstream.port, limits, sanitize=True))
+        sink = self.call(
+            {"model": "m"},
+            adapter=make_adapter(self.upstream.port, limits, sanitize=True),
+        )
         self.assertEqual(sink.status, 504)
 
     def test_sanitize_kill_switch_returns_body_untouched(self):
-        raw = json.dumps(self.completion({"prompt": "p", "provider": ""})).encode("utf-8")
+        raw = json.dumps(self.completion({"prompt": "p", "provider": ""})).encode(
+            "utf-8"
+        )
         self.upstream.respond = lambda h, b: FakeUpstream.json(h, raw)
-        sink = self.call({"model": "m", "tools": TOOLS}, adapter=make_adapter(self.upstream.port, sanitize=False))
+        sink = self.call(
+            {"model": "m", "tools": TOOLS},
+            adapter=make_adapter(self.upstream.port, sanitize=False),
+        )
         self.assertEqual(sink.body, raw)
 
     def test_saturated_backend_returns_503(self):
         gate = threading.Event()
         self.addCleanup(gate.set)
-        self.upstream.respond = lambda h, b: (gate.wait(3), FakeUpstream.json(h, {"ok": 1}))
+        self.upstream.respond = lambda h, b: (
+            gate.wait(3),
+            FakeUpstream.json(h, {"ok": 1}),
+        )
         adapter = make_adapter(self.upstream.port, sanitize=True)
         adapter.config["max_concurrent"] = 1
         adapter._slots = threading.BoundedSemaphore(1)
         adapter.host = type("Host", (), {"QUEUE_TIMEOUT_S": 0.2})()
-        first = threading.Thread(target=lambda: self.call({"model": "m"}, adapter=adapter))
+        first = threading.Thread(
+            target=lambda: self.call({"model": "m"}, adapter=adapter)
+        )
         first.start()
         for _ in range(100):
             if adapter.active_count():
@@ -1838,8 +1773,14 @@ class TestSeamNonStream(SeamCase):
 
 class TestSeamStream(SeamCase):
     def test_stream_end_to_end_sanitizes_and_keeps_order(self):
-        events = (content("hi") + tool_delta(0, 0, call_id="c", name="subagent", args='{"prompt":"p","provider":""}')
-                  + finish(0) + DONE)
+        events = (
+            content("hi")
+            + tool_delta(
+                0, 0, call_id="c", name="subagent", args='{"prompt":"p","provider":""}'
+            )
+            + finish(0)
+            + DONE
+        )
         self.upstream.respond = lambda h, b: FakeUpstream.sse(h, events)
         sink = self.call({"model": "m", "stream": True, "tools": TOOLS})
         self.assertEqual(sink.status, 200)
@@ -1855,162 +1796,79 @@ class TestSeamStream(SeamCase):
         self.assertNotEqual(sink.header("Content-Type"), "text/event-stream")
 
     def test_stream_eof_without_finish_reason_end_to_end(self):
-        events = tool_delta(0, 0, call_id="c", name="subagent", args='{"prompt":"p"') + b""
+        events = (
+            tool_delta(0, 0, call_id="c", name="subagent", args='{"prompt":"p"') + b""
+        )
         self.upstream.respond = lambda h, b: FakeUpstream.sse(h, events)
         sink = self.call({"model": "m", "stream": True, "tools": TOOLS})
         self.assertEqual(published_calls(sink.chunks), [])
-        self.assertEqual(payloads(sink.chunks)[-1]["error"]["code"], "upstream_incomplete_stream")
+        self.assertEqual(
+            payloads(sink.chunks)[-1]["error"]["code"], "upstream_incomplete_stream"
+        )
         self.assertTrue(sink.body.endswith(DONE))
 
     def test_stream_client_gone_closes_upstream_and_releases_budget(self):
-        events = b"".join(content("x%d" % i) for i in range(50)) + finish(0, "stop") + DONE
+        events = (
+            b"".join(content("x%d" % i) for i in range(50)) + finish(0, "stop") + DONE
+        )
         self.upstream.respond = lambda h, b: FakeUpstream.sse(h, events)
         adapter = make_adapter(self.upstream.port, sanitize=True)
         sink = CollectSink()
         sink.fail_after = 2
-        adapter.handle(path="/v1/chat/completions", raw_body=b"{}", request={"stream": True},
-                       headers={}, sink=sink)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={"stream": True},
+            headers={},
+            sink=sink,
+        )
         self.assertEqual(adapter.active_count(), 0)
         self.assertEqual(adapter.process_budget.used, 0)
 
     def test_stream_overflow_in_started_sse_is_error_frame(self):
-        events = tool_delta(0, 0, call_id="c", name="subagent", args="{" + "x" * 500) + finish(0) + DONE
+        events = (
+            tool_delta(0, 0, call_id="c", name="subagent", args="{" + "x" * 500)
+            + finish(0)
+            + DONE
+        )
         self.upstream.respond = lambda h, b: FakeUpstream.sse(h, events)
-        adapter = make_adapter(self.upstream.port, PassthroughLimits(accumulator_max_bytes=100), sanitize=True)
+        adapter = make_adapter(
+            self.upstream.port,
+            PassthroughLimits(accumulator_max_bytes=100),
+            sanitize=True,
+        )
         sink = self.call({"model": "m", "stream": True}, adapter=adapter)
         self.assertEqual(sink.status, 200)
         self.assertEqual(published_calls(sink.chunks), [])
-        self.assertEqual(payloads(sink.chunks)[-1]["error"]["code"], "upstream_response_too_large")
+        self.assertEqual(
+            payloads(sink.chunks)[-1]["error"]["code"], "upstream_response_too_large"
+        )
         self.assertEqual(adapter.process_budget.used, 0)
 
     def test_stream_choices_interleaved_end_to_end(self):
-        events = (tool_delta(0, 0, call_id="c0", name="subagent", args='{"prompt":"a"')
-                  + tool_delta(1, 0, call_id="c1", name="subagent", args='{"prompt":"b"')
-                  + tool_delta(0, 0, args="}") + tool_delta(1, 0, args="}")
-                  + finish(1) + finish(0) + DONE)
+        events = (
+            tool_delta(0, 0, call_id="c0", name="subagent", args='{"prompt":"a"')
+            + tool_delta(1, 0, call_id="c1", name="subagent", args='{"prompt":"b"')
+            + tool_delta(0, 0, args="}")
+            + tool_delta(1, 0, args="}")
+            + finish(1)
+            + finish(0)
+            + DONE
+        )
         self.upstream.respond = lambda h, b: FakeUpstream.sse(h, events)
         sink = self.call({"model": "m", "stream": True, "tools": TOOLS})
-        self.assertEqual([args_of(c) for c in published_calls(sink.chunks, 0)], [{"prompt": "a"}])
-        self.assertEqual([args_of(c) for c in published_calls(sink.chunks, 1)], [{"prompt": "b"}])
+        self.assertEqual(
+            [args_of(c) for c in published_calls(sink.chunks, 0)], [{"prompt": "a"}]
+        )
+        self.assertEqual(
+            [args_of(c) for c in published_calls(sink.chunks, 1)], [{"prompt": "b"}]
+        )
 
 
 # ---- fleet kind=passthrough ---------------------------------------------------------
-class TestFleetPassthroughKind(unittest.TestCase):
-    def raw(self):
-        data = load_raw_fleet()
-        return copy.deepcopy(data)
-
-    def entry_error(self, **override):
-        data = self.raw()
-        data["backends"]["codex"].update(override)
-        for key, value in list(data["backends"]["codex"].items()):
-            if value is None:
-                del data["backends"]["codex"][key]
-        try:
-            build_catalog(data, ADAPTER_KINDS)
-        except FleetViolation as exc:
-            return exc.reason
-        return ""
-
-    def test_live_fleet_declares_enabled_codex_passthrough_with_loopback_base_url(self):
-        codex = self.raw()["backends"]["codex"]
-        self.assertEqual(codex["kind"], "passthrough")
-        self.assertEqual(codex["base_url"], "http://127.0.0.1:2455/v1")
-        self.assertTrue(codex["enabled"])
-
-    def test_live_fleet_declares_upstream_auth_environment_names(self) -> None:
-        backends = self.raw()["backends"]
-        for backend, env_name in (
-            ("claude-p", "CLAUDE_P_BRIDGE_KEY"),
-            ("agy", "AGY_BRIDGE_KEY"),
-            ("opencode-zen", "OPENCODE_ZEN_BRIDGE_KEY"),
-            ("codex", "CODEX_LB_API_KEY"),
-        ):
-            self.assertEqual(backends[backend]["api_key_env"], env_name)
-            self.assertNotIn("api_key", backends[backend])
-
-    def test_valid_entry_accepted(self):
-        self.assertEqual(self.entry_error(), "")
-        self.assertEqual(self.entry_error(enabled=True), "")
-
-    def test_upstream_auth_config_validation(self) -> None:
-        for config in (
-            {"api_key_env": "TEST_UPSTREAM_KEY"},
-            {"api_key": "config-key"},
-            {"api_key_env": "TEST_UPSTREAM_KEY", "api_key": "config-key"},
-        ):
-            with self.subTest(config=config):
-                self.assertEqual(self.entry_error(**config), "")
-        for name in ("api_key_env", "api_key"):
-            for invalid in (None, False, 123, [], {}):
-                with self.subTest(name=name, invalid=invalid):
-                    entry = {
-                        "kind": "passthrough",
-                        "base_url": "http://127.0.0.1:2455/v1",
-                        name: invalid,
-                    }
-                    self.assertEqual(
-                        backend_entry_error("test", entry, ADAPTER_KINDS),
-                        f"backend_{name}_invalid",
-                    )
-            self.assertEqual(
-                backend_entry_error(
-                    "test", {"kind": "droid", name: "value"}, ADAPTER_KINDS
-                ),
-                "backend_key_unknown",
-            )
-
-    def test_base_url_validation_slugs(self):
-        self.assertEqual(self.entry_error(base_url=None), "backend_base_url_missing")
-        for bad in ("http://example.com/v1", "https://127.0.0.1:2455/v1", "http://127.0.0.1/v1",
-                    "http://127.0.0.1:2455/v2", "http://127.0.0.1:99999/v1", "http://localhost:2455/v1", 5):
-            with self.subTest(bad=bad):
-                self.assertEqual(self.entry_error(base_url=bad), "backend_base_url_invalid")
-
-    def test_base_url_rejected_for_other_kinds(self):
-        data = self.raw()
-        data["backends"]["droid"]["base_url"] = "http://127.0.0.1:2455/v1"
-        with self.assertRaises(FleetViolation) as ctx:
-            build_catalog(data, ADAPTER_KINDS)
-        self.assertEqual(ctx.exception.reason, "backend_base_url_unexpected")
-
-    def test_registry_builds_passthrough_adapter_without_spawn(self):
-        data = self.raw()
-        data["backends"]["codex"]["enabled"] = True
-        catalog = build_catalog(data, ADAPTER_KINDS)
-        registry = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog)
-        adapter = registry.get("codex")
-        self.assertIsInstance(adapter, PassthroughAdapter)
-        self.assertEqual({m.id for m in adapter.get_models()}, {"gpt-6.1-terra", "gpt-6.1-sol"})
-        self.assertTrue(adapter.is_healthy())
-        self.assertIs(registry.adapter_for_model("gpt-6.1-terra"), adapter)
 
 
 # ---- маршрут хаба: допуск, /v1/models, дословность ------------------------------------
-class TestBridgeSecrets(unittest.TestCase):
-    def test_strip_bridge_secrets_drops_upstream_keys(self) -> None:
-        env = {
-            "CODEX_LB_API_KEY": "codex-secret",
-            "CLAUDE_P_BRIDGE_KEY": "claude-secret",
-            "AGY_BRIDGE_KEY": "agy-secret",
-            "OPENCODE_ZEN_BRIDGE_KEY": "zen-secret",
-            "BRIDGE_KEY": "hub-secret",
-            "CUSTOM_BRIDGE_AUTH_KEY": "bridge-secret",
-            "FACTORY_API_KEY": "fk-secret",
-            "PATH": "/usr/bin",
-            "HOME": "/tmp/home",
-            "PORT": "9882",
-        }
-        self.assertIs(strip_bridge_secrets(env), env)
-        self.assertEqual(
-            env,
-            {
-                "FACTORY_API_KEY": "fk-secret",
-                "PATH": "/usr/bin",
-                "HOME": "/tmp/home",
-                "PORT": "9882",
-            },
-        )
 
 
 class TestPassthroughAuthFlagSource(unittest.TestCase):
@@ -2120,7 +1978,9 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                 unittest.mock.patch.object(server, "_budget", None),
                 unittest.mock.patch.object(server, "_shutting_down", False),
                 unittest.mock.patch.object(server, "_is_drain_enabled", lambda: False),
-                unittest.mock.patch.object(server, "_is_detached_enabled", lambda: False),
+                unittest.mock.patch.object(
+                    server, "_is_detached_enabled", lambda: False
+                ),
                 unittest.mock.patch.object(server.Handler, "_serve_passthrough", serve),
             ):
                 for enabled in (False, True, False):
@@ -2163,7 +2023,9 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                                 )
                                 self.assertEqual(
                                     captured_hub_auth,
-                                    [token == "hub-test-key"] if expected == 200 else [],
+                                    [token == "hub-test-key"]
+                                    if expected == 200
+                                    else [],
                                 )
                                 if expected == 401:
                                     self.assertEqual(
@@ -2180,24 +2042,6 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
                                     )
 
 
-class TestClientTokenValidation(unittest.TestCase):
-    def test_only_own_nonempty_upstream_token_is_accepted(self) -> None:
-        adapter = PassthroughAdapter(
-            "test", {"base_url": "http://127.0.0.1:2455/v1", "api_key": "ключ"}, dict
-        )
-        self.assertTrue(adapter.validate_client_token("ключ"))
-        for token in ("", "other-backend-key", "клюЧ"):
-            with self.subTest(token=token):
-                self.assertFalse(adapter.validate_client_token(token))
-
-    def test_unconfigured_upstream_does_not_authenticate_client_token(self) -> None:
-        adapter = PassthroughAdapter(
-            "test", {"base_url": "http://127.0.0.1:2455/v1"}, dict
-        )
-        self.assertFalse(adapter.validate_client_token(""))
-        self.assertFalse(adapter.validate_client_token("client-key"))
-
-
 class TestHubRoute(BridgeCase):
     HUB_KEY = "test-key"  # BridgeCase.AUTH_KEY
 
@@ -2207,18 +2051,44 @@ class TestHubRoute(BridgeCase):
         self.addCleanup(self.upstream.close)
         data = load_raw_fleet()
         data["backends"]["codex"]["enabled"] = True
-        data["backends"]["codex"]["base_url"] = "http://127.0.0.1:%d/v1" % self.upstream.port
+        data["backends"]["codex"]["base_url"] = (
+            "http://127.0.0.1:%d/v1" % self.upstream.port
+        )
         # Эти сценарии проверяют прежний контракт без настроенного upstream-ключа.
         data["backends"]["codex"].pop("api_key_env", None)
         server.FLEET = server._build_catalog(data)
         saved = server.BACKENDS
         self.addCleanup(setattr, server, "BACKENDS", saved)
-        server.BACKENDS = AdapterRegistry.from_fleet(server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server)
-        self.upstream.respond = lambda h, b: FakeUpstream.json(h, {
-            "id": "x", "object": "chat.completion", "choices": [{"index": 0, "finish_reason": "tool_calls",
-            "message": {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c1", "type": "function",
-                 "function": {"name": "subagent", "arguments": '{"prompt":"p","provider":""}'}}]}}]})
+        server.BACKENDS = AdapterRegistry.from_fleet(
+            server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
+        )
+        self.upstream.respond = lambda h, b: FakeUpstream.json(
+            h,
+            {
+                "id": "x",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "subagent",
+                                        "arguments": '{"prompt":"p","provider":""}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
 
     def post(
         self,
@@ -2241,28 +2111,48 @@ class TestHubRoute(BridgeCase):
             conn.close()
 
     def request_body(self, **extra):
-        return {"model": "gpt-6.1-terra", "reasoning_effort": "xhigh", "tools": TOOLS,
-                "messages": [{"role": "user", "content": "hi"}], **extra}
+        return {
+            "model": "gpt-6.1-terra",
+            "reasoning_effort": "xhigh",
+            "tools": TOOLS,
+            "messages": [{"role": "user", "content": "hi"}],
+            **extra,
+        }
 
     def test_authorized_request_reserves_body_budget_before_upstream(self):
         budget = server._ByteBudget(1)
-        with unittest.mock.patch.object(server, "_budget", budget), unittest.mock.patch.object(budget, "reserve", wraps=budget.reserve) as reserve:
+        with (
+            unittest.mock.patch.object(server, "_budget", budget),
+            unittest.mock.patch.object(
+                budget, "reserve", wraps=budget.reserve
+            ) as reserve,
+        ):
             status, _ = self.post(self.request_body())
             self.assertEqual(status, 503)
-            reserve.assert_called_once_with(len(json.dumps(self.request_body()).encode()))
+            reserve.assert_called_once_with(
+                len(json.dumps(self.request_body()).encode())
+            )
         self.assertEqual(budget._used, 0)
         self.assertEqual(self.upstream.requests, [])
 
     def test_default_passthrough_requires_explicit_exact_model(self):
         with unittest.mock.patch.object(server, "MODEL_ID", "gpt-6.1-terra"):
-            for extra in ({}, {"model": None}, {"model": ""}, {"model": " "}, {"model": " gpt-6.1-terra "}):
+            for extra in (
+                {},
+                {"model": None},
+                {"model": ""},
+                {"model": " "},
+                {"model": " gpt-6.1-terra "},
+            ):
                 body = {"messages": [{"role": "user", "content": "hi"}], **extra}
                 status, _ = self.post(body)
                 self.assertIn(status, (400, 401))
         self.assertEqual(self.upstream.requests, [])
 
     def test_unknown_string_model_is_404(self):
-        status, raw = self.post(self.request_body(model="unknown-model"), auth="Bearer " + self.HUB_KEY)
+        status, raw = self.post(
+            self.request_body(model="unknown-model"), auth="Bearer " + self.HUB_KEY
+        )
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(raw)["error"]["type"], "model_not_found")
         self.assertEqual(self.upstream.requests, [])
@@ -2271,14 +2161,20 @@ class TestHubRoute(BridgeCase):
         status, raw = self.post(self.request_body())
         self.assertEqual(status, 200)
         data = json.loads(raw)
-        self.assertEqual(args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"})
+        self.assertEqual(
+            args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"}
+        )
         sent = self.upstream.requests[0]
         self.assertNotIn("Authorization", sent["headers"])
         body = json.loads(sent["body"])
-        self.assertEqual((body["model"], body["reasoning_effort"]), ("gpt-6.1-terra", "xhigh"))  # без клампа
+        self.assertEqual(
+            (body["model"], body["reasoning_effort"]), ("gpt-6.1-terra", "xhigh")
+        )  # без клампа
 
     def test_passthrough_model_without_authorization_is_rejected_by_hub(self):
-        self.upstream.respond = lambda h, b: FakeUpstream.json(h, {"error": {"message": "no key"}}, status=401)
+        self.upstream.respond = lambda h, b: FakeUpstream.json(
+            h, {"error": {"message": "no key"}}, status=401
+        )
         status, raw = self.post(self.request_body(), auth=None)
         self.assertEqual(status, 401)
         self.assertEqual(json.loads(raw)["error"]["message"], "unauthorized")
@@ -2295,7 +2191,9 @@ class TestHubRoute(BridgeCase):
             server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
         )
 
-    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True)
+    @unittest.mock.patch(
+        "server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True
+    )
     def test_upstream_key_accepted_when_tolerance_flag_enabled(
         self, flag: unittest.mock.Mock
     ) -> None:
@@ -2333,7 +2231,9 @@ class TestHubRoute(BridgeCase):
             self.upstream.requests[-1]["headers"]["Authorization"], "Bearer config-key"
         )
 
-    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=False)
+    @unittest.mock.patch(
+        "server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=False
+    )
     def test_disabled_flag_rejects_configured_upstream_key(
         self, flag: unittest.mock.Mock
     ) -> None:
@@ -2353,11 +2253,19 @@ class TestHubRoute(BridgeCase):
                     self.assertEqual(status, 401)
                     self.assertEqual(
                         json.loads(raw),
-                        {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}},
+                        {
+                            "error": {
+                                "message": "unauthorized",
+                                "type": "auth_error",
+                                "code": 401,
+                            }
+                        },
                     )
         self.assertEqual(self.upstream.requests, [])
 
-    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True)
+    @unittest.mock.patch(
+        "server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True
+    )
     def test_dual_tolerance_invalid_key_rejected_401(
         self, flag: unittest.mock.Mock
     ) -> None:
@@ -2369,11 +2277,19 @@ class TestHubRoute(BridgeCase):
                     self.assertEqual(status, 401)
                     self.assertEqual(
                         json.loads(raw),
-                        {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}},
+                        {
+                            "error": {
+                                "message": "unauthorized",
+                                "type": "auth_error",
+                                "code": 401,
+                            }
+                        },
                     )
         self.assertEqual(self.upstream.requests, [])
 
-    @unittest.mock.patch("server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True)
+    @unittest.mock.patch(
+        "server.PASSTHROUGH_AUTH_FLAG_SOURCE.enabled", return_value=True
+    )
     def test_dual_tolerance_wrong_backend_key_rejected_401(
         self, flag: unittest.mock.Mock
     ) -> None:
@@ -2419,13 +2335,21 @@ class TestHubRoute(BridgeCase):
                     self.assertEqual(status, 401)
                     self.assertEqual(
                         json.loads(raw),
-                        {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}},
+                        {
+                            "error": {
+                                "message": "unauthorized",
+                                "type": "auth_error",
+                                "code": 401,
+                            }
+                        },
                     )
                     self.assertEqual(self.upstream.requests, [])
 
     def test_other_routes_still_require_hub_key(self):
-        status, raw = self.post({"model": server.MODEL_ID, "messages": [{"role": "user", "content": "x"}]},
-                                auth="Bearer upstream-key")
+        status, raw = self.post(
+            {"model": server.MODEL_ID, "messages": [{"role": "user", "content": "x"}]},
+            auth="Bearer upstream-key",
+        )
         self.assertEqual(status, 401)
         self.assertEqual(json.loads(raw)["error"]["type"], "auth_error")
         self.assertEqual(self.upstream.requests, [])
@@ -2433,15 +2357,24 @@ class TestHubRoute(BridgeCase):
     def test_unknown_path_with_upstream_key_is_401(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("POST", "/v1/other", body=b"{}", headers={"Authorization": "Bearer upstream-key"})
+            conn.request(
+                "POST",
+                "/v1/other",
+                body=b"{}",
+                headers={"Authorization": "Bearer upstream-key"},
+            )
             self.assertEqual(conn.getresponse().status, 401)
         finally:
             conn.close()
 
-    def test_models_listing_rejects_upstream_key_and_includes_passthrough_model_with_hub_key(self):
+    def test_models_listing_rejects_upstream_key_and_includes_passthrough_model_with_hub_key(
+        self,
+    ):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("GET", "/v1/models", headers={"Authorization": "Bearer upstream-key"})
+            conn.request(
+                "GET", "/v1/models", headers={"Authorization": "Bearer upstream-key"}
+            )
             resp = conn.getresponse()
             err_data = json.loads(resp.read())
         finally:
@@ -2453,7 +2386,9 @@ class TestHubRoute(BridgeCase):
 
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("GET", "/v1/models", headers={"Authorization": f"Bearer {self.HUB_KEY}"})
+            conn.request(
+                "GET", "/v1/models", headers={"Authorization": f"Bearer {self.HUB_KEY}"}
+            )
             resp = conn.getresponse()
             data = json.loads(resp.read())
         finally:
@@ -2468,7 +2403,13 @@ class TestHubRoute(BridgeCase):
         self.assertEqual(status, 401)
 
     def test_passthrough_stream_through_hub(self):
-        events = (tool_delta(0, 0, call_id="c", name="subagent", args='{"prompt":"p","provider":""}') + finish(0) + DONE)
+        events = (
+            tool_delta(
+                0, 0, call_id="c", name="subagent", args='{"prompt":"p","provider":""}'
+            )
+            + finish(0)
+            + DONE
+        )
         self.upstream.respond = lambda h, b: FakeUpstream.sse(h, events)
         status, raw = self.post(self.request_body(stream=True))
         self.assertEqual(status, 200)
@@ -2484,11 +2425,20 @@ class TestHubWithoutPassthrough(BridgeCase):
         data["backends"]["codex"]["enabled"] = False
         server.FLEET = server._build_catalog(data)
         self.addCleanup(setattr, server, "BACKENDS", server.BACKENDS)
-        server.BACKENDS = AdapterRegistry.from_fleet(server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server)
+        server.BACKENDS = AdapterRegistry.from_fleet(
+            server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
+        )
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("POST", "/v1/chat/completions", body=b"{}",
-                         headers={"Authorization": "Bearer other", "Content-Type": "application/json"})
+            conn.request(
+                "POST",
+                "/v1/chat/completions",
+                body=b"{}",
+                headers={
+                    "Authorization": "Bearer other",
+                    "Content-Type": "application/json",
+                },
+            )
             self.assertEqual(conn.getresponse().status, 401)
         finally:
             conn.close()
@@ -2498,26 +2448,10 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestDirectLoopbackValidation(unittest.TestCase):
-    def test_invalid_url_rejected_before_any_network_call(self):
-        for url in ("http://example.com:2455/v1", "https://127.0.0.1:2455/v1", "http://127.0.0.1/v1", "http://127.0.0.1:0/v1", "http://127.0.0.1:65536/v1", "http://127.0.0.1:abc/v1", "http://user@127.0.0.1:2455/v1", "http://127.0.0.1:2455/v1?x=1", "http://127.0.0.1:2455/v1#x", "http://127.1:2455/v1", "http://localhost.evil:2455/v1", "", None):
-            with self.subTest(url=url), unittest.mock.patch("http.client.HTTPConnection") as connection:
-                with self.assertRaises(ValueError):
-                    PassthroughAdapter("codex", {"base_url": url}, dict)
-                connection.assert_not_called()
-
-    def test_approved_loopback_urls_accepted(self):
-        for host in ("127.0.0.1", "localhost"):
-            adapter = PassthroughAdapter("codex", {"base_url": f"http://{host}:2455/v1"}, dict)
-            self.assertEqual((adapter._host, adapter._port), (host, 2455))
-
-
 # ---- ADR-0015 / VER-001: non-stream liveness, конфигурация и окна relay_sse ---------------
 import time  # noqa: E402
 
-from core.cli_runtime_config import NonstreamConfig  # noqa: E402
 from core.liveness_signals import LivenessWindow, WindowSpec  # noqa: E402
-from core.runtime_env import ConfigError  # noqa: E402
 
 NONSTREAM_FLAGS = (
     "BRIDGE_NONSTREAM_VIA_STREAM_ENABLED",
@@ -2529,89 +2463,15 @@ NONSTREAM_FLAGS = (
 @pytest.fixture
 def ns_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
     """Изоляция флагов ADR-0015: реальный dynamic_config недоступен, флаги выключены."""
-    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "missing-dynamic-config.json"))
+    monkeypatch.setenv(
+        "BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "missing-dynamic-config.json")
+    )
     for name in NONSTREAM_FLAGS:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False))
+    monkeypatch.setattr(
+        server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False)
+    )
     return monkeypatch
-
-
-class TestNonstreamLimitsFromEnv(unittest.TestCase):
-    def test_defaults_build_default_nonstream_config(self):
-        limits = PassthroughLimits.from_env({})
-        self.assertEqual(limits.nonstream, NonstreamConfig())
-        self.assertEqual(limits.poll_interval_s, 0.1)
-
-    def test_nonstream_field_is_built_from_canonical_env(self):
-        limits = PassthroughLimits.from_env({
-            "BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S": "7",
-            "BRIDGE_NONSTREAM_IDLE_TIMEOUT_S": "11",
-            "BRIDGE_NONSTREAM_SOFT_LIVENESS_BUDGET_S": "5",
-            "BRIDGE_NONSTREAM_SOFT_LIVENESS_MIN_CPU_DELTA_S": "0.2",
-            "BRIDGE_NONSTREAM_SAFETY_CAP_S": "13",
-            "BRIDGE_NONSTREAM_POLL_INTERVAL_S": "0.5",
-        })
-        self.assertEqual(
-            limits.nonstream,
-            NonstreamConfig(
-                first_progress_timeout_s=7.0, idle_timeout_s=11.0, soft_budget_s=5.0,
-                min_cpu_delta_s=0.2, safety_cap_s=13.0, poll_interval_s=0.5,
-            ),
-        )
-
-    def test_poll_interval_canonical_wins_over_legacy_alias(self):
-        both = PassthroughLimits.from_env({
-            "BRIDGE_NONSTREAM_POLL_INTERVAL_S": "0.5",
-            "BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "0.2",
-        })
-        self.assertEqual((both.poll_interval_s, both.nonstream.poll_interval_s), (0.5, 0.5))
-        legacy = PassthroughLimits.from_env({"BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "0.2"})
-        self.assertEqual((legacy.poll_interval_s, legacy.nonstream.poll_interval_s), (0.2, 0.2))
-        empty = PassthroughLimits.from_env({
-            "BRIDGE_NONSTREAM_POLL_INTERVAL_S": "  ",
-            "BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "0.3",
-        })
-        self.assertEqual(empty.poll_interval_s, 0.3)
-
-    def test_idle_timeout_legacy_alias_and_priority(self):
-        legacy = PassthroughLimits.from_env({"BRIDGE_IDLE_TIMEOUT_S": "42"})
-        self.assertEqual(legacy.nonstream.idle_timeout_s, 42.0)
-        both = PassthroughLimits.from_env({
-            "BRIDGE_NONSTREAM_IDLE_TIMEOUT_S": "17", "BRIDGE_IDLE_TIMEOUT_S": "42",
-        })
-        self.assertEqual(both.nonstream.idle_timeout_s, 17.0)
-
-    def test_invalid_nonstream_value_raises_config_error_without_value(self):
-        secret = "sk-secret-123"
-        cases = [
-            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", secret),
-            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "nan"),
-            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "inf"),
-            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "0"),
-            ("BRIDGE_NONSTREAM_IDLE_TIMEOUT_S", "99999"),
-            ("BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S", "0.5"),
-            ("BRIDGE_NONSTREAM_SAFETY_CAP_S", "-" + secret),
-            ("BRIDGE_NONSTREAM_POLL_INTERVAL_S", "0.001"),
-            ("BRIDGE_NONSTREAM_POLL_INTERVAL_S", "11"),
-            ("BRIDGE_NONSTREAM_SOFT_LIVENESS_MIN_CPU_DELTA_S", "0"),
-            ("BRIDGE_NONSTREAM_SOFT_LIVENESS_BUDGET_S", "-1"),
-        ]
-        for name, value in cases:
-            with self.subTest(name=name, value=value):
-                with self.assertRaises(ConfigError) as ctx:
-                    PassthroughLimits.from_env({name: value})
-                message = str(ctx.exception)
-                self.assertIn(name, message)
-                self.assertNotIn(value, message)
-
-    def test_invalid_legacy_alias_is_also_fail_fast(self):
-        with self.assertRaises(ConfigError) as ctx:
-            PassthroughLimits.from_env({"BRIDGE_PASSTHROUGH_POLL_INTERVAL_S": "sk-secret-123"})
-        self.assertNotIn("sk-secret-123", str(ctx.exception))
-
-    def test_soft_budget_zero_is_valid(self):
-        limits = PassthroughLimits.from_env({"BRIDGE_NONSTREAM_SOFT_LIVENESS_BUDGET_S": "0"})
-        self.assertEqual(limits.nonstream.soft_budget_s, 0.0)
 
 
 class ScriptedReader:
@@ -2640,14 +2500,21 @@ def relay_scripted(script, *, idle: float = 0.3, window=None, tail_s: float = 0.
     """relay_sse поверх расписания; heartbeat клиенту отключён, окна мелкие и детерминированные."""
     reader = ScriptedReader(script, tail_s)
     limits = PassthroughLimits(
-        idle_timeout_s=idle, total_timeout_s=10.0, heartbeat_interval_s=30.0,
-        poll_interval_s=0.01, reader_join_timeout_s=0.05,
+        idle_timeout_s=idle,
+        total_timeout_s=10.0,
+        heartbeat_interval_s=30.0,
+        poll_interval_s=0.01,
+        reader_join_timeout_s=0.05,
     )
     out: list = []
     started = time.monotonic()
     try:
         outcome = relay_sse(
-            reader.readline, out.append, tool_schemas=SCHEMAS, limits=limits, window=window,
+            reader.readline,
+            out.append,
+            tool_schemas=SCHEMAS,
+            limits=limits,
+            window=window,
         )
     finally:
         reader.stop.set()
@@ -2664,14 +2531,20 @@ NON_JSON_FRAMES = [b"data: keepalive\n\n", b"data: ping\n\n", b"data: {not json\
 
 @pytest.mark.parametrize("t_frame", T_FRAMES)
 def test_relay_transport_pulse_does_not_shift_idle_window(ns_env, t_frame) -> None:
-    script = [(0.0, content("a"))] + [(0.1, t_frame)] * 12 + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    script = (
+        [(0.0, content("a"))]
+        + [(0.1, t_frame)] * 12
+        + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    )
     with pytest.raises(TimeoutError):
         relay_scripted(script, idle=0.3)
 
 
 @pytest.mark.parametrize("frame", NON_JSON_FRAMES)
 def test_relay_non_json_data_is_t_when_soft_liveness_enabled(ns_env, frame) -> None:
-    ns_env.setenv("BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED", "true")  # строгая семантика: прогресс только S
+    ns_env.setenv(
+        "BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED", "true"
+    )  # строгая семантика: прогресс только S
     script = [(0.0, content("a"))] + [(0.1, frame)] * 12 + [(0.0, DONE)]
     with pytest.raises(TimeoutError):
         relay_scripted(script, idle=0.3)
@@ -2680,16 +2553,28 @@ def test_relay_non_json_data_is_t_when_soft_liveness_enabled(ns_env, frame) -> N
 @pytest.mark.parametrize(
     "data, shifts",
     [  # F-002: все флаги выключены — семантика `last_progress` идентична базовой ревизии 1d8e96c
-        ("{not json", True), ("ping", True), ("keepalive", True), ("  x  ", True),  # непустой не-JSON
-        ("", False), (None, False), ("[DONE]", False),
-        ("{}", False), ("null", False), ('{"choices":[{"index":0,"delta":{"role":"assistant"}}]}', False),
-        ('{"usage":{"total_tokens":1}}', False),  # кадры без choices/без полезной дельты
+        ("{not json", True),
+        ("ping", True),
+        ("keepalive", True),
+        ("  x  ", True),  # непустой не-JSON
+        ("", False),
+        (None, False),
+        ("[DONE]", False),
+        ("{}", False),
+        ("null", False),
+        ('{"choices":[{"index":0,"delta":{"role":"assistant"}}]}', False),
+        (
+            '{"usage":{"total_tokens":1}}',
+            False,
+        ),  # кадры без choices/без полезной дельты
         ('{"choices":[{"index":0,"delta":{"content":"a"}}]}', True),
         ('{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0}]}}]}', True),
     ],
 )
 def test_legacy_flags_off_progress_matches_baseline(ns_env, data, shifts) -> None:
-    reader = _TimedSseReader(lambda _n: b"", lambda _f: None, PassthroughLimits(), time.monotonic() + 5)
+    reader = _TimedSseReader(
+        lambda _n: b"", lambda _f: None, PassthroughLimits(), time.monotonic() + 5
+    )
     try:
         reader.progress.note(data)
         assert (reader.progress.last_progress is not None) is shifts
@@ -2700,7 +2585,9 @@ def test_legacy_flags_off_progress_matches_baseline(ns_env, data, shifts) -> Non
 @pytest.mark.parametrize("data", ["{not json", "ping", "keepalive", "  x  "])
 def test_strict_mode_non_json_does_not_shift_progress(ns_env, data) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED", "true")
-    reader = _TimedSseReader(lambda _n: b"", lambda _f: None, PassthroughLimits(), time.monotonic() + 5)
+    reader = _TimedSseReader(
+        lambda _n: b"", lambda _f: None, PassthroughLimits(), time.monotonic() + 5
+    )
     try:
         reader.progress.note(data)
         assert reader.progress.last_progress is None
@@ -2709,14 +2596,24 @@ def test_strict_mode_non_json_does_not_shift_progress(ns_env, data) -> None:
 
 
 @pytest.mark.parametrize("frame", NON_JSON_FRAMES)
-def test_relay_legacy_non_json_data_shifts_idle_window_as_baseline(ns_env, frame) -> None:
-    script = [(0.0, content("a"))] + [(0.1, frame)] * 8 + [(0.0, finish(0, "stop")), (0.0, DONE)]
+def test_relay_legacy_non_json_data_shifts_idle_window_as_baseline(
+    ns_env, frame
+) -> None:
+    script = (
+        [(0.0, content("a"))]
+        + [(0.1, frame)] * 8
+        + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    )
     outcome, _, elapsed = relay_scripted(script, idle=0.3)
     assert outcome.done and elapsed > 0.3  # окно скользило, как в базовой ревизии
 
 
 def test_relay_useful_chunk_shifts_idle_window(ns_env) -> None:
-    script = [(0.0, content("a"))] + [(0.1, content("b"))] * 8 + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    script = (
+        [(0.0, content("a"))]
+        + [(0.1, content("b"))] * 8
+        + [(0.0, finish(0, "stop")), (0.0, DONE)]
+    )
     outcome, out, elapsed = relay_scripted(script, idle=0.3)
     assert outcome.done and not outcome.incomplete
     assert elapsed > 0.3  # суммарное время больше idle: окно скользило
@@ -2725,13 +2622,19 @@ def test_relay_useful_chunk_shifts_idle_window(ns_env) -> None:
 
 def test_relay_pre_progress_pulses_do_not_arm_idle_window(ns_env) -> None:
     # До первого S скользящее idle-окно не действует: действует лишь общий дедлайн запроса.
-    script = [(0.1, b": keepalive\n\n")] * 5 + [(0.0, content("a")), (0.0, finish(0, "stop")), (0.0, DONE)]
+    script = [(0.1, b": keepalive\n\n")] * 5 + [
+        (0.0, content("a")),
+        (0.0, finish(0, "stop")),
+        (0.0, DONE),
+    ]
     outcome, _, _ = relay_scripted(script, idle=0.3)
     assert outcome.done
 
 
 def test_relay_window_receives_signals_s_and_t(ns_env) -> None:
-    window = LivenessWindow(WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0))
+    window = LivenessWindow(
+        WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0)
+    )
     events = b": keepalive\n\n" + content("a") + finish(0, "stop") + DONE
     outcome, _ = run_stream(events, window=window)
     snap = window.snapshot()
@@ -2742,7 +2645,9 @@ def test_relay_window_receives_signals_s_and_t(ns_env) -> None:
 
 
 def test_relay_window_transport_only_keeps_progress_none(ns_env) -> None:
-    window = LivenessWindow(WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0))
+    window = LivenessWindow(
+        WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0)
+    )
     run_stream(b": keepalive\n\n" + b"data: ping\n\n", window=window)
     snap = window.snapshot()
     assert snap.last_progress_kind == "none"
@@ -2751,8 +2656,14 @@ def test_relay_window_transport_only_keeps_progress_none(ns_env) -> None:
 
 
 def test_relay_window_reasoning_only_marks_reasoning_age(ns_env) -> None:
-    window = LivenessWindow(WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0))
-    reasoning = frame(chunk([{"index": 0, "delta": {"reasoning_content": "hm"}, "finish_reason": None}]))
+    window = LivenessWindow(
+        WindowSpec(first_timeout_s=5.0, idle_timeout_s=5.0, safety_cap_s=30.0)
+    )
+    reasoning = frame(
+        chunk(
+            [{"index": 0, "delta": {"reasoning_content": "hm"}, "finish_reason": None}]
+        )
+    )
     run_stream(reasoning + finish(0, "stop") + DONE, window=window)
     snap = window.snapshot()
     assert snap.last_progress_kind == "S"
@@ -2761,7 +2672,13 @@ def test_relay_window_reasoning_only_marks_reasoning_age(ns_env) -> None:
 
 
 def test_relay_without_window_and_flags_off_stays_verbatim(ns_env) -> None:
-    events = b": keepalive\n\n" + content("a") + b"data: {broken\n\n" + finish(0, "stop") + DONE
+    events = (
+        b": keepalive\n\n"
+        + content("a")
+        + b"data: {broken\n\n"
+        + finish(0, "stop")
+        + DONE
+    )
     outcome, out = run_stream(events)
     assert b"".join(out) == events
     assert outcome.done
@@ -2771,22 +2688,55 @@ class TestNonstreamFlagOffRegression(SeamCase):
     """VIA_STREAM=false: байты запроса и ответ статического non-stream пути прежние."""
 
     def completion(self, args):
-        return {"id": "x", "object": "chat.completion", "choices": [{"index": 0, "finish_reason": "tool_calls",
-                "message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "c1", "type": "function", "function": {"name": "subagent", "arguments": json.dumps(args)}}]}}]}
+        return {
+            "id": "x",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "type": "function",
+                                "function": {
+                                    "name": "subagent",
+                                    "arguments": json.dumps(args),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
 
     def run_case(self, flag_value):
-        patcher = unittest.mock.patch.dict(os.environ, {
-            "BRIDGE_DYNAMIC_CONFIG_PATH": os.path.join(tempfile.mkdtemp(), "missing.json"),
-        })
+        patcher = unittest.mock.patch.dict(
+            os.environ,
+            {
+                "BRIDGE_DYNAMIC_CONFIG_PATH": os.path.join(
+                    tempfile.mkdtemp(), "missing.json"
+                ),
+            },
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         for name in NONSTREAM_FLAGS:
             os.environ.pop(name, None)
         if flag_value is not None:
             os.environ["BRIDGE_NONSTREAM_VIA_STREAM_ENABLED"] = flag_value
-        self.upstream.respond = lambda h, b: FakeUpstream.json(h, self.completion({"prompt": "p", "provider": ""}))
-        request = {"model": "m", "stream": False, "tools": TOOLS, "messages": [{"role": "user", "content": "hi"}]}
+        self.upstream.respond = lambda h, b: FakeUpstream.json(
+            h, self.completion({"prompt": "p", "provider": ""})
+        )
+        request = {
+            "model": "m",
+            "stream": False,
+            "tools": TOOLS,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
         raw = json.dumps(request, indent=2).encode("utf-8")
         return raw, self.call(request, raw=raw)
 
@@ -2799,11 +2749,16 @@ class TestNonstreamFlagOffRegression(SeamCase):
                 self.assertEqual(sent["body"], raw)
                 self.assertIs(json.loads(sent["body"])["stream"], False)
                 self.assertEqual(sink.status, 200)
-                self.assertTrue(sink.header("Content-Type").startswith("application/json"))
+                self.assertTrue(
+                    sink.header("Content-Type").startswith("application/json")
+                )
                 self.assertEqual(sink.header("Content-Length"), str(len(sink.body)))
                 self.assertIsNone(sink.header("X-Turn-Id"))
                 data = json.loads(sink.body)
-                self.assertEqual(args_of(data["choices"][0]["message"]["tool_calls"][0]), {"prompt": "p"})
+                self.assertEqual(
+                    args_of(data["choices"][0]["message"]["tool_calls"][0]),
+                    {"prompt": "p"},
+                )
 
 
 class TestOwnerTokenNotForwardedUpstream(SeamCase):
@@ -2821,25 +2776,3 @@ class TestOwnerTokenNotForwardedUpstream(SeamCase):
         sent = {k.lower(): v for k, v in self.upstream.requests[0]["headers"].items()}
         self.assertNotIn("x-turn-owner-token", sent)
         self.assertEqual(sent["x-custom"], "1")
-
-
-class TestNeutralTimeoutLabel(unittest.TestCase):
-    """Подпись таймаута в `Handler._error_body`: прежняя по умолчанию, нейтральная под флагом."""
-
-    def _message(self, flag: str | None) -> str:
-        env = {"BRIDGE_DYNAMIC_CONFIG_PATH": os.path.join(tempfile.mkdtemp(), "missing.json")}
-        if flag is not None:
-            env["BRIDGE_CLI_NEUTRAL_NAMES_ENABLED"] = flag
-        with unittest.mock.patch.dict(os.environ, env):
-            if flag is None:
-                os.environ.pop("BRIDGE_CLI_NEUTRAL_NAMES_ENABLED", None)
-            body = server.Handler._error_body({"state": "timeout", "timeout_s": 5})
-        return body["message"]
-
-    def test_default_keeps_vendor_label(self):
-        self.assertIn("droid exec timed out", self._message(None))
-
-    def test_neutral_flag_removes_vendor_name_but_keeps_shape(self):
-        message = self._message("true")
-        self.assertIn("cli exec timed out", message)
-        self.assertNotIn("droid", message)
