@@ -243,6 +243,15 @@ def test_concurrent_writers_readers_and_close(telemetry_make_store, telemetry_ev
     assert errors == [] and st.get_telemetry_payload()["enabled"] is False  # закрытый стор читается без исключений
 
 
+def test_queue_maxsize_is_never_zero(telemetry_make_store):
+    """Очередь с нулевым размером недопустима: нижняя граница — один элемент."""
+    st = telemetry_make_store(queue_maxsize=0, name="zero")
+    try:
+        assert st._queue.maxsize == 1
+    finally:
+        st.close()
+
+
 def test_open_is_idempotent_and_starts_single_writer(tmp_path):
     st = RequestTelemetryStore(str(tmp_path / "io" / "t.duckdb"), force_sqlite=True, autostart=True, enabled=True,
                                flush_interval_ms=60000)

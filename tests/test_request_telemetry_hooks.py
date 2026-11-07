@@ -191,6 +191,13 @@ def test_topology_helpers_and_sink_note(monkeypatch):
     assert [(e["status_code"], e["error_type"]) for e in REQUEST_TELEMETRY.events] == [(200, None)]
 
 
+def test_note_without_bytes_changes_nothing():
+    """Учёт байт по умолчанию не добавляет ни одного байта (nbytes=0)."""
+    h = _begun()
+    h._telemetry_note()
+    assert (h._req_bytes, h._req_stream_chunks) == (0, 0)
+
+
 def test_fresh_handler_collects_nothing_before_begin():
     """Состояние класса: без _telemetry_begin ни хвост usage, ни событие не собираются."""
     fresh = _Handler()
