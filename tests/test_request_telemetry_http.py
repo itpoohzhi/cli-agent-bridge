@@ -29,7 +29,7 @@ class TestServerTelemetry(BridgeCase):
         self._tel_dir = tempfile.TemporaryDirectory()
         self._saved_store = server.REQUEST_TELEMETRY
         self.store = RequestTelemetryStore(
-            str(Path(self._tel_dir.name) / "bridge_telemetry.duckdb"), force_sqlite=True, autostart=False
+            str(Path(self._tel_dir.name) / "bridge_telemetry.duckdb"), force_sqlite=True, autostart=False, enabled=True
         )
         server.REQUEST_TELEMETRY = self.store
 
@@ -77,6 +77,13 @@ class TestServerTelemetry(BridgeCase):
         self.assertEqual((status, payload["window_hours"]), (200, 24.0))
         status, payload = self._get("/v1/telemetry?window_hours=2&limit=1")
         self.assertEqual((status, payload["window_hours"]), (200, 2.0))
+
+    def test_endpoint_clamps_nan_inf_and_huge_values(self):
+        for query, hours, rows in (("window_hours=nan&limit=-1", 24.0, 100), ("window_hours=inf&limit=1000000000", 24.0, 500),
+                                   ("window_hours=1e12&limit=5", 720.0, 5), ("window_hours=-5", 24.0, 100)):
+            status, payload = self._get(f"/v1/telemetry?{query}")
+            self.assertEqual((status, payload["window_hours"]), (200, hours), query)
+            self.assertLessEqual(len(payload["recent_requests"]), rows)
 
     def test_chat_requests_are_recorded_with_attribution(self):
         self._script_ok({"input_tokens": 11, "output_tokens": 4, "cache_read_tokens": 3})

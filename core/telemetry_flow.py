@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from core import defaults as D
-from core.telemetry_util import as_float, as_int, as_str, first
+from core.telemetry_util import as_float, as_int, as_str, first_truthy
 
 
 def _env_json(name: str, fallback: Any) -> Any:
@@ -32,7 +32,7 @@ def _matches(node: Mapping[str, Any], row: Mapping[str, Any], ua: str) -> bool:
 def _caller_node(nodes: Sequence[Mapping[str, Any]], row: Mapping[str, Any]) -> str:
     ua = as_str(row.get("user_agent")).lower()
     matched = [str(node["id"]) for node in nodes if _matches(node, row, ua)]
-    return str(first(*matched, default="other"))
+    return str(first_truthy(*matched, default="other"))
 
 
 def _tier_one(nodes: Sequence[Mapping[str, Any]], callers: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -63,7 +63,7 @@ def _tier_three(
     nodes: Sequence[Mapping[str, Any]], by_backend: Sequence[Mapping[str, Any]]
 ) -> tuple[list[dict[str, Any]], int]:
     """tier3: счётчики по egress-прокси (совпадение по подстроке) и сумма direct-запросов."""
-    egress = [(as_str(first(r.get("egress_proxy"), "direct")), as_int(r.get("requests"))) for r in by_backend]
+    egress = [(as_str(first_truthy(r.get("egress_proxy"), "direct")), as_int(r.get("requests"))) for r in by_backend]
     merged = [
         {**node, "requests": sum(count for proxy, count in egress if any(m in proxy for m in node.get("match", ())))}
         for node in nodes
@@ -78,11 +78,12 @@ def build_architecture_flow(
     topology: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """3 яруса: входящие клиенты -> L7-мосты протоколов -> L4/L7 egress-прокси, с живыми счётчиками."""
-    topo = dict(first(topology, _env_json("BRIDGE_TELEMETRY_TOPOLOGY_JSON", D.BRIDGE_TELEMETRY_TOPOLOGY)))
+    topo = dict(first_truthy(topology, _env_json("BRIDGE_TELEMETRY_TOPOLOGY_JSON", D.BRIDGE_TELEMETRY_TOPOLOGY)))
     keys = ("tier1_entry_callers", "tier2_l7_bridges", "tier3_l4_egress_proxies")
     tier1, tier2, tier3 = (dict(topo[key]) for key in keys)
     tier1["nodes"] = _tier_one(tier1["nodes"], callers)
     tier2["nodes"] = _tier_two(tier2["nodes"], by_backend)
     tier3["nodes"], tier3["direct_requests"] = _tier_three(tier3["nodes"], by_backend)
     return {"total_requests": as_int(summary.get("total_requests")), "tier1_entry_callers": tier1,
-            "tier2_l7_bridges": tier2, "tier3_l4_egress_proxies": tier3}
+            "tier2_l7_bridges": tier2, "tier3_l4_egress_proxies": tier3,
+            "callers": tier1["nodes"], "bridges": tier2["nodes"], "egress": tier3["nodes"]}  # плоские алиасы для UI

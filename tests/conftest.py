@@ -244,8 +244,8 @@ def telemetry_store(request: pytest.FixtureRequest, tmp_path: Path) -> Generator
     if request.param == "duckdb":
         pytest.importorskip("duckdb")
     db = str(tmp_path / "telemetry" / "bridge_telemetry.duckdb")
-    store = RequestTelemetryStore(db, force_sqlite=request.param != "duckdb", autostart=False)
-    assert store.engine == request.param
+    store = RequestTelemetryStore(db, force_sqlite=request.param != "duckdb", autostart=False, enabled=True)
+    assert store.ensure_open() and store.engine == request.param
     yield store
     store.close()
 
@@ -257,8 +257,9 @@ def telemetry_make_store(tmp_path: Path) -> Any:
 
     def make(engine: str = "sqlite3", *, name: str = "telemetry", **cfg: Any) -> Any:
         cfg.setdefault("autostart", False)
+        cfg.setdefault("enabled", True)
         store = RequestTelemetryStore(str(tmp_path / name / "bridge_telemetry.duckdb"), force_sqlite=engine != "duckdb", **cfg)
-        assert store.engine == engine
+        assert store.ensure_open() and store.engine == engine
         return store
 
     return make

@@ -98,7 +98,9 @@ BRIDGE_MUSE_STARTUP_TIMEOUT_S: float = get_env_float(
 
 # --- Телеметрия запросов (core/request_telemetry.py). Значения ниже — fallback: каждое
 # переопределяется переменной окружения с тем же именем (читается при создании стора).
-BRIDGE_TELEMETRY_ENABLED: bool = True
+# BRIDGE_TELEMETRY_ENABLED — GigaRC-флаг (kill-switch без рестарта): читается на каждом запросе
+# через core.runtime_env.flag_enabled (dynamic_config.json > env > false); дефолт false.
+BRIDGE_TELEMETRY_ENABLED: bool = False
 BRIDGE_TELEMETRY_DB_PATH: str = "~/.dsh/telemetry/bridge_telemetry.duckdb"
 BRIDGE_TELEMETRY_QUEUE_MAXSIZE: int = 4096
 BRIDGE_TELEMETRY_FLUSH_INTERVAL_MS: int = 500
@@ -111,6 +113,11 @@ BRIDGE_TELEMETRY_MAX_FIELD_LEN: int = 160
 BRIDGE_TELEMETRY_WINDOW_MIN_H: float = 0.1
 BRIDGE_TELEMETRY_WINDOW_MAX_H: float = 720.0
 BRIDGE_TELEMETRY_LIMIT_MAX: int = 500
+BRIDGE_TELEMETRY_FLUSH_MAX_BATCHES: int = 4  # пачек за один тик writer: prune не голодает при плотной очереди
+BRIDGE_TELEMETRY_PRUNE_RETRY_S: float = 5.0  # повтор prune после сбоя, отдельно от PRUNE_INTERVAL_S
+BRIDGE_TELEMETRY_REDACT_SCAN_FACTOR: int = 4  # строка усекается до max(MAX_FIELD_LEN * FACTOR, SCAN_MIN) до regex-редакции
+BRIDGE_TELEMETRY_REDACT_SCAN_MIN: int = 512
+BRIDGE_TELEMETRY_USAGE_TAIL_BYTES: int = 4096  # хвост ответа passthrough для разбора usage (читается один раз на процесс)
 # Карта backend_id -> (outbound_target, egress_proxy); JSON-override:
 # BRIDGE_TELEMETRY_BACKEND_TOPOLOGY_JSON='{"agy": [":9887", "direct"]}'.
 BRIDGE_TELEMETRY_BACKEND_TOPOLOGY: dict[str, tuple[str, str]] = {
@@ -195,6 +202,11 @@ __all__ = [
     "BRIDGE_TELEMETRY_WINDOW_MIN_H",
     "BRIDGE_TELEMETRY_WINDOW_MAX_H",
     "BRIDGE_TELEMETRY_LIMIT_MAX",
+    "BRIDGE_TELEMETRY_FLUSH_MAX_BATCHES",
+    "BRIDGE_TELEMETRY_PRUNE_RETRY_S",
+    "BRIDGE_TELEMETRY_REDACT_SCAN_FACTOR",
+    "BRIDGE_TELEMETRY_REDACT_SCAN_MIN",
+    "BRIDGE_TELEMETRY_USAGE_TAIL_BYTES",
     "BRIDGE_TELEMETRY_BACKEND_TOPOLOGY",
     "BRIDGE_TELEMETRY_TOPOLOGY",
     "get_env_str",

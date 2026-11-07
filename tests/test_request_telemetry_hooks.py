@@ -14,6 +14,7 @@ for _p in (str(_TESTS), str(_ROOT)):
 
 from core.telemetry_hooks import (  # noqa: E402
     TelemetryHooksMixin,
+    _query_number,
     http_error_type,
     known_model,
     resolve_backend_topology,
@@ -188,3 +189,56 @@ def test_topology_helpers_and_sink_note(monkeypatch):
     ok = _begun()
     ok._telemetry_passthrough_done(200)
     assert [(e["status_code"], e["error_type"]) for e in REQUEST_TELEMETRY.events] == [(200, None)]
+
+
+def test_query_number_rejects_nan_inf_and_nonpositive():
+    def window(value):
+        return _query_number({"window_hours": [value]}, "window_hours", 24.0, float)
+
+    assert [window(v) for v in ("nan", "inf", "-inf", "-5", "0", "abc", "2.5", "1e12")] == [24.0] * 6 + [2.5, 1e12]
+    assert [_query_number({"limit": [v]}, "limit", 100, int) for v in ("-1", "0", "7", "1e3", "1000000000")] == [100, 100, 7, 100, 10**9]
+    assert _query_number({}, "limit", 100, int) == 100
+
+
+def test_serve_get_passes_sane_values_to_store():
+    class Reader(_Handler):
+        sent: list = []
+
+        def _send(self, code, payload, extra_headers=None):
+            self.sent.append((code, payload))
+
+    class Store:
+        recent_limit = 100
+
+        def get_telemetry_payload(self, window_hours, limit):
+            return {"window_hours": window_hours, "limit": limit}
+
+    global REQUEST_TELEMETRY
+    saved, REQUEST_TELEMETRY = REQUEST_TELEMETRY, Store()
+    try:
+        for query, expected in (("window_hours=nan&limit=-1", (24.0, 100)), ("window_hours=inf&limit=zzz", (24.0, 100)),
+                                ("window_hours=3&limit=20", (3.0, 20))):
+            handler = Reader()
+            handler.sent = []
+            handler.path = f"/v1/telemetry?{query}"
+            handler._telemetry_serve_get()
+            assert handler.sent == [(200, {"window_hours": expected[0], "limit": expected[1]})], query
+    finally:
+        REQUEST_TELEMETRY = saved
+
+
+def test_disabled_store_collects_nothing():
+    class Off(_Sink):
+        def is_enabled(self):
+            return False
+
+    global REQUEST_TELEMETRY
+    saved, REQUEST_TELEMETRY = REQUEST_TELEMETRY, Off()
+    try:
+        h = _Handler()
+        h._telemetry_begin()
+        h._telemetry_tail(b'"usage": {"prompt_tokens": 1}')
+        h._telemetry_passthrough_done(200)
+        assert REQUEST_TELEMETRY.events == [] and h._req_tail == b"" and h._req_tracking is False
+    finally:
+        REQUEST_TELEMETRY = saved

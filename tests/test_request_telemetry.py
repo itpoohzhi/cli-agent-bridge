@@ -23,8 +23,10 @@ from core import defaults  # noqa: E402
 from core.request_telemetry import COLUMNS, RequestTelemetryStore, build_architecture_flow, classify_caller, sanitize_scalar  # noqa: E402
 
 MODULES = ("core/request_telemetry.py", "core/telemetry_flow.py", "core/telemetry_sql.py", "core/telemetry_hooks.py",
-           "core/telemetry_util.py")
-TEST_FILES = ("tests/test_request_telemetry.py", "tests/test_request_telemetry_http.py", "tests/test_request_telemetry_hooks.py")
+           "core/telemetry_util.py", "core/telemetry_query.py", "core/telemetry_usage.py")
+TEST_FILES = ("tests/test_request_telemetry.py", "tests/test_request_telemetry_http.py", "tests/test_request_telemetry_hooks.py",
+              "tests/test_request_telemetry_redaction.py", "tests/test_request_telemetry_runtime.py",
+              "tests/test_request_telemetry_contract.py")
 EXPECTED_COLUMNS = (
     "request_id ts_epoch ts_iso client_ip client_port user_agent subagent_id subagent_role client_kind "
     "auth_mode http_method endpoint model backend_id route_mode outbound_target egress_proxy stream "
@@ -41,9 +43,9 @@ def test_schema_and_primary_engine(telemetry_store, tmp_path):
     empty = telemetry_store.get_telemetry_payload()["summary"]  # квантили пустой выборки — NULL, не ошибка
     assert (empty["total_requests"], empty["p50_total_ms"], empty["ok_rate_pct"]) == (0, None, 0.0)
     pytest.importorskip("duckdb")
-    st = RequestTelemetryStore(str(tmp_path / "t" / "bridge_telemetry.duckdb"), autostart=False)
+    st = RequestTelemetryStore(str(tmp_path / "t" / "bridge_telemetry.duckdb"), autostart=False, enabled=True)
     try:
-        assert st.engine == "duckdb" and (tmp_path / "t" / "bridge_telemetry.duckdb").exists()
+        assert st.ensure_open() and st.engine == "duckdb" and (tmp_path / "t" / "bridge_telemetry.duckdb").exists()
         assert (tmp_path / "t").stat().st_mode & 0o777 == 0o700
     finally:
         st.close()
@@ -181,9 +183,10 @@ def test_sqlite_fallback_paths(tmp_path, monkeypatch, mode, telemetry_event):
         monkeypatch.setattr(rt, "duckdb", None)
     elif mode == "connect_fails":
         monkeypatch.setattr(rt, "duckdb", SimpleNamespace(connect=lambda *_a: 1 / 0))  # занятый/повреждённый файл
-    st = RequestTelemetryStore(str(tmp_path / "t" / "bridge_telemetry.duckdb"), force_sqlite=mode == "forced", autostart=False)
+    st = RequestTelemetryStore(
+        str(tmp_path / "t" / "bridge_telemetry.duckdb"), force_sqlite=mode == "forced", autostart=False, enabled=True)
     try:
-        assert st.engine == "sqlite3" and st.db_path.endswith(".sqlite3") and Path(st.db_path).exists()
+        assert st.ensure_open() and st.engine == "sqlite3" and st.db_path.endswith(".sqlite3") and Path(st.db_path).exists()
         st.record_request(telemetry_event())
         st.flush()
         assert st.get_telemetry_payload()["summary"]["total_requests"] == 1
@@ -191,36 +194,23 @@ def test_sqlite_fallback_paths(tmp_path, monkeypatch, mode, telemetry_event):
         st.close()
 
 
-def test_configuration_and_degraded_store(tmp_path, monkeypatch, telemetry_event):
+def test_configuration_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIDGE_TELEMETRY_BATCH_SIZE", "7")
     monkeypatch.setenv("BRIDGE_TELEMETRY_QUEUE_MAXSIZE", "11")
     monkeypatch.setenv("BRIDGE_TELEMETRY_RECENT_LIMIT", "3")
     monkeypatch.setenv("BRIDGE_TELEMETRY_DB_PATH", str(tmp_path / "env" / "t.duckdb"))
-    st = RequestTelemetryStore(force_sqlite=True, autostart=False)
+    st = RequestTelemetryStore(force_sqlite=True, autostart=False, enabled=True)
     try:
         assert (st._c["batch_size"], st._queue.maxsize, st.recent_limit) == (7, 11, 3)
-        assert st.db_path == str(tmp_path / "env" / "t.sqlite3")
+        assert st.ensure_open() and st.db_path == str(tmp_path / "env" / "t.sqlite3")
     finally:
         st.close()
     monkeypatch.setenv("BRIDGE_TELEMETRY_BATCH_SIZE", "junk")
-    st = RequestTelemetryStore(str(tmp_path / "e2" / "t.duckdb"), force_sqlite=True, autostart=False)
+    st = RequestTelemetryStore(str(tmp_path / "e2" / "t.duckdb"), force_sqlite=True, autostart=False, enabled=True)
     try:
         assert st._c["batch_size"] == defaults.BRIDGE_TELEMETRY_BATCH_SIZE == 100
     finally:
         st.close()
-    monkeypatch.setenv("BRIDGE_TELEMETRY_ENABLED", "0")
-    off = RequestTelemetryStore(str(tmp_path / "t" / "x.duckdb"))
-    payload = off.get_telemetry_payload()
-    assert off.record_request(telemetry_event()) is False and off.flush() == 0 and off._thread is None
-    assert off.prune() is None  # отключённый стор: prune — no-op, а не AttributeError
-    assert (payload["enabled"], payload["engine"], payload["summary"]["total_requests"]) == (False, "disabled", 0)
-    assert payload["recent_requests"] == [] and not (tmp_path / "t").exists()
-    assert all(key in payload for key in ("by_model", "by_backend", "by_client", "by_hour", "architecture_flow"))
-    monkeypatch.delenv("BRIDGE_TELEMETRY_ENABLED")
-    (tmp_path / "file").write_text("x")
-    broken = RequestTelemetryStore(str(tmp_path / "file" / "sub" / "x.duckdb"))
-    assert (broken.engine, broken.record_request(telemetry_event()), broken._thread) == ("disabled", False, None)
-    assert broken.get_telemetry_payload()["enabled"] is False
 
 
 def test_prune_batches_and_writer_loop(telemetry_make_store, telemetry_event, monkeypatch):
@@ -269,10 +259,10 @@ def test_writer_thread_lifecycle(telemetry_make_store, telemetry_event):
 
 def test_architecture_flow_topology_shape():
     flow = build_architecture_flow([], [], {"total_requests": 0})
-    assert list(flow)[1:] == ["tier1_entry_callers", "tier2_l7_bridges", "tier3_l4_egress_proxies"]
+    assert list(flow)[1:4] == ["tier1_entry_callers", "tier2_l7_bridges", "tier3_l4_egress_proxies"]
     assert {n["port"] for n in flow["tier2_l7_bridges"]["nodes"]} == {9882, 9881, 9883, 9887, 9886, 2455, 10830}
     assert {n["port"] for n in flow["tier3_l4_egress_proxies"]["nodes"]} == {10820, 10816, 10809}
-    assert all(flow[tier]["description"] for tier in list(flow)[1:])
+    assert all(flow[tier]["description"] for tier in list(flow)[1:4])
 
 
 def test_module_size_invariants():

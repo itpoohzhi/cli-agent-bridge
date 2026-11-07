@@ -168,7 +168,7 @@ from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa
 from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
-from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note  # noqa: E402
+from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note, telemetry_tail  # noqa: E402
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
@@ -1729,6 +1729,7 @@ class _HandlerSink(ResponseSink):
             self._client_gone_flag = True
             raise ClientGone() from exc
         telemetry_note(self._handler, len(data), chunk=True)
+        telemetry_tail(self._handler, data)
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
