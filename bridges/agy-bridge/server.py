@@ -2771,11 +2771,15 @@ def _session_key_for(
 
     Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
     """
-    chat = raw_chat_id.strip()
+    chat = raw_chat_id.strip() if isinstance(raw_chat_id, str) else ""
     if chat:
         chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
+        # Нестроковый cwd не должен ронять ключ: он просто не попадает в него.
+        cwd_clean = cwd.strip() if isinstance(cwd, str) else ""
         cwd_norm = (
-            os.path.normpath(cwd.strip()) if cwd and os.path.isabs(cwd.strip()) else ""
+            os.path.normpath(cwd_clean)
+            if cwd_clean and os.path.isabs(cwd_clean)
+            else ""
         )
         return (chat_token, model, cwd_norm, effort)
     cwd_clean = cwd.strip() if isinstance(cwd, str) else ""
@@ -7606,14 +7610,35 @@ class Handler(BaseHTTPRequestHandler):
             )
             raw_cwd = extra.get("cwd")
             cwd = ""
-            if (
-                isinstance(raw_cwd, str)
-                and raw_cwd.strip()
-                and os.path.isabs(raw_cwd.strip())
-            ):
-                cwd = os.path.normpath(raw_cwd.strip())
-                if len(cwd) > CWD_MAX_LEN:
-                    cwd = ""
+            cwd_invalid = False
+            # Штатное отсутствие cwd (None/"") и явно невалидный cwd различаются:
+            # невалидный деградирует не молча в "", а в fail-closed холодный ход.
+            if raw_cwd is not None:
+                if isinstance(raw_cwd, str):
+                    val = raw_cwd.strip()
+                    if val:
+                        if (
+                            not os.path.isabs(val)
+                            or "\x00" in val
+                            or any(ord(c) < 32 or ord(c) == 127 for c in val)
+                        ):
+                            _log(f"cwd-invalid-rejected cwd={val[:32]!r}")
+                            cwd_invalid = True
+                            force_cold = True
+                        else:
+                            normalized = os.path.normpath(val)
+                            if len(normalized) > CWD_MAX_LEN:
+                                _log(f"cwd-invalid-rejected cwd={val[:32]!r}")
+                                cwd_invalid = True
+                                force_cold = True
+                            else:
+                                cwd = normalized
+                else:
+                    _log(f"cwd-nonstring-rejected type={type(raw_cwd).__name__}")
+                    cwd_invalid = True
+                    force_cold = True
+            # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
+            isolation_enabled = _is_session_isolation_enabled()
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
@@ -7627,16 +7652,21 @@ class Handler(BaseHTTPRequestHandler):
                     cast(str, effort),
                     chat_id,
                 )
-                if tools_count > 0
+                if tools_count > 0 and isolation_enabled and not cwd_invalid
                 else None
             )
             if chat_id_invalid:
                 _log("chat-id-invalid-rejected")
                 sess_key = None
                 force_cold = True
+            if cwd_invalid or not isolation_enabled:
+                sess_key = None
+                force_cold = True
             if sess_key is not None and not _session_key_valid(sess_key):
                 sess_key = None
-            use_session_store = tools_count > 0 and sess_key is not None
+            use_session_store = (
+                tools_count > 0 and sess_key is not None and isolation_enabled
+            )
             raw_cid = (
                 extra.get("conversation_id")
                 if "conversation_id" in extra

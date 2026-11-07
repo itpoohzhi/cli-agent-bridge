@@ -13432,6 +13432,177 @@ class SessionFailClosedTests(unittest.TestCase):
             finally:
                 bridge.close()
 
+    def test_relative_cwd_is_fail_closed_without_shared_key(self) -> None:
+        """F-013: невалидный относительный cwd не становится общим ключом ("", ...)."""
+        for cwd in (
+            "webaccess",
+            "aibunker-workshop",
+            "rel/path",
+            " . ",
+            "..",
+            "~",
+        ):
+            with self.subTest(cwd=cwd), _Fixture() as fx:
+                _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID_B)])
+                captured: list[dict[str, object]] = []
+                handler_cls = _bval("Handler")
+
+                def capture(handler: object, ctx: dict[str, object]) -> None:
+                    captured.append(dict(ctx))
+                    _ = _ofn(handler, "_send")(200, {})
+
+                bridge = _HttpBridge()
+                try:
+                    with (
+                        mock.patch.object(handler_cls, "_serve_json", capture),
+                        mock.patch.object(_bridge(), "_session_claim") as claim,
+                        mock.patch.object(_bridge(), "_session_commit") as commit,
+                        mock.patch.object(_bridge(), "_log") as log,
+                    ):
+                        for text in ("первый воркспейс", "второй воркспейс"):
+                            body = _agentic_body(text)
+                            body["extra_body"] = {
+                                "chat_id": "test-agentic-chat",
+                                "cwd": cwd,
+                            }
+                            self.assertEqual(bridge.post(body)[0], 200)
+                        claim.assert_not_called()
+                        commit.assert_not_called()
+                        log.assert_any_call(
+                            f"cwd-invalid-rejected cwd={cwd.strip()[:32]!r}"
+                        )
+                finally:
+                    bridge.close()
+                self.assertEqual(len(captured), 2)
+                for ctx in captured:
+                    self.assertEqual(ctx["cwd"], "")
+                    self.assertIsNone(ctx["sess_key"])
+                    self.assertEqual(ctx["conversation_id"], "")
+                    self.assertIs(ctx["hot_resumed"], False)
+                    self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+                self.assertEqual(_bval("_session_store"), {})
+                self.assertTrue(
+                    all("--conversation" not in argv for argv in fx.spawns())
+                )
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_cwd_control_chars_nul_and_non_string_are_invalid(self) -> None:
+        """F-013: NUL, управляющие символы и нестроковый тип cwd отвергаются."""
+        cases: tuple[tuple[object, str], ...] = tuple(
+            (value, "cwd-invalid-rejected")
+            for value in (
+                "/w\x00/x",
+                "/w/x\x00",
+                "/w/\x01x",
+                "/w/\x1f/x",
+                "/w/\x7f",
+                "/w/\nx",
+                "/w/x\ty",
+            )
+        ) + tuple(
+            (value, "cwd-nonstring-rejected")
+            for value in (123, 1.5, True, False, [], {}, ["/w"])
+        )
+        with _Fixture() as fx:
+            _ = fx.write_scenario([], spawns=[_quick(_CID)] * len(cases))
+            captured: list[dict[str, object]] = []
+            handler_cls = _bval("Handler")
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_serve_json", capture),
+                    mock.patch.object(_bridge(), "_session_claim") as claim,
+                    mock.patch.object(_bridge(), "_session_commit") as commit,
+                    mock.patch.object(_bridge(), "_log") as log,
+                ):
+                    for raw, event in cases:
+                        with self.subTest(cwd=raw):
+                            body = _agentic_body("проверка cwd")
+                            body["extra_body"] = {
+                                "chat_id": "test-agentic-chat",
+                                "cwd": raw,
+                            }
+                            self.assertEqual(bridge.post(body)[0], 200)
+                            ctx = captured[-1]
+                            self.assertEqual(ctx["cwd"], "")
+                            self.assertIsNone(ctx["sess_key"])
+                            self.assertEqual(ctx["conversation_id"], "")
+                            self.assertIs(ctx["hot_resumed"], False)
+                            logged = [str(call.args[0]) for call in log.call_args_list]
+                            self.assertTrue(
+                                any(str(arg).startswith(event) for arg in logged),
+                                logged,
+                            )
+                    claim.assert_not_called()
+                    commit.assert_not_called()
+            finally:
+                bridge.close()
+            self.assertEqual(len(captured), len(cases))
+            self.assertEqual(_bval("_session_store"), {})
+            self.assertTrue(all("--conversation" not in a for a in fx.spawns()))
+
+    def test_isolation_kill_switch_disables_session_store(self) -> None:
+        """F-013: AGY_BRIDGE_SESSION_ISOLATION_ENABLED=0 отключает стор без рестарта."""
+        with _Fixture() as fx:
+            fx.set_env("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", "0")
+            _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID_B)])
+            captured: list[dict[str, object]] = []
+            handler_cls = _bval("Handler")
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_serve_json", capture),
+                    mock.patch.object(_bridge(), "_session_claim") as claim,
+                    mock.patch.object(_bridge(), "_session_commit") as commit,
+                ):
+                    for history in (False, True):
+                        body = _agentic_body("без изоляции", history)
+                        body["extra_body"] = {
+                            "chat_id": "test-agentic-chat",
+                            "cwd": str(fx.tmp),
+                        }
+                        self.assertEqual(bridge.post(body)[0], 200)
+                    claim.assert_not_called()
+                    commit.assert_not_called()
+            finally:
+                bridge.close()
+            self.assertEqual(len(captured), 2)
+            for ctx in captured:
+                self.assertIsNone(ctx["sess_key"])
+                self.assertEqual(ctx["conversation_id"], "")
+                self.assertIs(ctx["hot_resumed"], False)
+                self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+            self.assertEqual(_bval("_session_store"), {})
+            self.assertTrue(all("--conversation" not in a for a in fx.spawns()))
+
+    def test_session_key_for_non_string_cwd_with_chat_never_raises(self) -> None:
+        """F-013: нестроковый cwd при валидном chat ID не роняет ключ."""
+        key_for = _bfn("_session_key_for")
+        token = hashlib.sha256(b"chat-A").hexdigest()[:16]
+        for cwd in (None, 123, 1.5, True, [], {}, object()):
+            with self.subTest(cwd=cwd):
+                self.assertEqual(
+                    key_for("m", cwd, "low", "chat-A"), (token, "m", "", "low")
+                )
+        self.assertEqual(
+            key_for("m", None, "low", "  chat-A  "),
+            (token, "m", "", "low"),
+        )
+        for raw_chat in (None, 123, False):
+            with self.subTest(raw_chat=raw_chat):
+                self.assertEqual(key_for("m", "/w", "low", raw_chat), ("m", "/w", "low"))
+
     def test_legacy_cwd_session_key_with_empty_chat_id_is_rejected(self) -> None:
         """Ключ с пустым chat_id отбрасывается, а не превращается в общий cwd."""
         with _Fixture() as fx:
