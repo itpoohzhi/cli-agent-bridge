@@ -191,6 +191,16 @@ def test_topology_helpers_and_sink_note(monkeypatch):
     assert [(e["status_code"], e["error_type"]) for e in REQUEST_TELEMETRY.events] == [(200, None)]
 
 
+def test_fresh_handler_collects_nothing_before_begin():
+    """Состояние класса: без _telemetry_begin ни хвост usage, ни событие не собираются."""
+    fresh = _Handler()
+    REQUEST_TELEMETRY.events.clear()
+    assert (fresh._req_tracking, fresh._req_tail, fresh._req_started_mono) == (False, b"", None)
+    fresh._telemetry_tail(b'"usage": {"prompt_tokens": 1}')
+    fresh._record_telemetry(status_code=200)
+    assert (fresh._req_tail, REQUEST_TELEMETRY.events) == (b"", [])
+
+
 def test_query_number_rejects_nan_inf_and_nonpositive():
     def window(value):
         return _query_number({"window_hours": [value]}, "window_hours", 24.0, float)

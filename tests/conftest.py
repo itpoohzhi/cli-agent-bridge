@@ -29,6 +29,10 @@ import pytest_asyncio
 # Телеметрия запросов не должна писать в ~/.dsh владельца: БД тестового прогона — во временном каталоге.
 _TELEMETRY_TMP = tempfile.mkdtemp(prefix="bridge-telemetry-tests-")
 os.environ.setdefault("BRIDGE_TELEMETRY_DB_PATH", os.path.join(_TELEMETRY_TMP, "bridge_telemetry.duckdb"))
+# Штрафы моделей и GigaRC-флаги живут в общих файлах ~/.config/cli-agent-bridge: на хосте их меняют другие
+# сессии и живые мосты, поэтому прогон берёт свои (отсутствующие) файлы — иначе тесты зависят от соседей.
+os.environ.setdefault("BRIDGE_MODEL_PENALTIES_PATH", os.path.join(_TELEMETRY_TMP, "model_penalties.json"))
+os.environ.setdefault("BRIDGE_DYNAMIC_CONFIG_PATH", os.path.join(_TELEMETRY_TMP, "dynamic_config.json"))
 atexit.register(shutil.rmtree, _TELEMETRY_TMP, ignore_errors=True)
 
 GUARD_DOMAINS = ("threads", "async_tasks", "sockets", "descriptors", "environment", "singletons")
