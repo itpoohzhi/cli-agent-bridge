@@ -167,17 +167,22 @@ from core.cli_runtime_config import CliRuntimeConfig, WatchdogConfig, cli_label,
 from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa: E402
 from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
+from core.request_telemetry import RequestTelemetryStore  # noqa: E402
+from core.telemetry_hooks import TelemetryHooksMixin, resolve_backend_topology  # noqa: E402
 CLI_CFG = CliRuntimeConfig.from_env()
+REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
+
+
+def _resolve_backend_topology(backend_id: str, route_mode: str) -> tuple[str, str]:
+    """backend_id -> (outbound_target, egress_proxy) телеметрии; карта настраивается через env."""
+    return resolve_backend_topology(BACKENDS, backend_id, route_mode)
 
 
 HOME = Path.home()
 
 
 def _bridge_env(name: str, default: str = "") -> str:
-    """Читает параметр хаба с legacy fallback; принимает суффикс или полное имя.
-
-    Пустое canonical-значение уступает legacy-параметру.
-    """
+    """Читает параметр хаба с legacy fallback; принимает суффикс или полное имя (пустое canonical уступает legacy)."""
     if name.startswith("BRIDGE_"):
         value = os.environ.get(name) or os.environ.get("DROID_DSH_" + name)
         return value if value is not None else default
@@ -191,9 +196,7 @@ def _bridge_env(name: str, default: str = "") -> str:
 def _log(msg: str) -> None:
     """Диагностика в stderr (файлы вне каталога моста не создаём)."""
     try:
-        sys.stderr.write(
-            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
-        )
+        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")
         sys.stderr.flush()
     except OSError:
         pass
@@ -1695,6 +1698,9 @@ class _HandlerSink(ResponseSink):
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
+        note = getattr(self._handler, "_telemetry_note", None)
+        if note is not None:
+            note(first_byte=True)
         if getattr(self._handler, "_headers_already_sent", False):
             return
         try:
@@ -1724,6 +1730,9 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
+        note = getattr(self._handler, "_telemetry_note", None)
+        if note is not None:
+            note(len(data), chunk=True)
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
@@ -5117,7 +5126,7 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
             _qos_lock.notify_all()
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
     _delivery_reserved = 0  # байты, взятые в _DELIVERY_BUDGET текущим запросом (RW-011)
@@ -5217,14 +5226,10 @@ class Handler(BaseHTTPRequestHandler):
     def _client_tag(self) -> str:
         return f"{self.client_address[0]}:{self.client_address[1]}"
 
-    def _send(
-        self,
-        code: int,
-        payload: dict,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def _send(self, code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._response_status = int(code)
+        self._telemetry_error_response(int(code), payload, body)
         try:
             self.send_response(int(code))
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -5245,6 +5250,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(data.encode("utf-8"))
             self.wfile.flush()
+            self._telemetry_note(data)
             return True
         except (BrokenPipeError, ConnectionResetError, OSError):
             return False
@@ -5543,29 +5549,12 @@ class Handler(BaseHTTPRequestHandler):
             f"model_len={int(model_len)} client={self._client_tag()}"
         )
 
-    def _reject(
-        self,
-        code: int,
-        reason: str,
-        message: str,
-        model: str = "unknown",
-        model_len: int = 0,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def _reject(self, code: int, reason: str, message: str, model: str = "unknown", model_len: int = 0, extra_headers: dict[str, str] | None = None) -> None:
         """Отказ (до SSE): строка `reject …` в журнал и общий формат ошибки."""
         self._log_reject(reason, model, model_len)
+        self._telemetry_meta(model=None if model == "unknown" else model)
         self.close_connection = True
-        self._send(
-            code,
-            {
-                "error": {
-                    "message": message,
-                    "type": reason,
-                    "code": reason if reason == "model_not_found" else int(code),
-                }
-            },
-            extra_headers=extra_headers,
-        )
+        self._send(code, {"error": {"message": message, "type": reason, "code": reason if reason == "model_not_found" else int(code)}}, extra_headers=extra_headers)
 
     def _acquire_slot(self, keepalive):
         """Ждём слот семафора с учётом QoS (резерв слотов для UI и квота сабагентов)."""
@@ -6628,7 +6617,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- HTTP --------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
-        self._trace = None
+        self._trace = self._req_started_mono = None  # GET-ответы (_send) в телеметрию запросов не попадают
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
             # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
@@ -6667,11 +6656,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path == "/v1/resilience":
-            self._send(
-                200,
-                RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()),
-            )
+            self._send(200, RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()))
             return
+        if path == "/v1/telemetry":
+            return self._telemetry_serve_get()
         if path == "/v1/quarantine":
             if not _auth_ok(self):
                 self._send(
@@ -6833,6 +6821,7 @@ class Handler(BaseHTTPRequestHandler):
         self._headers_already_sent = False
         self._trace = None
         self._response_status = 0
+        self._telemetry_begin()
         path = self.path.split("?", 1)[0]
         m_cancel = (
             re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
@@ -6993,6 +6982,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
             self._parsed_req = req
+            self._telemetry_meta(stream=req.get("stream") is True, model=req.get("model") if isinstance(req.get("model"), str) else None)
             if REQUEST_ATTRIBUTION_ENABLED:
                 self._trace = _resolve_trace(dict(self.headers.items()), req)
             else:
@@ -7177,14 +7167,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             model_id = resolved_id
+            self._telemetry_meta(model=model_id)
             if model_id not in fleet_models:
-                self._reject(
-                    404,
-                    "model_not_found",
-                    "model is not in the catalogue",
-                    "unknown",
-                    model_len,
-                )
+                self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
                 return
             model = fleet_models[model_id]
             if deferred_passthrough_auth:
@@ -7934,17 +7919,21 @@ class Handler(BaseHTTPRequestHandler):
                     return False
             return True
 
+        queue_started = self._telemetry_queue_start(backend_id)
         qos_ok, qos_reason = qos.acquire_slot(
             is_interactive=is_interactive,
             keepalive_cb=_keepalive_cb if is_stream else None,
             timeout=qos_timeout,
             client_gone_fn=lambda: _client_gone(getattr(self, "connection", None)),
         )
+        self._telemetry_queue_done(queue_started)
         if not qos_ok:
             if qos_reason == "client_gone":
                 self.close_connection = True
+                self._record_telemetry(client_gone=True)
                 return
             if headers_sent[0]:
+                self._record_telemetry(status_code=503, error_type="overloaded_error")
                 err_payload = json.dumps(
                     {
                         "error": {
@@ -8006,6 +7995,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.close_connection = True
                 if headers_sent[0]:
+                    self._record_telemetry(status_code=503, error_type=exc.error_type)
                     err_payload = json.dumps(
                         {
                             "error": {
@@ -8059,9 +8049,8 @@ class Handler(BaseHTTPRequestHandler):
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
         lease = self._current_lease()
         started = time.monotonic()
-        _log(
-            f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}"
-        )
+        self._telemetry_meta(route_mode="passthrough", backend_id=adapter.id, model=model_id)
+        _log(f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}")
         raw, req = _strip_passthrough_env(raw, req)
         headers = {key: value for key, value in self.headers.items()}
         trace_headers = _trace_headers(self._trace)
@@ -8114,19 +8103,18 @@ class Handler(BaseHTTPRequestHandler):
                 )
         finally:
             get_registry().finish(live_id)
-            _log(
-                f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._record_telemetry(status_code=sink.status or None, error_type=f"http_{sink.status}" if sink.status >= 400 else None)
+            _log(f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json(self, ctx: dict) -> None:
         started = time.monotonic()
         self._response_status = 0
+        self._telemetry_meta(route_mode="cli", backend_id=ctx.get("backend"), model=ctx.get("model"), stream=False)
         try:
             self._serve_json_body(ctx)
         finally:
-            _log(
-                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._record_telemetry()
+            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
@@ -8148,6 +8136,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
+        self._telemetry_usage(usage)
         wire_usage = _wire_usage(
             usage.get("input_tokens", 0),
             usage.get("output_tokens", 0),
@@ -8201,6 +8190,7 @@ class Handler(BaseHTTPRequestHandler):
             for piece in _text_slices(value):
                 total += len(_escape_json_piece(piece))
         self._response_status = 200
+        self._telemetry_note(total, first_byte=True)
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(total))
@@ -8245,12 +8235,12 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_sse(self, ctx: dict) -> None:
         started = time.monotonic()
         self._response_status = 0
+        self._telemetry_meta(route_mode="cli", backend_id=ctx.get("backend"), model=ctx.get("model"), stream=True)
         try:
             self._serve_sse_body(ctx)
         finally:
-            _log(
-                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._record_telemetry(client_gone=self._client_write_dead)
+            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_sse_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
@@ -8279,6 +8269,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             _log("client gone before headers")
+            self._telemetry_gone()
             lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
@@ -8380,6 +8371,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not emit(chunk({field: piece})):
                         ok = False
                         break
+                    self._telemetry_note(chunk=True)
                     live_sent[0] += len(piece.encode("utf-8"))
                     if kind == "reasoning":
                         reasoning_live_chars += len(piece)
@@ -8429,6 +8421,7 @@ class Handler(BaseHTTPRequestHandler):
             lease.record_discard("client_disconnected")
             return
         if out.get("state") == "client_gone":
+            self._telemetry_gone()
             _log("client gone mid-stream, child killed")
             lease.record_discard("client_disconnected")
             return
@@ -8442,6 +8435,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
+        self._telemetry_error(err)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
@@ -8473,6 +8467,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not delivered:
                     _log("client gone during delivery; turn already committed")
                     return
+                self._telemetry_note(chunk=True)
             finish = "tool_calls" if out.get("tool_calls") else "stop"
             emit(chunk({}, finish))
             # Harness считает tok/s и % контекста только из usage в потоке
@@ -8483,6 +8478,7 @@ class Handler(BaseHTTPRequestHandler):
             out_usage = out.get("usage") or {}
             prompt_toks = out_usage.get("input_tokens", 0)
             compl_toks = out_usage.get("output_tokens", 0)
+            self._telemetry_usage(out_usage)
             if prompt_toks or compl_toks:
                 emit(
                     "data: "

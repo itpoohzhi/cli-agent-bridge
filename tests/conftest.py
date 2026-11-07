@@ -11,12 +11,22 @@ Guarantees order-invariance and zero state-leak across test execution:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 import threading
+import time
+from pathlib import Path
 from typing import Any, Generator
 
 import pytest
+
+# Телеметрия запросов не должна писать в ~/.dsh владельца: БД тестового прогона — во временном каталоге.
+_TELEMETRY_TMP = tempfile.mkdtemp(prefix="bridge-telemetry-tests-")
+os.environ.setdefault("BRIDGE_TELEMETRY_DB_PATH", os.path.join(_TELEMETRY_TMP, "bridge_telemetry.duckdb"))
+atexit.register(shutil.rmtree, _TELEMETRY_TMP, ignore_errors=True)
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -196,3 +206,79 @@ def _fresh_config_snapshots(monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     monkeypatch.setattr(runtime_env, "_SNAP_TTL_S", 0.0)
     yield
     runtime_env._SNAPSHOTS.clear()
+
+
+# --- Телеметрия запросов: общие фикстуры юнит- и HTTP-тестов (чтобы модули тестов остались в лимите M-MOD-I1) ---
+TELEMETRY_ENGINES = ("duckdb", "sqlite3")
+_TELEMETRY_EVENT_BASE = {
+    "request_id": "req-1", "client_ip": "127.0.0.1", "client_port": 5000, "user_agent": "pytest/1.0",
+    "http_method": "POST", "endpoint": "/v1/chat/completions", "model": "m-a", "backend_id": "agy",
+    "route_mode": "passthrough", "outbound_target": ":9887", "egress_proxy": ":10820 (xray SOCKS5)",
+    "stream": False, "status_code": 200, "queue_ms": 1.0, "ttfb_ms": 10.0, "total_ms": 100.0,
+    "stream_chunks": 0, "prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 2, "total_tokens": 15,
+    "response_bytes": 512,
+}
+
+
+@pytest.fixture(params=TELEMETRY_ENGINES)
+def telemetry_store(request: pytest.FixtureRequest, tmp_path: Path) -> Generator[Any, None, None]:
+    """Стор телеметрии на временной БД: duckdb (если доступен) и sqlite3-fallback."""
+    from core.request_telemetry import RequestTelemetryStore
+
+    if request.param == "duckdb":
+        pytest.importorskip("duckdb")
+    store = RequestTelemetryStore(
+        str(tmp_path / "telemetry" / "bridge_telemetry.duckdb"),
+        force_sqlite=request.param != "duckdb",
+        autostart=False,
+    )
+    assert store.engine == request.param
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def telemetry_make_store(tmp_path: Path) -> Any:
+    """Фабрика стора на временной БД с произвольными настройками очереди/ретенции."""
+    from core.request_telemetry import RequestTelemetryStore
+
+    def make(engine: str = "sqlite3", *, name: str = "telemetry", **cfg: Any) -> Any:
+        cfg.setdefault("autostart", False)
+        store = RequestTelemetryStore(
+            str(tmp_path / name / "bridge_telemetry.duckdb"), force_sqlite=engine != "duckdb", **cfg
+        )
+        assert store.engine == engine
+        return store
+
+    return make
+
+
+@pytest.fixture
+def telemetry_event() -> Any:
+    """Скалярное событие телеметрии с эталонными полями; любые поля переопределяются аргументом."""
+
+    def event(**over: Any) -> dict[str, Any]:
+        return {**_TELEMETRY_EVENT_BASE, **over}
+
+    return event
+
+
+@pytest.fixture
+def telemetry_payload(telemetry_store: Any, telemetry_event: Any) -> tuple[float, dict[str, Any]]:
+    """4 записи через горячий путь (503, стрим, сабагент, две модели) и снимок агрегатов за окно."""
+    now = time.time()
+    events = [
+        telemetry_event(request_id="a", total_ms=100.0, ttfb_ms=10.0, ts_epoch=now - 10),
+        telemetry_event(request_id="b", total_ms=200.0, ttfb_ms=20.0, ts_epoch=now - 9),
+        telemetry_event(
+            request_id="c", total_ms=300.0, ttfb_ms=30.0, ts_epoch=now - 8, status_code=503, error_type="overloaded"
+        ),
+        telemetry_event(
+            request_id="d", total_ms=400.0, ttfb_ms=40.0, ts_epoch=now - 7, stream=True, stream_chunks=7, model="m-b",
+            backend_id="muse", route_mode="cli", outbound_target=":9886", egress_proxy="direct",
+            subagent_id="coder-1", user_agent="claude-cli/2.0",
+        ),
+    ]
+    assert [telemetry_store.record_request(ev) for ev in events] == [True] * 4
+    assert telemetry_store.flush() == 4
+    return now, telemetry_store.get_telemetry_payload(window_hours=1, limit=10)
