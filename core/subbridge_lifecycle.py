@@ -1,12 +1,9 @@
 """Универсальный graceful-drain саб-мостов (agy / claude-p / opencode-zen).
 
-Наследник `HubLifecycleManager` (`core/lifecycle.py`): единые дефолты drain и `Retry-After`,
-фазы `DrainState` и штатная уборка сирот при старте. Обработчик `SIGTERM`/`SIGINT` только
-присваивает атрибуты (RW-007: ни `Lock`, ни `Event.set()`, ни I/O, ни `os._exit`). Остановкой
-управляет фоновый поток: новые ходы получают `503` + `Retry-After`, активные доводятся до
-`effective_drain_timeout_s`, затем оставшиеся группы гасятся параллельно вне сигнала;
-`_serve_sse` успевает дописать терминальный кадр и `[DONE]` (клиент не видит «upstream stream
-ended before finish_reason»).
+Наследник `HubLifecycleManager`: общие дефолты drain и `Retry-After`, фазы `DrainState`, уборка
+сирот при старте. `SIGTERM`/`SIGINT` только присваивают атрибуты (RW-007). Остановкой управляет
+фоновый поток: новые ходы получают `503`, активные доводятся до `effective_drain_timeout_s`,
+остальные группы гасятся вне сигнала (`_serve_sse` успевает дописать терминальный кадр).
 """
 
 from __future__ import annotations
@@ -26,13 +23,18 @@ from typing import Any
 
 from core.dataclass_compat import DC_SLOTS
 from core.lifecycle import DrainState, HubLifecycleManager
-from core.proc_groups import child_process_groups, terminate_proc_groups_parallel
+from core.proc_groups import (
+    child_process_groups,
+    spawn_registered,
+    terminate_proc_groups_parallel,
+)
 from core.subbridge_config import SubbridgeDrainConfig
 
 HEALTH_PATHS = ("/health", "/v1/health")
 WORKSPACE_ENV = "BRIDGE_WORKSPACE"
 DEFAULT_WORKSPACE = Path.home() / ".cache" / "cli-agent-bridge"
 Rejection = tuple[int, dict[str, str], dict[str, Any]]
+_block_spawns: Callable[[bool], None] = getattr(spawn_registered, "set_blocked")
 
 
 @dataclass(frozen=True, **DC_SLOTS)
@@ -57,15 +59,9 @@ class SubbridgeLifecycle(HubLifecycleManager):
     ) -> None:
         self.config = config or SubbridgeDrainConfig.from_env()
         self.hooks = hooks or SubbridgeHooks()
-        self._signal_received = False
-        self._shutdown_requested = False
         self._server: Any = None
-        self.forced_kill = False
-        self._draining = False
-        self.active_http_turns = 0
         self._turns_lock = threading.Lock()
-        self._force_killed = False
-        self._cleanup_done = False
+        self._reset_flags()
         super().__init__(
             workspace=workspace or os.environ.get(WORKSPACE_ENV) or DEFAULT_WORKSPACE,
             active_turns_fn=self.active_count,
@@ -80,26 +76,22 @@ class SubbridgeLifecycle(HubLifecycleManager):
         self._shutdown_requested = (
             True  # примитивный bool: безопасно в обработчике сигнала (RW-007)
         )
-        self.last_signal = int(signum)
+        self.last_signal = signum
 
     def is_draining(self) -> bool:
-        return (
-            self._draining
-            or self._signal_received
-            or self._shutdown_requested
-            or super().is_draining()
-        )
+        flags = (self._draining, self._signal_received, self._shutdown_requested)
+        return any(flags) or super().is_draining()
 
     def reset(self) -> None:
         """Сбрасывает состояние координатора (для тестов): фазы, флаги и счётчики ходов."""
         super().reset()
-        self._signal_received = False
-        self._shutdown_requested = False
-        self._draining = False
-        self.forced_kill = False
-        self._force_killed = False
-        self._cleanup_done = False
+        self._reset_flags()
+
+    def _reset_flags(self) -> None:
+        self._signal_received = self._shutdown_requested = self._draining = False
+        self.forced_kill = self._force_killed = self._cleanup_done = False
         self.active_http_turns = 0
+        _block_spawns(False)  # новый цикл остановки не наследует барьер spawn
 
     def enter_turn(self, path: str) -> Rejection | None:
         """Атомарный допуск: проверка drain и учёт хода под одним замком (нет окна «допущен, но не посчитан»)."""
@@ -130,15 +122,9 @@ class SubbridgeLifecycle(HubLifecycleManager):
             procs = 0
         return max(self.active_http_turns, procs)
 
-    def health_headers(self) -> dict[str, str]:
-        return {"X-Bridge-Draining": "true"} if self.is_draining() else {}
-
     def apply_health(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return (
-            {**payload, "ok": False, "draining": True}
-            if self.is_draining()
-            else payload
-        )
+        draining = {"ok": False, "draining": True}
+        return {**payload, **draining} if self.is_draining() else payload
 
     def admission_rejection(self, path: str) -> Rejection | None:
         if not self.is_draining() or path.split("?", 1)[0].endswith("/cancel"):
@@ -148,11 +134,8 @@ class SubbridgeLifecycle(HubLifecycleManager):
             "X-Bridge-Draining": "true",
         }
         message = "Bridge is draining for restart, please retry"
-        return (
-            503,
-            headers,
-            {"error": {"message": message, "type": "overloaded", "code": 503}},
-        )
+        error = {"message": message, "type": "overloaded", "code": 503}
+        return 503, headers, {"error": error}
 
     def _log(self, message: str) -> None:
         if self.hooks.log_fn is not None:
@@ -169,23 +152,20 @@ class SubbridgeLifecycle(HubLifecycleManager):
                 self.hooks.cleanup_fn()
 
     def force_kill(self) -> None:
-        """Мягкая параллельная зачистка групп; идемпотентна в рамках цикла остановки (без второго `ps`)."""
-        if self._force_killed:
-            return
+        """Параллельная зачистка групп; блокирует новые `spawn_registered` и подметает остатки при КАЖДОМ вызове.
+
+        Источники групп объединяются (`procs_fn` + `child_process_groups`, дедуп по PID); `cleanup_fn` — один раз.
+        """
+        _block_spawns(True)
         self._force_killed = True
         try:
             if self.hooks.force_kill_fn is not None:
                 self.hooks.force_kill_fn()
             else:
-                cfg = self.config.effective_timers()
-                procs = (
-                    self.hooks.procs_fn()
-                    if self.hooks.procs_fn is not None
-                    else child_process_groups()
-                )
-                terminate_proc_groups_parallel(
-                    procs, cfg.kill_term_grace_s, cfg.kill_wait_s
-                )
+                term, kill, _flush = self.config.effective_timers()
+                own = self.hooks.procs_fn() if self.hooks.procs_fn else []
+                groups = {p.pid: p for p in [*child_process_groups(), *own]}
+                terminate_proc_groups_parallel(list(groups.values()), term, kill)
         except Exception as exc:  # noqa: BLE001 — остановка не должна падать на зачистке
             self._log(f"drain_force_kill_error err={type(exc).__name__}")
         self._cleanup()
@@ -220,7 +200,10 @@ class SubbridgeLifecycle(HubLifecycleManager):
                 self.forced_kill, active = True, self.active_count()
                 self._log(f"drain_timeout active={active} budget_s={budget:.1f}")
                 self.force_kill()
-                self._wait_until(lambda: self.active_http_turns == 0, cfg.flush_grace_s)
+                self._wait_until(
+                    lambda: self.active_http_turns == 0, cfg.effective_timers()[2]
+                )
+                self.force_kill()  # финальный подметающий проход: ход, проснувшийся после снимка
         finally:  # без shutdown мост застрял бы в вечном 503
             self.state = DrainState.STOPPED
             self.drain_completed.set()
@@ -250,9 +233,11 @@ class SubbridgeLifecycle(HubLifecycleManager):
             server.serve_forever()
         finally:
             server.server_close()
-            # Штатный drain уже всё погасил: второй зачистки и лишнего `ps` быть не должно.
-            if not self._force_killed and (
-                not self._signal_received or self.active_count() > 0
+            # Штатный drain без принуждения уже всё погасил; после принуждения — финальный проход.
+            if (
+                self._force_killed
+                or not self._signal_received
+                or self.active_count() > 0
             ):
                 self.force_kill()
             else:
@@ -276,16 +261,26 @@ class SubbridgeLifecycle(HubLifecycleManager):
             h.wfile.write(data)
 
         def do_get(h: Any) -> None:
-            if life.is_draining() and h.path.split("?", 1)[0] in HEALTH_PATHS:
-                payload = life.apply_health({"ok": True, "active": life.active_count()})
-                return reply(h, 200, life.health_headers(), payload)
-            return orig_get(h)
+            try:
+                if life.is_draining() and h.path.split("?", 1)[0] in HEALTH_PATHS:
+                    payload = life.apply_health(
+                        {"ok": True, "active": life.active_count()}
+                    )
+                    return reply(h, 200, life.health_headers(), payload)
+                return orig_get(h)
+            finally:
+                if life.is_draining():
+                    h.close_connection = True
 
         def do_post(h: Any) -> None:
-            with life.track_turn(h.path) as rejection:
-                if rejection is not None:
-                    return reply(h, *rejection)
-                return orig_post(h)
+            try:
+                with life.track_turn(h.path) as rejection:
+                    if rejection is not None:
+                        return reply(h, *rejection)
+                    return orig_post(h)
+            finally:  # keep-alive не должен держать сервер в drain
+                if life.is_draining():
+                    h.close_connection = True
 
         handler_cls.do_GET, handler_cls.do_POST = do_get, do_post
         return handler_cls

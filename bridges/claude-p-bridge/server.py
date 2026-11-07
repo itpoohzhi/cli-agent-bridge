@@ -60,6 +60,7 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from core.proc_groups import spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 
 try:
@@ -473,7 +474,7 @@ class Run:
         child_env["BRIDGE_ZERO_CANON"] = "1"
         child_env.pop("CLAUDE_P_BRIDGE_KEY", None)
 
-        self.proc = subprocess.Popen(
+        self.proc = spawn_registered(
             cmd, cwd=str(img_dir if img_dir is not None else WORKSPACE),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, env=child_env,

@@ -82,6 +82,7 @@ from core.stream_framing import (
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
 )
+_SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
 
 # Имена env (таблица AD-005) и значения по умолчанию: defaults — не потолки, переопределяются.
 ENV_MAX_PARALLEL_CALLS = "BRIDGE_MAX_PARALLEL_CALLS"
@@ -136,7 +137,6 @@ _REQUEST_DROP = _HOP_BY_HOP | {
     _TOOL_SANITIZED_HEADER,
 }
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
-
 
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
     try:
@@ -1286,7 +1286,7 @@ class PassthroughAdapter(BackendAdapter):
         if internal is not None:
             raw_body, window = internal, window or passthrough_window(self.limits, path, request)
         deadline, open_deadline = request_deadlines(self.limits, internal is not None)
-        slide = open_sliding_deadline(deadline, self.limits, internal is not None, request, DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW).enabled)
+        slide = open_sliding_deadline(deadline, self.limits, internal is not None, request, _SLIDING_WIN_FLAG.enabled)
         queue_timeout = min(
             float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)),
             self.limits.total_timeout_s,

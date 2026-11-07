@@ -113,9 +113,11 @@ def test_effective_drain_timeout_is_clamped_below_exit_timeout() -> None:
     assert cfg_cls.from_env(
         {"BRIDGE_EXIT_TIMEOUT_S": "100"}
     ).effective_drain_timeout_s == pytest.approx(88.0)
-    assert cfg_cls.from_env(
-        {"BRIDGE_EXIT_TIMEOUT_S": "5"}
-    ).effective_drain_timeout_s == pytest.approx(0.05)
+    short = cfg_cls.from_env({"BRIDGE_EXIT_TIMEOUT_S": "5"})
+    assert short.effective_drain_timeout_s == pytest.approx(
+        3.5
+    )  # 5 - (0.5+0.3+0.2) - 0.5
+    assert short.effective_drain_timeout_s + sum(short.effective_timers()) < 5.0
 
 
 def test_long_drain_is_clamped_to_real_exit_timeout_not_extending_it() -> None:
@@ -166,13 +168,13 @@ def test_drain_enabled_honours_hub_env_names(
 
 def test_effective_timers_fit_kill_budget_under_short_exit_timeout() -> None:
     cfg_cls = lifecycle_mod().SubbridgeDrainConfig
-    legacy = cfg_cls.from_env({"BRIDGE_EXIT_TIMEOUT_S": "5"}).effective_timers()
-    assert legacy.kill_term_grace_s + legacy.kill_wait_s == pytest.approx(0.2)
-    assert legacy.kill_term_grace_s / legacy.kill_wait_s == pytest.approx(2.0 / 3.0)
-    mid = cfg_cls.from_env({"BRIDGE_EXIT_TIMEOUT_S": "14"}).effective_timers()
-    assert mid.kill_term_grace_s + mid.kill_wait_s == pytest.approx(4.5)  # (14-5)*0.5
+    assert cfg_cls.from_env({"BRIDGE_EXIT_TIMEOUT_S": "5"}).effective_timers() == (
+        pytest.approx(0.5),
+        pytest.approx(0.3),
+        pytest.approx(0.2),
+    )  # короткий ExitTimeOut: потолки таймеров
     roomy = cfg_cls.from_env({"BRIDGE_EXIT_TIMEOUT_S": "180"})
-    assert roomy.effective_timers() is roomy
+    assert roomy.effective_timers() == (2.0, 3.0, 2.0)  # дефолты не сжимаются
 
 
 def test_force_kill_uses_clamped_timers_under_short_exit_timeout(
@@ -187,7 +189,7 @@ def test_force_kill_uses_clamped_timers_under_short_exit_timeout(
     )
     cfg = mod.SubbridgeDrainConfig.from_env({"BRIDGE_EXIT_TIMEOUT_S": "5"})
     mod.SubbridgeLifecycle(cfg, mod.SubbridgeHooks(procs_fn=lambda: [])).force_kill()
-    assert len(seen) == 1 and sum(seen[0]) == pytest.approx(0.2)
+    assert len(seen) == 1 and sum(seen[0]) == pytest.approx(0.8)  # TERM 0.5 + KILL 0.3
 
 
 def test_lifecycle_reuses_hub_manager_and_shared_defaults() -> None:
@@ -204,32 +206,32 @@ def test_lifecycle_reuses_hub_manager_and_shared_defaults() -> None:
     assert life.retry_after_s == cfg.retry_after_s
 
 
-def test_short_exit_timeout_threshold_is_configurable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """F-005 (Seat 3): порог короткого `ExitTimeOut` настраивается, дефолт 15 с."""
-    cfg = lifecycle_mod().SubbridgeDrainConfig.from_env({"BRIDGE_EXIT_TIMEOUT_S": "14"})
-    assert cfg.effective_timers().kill_term_grace_s == pytest.approx(1.8)
-    monkeypatch.setenv("BRIDGE_SHORT_EXIT_TIMEOUT_S", "1")
-    assert cfg.effective_timers() is cfg  # порог ниже `ExitTimeOut`: сжатия нет
-    monkeypatch.setenv("BRIDGE_SHORT_EXIT_TIMEOUT_S", "20")
-    assert cfg.effective_timers().kill_term_grace_s == pytest.approx(1.8)
+def test_short_exit_timeout_threshold_is_configurable() -> None:
+    """F-005 (Seat 3): порог короткого `ExitTimeOut` — поле конфига из того же `env`, дефолт 15 с."""
+    cfg_cls = lifecycle_mod().SubbridgeDrainConfig
+    base = {"BRIDGE_EXIT_TIMEOUT_S": "14"}
+    assert cfg_cls.from_env(base).short_exit_threshold_s == 15.0
+    assert cfg_cls.from_env(base).effective_timers()[0] == pytest.approx(0.5)
+    below = cfg_cls.from_env({**base, "BRIDGE_SHORT_EXIT_TIMEOUT_S": "1"})
+    assert below.short_exit_threshold_s == 1.0  # порог ниже `ExitTimeOut`: потолков нет
+    assert below.effective_timers() == (2.0, 3.0, 2.0)
 
 
-def test_force_kill_is_idempotent_per_shutdown_cycle(
+def test_force_kill_sweeps_every_call_but_cleans_up_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F-001 (Seat 1): повторной зачистки (и второго `ps`) в одном цикле остановки нет."""
+    """F-002 (Seat 1): каждый `force_kill` подметает остатки (`ps`), `cleanup_fn` — один раз за цикл."""
     mod = lifecycle_mod()
     scans: list[int] = []
+    cleanups: list[int] = []
     monkeypatch.setattr(mod, "child_process_groups", lambda: scans.append(1) or [])
-    life = make_life()
+    life = make_life(cleanup_fn=lambda: cleanups.append(1))
     life.force_kill()
     life.force_kill()
-    assert scans == [1]
+    assert scans == [1, 1] and cleanups == [1]
     life.reset()
     life.force_kill()
-    assert scans == [1, 1]  # новый цикл остановки — новая зачистка
+    assert scans == [1, 1, 1] and cleanups == [1, 1]  # новый цикл — новый cleanup
 
 
 def test_serve_forever_reaps_orphans_on_startup() -> None:
@@ -307,7 +309,7 @@ def test_signal_handler_is_lock_free_assignment_only() -> None:
         for n in ast.walk(func)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
     ]
-    assert calls == ["int"]
+    assert calls == []  # без `int()` в обработчике (RW-007)
     assert not [
         n
         for n in ast.walk(func)
@@ -828,10 +830,12 @@ class _FakeProc:
     """Двойник `Popen`: `poll()` — `None`, пока `rc` не выставлен."""
 
     def __init__(self, pid: int, rc: int | None = None) -> None:
-        self.pid, self.rc = pid, rc
+        self.pid, self.rc, self.returncode = pid, rc, None
 
     def poll(self) -> int | None:
-        return self.rc
+        if self.rc is not None:
+            self.returncode = self.rc  # как `Popen.poll()`: собирает завершившегося
+        return self.returncode
 
 
 def test_register_proc_group_prunes_finished_leaders_without_reads(
@@ -841,6 +845,7 @@ def test_register_proc_group_prunes_finished_leaders_without_reads(
     import core.proc_groups as pg
 
     monkeypatch.setattr(pg, "_group_alive", lambda _pgid: False)  # фиктивные PID
+    monkeypatch.setattr(pg, "_kill_group", lambda *_a: None)
     pg.reset_proc_groups()
     try:
         finished = [_FakeProc(10_000 + i, rc=0) for i in range(50)]
@@ -872,6 +877,7 @@ def test_proc_group_registry_is_thread_safe_under_churn(
     import core.proc_groups as pg
 
     monkeypatch.setattr(pg, "_group_alive", lambda _pgid: False)  # фиктивные PID
+    monkeypatch.setattr(pg, "_kill_group", lambda *_a: None)
     pg.reset_proc_groups()
     errors: list[BaseException] = []
     start = threading.Barrier(5)
@@ -1062,20 +1068,21 @@ def test_group_alive_treats_permission_error_as_dead(
     assert pg._group_alive(4242) is True
 
 
-def test_prune_keeps_finished_leader_while_group_has_survivors(
+def test_prune_reaps_finished_leader_and_kills_its_orphans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """RW-010: завершившийся лидер выбывает из реестра сразу, сироты его группы гасятся при сборе."""
     import core.proc_groups as pg
 
-    alive_groups = {31_001}
-    monkeypatch.setattr(pg, "_group_alive", lambda pgid: pgid in alive_groups)
+    killed: list[int] = []
+    monkeypatch.setattr(pg, "_group_alive", lambda pgid: pgid == 31_001)
+    monkeypatch.setattr(pg, "_kill_group", lambda pgid, *_a: killed.append(pgid))
     pg.reset_proc_groups()
     try:
         pg.register_proc_group(_FakeProc(31_001, rc=0))  # лидер вышел, внук жив
         pg.register_proc_group(_FakeProc(31_002, rc=0))  # группа мертва
-        assert [p.pid for p in pg.live_proc_groups()] == [31_001]
-        alive_groups.clear()
-        assert pg.live_proc_groups() == []
+        assert pg.live_proc_groups() == []  # ни одного собранного `Popen` в реестре
+        assert killed == [31_001]
     finally:
         pg.reset_proc_groups()
 
