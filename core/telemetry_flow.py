@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from core import defaults as D
+from core.telemetry_util import as_float, as_int, as_str, first
 
 
 def _env_json(name: str, fallback: Any) -> Any:
@@ -17,13 +18,57 @@ def _env_json(name: str, fallback: Any) -> Any:
         return fallback
 
 
+def _matches(node: Mapping[str, Any], row: Mapping[str, Any], ua: str) -> bool:
+    """Узел tier1 совпал: роль сабагента, флаг subagent или подстрока User-Agent."""
+    roles: Sequence[Any] = node.get("roles", ())
+    markers: Sequence[Any] = node.get("ua", ())
+    return any((
+        all((bool(node.get("subagent")), row.get("client_kind") == "subagent")),
+        row.get("subagent_role") in roles,
+        any(marker in ua for marker in markers),
+    ))
+
+
 def _caller_node(nodes: Sequence[Mapping[str, Any]], row: Mapping[str, Any]) -> str:
-    ua = str(row.get("user_agent") or "").lower()
-    for n in nodes:
-        by_kind = n.get("subagent") and row.get("client_kind") == "subagent"
-        if by_kind or row.get("subagent_role") in n.get("roles", ()) or any(m in ua for m in n.get("ua", ())):
-            return str(n["id"])
-    return "other"
+    ua = as_str(row.get("user_agent")).lower()
+    matched = [str(node["id"]) for node in nodes if _matches(node, row, ua)]
+    return str(first(*matched, default="other"))
+
+
+def _tier_one(nodes: Sequence[Mapping[str, Any]], callers: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """tier1: счётчики по узлам входа плюс агрегат «other» для неопознанных клиентов."""
+    counts: dict[str, int] = {}
+    for row in callers:
+        node_id = _caller_node(nodes, row)
+        counts[node_id] = counts.get(node_id, 0) + as_int(row.get("requests"))
+    merged = [{**node, "requests": counts.get(node["id"], 0)} for node in nodes]
+    return [*merged, {"id": "other", "name": "Other", "requests": counts.get("other", 0)}]
+
+
+def _tier_two(nodes: Sequence[Mapping[str, Any]], by_backend: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """tier2: счётчики по L7-мостам; узел с all=true агрегирует весь хаб."""
+    merged: list[dict[str, Any]] = []
+    for node in nodes:
+        backends: Sequence[Any] = node.get("backends", ())
+        rows = list(by_backend) if node.get("all") else [r for r in by_backend if r.get("backend_id") in backends]
+        requests = sum(as_int(r.get("requests")) for r in rows)
+        weighted = sum(as_float(r.get("avg_total_ms")) * as_int(r.get("requests")) for r in rows)
+        tokens = sum(as_int(r.get("total_tokens")) for r in rows)
+        merged.append({**node, "requests": requests, "total_tokens": tokens,
+                       "avg_total_ms": round(weighted / requests, 2) if requests else None})
+    return merged
+
+
+def _tier_three(
+    nodes: Sequence[Mapping[str, Any]], by_backend: Sequence[Mapping[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """tier3: счётчики по egress-прокси (совпадение по подстроке) и сумма direct-запросов."""
+    egress = [(as_str(first(r.get("egress_proxy"), "direct")), as_int(r.get("requests"))) for r in by_backend]
+    merged = [
+        {**node, "requests": sum(count for proxy, count in egress if any(m in proxy for m in node.get("match", ())))}
+        for node in nodes
+    ]
+    return merged, sum(count for proxy, count in egress if proxy == "direct")
 
 
 def build_architecture_flow(
@@ -33,24 +78,11 @@ def build_architecture_flow(
     topology: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """3 яруса: входящие клиенты -> L7-мосты протоколов -> L4/L7 egress-прокси, с живыми счётчиками."""
-    topo = topology or _env_json("BRIDGE_TELEMETRY_TOPOLOGY_JSON", D.BRIDGE_TELEMETRY_TOPOLOGY)
-    t1, t2, t3 = (dict(topo[k]) for k in ("tier1_entry_callers", "tier2_l7_bridges", "tier3_l4_egress_proxies"))
-    counts: dict[str, int] = {}
-    for row in callers:
-        node_id = _caller_node(t1["nodes"], row)
-        counts[node_id] = counts.get(node_id, 0) + int(row.get("requests") or 0)
-    t1["nodes"] = [{**n, "requests": counts.get(n["id"], 0)} for n in t1["nodes"]]
-    t1["nodes"].append({"id": "other", "name": "Other", "requests": counts.get("other", 0)})
-    nodes2 = []
-    for n in t2["nodes"]:
-        rows = list(by_backend) if n.get("all") else [r for r in by_backend if r.get("backend_id") in n.get("backends", ())]
-        reqs = sum(int(r.get("requests") or 0) for r in rows)
-        weighted = sum((r.get("avg_total_ms") or 0.0) * int(r.get("requests") or 0) for r in rows)
-        nodes2.append({**n, "requests": reqs, "total_tokens": sum(int(r.get("total_tokens") or 0) for r in rows),
-                       "avg_total_ms": round(weighted / reqs, 2) if reqs else None})
-    t2["nodes"] = nodes2
-    egress = [(str(r.get("egress_proxy") or "direct"), int(r.get("requests") or 0)) for r in by_backend]
-    t3["nodes"] = [{**n, "requests": sum(c for e, c in egress if any(m in e for m in n.get("match", ())))} for n in t3["nodes"]]
-    t3["direct_requests"] = sum(c for e, c in egress if e == "direct")
-    return {"total_requests": int(summary.get("total_requests") or 0), "tier1_entry_callers": t1,
-            "tier2_l7_bridges": t2, "tier3_l4_egress_proxies": t3}
+    topo = dict(first(topology, _env_json("BRIDGE_TELEMETRY_TOPOLOGY_JSON", D.BRIDGE_TELEMETRY_TOPOLOGY)))
+    keys = ("tier1_entry_callers", "tier2_l7_bridges", "tier3_l4_egress_proxies")
+    tier1, tier2, tier3 = (dict(topo[key]) for key in keys)
+    tier1["nodes"] = _tier_one(tier1["nodes"], callers)
+    tier2["nodes"] = _tier_two(tier2["nodes"], by_backend)
+    tier3["nodes"], tier3["direct_requests"] = _tier_three(tier3["nodes"], by_backend)
+    return {"total_requests": as_int(summary.get("total_requests")), "tier1_entry_callers": tier1,
+            "tier2_l7_bridges": tier2, "tier3_l4_egress_proxies": tier3}

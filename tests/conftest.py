@@ -1,198 +1,214 @@
 """Global pytest configuration and bridge isolation fixtures.
 
-Guarantees order-invariance and zero state-leak across test execution:
-1. Preserves and restores os.environ snapshot per test.
-2. Cleans up leaked background asyncio tasks and child processes.
-3. Resets bridge singletons (_shutting_down, _budget, LIFECYCLE, _rpc_procs).
-4. Defensively avoids importing server during collection phase (zero blast-radius).
-5. Detects dirty state leaks in canary/diversion runs (T-ISO-I2 sensitivity).
+T-ISO-I2: шесть доменов guard'а (GUARD_DOMAINS) на общем session-loop: threads, unfinished async tasks,
+sockets, descriptors, environment, module singletons/caches. В дельте только имена env, без значений.
+Утечка роняет тест в strict-режиме (BRIDGE_STRICT_ISOLATION_ASSERT=1 или маркер strict_leak_check).
 """
 
 from __future__ import annotations
 
 import asyncio
 import atexit
+import gc
+import hashlib
 import os
 import shutil
+import socket
+import stat
 import sys
 import tempfile
 import threading
 import time
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, Generator
 
 import pytest
+import pytest_asyncio
 
 # Телеметрия запросов не должна писать в ~/.dsh владельца: БД тестового прогона — во временном каталоге.
 _TELEMETRY_TMP = tempfile.mkdtemp(prefix="bridge-telemetry-tests-")
 os.environ.setdefault("BRIDGE_TELEMETRY_DB_PATH", os.path.join(_TELEMETRY_TMP, "bridge_telemetry.duckdb"))
 atexit.register(shutil.rmtree, _TELEMETRY_TMP, ignore_errors=True)
 
+GUARD_DOMAINS = ("threads", "async_tasks", "sockets", "descriptors", "environment", "singletons")
+_IGNORED_ENV = frozenset({"PYTEST_CURRENT_TEST"})
+_WARM = {"done": False}
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers for isolation testing."""
-    config.addinivalue_line(
-        "markers", "strict_leak_check: fail-fast if test leaks singletons or env"
-    )
+    config.addinivalue_line("markers", "strict_leak_check: fail-fast if test leaks singletons, env or resources")
 
 
-def _get_server_mod() -> Any | None:
-    """Return imported server module from sys.modules without forcing import."""
-    return sys.modules.get("server")
+def _is_strict(node: Any) -> bool:
+    marker = node.get_closest_marker("strict_leak_check") if node is not None else None
+    return os.environ.get("BRIDGE_STRICT_ISOLATION_ASSERT") == "1" or marker is not None
 
 
-def _get_agy_bridge_mod() -> Any | None:
-    """Return imported agy bridge module from sys.modules if present."""
-    return sys.modules.get("agy_bridge_server_under_test")
+def _env_digests() -> dict[str, str]:
+    """key -> sha256(value); surrogateescape: не-UTF-8 значения окружения не роняют guard."""
+    return {k: hashlib.sha256(v.encode("utf-8", "surrogateescape")).hexdigest() for k, v in os.environ.items()
+            if k not in _IGNORED_ENV}
 
 
-def _execute_bridge_isolation(
-    request: pytest.FixtureRequest | Any,
-) -> Generator[None, None, None]:
-    """Underlying generator performing bridge isolation snapshot and reset."""
-    # --- PHASE 1: Pre-test snapshot ---
-    env_snapshot = dict(os.environ)
-    sys_path_snapshot = list(sys.path)
+def _fd_numbers() -> frozenset[int]:
+    """Открытые дескрипторы процесса (без дескриптора самого листинга)."""
+    for root in ("/dev/fd", "/proc/self/fd"):
+        try:
+            handle = os.open(root, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            return frozenset(int(name) for name in os.listdir(handle)) - {handle}
+        finally:
+            os.close(handle)
+    return frozenset()
 
-    baseline_tasks: set[asyncio.Task[Any]] = set()
+
+def _is_socket(fd: int) -> bool:
     try:
-        loop = asyncio.get_running_loop()
-        if not loop.is_closed():
-            baseline_tasks = {t for t in asyncio.all_tasks(loop) if not t.done()}
-    except RuntimeError:
-        pass
+        return stat.S_ISSOCK(os.fstat(fd).st_mode)
+    except OSError:
+        return False
 
-    srv = _get_server_mod()
-    if srv is not None:
-        if getattr(srv, "_shutting_down", False):
-            srv._shutting_down = False
-        if getattr(srv, "_budget", None) is not None:
-            srv._budget = None
-        if hasattr(srv, "LIFECYCLE") and hasattr(srv.LIFECYCLE, "reset"):
-            try:
-                srv.LIFECYCLE.reset()
-            except Exception:
-                pass
 
-    agy_srv = _get_agy_bridge_mod()
-    if agy_srv is not None:
-        if getattr(agy_srv, "_shutting_down", False):
-            agy_srv._shutting_down = False
-        if getattr(agy_srv, "_budget", None) is not None:
-            agy_srv._budget = None
-
-    # --- PHASE 2: Yield to test execution ---
-    yield
-
-    # --- PHASE 3: Post-test audit & leak containment ---
-    dirty_reasons: list[str] = []
-
-    # 1. Drain & cancel orphaned asyncio tasks created during the test
+def _live_tasks() -> frozenset[Any]:
     try:
-        loop = asyncio.get_running_loop()
-        if not loop.is_closed():
-            current_tasks = {t for t in asyncio.all_tasks(loop) if not t.done()}
-            orphaned = current_tasks - baseline_tasks
-            if orphaned:
-                dirty_reasons.append(f"leaked_tasks={len(orphaned)}")
-            for task in orphaned:
-                task.cancel()
+        return frozenset(t for t in asyncio.all_tasks() if not t.done())
     except RuntimeError:
-        pass
+        return frozenset()
 
-    # 2. Reset and clean up main server module singletons
-    srv = _get_server_mod()
-    if srv is not None:
-        if getattr(srv, "_shutting_down", False):
-            dirty_reasons.append("dirty_singleton=_shutting_down")
-        if getattr(srv, "_budget", None) is not None:
-            dirty_reasons.append("dirty_singleton=_budget")
 
-        if hasattr(srv, "_rpc_procs") and isinstance(srv._rpc_procs, dict):
-            active_lock = getattr(srv, "_active_lock", threading.Lock())
-            with active_lock:
-                procs = list(srv._rpc_procs.values())
-            if procs:
-                dirty_reasons.append(f"leaked_rpc_procs={len(procs)}")
-            for proc in procs:
-                try:
-                    if hasattr(proc, "close"):
-                        proc.close(mode="term", term_wait=0.1, kill_wait=0.1)
-                except Exception:
-                    pass
-            srv._rpc_procs.clear()
+def _snapshot() -> dict[str, Any]:
+    return {"threads": frozenset(threading.enumerate()), "fds": _fd_numbers(), "tasks": _live_tasks(),
+            "env": _env_digests(), "env_raw": dict(os.environ), "path": list(sys.path)}
 
-        if hasattr(srv, "_reset_rpc_state"):
-            try:
-                srv._reset_rpc_state()
-            except Exception:
-                pass
 
-        srv._shutting_down = False
-        srv._budget = None
-        if hasattr(srv, "LIFECYCLE") and hasattr(srv.LIFECYCLE, "reset"):
-            try:
-                srv.LIFECYCLE.reset()
-            except Exception:
-                pass
-        if hasattr(srv, "_active_turns"):
-            srv._active_turns = None
-
-    # 3. Reset standalone agy bridge module singletons
-    agy_srv = _get_agy_bridge_mod()
-    if agy_srv is not None:
-        if getattr(agy_srv, "_shutting_down", False):
-            dirty_reasons.append("dirty_agy_singleton=_shutting_down")
-        if getattr(agy_srv, "_budget", None) is not None:
-            dirty_reasons.append("dirty_agy_singleton=_budget")
-        if hasattr(agy_srv, "_shutting_down"):
-            agy_srv._shutting_down = False
-        if hasattr(agy_srv, "_budget"):
-            agy_srv._budget = None
-        if hasattr(agy_srv, "_rpc_procs") and isinstance(agy_srv._rpc_procs, dict):
-            if agy_srv._rpc_procs:
-                dirty_reasons.append(f"leaked_agy_procs={len(agy_srv._rpc_procs)}")
-            agy_srv._rpc_procs.clear()
-
-    # 4. Audit & restore environment variables exactly
-    ignored_env = {"PYTEST_CURRENT_TEST"}
-    added_env = (set(os.environ.keys()) - set(env_snapshot.keys())) - ignored_env
-    if added_env:
-        dirty_reasons.append(f"mutated_env_added={sorted(added_env)}")
-    mutated_env = {
-        k: (env_snapshot[k], os.environ.get(k))
-        for k in env_snapshot
-        if os.environ.get(k) != env_snapshot[k] and k not in ignored_env
+def _leaks(base: dict[str, Any]) -> list[str]:
+    """Дельта доменов threads/async_tasks/sockets/descriptors/environment к baseline (без значений env)."""
+    new_fds = _fd_numbers() - base["fds"]
+    if new_fds:
+        gc.collect()  # дескрипторы, ещё удерживаемые циклическим мусором, утечкой не считаются
+        new_fds = _fd_numbers() - base["fds"]
+    socks = {fd for fd in new_fds if _is_socket(fd)}
+    env = _env_digests()
+    found: dict[str, Any] = {
+        "threads": sorted(t.name for t in threading.enumerate() if t not in base["threads"] and t.is_alive()),
+        "async_tasks": len(_live_tasks() - base["tasks"] - {asyncio.current_task()}),
+        "sockets": len(socks),
+        "descriptors": len(new_fds - socks),
+        "environment": sorted(k for k in env.keys() | base["env"].keys() if env.get(k) != base["env"].get(k)),
     }
-    if mutated_env:
-        dirty_reasons.append(f"mutated_env_changed={sorted(mutated_env.keys())}")
+    return [f"{domain}={value}" for domain, value in found.items() if value]
 
-    for key in added_env:
-        os.environ.pop(key, None)
-    for key, val in env_snapshot.items():
-        if os.environ.get(key) != val:
-            os.environ[key] = val
 
-    # 5. Restore sys.path to prevent module resolution poisoning across suites
-    sys.path[:] = sys_path_snapshot
+async def _warm_runtime_once() -> None:
+    """Один прогрев loop и default executor до copied baseline: их поток не считается утечкой."""
+    if not _WARM["done"]:
+        await asyncio.get_running_loop().run_in_executor(None, hash, "warm")
+        socket.getfqdn("127.0.0.1")  # server_bind: resolver лениво открывает process-wide unix-сокет
+        _WARM["done"] = True
 
-    # 5. Fail-fast if strict leak checking is active (canary diversion / T-ISO-I2)
-    node = getattr(request, "node", None)
-    is_strict = (
-        os.environ.get("BRIDGE_STRICT_ISOLATION_ASSERT") == "1"
-        or (node is not None and node.get_closest_marker("strict_leak_check") is not None)
-    )
-    if is_strict and dirty_reasons:
-        test_name = getattr(node, "nodeid", "unknown_test")
-        raise AssertionError(
-            f"State leak detected in {test_name}: {'; '.join(dirty_reasons)}"
-        )
+
+def _reset_flags(mod: Any, tag: str, full: bool, dirty: list[str]) -> None:
+    """Флаги `_shutting_down`/`_budget` модуля: при full — записать грязное, затем вернуть чистое."""
+    for attr, clean in (("_shutting_down", False), ("_budget", None)):
+        if full and getattr(mod, attr, clean) != clean:
+            dirty.append(f"dirty_{tag}singleton={attr}")
+        if not tag or hasattr(mod, attr):
+            setattr(mod, attr, clean)
+
+
+def _drain_procs(mod: Any, tag: str, dirty: list[str]) -> None:
+    """RPC-процессы модуля: записать утечку, закрыть процессы сервера, очистить реестр."""
+    procs = getattr(mod, "_rpc_procs", None)
+    if not isinstance(procs, dict):
+        return
+    with getattr(mod, "_active_lock", threading.Lock()):
+        held = list(procs.values())
+    if held:
+        dirty.append(f"leaked_{tag or 'rpc_'}procs={len(held)}")
+    for proc in held if not tag else ():
+        try:
+            proc.close(mode="term", term_wait=0.1, kill_wait=0.1)
+        except Exception:
+            pass
+    procs.clear()
+
+
+def _run_hooks(mod: Any, full: bool) -> None:
+    """Сброс LIFECYCLE и (при full) RPC-состояния; сбой хука не ломает guard."""
+    hooks = [getattr(getattr(mod, "LIFECYCLE", None), "reset", None)]
+    hooks += [getattr(mod, "_reset_rpc_state", None)] * full
+    for hook in filter(callable, hooks):
+        try:
+            hook()
+        except Exception:
+            pass
+
+
+def _reset_singletons(full: bool, dirty: list[str]) -> None:
+    """Домен module singletons/caches: сбросить синглтоны моста; при full — записать грязное состояние."""
+    for mod in (sys.modules.get("server"), sys.modules.get("agy_bridge_server_under_test")):
+        if mod is None:
+            continue
+        tag = "" if mod.__name__ == "server" else "agy_"
+        _reset_flags(mod, tag, full, dirty)
+        if full:
+            _drain_procs(mod, tag, dirty)
+        _run_hooks(mod, full)
+        if full and not tag and hasattr(mod, "_active_turns"):
+            mod._active_turns = None
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def async_leak_guard(request: pytest.FixtureRequest) -> AsyncGenerator[None, None]:
+    """Шестидоменный guard на общем session-loop: warmup, baseline, дельта после teardown и monkeypatch undo."""
+    await _warm_runtime_once()
+    base = _snapshot()
+    yield
+    for task in _live_tasks() - base["tasks"] - {asyncio.current_task()}:
+        task.cancel()
+    dirty = _leaks(base)
+    for key in (set(os.environ) | set(base["env_raw"])) - _IGNORED_ENV:
+        if key in base["env_raw"]:
+            os.environ[key] = base["env_raw"][key]
+        else:
+            os.environ.pop(key, None)
+    sys.path[:] = base["path"]
+    if dirty and _is_strict(getattr(request, "node", None)):
+        raise AssertionError(f"State leak detected in {request.node.nodeid}: {'; '.join(dirty)}")
 
 
 @pytest.fixture(autouse=True)
-def verify_and_reset_bridge_state(
-    request: pytest.FixtureRequest,
-) -> Generator[None, None, None]:
+def guarded_monkeypatch(verify_and_reset_bridge_state: None, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """monkeypatch откатывается раньше аудита окружения и async-guard: те сравнивают состояние уже после undo."""
+    yield
+    monkeypatch.undo()
+
+
+def _execute_bridge_isolation(request: Any) -> Generator[None, None, None]:
+    """Синглтоны моста, окружение и sys.path: чистое состояние до теста; после — аудит, откат и (в strict) отказ."""
+    env_before, path_before = dict(os.environ), list(sys.path)
+    _reset_singletons(False, [])
+    yield
+    dirty: list[str] = []
+    _reset_singletons(True, dirty)
+    added = sorted((set(os.environ) - set(env_before)) - _IGNORED_ENV)
+    changed = sorted(k for k, v in env_before.items() if k not in _IGNORED_ENV and os.environ.get(k) != v)
+    dirty += [f"mutated_env_{label}={keys}" for label, keys in (("added", added), ("changed", changed)) if keys]
+    for key in added:
+        os.environ.pop(key, None)
+    os.environ.update({k: env_before[k] for k in changed})
+    sys.path[:] = path_before
+    node = getattr(request, "node", None)
+    if dirty and _is_strict(node):
+        raise AssertionError(f"State leak detected in {getattr(node, 'nodeid', 'unknown_test')}: {'; '.join(dirty)}")
+
+
+@pytest.fixture(autouse=True)
+def verify_and_reset_bridge_state(async_leak_guard: None, request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """Autouse fixture ensuring pristine state before and after each test."""
     yield from _execute_bridge_isolation(request)
 
@@ -227,11 +243,8 @@ def telemetry_store(request: pytest.FixtureRequest, tmp_path: Path) -> Generator
 
     if request.param == "duckdb":
         pytest.importorskip("duckdb")
-    store = RequestTelemetryStore(
-        str(tmp_path / "telemetry" / "bridge_telemetry.duckdb"),
-        force_sqlite=request.param != "duckdb",
-        autostart=False,
-    )
+    db = str(tmp_path / "telemetry" / "bridge_telemetry.duckdb")
+    store = RequestTelemetryStore(db, force_sqlite=request.param != "duckdb", autostart=False)
     assert store.engine == request.param
     yield store
     store.close()
@@ -244,9 +257,7 @@ def telemetry_make_store(tmp_path: Path) -> Any:
 
     def make(engine: str = "sqlite3", *, name: str = "telemetry", **cfg: Any) -> Any:
         cfg.setdefault("autostart", False)
-        store = RequestTelemetryStore(
-            str(tmp_path / name / "bridge_telemetry.duckdb"), force_sqlite=engine != "duckdb", **cfg
-        )
+        store = RequestTelemetryStore(str(tmp_path / name / "bridge_telemetry.duckdb"), force_sqlite=engine != "duckdb", **cfg)
         assert store.engine == engine
         return store
 
@@ -270,9 +281,7 @@ def telemetry_payload(telemetry_store: Any, telemetry_event: Any) -> tuple[float
     events = [
         telemetry_event(request_id="a", total_ms=100.0, ttfb_ms=10.0, ts_epoch=now - 10),
         telemetry_event(request_id="b", total_ms=200.0, ttfb_ms=20.0, ts_epoch=now - 9),
-        telemetry_event(
-            request_id="c", total_ms=300.0, ttfb_ms=30.0, ts_epoch=now - 8, status_code=503, error_type="overloaded"
-        ),
+        telemetry_event(request_id="c", total_ms=300.0, ttfb_ms=30.0, ts_epoch=now - 8, status_code=503, error_type="overloaded"),
         telemetry_event(
             request_id="d", total_ms=400.0, ttfb_ms=40.0, ts_epoch=now - 7, stream=True, stream_chunks=7, model="m-b",
             backend_id="muse", route_mode="cli", outbound_target=":9886", egress_proxy="direct",

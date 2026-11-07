@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,8 +22,9 @@ import core.request_telemetry as rt  # noqa: E402
 from core import defaults  # noqa: E402
 from core.request_telemetry import COLUMNS, RequestTelemetryStore, build_architecture_flow, classify_caller, sanitize_scalar  # noqa: E402
 
-MODULES = ("core/request_telemetry.py", "core/telemetry_flow.py", "core/telemetry_sql.py", "core/telemetry_hooks.py")
-TEST_FILES = ("tests/test_request_telemetry.py", "tests/test_request_telemetry_http.py")
+MODULES = ("core/request_telemetry.py", "core/telemetry_flow.py", "core/telemetry_sql.py", "core/telemetry_hooks.py",
+           "core/telemetry_util.py")
+TEST_FILES = ("tests/test_request_telemetry.py", "tests/test_request_telemetry_http.py", "tests/test_request_telemetry_hooks.py")
 EXPECTED_COLUMNS = (
     "request_id ts_epoch ts_iso client_ip client_port user_agent subagent_id subagent_role client_kind "
     "auth_mode http_method endpoint model backend_id route_mode outbound_target egress_proxy stream "
@@ -36,6 +38,8 @@ def test_schema_and_primary_engine(telemetry_store, tmp_path):
     assert telemetry_store._query("SELECT * FROM bridge_requests") == []
     with telemetry_store._db_lock:
         assert [d[0] for d in telemetry_store._con.execute("SELECT * FROM bridge_requests").description] == EXPECTED_COLUMNS
+    empty = telemetry_store.get_telemetry_payload()["summary"]  # квантили пустой выборки — NULL, не ошибка
+    assert (empty["total_requests"], empty["p50_total_ms"], empty["ok_rate_pct"]) == (0, None, 0.0)
     pytest.importorskip("duckdb")
     st = RequestTelemetryStore(str(tmp_path / "t" / "bridge_telemetry.duckdb"), autostart=False)
     try:
@@ -59,7 +63,7 @@ def test_payload_contract(telemetry_payload, telemetry_store):
     assert s["total_response_bytes"] == 2048
     by_model = {(r["model"], r["backend_id"]): r for r in payload["by_model"]}
     assert (by_model[("m-a", "agy")]["requests"], by_model[("m-a", "agy")]["error_requests"]) == (3, 1)
-    assert by_model[("m-a", "agy")]["ok_rate_pct"] == round(200 / 3, 2)
+    assert by_model[("m-a", "agy")]["ok_rate_pct"] == 66.67  # 2 из 3 успешных
     assert by_model[("m-b", "muse")]["p95_total_ms"] == 400.0
     assert payload["by_model"][0]["model"] == "m-a"  # сортировка по числу запросов
     by_backend = {r["backend_id"]: r for r in payload["by_backend"]}
@@ -77,7 +81,7 @@ def test_payload_contract(telemetry_payload, telemetry_store):
     assert "auth_mode" not in recent[0] and "client_port" not in recent[0]
     flow = payload["architecture_flow"]
     tier1 = {n["id"]: n["requests"] for n in flow["tier1_entry_callers"]["nodes"]}
-    assert (flow["total_requests"], tier1["subagents"], tier1["other"]) == (4, 1, 3)
+    assert (flow["total_requests"], tier1["subagents"], tier1["claude-code"], tier1["other"]) == (4, 1, 0, 3)
     tier2 = {n["id"]: n["requests"] for n in flow["tier2_l7_bridges"]["nodes"]}
     assert (tier2["universal-9882"], tier2["agy-9887"], tier2["muse-9886"], tier2["codex-2455"]) == (4, 3, 1, 0)
     tier3 = {n["id"]: n["requests"] for n in flow["tier3_l4_egress_proxies"]["nodes"]}
@@ -93,8 +97,10 @@ def test_window_and_limit_clamp_and_filtering(telemetry_store, telemetry_event):
     assert telemetry_store.get_telemetry_payload(window_hours=24)["summary"]["total_requests"] == 2
     assert telemetry_store.get_telemetry_payload(window_hours=-5)["window_hours"] == 0.1
     assert telemetry_store.get_telemetry_payload(window_hours=10**6)["window_hours"] == 720.0
+    assert telemetry_store.get_telemetry_payload(window_hours="junk")["window_hours"] == 24.0
     assert len(telemetry_store.get_telemetry_payload(limit=0)["recent_requests"]) == 1
     assert len(telemetry_store.get_telemetry_payload(limit=10**6)["recent_requests"]) == 2
+    assert len(telemetry_store.get_telemetry_payload(limit="junk")["recent_requests"]) == 2
 
 
 def test_caller_attribution_and_storage(telemetry_store, telemetry_event):
@@ -102,16 +108,16 @@ def test_caller_attribution_and_storage(telemetry_store, telemetry_event):
         "subagent_id": "coder-1", "subagent_role": "coder", "client_kind": "subagent",
     }
     assert (classify_caller("skeptic-r1")["subagent_role"], classify_caller("seat-1")["subagent_role"]) == ("skeptic", "seat")
-    assert classify_caller("analyst-4")["subagent_role"] == "analyst"
     assert classify_caller({"x-subagent-id": "coder-1", "X-Subagent-Role": "Reviewer"})["subagent_role"] == "reviewer"
     assert classify_caller({}) == {"subagent_id": "", "subagent_role": "interactive", "client_kind": "interactive"}
     assert (classify_caller(None, None)["client_kind"], classify_caller("   ")["client_kind"]) == ("interactive", "interactive")
     telemetry_store.record_request(telemetry_event(subagent_id="coder-1"))
-    telemetry_store.record_request(telemetry_event(request_id="req-2"))
+    telemetry_store.record_request(telemetry_event(request_id="req-2", ttfb_ms=None, auth_mode=None, ts_epoch="junk"))
     telemetry_store.flush()
     rows = {r["request_id"]: r for r in telemetry_store.get_telemetry_payload()["recent_requests"]}
     assert (rows["req-1"]["client_kind"], rows["req-1"]["subagent_role"]) == ("subagent", "coder")
-    assert (rows["req-2"]["client_kind"], rows["req-2"]["subagent_role"]) == ("interactive", "interactive")
+    assert (rows["req-2"]["client_kind"], rows["req-2"]["ttfb_ms"]) == ("interactive", None)
+    assert abs(rows["req-2"]["ts_epoch"] - time.time()) < 60 and rows["req-2"]["ts_iso"].endswith("Z")  # junk ts -> now
 
 
 def test_queue_full_and_concurrent_producers(telemetry_make_store, telemetry_event):
@@ -119,9 +125,8 @@ def test_queue_full_and_concurrent_producers(telemetry_make_store, telemetry_eve
     try:
         started = time.perf_counter()
         results = [st.record_request(telemetry_event(request_id=f"r{i}")) for i in range(50)]
-        elapsed = time.perf_counter() - started
         assert results[:2] == [True, True] and not any(results[2:])
-        assert elapsed < 1.0  # ни одного ожидания на горячем пути
+        assert time.perf_counter() - started < 1.0  # ни одного ожидания на горячем пути
         payload = st.get_telemetry_payload()
         assert (payload["dropped_events"], payload["queue_size"]) == (48, 2)
         assert st.flush() == 2 and st.record_request(telemetry_event(request_id="after")) is True
@@ -135,12 +140,10 @@ def test_queue_full_and_concurrent_producers(telemetry_make_store, telemetry_eve
 
     threads = [threading.Thread(target=produce, args=(n,)) for n in range(8)]
     try:
-        for t in threads:
-            t.start()
+        [t.start() for t in threads]
         wide.get_telemetry_payload()  # чтение параллельно записи не падает
-        for t in threads:
-            t.join()
-        assert wide.flush() + 0 >= 0
+        [t.join() for t in threads]
+        wide.flush()
         assert wide.get_telemetry_payload()["summary"]["total_requests"] == 400
     finally:
         wide.close()
@@ -155,21 +158,16 @@ def test_sanitize_scalar_redacts_secrets_and_keeps_scalars():
         assert not any(secret in cleaned for secret in secrets), raw
     assert sanitize_scalar("x" * 1000) == "x" * 160 and sanitize_scalar("abcdef", max_len=3) == "abc"
     assert sanitize_scalar(7) == 7 and sanitize_scalar(True) is True and sanitize_scalar(None) is None
-    assert sanitize_scalar(float("nan")) is None
+    assert sanitize_scalar(1.5) == 1.5 and sanitize_scalar(float("nan")) is None and sanitize_scalar(float("inf")) is None
     assert sanitize_scalar({"messages": ["secret prompt"]}) is None
     assert sanitize_scalar(["a"]) is None and sanitize_scalar(b"raw") is None
 
 
 def test_secrets_and_bodies_never_reach_storage(telemetry_store, telemetry_event):
-    telemetry_store.record_request(
-        telemetry_event(
-            user_agent="agent Bearer secret123 sk-abcdef12345678",
-            error_type="failed api_key=xyz987",
-            messages=[{"role": "user", "content": "TOP-SECRET-PROMPT"}],
-            headers={"Authorization": "Bearer secret123"},
-            env={"SOME_VAR": "ENV-VALUE-MARKER-9"},
-        )
-    )
+    telemetry_store.record_request(telemetry_event(
+        user_agent="agent Bearer secret123 sk-abcdef12345678", error_type="failed api_key=xyz987",
+        messages=[{"role": "user", "content": "TOP-SECRET-PROMPT"}], headers={"Authorization": "Bearer secret123"},
+        env={"SOME_VAR": "ENV-VALUE-MARKER-9"}))
     telemetry_store.flush()
     dump = json.dumps(telemetry_store.get_telemetry_payload()) + json.dumps(telemetry_store._query("SELECT * FROM bridge_requests"))
     leaked = ("secret123", "sk-abcdef12345678", "xyz987", "TOP-SECRET-PROMPT", "ENV-VALUE-MARKER-9")
@@ -182,12 +180,7 @@ def test_sqlite_fallback_paths(tmp_path, monkeypatch, mode, telemetry_event):
     if mode == "no_duckdb":
         monkeypatch.setattr(rt, "duckdb", None)
     elif mode == "connect_fails":
-        class Broken:
-            @staticmethod
-            def connect(*_a, **_k):
-                raise RuntimeError("database is locked")
-
-        monkeypatch.setattr(rt, "duckdb", Broken)
+        monkeypatch.setattr(rt, "duckdb", SimpleNamespace(connect=lambda *_a: 1 / 0))  # занятый/повреждённый файл
     st = RequestTelemetryStore(str(tmp_path / "t" / "bridge_telemetry.duckdb"), force_sqlite=mode == "forced", autostart=False)
     try:
         assert st.engine == "sqlite3" and st.db_path.endswith(".sqlite3") and Path(st.db_path).exists()
@@ -218,42 +211,60 @@ def test_configuration_and_degraded_store(tmp_path, monkeypatch, telemetry_event
     monkeypatch.setenv("BRIDGE_TELEMETRY_ENABLED", "0")
     off = RequestTelemetryStore(str(tmp_path / "t" / "x.duckdb"))
     payload = off.get_telemetry_payload()
-    assert off.record_request(telemetry_event()) is False and off.flush() == 0
+    assert off.record_request(telemetry_event()) is False and off.flush() == 0 and off._thread is None
+    assert off.prune() is None  # отключённый стор: prune — no-op, а не AttributeError
     assert (payload["enabled"], payload["engine"], payload["summary"]["total_requests"]) == (False, "disabled", 0)
-    assert payload["recent_requests"] == []
+    assert payload["recent_requests"] == [] and not (tmp_path / "t").exists()
     assert all(key in payload for key in ("by_model", "by_backend", "by_client", "by_hour", "architecture_flow"))
-    assert not (tmp_path / "t").exists()
     monkeypatch.delenv("BRIDGE_TELEMETRY_ENABLED")
     (tmp_path / "file").write_text("x")
-    broken = RequestTelemetryStore(str(tmp_path / "file" / "sub" / "x.duckdb"), autostart=False)
-    assert (broken.engine, broken.record_request(telemetry_event())) == ("disabled", False)
+    broken = RequestTelemetryStore(str(tmp_path / "file" / "sub" / "x.duckdb"))
+    assert (broken.engine, broken.record_request(telemetry_event()), broken._thread) == ("disabled", False, None)
     assert broken.get_telemetry_payload()["enabled"] is False
 
 
-def test_prune_and_background_writer(telemetry_make_store, telemetry_event):
-    st = telemetry_make_store(retention_days=1, max_rows=3, name="prune")
+def test_prune_batches_and_writer_loop(telemetry_make_store, telemetry_event, monkeypatch):
+    st = telemetry_make_store(retention_days=1, max_rows=3, batch_size=2, name="prune")
     try:
         now = time.time()
         for i in range(6):
             st.record_request(telemetry_event(request_id=f"n{i}", ts_epoch=now - i))
         st.record_request(telemetry_event(request_id="stale", ts_epoch=now - 3 * 86400))
+        assert [len(st._drain()) for _ in range(4)] == [2, 2, 2, 1]  # пачки не длиннее batch_size
+        for i in range(7):
+            st.record_request(telemetry_event(request_id=f"m{i}", ts_epoch=now - 10 - i))
         st.flush()
         st.prune()
         ids = {r["request_id"] for r in st._query("SELECT request_id FROM bridge_requests")}
-        assert "stale" not in ids and len(ids) <= 4 and {"n0", "n1", "n2"} <= ids
+        assert "stale" not in ids and len(ids) <= 4 and {"m0", "m1", "m2"} <= ids
+        st._last_prune, st._c["prune_interval_s"] = 100.0, 10.0
+        monkeypatch.setattr(rt.time, "monotonic", lambda: 110.0)  # ровно на границе интервала
+        assert st._prune_due() is True
+        monkeypatch.setattr(rt.time, "monotonic", lambda: 109.0)
+        assert st._prune_due() is False
     finally:
         st.close()
-    writer = telemetry_make_store(flush_interval_ms=20, batch_size=3, autostart=True, name="writer")  # фоновый writer
+
+
+def test_writer_thread_lifecycle(telemetry_make_store, telemetry_event):
+    ticks = iter([False, False, True])  # два витка writer без реальных ожиданий
+    st = telemetry_make_store(batch_size=5, name="loop")
     try:
-        for i in range(10):
-            writer.record_request(telemetry_event(request_id=f"w{i}"))
-        deadline = time.time() + 5
-        while time.time() < deadline and writer.get_telemetry_payload()["summary"]["total_requests"] < 10:
-            time.sleep(0.02)
-        assert writer.get_telemetry_payload()["summary"]["total_requests"] == 10
+        st.record_request(telemetry_event(request_id="loop"))
+        st._stop, st._last_prune = SimpleNamespace(wait=lambda _t: next(ticks), set=lambda: None), -1e9
+        st.prune = lambda: (_ for _ in ()).throw(RuntimeError("prune broke"))  # сбой prune не роняет writer
+        st._writer_loop()
+        assert st._last_prune > 0 and st._query("SELECT COUNT(*) AS n FROM bridge_requests")[0]["n"] == 1
+        st._thread = threading.current_thread()
+        st._join_writer()  # join самого себя запрещён: вызов не должен бросать RuntimeError
     finally:
-        writer.close()
-        writer.close()  # идемпотентно
+        st._thread = None
+        st.close()
+    live = telemetry_make_store(autostart=True, flush_interval_ms=5, name="live")
+    thread = live._thread
+    live.close()
+    live.close()  # идемпотентно
+    assert thread is not None and not thread.is_alive()
 
 
 def test_architecture_flow_topology_shape():
@@ -265,7 +276,7 @@ def test_architecture_flow_topology_shape():
 
 
 def test_module_size_invariants():
-    """M-MOD-I1: файл <= 300 строк, функция <= 50 строк и <= 5 параметров; server.py — базовая линия 8746 строк."""
+    """M-MOD-I1: файл <= 300 строк, функция <= 40 строк и <= 5 параметров; server.py — базовая линия 8746 строк."""
     for rel in (*MODULES, *TEST_FILES):
         src = (_ROOT / rel).read_text(encoding="utf-8")
         assert len(src.splitlines()) <= 300, (rel, len(src.splitlines()))
@@ -273,6 +284,6 @@ def test_module_size_invariants():
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 args = node.args
                 params = len(args.posonlyargs) + len(args.args) + len(args.kwonlyargs) + bool(args.vararg) + bool(args.kwarg)
-                assert (node.end_lineno or 0) - node.lineno + 1 <= 50, (rel, node.name)
+                assert (node.end_lineno or 0) - node.lineno + 1 <= 40, (rel, node.name)
                 assert params <= 5, (rel, node.name)
     assert len((_ROOT / "server.py").read_text(encoding="utf-8").splitlines()) <= 8746

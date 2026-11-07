@@ -168,7 +168,7 @@ from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa
 from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
-from core.telemetry_hooks import TelemetryHooksMixin, resolve_backend_topology  # noqa: E402
+from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note  # noqa: E402
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
@@ -1698,9 +1698,7 @@ class _HandlerSink(ResponseSink):
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
-        note = getattr(self._handler, "_telemetry_note", None)
-        if note is not None:
-            note(first_byte=True)
+        telemetry_note(self._handler, first_byte=True)
         if getattr(self._handler, "_headers_already_sent", False):
             return
         try:
@@ -1730,9 +1728,7 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
-        note = getattr(self._handler, "_telemetry_note", None)
-        if note is not None:
-            note(len(data), chunk=True)
+        telemetry_note(self._handler, len(data), chunk=True)
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
@@ -5552,9 +5548,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     def _reject(self, code: int, reason: str, message: str, model: str = "unknown", model_len: int = 0, extra_headers: dict[str, str] | None = None) -> None:
         """Отказ (до SSE): строка `reject …` в журнал и общий формат ошибки."""
         self._log_reject(reason, model, model_len)
-        self._telemetry_meta(model=None if model == "unknown" else model)
+        self._telemetry_meta(model=known_model(model))
         self.close_connection = True
-        self._send(code, {"error": {"message": message, "type": reason, "code": reason if reason == "model_not_found" else int(code)}}, extra_headers=extra_headers)
+        self._send(code, {"error": {"message": message, "type": reason, "code": {"model_not_found": reason}.get(reason, int(code))}}, extra_headers=extra_headers)
 
     def _acquire_slot(self, keepalive):
         """Ждём слот семафора с учётом QoS (резерв слотов для UI и квота сабагентов)."""
@@ -6982,7 +6978,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
             self._parsed_req = req
-            self._telemetry_meta(stream=req.get("stream") is True, model=req.get("model") if isinstance(req.get("model"), str) else None)
+            self._telemetry_meta_request(req)
             if REQUEST_ATTRIBUTION_ENABLED:
                 self._trace = _resolve_trace(dict(self.headers.items()), req)
             else:
@@ -8103,7 +8099,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 )
         finally:
             get_registry().finish(live_id)
-            self._record_telemetry(status_code=sink.status or None, error_type=f"http_{sink.status}" if sink.status >= 400 else None)
+            self._telemetry_passthrough_done(sink.status)
             _log(f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json(self, ctx: dict) -> None:

@@ -12,25 +12,54 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from core import defaults as D
+from core.telemetry_util import as_int, as_str, first, header_value
 
 _USAGE_KEYS = {"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens", "cached_tokens": "cache_read_tokens"}
+_MODEL_PLACEHOLDERS = {"unknown": None}
+
+
+def _pair(value: Any) -> tuple[str, str] | None:
+    """Пара (outbound_target, egress_proxy) из JSON-значения; None — значение парой не является."""
+    try:
+        head, tail = value[0], value[1]
+    except (TypeError, KeyError, IndexError):
+        return None
+    return str(head), str(tail)
 
 
 @functools.lru_cache(maxsize=8)
 def _parse_backend_topology(raw: str) -> dict[str, tuple[str, str]]:
+    """JSON-карта backend_id -> (outbound_target, egress_proxy); битые значения игнорируются."""
     try:
         parsed = json.loads(raw) if raw else {}
     except ValueError:
         return {}
-    return {
-        str(key): (str(val[0]), str(val[1]))
-        for key, val in (parsed.items() if isinstance(parsed, dict) else ())
-        if isinstance(val, (list, tuple)) and len(val) >= 2
-    }
+    items = parsed.items() if isinstance(parsed, dict) else ()
+    pairs = ((str(key), _pair(value)) for key, value in items)
+    return {key: pair for key, pair in pairs if pair}
+
+
+def known_model(model: str) -> str | None:
+    """Модель для телеметрии; плейсхолдер «unknown» не записывается."""
+    return _MODEL_PLACEHOLDERS.get(model, model)
+
+
+def http_error_type(status: int) -> str | None:
+    """Тип ошибки для ответов 4xx/5xx; None — успешный статус."""
+    label = f"http_{status}" if status >= 400 else None
+    return label
+
+
+def telemetry_note(handler: Any, nbytes: int | str = 0, chunk: bool = False, first_byte: bool = False) -> None:
+    """Проброс учёта байт из ResponseSink в миксин обработчика (нет миксина — no-op)."""
+    note = getattr(handler, "_telemetry_note", None)
+    if callable(note):
+        note(nbytes, chunk=chunk, first_byte=first_byte)
 
 
 def resolve_backend_topology(backends: Any, backend_id: str, route_mode: str) -> tuple[str, str]:
@@ -47,20 +76,27 @@ def resolve_backend_topology(backends: Any, backend_id: str, route_mode: str) ->
 
 
 def _query_number(qs: dict[str, list[str]], key: str, default: Any, cast: type) -> Any:
+    """Числовой параметр запроса: последнее значение, при мусоре — default."""
     try:
-        return cast((qs.get(key) or [str(default)])[-1])
+        return cast(first(qs.get(key), [str(default)])[-1])
     except ValueError:
         return default
+
+
+def _auth_mode(auth: str) -> str:
+    """Режим авторизации запроса для телеметрии: bearer/other/none."""
+    mode = "bearer" if auth.lower().startswith("bearer ") else ("other" if auth else "none")
+    return mode
 
 
 class TelemetryHooksMixin:
     """Учёт одного запроса: старт, байты/TTFB/чанки, одна идемпотентная запись в стор."""
 
     # Атрибуты HTTP-обработчика хоста: объявлены для типизации, реализация — в MRO после миксина.
-    headers: Any
-    command: str
-    path: str
-    client_address: tuple[str, int]
+    headers: Any = None
+    command: str = ""
+    path: str = ""
+    client_address: tuple[str, int] = ("", 0)
 
     _req_started_mono: float | None = None
     _req_queue_ms = 0.0
@@ -70,12 +106,21 @@ class TelemetryHooksMixin:
     _req_bytes = 0
     _req_meta: dict[str, Any] | None = None
 
+    def _send(self, code: int, payload: Any, extra_headers: dict[str, str] | None = None) -> None:
+        """Заглушка отправки: рабочая реализация — в HTTP-обработчике хоста."""
+        raise NotImplementedError
+
+    def _subagent_id(self) -> str | None:
+        """Заглушка атрибуции: рабочая реализация — в HTTP-обработчике хоста."""
+        return None
+
     def _telemetry_srv(self) -> Any:
-        for cls in type(self).__mro__:
-            mod = sys.modules.get(cls.__module__)
-            if mod is not None and hasattr(mod, "REQUEST_TELEMETRY"):
-                return mod
-        raise RuntimeError("telemetry facade module not found")
+        """Модуль фасада по MRO обработчика: в нём живут REQUEST_TELEMETRY, BACKENDS, _log."""
+        modules = [sys.modules.get(cls.__module__) for cls in type(self).__mro__]
+        try:
+            return next(mod for mod in modules if hasattr(mod, "REQUEST_TELEMETRY"))
+        except StopIteration:
+            raise RuntimeError("telemetry facade module not found") from None
 
     def _telemetry_begin(self) -> None:
         """Старт отсчёта нового запроса (Handler живёт на соединение, не на запрос)."""
@@ -86,22 +131,28 @@ class TelemetryHooksMixin:
 
     def _telemetry_note(self, nbytes: int | str = 0, chunk: bool = False, first_byte: bool = False) -> None:
         """Учёт отданных клиенту байт (str — по UTF-8); TTFB фиксируется по первому chunk/first_byte."""
-        if self._req_started_mono is None:
+        started = self._req_started_mono
+        if started is None:
             return
         self._req_bytes += len(nbytes.encode("utf-8")) if isinstance(nbytes, str) else nbytes
-        if chunk:
-            self._req_stream_chunks += 1
-        if (chunk or first_byte) and self._req_ttfb_ms is None:
-            self._req_ttfb_ms = (time.monotonic() - self._req_started_mono) * 1000.0
+        self._req_stream_chunks += int(chunk)
+        if all((any((first_byte, chunk)), self._req_ttfb_ms is None)):
+            self._req_ttfb_ms = (time.monotonic() - started) * 1000.0
 
     def _telemetry_meta(self, **fields: Any) -> None:
         """Дополнить метаданные запроса; None не затирает уже известное значение."""
-        if self._req_started_mono is not None and self._req_meta is not None:
-            self._req_meta.update({k: v for k, v in fields.items() if v is not None})
+        updates = {key: value for key, value in fields.items() if value is not None}
+        first(self._req_meta, default={}).update(updates)
+
+    def _telemetry_meta_request(self, req: Mapping[str, Any]) -> None:
+        """Метаданные из тела запроса: режим потока и модель (только строковая)."""
+        model = req.get("model")
+        self._telemetry_meta(stream=bool(req.get("stream")), model=model if isinstance(model, str) else None)
 
     def _telemetry_usage(self, usage: dict[str, Any] | None) -> None:
-        usage = usage or {}
-        self._telemetry_meta(**{dst: usage.get(src) for dst, src in _USAGE_KEYS.items()})
+        """Токены из usage-блока ответа бэкенда (input/output/cache_read)."""
+        values = first(usage, default={})
+        self._telemetry_meta(**{dst: values.get(src) for dst, src in _USAGE_KEYS.items()})
 
     def _telemetry_queue_start(self, backend_id: str) -> float:
         self._telemetry_meta(backend_id=backend_id)
@@ -115,51 +166,57 @@ class TelemetryHooksMixin:
 
     def _telemetry_error(self, err: dict[str, Any] | None) -> None:
         """Ошибка бэкенда/доставки: статус >= 400 (иначе 502) и тип ошибки в метаданные."""
-        if err is None:
+        if not err:
             return
         code = err.get("code")
-        self._telemetry_meta(status_code=code if isinstance(code, int) and code >= 400 else 502, error_type=err.get("type"))
+        failed = (code if isinstance(code, int) else 0) >= 400
+        self._telemetry_meta(status_code=code if failed else 502, error_type=err.get("type"))
 
     def _telemetry_error_response(self, code: int, payload: Any, body: bytes) -> None:
         """Ответ-ошибка из _send (отказы до маршрутизации тоже попадают в статистику)."""
-        if code < 400 or self._req_started_mono is None:
-            return
-        error = payload.get("error") if isinstance(payload, dict) else None
-        self._telemetry_note(len(body))
-        self._record_telemetry(status_code=code, error_type=error.get("type") if isinstance(error, dict) else None)
+        error = payload.get("error") if isinstance(payload, dict) else {}
+        error_type = error.get("type") if isinstance(error, dict) else None
+        if code >= 400:
+            self._telemetry_note(len(body))
+            self._record_telemetry(status_code=code, error_type=error_type)
+
+    def _telemetry_passthrough_done(self, status: int) -> None:
+        """Финал passthrough-маршрута: статус ответа и тип ошибки для 4xx/5xx."""
+        self._record_telemetry(status_code=first(status, None), error_type=http_error_type(status))
 
     def _telemetry_serve_get(self) -> None:
+        """GET /v1/telemetry: снимок агрегатов за окно (Bearer проверен фасадом до вызова)."""
         store = self._telemetry_srv().REQUEST_TELEMETRY
         qs = parse_qs(urlparse(self.path).query)
         payload = store.get_telemetry_payload(
             window_hours=_query_number(qs, "window_hours", 24.0, float),
             limit=_query_number(qs, "limit", store.recent_limit, int),
         )
-        self._send(200, payload)  # type: ignore[attr-defined] - реализация в обработчике хоста
+        self._send(200, payload)
 
     def _telemetry_event(self, meta: dict[str, Any], status: int) -> dict[str, Any]:
-        srv, hdrs = self._telemetry_srv(), getattr(self, "headers", None)
-        backend_id, route_mode = str(meta.get("backend_id") or ""), str(meta.get("route_mode") or "")
+        """Событие для стора: адрес, атрибуция, топология, латентности, токены и статус."""
+        srv, headers, address = self._telemetry_srv(), self.headers, self.client_address
+        backend_id, route_mode = as_str(meta.get("backend_id")), as_str(meta.get("route_mode"))
         target, egress = resolve_backend_topology(srv.BACKENDS, backend_id, route_mode) if backend_id else (None, None)
-        auth = hdrs.get("Authorization", "") if hdrs else ""
-        usage = {k: meta.pop(k, None) for k in _USAGE_KEYS}
-        usage["total_tokens"] = (usage["prompt_tokens"] or 0) + (usage["completion_tokens"] or 0) or None
+        auth = as_str(header_value(headers, "Authorization"))
+        usage = {key: meta.pop(key, None) for key in _USAGE_KEYS}
+        usage["total_tokens"] = first(as_int(usage["prompt_tokens"]) + as_int(usage["completion_tokens"]), None)
         trace = getattr(self, "_trace", None)
-        role_header = srv._bridge_env("SUBAGENT_ROLE_HEADER", "X-Subagent-Role")
         return {
             "request_id": trace.request_id if trace else None,
-            "client_ip": self.client_address[0],
-            "client_port": self.client_address[1],
-            "user_agent": hdrs.get("User-Agent") if hdrs else None,
-            "subagent_id": self._subagent_id(),  # type: ignore[attr-defined] - реализация в обработчике хоста
-            "subagent_role": hdrs.get(role_header) if hdrs else None,
-            "auth_mode": "bearer" if auth.lower().startswith("bearer ") else ("none" if not auth else "other"),
+            "client_ip": address[0],
+            "client_port": address[1],
+            "user_agent": header_value(headers, "User-Agent"),
+            "subagent_id": self._subagent_id(),
+            "subagent_role": header_value(headers, srv._bridge_env("SUBAGENT_ROLE_HEADER", "X-Subagent-Role")),
+            "auth_mode": _auth_mode(auth),
             "http_method": self.command,
             "outbound_target": target,
             "egress_proxy": egress,
             "queue_ms": self._req_queue_ms,
             "ttfb_ms": self._req_ttfb_ms,
-            "total_ms": (time.monotonic() - (self._req_started_mono or 0.0)) * 1000.0,
+            "total_ms": (time.monotonic() - first(self._req_started_mono, default=0.0)) * 1000.0,
             "stream_chunks": self._req_stream_chunks,
             "response_bytes": self._req_bytes,
             **meta,
@@ -169,20 +226,33 @@ class TelemetryHooksMixin:
 
     def _record_telemetry(self, client_gone: bool = False, **fields: Any) -> None:
         """Одна запись на запрос (идемпотентно); неблокирующая, исключения наружу не выходят."""
-        if self._req_started_mono is None or self._req_recorded:
-            return
-        self._req_recorded = True
-        srv = self._telemetry_srv()
-        try:
-            gone = {"status_code": 499, "error_type": "client_disconnected"} if client_gone else {}
-            meta = {**(self._req_meta or {}), **gone, **fields}
-            exc = sys.exc_info()[1]
-            status = int(meta.get("status_code") or getattr(self, "_response_status", 0) or 0)
-            if exc is not None and not meta.get("error_type"):
-                meta["error_type"] = type(exc).__name__
-                status = 499 if isinstance(exc, (BrokenPipeError, ConnectionResetError)) else (status or 500)
-            if not status:
-                status, meta["error_type"] = 499, meta.get("error_type") or "client_disconnected"
-            srv.REQUEST_TELEMETRY.record_request(self._telemetry_event(meta, status))
-        except Exception as err:  # noqa: BLE001 - телеметрия не должна влиять на ответ
-            srv._log(f"telemetry_record_failed err={srv._err_summary(repr(err), 120)!r}")
+        if all((self._req_started_mono is not None, not self._req_recorded)):
+            self._req_recorded = True
+            srv = self._telemetry_srv()
+            try:
+                self._emit_telemetry(srv, client_gone, fields)
+            except Exception as err:  # noqa: BLE001 - телеметрия не должна влиять на ответ
+                srv._log(f"telemetry_record_failed err={srv._err_summary(repr(err), 120)!r}")
+
+    def _emit_telemetry(self, srv: Any, client_gone: bool, fields: dict[str, Any]) -> None:
+        """Собрать событие из метаданных и контекста исключения и отдать стору."""
+        gone = {"status_code": 499, "error_type": "client_disconnected"} if client_gone else {}
+        meta = {**first(self._req_meta, default={}), **gone, **fields}
+        exc = sys.exc_info()[1]
+        status = as_int(first(meta.get("status_code"), getattr(self, "_response_status", 0)))
+        if all((exc is not None, not meta.get("error_type"))):
+            meta["error_type"] = type(exc).__name__
+            status = 499 if isinstance(exc, (BrokenPipeError, ConnectionResetError)) else as_int(first(status, 500))
+        if not status:
+            meta["error_type"] = first(meta.get("error_type"), "client_disconnected")
+            status = 499
+        srv.REQUEST_TELEMETRY.record_request(self._telemetry_event(meta, status))
+
+
+__all__ = [
+    "TelemetryHooksMixin",
+    "http_error_type",
+    "known_model",
+    "resolve_backend_topology",
+    "telemetry_note",
+]
