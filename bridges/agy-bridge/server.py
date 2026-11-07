@@ -2911,9 +2911,14 @@ def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
         return None
     cwd_index = 2 if len(parts) == 4 else 1
     cwd = parts[cwd_index].strip()
-    if not cwd or not os.path.isabs(cwd):
+    if cwd:
+        if not os.path.isabs(cwd):
+            return None
+        parts[cwd_index] = os.path.normpath(cwd)
+    elif len(parts) == 4:
+        parts[cwd_index] = ""
+    else:
         return None
-    parts[cwd_index] = os.path.normpath(cwd)
     key = tuple(parts)
     if not _session_key_valid(key):
         return None

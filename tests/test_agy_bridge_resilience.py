@@ -12573,9 +12573,14 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
             self.assertEqual(_bfn("_load_persisted_sessions")(), 0)
             self.assertIs(_bval("_sessions_persist_ready"), True)
             key4 = ("fedcba9876543210", "m", "/w", "high")
+            key_no_cwd = cast(
+                "tuple[str, ...]",
+                _bfn("_session_key_for")("m", "", "low", "chat-without-cwd"),
+            )
             _ = commit(key_low, _CID)
             _ = commit(key4, _CID_B)
             _ = commit(key4, _CID_B)
+            _ = commit(key_no_cwd, _CID_C)
             self.assertTrue(path.exists())
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
@@ -12588,7 +12593,7 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                 tuple(cast("list[str]", item["key"])): item
                 for item in cast("list[dict[str, object]]", doc["sessions"])
             }
-            self.assertEqual(set(saved), {key_low, key4})
+            self.assertEqual(set(saved), {key_low, key4, key_no_cwd})
             self.assertEqual(saved[key4]["turns"], 2)
             # Протухшие и битые записи на диске отсекаются при загрузке.
             now = time.time()
@@ -12627,16 +12632,18 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                     store = cast(
                         "dict[tuple[str, ...], dict[str, object]]", second._session_store
                     )
-                    self.assertEqual(restored, 2)
-                    self.assertEqual(set(store), {key_low, key4})
+                    self.assertEqual(restored, 3)
+                    self.assertEqual(set(store), {key_low, key4, key_no_cwd})
                     self.assertEqual(store[key_low]["cid"], _CID)
                     self.assertEqual(store[key4]["turns"], 2)
+                    self.assertEqual(store[key_no_cwd]["cid"], _CID_C)
                     claim = cast(Callable[[tuple, str], str], second._session_claim)
                     self.assertEqual(claim(key4, "t-1"), _CID_B)
                     self.assertEqual(claim(key_low, "t-2"), _CID)
+                    self.assertEqual(claim(key_no_cwd, "t-3"), _CID_C)
                     # Загрузка переписала файл без протухших записей.
                     cleaned = json.loads(path.read_text(encoding="utf-8"))
-                    self.assertEqual(len(cleaned["sessions"]), 2)
+                    self.assertEqual(len(cleaned["sessions"]), 3)
                     # Битый файл: fail-open, старт не падает.
                     _ = path.write_text("{not json", encoding="utf-8")
                     store.clear()
@@ -13340,7 +13347,13 @@ class SessionFailClosedTests(unittest.TestCase):
         )
         for raw in invalid:
             self.assertIsNone(decode(raw), repr(raw))
-        for cwd in ("", " \t ", ".", "..", "~", "rel/path"):
+        for cwd in ("", " \t "):
+            self.assertIsNone(decode(["m", cwd, "low"]))
+            self.assertEqual(
+                decode(["0123456789abcdef", "m", cwd, "low"]),
+                ("0123456789abcdef", "m", "", "low"),
+            )
+        for cwd in (".", "..", "~", "rel/path"):
             for raw in (["m", cwd, "low"], ["0123456789abcdef", "m", cwd, "low"]):
                 self.assertIsNone(decode(raw), repr(raw))
         for valid in (
