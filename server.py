@@ -191,7 +191,14 @@ from core.gateway_execution_policy import (  # noqa: E402
     validate_autonomy_request,
     validate_boolean_flags,
 )
-
+from core.catalog_flags import (  # noqa: E402
+    catalog_flags,
+    load_sidecar_view,
+    quarantine_gate_enabled,
+    resolve_fleet_path,
+    sidecar_allowlist,
+)
+from core import quarantine_gate as qgate  # noqa: E402
 CLI_CFG = CliRuntimeConfig.from_env()
 
 
@@ -229,9 +236,8 @@ PORT = int(_bridge_env("PORT", "9882"))
 AUTH_KEY = _bridge_env("KEY")
 BRIDGE_KEY = AUTH_KEY
 LAUNCHER = CLI_CFG.launcher or str(HOME / ".config" / "factory-launch" / "droid-cli.sh")
-FLEET_PATH = Path(
-    os.environ.get("DROID_DSH_BRIDGE_FLEET", "") or str(ROOT / "fleet.json")
-)
+# Явный DROID_DSH_BRIDGE_FLEET приоритетнее флага BRIDGE_COMPILED_FLEET_ENABLED (стенды тестов).
+FLEET_PATH = resolve_fleet_path(ROOT / "fleet.json", ADAPTER_KINDS)
 ENV_MODEL = os.environ.get("DROID_DSH_BRIDGE_MODEL", "").strip()
 IMAGE_PROBE = os.environ.get("DROID_DSH_BRIDGE_IMAGE_PROBE", "") == "1"
 # ADR 0010: санитизация аргументов tool_calls (пустые опциональные строки, распаковка `parallel`).
@@ -491,10 +497,35 @@ IMAGE_EXTENSIONS = {
 }
 
 
+def _quarantine_denial(model_id: str, subagent_id: str | None) -> "qgate.Deny | None":
+    """Решение карантинного гейта (флаг `BRIDGE_QUARANTINE_GATE_ENABLED`): `Deny` или `None`.
+
+    Роль — из `X-Subagent-Id`; сайдкар битый — fail-closed для не-open ролей.
+    """
+    if not quarantine_gate_enabled():
+        return None
+    try:
+        view = load_sidecar_view()
+    except (OSError, ValueError):
+        classes = qgate.RoleClasses.from_env()
+        if classes.is_open(qgate.role_from_subagent_id(subagent_id)):
+            return None
+        return qgate.Deny(model=model_id, status="sidecar_unreadable")
+    decision = qgate.gate(model_id, subagent_id, view)
+    return decision if isinstance(decision, qgate.Deny) else None
+
+
 def _build_catalog(data: Any) -> dict:
     """Общий с fleet_check структурный валидатор; env/probe остаются настройками хоста."""
+    flags = catalog_flags()
     return build_catalog(
-        data, ADAPTER_KINDS, env_model=ENV_MODEL, image_probe=IMAGE_PROBE
+        data,
+        ADAPTER_KINDS,
+        env_model=ENV_MODEL,
+        image_probe=IMAGE_PROBE,
+        mode="isolate" if flags.safe_catalog else "strict",
+        constraints_enabled=flags.provider_constraints,
+        allowlist=sidecar_allowlist() if flags.provider_constraints else None,
     )
 
 
@@ -516,6 +547,8 @@ def _load_fleet() -> dict:
         sys.stderr.write("fleet_invalid model=- reason=fleet_unreadable\n")
         sys.stderr.flush()
         raise SystemExit(1)
+    for rejected_id, reason in catalog.get("rejected", {}).items():
+        sys.stderr.write(f"fleet_model_rejected model={rejected_id} reason={reason}\n")
     catalog["path"] = str(FLEET_PATH)
     catalog["sha256"] = hashlib.sha256(raw).hexdigest()
     return catalog
@@ -7204,6 +7237,12 @@ class Handler(BaseHTTPRequestHandler):
                     model_id,
                     model_len,
                 )
+            denial = _quarantine_denial(model_id, self.headers.get("X-Subagent-Id"))
+            if denial is not None:
+                self._log_reject(denial.reason, model_id, model_len)
+                self.close_connection = True
+                self._send(denial.http, denial.body())
+                return
             if deferred_passthrough_auth:
                 selected = BACKENDS.get(model["backend"])
                 if not isinstance(

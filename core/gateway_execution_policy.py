@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 from typing import cast
 
 AUTONOMY_LEVELS = ("low", "medium", "high")
@@ -15,8 +15,14 @@ MUTATING_SUBAGENT_DEFAULT = "coder-"
 DENY_SUBAGENT_DEFAULT = "panel-judge-,judge-,seat-"
 
 
-class Autonomy(StrEnum):
-    """Допустимые уровни прав, проверяемые конструктором перечисления."""
+class Autonomy(str, Enum):
+    """Допустимые уровни прав, проверяемые конструктором перечисления.
+
+    `(str, Enum)` вместо `StrEnum`: хаб запускается на /usr/bin/python3 (3.9).
+    """
+
+    def __str__(self) -> str:
+        return str(self.value)
 
     OFF = "off"
     LOW = "low"

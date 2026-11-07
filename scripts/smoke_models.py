@@ -54,19 +54,48 @@ def _clean_markdown_cell(value: str) -> str:
     return value.strip().strip("` ")
 
 
-def _family_for_model(model_id: str, fallback: str = "") -> str:
-    lowered = model_id.lower()
-    if lowered.startswith("claude-"):
-        return "Anthropic"
-    if lowered.startswith("gpt-"):
-        return "OpenAI"
-    if lowered.startswith("gemini-"):
-        return "Google"
-    if lowered.startswith("muse-"):
-        return "Meta"
-    if "deepseek" in lowered:
-        return "DeepSeek"
-    return fallback.strip()
+def _catalog_lock_path() -> Path:
+    """Сайдкар каталога: `BRIDGE_CATALOG_LOCK` либо `<BRIDGE_STATE_DIR>/catalog.lock.json`."""
+    explicit = os.environ.get("BRIDGE_CATALOG_LOCK")
+    if explicit:
+        return Path(explicit).expanduser()
+    state = os.environ.get("BRIDGE_STATE_DIR") or "~/work/cli-agent-bridge/state"
+    return Path(state).expanduser() / "catalog.lock.json"
+
+
+def _catalog_families() -> dict[str, str]:
+    """`models[mid].family` из сайдкара каталога; нет файла/поля - пустая карта."""
+    try:
+        data = json.loads(_catalog_lock_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, dict):
+        return {}
+    families: dict[str, str] = {}
+    for model_id, record in models.items():
+        family = record.get("family") if isinstance(record, dict) else None
+        if isinstance(family, str) and family.strip():
+            families[str(model_id)] = family.strip()
+    return families
+
+
+def _effort_overrides() -> dict[str, str]:
+    """Data-driven override эффорта: env `BRIDGE_SMOKE_EFFORT_OVERRIDES` = JSON {"model": "effort"}."""
+    raw = os.environ.get("BRIDGE_SMOKE_EFFORT_OVERRIDES", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(model): str(effort).lower()
+        for model, effort in data.items()
+        if isinstance(effort, str) and effort.strip()
+    }
 
 
 def parse_models_md(path: Path) -> list[ModelEntry]:
@@ -76,6 +105,8 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
         raise FileNotFoundError(f"Канонический файл models.md не найден: {path}")
 
     content = path.read_text(encoding="utf-8")
+    catalog_families = _catalog_families()
+    effort_overrides = _effort_overrides()
     entries: list[ModelEntry] = []
     current_role = "General"
     current_table_role = ""
@@ -193,7 +224,6 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
             if re.sub(r"[`*]", "", part).strip()
         ]
         fallback_family = family_parts[0] if family_parts else family_cell.strip()
-        effort_values = {effort.lower() for effort in efforts}
 
         for idx, model_id in enumerate(model_ids):
             if model_id.lower() in {
@@ -209,7 +239,7 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
                 continue
             effort = efforts[idx] if idx < len(efforts) else efforts[0]
             family_hint = family_parts[idx] if idx < len(family_parts) else fallback_family
-            family = _family_for_model(model_id, family_hint)
+            family = catalog_families.get(model_id) or family_hint.strip()
 
             family_lower = family.lower()
             explicit_annotation_matched = False
@@ -219,14 +249,8 @@ def parse_models_md(path: Path) -> list[ModelEntry]:
                     explicit_annotation_matched = True
                     break
 
-            if not explicit_annotation_matched:
-                model_lower = model_id.lower()
-                if model_lower.startswith("deepseek-v4.1-flash") and "off" in effort_values:
-                    effort = "off"
-                if model_lower == "gemini-3.8-flash" and (
-                    effort in {"", "off"} or "medium" in effort_values
-                ):
-                    effort = "medium"
+            if not explicit_annotation_matched and model_id in effort_overrides:
+                effort = effort_overrides[model_id]
 
             entries.append(ModelEntry(role, model_id, effort, family))
 
@@ -361,9 +385,17 @@ def is_model_limit_error(status_code: int, body: str) -> bool:
     return any(phrase in lowered for phrase in explicit_phrases)
 
 
+def _fleet_path() -> Path:
+    """`BRIDGE_FLEET_PATH`, затем `DROID_DSH_BRIDGE_FLEET`, иначе `<repo>/fleet.json`."""
+    raw = os.environ.get("BRIDGE_FLEET_PATH") or os.environ.get("DROID_DSH_BRIDGE_FLEET")
+    if raw:
+        return Path(raw).expanduser()
+    return Path(__file__).resolve().parents[1] / "fleet.json"
+
+
 @lru_cache(maxsize=1)
 def _load_fleet_config() -> tuple[frozenset[str], dict[str, str]]:
-    fleet_path = Path(__file__).resolve().parents[1] / "config" / "fleet.json"
+    fleet_path = _fleet_path()
     try:
         data = json.loads(fleet_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -830,7 +862,43 @@ def run_parallel_smoke(
     return [result for result in results if result is not None]
 
 
-def main() -> int:
+def _load_capability_probe() -> Any:
+    """Подгружает `capability_probe.py` рядом со скриптом (каталог scripts не пакет)."""
+    cached = sys.modules.get("capability_probe")
+    if cached is not None:
+        return cached
+    import importlib.util
+
+    path = Path(__file__).resolve().with_name("capability_probe.py")
+    spec = importlib.util.spec_from_file_location("capability_probe", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("capability_probe.py not found")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["capability_probe"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_probe_model(args: argparse.Namespace) -> int:
+    """`--probe-model`: коды выхода 0 confirmed / 1 quarantine_failed / 2 inconclusive / 3 usage."""
+    try:
+        probe = _load_capability_probe()
+    except (ImportError, OSError) as exc:
+        print(f"USAGE: capability probe unavailable: {exc}", file=sys.stderr)
+        return 3
+    return int(
+        probe.probe_cli(
+            args.probe_model,
+            provider_id=args.provider or None,
+            hub_url=args.hub_url,
+            force=args.force,
+            as_json=args.as_json,
+            providers_dir=args.providers_dir,
+        )
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Smoke test runner for models defined in models.md"
     )
@@ -848,7 +916,20 @@ def main() -> int:
     parser.add_argument("--subprocesses", action="store_true")
     parser.add_argument("--strict-limits", action="store_true")
     parser.add_argument("--worker-single", action="store_true", help=argparse.SUPPRESS)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--probe-model",
+        type=str,
+        default="",
+        help="run the capability probe (P1..P5) for one canonical model id",
+    )
+    parser.add_argument("--provider", type=str, default="", help="provider id for --probe-model")
+    parser.add_argument("--force", action="store_true", help="re-probe even if confirmed")
+    parser.add_argument("--json", dest="as_json", action="store_true")
+    parser.add_argument("--providers-dir", type=Path, default=None)
+    args = parser.parse_args(argv)
+
+    if args.probe_model:
+        return _run_probe_model(args)
 
     if args.worker_single:
         ok, status, latency = smoke_test_model(

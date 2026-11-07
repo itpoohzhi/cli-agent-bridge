@@ -1,0 +1,35 @@
+# Провайдер codex: codex-lb (OpenAI GPT), passthrough к :2455.
+manifest_version: 1
+provider_id: codex
+kind: passthrough
+enabled: true
+required: false
+owned_by: openai-codex
+transport:
+  bridge: {base_url: 'http://127.0.0.1:2455/v1', api_key_env: CODEX_LB_API_KEY}
+allow_base_url:
+- {scheme: http, host: 127.0.0.1, port: 2455, path_prefix: /v1}
+limits: {max_concurrent: 128, quota_group: openai-codex, timeout_s: 180}
+discovery:
+  method: http
+  http: {path: /models, id_field: 'data[].id'}
+  include: [gpt-*]
+  exclude: ['*-free']
+  refresh_interval_s: 900
+family_rule:
+  type: prefix
+  prefix:
+    verified: true
+    map: {gpt-: OpenAI}
+models_overrides:
+  gpt-6.1-terra:
+    name: GPT-6.1 Terra (Codex passthrough)
+    efforts: [low, medium, high]
+    default_effort: high
+    context_window: 500000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+params:
+  effort_field: reasoning_effort
+  adaptive_whitelist: [reasoning_effort, thinking, temperature, top_p]
