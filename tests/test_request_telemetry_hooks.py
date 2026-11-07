@@ -191,6 +191,20 @@ def test_topology_helpers_and_sink_note(monkeypatch):
     assert [(e["status_code"], e["error_type"]) for e in REQUEST_TELEMETRY.events] == [(200, None)]
 
 
+def test_query_number_takes_the_last_repeated_value():
+    """Повторённый параметр: решает последнее значение, а не первое."""
+    assert _query_number({"window_hours": ["6", "2.5"]}, "window_hours", 24.0, float) == 2.5
+    assert _query_number({"limit": ["7", "3"]}, "limit", 100, int) == 3
+
+
+def test_default_response_status_is_zero():
+    """Нет статуса ответа у обработчика: база для вывода статуса — 0, а не 1."""
+    h = _begun()
+    assert getattr(h, "_response_status") == 0
+    h._record_telemetry()
+    assert REQUEST_TELEMETRY.events[-1]["status_code"] == 499  # без статуса запрос считается оборванным
+
+
 def test_note_without_bytes_changes_nothing():
     """Учёт байт по умолчанию не добавляет ни одного байта (nbytes=0)."""
     h = _begun()

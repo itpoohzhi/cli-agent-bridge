@@ -29,6 +29,33 @@ CANON_ALIASES = {
 ROW_ALIASES = {"backend_id": "backend", "ts_epoch": "ts", "status_code": "status", "stream_chunks": "chunks"}
 
 
+def _flow_of(topology):
+    from core.telemetry_flow import build_architecture_flow
+
+    return build_architecture_flow([], [], {"total_requests": 0}, topology)
+
+
+def test_flow_nodes_without_traffic_report_explicit_zero():
+    """Узлы топологии без трафика отдаются с нулём, а не пропускаются."""
+    flow = _flow_of({
+        "tier1_entry_callers": {"nodes": [{"id": "quiet", "name": "q"}]},
+        "tier2_l7_bridges": {"nodes": [{"id": "b", "port": 1, "backends": ["none"]}]},
+        "tier3_l4_egress_proxies": {"nodes": [{"id": "e", "port": 2, "match": [":2"]}]},
+    })
+    assert [n["requests"] for n in flow["tier1_entry_callers"]["nodes"]] == [0, 0]  # узел + агрегат «other»
+    assert [n["requests"] for n in flow["tier2_l7_bridges"]["nodes"]] == [0]
+    assert [n["requests"] for n in flow["tier3_l4_egress_proxies"]["nodes"]] == [0]
+
+
+def test_clean_row_marks_rate_only_for_aggregates():
+    """ok_rate_pct добавляется только агрегатам: строки журнала не получают лишний ключ."""
+    from core.telemetry_sql import clean_row
+
+    assert "ok_rate_pct" not in clean_row({"requests": 3, "ok_requests": 2})
+    assert clean_row({"requests": 3, "ok_requests": 3}, True)["ok_rate_pct"] == 100.0
+    assert clean_row({"total_requests": 0}, True)["ok_rate_pct"] == 0.0
+
+
 def test_payload_has_canonical_and_ui_alias_fields(telemetry_payload):
     _, payload = telemetry_payload
     summary = payload["summary"]
