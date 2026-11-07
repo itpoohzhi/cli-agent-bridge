@@ -2,13 +2,18 @@
 
 import copy
 import contextlib
+import importlib
 import io
 import json
+import os
 import sys
 import tempfile
+import time
 import types
 import unittest
+from hashlib import sha256
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,7 +77,7 @@ class TestLiveFleetV3(unittest.TestCase):
             ["droid", "muse", "codex", "agy", "opencode-zen", "claude-p"],
         )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
-        self.assertFalse(catalog["backends"]["droid"]["enabled"])  # ADR 0017: Droid выведен
+        self.assertTrue(catalog["backends"]["droid"]["enabled"])
         self.assertFalse(catalog["backends"]["droid"]["required"])
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
@@ -93,7 +98,9 @@ class TestLiveFleetV3(unittest.TestCase):
             self.assertEqual(backend["kind"], "passthrough", name)
             self.assertEqual(backend["base_url"], "http://127.0.0.1:%d/v1" % port, name)
             self.assertFalse(backend["required"], name)
-            self.assertTrue(backend["enabled"], name)  # ADR 0017: passthrough-бэкенды включены
+            self.assertTrue(
+                backend["enabled"], name
+            )  # ADR 0017: passthrough-бэкенды включены
 
     def test_default_model_is_muse_wonder_full(self):
         """ADR 0015: умолчание каталога - активная модель muse, а не выводимый Droid."""
@@ -105,10 +112,10 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_models_are_bound_to_backends(self):
         data = raw_v3()
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 18)
-        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
-        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
-        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
+        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "droid")
+        self.assertIn("deepseek-v4.1-flash", catalog["models"])
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
@@ -121,12 +128,12 @@ class TestLiveFleetV3(unittest.TestCase):
                 self.assertEqual(model["efforts"], ["max"])
                 self.assertEqual(model["default_effort"], "max")
 
-    def test_droid_models_unchanged(self):
+    def test_subscription_droid_models_are_published(self):
         catalog = server._build_catalog(raw_v3())
-        # deepseek-v4.1-flash - неактивная историческая запись за выключенным Droid (ADR 0017)
-        self.assertEqual([mid for mid in catalog["order"] if catalog["models"][mid]["backend"] == "droid"], [])
-        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
-        self.assertFalse(raw_v3()["backends"]["droid"]["enabled"])
+        self.assertEqual(
+            sum(m["backend"] == "droid" for m in catalog["models"].values()), 5
+        )
+        self.assertTrue(raw_v3()["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
         self.assertNotIn("grok-4.7", catalog["models"])
         self.assertNotIn("glm-5.3", catalog["models"])
@@ -140,7 +147,7 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(len(catalog["order"]), 18)
+        self.assertEqual(len(catalog["order"]), 20)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -548,7 +555,7 @@ class TestFleetCheckParity(unittest.TestCase):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 18)
+        self.assertEqual(len(catalog["order"]), 20)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):
@@ -564,16 +571,6 @@ class TestFleetCheckParity(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertFalse(result["ok"])
         self.assertIn("model_invalid", result["checks"][0]["errors"][0])
-
-
-
-
-import importlib
-import os
-import sys
-import time
-from hashlib import sha256
-from unittest import mock
 
 
 class _CredentialsReportRecorder:
@@ -627,9 +624,7 @@ class TestProviderCredentialsCheck(unittest.TestCase):
     def check(self, env_lines, refs_values, environ=None, profiles=None):
         env_path = self.write(".env", self.lines(*env_lines))
         refs_lines = ["  %s: %s" % kv for kv in refs_values]
-        creds_path = self.write(
-            "credentials.yaml", self.lines("refs:", *refs_lines)
-        )
+        creds_path = self.write("credentials.yaml", self.lines("refs:", *refs_lines))
         report = _CredentialsReportRecorder()
         self.fc.check_provider_credentials(
             profiles or self.profiles(self.KEY),
@@ -647,18 +642,21 @@ class TestProviderCredentialsCheck(unittest.TestCase):
         catalogue = self.write("catalogue.json", "{}")
         profile = self.profiles(*(names or (self.KEY,)))["desktop"]
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.multiple(
-            self.fc,
-            check_catalogue=mock.DEFAULT,
-            droid_scope=mock.MagicMock(side_effect=lambda cat: cat),
-            check_policy=mock.DEFAULT,
-            check_efforts=mock.DEFAULT,
-            check_profile=mock.MagicMock(return_value=profile),
-            check_default_compat=mock.DEFAULT,
-            check_opus=mock.DEFAULT,
-        ), mock.patch.dict(os.environ, env_vars or {}), contextlib.redirect_stdout(
-            out
-        ), contextlib.redirect_stderr(err):
+        with (
+            mock.patch.multiple(
+                self.fc,
+                check_catalogue=mock.DEFAULT,
+                droid_scope=mock.MagicMock(side_effect=lambda cat: cat),
+                check_policy=mock.DEFAULT,
+                check_efforts=mock.DEFAULT,
+                check_profile=mock.MagicMock(return_value=profile),
+                check_default_compat=mock.DEFAULT,
+                check_opus=mock.DEFAULT,
+            ),
+            mock.patch.dict(os.environ, env_vars or {}),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
             code = self.fc.main(["--catalogue", catalogue] + argv)
         return code, out.getvalue(), err.getvalue()
 
@@ -866,6 +864,7 @@ class TestProviderCredentialsCheck(unittest.TestCase):
         self.assertEqual(errs, [])
         self.assertEqual(len(found), 20)
         self.assertLessEqual(elapsed, 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

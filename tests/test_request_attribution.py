@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import server  # noqa: E402
+from tests.gateway_policy_testlib import assert_deepseek_defaults, install_route_auth  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
 from core.backend_adapter import AdapterRegistry  # noqa: E402
 
@@ -28,11 +29,11 @@ ALIASES = (
     "gemini-4-argon-high",
     "gemini-4-argon-medium",
     "gemini-4-argon-low",
-    "gemini-3.8-flash-high",
-    "gemini-3.8-flash-medium",
-    "gemini-3.8-flash-low",
+    "gpt-6.1-terra-high",
+    "gpt-6.1-terra-medium",
+    "gpt-6.1-terra-low",
     "claude-opus-5-5-high",
-    "claude-sonnet-5-5-xhigh",
+    "deepseek-v4.1-flash-free-max",
 )
 
 
@@ -41,7 +42,7 @@ def route(monkeypatch, tmp_path):
     """Выполнить do_POST без сокета, сохранив наблюдаемую границу адаптера."""
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
-    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-route.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
+    install_route_auth(monkeypatch, tmp_path, "route")
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
     monkeypatch.setattr(server, "_budget", server._ByteBudget(1_000_000))
@@ -135,7 +136,7 @@ def wire(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
-    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / "missing-wire.env", environ={"AUTH_KEY": "hub-test-key", "BRIDGE_KEY": "hub-test-key"}))
+    install_route_auth(monkeypatch, tmp_path, "wire")
     monkeypatch.setattr(server, "_log", logs.append)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
@@ -392,6 +393,7 @@ def test_log_lines_contain_ids(wire, monkeypatch, tmp_path):
             and "request_id=req_cli_alias" in line
             for line in wire.logs
         )
+        assert_deepseek_defaults(wire)
     finally:
         server._reset_rpc_state()
 
@@ -415,14 +417,6 @@ def test_effort_alias_resolves_passthrough(wire, alias):
         "model": base,
         "reasoning_effort": effort,
     }
-
-
-def test_effort_alias_keeps_explicit_effort(wire):
-    assert (
-        wire.call({"model": "claude-sonnet-5-5-xhigh", "reasoning_effort": "low"})[0]
-        == 200
-    )
-    assert json.loads(wire.records[-1][1])["reasoning_effort"] == "low"
 
 
 def test_exact_id_body_untouched(wire):
@@ -481,7 +475,7 @@ def test_models_default_does_not_advertise_aliases(wire, monkeypatch):
 
 
 def test_models_env_enables_only_requested_aliases(wire, monkeypatch):
-    requested = ("gemini-4-argon-high", "claude-sonnet-5-5-xhigh")
+    requested = ("gemini-4-argon-high", "gpt-6.1-terra-high")
     monkeypatch.setenv("BRIDGE_ADVERTISE_EFFORT_ALIASES", ",".join(requested))
     cfg = server._load_request_config()
     assert cfg["ADVERTISED_EFFORT_ALIASES"] == requested

@@ -11,8 +11,8 @@ system/tools/cwd) = новая generation с replay. Idle-процесс гас�
 `DROID_DSH_BRIDGE_IDLE_SECONDS` (по умолчанию 2700 с), SID и файлы остаются, следующий
 ход восстанавливается `load_session` того же SID. Без ключа, для title-запросов и для
 запросов с изображениями — эфемерная чистая сессия с replay истории запроса.
-Автономность даунстрим-исполнителя задаётся top-level полем `autonomy`
-(`low|medium|high|off`, дефолт `high`); иное = 400 `unsupported_autonomy`.
+Поле `autonomy`: `low|medium|high|off`, DROID_DEFAULT_AUTONOMY, безопасный дефолт `off`.
+`high` требует DROID_ALLOW_HIGH_AUTONOMY=1; иное = 400 `unsupported_autonomy`.
 `--skip-permissions-unsafe` не используется никогда; нативные tools droid отключены,
 запросы разрешений отклоняются (`autoRejectPermissionRequests`).
 Вывод хода удерживается до `agent_turn_completed` и затем отдаётся в OpenAI Chat
@@ -76,14 +76,16 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     discover_local_cdp_url,
     is_loopback_cdp_url,
 )
-from receipt_schema import (  # noqa: E402
-    RECEIPT_PROBES,
+from tools.receipt_schema import (  # noqa: E402
+    RECEIPT_PROBES as RECEIPT_PROBES,
     RECEIPT_SCHEMA,
     RPC_API_VERSION,
-    SETTINGS_PROFILE,
-    TOOLS_POLICY,
-    settings_profile_digest,
-    tools_policy_digest,
+    SETTINGS_PROFILE as SETTINGS_PROFILE,
+    TOOLS_POLICY as TOOLS_POLICY,
+    settings_profile_digest as settings_profile_digest,
+    tools_policy_digest as tools_policy_digest,
+    validate_receipt_components,
+    validate_model_catalog,
 )
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
@@ -94,6 +96,7 @@ from adapters.passthrough_adapter import (  # noqa: E402
     ResponseSink,
 )
 from core.backend_adapter import (  # noqa: E402
+    EFFORT_LEVELS as EFFORT_LEVELS,
     AdapterRegistry,
     FleetViolation,
     ImageAttachment,
@@ -112,7 +115,7 @@ from core.resilience import (  # noqa: E402
     ResilienceLease,
     ResilienceManager,
 )
-from core.lifecycle import (  # noqa: E402
+from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежние реэкспорты фасада
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
     KEEPALIVE_INTERVAL_S,
@@ -151,7 +154,7 @@ from core.turn_session_manager import (  # noqa: E402
     TurnSessionManager,
     _is_detached_enabled,
     _is_drain_enabled,
-    _is_watchdog_enabled,
+    _is_watchdog_enabled as _is_watchdog_enabled,
     hash_token,
     validate_turn_id,
 )
@@ -163,10 +166,33 @@ from core.watchdog import (  # noqa: E402,F401
     ProcessWatchdog,
 )
 from core.model_penalty import get_penalty_tracker  # noqa: E402
-from core.cli_runtime_config import CliRuntimeConfig, WatchdogConfig, cli_label, cli_number  # noqa: E402
+from core.cli_runtime_config import (  # noqa: E402 - импорт после настройки путей пакетов
+    CliRuntimeConfig,
+    WatchdogConfig,
+    cli_label,
+    cli_number,
+)
 from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa: E402
 from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
+from core.request_telemetry import RequestTelemetryStore  # noqa: E402
+from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note, telemetry_tail  # noqa: E402
+from core.gateway_execution_policy import (  # noqa: E402
+    AUTONOMY_LEVELS as AUTONOMY_LEVELS,
+    AUTONOMY_OFF as AUTONOMY_OFF,
+    AutonomyViolation,
+    RpcError as RpcError,
+    RpcPermissionDenied as RpcPermissionDenied,
+    allow_high_autonomy,
+    default_autonomy,
+    denied_subagent,
+    permission_event,
+    permission_frame,
+    require,
+    resolve_autonomy_decision,
+    validate_autonomy_request,
+    validate_boolean_flags,
+)
 from core.catalog_flags import (  # noqa: E402
     catalog_flags,
     load_sidecar_view,
@@ -176,16 +202,19 @@ from core.catalog_flags import (  # noqa: E402
 )
 from core import quarantine_gate as qgate  # noqa: E402
 CLI_CFG = CliRuntimeConfig.from_env()
+REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
+
+
+def _resolve_backend_topology(backend_id: str, route_mode: str) -> tuple[str, str]:
+    """backend_id -> (outbound_target, egress_proxy) телеметрии; карта настраивается через env."""
+    return resolve_backend_topology(BACKENDS, backend_id, route_mode)
 
 
 HOME = Path.home()
 
 
 def _bridge_env(name: str, default: str = "") -> str:
-    """Читает параметр хаба с legacy fallback; принимает суффикс или полное имя.
-
-    Пустое canonical-значение уступает legacy-параметру.
-    """
+    """Читает параметр хаба с legacy fallback; принимает суффикс или полное имя (пустое canonical уступает legacy)."""
     if name.startswith("BRIDGE_"):
         value = os.environ.get(name) or os.environ.get("DROID_DSH_" + name)
         return value if value is not None else default
@@ -199,9 +228,7 @@ def _bridge_env(name: str, default: str = "") -> str:
 def _log(msg: str) -> None:
     """Диагностика в stderr (файлы вне каталога моста не создаём)."""
     try:
-        sys.stderr.write(
-            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
-        )
+        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")
         sys.stderr.flush()
     except OSError:
         pass
@@ -222,8 +249,6 @@ BRIDGE_SANITIZE_TOOL_CALLS = os.getenv(
 ).lower() in ("true", "1", "yes")
 # ADR 0011 AD-005: лимиты читаются здесь (не в ядре, BND-001) и передаются в ядро аргументами:
 # BRIDGE_MAX_PARALLEL_CALLS (по умолчанию 64), BRIDGE_MAX_PARALLEL_DEPTH, лимиты passthrough.
-# Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
 # Полная шкала reasoning для клампа запрошенного effort к каталогу модели.
 EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
@@ -450,12 +475,10 @@ def clamp_effort_downward(
     return default, True
 
 
-# Уровни автономности даунстрим-исполнителя: передаются в `autonomyLevel` RPC
-# (`initialize_session`/`update_session_settings`) и сверяются read-back; дефолт high,
-# `off` — read-only режим droid (Reviewer-пути).
-AUTONOMY_LEVELS = ("low", "medium", "high")
-AUTONOMY_OFF = "off"
-AUTONOMY_DEFAULT = "high"
+# Автономность RPC сверяется read-back; безопасный дефолт off — read-only.
+_allow_high_autonomy = functools.partial(allow_high_autonomy, "DROID")
+_default_autonomy = functools.partial(default_autonomy, "DROID")
+AUTONOMY_DEFAULT = _default_autonomy()
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 # Известные сигнатуры изображений: нужны, чтобы отличить image_type_mismatch
 # от unsupported_image_type (пиксели не декодируются, сторонних библиотек нет).
@@ -1008,7 +1031,6 @@ _MASK_NAME = re.compile(r"TOKEN|KEY|SECRET|AUTH|PASS", re.IGNORECASE)
 
 
 class _ForwardFlagSource(DynamicFlagSource):
-
     _flag_name = FORWARD_FLAG
 
 
@@ -1153,40 +1175,12 @@ def _receipt_path() -> Path:
 # Квалификационный receipt (RW-009): четвёрка «образ + протокол + политика tools + профиль настроек».
 # Любое расхождение с ожиданиями моста запрещает spawn до новой квалификации (tools/droid_image.py).
 # Константы и отпечатки живут в tools/receipt_schema.py: их делят мост и установщик (RW-013).
-def _check_receipt_quad(rec: dict) -> None:
+def _check_receipt_quad(rec: Mapping[str, object]) -> None:
     """Проверка протокола, политики tools и профиля настроек receipt; расхождение — LauncherUnavailable."""
-    protocol = rec.get("protocol")
-    if (
-        not isinstance(protocol, dict)
-        or protocol.get("api_version") != RPC_API_VERSION
-        or not isinstance(protocol.get("protocol_version"), str)
-        or not protocol["protocol_version"]
-    ):
-        raise LauncherUnavailable(
-            "droid receipt: stream-jsonrpc protocol version mismatch"
-        )
-    policy = rec.get("tools_policy")
-    ids = policy.get("disabled_tool_ids") if isinstance(policy, dict) else None
-    if (
-        not isinstance(policy, dict)
-        or policy.get("policy") != TOOLS_POLICY
-        or not isinstance(ids, list)
-        or not ids
-        or policy.get("digest") != tools_policy_digest(ids)
-    ):
-        raise LauncherUnavailable("droid receipt: tools policy mismatch")
-    profile = rec.get("settings_profile")
-    if (
-        not isinstance(profile, dict)
-        or profile.get("profile") != SETTINGS_PROFILE
-        or profile.get("digest") != settings_profile_digest()
-    ):
-        raise LauncherUnavailable("droid receipt: settings profile mismatch")
-    probes = rec.get("probes")
-    if not isinstance(probes, dict) or any(
-        probes.get(name) != "ok" for name in RECEIPT_PROBES
-    ):
-        raise LauncherUnavailable("droid receipt: qualification probes are not all ok")
+    try:
+        validate_receipt_components(rec)
+    except (ValueError, TypeError) as exc:
+        raise LauncherUnavailable(str(exc)) from exc
 
 
 def _load_receipt() -> tuple:
@@ -1729,6 +1723,7 @@ class _HandlerSink(ResponseSink):
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
+        telemetry_note(self._handler, first_byte=True)
         if getattr(self._handler, "_headers_already_sent", False):
             return
         try:
@@ -1758,6 +1753,8 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
+        telemetry_note(self._handler, len(data), chunk=True)
+        telemetry_tail(self._handler, data)
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
@@ -1972,10 +1969,6 @@ def _kill_all(*_: Any) -> None:
         _log(f"sweep_workspace_failed err={_err_summary(exc, 80)!r}")
     _log(f"shutdown: closed {closed} child process group(s)")
     os._exit(0)
-
-
-class RpcError(Exception):
-    """Ошибка протокола droid: JSON-RPC error, невалидный обязательный ответ."""
 
 
 class RpcEof(RpcError):
@@ -2527,16 +2520,18 @@ class RpcProcess:
             if "id" in msg and ("result" in msg or "error" in msg):
                 self._put("resp", msg, size)
             return
-        if msg.get("id") is not None:
-            # Серверные запросы (разрешения): ответ отрицательный, ход не виснет.
+        if permission_frame(msg):
             self.server_requests += 1
-            if method == "droid.request_permission":
-                self._respond(msg["id"], result={"selectedOption": "cancel"})
-            else:
-                self._respond(
-                    msg["id"],
-                    error={"code": -32601, "message": "not supported by bridge"},
-                )
+            return self._put(
+                "permission", "permission request forbidden by bridge", size
+            )
+        if msg.get("id") is not None:
+            # Запрос разрешения — нарушение безопасного профиля, ход прерывается.
+            self.server_requests += 1
+            self._respond(
+                msg["id"],
+                error={"code": -32601, "message": "not supported by bridge"},
+            )
             return
         if method == "droid.session_notification":
             params = msg.get("params")
@@ -2570,6 +2565,8 @@ class RpcProcess:
         except queue.Empty:
             return None
         self._taken(event)
+        kind, payload, *_ = event
+        require(kind != "permission", RpcPermissionDenied(str(payload)))
         if event[0] == "eof":
             self.eof_rc = event[1]
             self.inbox.put(event)
@@ -3838,7 +3835,9 @@ _REMINDER_CLOSE = "</system-reminder>"
 
 
 def _truncation_marker(limit: int) -> str:
-    return f"\n\n[... agent-instructions truncated by bridge to limit {limit} bytes ...]\n"
+    return (
+        f"\n\n[... agent-instructions truncated by bridge to limit {limit} bytes ...]\n"
+    )
 
 
 def _truncate_instr_text(text: str, limit: int) -> str:
@@ -3884,7 +3883,9 @@ def _truncate_instr_text(text: str, limit: int) -> str:
             continue
         header_bytes = len(text[start:body_start].encode("utf-8"))
         body_b = text[body_start:end].encode("utf-8")
-        if need >= len(body_b):  # от тела ничего не остаётся: заголовок без тела не нужен
+        if need >= len(
+            body_b
+        ):  # от тела ничего не остаётся: заголовок без тела не нужен
             pieces[index] = ""
             need -= len(body_b) + header_bytes
         else:
@@ -3929,7 +3930,9 @@ def _soft_truncate_instructions(
             rest = [
                 part
                 for part in content
-                if not (isinstance(part, str) or (isinstance(part, dict) and "text" in part))
+                if not (
+                    isinstance(part, str) or (isinstance(part, dict) and "text" in part)
+                )
             ]
             msg["content"] = [{"type": "text", "text": new_text}, *rest]
         else:
@@ -4292,18 +4295,7 @@ class Run:
             )
         self._check_flags(settings)
 
-    @staticmethod
-    def _check_flags(settings: dict) -> None:
-        """disableBuiltinSkills/autoRejectPermissionRequests: если droid их сообщает, они обязаны быть true.
-
-        Реальный droid (протокол 1.248) эти поля в settings не возвращает, поэтому отсутствие
-        не отказ; присутствующее расхождение — fail-closed.
-        """
-        for flag in ("disableBuiltinSkills", "autoRejectPermissionRequests"):
-            if flag in settings and settings[flag] is not True:
-                raise RpcError(
-                    f"settings read-back: {flag} is {settings[flag]!r}, expected true"
-                )
+    _check_flags = staticmethod(validate_boolean_flags)
 
     def _initialize(self, proc: RpcProcess) -> None:
         plan = self.plan
@@ -4351,19 +4343,17 @@ class Run:
                 f"droid protocol {proc.protocol_version or '-'} differs from qualified {expected}"
             )
 
-    @staticmethod
-    def _check_tools_policy(listed: list) -> None:
-        """Каталог tools живого droid обязан совпасть с квалифицированным набором из receipt (RW-009)."""
+    def _check_tools_policy(self, listed: list) -> None:
+        """Точный каталог текущей модели обязан быть квалифицирован в receipt."""
         if not RECEIPT_REQUIRED:
             return
         try:
             _, rec = _load_receipt()
         except LauncherUnavailable as exc:
             raise RpcError(f"droid receipt changed during spawn: {exc}")
-        if sorted(listed) != sorted(rec["tools_policy"]["disabled_tool_ids"]):
-            raise RpcError(
-                "native tool catalogue differs from the qualified tools policy"
-            )
+        validate_model_catalog(
+            rec.get("qualified_models"), self.plan["settings"][0], listed, RpcError
+        )
 
     def _disable_native_tools(self, proc: RpcProcess) -> None:
         """Нативные tools отключаются по АКТУАЛЬНОМУ list_tools (новые id тоже); сбой — fail-closed."""
@@ -4450,7 +4440,7 @@ class Run:
                 {"sessionId": plan["sid"], "disableBuiltinSkills": True},
                 self.cancel,
             )
-        except RpcEof:
+        except (RpcEof, RpcPermissionDenied):
             raise
         except RpcError as exc:
             _log(
@@ -4649,6 +4639,10 @@ class Run:
             self._quarantined += 1  # чужая/устаревшая сессия в карантин
             return False
         ntype = note.get("type")
+        require(
+            not permission_event(ntype),
+            RpcPermissionDenied("permission request forbidden by bridge"),
+        )
         mid = str(note.get("messageId") or "")
         if ntype == "create_message":
             self._on_create(note, mid)
@@ -5151,7 +5145,7 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
             _qos_lock.notify_all()
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
     _delivery_reserved = 0  # байты, взятые в _DELIVERY_BUDGET текущим запросом (RW-011)
@@ -5229,7 +5223,9 @@ class Handler(BaseHTTPRequestHandler):
     def _effective_idle_timeout_s(self) -> float:
         raw_to = None
         if hasattr(self, "headers") and self.headers:
-            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get("X-Subagent-Timeout")
+            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get(
+                "X-Subagent-Timeout"
+            )
         if raw_to:
             try:
                 val = float(raw_to.strip())
@@ -5251,14 +5247,10 @@ class Handler(BaseHTTPRequestHandler):
     def _client_tag(self) -> str:
         return f"{self.client_address[0]}:{self.client_address[1]}"
 
-    def _send(
-        self,
-        code: int,
-        payload: dict,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def _send(self, code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._response_status = int(code)
+        self._telemetry_error_response(int(code), payload, body)
         try:
             self.send_response(int(code))
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -5279,6 +5271,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(data.encode("utf-8"))
             self.wfile.flush()
+            self._telemetry_note(data)
             return True
         except (BrokenPipeError, ConnectionResetError, OSError):
             return False
@@ -5347,17 +5340,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.headers.get("Transfer-Encoding") is not None:
             self.close_connection = True
-            self._reject(
-                400, "invalid_request", "Transfer-Encoding is not supported"
-            )
+            self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
             return
 
         lengths = self.headers.get_all("Content-Length", [])
         if len(lengths) != 1:
             self.close_connection = True
-            self._reject(
-                400, "invalid_request", "A single Content-Length is required"
-            )
+            self._reject(400, "invalid_request", "A single Content-Length is required")
             return
 
         raw_length = lengths[0].strip()
@@ -5399,9 +5388,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "set_enabled":
             enabled = body.get("enabled", True)
             if not isinstance(enabled, bool):
-                self._reject(
-                    400, "invalid_request", "enabled must be a boolean"
-                )
+                self._reject(400, "invalid_request", "enabled must be a boolean")
                 return
 
             res = _PENALTY_TRACKER.set_enabled(enabled)
@@ -5432,9 +5419,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if action == "unban":
                 _PENALTY_TRACKER.unpenalize_model(model)
-                self._send(
-                    200, {"ok": True, "action": "unban", "model": model}
-                )
+                self._send(200, {"ok": True, "action": "unban", "model": model})
                 return
 
             raw_duration = body.get("duration_s", 300.0)
@@ -5577,29 +5562,12 @@ class Handler(BaseHTTPRequestHandler):
             f"model_len={int(model_len)} client={self._client_tag()}"
         )
 
-    def _reject(
-        self,
-        code: int,
-        reason: str,
-        message: str,
-        model: str = "unknown",
-        model_len: int = 0,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def _reject(self, code: int, reason: str, message: str, model: str = "unknown", model_len: int = 0, extra_headers: dict[str, str] | None = None) -> None:
         """Отказ (до SSE): строка `reject …` в журнал и общий формат ошибки."""
         self._log_reject(reason, model, model_len)
+        self._telemetry_meta(model=known_model(model))
         self.close_connection = True
-        self._send(
-            code,
-            {
-                "error": {
-                    "message": message,
-                    "type": reason,
-                    "code": reason if reason == "model_not_found" else int(code),
-                }
-            },
-            extra_headers=extra_headers,
-        )
+        self._send(code, {"error": {"message": message, "type": reason, "code": {"model_not_found": reason}.get(reason, int(code))}}, extra_headers=extra_headers)
 
     def _acquire_slot(self, keepalive):
         """Ждём слот семафора с учётом QoS (резерв слотов для UI и квота сабагентов)."""
@@ -5617,7 +5585,10 @@ class Handler(BaseHTTPRequestHandler):
                         return "client_gone"
                     if time.monotonic() - waited > timeout_budget:
                         return "queue_timeout"
-                    if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                    if (
+                        keepalive is not None
+                        and time.monotonic() - last_ka >= KEEPALIVE_S
+                    ):
                         last_ka = time.monotonic()
                         if not keepalive():
                             return "client_gone"
@@ -5686,7 +5657,6 @@ class Handler(BaseHTTPRequestHandler):
         result_ev = {}
         turn_start = time.monotonic()
         last_ka = time.monotonic()
-        is_subagent = self._is_subagent_request()
         # Safety cap is the absolute upper bound (watchdog against infinite loops)
         safety_cap_s = self._effective_safety_cap_s()
         safety_deadline = turn_start + safety_cap_s
@@ -5828,17 +5798,20 @@ class Handler(BaseHTTPRequestHandler):
                 return state("client_gone", 1, "turn cancelled")
             now = time.monotonic()
             if now > safety_deadline:
-                return state("safety_cap", 124, f"proxy safety cap timeout after {safety_cap_s:.1f}s")
-            if (
-                not run.got_event
-                and now - run.started > FIRST_TOKEN_TIMEOUT_S
-            ):
+                return state(
+                    "safety_cap",
+                    124,
+                    f"proxy safety cap timeout after {safety_cap_s:.1f}s",
+                )
+            if not run.got_event and now - run.started > FIRST_TOKEN_TIMEOUT_S:
                 return state(
                     "first_token_timeout",
                     124,
                     f"{cli_label('no_event')} within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 )
-            latest_progress = max(last_activity, getattr(run, "last_progress", 0.0) or 0.0)
+            latest_progress = max(
+                last_activity, getattr(run, "last_progress", 0.0) or 0.0
+            )
             effective_idle = max(idle_timeout_s, 1.0)
             if run.got_event and (now - latest_progress > effective_idle):
                 if (
@@ -6436,7 +6409,8 @@ class Handler(BaseHTTPRequestHandler):
         timeout_s = float(out.get("timeout_s") or TIMEOUT_S)
         if st == "timeout":
             return {
-                "message": out.get("err") or f"{label} exec timed out after {timeout_s:.1f}s",
+                "message": out.get("err")
+                or f"{label} exec timed out after {timeout_s:.1f}s",
                 "type": "timeout",
                 "code": 504,
             }
@@ -6491,7 +6465,9 @@ class Handler(BaseHTTPRequestHandler):
             }
         if st == "droid_error":
             return {
-                "message": str(out.get("err") or f"{cli_label('exec')} reported an error")[:500],
+                "message": str(
+                    out.get("err") or f"{cli_label('exec')} reported an error"
+                )[:500],
                 "type": "droid_error",
                 "code": 502,
             }
@@ -6662,7 +6638,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- HTTP --------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
-        self._trace = None
+        self._trace = self._req_started_mono = None  # GET-ответы (_send) в телеметрию запросов не попадают
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
             # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
@@ -6701,11 +6677,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path == "/v1/resilience":
-            self._send(
-                200,
-                RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()),
-            )
+            self._send(200, RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()))
             return
+        if path == "/v1/telemetry":
+            return self._telemetry_serve_get()
         if path == "/v1/quarantine":
             if not _auth_ok(self):
                 self._send(
@@ -6867,6 +6842,7 @@ class Handler(BaseHTTPRequestHandler):
         self._headers_already_sent = False
         self._trace = None
         self._response_status = 0
+        self._telemetry_begin()
         path = self.path.split("?", 1)[0]
         m_cancel = (
             re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
@@ -6877,7 +6853,9 @@ class Handler(BaseHTTPRequestHandler):
             _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
         ):
             is_sub = self._is_subagent_request()
-            code, drain_headers, drain_body = LIFECYCLE.draining_response(is_subagent=is_sub)
+            code, drain_headers, drain_body = LIFECYCLE.draining_response(
+                is_subagent=is_sub
+            )
             err = drain_body.get("error", {})
             self._reject(
                 code,
@@ -7027,6 +7005,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
             self._parsed_req = req
+            self._telemetry_meta_request(req)
             if REQUEST_ATTRIBUTION_ENABLED:
                 self._trace = _resolve_trace(dict(self.headers.items()), req)
             else:
@@ -7211,16 +7190,35 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             model_id = resolved_id
+            self._telemetry_meta(model=model_id)
             if model_id not in fleet_models:
-                self._reject(
-                    404,
-                    "model_not_found",
-                    "model is not in the catalogue",
-                    "unknown",
-                    model_len,
-                )
+                self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
                 return
             model = fleet_models[model_id]
+            is_droid = str(model.get("backend") or "").strip().lower() == "droid"
+            # denied: объединение raw-заголовка и trace (заголовок/extra_body/body), чтобы
+            # роль судьи нельзя было провести альтернативным источником идентификатора.
+            raw_subagent_id = str(self.headers.get("X-Subagent-Id") or "")
+            # Прочие backend не платят за разбор trace; при выключенной атрибуции
+            # self._trace пуст, поэтому для droid он строится здесь же, иначе запрет
+            # судьям стал бы fail-open и обходился через extra_body/body.
+            trace_subagent_id = None
+            if is_droid:
+                trace = getattr(self, "_trace", None) or _resolve_trace(
+                    dict(self.headers.items()), req
+                )
+                trace_subagent_id = trace.subagent_id
+            denied_role = is_droid and denied_subagent(
+                "DROID", raw_subagent_id, trace_subagent_id
+            )
+            if denied_role:
+                return self._reject(
+                    403,
+                    "droid_forbidden_for_role",
+                    "droid route is forbidden for this subagent role",
+                    model_id,
+                    model_len,
+                )
             denial = _quarantine_denial(model_id, self.headers.get("X-Subagent-Id"))
             if denial is not None:
                 self._log_reject(denial.reason, model_id, model_len)
@@ -7256,7 +7254,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 upstream_model = model.get("upstream_model")
-                has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+                has_upstream = isinstance(upstream_model, str) and bool(
+                    upstream_model.strip()
+                )
                 if has_upstream or alias is not None:
                     target_model = upstream_model.strip() if has_upstream else model_id
                     req = {**req, "model": target_model}
@@ -7305,37 +7305,28 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             # (9a) autonomy: low|medium|high|off -> `autonomyLevel` RPC
-            # (off — read-only droid, Reviewer-пути); дефолт high (максимум).
-            raw_autonomy = req.get("autonomy")
-            if raw_autonomy is None:
-                autonomy = AUTONOMY_DEFAULT
-                autonomy_source = "default"
-            elif isinstance(raw_autonomy, str):
-                candidate = raw_autonomy.strip()
-                if not candidate:
-                    autonomy = AUTONOMY_DEFAULT
-                    autonomy_source = "default"
-                elif candidate in AUTONOMY_LEVELS or candidate == AUTONOMY_OFF:
-                    autonomy = candidate
-                    autonomy_source = "request"
-                else:
-                    self._reject(
-                        400,
-                        "unsupported_autonomy",
-                        "autonomy is not allowed (low|medium|high|off)",
-                        model_id,
-                        model_len,
+            # (off — read-only droid); дефолт конфигурируемый, fail-closed off.
+            autonomy, autonomy_source = req.get("autonomy"), "request"
+            if is_droid:
+                try:
+                    decision = resolve_autonomy_decision(
+                        req.get("autonomy"),
+                        "DROID",
+                        subagent_id=raw_subagent_id or None,
+                        require_subagent=True,
                     )
+                    autonomy, autonomy_source = decision.value, decision.source
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
                     return
             else:
-                self._reject(
-                    400,
-                    "unsupported_autonomy",
-                    "autonomy must be a string",
-                    model_id,
-                    model_len,
-                )
-                return
+                # Не-Droid маршруты сохраняют прежнюю базовую проверку формата: тип и
+                # значение low|medium|high|off проверяются без Droid-ограничений роли.
+                try:
+                    _ = validate_autonomy_request(req.get("autonomy"))
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
+                    return
             # (10) reasoning-объект не поддерживаем.
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(
@@ -7974,17 +7965,21 @@ class Handler(BaseHTTPRequestHandler):
                     return False
             return True
 
+        queue_started = self._telemetry_queue_start(backend_id)
         qos_ok, qos_reason = qos.acquire_slot(
             is_interactive=is_interactive,
             keepalive_cb=_keepalive_cb if is_stream else None,
             timeout=qos_timeout,
             client_gone_fn=lambda: _client_gone(getattr(self, "connection", None)),
         )
+        self._telemetry_queue_done(queue_started)
         if not qos_ok:
             if qos_reason == "client_gone":
                 self.close_connection = True
+                self._record_telemetry(client_gone=True)
                 return
             if headers_sent[0]:
+                self._record_telemetry(status_code=503, error_type="overloaded_error")
                 err_payload = json.dumps(
                     {
                         "error": {
@@ -8046,6 +8041,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.close_connection = True
                 if headers_sent[0]:
+                    self._record_telemetry(status_code=503, error_type=exc.error_type)
                     err_payload = json.dumps(
                         {
                             "error": {
@@ -8099,9 +8095,8 @@ class Handler(BaseHTTPRequestHandler):
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
         lease = self._current_lease()
         started = time.monotonic()
-        _log(
-            f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}"
-        )
+        self._telemetry_meta(route_mode="passthrough", backend_id=adapter.id, model=model_id)
+        _log(f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}")
         raw, req = _strip_passthrough_env(raw, req)
         headers = {key: value for key, value in self.headers.items()}
         trace_headers = _trace_headers(self._trace)
@@ -8115,16 +8110,29 @@ class Handler(BaseHTTPRequestHandler):
             headers = {
                 key: value
                 for key, value in headers.items()
-                if key.lower() not in {"authorization", "x-api-key", "x-turn-owner-token"}
+                if key.lower()
+                not in {"authorization", "x-api-key", "x-turn-owner-token"}
             }
         live_id = new_passthrough_turn_id() if flag_enabled(FLAG_TELEMETRY) else ""
         window = passthrough_window(adapter.limits, self.path, req) if live_id else None
-        sink = _HandlerSink(self, extra_headers=[*trace_headers, ("X-Turn-Id", live_id)] if live_id else trace_headers)
+        sink = _HandlerSink(
+            self,
+            extra_headers=[*trace_headers, ("X-Turn-Id", live_id)]
+            if live_id
+            else trace_headers,
+        )
         try:
             extra = {"window": window} if live_id else {}
             if live_id:
                 get_registry().register(live_id, _owner_token_hash(self), window)
-            adapter.handle(path=self.path, raw_body=raw, request=req, headers=headers, sink=sink, **extra)
+            adapter.handle(
+                path=self.path,
+                raw_body=raw,
+                request=req,
+                headers=headers,
+                sink=sink,
+                **extra,
+            )
             fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
             canonical_model_id = (
                 _resolve_model_alias(model_id, fleet_models)[0]
@@ -8154,19 +8162,18 @@ class Handler(BaseHTTPRequestHandler):
                 )
         finally:
             get_registry().finish(live_id)
-            _log(
-                f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._telemetry_passthrough_done(sink.status)
+            _log(f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json(self, ctx: dict) -> None:
         started = time.monotonic()
         self._response_status = 0
+        self._telemetry_meta(route_mode="cli", backend_id=ctx.get("backend"), model=ctx.get("model"), stream=False)
         try:
             self._serve_json_body(ctx)
         finally:
-            _log(
-                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._record_telemetry()
+            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
@@ -8188,6 +8195,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
+        self._telemetry_usage(usage)
         wire_usage = _wire_usage(
             usage.get("input_tokens", 0),
             usage.get("output_tokens", 0),
@@ -8241,6 +8249,7 @@ class Handler(BaseHTTPRequestHandler):
             for piece in _text_slices(value):
                 total += len(_escape_json_piece(piece))
         self._response_status = 200
+        self._telemetry_note(total, first_byte=True)
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(total))
@@ -8285,12 +8294,12 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_sse(self, ctx: dict) -> None:
         started = time.monotonic()
         self._response_status = 0
+        self._telemetry_meta(route_mode="cli", backend_id=ctx.get("backend"), model=ctx.get("model"), stream=True)
         try:
             self._serve_sse_body(ctx)
         finally:
-            _log(
-                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._record_telemetry(client_gone=self._client_write_dead)
+            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_sse_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
@@ -8319,6 +8328,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             _log("client gone before headers")
+            self._telemetry_gone()
             lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
@@ -8420,6 +8430,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not emit(chunk({field: piece})):
                         ok = False
                         break
+                    self._telemetry_note(chunk=True)
                     live_sent[0] += len(piece.encode("utf-8"))
                     if kind == "reasoning":
                         reasoning_live_chars += len(piece)
@@ -8469,6 +8480,7 @@ class Handler(BaseHTTPRequestHandler):
             lease.record_discard("client_disconnected")
             return
         if out.get("state") == "client_gone":
+            self._telemetry_gone()
             _log("client gone mid-stream, child killed")
             lease.record_discard("client_disconnected")
             return
@@ -8482,6 +8494,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
+        self._telemetry_error(err)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
@@ -8513,6 +8526,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not delivered:
                     _log("client gone during delivery; turn already committed")
                     return
+                self._telemetry_note(chunk=True)
             finish = "tool_calls" if out.get("tool_calls") else "stop"
             emit(chunk({}, finish))
             # Harness считает tok/s и % контекста только из usage в потоке
@@ -8523,6 +8537,7 @@ class Handler(BaseHTTPRequestHandler):
             out_usage = out.get("usage") or {}
             prompt_toks = out_usage.get("input_tokens", 0)
             compl_toks = out_usage.get("output_tokens", 0)
+            self._telemetry_usage(out_usage)
             if prompt_toks or compl_toks:
                 emit(
                     "data: "

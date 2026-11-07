@@ -17,11 +17,13 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import baseline_rename_count, orphan_registry_entries  # noqa: E402
 from bridge_testlib import pid_alive, wait_until  # noqa: E402
 from rpc_testlib import (  # noqa: E402
     DONE_LINE,
@@ -382,9 +384,9 @@ class TestTimeoutsAndCancel(RpcCase):
         server.KEEPALIVE_S = self.saved_ka
         super().tearDown()
 
-    def test_tm010_silence_watchdog_interrupts_and_invalidates_chat(self):
+    def test_tm010_silence_watchdog_interrupts_and_invalidates_chat(self) -> None:
         """TM-010: watchdog без прогресса -> interrupt, 504 timeout; чат DIRTY, следующий ход — replay."""
-        server.SILENCE_WATCHDOG_S = 0.6
+        self.enterContext(mock.patch.object(server, "IDLE_TIMEOUT_S", 0.6))
         self.hub.script(
             [{"steps": [{"op": "text", "text": "partial"}, {"op": "hang"}]}]
         )
@@ -660,25 +662,16 @@ class TestPersistenceAndShutdown(RpcCase):
             bystander.kill()
             bystander.wait()
 
-    def test_tm013_reconcile_kills_only_own_orphans_by_start_signature(self):
+    def test_tm013_reconcile_kills_only_own_orphans_by_start_signature(self) -> None:
         """TM-013: на старте проверка PID/PGID/start-signature; чужой PID не убивается; EOF у детей при смерти родителя."""
+        self.enterContext(
+            mock.patch.object(server, "has_live_parent", return_value=False)
+        )
         own = subprocess.Popen(["sleep", "60"], start_new_session=True)
         foreign = subprocess.Popen(["sleep", "60"], start_new_session=True)
         reused = subprocess.Popen(["sleep", "60"], start_new_session=True)
         try:
-            entries = [
-                {
-                    "pid": own.pid,
-                    "start": server._proc_start_sig(own.pid),
-                    "bridge_pid": 1,
-                },
-                {
-                    "pid": reused.pid,
-                    "start": "Mon Jan  1 00:00:00 1990",
-                    "bridge_pid": 1,
-                },  # подпись не совпала
-                {"pid": foreign.pid, "start": "", "bridge_pid": 1},  # без подписи
-            ]
+            entries = orphan_registry_entries(own, reused, foreign)
             server._atomic_write(server._children_path(), json.dumps(entries).encode())
             self.assertEqual(server.reconcile_children(), 1)
             self.assertTrue(wait_until(lambda: own.poll() is not None))
@@ -841,7 +834,9 @@ class TestJournalGolden(RpcCase):
             self.assertEqual(chat.send()[0], 200)
             self.assertEqual(chat.ask("again")[0], 200)
         strict = [
-            ln for ln in lines if ln.startswith(("exec ", "usage ", "done ", "reject "))
+            ln
+            for ln in lines
+            if ln.startswith(("exec ", "usage ", "done ", "reject "))
             and not ln.startswith("done route=")
         ]
         for line in strict:
@@ -930,10 +925,7 @@ class TestBaselineInventory(unittest.TestCase):
             if new not in present
         ]
         self.assertEqual(missing, [])
-        renamed = {
-            old: t for old, t in data["baseline_to_current"].items() if t != [old]
-        }
-        self.assertEqual(len(renamed), 6)  # 4 RPC + 2 effort-clamp oracle_change
+        self.assertEqual(baseline_rename_count(data["baseline_to_current"]), 7)
 
 
 if __name__ == "__main__":

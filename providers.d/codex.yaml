@@ -22,15 +22,6 @@ family_rule:
     verified: true
     map: {gpt-: OpenAI}
 models_overrides:
-  gpt-6.1-sol:
-    name: GPT-6.1 Sol (Codex passthrough)
-    efforts: [high]
-    default_effort: high
-    context_window: 272000
-    max_tokens: 128000
-    input: [text]
-    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
-    policy_lines: [111, 398, 406, 436]
   gpt-6.1-terra:
     name: GPT-6.1 Terra (Codex passthrough)
     efforts: [low, medium, high]
