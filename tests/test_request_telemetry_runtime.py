@@ -243,6 +243,31 @@ def test_concurrent_writers_readers_and_close(telemetry_make_store, telemetry_ev
     assert errors == [] and st.get_telemetry_payload()["enabled"] is False  # закрытый стор читается без исключений
 
 
+def test_open_is_idempotent_and_starts_single_writer(tmp_path):
+    st = RequestTelemetryStore(str(tmp_path / "io" / "t.duckdb"), force_sqlite=True, autostart=True, enabled=True,
+                               flush_interval_ms=60000)
+    try:
+        assert st.ensure_open() and st._opened is True
+        thread = st._thread
+        assert st.ensure_open() is True and st._thread is thread  # повторное обращение не переоткрывает стор
+        assert sum(t.name == "bridge-telemetry-writer" for t in threading.enumerate()) == 1
+    finally:
+        st.close()
+
+
+def test_tick_writes_queued_rows_without_waiting_for_empty_queue(telemetry_make_store, telemetry_event):
+    st = telemetry_make_store(batch_size=2, flush_max_batches=1, name="tick")
+    try:
+        for i in range(5):
+            st.record_request(telemetry_event(request_id=f"t{i}"))
+        st._tick()
+        assert st._query("SELECT COUNT(*) AS n FROM bridge_requests")[0]["n"] == 2 and st._queue.qsize() == 3
+        st._tick()
+        assert st._query("SELECT COUNT(*) AS n FROM bridge_requests")[0]["n"] == 4
+    finally:
+        st.close()
+
+
 def test_window_is_clamped_and_nan_falls_back(telemetry_store):
     values = [telemetry_store._window(v) for v in (float("nan"), float("inf"), float("-inf"), -5, 1e12, "junk", None)]
     assert values == [24.0, 720.0, 0.1, 0.1, 720.0, 24.0, 24.0]
