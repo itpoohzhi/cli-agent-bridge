@@ -24,9 +24,9 @@ EXTRA_TOOL = "wait-for-script-cli"
 MODEL_EFFORTS = (
     ("low", "medium", "high", "max"),
     ("low", "medium", "high"),
-    ("off", "low", "medium", "high"),
+    ("off", "low", "high", "max"),
     ("low", "medium", "high"),
-    ("low", "medium", "high"),
+    ("low", "high", "max"),
 )
 PROBE_PAIRS = [
     (mid, effort)

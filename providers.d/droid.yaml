@@ -39,7 +39,7 @@ models_overrides:
     policy_lines: [100, 142, 174, 431]
   deepseek-v4.1-flash:
     name: DeepSeek V4.1 Flash (Droid bridge)
-    efforts: ['off', low, medium, high]
+    efforts: ['off', low, high, max]
     default_effort: 'off'
     context_window: 1000000
     max_tokens: 384000
@@ -57,7 +57,7 @@ models_overrides:
     policy_lines: [111, 398, 406, 436]
   kimi-k3.1-pro:
     name: Kimi K3.1 Pro (Droid bridge)
-    efforts: [low, medium, high]
+    efforts: [low, high, max]
     default_effort: high
     context_window: 262144
     max_tokens: 16384
