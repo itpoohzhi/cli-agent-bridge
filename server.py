@@ -76,12 +76,14 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     discover_local_cdp_url,
     is_loopback_cdp_url,
 )
-from receipt_schema import (  # noqa: E402
+from receipt_schema import (  # noqa: E402,F401
     RECEIPT_PROBES,
     RECEIPT_SCHEMA,
     RPC_API_VERSION,
     SETTINGS_PROFILE,
     TOOLS_POLICY,
+    ReceiptV3,
+    catalog_tool_ids,
     settings_profile_digest,
     tools_policy_digest,
 )
@@ -175,10 +177,16 @@ from core.catalog_flags import (  # noqa: E402
     sidecar_allowlist,
 )
 from core import quarantine_gate as qgate  # noqa: E402
+from core.droid_session_gate import (  # noqa: E402
+    ToolsGateError,
+    admit_model,
+    plan_tools_disable,
+    verify_tools_disabled,
+)
 from core.effort_policy import (  # noqa: E402
     DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_LEVELS as EFFORT_LEVELS, EFFORT_ORDER,
-    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec, catalog_effort_specs,
-    clamp_effort_downward, describe_clamp, resolve_alias_effort,
+    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec, canonical_model_id,
+    catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields, resolve_passthrough_effort,
 )
 CLI_CFG = CliRuntimeConfig.from_env()
@@ -1153,15 +1161,7 @@ def _check_receipt_quad(rec: dict) -> None:
         raise LauncherUnavailable(
             "droid receipt: stream-jsonrpc protocol version mismatch"
         )
-    policy = rec.get("tools_policy")
-    ids = policy.get("disabled_tool_ids") if isinstance(policy, dict) else None
-    if (
-        not isinstance(policy, dict)
-        or policy.get("policy") != TOOLS_POLICY
-        or not isinstance(ids, list)
-        or not ids
-        or policy.get("digest") != tools_policy_digest(ids)
-    ):
+    if isinstance(ReceiptV3.parse(rec), str):
         raise LauncherUnavailable("droid receipt: tools policy mismatch")
     profile = rec.get("settings_profile")
     if (
@@ -1217,6 +1217,18 @@ def _load_receipt() -> tuple:
         raise LauncherUnavailable("droid image sha256 does not match receipt")
     _check_receipt_quad(rec)
     return real, rec
+
+
+def _tools_receipt() -> ReceiptV3 | None:
+    """Квалификация tools по моделям из receipt; None — gate выключен."""
+    try:
+        _, rec = _load_receipt()
+    except LauncherUnavailable as exc:
+        raise RpcError(f"droid receipt changed during spawn: {exc}")
+    parsed = ReceiptV3.parse(rec) if rec else None
+    if isinstance(parsed, str):
+        raise RpcError(f"droid receipt invalid: {parsed}")
+    return parsed
 
 
 def _droid_image() -> str:
@@ -4177,7 +4189,7 @@ class Run:
             self._publish(("stream_error", str(exc)[:500]))
         except RpcEof as exc:
             self._publish(("done", (exc.rc or 1, "")))
-        except RpcError as exc:
+        except (RpcError, ToolsGateError) as exc:
             self._publish(("pump_error", str(exc)[:500]))
         except OSError as exc:
             self._publish(("pump_error", repr(exc)))
@@ -4322,7 +4334,7 @@ class Run:
         msgs = raw_msgs if isinstance(raw_msgs, list) else []
         self.sid = sid
         self.droid_real = sum(1 for m in msgs if not _is_service_message(m))
-        self._disable_native_tools(proc)
+        self._disable_native_tools(proc, plan["settings"][0])
 
     @staticmethod
     def _check_protocol(proc: RpcProcess) -> None:
@@ -4339,51 +4351,18 @@ class Run:
                 f"droid protocol {proc.protocol_version or '-'} differs from qualified {expected}"
             )
 
-    @staticmethod
-    def _check_tools_policy(listed: list) -> None:
-        """Каталог tools живого droid обязан совпасть с квалифицированным набором из receipt (RW-009)."""
-        if not RECEIPT_REQUIRED:
-            return
-        try:
-            _, rec = _load_receipt()
-        except LauncherUnavailable as exc:
-            raise RpcError(f"droid receipt changed during spawn: {exc}")
-        if sorted(listed) != sorted(rec["tools_policy"]["disabled_tool_ids"]):
-            raise RpcError(
-                "native tool catalogue differs from the qualified tools policy"
-            )
-
-    def _disable_native_tools(self, proc: RpcProcess) -> None:
-        """Нативные tools отключаются по АКТУАЛЬНОМУ list_tools (новые id тоже); сбой — fail-closed."""
+    def _disable_native_tools(self, proc: RpcProcess, model: str) -> None:
+        """Нативные tools модели отключаются по актуальному list_tools; сбой — fail-closed."""
         result, _ = proc.call("droid.list_tools", {}, self.cancel)
-        tools = result.get("tools")
-        if (
-            not isinstance(tools, list)
-            or not tools
-            or not all(
-                isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"]
-                for t in tools
-            )
-        ):
-            raise RpcError("list_tools: invalid catalogue")
-        ids = [t["id"] for t in tools]
-        self._check_tools_policy(ids)
-        keep = set(self.plan.get("keep_tools") or ())
-        ids = [i for i in ids if i not in keep]
-        if not ids:
-            return
-        _, stash = proc.call(
-            "droid.update_session_settings", {"disabledToolIds": ids}, self.cancel
-        )
-        updated = self._wait_settings_updated(proc, stash)
-        if updated is None:
-            raise RpcError("native tools: settings_updated read-back not received")
-        disabled = updated.get("disabledToolIds")
-        if not isinstance(disabled, list):
-            raise RpcError("native tools: disabledToolIds missing in read-back")
-        if not set(ids).issubset(set(map(str, disabled))):
-            raise RpcError("native tools were not disabled (read-back mismatch)")
-        self._check_flags(updated)
+        ids = catalog_tool_ids(result.get("tools"))
+        keep = self.plan.get("keep_tools") or ()
+        plan = plan_tools_disable(ids, _tools_receipt(), model, keep)
+        if plan.disabled_ids:
+            params = {"disabledToolIds": list(plan.disabled_ids)}
+            _, stash = proc.call("droid.update_session_settings", params, self.cancel)
+            updated = self._wait_settings_updated(proc, stash)
+            verify_tools_disabled(plan, updated)
+            self._check_flags(updated)
 
     def _wait_settings_updated(
         self, proc: RpcProcess, stash: list, timeout: float = 2.0
@@ -4418,6 +4397,7 @@ class Run:
         if tuple(current) == tuple(desired):
             return
         model, effort, autonomy = desired
+        admit_model(_tools_receipt(), model)
         params = {
             "modelId": model,
             "reasoningEffort": effort,
@@ -4428,6 +4408,8 @@ class Run:
         if settings is None or "modelId" not in settings:
             raise _NeedRebase()  # read-back не подтвердился: безопасно — свежая generation
         self._check_settings(settings)
+        if model != current[0]:
+            self._disable_native_tools(proc, model)
 
     def _load(self, proc: RpcProcess) -> bool:
         """load_session того же SID + проверка целостности; False -> свежая generation."""
@@ -4483,7 +4465,7 @@ class Run:
             if isinstance(settings, dict)
             else ("", "", "")
         )
-        self._disable_native_tools(proc)
+        self._disable_native_tools(proc, str(plan["current_settings"][0] or plan["settings"][0]))
         try:
             self._sync_settings(proc, plan["settings"])
         except _NeedRebase:

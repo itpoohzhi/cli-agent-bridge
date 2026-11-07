@@ -4,7 +4,7 @@
 Копирует исполняемый файл droid в `workspace/runtime/droid-image/<sha256>/droid`
 (каталоги 0700, файл 0500; sha256 считается по КОПИИ после fsync), глобальный бинарь не
 меняет. Затем ЗАПУСКАЕТ копию по stream-jsonrpc и проверяет три пробы (spawn, update, load):
-только после их успеха атомарно пишется `workspace/state/droid-binary-receipt.json` (schema 2).
+только после их успеха атомарно пишется `workspace/state/droid-binary-receipt.json` (schema 3).
 
 Receipt фиксирует четвёрку допуска: образ (sha256) + протокол (`api_version` и
 `factoryProtocolVersion` из кадров живого droid) + политика tools (id отключаемых tools и отпечаток)
@@ -18,7 +18,6 @@ Receipt фиксирует четвёрку допуска: образ (sha256) 
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -29,11 +28,15 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import IO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from droid_qualify_models import (  # noqa: E402
+    ProbeError, ProbeSettings, RpcExchange, build_parser, init_params, qualify_models, resolve_models,
+)
 import receipt_schema as schema  # noqa: E402  - единственная общая с мостом зависимость: без server.py и fleet.json
 
 PROBE_TIMEOUT_S = 30.0
@@ -49,11 +52,7 @@ READBACK_KEYS = (
 )
 
 
-class ProbeError(Exception):
-    """Проба квалификации не пройдена: receipt не пишется."""
-
-
-def _settings_from_notes(notes: list) -> dict | None:
+def _settings_from_notes(notes: Sequence[object]) -> dict | None:
     """settings из первой нотификации settings_updated среди уже полученных call()."""
     for params in notes:
         note = params.get("notification") if isinstance(params, dict) else None
@@ -178,8 +177,8 @@ class _Rpc:
         self.inbox.put(None)
 
     def call(
-        self, method: str, params: dict, timeout: float = PROBE_TIMEOUT_S
-    ) -> tuple:
+        self, method: str, params: Mapping[str, object], timeout: float = PROBE_TIMEOUT_S
+    ) -> RpcExchange:
         """-> (result, нотификации за время ожидания)."""
         self._next += 1
         rid = f"p{self._next}"
@@ -212,7 +211,7 @@ class _Rpc:
                 if msg.get("error") is not None:
                     raise ProbeError(f"{method}: {str(msg['error'])[:200]}")
                 result = msg.get("result")
-                return (result if isinstance(result, dict) else {}), notes
+                return RpcExchange(result if isinstance(result, dict) else {}, notes)
             if msg.get("method") == "droid.session_notification" and isinstance(
                 msg.get("params"), dict
             ):
@@ -299,20 +298,7 @@ def run_probes(image: Path, workspace: Path) -> dict:
     try:
         result, _ = rpc.call(
             "droid.initialize_session",
-            {
-                "machineId": "droid-image-probe",
-                "cwd": str(cwd),
-                "modelId": model,
-                "reasoningEffort": effort,
-                "autonomyLevel": PROBE_AUTONOMY,
-                "interactionMode": "auto",
-                "title": "droid-image-probe",
-                **{
-                    k: v
-                    for k, v in schema.SETTINGS_PROFILE.items()
-                    if k != "interactionMode"
-                },
-            },
+            init_params(ProbeSettings(cwd, effort, PROBE_AUTONOMY), model),
         )
         sid = result.get("sessionId")
         settings = result.get("settings")
@@ -335,17 +321,9 @@ def run_probes(image: Path, workspace: Path) -> dict:
         if not protocol:
             raise ProbeError("spawn: в кадрах droid нет factoryProtocolVersion")
         tools, _ = rpc.call("droid.list_tools", {})
-        listed = tools.get("tools")
-        if (
-            not isinstance(listed, list)
-            or not listed
-            or not all(
-                isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"]
-                for t in listed
-            )
-        ):
+        ids = list(schema.catalog_tool_ids(tools.get("tools")))
+        if not ids:
             raise ProbeError("update: list_tools вернул некорректный каталог")
-        ids = sorted(t["id"] for t in listed)
         _, stash = rpc.call("droid.update_session_settings", {"disabledToolIds": ids})
         updated = _settings_from_notes(stash)
         if updated is None:
@@ -382,10 +360,8 @@ def run_probes(image: Path, workspace: Path) -> dict:
     }
 
 
-def install_image(source: Path, workspace: Path) -> dict:
-    """Скопировать образ, пройти пробы, записать receipt; вернуть содержимое receipt."""
-    snapshot = source.stat()
-    source_sha = _sha256(source)
+def _publish_image(source: Path, workspace: Path) -> tuple[Path, str]:
+    """Копия образа `runtime/droid-image/<sha256>/droid` (0500) -> (путь, sha256)."""
     runtime = workspace / "runtime" / "droid-image"
     _ensure_private_chain(runtime, workspace)
     tmp = runtime / f".incoming-{os.getpid()}"
@@ -400,8 +376,16 @@ def install_image(source: Path, workspace: Path) -> dict:
         os.chmod(image, 0o700)
     os.replace(tmp, image)
     os.chmod(image, 0o500)
-    facts = run_probes(image, workspace)
-    receipt = {
+    return image, image_sha
+
+
+def _receipt_document(
+    origin: tuple[Path, os.stat_result, str], image: Path, image_sha: str, facts: dict
+) -> dict:
+    """Документ receipt v3."""
+    source, snapshot, source_sha = origin
+    qualified = facts["qualified_models"]
+    return {
         "schema": schema.RECEIPT_SCHEMA,
         "image_path": str(image),
         "image_sha256": image_sha,
@@ -412,8 +396,9 @@ def install_image(source: Path, workspace: Path) -> dict:
         "tools_policy": {
             "policy": schema.TOOLS_POLICY,
             "disabled_tool_ids": facts["disabled_tool_ids"],
-            "digest": schema.tools_policy_digest(facts["disabled_tool_ids"]),
+            "digest": schema.tools_policy_digest(facts["disabled_tool_ids"], qualified),
         },
+        "qualified_models": schema.canonical_qualified_models(qualified),
         "settings_profile": {
             "profile": schema.SETTINGS_PROFILE,
             "digest": schema.settings_profile_digest(),
@@ -428,42 +413,41 @@ def install_image(source: Path, workspace: Path) -> dict:
         },
         "created_at": int(time.time()),
     }
+
+
+def install_image(source: Path, workspace: Path, models: Sequence[str] = ()) -> dict:
+    """Скопировать образ, пройти пробы и квалификацию `models`, записать receipt."""
+    snapshot, source_sha = source.stat(), _sha256(source)
+    image, image_sha = _publish_image(source, workspace)
+    facts = run_probes(image, workspace)
+    home, cwd = (workspace / "runtime" / name for name in ("probe-home", "probe-cwd"))
+    settings = ProbeSettings(cwd, PROBE_MODEL_EFFORT[1], PROBE_AUTONOMY)
+    probed = schema.QualifiedModelSpec(PROBE_MODEL_EFFORT[0], tuple(facts["disabled_tool_ids"]))
+    others = qualify_models(lambda: _Rpc(image, cwd, home), settings, models)
+    facts["qualified_models"] = {q.model_id: q.tool_ids for q in (probed, *others)}
+    receipt = _receipt_document((source, snapshot, source_sha), image, image_sha, facts)
     state = workspace / "state"
     _ensure_private_chain(state, workspace)
-    target = state / "droid-binary-receipt.json"
     staging = state / f".receipt-{os.getpid()}.tmp"
     fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(receipt, handle, sort_keys=True)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(staging, target)
+    os.replace(staging, state / "droid-binary-receipt.json")
     return receipt
 
 
 def main(argv: list | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="droid_image", description=__doc__.splitlines()[0]
-    )
-    parser.add_argument(
-        "--source",
-        default=os.path.expanduser("~/.local/bin/droid"),
-        help="глобальный бинарь droid (не изменяется)",
-    )
-    parser.add_argument(
-        "--workspace",
-        default=str(Path(__file__).resolve().parent.parent / "workspace"),
-        help="workspace моста (runtime/droid-image и state/)",
-    )
-    args = parser.parse_args(argv)
-    source = Path(args.source)
+    args = build_parser(__doc__.splitlines()[0]).parse_args(argv)
+    source = Path(args.source or os.path.expanduser("~/.local/bin/droid"))
     if not source.is_file() or not os.access(source, os.X_OK):
         sys.stderr.write(
             f"droid_image: источник не найден или не исполняем: {source}\n"
         )
         return 2
     try:
-        receipt = install_image(source, Path(args.workspace))
+        receipt = install_image(source, Path(args.workspace), resolve_models(args))
     except ProbeError as exc:
         sys.stderr.write(
             f"droid_image: проба квалификации не пройдена, receipt не записан: {exc}\n"
@@ -471,7 +455,8 @@ def main(argv: list | None = None) -> int:
         return 3
     sys.stdout.write(
         f"image={receipt['image_path']} sha256={receipt['image_sha256']} "
-        f"protocol={receipt['protocol']['protocol_version']}\n"
+        f"protocol={receipt['protocol']['protocol_version']} "
+        f"models={len(receipt['qualified_models'])}\n"
     )
     return 0
 
