@@ -95,7 +95,6 @@ import random
 import re
 import select
 import shutil
-import signal
 import socket
 import sqlite3
 import subprocess
@@ -153,6 +152,8 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.proc_groups import spawn_registered  # noqa: E402
+from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.stream_interruption_recovery import (  # noqa: E402
     InterruptionTailState,
     evaluate_graceful_interruption,
@@ -183,7 +184,6 @@ FLEET_PATH = Path(os.environ.get("AGY_BRIDGE_FLEET", "") or str(ROOT / "fleet.js
 ENV_MODEL = os.environ.get("AGY_BRIDGE_MODEL", "").strip()
 WORKSPACE = ROOT / "workspace"
 PRINT_TIMEOUT = os.environ.get("AGY_BRIDGE_PRINT_TIMEOUT", "0")
-
 
 def _env_float(name: str, default: float, low: float, high: float) -> float:
     """Float из окружения; пустое/невалидное/неконечное/вне [low, high] -> default."""
@@ -3121,7 +3121,7 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
-_kill_all = _supervisor.kill_all
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=lambda: list(_active.copy().values()), cleanup_fn=lambda: _supervisor.kill_all([p for p in _active.copy().values() if p.returncode is None]), log_fn=_log), workspace=WORKSPACE)
 
 
 # ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
@@ -5364,7 +5364,7 @@ class Run:
             plan.anchored = False
             plan.reason = "cid_busy"
         try:
-            self.proc = subprocess.Popen(
+            self.proc = spawn_registered(
                 cmd,
                 cwd=work_dir,
                 stdin=subprocess.PIPE,
@@ -5966,6 +5966,7 @@ class Run:
         _kill_group(self.proc)
         with _active_lock:
             _active.pop(self.proc.pid, None)
+        spawn_registered.unregister(self.proc)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:
@@ -6243,6 +6244,7 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
+@_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _registry_job: _Job | None = None
     protocol_version = "HTTP/1.1"
@@ -8376,8 +8378,6 @@ def main() -> None:
         _launcher()
     except LauncherUnavailable:
         _log(f"launcher_missing path={LAUNCHER} (requests will fail with 503)")
-    signal.signal(signal.SIGTERM, _kill_all)
-    signal.signal(signal.SIGINT, _kill_all)
     api_key_present = "yes" if AUTH_KEY else "no"
     server = Server((HOST, PORT), Handler)
     _log(
@@ -8386,7 +8386,7 @@ def main() -> None:
         f"api_key={api_key_present}"
     )
     print(f"[agy-bridge] listening on http://{HOST}:{PORT}/v1", flush=True)
-    server.serve_forever()
+    raise SystemExit(_LIFECYCLE.serve_forever(server))
 
 
 if __name__ == "__main__":

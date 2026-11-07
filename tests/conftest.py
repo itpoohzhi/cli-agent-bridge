@@ -255,6 +255,16 @@ def _fresh_config_snapshots(
     runtime_env._SNAPSHOTS.clear()
 
 
+@pytest.fixture(autouse=True)
+def _spawn_barrier_open() -> Generator[None, None, None]:
+    """Барьер `spawn_registered` глобален: `force_kill` одного теста не должен блокировать spawn в других."""
+    from core import proc_groups
+
+    proc_groups._set_spawn_blocked(False)
+    yield
+    proc_groups._set_spawn_blocked(False)
+
+
 # --- Телеметрия запросов: общие фикстуры юнит- и HTTP-тестов (чтобы модули тестов остались в лимите M-MOD-I1) ---
 TELEMETRY_ENGINES = ("duckdb", "sqlite3")
 _TELEMETRY_EVENT_BASE = {

@@ -73,14 +73,16 @@ except ImportError:
     RepetitionGuard = None  # type: ignore[assignment,misc]
 from core.cli_runtime_config import NonstreamConfig
 from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
-from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, relax_socket_timeout, request_deadlines
-from core.runtime_env import bounded_int as _bounded_int, env_bool, positive_int as _positive_int
+from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
+from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, SlidingDeadline, open_sliding_deadline
+from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
 from core.stream_framing import (
     build_stream_error_chunk,
     format_sse_event,
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
 )
+_SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
 
 # Имена env (таблица AD-005) и значения по умолчанию: defaults — не потолки, переопределяются.
 ENV_MAX_PARALLEL_CALLS = "BRIDGE_MAX_PARALLEL_CALLS"
@@ -136,7 +138,6 @@ _REQUEST_DROP = _HOP_BY_HOP | {
 }
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
 
-
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
     try:
         value = float(str(environ.get(name, "")).strip())
@@ -159,6 +160,7 @@ class PassthroughLimits:
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S  # совместимость старого конструктора
     idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S
     total_timeout_s: float = DEFAULT_TOTAL_TIMEOUT_S
+    stream_safety_cap_s: float = 3600.0  # потолок активного stream=True при скользящем окне
     heartbeat_interval_s: float = 12.0
     poll_interval_s: float = 0.1
     reader_join_timeout_s: float = 0.2
@@ -215,6 +217,7 @@ class PassthroughLimits:
             total_timeout_s=_positive_float(
                 env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S
             ),
+            stream_safety_cap_s=_positive_float(env, "BRIDGE_STREAM_SAFETY_CAP_S", 3600.0),
             heartbeat_interval_s=_positive_float(
                 env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
             ),
@@ -706,14 +709,14 @@ class _TimedSseReader:
         readline: Callable[[int], bytes],
         write: Callable[[bytes], None],
         limits: PassthroughLimits,
-        deadline: float,
+        deadline: float | SlidingDeadline,
         window: LivenessWindow | None = None,
         enforce: bool = False,
     ) -> None:
         self.limits = limits
-        self.deadline = deadline
+        self.cell = SlidingDeadline.wrap(deadline)
         self.write = write
-        self.progress = SseProgress(window, enforce)
+        self.progress = SseProgress(window, enforce, self.cell)
         self.items: queue.Queue[bytes | Exception] = queue.Queue(
             maxsize=limits.read_queue_max_entries
         )
@@ -754,7 +757,7 @@ class _TimedSseReader:
         self.request_read.release()
         while True:
             now = time.monotonic()
-            remaining = self.progress.remaining(self.deadline - now)
+            remaining = self.progress.remaining(self.cell.deadline_s - now)
             if self.progress.last_progress is not None:
                 remaining = min(
                     remaining, self.progress.last_progress + self.limits.idle_timeout_s - now
@@ -772,7 +775,7 @@ class _TimedSseReader:
                 )
             except queue.Empty:
                 continue
-            if time.monotonic() >= self.deadline:
+            if time.monotonic() >= self.cell.deadline_s:
                 raise TimeoutError("upstream stream deadline exceeded")
             if isinstance(item, Exception):
                 raise item
@@ -796,7 +799,7 @@ def relay_sse(
     sanitize: bool = True,
     trusted_tools: bool = False,
     state: StreamOutcome | None = None,
-    deadline: float | None = None,
+    deadline: float | SlidingDeadline | None = None,
     window: LivenessWindow | None = None,
 ) -> StreamOutcome:
     """Пробросить SSE-поток upstream клиенту с санитизацией `tool_calls` (AD-005).
@@ -1283,6 +1286,7 @@ class PassthroughAdapter(BackendAdapter):
         if internal is not None:
             raw_body, window = internal, window or passthrough_window(self.limits, path, request)
         deadline, open_deadline = request_deadlines(self.limits, internal is not None)
+        slide = open_sliding_deadline(deadline, self.limits, internal is not None, request, _SLIDING_WIN_FLAG.enabled)
         queue_timeout = min(
             float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)),
             self.limits.total_timeout_s,
@@ -1313,10 +1317,8 @@ class PassthroughAdapter(BackendAdapter):
                         continue
 
         def watch() -> None:
-            while not stop.wait(
-                min(self.limits.poll_interval_s, max(0.0, deadline - time.monotonic()))
-            ):
-                if time.monotonic() >= deadline or sink.client_gone():
+            while not stop.wait(min(self.limits.poll_interval_s, max(0.0, slide.deadline_s - time.monotonic()))):
+                if time.monotonic() >= slide.deadline_s or sink.client_gone():
                     abort()
                     return
 
@@ -1357,8 +1359,7 @@ class PassthroughAdapter(BackendAdapter):
                 resp = conn.getresponse()
                 if time.monotonic() >= deadline:
                     raise TimeoutError()
-                if internal is not None:
-                    relax_socket_timeout(conn.sock, deadline, self.limits.read_timeout_s)
+                slide.relax_socket(conn.sock, self.limits.read_timeout_s, internal is not None)
                 if resp.status in (502, 503) and getattr(
                     sink, "accepts_presend_errors", False
                 ):
@@ -1414,7 +1415,7 @@ class PassthroughAdapter(BackendAdapter):
                         sink, 502, "upstream_unavailable", "upstream is unavailable"
                     )
                 return
-            successful = self._respond(resp, request, sink, deadline, on_timeout=abort, window=window)
+            successful = self._respond(resp, request, sink, deadline, on_timeout=abort, window=window, slide=slide)
         except ClientGone:
             abort()
             self._log("passthrough client_gone")
@@ -1604,6 +1605,7 @@ class PassthroughAdapter(BackendAdapter):
         *,
         on_timeout: Callable[[], None] | None = None,
         window: LivenessWindow | None = None,
+        slide: SlidingDeadline | None = None,
     ) -> bool:
         content_type = (resp.getheader("Content-Type") or "").lower()
         encoded = (
@@ -1614,9 +1616,7 @@ class PassthroughAdapter(BackendAdapter):
         sse = resp.status == 200 and "text/event-stream" in content_type
         agg = window if sse and window and window.internal_stream else None
         if sse and agg is None:
-            return self._relay_stream(
-                resp, schemas, sink, sanitize, deadline, on_timeout, window
-            )
+            return self._relay_stream(resp, schemas, sink, sanitize, slide or deadline, on_timeout, window)
         try:
             if agg is not None:
                 body = self._aggregate_sse(resp, agg)
@@ -1674,7 +1674,7 @@ class PassthroughAdapter(BackendAdapter):
         schemas: Optional[dict[str, Any]],
         sink: ResponseSink,
         sanitize: bool,
-        deadline: float | None = None,
+        deadline: float | SlidingDeadline | None = None,
         on_timeout: Callable[[], None] | None = None,
         window: LivenessWindow | None = None,
     ) -> bool:
