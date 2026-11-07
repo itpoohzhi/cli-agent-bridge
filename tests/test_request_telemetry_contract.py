@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,6 +102,60 @@ def test_architecture_flow_aliases_and_dynamic_topology(telemetry_store, telemet
     assert {n["id"]: n["requests"] for n in flow["egress"]} == {"px": 1}
     assert {n["id"]: n["requests"] for n in flow["callers"]}["ci"] == 1
     assert all("port" in node for node in flow["bridges"])
+
+
+def _parity_events(telemetry_event):
+    """Детерминированный набор: успехи, ошибка, стрим с токенами и сабагент с двумя моделями/бэкендами."""
+    now = time.time()
+    return [
+        telemetry_event(request_id="p1", ts_epoch=now - 50, total_ms=100.0, ttfb_ms=10.0, queue_ms=1.0),
+        telemetry_event(request_id="p2", ts_epoch=now - 40, total_ms=200.0, ttfb_ms=20.0, queue_ms=2.0),
+        telemetry_event(request_id="p3", ts_epoch=now - 30, total_ms=300.0, ttfb_ms=30.0, queue_ms=3.0,
+                        status_code=503, error_type="overloaded", model="m-b", backend_id="muse", route_mode="cli",
+                        outbound_target=":9886", egress_proxy="direct"),
+        telemetry_event(request_id="p4", ts_epoch=now - 20, total_ms=400.0, ttfb_ms=40.0, queue_ms=4.0, stream=True,
+                        stream_chunks=3, prompt_tokens=20, completion_tokens=10, cached_tokens=0, total_tokens=30),
+        telemetry_event(request_id="p5", ts_epoch=now - 10, total_ms=500.0, ttfb_ms=50.0, queue_ms=5.0,
+                        subagent_id="coder-1", user_agent="claude-cli/2.0", response_bytes=1024),
+    ]
+
+
+def _parity_snapshots(tmp_path, events):
+    """Снимок агрегатов за окно на DuckDB и на sqlite3-фолбэке с одинаковыми событиями."""
+    from core.request_telemetry import RequestTelemetryStore
+
+    stores = []
+    try:
+        for force_sqlite, engine in ((False, "duckdb"), (True, "sqlite3")):
+            store = RequestTelemetryStore(str(tmp_path / engine / "bridge_telemetry.duckdb"),
+                                          force_sqlite=force_sqlite, autostart=False, enabled=True)
+            assert store.ensure_open() and store.engine == engine
+            stores.append(store)
+            assert [store.record_request(ev) for ev in events] == [True] * len(events)
+            assert store.flush() == len(events)
+        return [store.get_telemetry_payload(window_hours=24.0, limit=50) for store in stores]
+    finally:
+        for store in stores:
+            store.close()
+
+
+def test_duckdb_and_sqlite_aggregate_parity(tmp_path, telemetry_event):
+    """F-027: DuckDB и sqlite3-фолбэк отдают одинаковый снимок агрегатов на одинаковых событиях."""
+    pytest.importorskip("duckdb")
+    duck, sqlite = _parity_snapshots(tmp_path, _parity_events(telemetry_event))
+    volatile = {"engine", "db_path", "generated_at"}
+    assert set(duck) == set(sqlite)
+    assert {k: v for k, v in duck.items() if k not in volatile} == {k: v for k, v in sqlite.items() if k not in volatile}
+    summary = duck["summary"]
+    assert (summary["total_requests"], summary["ok_requests"], summary["error_requests"], summary["ok_rate_pct"]) == (
+        5, 4, 1, 80.0)
+    assert (summary["avg_ttfb_ms"], summary["avg_total_ms"], summary["max_total_ms"]) == (30.0, 300.0, 500.0)
+    assert (summary["p50_ttfb_ms"], summary["p95_ttfb_ms"]) == (30.0, 48.0)
+    assert (summary["p50_total_ms"], summary["p95_total_ms"]) == (300.0, 480.0)
+    assert (summary["prompt_tokens"], summary["total_tokens"]) == (60, 90)
+    for section in ("by_model", "by_backend", "by_client", "by_hour", "recent_requests"):
+        assert len(duck[section]) == len(sqlite[section]) > 0, section
+    assert duck["architecture_flow"] == sqlite["architecture_flow"]
 
 
 class _Sink:

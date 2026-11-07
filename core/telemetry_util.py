@@ -12,8 +12,10 @@ import itertools
 import operator
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 _IS_NONE = functools.partial(operator.is_, None)
+_LOOPBACK_ORIGINS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 
 def first(*values: Any, default: Any = None) -> Any:
@@ -67,6 +69,12 @@ def header_value(headers: Any, name: str) -> Any:
     """Значение заголовка из email.message/словаря; None — источника или заголовка нет."""
     getter = getattr(headers, "get", lambda _name: None)
     return getter(name)
+
+
+def origin_allowed(headers: Any) -> bool:
+    """Не браузерный кросс-сайтовый запрос: cross-site fetch и Origin вне loopback отклоняются."""
+    site, origin = header_value(headers, "Sec-Fetch-Site"), header_value(headers, "Origin")
+    return not (site == "cross-site" or (origin and urlparse(origin).hostname not in _LOOPBACK_ORIGINS))
 
 
 def close_quietly(resource: Any) -> None:

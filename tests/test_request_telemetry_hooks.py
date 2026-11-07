@@ -20,6 +20,7 @@ from core.telemetry_hooks import (  # noqa: E402
     resolve_backend_topology,
     telemetry_note,
 )
+from core.telemetry_util import origin_allowed  # noqa: E402
 
 
 class _Sink:
@@ -263,6 +264,20 @@ def test_serve_get_passes_sane_values_to_store():
             assert handler.sent == [(200, {"window_hours": expected[0], "limit": expected[1]})], query
     finally:
         REQUEST_TELEMETRY = saved
+
+
+def test_origin_guard_blocks_cross_site_and_foreign_origins():
+    """F-003: cross-site fetch и Origin вне loopback получают 403 до чтения стора; loopback допускается."""
+    ok = ({}, {"Origin": "http://127.0.0.1:18080"}, {"Origin": "http://localhost:9882"}, {"Origin": "http://[::1]:1"},
+          {"Sec-Fetch-Site": "same-origin"})
+    bad = ({"Origin": "https://evil.example"}, {"Origin": "null"}, {"Sec-Fetch-Site": "cross-site"},
+           {"Origin": "http://127.0.0.1:18080", "Sec-Fetch-Site": "cross-site"})
+    assert all(origin_allowed(headers) for headers in ok) and not any(origin_allowed(headers) for headers in bad)
+    handler, sent = _Handler(), []
+    handler._send = lambda code, payload, extra_headers=None: sent.append((code, payload))
+    handler.headers = {"Origin": "https://evil.example"}
+    handler._telemetry_serve_get()
+    assert sent == [(403, {"error": {"message": "Forbidden origin", "type": "forbidden"}})]
 
 
 def test_disabled_store_collects_nothing():

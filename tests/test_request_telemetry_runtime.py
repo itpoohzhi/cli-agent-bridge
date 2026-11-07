@@ -21,7 +21,7 @@ for _p in (str(_TESTS), str(_ROOT)):
         sys.path.insert(0, _p)
 
 import core.request_telemetry as rt  # noqa: E402
-from core import defaults  # noqa: E402
+from core import defaults, runtime_env  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
 
 
@@ -103,7 +103,8 @@ def test_dynamic_config_file_flag_controls_unpinned_store(tmp_path, monkeypatch,
         st.close()
 
 
-def test_record_request_is_o1_without_regex_or_env_reads(telemetry_make_store, telemetry_event, monkeypatch):
+def test_record_request_is_o1_without_regex_env_or_config_reads(
+        tmp_path, telemetry_make_store, telemetry_event, monkeypatch):
     st = telemetry_make_store(queue_maxsize=20000, name="o1")
     env_reads, rows = [], []
     monkeypatch.setattr(rt, "make_row", lambda *a, **k: rows.append(a))
@@ -116,6 +117,19 @@ def test_record_request_is_o1_without_regex_or_env_reads(telemetry_make_store, t
         st._queue.queue.clear()
     finally:
         st.close()
+    cfg = tmp_path / "dynamic.json"
+    cfg.write_text(json.dumps({"BRIDGE_TELEMETRY_ENABLED": True}), encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(cfg))
+    dyn, reads = RequestTelemetryStore(str(tmp_path / "o1-dyn" / "t.duckdb"), force_sqlite=True, autostart=False), []
+    try:
+        assert dyn.record_request(telemetry_event()) is True  # первый ход читает файл конфига один раз
+        env_reads.clear()
+        monkeypatch.setattr(runtime_env, "_load_snapshot", lambda path: reads.append(path) or {})
+        assert all(dyn.record_request(telemetry_event()) for _ in range(100))
+        assert (reads, env_reads) == ([], [])  # mtime_ns не менялся: файл конфига в горячем пути не читается
+        dyn._queue.queue.clear()
+    finally:
+        dyn.close()
 
 
 def test_rejected_events_are_counted_not_swallowed(telemetry_store, telemetry_event, monkeypatch):

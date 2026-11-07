@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 from core import defaults as D
 from core.telemetry_usage import extract_usage, tail_limit
-from core.telemetry_util import as_int, as_str, first_truthy, header_value
+from core.telemetry_util import as_int, as_str, first_truthy, header_value, origin_allowed
 
 _USAGE_KEYS = {"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens", "cached_tokens": "cache_read_tokens"}
 _MODEL_PLACEHOLDERS = {"unknown": None}
@@ -217,7 +217,9 @@ class TelemetryHooksMixin:
         self._record_telemetry(status_code=first_truthy(status, None), error_type=http_error_type(status))
 
     def _telemetry_serve_get(self) -> None:
-        """GET /v1/telemetry: снимок агрегатов за окно (Bearer проверен фасадом до вызова)."""
+        """GET /v1/telemetry: снимок агрегатов за окно (Bearer проверен фасадом до вызова); чужой Origin — 403."""
+        if not origin_allowed(self.headers):
+            return self._send(403, {"error": {"message": "Forbidden origin", "type": "forbidden"}})
         store = self._telemetry_srv().REQUEST_TELEMETRY
         qs = parse_qs(urlparse(self.path).query)
         payload = store.get_telemetry_payload(

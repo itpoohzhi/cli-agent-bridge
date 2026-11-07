@@ -60,6 +60,26 @@ class TestServerTelemetry(BridgeCase):
         self.assertEqual(status, 401)
         self.assertEqual(body["error"]["type"], "auth_error")
 
+    def _origin_get(self, headers):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        try:
+            conn.request("GET", "/v1/telemetry", headers={"Authorization": "Bearer test-key", **headers})
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def test_endpoint_rejects_cross_site_origins(self):
+        for headers in ({"Origin": "https://evil.example"}, {"Sec-Fetch-Site": "cross-site"},
+                        {"Origin": "http://127.0.0.1:18080", "Sec-Fetch-Site": "cross-site"}):
+            status, body = self._origin_get(headers)
+            self.assertEqual(status, 403)
+            self.assertEqual(body, {"error": {"message": "Forbidden origin", "type": "forbidden"}})
+        for headers in ({"Origin": "http://127.0.0.1:18080"}, {"Origin": "http://localhost:9882"},
+                        {"Sec-Fetch-Site": "same-origin"}):
+            status, payload = self._origin_get(headers)
+            self.assertEqual((status, payload["engine"]), (200, "sqlite3"))
+
     def test_endpoint_returns_full_schema(self):
         status, payload = self._get("/v1/telemetry")
         self.assertEqual(status, 200)
