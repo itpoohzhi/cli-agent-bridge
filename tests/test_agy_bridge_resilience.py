@@ -13378,7 +13378,7 @@ class SessionFailClosedTests(unittest.TestCase):
         for chat, cwd, expected in (
             (" chat-A ", "", (token, "m", "", "low")),
             ("chat-A", " /w/../abs/./path ", (token, "m", "/abs/path", "low")),
-            ("chat-A", "rel/path", (token, "m", "", "low")),
+            ("chat-A", " /w ", (token, "m", "/w", "low")),
             ("", " /w ", ("m", "/w", "low")),
             ("", "/w/../abs/./path", ("m", "/abs/path", "low")),
             (" \t ", "/w", ("m", "/w", "low")),
@@ -13389,6 +13389,10 @@ class SessionFailClosedTests(unittest.TestCase):
                 key = key_for("m", cwd, "low", chat)
                 self.assertEqual(key, expected)
                 self.assertEqual(valid(key), bool(expected))
+        # F-002: невалидный (относительный) cwd при chat id ключа не образует.
+        for cwd in ("rel/path", "webaccess", ".", "..", "~", " . "):
+            with self.subTest(chat="chat-A", cwd=cwd):
+                self.assertEqual(key_for("m", cwd, "low", "chat-A"), ())
         for key in ((), ("m",), ("m", "", "low"), ("m", " \t ", "low"),
                     ("", "m", "/w", "low"), (" \t ", "m", "/w", "low")):
             self.assertFalse(valid(key), repr(key))
@@ -13400,13 +13404,16 @@ class SessionFailClosedTests(unittest.TestCase):
                 self.assertEqual(_bfn("_session_key_for")("m", cwd, "low"), ())
 
     def test_request_cwd_is_normalized_before_length_limit(self) -> None:
-        """HTTP-вход нормализует абсолютный cwd и проверяет длину результата."""
+        """HTTP-вход проверяет длину сырой строки и лишь затем нормализует cwd."""
         limit = _int(_bval("CWD_MAX_LEN"))
         cases = (
             (" /w/../abs/./path ", "/abs/path"),
             ("/" + "a" * (limit - 1), "/" + "a" * (limit - 1)),
             ("/" + "a" * limit, ""),
-            ("/w/.." * limit, "/"),
+            ("/w/.." * 2, "/"),
+            # F-001: лимит на сырой строке — normpath схлопнул бы её в "/tmp".
+            ("/" * 100_000 + "tmp", ""),
+            ("/w/.." * limit, ""),
         )
         with _Fixture():
             captured: list[dict[str, object]] = []
@@ -13431,6 +13438,43 @@ class SessionFailClosedTests(unittest.TestCase):
                             )
             finally:
                 bridge.close()
+
+    def test_request_cwd_length_is_checked_before_normalization(self) -> None:
+        """F-001: "/"*N + "tmp" отвергается до normpath, не схлопываясь в "/tmp"."""
+        raw = "/" * 100_000 + "tmp"
+        with _Fixture() as fx:
+            captured: list[dict[str, object]] = []
+            handler_cls = _bval("Handler")
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_serve_json", capture),
+                    mock.patch.object(_bridge(), "_session_claim") as claim,
+                    mock.patch.object(_bridge(), "_session_commit") as commit,
+                    mock.patch.object(_bridge(), "_log") as log,
+                ):
+                    body = _agentic_body("длинный cwd")
+                    body["extra_body"] = {"cwd": raw, "chat_id": "test-agentic-chat"}
+                    self.assertEqual(bridge.post(body)[0], 200)
+                    claim.assert_not_called()
+                    commit.assert_not_called()
+                    log.assert_any_call(f"cwd-invalid-rejected cwd={raw[:32]!r}")
+            finally:
+                bridge.close()
+            self.assertEqual(len(captured), 1)
+            ctx = captured[0]
+            self.assertEqual(ctx["cwd"], "")
+            self.assertIsNone(ctx["sess_key"])  # cwd_invalid: ключ не строится
+            self.assertEqual(ctx["conversation_id"], "")  # force_cold
+            self.assertIs(ctx["hot_resumed"], False)
+            self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+            self.assertEqual(fx.spawns(), [])
+            self.assertEqual(_bval("_session_store"), {})
 
     def test_relative_cwd_is_fail_closed_without_shared_key(self) -> None:
         """F-013: невалидный относительный cwd не становится общим ключом ("", ...)."""
@@ -13587,10 +13631,22 @@ class SessionFailClosedTests(unittest.TestCase):
             self.assertTrue(all("--conversation" not in a for a in fx.spawns()))
 
     def test_session_key_for_non_string_cwd_with_chat_never_raises(self) -> None:
-        """F-013: нестроковый cwd при валидном chat ID не роняет ключ."""
+        """F-002: невалидный cwd при валидном chat ID не роняет ключ, а гасит его."""
         key_for = _bfn("_session_key_for")
         token = hashlib.sha256(b"chat-A").hexdigest()[:16]
-        for cwd in (None, 123, 1.5, True, [], {}, object()):
+        # Fail-closed: любой переданный невалидный cwd ключа не образует.
+        limit = _int(_bval("CWD_MAX_LEN"))
+        invalid_cwd: tuple[object, ...] = (
+            123, 1.5, True, [], {}, object(),
+            "relative/path", "webaccess", ".", "..", "~",
+            "/w\x00/x", "/w/\x01x", "/w/\x1f/x", "/w/\x7f", "/w/\ud800",
+            "/" + "a" * (limit + 1),
+        )
+        for cwd in invalid_cwd:
+            with self.subTest(cwd=cwd):
+                self.assertEqual(key_for("m", cwd, "low", "chat-A"), ())
+        # Штатное отсутствие cwd (None/""/пробелы) даёт ключ без cwd-сегмента.
+        for cwd in (None, "", " \t "):
             with self.subTest(cwd=cwd):
                 self.assertEqual(
                     key_for("m", cwd, "low", "chat-A"), (token, "m", "", "low")
@@ -13599,6 +13655,10 @@ class SessionFailClosedTests(unittest.TestCase):
             key_for("m", None, "low", "  chat-A  "),
             (token, "m", "", "low"),
         )
+        # Суррогаты и контролы в chat id не доходят до encode("utf-8").
+        for raw_chat in ("chat-\ud800", "chat\x01id", "chat\x7fid", "\udfff"):
+            with self.subTest(raw_chat=raw_chat):
+                self.assertEqual(key_for("m", "/w", "low", raw_chat), ())
         for raw_chat in (None, 123, False):
             with self.subTest(raw_chat=raw_chat):
                 self.assertEqual(key_for("m", "/w", "low", raw_chat), ("m", "/w", "low"))

@@ -2770,21 +2770,41 @@ def _session_key_for(
     """Ключ горячей сессии: токен чата, иначе cwd; без обоих ключ пуст.
 
     Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
+    Переданный, но невалидный cwd (не строка, относительный, длиннее
+    CWD_MAX_LEN, с NUL/контролами/суррогатами) — fail-closed: ключа нет.
+    Пустой cwd допустим только при штатном отсутствии cwd (None или "").
     """
     chat = raw_chat_id.strip() if isinstance(raw_chat_id, str) else ""
+    # Суррогаты и контролы в chat id не должны доходить до encode("utf-8").
+    if any(
+        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in chat
+    ):
+        return ()
+
+    cwd_norm = ""
+    if cwd is not None:
+        if isinstance(cwd, str):
+            val = cwd.strip()
+            if val:
+                if (
+                    len(val) > CWD_MAX_LEN
+                    or not os.path.isabs(val)
+                    or "\x00" in val
+                    or any(
+                        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                        for c in val
+                    )
+                ):
+                    return ()
+                cwd_norm = os.path.normpath(val)
+        else:
+            return ()
+
     if chat:
         chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
-        # Нестроковый cwd не должен ронять ключ: он просто не попадает в него.
-        cwd_clean = cwd.strip() if isinstance(cwd, str) else ""
-        cwd_norm = (
-            os.path.normpath(cwd_clean)
-            if cwd_clean and os.path.isabs(cwd_clean)
-            else ""
-        )
         return (chat_token, model, cwd_norm, effort)
-    cwd_clean = cwd.strip() if isinstance(cwd, str) else ""
-    if cwd_clean and os.path.isabs(cwd_clean):
-        return (model, os.path.normpath(cwd_clean), effort)
+    if cwd_norm:
+        return (model, cwd_norm, effort)
     return ()
 
 
@@ -7613,26 +7633,26 @@ class Handler(BaseHTTPRequestHandler):
             cwd_invalid = False
             # Штатное отсутствие cwd (None/"") и явно невалидный cwd различаются:
             # невалидный деградирует не молча в "", а в fail-closed холодный ход.
+            # Длина и запрещённые символы проверяются на сырой строке ДО normpath:
+            # иначе "/"*N + "tmp" схлопывается в "/tmp", обходя лимит и аллоцируя O(N).
             if raw_cwd is not None:
                 if isinstance(raw_cwd, str):
                     val = raw_cwd.strip()
                     if val:
                         if (
-                            not os.path.isabs(val)
+                            len(val) > CWD_MAX_LEN
+                            or not os.path.isabs(val)
                             or "\x00" in val
-                            or any(ord(c) < 32 or ord(c) == 127 for c in val)
+                            or any(
+                                ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                                for c in val
+                            )
                         ):
                             _log(f"cwd-invalid-rejected cwd={val[:32]!r}")
                             cwd_invalid = True
                             force_cold = True
                         else:
-                            normalized = os.path.normpath(val)
-                            if len(normalized) > CWD_MAX_LEN:
-                                _log(f"cwd-invalid-rejected cwd={val[:32]!r}")
-                                cwd_invalid = True
-                                force_cold = True
-                            else:
-                                cwd = normalized
+                            cwd = os.path.normpath(val)
                 else:
                     _log(f"cwd-nonstring-rejected type={type(raw_cwd).__name__}")
                     cwd_invalid = True
