@@ -14,7 +14,7 @@ discovery:
   method: http
   http: {path: /models, id_field: 'data[].id'}
   include: [gpt-*]
-  exclude: ['*-free']
+  exclude: ['*-free', 'gpt-6.1-sol']
   refresh_interval_s: 900
 family_rule:
   type: prefix
