@@ -233,8 +233,8 @@ def test_query_number_rejects_nan_inf_and_nonpositive():
     def window(value):
         return _query_number({"window_hours": [value]}, "window_hours", 24.0, float)
 
-    assert [window(v) for v in ("nan", "inf", "-inf", "-5", "0", "abc", "2.5", "1e12")] == [24.0] * 6 + [2.5, 1e12]
-    assert [_query_number({"limit": [v]}, "limit", 100, int) for v in ("-1", "0", "7", "1e3", "1000000000")] == [100, 100, 7, 100, 10**9]
+    assert [window(v) for v in ("nan", "inf", "-inf", "-5", "0", "abc", "1", "2.5", "1e12")] == [24.0] * 6 + [1.0, 2.5, 1e12]
+    assert [_query_number({"limit": [v]}, "limit", 100, int) for v in ("-1", "0", "1", "7", "1e3", "1000000000")] == [100, 100, 1, 7, 100, 10**9]
     assert _query_number({}, "limit", 100, int) == 100
 
 

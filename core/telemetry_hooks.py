@@ -200,8 +200,8 @@ class TelemetryHooksMixin:
         if not err:
             return
         code = err.get("code")
-        failed = (code if isinstance(code, int) else 0) >= 400
-        self._telemetry_meta(status_code=code if failed else 502, error_type=err.get("type"))
+        status = code if isinstance(code, int) else 502
+        self._telemetry_meta(status_code=status if status >= 400 else 502, error_type=err.get("type"))
 
     def _telemetry_error_response(self, code: int, payload: Any, body: bytes) -> None:
         """Ответ-ошибка из _send (отказы до маршрутизации тоже попадают в статистику)."""
