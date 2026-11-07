@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,15 +87,37 @@ def qualify_models(
     return tuple(qualify_model(open_rpc, settings, model) for model in models)
 
 
+def qualify_with_probe(
+    open_rpc: Callable[[], DroidRpcSessionProtocol],
+    settings: ProbeSettings,
+    probed: tuple[str, Sequence[str]],
+    models: Sequence[str],
+) -> dict[str, tuple[str, ...]]:
+    """`qualified_models`: проб-модель `(id, tools)` и `models` отдельными сессиями."""
+    first = schema.QualifiedModelSpec(probed[0], tuple(sorted(probed[1])))
+    specs = (first, *qualify_models(open_rpc, settings, models))
+    return {q.model_id: q.tool_ids for q in specs}
+
+
 def build_parser(description: str) -> argparse.ArgumentParser:
-    """CLI `droid_image`: источник, workspace, модели и каталог манифестов."""
+    """CLI `droid_image`: источник, workspace, модели, каталог манифестов, проверка receipt."""
     parser = argparse.ArgumentParser(prog="droid_image", description=description)
     add = parser.add_argument
     add("--source", default=None, help="бинарь droid (по умолчанию ~/.local/bin/droid)")
     add("--workspace", default=str(REPO_ROOT / "workspace"), help="workspace моста")
     add("--models", default="", help="модели через запятую (по умолчанию — из droid.yaml)")
     add("--providers-dir", default=str(REPO_ROOT / "providers.d"), help="каталог манифестов")
+    add("--verify-receipt", default=None, metavar="PATH", help="проверить receipt без запуска: 0 — годен, 4 — нет")
     return parser
+
+
+def verify_receipt_cli(args: argparse.Namespace) -> int:
+    """`--verify-receipt`: проверка без запуска образа; 0 — годен, иначе `EXIT_VERIFY_FAILED`."""
+    source = Path(str(args.source)) if args.source else None
+    verdict = verify.verify_receipt(Path(str(args.verify_receipt)), Path(str(args.providers_dir)), source)
+    stream = sys.stdout if verdict.ok else sys.stderr
+    stream.write(f"droid_image: receipt v3 {'годен' if verdict.ok else verdict.reason}\n")
+    return 0 if verdict.ok else verify.EXIT_VERIFY_FAILED
 
 
 def resolve_models(args: argparse.Namespace) -> Sequence[str]:

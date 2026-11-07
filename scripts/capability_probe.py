@@ -67,6 +67,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from core import discovery as _discovery  # noqa: E402
 from core.backend_adapter import EFFORT_LEVELS  # noqa: E402
+from core.catalog_promote import PromoteRequest, add_promote_arguments, promote_confirmed  # noqa: E402
 from core.param_adapter import resolve_state_dir  # noqa: E402
 from core.probe_manifest_select import select_manifest as _select_core_manifest  # noqa: E402
 from core.provider_manifest import ModelsDefaults, ProviderManifest  # noqa: E402
@@ -1109,6 +1110,8 @@ def probe_cli(
     env: Optional[Mapping[str, str]] = None,
     http: Optional[Transport] = None,
     out: Any = None,
+    promote: bool = False,
+    state_dir: Optional[Path] = None,
 ) -> int:
     """Общая точка входа для `capability_probe.py` и `smoke_models.py --probe-model`."""
     source: Mapping[str, str] = os.environ if env is None else env
@@ -1141,6 +1144,7 @@ def probe_cli(
             http=http,
             env=source,
             force=force,
+            state_dir=state_dir,
         )
     except ProbeBusy as exc:
         print(mask_secret("INCONCLUSIVE: probe busy (%s)" % exc, api_key), file=stream)
@@ -1181,6 +1185,13 @@ def probe_cli(
             ),
             file=stream,
         )
+    if promote and result.verdict == VERDICT_CONFIRMED:
+        request = PromoteRequest.from_probe(result, manifest.provider_id, model_id)
+        target = state_dir or resolve_state_dir(source)
+        failure = promote_confirmed(request, target, providers_dir=providers_dir, env=source)
+        if failure:
+            print("FAIL: promote_failed (%s)" % failure, file=sys.stderr)
+            return EXIT_FAILED
     return result.exit_code
 
 
@@ -1196,6 +1207,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--providers-dir", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", dest="as_json", action="store_true")
+    add_promote_arguments(parser)
     return parser
 
 
@@ -1211,6 +1223,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         force=args.force,
         as_json=args.as_json,
         providers_dir=args.providers_dir,
+        promote=args.promote,
+        state_dir=args.state_dir,
     )
 
 

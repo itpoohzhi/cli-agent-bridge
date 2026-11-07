@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # Квитанция droid v3 (qualified_models): схема, DTO, fail-closed проверка моста, квалификация моделей.
 
+import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import droid_image  # noqa: E402
+import droid_receipt_verify as verify  # noqa: E402
 import receipt_schema as schema  # noqa: E402
 import server  # noqa: E402
 
@@ -212,3 +214,84 @@ def test_failed_model_qualification_writes_no_receipt(tmp_path: Path) -> None:
     with pytest.raises(droid_image.ProbeError):
         _install(tmp_path, rpc, list(QUALIFIED))
     assert not (tmp_path / "workspace" / "state" / "droid-binary-receipt.json").exists()
+
+
+# ---- --verify-receipt --------------------------------------------------------------------
+
+
+def _providers_with_droid(tmp_path: Path, models: list[str]) -> Path:
+    directory = tmp_path / "providers.d"
+    directory.mkdir(exist_ok=True)
+    body = "".join(f"  {m}: {{}}\n" for m in models)
+    (directory / "droid.yaml").write_text(
+        "manifest_version: 1\nprovider_id: droid\nkind: droid\nowned_by: factory-droid\n"
+        "transport:\n  bridge: {}\nmodels_overrides:\n" + body,
+        encoding="utf-8",
+    )
+    return directory
+
+
+def _receipt_path(tmp_path: Path) -> Path:
+    return tmp_path / "workspace" / "state" / "droid-binary-receipt.json"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Реальный `~/.local/bin/droid` не должен запускаться ни при каком сбое разбора аргументов."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+def _verify(tmp_path: Path, models: list[str], *extra: str) -> int:
+    providers = _providers_with_droid(tmp_path, models)
+    args = ["--verify-receipt", str(_receipt_path(tmp_path)), "--providers-dir"]
+    return droid_image.main([*args, str(providers), *extra])
+
+
+def _installed(tmp_path: Path) -> None:
+    _install(
+        tmp_path,
+        PerModelRpc({m: list(i) for m, i in QUALIFIED.items()}),
+        list(QUALIFIED),
+    )
+
+
+def test_verify_receipt_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _installed(tmp_path)
+    assert _verify(tmp_path, list(QUALIFIED)) == 0
+    assert (
+        _verify(tmp_path, [*QUALIFIED, "gemini-3.8-flash"]) == verify.EXIT_VERIFY_FAILED
+    )
+    assert "gemini-3.8-flash" in capsys.readouterr().err
+    other = tmp_path / "other-droid"
+    other.write_bytes(b"different")
+    assert _verify(tmp_path, list(QUALIFIED), "--source", str(other)) != 0
+    image = Path(json.loads(_receipt_path(tmp_path).read_text())["image_path"])
+    image.chmod(0o700)
+    image.write_bytes(b"tampered")
+    assert _verify(tmp_path, list(QUALIFIED)) != 0
+
+
+def test_verify_receipt_verdicts_are_typed_and_fail_closed(tmp_path: Path) -> None:
+    _installed(tmp_path)
+    providers = _providers_with_droid(tmp_path, list(QUALIFIED))
+    assert (
+        verify.verify_receipt(_receipt_path(tmp_path), providers)
+        == verify.ReceiptVerdict()
+    )
+    gone = verify.verify_receipt(tmp_path / "absent.json", providers)
+    assert (gone.ok, gone.reason) == (False, "receipt_unreadable")
+    empty = verify.verify_receipt(_receipt_path(tmp_path), tmp_path / "no-providers")
+    assert empty.reason == "droid_manifest_empty"
+
+
+def test_verify_receipt_tolerates_non_mapping_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _installed(tmp_path)
+    receipt = json.loads(_receipt_path(tmp_path).read_text(encoding="utf-8"))
+    receipt["source"] = ["bad"]  # внешний JSON: вместо mapping пришёл список
+    _receipt_path(tmp_path).write_text(json.dumps(receipt), encoding="utf-8")
+    other = tmp_path / "other-droid"
+    other.write_bytes(b"different")
+    assert _verify(tmp_path, list(QUALIFIED), "--source", str(other)) != 0
+    assert "binary_sha256_mismatch" in capsys.readouterr().err

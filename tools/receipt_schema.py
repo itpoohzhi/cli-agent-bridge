@@ -63,6 +63,37 @@ class ReceiptV3:
         return next((slug for slug, bad in problems if bad), cls(disabled, qualified))
 
 
+def _protocol_ok(protocol: object) -> bool:
+    """`api_version` совпадает с мостом, `protocol_version` — непустая строка."""
+    fields = protocol if isinstance(protocol, Mapping) else {}
+    version = fields.get("protocol_version")
+    return fields.get("api_version") == RPC_API_VERSION and isinstance(version, str) and bool(version)
+
+
+def _profile_ok(profile: object) -> bool:
+    """Профиль настроек и его отпечаток совпадают с профилем моста."""
+    got = {k: profile.get(k) for k in ("profile", "digest")} if isinstance(profile, Mapping) else None
+    return got == {"profile": SETTINGS_PROFILE, "digest": settings_profile_digest()}
+
+
+def _probes_ok(probes: object) -> bool:
+    """Все пробы квалификации завершились `ok`."""
+    return isinstance(probes, Mapping) and all(probes.get(n) == "ok" for n in RECEIPT_PROBES)
+
+
+def receipt_gate_problem(rec: object) -> str:
+    """Slug первой причины отказа допуска (протокол, tools, профиль, пробы) либо ''."""
+    top = rec if isinstance(rec, Mapping) else {}
+    parsed = ReceiptV3.parse(rec)
+    problems = (
+        ("protocol_mismatch", not _protocol_ok(top.get("protocol"))),
+        (parsed if isinstance(parsed, str) else "", isinstance(parsed, str)),
+        ("settings_profile_mismatch", not _profile_ok(top.get("settings_profile"))),
+        ("probes_not_ok", not _probes_ok(top.get("probes"))),
+    )
+    return next((slug for slug, bad in problems if bad), "")
+
+
 def json_digest(obj: Any) -> str:
     return hashlib.sha256(
         json.dumps(

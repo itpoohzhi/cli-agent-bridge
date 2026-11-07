@@ -84,6 +84,7 @@ from receipt_schema import (  # noqa: E402,F401
     TOOLS_POLICY,
     ReceiptV3,
     catalog_tool_ids,
+    receipt_gate_problem,
     settings_profile_digest,
     tools_policy_digest,
 )
@@ -1149,32 +1150,19 @@ def _receipt_path() -> Path:
 # Квалификационный receipt (RW-009): четвёрка «образ + протокол + политика tools + профиль настроек».
 # Любое расхождение с ожиданиями моста запрещает spawn до новой квалификации (tools/droid_image.py).
 # Константы и отпечатки живут в tools/receipt_schema.py: их делят мост и установщик (RW-013).
+_RECEIPT_REFUSALS = {
+    "protocol_mismatch": "stream-jsonrpc protocol version mismatch",
+    "settings_profile_mismatch": "settings profile mismatch",
+    "probes_not_ok": "qualification probes are not all ok",
+}
+
+
 def _check_receipt_quad(rec: dict) -> None:
     """Проверка протокола, политики tools и профиля настроек receipt; расхождение — LauncherUnavailable."""
-    protocol = rec.get("protocol")
-    if (
-        not isinstance(protocol, dict)
-        or protocol.get("api_version") != RPC_API_VERSION
-        or not isinstance(protocol.get("protocol_version"), str)
-        or not protocol["protocol_version"]
-    ):
-        raise LauncherUnavailable(
-            "droid receipt: stream-jsonrpc protocol version mismatch"
-        )
-    if isinstance(ReceiptV3.parse(rec), str):
-        raise LauncherUnavailable("droid receipt: tools policy mismatch")
-    profile = rec.get("settings_profile")
-    if (
-        not isinstance(profile, dict)
-        or profile.get("profile") != SETTINGS_PROFILE
-        or profile.get("digest") != settings_profile_digest()
-    ):
-        raise LauncherUnavailable("droid receipt: settings profile mismatch")
-    probes = rec.get("probes")
-    if not isinstance(probes, dict) or any(
-        probes.get(name) != "ok" for name in RECEIPT_PROBES
-    ):
-        raise LauncherUnavailable("droid receipt: qualification probes are not all ok")
+    slug = receipt_gate_problem(rec)
+    if slug:
+        reason = _RECEIPT_REFUSALS.get(slug, "tools policy mismatch")
+        raise LauncherUnavailable(f"droid receipt: {reason}")
 
 
 def _load_receipt() -> tuple:

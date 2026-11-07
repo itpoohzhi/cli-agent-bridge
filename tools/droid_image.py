@@ -35,7 +35,7 @@ from typing import IO
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from droid_qualify_models import (  # noqa: E402
-    ProbeError, ProbeSettings, RpcExchange, build_parser, init_params, qualify_models, resolve_models,
+    ProbeError, ProbeSettings, RpcExchange, build_parser, init_params, qualify_with_probe, resolve_models, verify_receipt_cli,
 )
 import receipt_schema as schema  # noqa: E402  - единственная общая с мостом зависимость: без server.py и fleet.json
 
@@ -422,9 +422,7 @@ def install_image(source: Path, workspace: Path, models: Sequence[str] = ()) -> 
     facts = run_probes(image, workspace)
     home, cwd = (workspace / "runtime" / name for name in ("probe-home", "probe-cwd"))
     settings = ProbeSettings(cwd, PROBE_MODEL_EFFORT[1], PROBE_AUTONOMY)
-    probed = schema.QualifiedModelSpec(PROBE_MODEL_EFFORT[0], tuple(facts["disabled_tool_ids"]))
-    others = qualify_models(lambda: _Rpc(image, cwd, home), settings, models)
-    facts["qualified_models"] = {q.model_id: q.tool_ids for q in (probed, *others)}
+    facts["qualified_models"] = qualify_with_probe(lambda: _Rpc(image, cwd, home), settings, (PROBE_MODEL_EFFORT[0], facts["disabled_tool_ids"]), models)
     receipt = _receipt_document((source, snapshot, source_sha), image, image_sha, facts)
     state = workspace / "state"
     _ensure_private_chain(state, workspace)
@@ -440,6 +438,8 @@ def install_image(source: Path, workspace: Path, models: Sequence[str] = ()) -> 
 
 def main(argv: list | None = None) -> int:
     args = build_parser(__doc__.splitlines()[0]).parse_args(argv)
+    if args.verify_receipt:
+        return verify_receipt_cli(args)
     source = Path(args.source or os.path.expanduser("~/.local/bin/droid"))
     if not source.is_file() or not os.access(source, os.X_OK):
         sys.stderr.write(
