@@ -412,6 +412,10 @@ def _probe_facts(
         "protocol_version": facts[0][0],
         "disabled_tool_ids": sorted(set[str]().union(*(fact[1] for fact in facts))),
         "qualified_models": {mid: sorted(ids) for mid, ids in catalogs.items()},
+        "qualified_targets": [
+            schema.QualifiedTarget(model=target.model, effort=target.effort)
+            for target in targets
+        ],
         "not_confirmed_readback_by_model": {
             mid: sorted(keys) for mid, keys in missing.items()
         },
@@ -464,6 +468,7 @@ def install_image(source: Path, workspace: Path) -> schema.DroidReceipt:
         },
         "probes": facts["probes"],
         "qualified_models": facts["qualified_models"],
+        "qualified_targets": facts["qualified_targets"],
         "not_confirmed_readback_by_model": facts["not_confirmed_readback_by_model"],
         "source": {
             "path": str(source),

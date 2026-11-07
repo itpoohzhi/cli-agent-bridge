@@ -241,11 +241,24 @@ def make_receipt(image_path, digest, **override):
     import fake_droid
 
     ids = list(fake_droid.DEFAULT_TOOLS)
-    qualified = {
-        mid: sorted(ids)
+    droid_models = {
+        mid: model
         for mid, model in server.FLEET["models"].items()
         if model.get("backend") == "droid"
     }
+    qualified = {mid: sorted(ids) for mid in droid_models}
+    # Поуровневые цели строятся из того же стендового каталога, что и qualified_models,
+    # чтобы receipt оставался согласованным при любой мутации fleet.json в тесте.
+    targets = [
+        {"model": mid, "effort": effort}
+        for mid, model in droid_models.items()
+        for effort in dict.fromkeys(
+            [
+                str(model.get("default_effort") or ""),
+                *map(str, model.get("efforts") or []),
+            ]
+        )
+    ]
     receipt = {
         "schema": server.RECEIPT_SCHEMA,
         "image_path": str(image_path),
@@ -265,6 +278,7 @@ def make_receipt(image_path, digest, **override):
         },
         "probes": {name: "ok" for name in server.RECEIPT_PROBES},
         "qualified_models": qualified,
+        "qualified_targets": targets,
     }
     receipt.update(override)
     return receipt

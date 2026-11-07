@@ -14,7 +14,7 @@ from typing import TypedDict, cast
 
 from core.backend_adapter import EFFORT_LEVELS
 from core.gateway_execution_policy import require
-from tools.receipt_schema import SETTINGS_PROFILE
+from tools.receipt_schema import SETTINGS_PROFILE, QualifiedTarget
 
 
 FLEET_PATH = Path(__file__).resolve().parents[1] / "fleet.json"
@@ -34,6 +34,7 @@ class ProbeFacts(TypedDict):
     protocol_version: str
     disabled_tool_ids: list[str]
     qualified_models: dict[str, list[str]]
+    qualified_targets: list[QualifiedTarget]
     not_confirmed_readback_by_model: dict[str, list[str]]
     probes: dict[str, str]
     readback: dict[str, list[str]]

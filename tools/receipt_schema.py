@@ -41,6 +41,13 @@ class ReceiptSettings(TypedDict):
     readback: dict[str, list[str]]
 
 
+class QualifiedTarget(TypedDict):
+    """Квалифицированная пара модели и уровня рассуждения (внутренняя деталь receipt)."""
+
+    model: str
+    effort: str
+
+
 class DroidReceipt(TypedDict):
     """Типизированный JSON receipt, совместимый с прежними словарными читателями."""
 
@@ -52,6 +59,9 @@ class DroidReceipt(TypedDict):
     settings_profile: ReceiptSettings
     probes: dict[str, str]
     qualified_models: dict[str, list[str]]
+    # Поуровневое доказательство всех пройденных пар (model, effort); в HTTP-ответы не
+    # сериализуется и остаётся внутренней частью receipt.
+    qualified_targets: list[QualifiedTarget]
     not_confirmed_readback_by_model: dict[str, list[str]]
     source: dict[str, str | int]
     created_at: int
@@ -119,6 +129,47 @@ def validate_model_catalog(
     require(sorted(listed) == sorted(cast(list[str], expected)), error)
 
 
+def validate_qualified_targets(
+    targets: object, qualified_models: object
+) -> list[QualifiedTarget]:
+    """Проверить поуровневую квалификацию: непустые пары (модель, effort) без дублей.
+
+    Каждая модель обязана присутствовать в строгом каталоге `qualified_models`, иначе
+    поуровневое доказательство не относится к квалификации этого receipt.
+    """
+    error = ValueError(
+        "receipt missing or invalid qualified_targets, re-run droid_image.py"
+    )
+    require(isinstance(targets, list), error)
+    listed = cast(list[object], targets)
+    require(bool(listed), error)
+    catalog = (
+        cast(dict[object, object], qualified_models)
+        if isinstance(qualified_models, dict)
+        else {}
+    )
+    pairs: set[tuple[str, str]] = set()
+    for entry in listed:
+        require(isinstance(entry, dict), error)
+        item = cast(dict[str, object], entry)
+        model, effort = item.get("model"), item.get("effort")
+        require(
+            all(
+                (
+                    isinstance(model, str),
+                    bool(model),
+                    isinstance(effort, str),
+                    bool(effort),
+                )
+            ),
+            error,
+        )
+        require(cast(str, model) in catalog, error)
+        pairs.add((cast(str, model), cast(str, effort)))
+    require(len(pairs) == len(listed), error)
+    return cast(list[QualifiedTarget], listed)
+
+
 def validate_receipt_components(rec: Mapping[str, object]) -> None:
     """Проверить протокол, квалификацию и профиль общей схемы receipt."""
     message = "droid receipt: stream-jsonrpc protocol version mismatch"
@@ -168,6 +219,14 @@ def _validate_receipt_policy(rec: Mapping[str, object]) -> None:
             )
         ),
         ValueError(message),
+    )
+    targets = validate_qualified_targets(rec.get("qualified_targets"), qualified)
+    covered = {entry["model"] for entry in targets}
+    require(
+        covered == set(qualified),
+        ValueError(
+            "receipt missing or invalid qualified_targets, re-run droid_image.py"
+        ),
     )
 
 

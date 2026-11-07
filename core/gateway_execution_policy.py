@@ -10,6 +10,9 @@ from typing import cast
 
 AUTONOMY_LEVELS = ("low", "medium", "high")
 AUTONOMY_OFF = "off"
+# Префиксы ролей по умолчанию: мутировать вправе только coder-*, судьи и места запрещены.
+MUTATING_SUBAGENT_DEFAULT = "coder-"
+DENY_SUBAGENT_DEFAULT = "panel-judge-,judge-,seat-"
 
 
 class Autonomy(StrEnum):
@@ -86,11 +89,18 @@ class AutonomyDecision:
 
 
 def _csv_env(name: str, default: str) -> tuple[str, ...]:
-    """Нормализовать конфигурируемые префиксы; пустой список никого не допускает."""
-    return tuple(
+    """Нормализовать префиксы; пустые и дикие элементы отброшены, пустой набор — дефолт.
+
+    Пустая строка или `*` в конфигурации не должны превращаться в разрешение всем:
+    после отбраковки набор всегда непустой, а `startswith(())` ложен.
+    """
+    items = tuple(
         item.strip().lower()
         for item in os.environ.get(name, default).split(",")
-        if item.strip()
+        if item.strip() and item.strip() != "*"
+    )
+    return items or tuple(
+        item.strip().lower() for item in default.split(",") if item.strip()
     )
 
 
@@ -109,7 +119,9 @@ def _check_mutating_role(
         or enforced not in ("0", "false", "no")
     ):
         return
-    prefixes = _csv_env("DROID_MUTATING_SUBAGENT_PREFIXES", "coder-")
+    prefixes = _csv_env(
+        f"{namespace.upper()}_MUTATING_SUBAGENT_PREFIXES", MUTATING_SUBAGENT_DEFAULT
+    )
     require(
         (subagent_id or "").strip().lower().startswith(prefixes),
         AutonomyViolation(
@@ -117,6 +129,30 @@ def _check_mutating_role(
             f"autonomy={value!r} requires mutating subagent prefix {prefixes}",
         ),
     )
+
+
+def validate_autonomy_request(raw: object) -> str:
+    """Проверить формат уровня прав без backend-специфичных ограничений.
+
+    Сохраняет прежний контракт не-Droid маршрутов: не строковое значение или строка
+    вне `low|medium|high|off` даёт `unsupported_autonomy`, а отсутствие и пустая
+    строка остаются ``""`` (дефолт выбирает вызывающая сторона).
+    """
+    if raw is None:
+        return ""
+    require(
+        isinstance(raw, str),
+        AutonomyViolation("unsupported_autonomy", "autonomy must be a string"),
+    )
+    candidate = cast(str, raw).strip()
+    if not candidate:
+        return ""
+    try:
+        return Autonomy(candidate).value
+    except ValueError as exc:
+        raise AutonomyViolation(
+            "unsupported_autonomy", "autonomy is not allowed (low|medium|high|off)"
+        ) from exc
 
 
 def resolve_autonomy_decision(
@@ -172,12 +208,20 @@ def resolve_autonomy(
     ).value
 
 
-def denied_subagent(subagent_id: str, prefixes: str) -> bool:
-    """Проверить настраиваемые префиксы роли без зависимости от агента."""
-    normalized = tuple(
-        prefix.strip().lower() for prefix in prefixes.split(",") if prefix.strip()
+def denied_subagent(namespace: str, *subagent_ids: str | None) -> bool:
+    """Запретить роль по любому представлению идентификатора в рамках namespace.
+
+    Проверяется объединение значений (raw-заголовок и trace из заголовка, extra_body
+    или тела), чтобы запрет нельзя было обойти альтернативным источником.
+    """
+    prefixes = _csv_env(
+        f"{namespace.upper()}_DENY_SUBAGENT_PREFIXES", DENY_SUBAGENT_DEFAULT
     )
-    return subagent_id.strip().lower().startswith(normalized)
+    return any(
+        candidate.strip().lower().startswith(prefixes)
+        for candidate in (str(value or "") for value in subagent_ids)
+        if candidate.strip()
+    )
 
 
 def permission_event(*names: object) -> bool:

@@ -188,6 +188,7 @@ from core.gateway_execution_policy import (  # noqa: E402
     permission_frame,
     require,
     resolve_autonomy_decision,
+    validate_autonomy_request,
     validate_boolean_flags,
 )
 
@@ -7180,12 +7181,20 @@ class Handler(BaseHTTPRequestHandler):
                 return
             model = fleet_models[model_id]
             is_droid = str(model.get("backend") or "").strip().lower() == "droid"
-            subagent_id = str(self.headers.get("X-Subagent-Id") or "")
+            # denied: объединение raw-заголовка и trace (заголовок/extra_body/body), чтобы
+            # роль судьи нельзя было провести альтернативным источником идентификатора.
+            raw_subagent_id = str(self.headers.get("X-Subagent-Id") or "")
+            # Прочие backend не платят за разбор trace; при выключенной атрибуции
+            # self._trace пуст, поэтому для droid он строится здесь же, иначе запрет
+            # судьям стал бы fail-open и обходился через extra_body/body.
+            trace_subagent_id = None
+            if is_droid:
+                trace = getattr(self, "_trace", None) or _resolve_trace(
+                    dict(self.headers.items()), req
+                )
+                trace_subagent_id = trace.subagent_id
             denied_role = is_droid and denied_subagent(
-                subagent_id,
-                os.environ.get(
-                    "DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-"
-                ),
+                "DROID", raw_subagent_id, trace_subagent_id
             )
             if denied_role:
                 return self._reject(
@@ -7282,10 +7291,18 @@ class Handler(BaseHTTPRequestHandler):
                     decision = resolve_autonomy_decision(
                         req.get("autonomy"),
                         "DROID",
-                        subagent_id=subagent_id,
+                        subagent_id=raw_subagent_id or None,
                         require_subagent=True,
                     )
                     autonomy, autonomy_source = decision.value, decision.source
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
+                    return
+            else:
+                # Не-Droid маршруты сохраняют прежнюю базовую проверку формата: тип и
+                # значение low|medium|high|off проверяются без Droid-ограничений роли.
+                try:
+                    _ = validate_autonomy_request(req.get("autonomy"))
                 except AutonomyViolation as exc:
                     self._reject(400, exc.reason, str(exc), model_id, model_len)
                     return
