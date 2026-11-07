@@ -196,3 +196,13 @@ def _fresh_config_snapshots(monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     monkeypatch.setattr(runtime_env, "_SNAP_TTL_S", 0.0)
     yield
     runtime_env._SNAPSHOTS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _spawn_barrier_open() -> Generator[None, None, None]:
+    """Барьер `spawn_registered` глобален: `force_kill` одного теста не должен блокировать spawn в других."""
+    from core import proc_groups
+
+    proc_groups._set_spawn_blocked(False)
+    yield
+    proc_groups._set_spawn_blocked(False)

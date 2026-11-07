@@ -28,7 +28,7 @@ def _env_seconds(name: str, default: float, low: float) -> float:
 
 
 _LIVE_PROCS: dict[int, Any] = {}
-_LIVE_LOCK = threading.Lock()
+_LIVE_LOCK = threading.RLock()  # `spawn_registered` регистрирует под тем же замком
 _spawn_blocked = False
 
 
@@ -48,39 +48,30 @@ def _kill_group(pgid: int, sig: signal.Signals = signal.SIGKILL) -> None:
         os.killpg(pgid, sig)
 
 
-def _prune_finished() -> None:
-    """Реестр хранит только живых несобранных лидеров; вызывать только под `_LIVE_LOCK`.
+def _prune_finished() -> list[Any]:
+    """Выбрасывает собранных лидеров; вызывать под `_LIVE_LOCK`. Только чтение `returncode`.
 
-    Собранный кем-то лидер (`returncode is not None`) выбывает без сигналов: его PID свободен
-    и мог быть переиспользован. Лидер, завершившийся только что (его собрал `poll()` здесь),
-    выбывает вместе с осиротевшими потомками своей группы: до освобождения PID группа занята.
+    `poll()`/`waitpid` здесь запрещены: они гонятся с `proc.wait()`/`communicate()` рабочего
+    потока (при `ECHILD` CPython выставляет `returncode = 0`) и собирают лидера до сигнала группе.
     """
     for pid, proc in list(_LIVE_PROCS.items()):
         if proc.returncode is not None:
             del _LIVE_PROCS[pid]
-        elif proc.poll() is not None:
-            del _LIVE_PROCS[pid]
-            if _group_alive(pid):
-                _kill_group(pid)
-
-
-def _register_locked(proc: Any) -> Any:
-    _prune_finished()
-    _LIVE_PROCS[proc.pid] = proc
-    return proc
+    return list(_LIVE_PROCS.values())
 
 
 def register_proc_group(proc: Any) -> Any:
     """Регистрирует группу потомка: остановка гасит её напрямую, без сканирования `ps`."""
     with _LIVE_LOCK:
-        return _register_locked(proc)
+        _prune_finished()
+        _LIVE_PROCS[proc.pid] = proc
+    return proc
 
 
 def live_proc_groups() -> list[Any]:
-    """Живые несобранные лидеры; завершившиеся выбывают при чтении (вместе с сиротами)."""
+    """Несобранные лидеры; собранные выбывают при чтении."""
     with _LIVE_LOCK:
-        _prune_finished()
-        return list(_LIVE_PROCS.values())
+        return _prune_finished()
 
 
 def reset_proc_groups() -> None:
@@ -107,90 +98,84 @@ def spawn_registered(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
     with _LIVE_LOCK:
         if _spawn_blocked:
             raise RuntimeError("Subbridge is shutting down; process spawn rejected")
-        return _register_locked(subprocess.Popen(*args, **kwargs))
+        return register_proc_group(subprocess.Popen(*args, **kwargs))
 
 
-def _wait_groups(procs: list[Any], budget_s: float) -> list[int]:
-    """Ждёт общий бюджет, НЕ собирая лидеров (`poll()` запрещён: PID держит зомби). Возвращает живые PGID."""
+def _wait_groups(procs: list[Any], budget_s: float) -> list[Any]:
+    """Ждёт общий бюджет без `poll()`; возвращает процессы, чья группа жива и лидер не собран.
+
+    Собранный лидер освободил PID: такой группе сигнал слать нельзя (PID мог уйти чужой группе).
+    """
     end = time.monotonic() + budget_s
-    poll_s = _env_seconds(
-        "BRIDGE_KILL_POLL_INTERVAL_S", 0.05, 0.005
-    )  # шаг опроса живости групп
+    poll_s = _env_seconds("BRIDGE_KILL_POLL_INTERVAL_S", 0.05, 0.005)
     while True:
-        alive = [p.pid for p in procs if _group_alive(p.pid)]
+        alive = [p for p in procs if p.returncode is None and _group_alive(p.pid)]
         if not alive or time.monotonic() >= end:
             return alive
         time.sleep(poll_s)
 
 
-def _reap(proc: Any, wait_s: float = 0.0) -> None:
-    """Собирает лидера только после сигналов и выводит его из реестра.
-
-    `wait_s` > 0 дожидается выхода лидера: на macOS умирающий процесс на миг даёт `EPERM`.
-    """
+def _reap(proc: Any, wait_s: float) -> None:
+    """Дожидается лидера в пределах `wait_s`; из реестра выводит только собранного."""
     with contextlib.suppress(Exception):
-        if wait_s > 0 and hasattr(proc, "wait"):
-            _ = proc.wait(timeout=wait_s)
-        else:
-            _ = proc.poll()
-    with _LIVE_LOCK:
-        if _LIVE_PROCS.get(getattr(proc, "pid", -1)) is proc:
-            del _LIVE_PROCS[proc.pid]
+        if proc.returncode is None:
+            _ = proc.wait(timeout=max(0.0, wait_s))
+    if proc.returncode is not None:
+        with _LIVE_LOCK:
+            _ = _LIVE_PROCS.pop(proc.pid, None)
 
 
 def terminate_proc_groups_parallel(
     procs: list[Any], term_grace_s: float, kill_wait_s: float
 ) -> None:
-    """`SIGTERM` всем группам разом, общий grace, затем `SIGKILL` выжившим: `<= grace + wait`.
+    """`SIGTERM` всем группам разом, общий grace, затем `SIGKILL`: `<= term_grace_s + kill_wait_s`.
 
-    Уже собранный лидер (`returncode is not None`) не сигналится никогда: его PID мог перейти
-    чужой группе. Несобранный лидер (даже зомби) держит PID в таблице ядра, поэтому группа
-    гасится до `poll()`; лидеров собирает `finally`, и читатель `proc.wait()` видит `-15`/`-9`.
+    Собранный лидер (`returncode is not None`) не сигналится никогда. Несобранный (даже зомби)
+    держит PID в ядре, поэтому группа гасится до сбора. `SIGKILL`-ожидание и сбор лидеров
+    в `finally` делят ОДИН дедлайн `kill_wait_s`, а не `kill_wait_s` на каждый процесс.
     """
     own, live = os.getpgrp(), []
     for p in filter(None, procs):
-        if (
-            getattr(p, "returncode", None) is None
-            and p.pid > 1
-            and p.pid != own
-            and _group_alive(p.pid)
-        ):
+        if p.returncode is None and p.pid > 1 and p.pid != own and _group_alive(p.pid):
             live.append(p)
         else:
-            _reap(p)  # собран (PID чужой) либо группа мертва (остался зомби-лидер)
+            _reap(p, 0.0)  # собран (PID чужой) либо группа мертва (зомби-лидер)
+    reap_end = time.monotonic() + max(0.0, kill_wait_s)
     try:
         for p in live:
             _kill_group(p.pid, signal.SIGTERM)
         survivors = _wait_groups(live, term_grace_s)
-        for pgid in survivors:
-            _kill_group(pgid, signal.SIGKILL)
+        reap_end = time.monotonic() + max(0.0, kill_wait_s)
+        for p in survivors:
+            if p.returncode is None:  # мог быть собран рабочим потоком после SIGTERM
+                _kill_group(p.pid, signal.SIGKILL)
         if survivors:
-            _wait_groups(live, kill_wait_s)
+            _wait_groups(survivors, max(0.0, reap_end - time.monotonic()))
     finally:
         for p in live:
-            _reap(p, kill_wait_s)
+            _reap(p, reap_end - time.monotonic())
 
 
 def _unregister_proc_group(proc: Any) -> None:
-    """Снимает `proc` с учёта; несобранного лидера (и его группу) гасит и собирает."""
-    with _LIVE_LOCK:
-        if _LIVE_PROCS.get(proc.pid) is proc:
-            del _LIVE_PROCS[proc.pid]
-    if proc.returncode is None:
-        grace = _env_seconds("BRIDGE_KILL_TERM_GRACE_S", 2.0, 0.0)
-        terminate_proc_groups_parallel(
-            [proc], grace, _env_seconds("BRIDGE_KILL_WAIT_S", 3.0, 0.0)
-        )
+    """Вызывается рабочим потоком по завершении хода: гасит остатки группы и снимает `proc` с учёта."""
+    grace = _env_seconds("BRIDGE_UNREGISTER_GRACE_S", 0.2, 0.0)
+    if proc.returncode is None and _group_alive(proc.pid):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            _kill_group(proc.pid, sig)
+            if not _wait_groups([proc], grace):
+                break
+    _reap(proc, grace)
+    with (
+        _LIVE_LOCK
+    ):  # лидера мог собрать `communicate()` этого же хода: запись всё равно снимается
+        _ = _LIVE_PROCS.pop(proc.pid, None)
 
 
 class _ChildGroup:
-    """Группа прямого потомка без `Popen`: `poll()` — `None`, пока жива хоть одна группа."""
+    """Группа прямого потомка без `Popen` (`returncode` всегда `None`: лидера собирает его владелец)."""
 
     def __init__(self, pid: int) -> None:
-        self.pid = pid
-
-    def poll(self) -> int | None:
-        return None if _group_alive(self.pid) else 0
+        self.pid, self.returncode = pid, None
 
 
 def child_process_groups() -> list[_ChildGroup]:

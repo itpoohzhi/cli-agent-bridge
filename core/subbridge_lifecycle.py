@@ -79,19 +79,19 @@ class SubbridgeLifecycle(HubLifecycleManager):
         self.last_signal = signum
 
     def is_draining(self) -> bool:
-        flags = (self._draining, self._signal_received, self._shutdown_requested)
+        flags = (self._signal_received, self._shutdown_requested)
         return any(flags) or super().is_draining()
 
     def reset(self) -> None:
         """Сбрасывает состояние координатора (для тестов): фазы, флаги и счётчики ходов."""
         super().reset()
         self._reset_flags()
+        _block_spawns(False)  # новый цикл остановки не наследует барьер spawn
 
     def _reset_flags(self) -> None:
-        self._signal_received = self._shutdown_requested = self._draining = False
-        self.forced_kill = self._force_killed = self._cleanup_done = False
+        self._signal_received = self._shutdown_requested = False
+        self.forced_kill = self._cleanup_done = False
         self.active_http_turns = 0
-        _block_spawns(False)  # новый цикл остановки не наследует барьер spawn
 
     def enter_turn(self, path: str) -> Rejection | None:
         """Атомарный допуск: проверка drain и учёт хода под одним замком (нет окна «допущен, но не посчитан»)."""
@@ -113,11 +113,12 @@ class SubbridgeLifecycle(HubLifecycleManager):
                     self.active_http_turns -= 1
 
     def active_count(self) -> int:
+        hooks = self.hooks
         try:
-            if self.hooks.active_procs_fn is not None:
-                procs = self.hooks.active_procs_fn()
+            if hooks.active_procs_fn is not None:
+                procs = hooks.active_procs_fn()
             else:
-                procs = len(self.hooks.procs_fn()) if self.hooks.procs_fn else 0
+                procs = len(hooks.procs_fn()) if hooks.procs_fn else 0
         except Exception:  # noqa: BLE001 — гонка с мутацией реестра не должна ронять drain
             procs = 0
         return max(self.active_http_turns, procs)
@@ -134,8 +135,11 @@ class SubbridgeLifecycle(HubLifecycleManager):
             "X-Bridge-Draining": "true",
         }
         message = "Bridge is draining for restart, please retry"
-        error = {"message": message, "type": "overloaded", "code": 503}
-        return 503, headers, {"error": error}
+        return (
+            503,
+            headers,
+            {"error": {"message": message, "type": "overloaded", "code": 503}},
+        )
 
     def _log(self, message: str) -> None:
         if self.hooks.log_fn is not None:
@@ -152,12 +156,14 @@ class SubbridgeLifecycle(HubLifecycleManager):
                 self.hooks.cleanup_fn()
 
     def force_kill(self) -> None:
-        """Параллельная зачистка групп; блокирует новые `spawn_registered` и подметает остатки при КАЖДОМ вызове.
+        """Однократная параллельная зачистка групп (`ps` не чаще раза за остановку), барьер на новые spawn.
 
-        Источники групп объединяются (`procs_fn` + `child_process_groups`, дедуп по PID); `cleanup_fn` — один раз.
+        Источники групп объединяются: `procs_fn` + `child_process_groups`, дедуп по PID.
         """
+        if self.forced_kill:
+            return
+        self.forced_kill = True
         _block_spawns(True)
-        self._force_killed = True
         try:
             if self.hooks.force_kill_fn is not None:
                 self.hooks.force_kill_fn()
@@ -168,7 +174,6 @@ class SubbridgeLifecycle(HubLifecycleManager):
                 terminate_proc_groups_parallel(list(groups.values()), term, kill)
         except Exception as exc:  # noqa: BLE001 — остановка не должна падать на зачистке
             self._log(f"drain_force_kill_error err={type(exc).__name__}")
-        self._cleanup()
 
     def _wait_until(self, done: Callable[[], bool], budget_s: float) -> bool:
         end = time.monotonic() + budget_s
@@ -188,22 +193,24 @@ class SubbridgeLifecycle(HubLifecycleManager):
                     "active_turns_before": 0,
                     "state": self.state,
                 }  # повторный вызов: drain уже идёт/завершён
-            self._draining = True
             self._shutdown_requested = True
             self.state = DrainState.DRAINING
+        _block_spawns(
+            True
+        )  # допущенные ходы уже посчитаны, новых процессов не порождаем
         self.shutdown_requested.set()
         active = self.active_count()
         try:
             budget = cfg.effective_drain_timeout_s if cfg.enabled else 0.0
             self._log(f"drain_started signal={self.last_signal or 0} active={active}")
             if not self._wait_until(lambda: self.active_count() == 0, budget):
-                self.forced_kill, active = True, self.active_count()
+                active = self.active_count()
                 self._log(f"drain_timeout active={active} budget_s={budget:.1f}")
                 self.force_kill()
                 self._wait_until(
                     lambda: self.active_http_turns == 0, cfg.effective_timers()[2]
                 )
-                self.force_kill()  # финальный подметающий проход: ход, проснувшийся после снимка
+                self._cleanup()  # после flush: `cleanup_fn` не режет каталоги живых ходов
         finally:  # без shutdown мост застрял бы в вечном 503
             self.state = DrainState.STOPPED
             self.drain_completed.set()
@@ -233,15 +240,12 @@ class SubbridgeLifecycle(HubLifecycleManager):
             server.serve_forever()
         finally:
             server.server_close()
-            # Штатный drain без принуждения уже всё погасил; после принуждения — финальный проход.
-            if (
-                self._force_killed
-                or not self._signal_received
-                or self.active_count() > 0
+            # Не принуждённый штатный drain уже всё погасил: `ps`-проход не нужен.
+            if not self.forced_kill and (
+                not self._signal_received or self.active_count() > 0
             ):
                 self.force_kill()
-            else:
-                self._cleanup()
+            self._cleanup()
         return 0
 
     def install(self, handler_cls: Any) -> Any:

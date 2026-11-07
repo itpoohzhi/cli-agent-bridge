@@ -35,7 +35,6 @@ if _ZEN_ROOT not in sys.path:
 
 from zen_bridge.adapters.serve_helper_cli import _run_serve_helper_cli
 
-
 if sys.argv[1:2] == ["--serve-helper"]:
     raise SystemExit(_run_serve_helper_cli(sys.argv[2:]))
 else:
@@ -90,7 +89,6 @@ from core.tool_emulation import (  # noqa: E402
     build_tool_schemas,
     sanitize_tool_calls_list,
 )
-
 
 def _positive_int(raw: str | None, default: int) -> int:
     """Положительное целое из env-строки; нечисловое/неположительное значение -> default."""
@@ -1158,6 +1156,7 @@ def _stop_proc(proc: subprocess.Popen[str]) -> None:
             os.killpg(pgid, signal.SIGKILL)
         except OSError:
             pass
+    spawn_registered.unregister(proc)
 
 
 _STDOUT_POLL_S = 0.25
@@ -2544,6 +2543,7 @@ class _ServeLease:
                 _ = self.helper.wait(timeout=max(0.1, _deadline - time.monotonic()))
             except (OSError, subprocess.SubprocessError):
                 pass
+        spawn_registered.unregister(self.helper)
         for stream in (self.helper.stdout, self.helper.stderr):
             try:
                 if stream is not None:

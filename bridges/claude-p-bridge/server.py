@@ -60,7 +60,7 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from core.proc_groups import spawn_registered  # noqa: E402
+from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 
 try:
@@ -446,6 +446,8 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 def _cleanup_active_img_dirs() -> None:
     """Зачистка каталогов картинок убитых ходов; вызывается вне обработчика сигнала."""
+    if live_proc_groups():  # каталоги живых ходов не трогаем
+        return
     with _active_lock:
         img_dirs = list(_active_img_dirs)
     for img_dir in img_dirs:  # только свои сессионные каталоги картинок
@@ -557,6 +559,7 @@ class Run:
         self.proc.wait(timeout=PROCESS_WAIT_S)
         with _active_lock:
             _active.pop(self.proc.pid, None)
+        spawn_registered.unregister(self.proc)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:

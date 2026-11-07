@@ -85,12 +85,73 @@ def test_registry_never_retains_reaped_processes() -> None:
     assert all(p.returncode is None for p in live)
 
 
-def test_finished_leader_orphans_are_cleaned_when_registry_observes_exit() -> None:
-    """RW-010: сироты завершившегося лидера гасятся в момент сбора, drain не ждёт их до таймаута."""
+def test_registry_read_never_reaps_or_kills() -> None:
+    """F-001 (Seat 1/3): чтение реестра не зовёт `poll()` — вышедший, но несобранный лидер остаётся, сироты живы."""
     proc, child = spawn_orphan_parent()
-    assert pg.live_proc_groups() == []  # `poll()` собрал лидера и убил его группу
-    assert proc.returncode is not None
-    assert pid_gone(child)
+    assert [p.pid for p in pg.live_proc_groups()] == [proc.pid]
+    assert proc.returncode is None  # `waitpid` не вызывался
+    os.kill(child, 0)  # сирота жив
+    pg.terminate_proc_groups_parallel([proc], 1.0, 1.0)
+    assert pid_gone(child) and proc.returncode is not None
+
+
+def test_no_sigkill_for_leader_reaped_after_sigterm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seat 1 F-001.2: рабочий поток собрал лидера после SIGTERM — PID свободен, SIGKILL ему не шлём."""
+    sent: list[tuple[int, int]] = []
+
+    class Leader:
+        pid, returncode = 77_001, None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    leader = Leader()
+    monkeypatch.setattr(pg, "_group_alive", lambda _pgid: True)
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        sent.append((pgid, sig))
+        leader.returncode = -15  # `proc.wait()` рабочего потока собрал лидера
+
+    monkeypatch.setattr(pg.os, "killpg", fake_killpg)
+    pg.terminate_proc_groups_parallel([leader], 0.05, 0.05)
+    assert [sig for _, sig in sent] == [15]  # только SIGTERM
+
+
+def test_reap_phase_shares_one_deadline_for_all_leaders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-003.3 (Seat 1/2/3): сбор лидеров делит ОДИН дедлайн `kill_wait_s`, а не `kill_wait_s` на процесс."""
+    waits: list[float] = []
+
+    class Stuck:
+        returncode = None
+
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def wait(self, timeout: float | None = None) -> int:
+            waits.append(timeout or 0.0)
+            time.sleep(timeout or 0.0)
+            raise subprocess.TimeoutExpired("x", timeout or 0.0)
+
+    procs = [Stuck(78_000 + i) for i in range(20)]
+    monkeypatch.setattr(pg, "_group_alive", lambda _pgid: True)
+    monkeypatch.setattr(pg.os, "killpg", lambda *_a: None)
+    start = time.monotonic()
+    pg.terminate_proc_groups_parallel(procs, 0.05, 0.4)
+    assert time.monotonic() - start < 0.05 + 0.4 + 0.5  # не 20 * 0.4
+    assert sum(waits) <= 0.45
+
+
+def test_unregister_removes_entry_even_when_leader_already_reaped() -> None:
+    proc = pg.spawn_registered(["true"])
+    proc.wait()  # `communicate()` этого же хода собрал лидера
+    pg.register_proc_group(proc)
+    pg.spawn_registered.unregister(proc)  # type: ignore[attr-defined]
+    assert proc.pid not in [p.pid for p in pg.live_proc_groups()]
+    assert pg.terminate_proc_groups_parallel([], 0.1, 0.1) is None
 
 
 def test_spawn_barrier_rejects_new_children_during_shutdown() -> None:

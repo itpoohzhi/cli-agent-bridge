@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from core.runtime_env import flag_enabled
 
@@ -105,6 +105,7 @@ class LivenessWindow:
 
     def __init__(self, spec: WindowSpec, *, clock: Callable[[], float] = time.monotonic, soft_enabled: Callable[[], bool] = lambda: False) -> None:
         self._spec, self._clock, self._soft_enabled = spec, clock, soft_enabled
+        self.clock = clock
         self._lock = threading.Lock()
         now = clock()
         cap = now + spec.safety_cap_s
@@ -187,10 +188,14 @@ class LivenessWindow:
             )
 
 
+class DeadlineCell(Protocol):
+    def advance(self, now: float, is_useful_chunk: bool, epoch: int | None = None) -> None: ...
+
+
 class SseProgress:
     """SSE frame S/T tracker; legacy `last_progress` semantics when flags are off."""
 
-    def __init__(self, window: LivenessWindow | None, enforce: bool, cell: Any = None) -> None:
+    def __init__(self, window: LivenessWindow | None, enforce: bool, cell: DeadlineCell | None = None) -> None:
         self.window, self.enforce, self.last_progress, self.cell = window, enforce, None, cell
         self.useful = False  # последний кадр был полезным (S либо легаси-прогресс)
         self.strict = enforce or flag_enabled(FLAG_SOFT_LIVENESS)
@@ -208,7 +213,7 @@ class SseProgress:
         if self.useful:
             self.last_progress = time.monotonic()
         if self.cell is not None:  # скользящее окно: полезный кадр сдвигает дедлайн стрима
-            self.cell.advance(time.monotonic(), self.useful)
+            self.cell.advance(self.window.clock() if self.window else time.monotonic(), self.useful)
         return chunk
 
 

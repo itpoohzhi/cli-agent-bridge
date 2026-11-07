@@ -112,11 +112,11 @@ def test_effective_drain_timeout_is_clamped_below_exit_timeout() -> None:
     cfg_cls = lifecycle_mod().SubbridgeDrainConfig
     assert cfg_cls.from_env(
         {"BRIDGE_EXIT_TIMEOUT_S": "100"}
-    ).effective_drain_timeout_s == pytest.approx(88.0)
+    ).effective_drain_timeout_s == pytest.approx(86.0)
     short = cfg_cls.from_env({"BRIDGE_EXIT_TIMEOUT_S": "5"})
     assert short.effective_drain_timeout_s == pytest.approx(
-        3.5
-    )  # 5 - (0.5+0.3+0.2) - 0.5
+        3.25
+    )  # 5 - (0.5+0.3+0.2) - (0.5+0.25)
     assert short.effective_drain_timeout_s + sum(short.effective_timers()) < 5.0
 
 
@@ -127,13 +127,13 @@ def test_long_drain_is_clamped_to_real_exit_timeout_not_extending_it() -> None:
         {"BRIDGE_EXIT_TIMEOUT_S": "180", "BRIDGE_DRAIN_TIMEOUT_S": "300"}
     )
     assert explicit.exit_timeout_s == 180.0
-    assert explicit.effective_drain_timeout_s == pytest.approx(168.0)
+    assert explicit.effective_drain_timeout_s == pytest.approx(166.0)
     derived = cfg_cls.from_env({"BRIDGE_DRAIN_TIMEOUT_S": "300"})
     assert (
         derived.exit_timeout_s == 180.0
     )  # без `BRIDGE_EXIT_TIMEOUT_S` остаётся дефолт
     assert derived.effective_drain_timeout_s == pytest.approx(
-        168.0
+        166.0
     )  # клампится под него
     short = cfg_cls.from_env({"BRIDGE_DRAIN_TIMEOUT_S": "20"})
     assert short.exit_timeout_s == 180.0
@@ -217,10 +217,10 @@ def test_short_exit_timeout_threshold_is_configurable() -> None:
     assert below.effective_timers() == (2.0, 3.0, 2.0)
 
 
-def test_force_kill_sweeps_every_call_but_cleans_up_once(
+def test_force_kill_runs_once_per_cycle_and_cleanup_is_separate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F-002 (Seat 1): каждый `force_kill` подметает остатки (`ps`), `cleanup_fn` — один раз за цикл."""
+    """F-003.1 (Seat 1): `force_kill` (и `ps -A`) — не чаще раза за остановку; `cleanup_fn` зовёт drain после flush."""
     mod = lifecycle_mod()
     scans: list[int] = []
     cleanups: list[int] = []
@@ -228,10 +228,13 @@ def test_force_kill_sweeps_every_call_but_cleans_up_once(
     life = make_life(cleanup_fn=lambda: cleanups.append(1))
     life.force_kill()
     life.force_kill()
-    assert scans == [1, 1] and cleanups == [1]
+    assert scans == [1] and cleanups == [] and life.forced_kill
+    life._cleanup()
+    life._cleanup()
+    assert cleanups == [1]  # ровно один раз
     life.reset()
     life.force_kill()
-    assert scans == [1, 1, 1] and cleanups == [1, 1]  # новый цикл — новый cleanup
+    assert scans == [1, 1]  # новый цикл остановки — новая зачистка
 
 
 def test_serve_forever_reaps_orphans_on_startup() -> None:
@@ -396,8 +399,8 @@ def test_terminate_groups_parallel_has_bounded_budget_and_kills_stubborn() -> No
 
 
 def test_terminate_groups_skips_own_group_and_invalid_pgid() -> None:
-    own = type("P", (), {"pid": os.getpgrp(), "poll": lambda self: None})()
-    bad = type("P", (), {"pid": 1, "poll": lambda self: None})()
+    own = type("P", (), {"pid": os.getpgrp(), "returncode": None})()
+    bad = type("P", (), {"pid": 1, "returncode": None})()
     lifecycle_mod().terminate_proc_groups_parallel([own, bad], 0.01, 0.01)  # type: ignore[list-item]
 
 
@@ -830,11 +833,9 @@ class _FakeProc:
     """Двойник `Popen`: `poll()` — `None`, пока `rc` не выставлен."""
 
     def __init__(self, pid: int, rc: int | None = None) -> None:
-        self.pid, self.rc, self.returncode = pid, rc, None
+        self.pid, self.returncode = pid, rc  # `rc` задан = лидер уже собран
 
     def poll(self) -> int | None:
-        if self.rc is not None:
-            self.returncode = self.rc  # как `Popen.poll()`: собирает завершившегося
         return self.returncode
 
 
@@ -861,7 +862,7 @@ def test_register_proc_group_prunes_finished_leaders_without_reads(
         assert set(pg._LIVE_PROCS) == {20_000}  # последний завершённый тоже выбыл
         alive_two = _FakeProc(20_001)
         assert pg.register_proc_group(alive_two) is alive_two
-        alive.rc = -15
+        alive.returncode = -15  # собран рабочим потоком
         pg.register_proc_group(_FakeProc(20_002))
         assert set(pg._LIVE_PROCS) == {20_001, 20_002}
         assert [p.pid for p in pg.live_proc_groups()] == [20_001, 20_002]
@@ -1068,21 +1069,29 @@ def test_group_alive_treats_permission_error_as_dead(
     assert pg._group_alive(4242) is True
 
 
-def test_prune_reaps_finished_leader_and_kills_its_orphans(
+def test_prune_only_reads_returncode_and_never_signals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RW-010: завершившийся лидер выбывает из реестра сразу, сироты его группы гасятся при сборе."""
+    """F-001 (Seat 1/3): `_prune_finished` не зовёт `poll()`/`killpg` (гонка с `communicate()`), только читает `returncode`."""
     import core.proc_groups as pg
 
-    killed: list[int] = []
-    monkeypatch.setattr(pg, "_group_alive", lambda pgid: pgid == 31_001)
-    monkeypatch.setattr(pg, "_kill_group", lambda pgid, *_a: killed.append(pgid))
+    class Spy(_FakeProc):
+        def poll(self) -> int | None:
+            raise AssertionError("poll() внутри prune запрещён")
+
+    sent: list[int] = []
+    monkeypatch.setattr(pg, "_kill_group", lambda pgid, *_a: sent.append(pgid))
+    monkeypatch.setattr(pg.os, "killpg", lambda pgid, sig: sent.append(pgid))
     pg.reset_proc_groups()
     try:
-        pg.register_proc_group(_FakeProc(31_001, rc=0))  # лидер вышел, внук жив
-        pg.register_proc_group(_FakeProc(31_002, rc=0))  # группа мертва
-        assert pg.live_proc_groups() == []  # ни одного собранного `Popen` в реестре
-        assert killed == [31_001]
+        pg.register_proc_group(
+            Spy(31_001, rc=0)
+        )  # собран `communicate()` в рабочем потоке
+        pg.register_proc_group(
+            Spy(31_002)
+        )  # несобранный: остаётся, даже если лидер уже вышел
+        assert [p.pid for p in pg.live_proc_groups()] == [31_002]
+        assert sent == []
     finally:
         pg.reset_proc_groups()
 
@@ -1095,11 +1104,13 @@ def test_terminate_skips_reaped_leaders_with_dead_groups(
 
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(pg.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
-    monkeypatch.setattr(pg, "_group_alive", lambda pgid: pgid == 32_001)
+    monkeypatch.setattr(pg, "_group_alive", lambda pgid: pgid in (32_001, 32_002))
     pg.terminate_proc_groups_parallel(
-        [_FakeProc(32_000, rc=0), _FakeProc(32_001, rc=0)], 0.0, 0.0
+        [_FakeProc(32_000, rc=0), _FakeProc(32_001), _FakeProc(32_002, rc=0)], 0.0, 0.0
     )
-    assert {pgid for pgid, _ in sent} == {32_001}
+    assert {pgid for pgid, _ in sent} == {
+        32_001
+    }  # собранные 32_000/32_002 не сигналятся
 
 
 def test_spawn_registered_makes_child_a_group_leader() -> None:

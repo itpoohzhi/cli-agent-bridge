@@ -152,6 +152,7 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.proc_groups import spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.stream_interruption_recovery import (  # noqa: E402
     InterruptionTailState,
@@ -183,7 +184,6 @@ FLEET_PATH = Path(os.environ.get("AGY_BRIDGE_FLEET", "") or str(ROOT / "fleet.js
 ENV_MODEL = os.environ.get("AGY_BRIDGE_MODEL", "").strip()
 WORKSPACE = ROOT / "workspace"
 PRINT_TIMEOUT = os.environ.get("AGY_BRIDGE_PRINT_TIMEOUT", "0")
-
 
 def _env_float(name: str, default: float, low: float, high: float) -> float:
     """Float из окружения; пустое/невалидное/неконечное/вне [low, high] -> default."""
@@ -3045,7 +3045,7 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
-_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=lambda: list(_active.copy().values()), log_fn=_log), workspace=WORKSPACE)
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=lambda: list(_active.copy().values()), cleanup_fn=lambda: _supervisor.kill_all([p for p in _active.copy().values() if p.returncode is None]), log_fn=_log), workspace=WORKSPACE)
 
 
 # ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
@@ -5288,7 +5288,7 @@ class Run:
             plan.anchored = False
             plan.reason = "cid_busy"
         try:
-            self.proc = subprocess.Popen(
+            self.proc = spawn_registered(
                 cmd,
                 cwd=work_dir,
                 stdin=subprocess.PIPE,
@@ -5890,6 +5890,7 @@ class Run:
         _kill_group(self.proc)
         with _active_lock:
             _active.pop(self.proc.pid, None)
+        spawn_registered.unregister(self.proc)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import signal
-import subprocess
 import sys
 from typing import Any
 
@@ -46,7 +45,7 @@ def test_drain_plus_tail_always_fits_exit_timeout(env: dict[str, str]) -> None:
     assert cfg.effective_drain_timeout_s + sum(timers) < cfg.exit_timeout_s
 
 
-def test_defaults_are_not_squeezed_and_drain_is_168s() -> None:
+def test_defaults_are_not_squeezed_and_drain_is_166s() -> None:
     cfg = SubbridgeDrainConfig.from_env({"BRIDGE_EXIT_TIMEOUT_S": "180"})
     assert cfg.effective_timers() == (2.0, 3.0, 2.0)
     assert cfg.effective_drain_timeout_s == pytest.approx(
@@ -55,7 +54,9 @@ def test_defaults_are_not_squeezed_and_drain_is_168s() -> None:
     big = SubbridgeDrainConfig.from_env(
         {"BRIDGE_EXIT_TIMEOUT_S": "180", "BRIDGE_DRAIN_TIMEOUT_S": "999"}
     )
-    assert big.effective_drain_timeout_s == pytest.approx(168.0)
+    assert big.effective_drain_timeout_s == pytest.approx(
+        166.0
+    )  # 180 - 7 (хвост) - 5 (запас) - 2 (проба ps)
 
 
 def test_oversized_tail_is_scaled_proportionally() -> None:
@@ -128,27 +129,59 @@ def test_handle_signal_stores_signum_without_conversion() -> None:
     assert life._signal_received and life._shutdown_requested
 
 
-def test_force_kill_blocks_spawn_and_resweeps_late_children() -> None:
-    """F-002: после `force_kill` новых потомков нет, а поздно зарегистрированный гасится повторным проходом."""
+def test_force_kill_blocks_spawn_and_runs_once() -> None:
+    """F-002/F-003.1: после `force_kill` новых потомков нет; повторный вызов — no-op; `reset` снимает барьер."""
     life = mod.SubbridgeLifecycle(
         SubbridgeDrainConfig(kill_term_grace_s=0.2, kill_wait_s=0.5),
         mod.SubbridgeHooks(procs_fn=pg.live_proc_groups),
     )
+    victim = pg.spawn_registered([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         life.force_kill()
+        assert victim.returncode is not None and victim.returncode < 0
         with pytest.raises(RuntimeError):
             pg.spawn_registered([sys.executable, "-c", "pass"])
-        late = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            start_new_session=True,
-        )
-        pg.register_proc_group(late)  # «проснувшийся» ход успел до барьера
-        life.force_kill()
-        assert late.returncode is not None and late.returncode < 0
+        life.force_kill()  # второй вызов ничего не делает
+        assert life.forced_kill
     finally:
         life.reset()  # снимает барьер для остальных тестов
         pg.reset_proc_groups()
     assert pg.spawn_registered(["true"]).wait() == 0
+
+
+def test_drain_blocks_spawn_from_start_and_calls_cleanup_after_flush() -> None:
+    """F-003.1: барьер включается со старта drain; `cleanup_fn` — после принудительной зачистки и flush."""
+    order: list[str] = []
+    life = mod.SubbridgeLifecycle(
+        SubbridgeDrainConfig(
+            drain_timeout_s=0.05, flush_grace_s=0.05, poll_interval_s=0.005
+        ),
+        mod.SubbridgeHooks(
+            force_kill_fn=lambda: order.append("kill"),
+            cleanup_fn=lambda: order.append("cleanup"),
+            active_procs_fn=lambda: 1,
+        ),
+    )
+
+    class Server:
+        def shutdown(self) -> None:
+            order.append("shutdown")
+
+    try:
+        life.run_drain_once(Server())
+        assert order == ["kill", "cleanup", "shutdown"]
+        with pytest.raises(RuntimeError):
+            pg.spawn_registered(["true"])
+    finally:
+        life.reset()
+
+
+def test_exit_timeout_is_floored_and_probe_is_part_of_the_margin() -> None:
+    """Seat 3 F-008 / Seat 1 F-003.2: `ExitTimeOut` не ниже пола; проба `ps` входит в запас."""
+    tiny = SubbridgeDrainConfig.from_env({"BRIDGE_EXIT_TIMEOUT_S": "0.001"})
+    assert tiny.exit_timeout_s == 1.0
+    cfg = SubbridgeDrainConfig.from_env({"BRIDGE_EXIT_TIMEOUT_S": "180"})
+    assert cfg.margin_s == pytest.approx(5.0 + 2.0)
 
 
 def test_force_kill_merges_registry_and_ps_groups_without_duplicates(

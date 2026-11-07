@@ -23,6 +23,8 @@ _ENV_VARS = {
     "flush_grace_s": "BRIDGE_DRAIN_FLUSH_GRACE_S",
     "poll_interval_s": "BRIDGE_DRAIN_POLL_INTERVAL_S",
     "safety_margin_s": "BRIDGE_DRAIN_SAFETY_MARGIN_S",
+    "probe_timeout_s": "BRIDGE_PROCESS_PROBE_TIMEOUT_S",
+    "short_exit_threshold_s": "BRIDGE_SHORT_EXIT_TIMEOUT_S",  # порог короткого `ExitTimeOut`
 }
 _DRAIN_ENABLED_ENV = (
     "BRIDGE_ENABLE_GRACEFUL_DRAIN",
@@ -35,7 +37,11 @@ SHORT_EXIT_CAPS_S = (
     0.3,
     0.2,
 )  # потолки (TERM, KILL, flush) при коротком `ExitTimeOut`
-MIN_DRAIN_S, MIN_TAIL_S = 0.05, 0.3  # пол drain и пол бюджета зачистки
+MIN_DRAIN_S, MIN_TAIL_S, MIN_EXIT_S = (
+    0.05,
+    0.3,
+    1.0,
+)  # полы: drain, зачистка, `ExitTimeOut`
 
 
 def _env_float(
@@ -47,12 +53,6 @@ def _env_float(
         return default
     ok = value >= 0 if allow_zero else value > 0
     return value if math.isfinite(value) and ok else default
-
-
-def short_exit_timeout_s(env: Mapping[str, str] | None = None) -> float:
-    """Порог короткого `ExitTimeOut`, ниже которого kill-таймеры сжимаются (настраивается env)."""
-    source = os.environ if env is None else env
-    return _env_float(source, "BRIDGE_SHORT_EXIT_TIMEOUT_S", SHORT_EXIT_TIMEOUT_S)
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,7 @@ class SubbridgeDrainConfig:
     poll_interval_s: float = 0.05
     safety_margin_s: float = 5.0
     short_exit_threshold_s: float = SHORT_EXIT_TIMEOUT_S
+    probe_timeout_s: float = 2.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> SubbridgeDrainConfig:
@@ -78,7 +79,7 @@ class SubbridgeDrainConfig:
             name: _env_float(source, var, base[name], name == "drain_timeout_s")
             for name, var in _ENV_VARS.items()
         }
-        values["short_exit_threshold_s"] = short_exit_timeout_s(source)
+        values["exit_timeout_s"] = max(MIN_EXIT_S, values["exit_timeout_s"])
         retry = int(_env_float(source, "BRIDGE_RETRY_AFTER_S", base["retry_after_s"]))
         # Порядок как у хаба: явный флаг саб-моста, затем переменные `HubLifecycleManager`.
         enabled = env_bool(source, _DRAIN_ENABLED_ENV, True)
@@ -88,8 +89,9 @@ class SubbridgeDrainConfig:
 
     @property
     def margin_s(self) -> float:
-        """Запас до `SIGKILL` от launchd: `safety_margin_s`, но не больше 10% `ExitTimeOut`."""
-        return min(self.safety_margin_s, self.exit_timeout_s * 0.1)
+        """Запас до `SIGKILL` от launchd: `safety_margin_s` (<= 10% `ExitTimeOut`) + проба `ps` (<= 5%)."""
+        probe = min(self.probe_timeout_s, self.exit_timeout_s * 0.05)
+        return min(self.safety_margin_s, self.exit_timeout_s * 0.1) + probe
 
     def effective_timers(self) -> tuple[float, float, float]:
         """`(TERM-grace, KILL-wait, flush)`, вмещающиеся в `ExitTimeOut` при ЛЮБЫХ значениях env.
