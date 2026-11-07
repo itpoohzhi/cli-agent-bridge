@@ -96,6 +96,86 @@ BRIDGE_MUSE_STARTUP_TIMEOUT_S: float = get_env_float(
     "BRIDGE_MUSE_STARTUP_TIMEOUT_S", 180.0
 )
 
+# --- Телеметрия запросов (core/request_telemetry.py). Значения ниже — fallback: каждое
+# переопределяется переменной окружения с тем же именем (читается при создании стора).
+# BRIDGE_TELEMETRY_ENABLED — GigaRC-флаг (kill-switch без рестарта): читается на каждом запросе
+# через core.runtime_env.flag_enabled (dynamic_config.json > env > false); дефолт false.
+BRIDGE_TELEMETRY_ENABLED: bool = False
+BRIDGE_TELEMETRY_DB_PATH: str = "~/.dsh/telemetry/bridge_telemetry.duckdb"
+BRIDGE_TELEMETRY_QUEUE_MAXSIZE: int = 4096
+BRIDGE_TELEMETRY_FLUSH_INTERVAL_MS: int = 500
+BRIDGE_TELEMETRY_BATCH_SIZE: int = 100
+BRIDGE_TELEMETRY_RETENTION_DAYS: int = 14
+BRIDGE_TELEMETRY_MAX_ROWS: int = 500000
+BRIDGE_TELEMETRY_RECENT_LIMIT: int = 100
+BRIDGE_TELEMETRY_PRUNE_INTERVAL_S: float = 60.0
+BRIDGE_TELEMETRY_MAX_FIELD_LEN: int = 160
+BRIDGE_TELEMETRY_WINDOW_MIN_H: float = 0.1
+BRIDGE_TELEMETRY_WINDOW_MAX_H: float = 720.0
+BRIDGE_TELEMETRY_LIMIT_MAX: int = 500
+BRIDGE_TELEMETRY_FLUSH_MAX_BATCHES: int = 4  # пачек за один тик writer: prune не голодает при плотной очереди
+BRIDGE_TELEMETRY_PRUNE_RETRY_S: float = 5.0  # повтор prune после сбоя, отдельно от PRUNE_INTERVAL_S
+BRIDGE_TELEMETRY_REDACT_SCAN_FACTOR: int = 4  # строка усекается до max(MAX_FIELD_LEN * FACTOR, SCAN_MIN) до regex-редакции
+BRIDGE_TELEMETRY_REDACT_SCAN_MIN: int = 512
+BRIDGE_TELEMETRY_USAGE_TAIL_BYTES: int = 4096  # хвост ответа passthrough для разбора usage (читается один раз на процесс)
+# Карта backend_id -> (outbound_target, egress_proxy); JSON-override:
+# BRIDGE_TELEMETRY_BACKEND_TOPOLOGY_JSON='{"agy": [":9887", "direct"]}'.
+BRIDGE_TELEMETRY_BACKEND_TOPOLOGY: dict[str, tuple[str, str]] = {
+    "droid": ("cli:droid", "direct"),
+    "muse": (":9886", ":10820 (xray SOCKS5)"),
+    "claude-p": (":9881", "direct"),
+    "opencode-zen": (":9883", ":10816 (pproxy HTTP)"),
+    "opencode": (":9883", ":10816 (pproxy HTTP)"),
+    "agy": (":9887", ":10820 (xray SOCKS5)"),
+    "codex": (":2455", ":10820 (xray SOCKS5)"),
+    "georouter": (":10830", ":10820 (xray SOCKS5)"),
+    "litellm": (":10830", ":10820 (xray SOCKS5)"),
+}
+# Трёхъярусная карта потока для architecture_flow; JSON-override:
+# BRIDGE_TELEMETRY_TOPOLOGY_JSON. Узлы tier1 сопоставляются первым совпадением
+# (roles / subagent / ua), tier2 — по backends (all=true — весь хаб), tier3 — по match.
+BRIDGE_TELEMETRY_TOPOLOGY: dict[str, dict] = {
+    "tier1_entry_callers": {
+        "layer": "L7 inbound callers",
+        "description": "Клиенты и агенты, которые обращаются к хабу :9882 (Bearer BRIDGE_KEY).",
+        "nodes": [
+            {"id": "council", "name": "launch_seat.py / Council", "roles": ["seat", "skeptic"]},
+            {"id": "subagents", "name": "Subagents (X-Subagent-Id)", "subagent": True},
+            {"id": "claude-code", "name": "Claude Code", "ua": ["claude"]},
+            {"id": "codex-cli", "name": "Codex CLI", "ua": ["codex"]},
+            {"id": "factory-droid", "name": "Factory Droid", "ua": ["droid", "factory"]},
+            {"id": "dsh", "name": "DSH Desktop/Web", "ua": ["dsh", "electron", "mozilla"]},
+        ],
+    },
+    "tier2_l7_bridges": {
+        "layer": "L7 AI protocol bridges",
+        "description": (
+            "Переводят протокол в OpenAI /v1/chat/completions: санитизация tool-calls, SSE-фрейминг, "
+            "circuit breaker, карантин моделей, управление сессиями."
+        ),
+        "nodes": [
+            {"id": "universal-9882", "name": "cli-agent-bridge (Universal Hub)", "port": 9882, "all": True},
+            {"id": "claude-9881", "name": "claude-p-bridge", "port": 9881, "backends": ["claude-p"]},
+            {"id": "opencode-9883", "name": "opencode-zen-bridge", "port": 9883, "backends": ["opencode-zen", "opencode"]},
+            {"id": "agy-9887", "name": "agy-bridge", "port": 9887, "backends": ["agy"]},
+            {"id": "muse-9886", "name": "muse-bridge", "port": 9886, "backends": ["muse"]},
+            {"id": "codex-2455", "name": "codex-lb", "port": 2455, "backends": ["codex"]},
+            {"id": "georouter-10830", "name": "eye-litellm / OpenCode Go", "port": 10830, "backends": ["georouter", "litellm"]},
+        ],
+    },
+    "tier3_l4_egress_proxies": {
+        "layer": "L4/L7 network egress proxies",
+        "description": (
+            "Транспорт TCP/TLS/SOCKS5/HTTP-туннеля до провайдера; не меняют LLM JSON/SSE полезную нагрузку."
+        ),
+        "nodes": [
+            {"id": "xray-10820", "name": "xray SOCKS5 (Amsterdam Aeza)", "port": 10820, "match": [":10820"]},
+            {"id": "pproxy-10816", "name": "pproxy HTTP-to-SOCKS5 shim", "port": 10816, "match": [":10816"]},
+            {"id": "xray-10809", "name": "xray Timeweb fallback", "port": 10809, "match": [":10809", ":10801"]},
+        ],
+    },
+}
+
 
 __all__ = [
     "BRIDGE_RESIDENT_MODELS",
@@ -109,6 +189,26 @@ __all__ = [
     "BRIDGE_STRICT_STARTUP",
     "BRIDGE_EFFORT_LEVELS",
     "BRIDGE_MUSE_STARTUP_TIMEOUT_S",
+    "BRIDGE_TELEMETRY_ENABLED",
+    "BRIDGE_TELEMETRY_DB_PATH",
+    "BRIDGE_TELEMETRY_QUEUE_MAXSIZE",
+    "BRIDGE_TELEMETRY_FLUSH_INTERVAL_MS",
+    "BRIDGE_TELEMETRY_BATCH_SIZE",
+    "BRIDGE_TELEMETRY_RETENTION_DAYS",
+    "BRIDGE_TELEMETRY_MAX_ROWS",
+    "BRIDGE_TELEMETRY_RECENT_LIMIT",
+    "BRIDGE_TELEMETRY_PRUNE_INTERVAL_S",
+    "BRIDGE_TELEMETRY_MAX_FIELD_LEN",
+    "BRIDGE_TELEMETRY_WINDOW_MIN_H",
+    "BRIDGE_TELEMETRY_WINDOW_MAX_H",
+    "BRIDGE_TELEMETRY_LIMIT_MAX",
+    "BRIDGE_TELEMETRY_FLUSH_MAX_BATCHES",
+    "BRIDGE_TELEMETRY_PRUNE_RETRY_S",
+    "BRIDGE_TELEMETRY_REDACT_SCAN_FACTOR",
+    "BRIDGE_TELEMETRY_REDACT_SCAN_MIN",
+    "BRIDGE_TELEMETRY_USAGE_TAIL_BYTES",
+    "BRIDGE_TELEMETRY_BACKEND_TOPOLOGY",
+    "BRIDGE_TELEMETRY_TOPOLOGY",
     "get_env_str",
     "get_env_int",
     "get_env_float",
