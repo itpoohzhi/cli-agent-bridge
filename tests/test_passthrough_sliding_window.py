@@ -230,10 +230,12 @@ def test_open_sliding_deadline_arms_only_for_client_stream_with_flag(
         return flag
 
     cell = sw().open_sliding_deadline(
-        50.0, _Limits(), internal, request_body, flag_fn, now_s=100.0
+        110.0, _Limits(), internal, request_body, flag_fn, now_s=100.0
     )
     assert (cell.state is not None) is armed
-    assert cell.deadline_s == (110.0 if armed else 50.0)
+    assert (
+        cell.deadline_s == 110.0
+    )  # внешний дедлайн вызывающего сохранён в обоих случаях
     if internal:
         assert calls == []  # флаг не читается, когда ячейка заведомо статична
 
@@ -242,7 +244,7 @@ def test_kill_switch_stops_extending_open_stream_mid_flight() -> None:
     """F-003: выключение флага посреди открытого стрима прекращает продление дедлайна."""
     enabled = [True]
     cell = sw().open_sliding_deadline(
-        50.0, _Limits(), False, {"stream": True}, lambda: enabled[0], now_s=100.0
+        110.0, _Limits(), False, {"stream": True}, lambda: enabled[0], now_s=100.0
     )
     assert cell.state is not None and cell.deadline_s == 110.0
     cell.advance(108.0, True)
@@ -329,7 +331,33 @@ def test_open_sliding_deadline_defaults_to_monotonic_clock() -> None:
     cell = sw().open_sliding_deadline(
         0.0, _Limits(), False, {"stream": True}, lambda: True
     )
-    assert before + 10.0 <= cell.deadline_s <= time.monotonic() + 10.0
+    assert (
+        before + 5.0 <= cell.deadline_s <= time.monotonic() + 5.0
+    )  # нет дедлайна: `idle_timeout_s`
+
+
+def test_open_sliding_deadline_preserves_external_deadline_in_state() -> None:
+    """Seat 1 F-002: окно КА строится от дедлайна вызывающего, а не от `total_timeout_s`."""
+    cell = sw().open_sliding_deadline(
+        107.0, _Limits(), False, {"stream": True}, lambda: True, now_s=100.0
+    )
+    assert cell.state is not None
+    assert cell.state.initial_timeout_s == 7.0 and cell.state.deadline_s == 107.0
+    assert cell.deadline_s == 107.0
+    expired = sw().open_sliding_deadline(
+        50.0, _Limits(), False, {"stream": True}, lambda: True, now_s=100.0
+    )
+    assert expired.state is not None and expired.state.initial_timeout_s == 0.0
+
+
+def test_kill_switch_never_shrinks_cell_deadline_below_external() -> None:
+    """Seat 1 F-002: выключенный флаг не сдвигает `deadline_s` назад к состоянию КА."""
+    enabled = [False]
+    cell = sw().SlidingDeadline(200.0, enabled_fn=lambda: enabled[0])
+    cell.arm_for(100.0, _Limits(), 7.0)
+    assert cell.deadline_s == 200.0
+    cell.advance(101.0, True)
+    assert cell.deadline_s == 200.0
 
 
 def sse_stream() -> bytes:

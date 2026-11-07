@@ -834,10 +834,13 @@ class _FakeProc:
         return self.rc
 
 
-def test_register_proc_group_prunes_finished_leaders_without_reads() -> None:
+def test_register_proc_group_prunes_finished_leaders_without_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F-001 (BLOCKER Seat 1): реестр не растёт в демоне и не держит закрытые `Popen`."""
     import core.proc_groups as pg
 
+    monkeypatch.setattr(pg, "_group_alive", lambda _pgid: False)  # фиктивные PID
     pg.reset_proc_groups()
     try:
         finished = [_FakeProc(10_000 + i, rc=0) for i in range(50)]
@@ -863,9 +866,12 @@ def test_register_proc_group_prunes_finished_leaders_without_reads() -> None:
         pg.reset_proc_groups()
 
 
-def test_proc_group_registry_is_thread_safe_under_churn() -> None:
+def test_proc_group_registry_is_thread_safe_under_churn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import core.proc_groups as pg
 
+    monkeypatch.setattr(pg, "_group_alive", lambda _pgid: False)  # фиктивные PID
     pg.reset_proc_groups()
     errors: list[BaseException] = []
     start = threading.Barrier(5)
@@ -1034,3 +1040,105 @@ def test_child_process_groups_ignore_non_leaders_and_foreign_children() -> None:
     finally:
         same_group.kill()
         same_group.wait(3)
+
+
+def test_group_alive_treats_permission_error_as_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-004 (Seat 1): `EPERM` на `killpg(pgid, 0)` — PGID чужой/переиспользован, группа не наша."""
+    import core.proc_groups as pg
+
+    def raiser(exc: OSError) -> Any:
+        def fake(_pgid: int, _sig: int) -> None:
+            raise exc
+
+        return fake
+
+    monkeypatch.setattr(pg.os, "killpg", raiser(PermissionError()))
+    assert pg._group_alive(4242) is False
+    monkeypatch.setattr(pg.os, "killpg", raiser(ProcessLookupError()))
+    assert pg._group_alive(4242) is False
+    monkeypatch.setattr(pg.os, "killpg", raiser(OSError(5, "io")))
+    assert pg._group_alive(4242) is True
+
+
+def test_prune_keeps_finished_leader_while_group_has_survivors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core.proc_groups as pg
+
+    alive_groups = {31_001}
+    monkeypatch.setattr(pg, "_group_alive", lambda pgid: pgid in alive_groups)
+    pg.reset_proc_groups()
+    try:
+        pg.register_proc_group(_FakeProc(31_001, rc=0))  # лидер вышел, внук жив
+        pg.register_proc_group(_FakeProc(31_002, rc=0))  # группа мертва
+        assert [p.pid for p in pg.live_proc_groups()] == [31_001]
+        alive_groups.clear()
+        assert pg.live_proc_groups() == []
+    finally:
+        pg.reset_proc_groups()
+
+
+def test_terminate_skips_reaped_leaders_with_dead_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-004: уже собранный лидер с мёртвой группой не получает сигнал (PID мог быть переиспользован)."""
+    import core.proc_groups as pg
+
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(pg.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(pg, "_group_alive", lambda pgid: pgid == 32_001)
+    pg.terminate_proc_groups_parallel(
+        [_FakeProc(32_000, rc=0), _FakeProc(32_001, rc=0)], 0.0, 0.0
+    )
+    assert {pgid for pgid, _ in sent} == {32_001}
+
+
+def test_spawn_registered_makes_child_a_group_leader() -> None:
+    import core.proc_groups as pg
+
+    pg.reset_proc_groups()
+    proc = pg.spawn_registered([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert os.getpgid(proc.pid) == proc.pid  # лидер сессии по умолчанию
+    finally:
+        pg.terminate_proc_groups_parallel([proc], 2.0, 2.0)
+        proc.wait(3)
+        pg.reset_proc_groups()
+
+
+def test_signal_sets_shutdown_flag_and_drain_is_idempotent() -> None:
+    """Seat 3 F-001: `handle_signal` ставит оба bool; повторный `run_drain_once` — no-op без второго shutdown."""
+    life = make_life(procs_fn=lambda: [])
+
+    class _Server:
+        calls = 0
+
+        def shutdown(self) -> None:
+            type(self).calls += 1
+
+    life.handle_signal(signal.SIGTERM)
+    assert life._signal_received and life._shutdown_requested
+    life._server = _Server()
+    first = life.run_drain_once()
+    second = life.run_drain_once()
+    assert first["state"] == "STOPPED" and second["state"] == "STOPPED"
+    assert _Server.calls == 1 and life.shutdown_requested.is_set()
+
+
+def test_opencode_zen_counts_helper_processes_as_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seat 1 F-005: хелперы из `spawn_registered` учитываются как активные при drain."""
+    module = load_bridge(
+        "opencode-zen-bridge", {"OPENCODE_ZEN_BRIDGE_KEY": KEY}, monkeypatch
+    )
+    proc = module.spawn_registered(
+        [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    try:
+        assert module._LIFECYCLE.hooks.active_procs_fn() >= 1
+    finally:
+        proc.kill()
+        proc.wait(3)

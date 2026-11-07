@@ -2186,7 +2186,7 @@ def _log(msg: str) -> None:
         pass
 
 
-_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: len(_active), log_fn=_log), workspace=WORKSPACE)
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: len(_active) + len(live_proc_groups()), log_fn=_log), workspace=WORKSPACE)
 
 
 class _RequestAttempts(_RequestAttemptsBase):

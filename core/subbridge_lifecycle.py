@@ -58,6 +58,8 @@ class SubbridgeLifecycle(HubLifecycleManager):
         self.config = config or SubbridgeDrainConfig.from_env()
         self.hooks = hooks or SubbridgeHooks()
         self._signal_received = False
+        self._shutdown_requested = False
+        self._server: Any = None
         self.forced_kill = False
         self._draining = False
         self.active_http_turns = 0
@@ -75,15 +77,24 @@ class SubbridgeLifecycle(HubLifecycleManager):
 
     def handle_signal(self, signum: int, _frame: Any = None) -> None:
         self._signal_received = True
+        self._shutdown_requested = (
+            True  # примитивный bool: безопасно в обработчике сигнала (RW-007)
+        )
         self.last_signal = int(signum)
 
     def is_draining(self) -> bool:
-        return self._draining or self._signal_received or super().is_draining()
+        return (
+            self._draining
+            or self._signal_received
+            or self._shutdown_requested
+            or super().is_draining()
+        )
 
     def reset(self) -> None:
         """Сбрасывает состояние координатора (для тестов): фазы, флаги и счётчики ходов."""
         super().reset()
         self._signal_received = False
+        self._shutdown_requested = False
         self._draining = False
         self.forced_kill = False
         self._force_killed = False
@@ -192,8 +203,15 @@ class SubbridgeLifecycle(HubLifecycleManager):
         cfg = self.config
         target = self._server if server is None else server
         with self._turns_lock:  # барьер: допущенные ходы посчитаны, новые получат 503
+            if self.state in (DrainState.DRAINING, DrainState.STOPPED):
+                return {
+                    "active_turns_before": 0,
+                    "state": self.state,
+                }  # повторный вызов: drain уже идёт/завершён
             self._draining = True
-        self.state = DrainState.DRAINING
+            self._shutdown_requested = True
+            self.state = DrainState.DRAINING
+        self.shutdown_requested.set()
         active = self.active_count()
         try:
             budget = cfg.effective_drain_timeout_s if cfg.enabled else 0.0
@@ -213,12 +231,13 @@ class SubbridgeLifecycle(HubLifecycleManager):
         return {"active_turns_before": active, "state": self.state}
 
     def _watch(self, server: Any) -> None:
-        while not self._signal_received:
+        while not (self._signal_received or self._shutdown_requested):
             time.sleep(self.config.poll_interval_s)
         self.run_drain_once(server)
 
     def serve_forever(self, server: Any, install_signals: bool = True) -> int:
         """Обслуживает сервер до остановки по сигналу; возвращает код выхода процесса."""
+        self._server = server
         if install_signals and threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self.handle_signal)
             signal.signal(signal.SIGINT, self.handle_signal)

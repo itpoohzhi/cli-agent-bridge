@@ -119,12 +119,17 @@ class SlidingDeadline:
             cap_s = self.deadline_s if self.state is None else self.state.cap_deadline_s
             relax_socket_timeout(sock, cap_s, read_timeout_s)
 
-    def arm_for(self, now: float, limits: Any) -> None:
-        """Вооружает ячейку лимитами адаптера (`total_timeout_s`, `idle_timeout_s`, `stream_safety_cap_s`)."""
+    def arm_for(
+        self, now: float, limits: Any, initial_timeout_s: float | None = None
+    ) -> None:
+        """Вооружает ячейку лимитами адаптера; начальное окно — `initial_timeout_s` или `total_timeout_s`."""
+        initial = (
+            limits.total_timeout_s if initial_timeout_s is None else initial_timeout_s
+        )
         self.arm(
             init_sliding_stream(
                 now,
-                limits.total_timeout_s,
+                initial,
                 limits.idle_timeout_s,
                 limits.stream_safety_cap_s,
                 True,
@@ -141,7 +146,9 @@ class SlidingDeadline:
         if self.state is None or not is_useful_chunk:
             return
         self.state = step_sliding_stream(self.state, now, True, self.enabled(), epoch)
-        self.deadline_s = self.state.deadline_s
+        self.deadline_s = max(
+            self.deadline_s, self.state.deadline_s
+        )  # kill-switch не сжимает дедлайн
 
     @staticmethod
     def wrap(deadline: float | SlidingDeadline) -> SlidingDeadline:
@@ -162,5 +169,12 @@ def open_sliding_deadline(
     """Ячейка дедлайна запроса; вооружается только для клиентского `stream=True` при включённом флаге."""
     cell = SlidingDeadline(deadline, enabled_fn=flag_enabled_fn)
     if not is_internal and request.get("stream") is True and flag_enabled_fn():
-        cell.arm_for(time.monotonic() if now_s is None else now_s, limits)
+        now = time.monotonic() if now_s is None else now_s
+        # дедлайн вызывающего задаёт начальное окно КА: внешний срок не теряется и не растягивается
+        ext = (
+            max(0.0, float(deadline) - float(now))
+            if deadline > 0
+            else limits.idle_timeout_s
+        )
+        cell.arm_for(now, limits, ext)
     return cell

@@ -36,7 +36,7 @@ _LIVE_LOCK = threading.Lock()
 def _prune_finished() -> None:
     """Выбрасывает завершённых лидеров; вызывать только под `_LIVE_LOCK`."""
     for pid, proc in list(_LIVE_PROCS.items()):
-        if proc.poll() is not None:
+        if proc.poll() is not None and not _group_alive(getattr(proc, "pid", -1)):
             _ = _LIVE_PROCS.pop(pid, None)
 
 
@@ -66,7 +66,8 @@ def reset_proc_groups() -> None:
 
 
 def spawn_registered(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
-    """Запускает потомка и сразу регистрирует его группу: мосту не нужен отдельный вызов."""
+    """Запускает потомка лидером новой сессии (`pgid == pid`) и сразу регистрирует его группу."""
+    kwargs.setdefault("start_new_session", True)
     return register_proc_group(subprocess.Popen(*args, **kwargs))
 
 
@@ -83,7 +84,10 @@ def _process_probe_timeout_s() -> float:
 def _group_alive(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)
-    except ProcessLookupError:
+    except (
+        ProcessLookupError,
+        PermissionError,
+    ):  # PGID исчез или чужой/переиспользован
         return False
     except OSError:
         return True
@@ -106,7 +110,11 @@ def terminate_proc_groups_parallel(
 ) -> None:
     """`SIGTERM` всем группам разом, общий grace, затем `SIGKILL` выжившим: `<= grace + wait`."""
     own = os.getpgrp()
-    owned = [p for p in procs if p.pid > 1 and p.pid != own]
+    owned = [
+        p
+        for p in procs
+        if p.pid > 1 and p.pid != own and (p.poll() is None or _group_alive(p.pid))
+    ]  # уже собранный лидер с мёртвой группой: PID мог быть переиспользован
 
     def send(pgids: list[int], sig: signal.Signals) -> None:
         for pgid in pgids:
