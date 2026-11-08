@@ -46,7 +46,7 @@ class ImageCase(BridgeCase):
 
     def confirmed_stand(
         self,
-        model_id="deepseek-v4.1-flash",
+        model_id="gpt-6.1-sol",
         efforts_proven=None,
         impl_version=1,
         formats=("image/png",),
@@ -471,24 +471,24 @@ class TestProofFailClosed(ImageCase):
 
     def test_valid_proof_accepts_then_degrades_on_binary_change(self):
         binary, _ = self.confirmed_stand()
-        status, _ = self.request("deepseek-v4.1-flash", "max")
+        status, _ = self.request("gpt-6.1-sol", "max")
         self.assertEqual(status, 200)
         self.assertEqual(len(self.hub.admissions()), 1)
         binary.write_bytes(b"other-binary-content")
         with self.capture_logs() as lines:
-            status, body = self.request("deepseek-v4.1-flash", "max")
+            status, body = self.request("gpt-6.1-sol", "max")
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "image_input_not_supported")
         self.assertTrue(
             any(
-                "image_proof_invalid model=deepseek-v4.1-flash "
+                "image_proof_invalid model=gpt-6.1-sol "
                 "reason=droid_binary_sha" in ln
                 for ln in lines
             )
         )
         status, _ = self._post_json(
             {
-                "model": "deepseek-v4.1-flash",
+                "model": "gpt-6.1-sol",
                 "reasoning_effort": "max",
                 "messages": [{"role": "user", "content": "text alive"}],
             }
@@ -498,13 +498,13 @@ class TestProofFailClosed(ImageCase):
     def test_impl_version_mismatch_degrades(self):
         self.confirmed_stand(impl_version=2)
         with self.capture_logs() as lines:
-            status, body = self.request("deepseek-v4.1-flash", "high")
+            status, body = self.request("gpt-6.1-sol", "high")
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "image_input_not_supported")
         self.assertTrue(any("reason=impl_version" in ln for ln in lines))
         status, _ = self._post_json(
             {
-                "model": "deepseek-v4.1-flash",
+                "model": "gpt-6.1-sol",
                 "reasoning_effort": "high",
                 "messages": [{"role": "user", "content": "still text"}],
             }
@@ -514,16 +514,16 @@ class TestProofFailClosed(ImageCase):
     def test_formats_mismatch_degrades(self):
         self.confirmed_stand(formats=())
         with self.capture_logs() as lines:
-            status, body = self.request("deepseek-v4.1-flash", "high")
+            status, body = self.request("gpt-6.1-sol", "high")
         self.assertEqual(status, 400)
         self.assertTrue(any("reason=formats" in ln for ln in lines))
 
     def test_effort_not_proven_degrades_only_that_effort(self):
         self.confirmed_stand(efforts_proven=["high"])
-        status, _ = self.request("deepseek-v4.1-flash", "high")
+        status, _ = self.request("gpt-6.1-sol", "high")
         self.assertEqual(status, 200)
         with self.capture_logs() as lines:
-            status, body = self.request("deepseek-v4.1-flash", "off")
+            status, body = self.request("gpt-6.1-sol", "off")
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "image_input_not_supported")
         self.assertTrue(any("reason=effort" in ln for ln in lines))

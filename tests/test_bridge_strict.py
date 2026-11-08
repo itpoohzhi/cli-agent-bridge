@@ -991,17 +991,7 @@ class TestHealthAndModels(BridgeCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             sorted(body),
-            sorted(
-                [
-                    "ok",
-                    "transport",
-                    "model",
-                    "active",
-                    "max_concurrent",
-                    "tool_emulation",
-                    "uptime_s",
-                ]
-            ),
+            sorted(["ok", "transport", "model", "active", "max_concurrent", "tool_emulation", "uptime_s"]),
         )
         self.assertNotIn("default_auto", body)
 
@@ -1009,8 +999,7 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 19 моделей каталога + legacy-моки стенда FakeDroid, которых нет в каталоге
-        # (deepseek-v4.1-flash уже входит в каталог как модель opencode-go).
+        # 19 моделей каталога + legacy-моки FakeDroid вне каталога (deepseek-v4.1-flash уже в каталоге, opencode-go).
         catalog_ids = {m["id"] for m in load_raw_fleet()["models"]}
         legacy_extra = [m for m in _DROID_LEGACY_MODELS if m["id"] not in catalog_ids]
         self.assertEqual(len(body["data"]), 19 + len(legacy_extra))

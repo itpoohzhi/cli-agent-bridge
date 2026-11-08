@@ -196,15 +196,9 @@ from core.catalog_flags import (  # noqa: E402
     sidecar_allowlist,
 )
 from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
-from core.droid_session_gate import (  # noqa: E402
-    ToolsGateError,
-    admit_model,
-    plan_tools_disable,
-    verify_tools_disabled,
-)
+from core.droid_session_gate import ToolsGateError, admit_model, plan_tools_disable, verify_tools_disabled  # noqa: E402
 from core.effort_policy import (  # noqa: E402
-    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER,
-    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
+    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER, FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
     catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields, resolve_passthrough_effort,
 )
@@ -662,14 +656,8 @@ def _effort_specs() -> dict[str, ModelEffortSpec]:
     """Спеки effort каталога с кэшем."""
     global _EFFORT_SPECS_CACHE
     # FLEET.get первым: у GatedCatalog он синхронизирует флаг droid до чтения `_st` и models.
-    key = (
-        FLEET.get("sha256"),
-        getattr(FLEET, "_st", None),
-        id(FLEET.get("models")),
-        ADVERTISED_EFFORT_ALIASES,
-        EFFORT_ALIAS_ENABLED,
-        EFFORT_SUFFIXES,
-    )
+    key = (FLEET.get("sha256"), getattr(FLEET, "_st", None), id(FLEET.get("models")),
+           ADVERTISED_EFFORT_ALIASES, EFFORT_ALIAS_ENABLED, EFFORT_SUFFIXES)
     if _EFFORT_SPECS_CACHE[0] != key:
         models = FLEET.get("models", {})
         found = {a: r for a in ADVERTISED_EFFORT_ALIASES if (r := _resolve_model_alias(a, models))}
@@ -4373,12 +4361,7 @@ class Run:
             _, rec = _load_receipt()
         except LauncherUnavailable as exc:
             raise RpcError(f"droid receipt changed during spawn: {exc}")
-        validate_model_catalog(
-            rec.get("qualified_models"),
-            model or self.plan["settings"][0],
-            listed,
-            RpcError,
-        )
+        validate_model_catalog(rec.get("qualified_models"), model or self.plan["settings"][0], listed, RpcError)
 
     def _disable_native_tools(self, proc: RpcProcess, model: str) -> None:
         """Нативные tools модели отключаются по актуальному list_tools; сбой — fail-closed."""
@@ -4388,8 +4371,7 @@ class Run:
         plan = plan_tools_disable(ids, _tools_receipt(), model, keep)
         self._check_tools_policy(list(ids), model)
         if plan.disabled_ids:
-            params = {"disabledToolIds": list(plan.disabled_ids)}
-            _, stash = proc.call("droid.update_session_settings", params, self.cancel)
+            _, stash = proc.call("droid.update_session_settings", {"disabledToolIds": list(plan.disabled_ids)}, self.cancel)
             updated = self._wait_settings_updated(proc, stash)
             verify_tools_disabled(plan, updated)
             self._check_flags(updated)

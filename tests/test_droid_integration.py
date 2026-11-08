@@ -47,7 +47,9 @@ def test_subscription_catalog(model_id: str, efforts: tuple[str, ...]) -> None:
 def test_removed_droid_models_absent_from_fleet() -> None:
     model_ids = {model["id"] for model in fleet_data()["models"]}
     assert "kimi-k3.1-pro" not in model_ids
-    assert "deepseek-v4.1-flash" not in model_ids
+    droid_mids = {m["id"] for m in fleet_data()["models"] if m.get("backend") == "droid"}
+    assert "deepseek-v4.1-flash" not in droid_mids
+    assert "deepseek-v4.1-flash" in model_ids
 
 
 @pytest.mark.parametrize("model_id", DROID_MODEL_IDS)
