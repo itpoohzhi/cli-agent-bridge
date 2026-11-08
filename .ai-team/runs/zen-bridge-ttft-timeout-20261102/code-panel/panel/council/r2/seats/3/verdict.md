@@ -1,6 +1,0 @@
-PANEL-NONCE: 0ba22084d5ffae69
-ARTIFACT-SHA256: 5ea11245c3546b12f1de9c303b0ace2ae267e271d264f328fe4565e904c024a9
-AGREE RW-001 — проверил: [server.py](/Users/aazhiry1/work/src/cli-agent-bridge/bridges/opencode-zen-bridge/server.py:6697) — ханки `class Run` (`ttft_origin`/`split_timeout`, @@6428/6569/6642/6669/6815 в `git diff`) отсутствуют в «Полном Git Diff» пакета, ревью по пакету неполно.
-AGREE RW-002 — проверил: [server.py](/Users/aazhiry1/work/src/cli-agent-bridge/bridges/opencode-zen-bridge/server.py:4827) — serve считает TTFT от `prompt_send_start`, Run от условного `ttft_origin` (:6697, `total_spawns<=1`), stream от `attempt_start if collected_texts or tool_calls else request_t0` (:8375); retry без текста после 25с от `request_t0` убивается мгновенно — одна политика, три семантики, системной гармонии нет.
-AMEND RW-003 — priority=BLOCKER-OPINION; fix=единый `TimeoutPolicy`-хелпер с общим activity-guard (активный тул/сабагент) для serve/Run/stream вместо трёх копий — причина: [server.py](/Users/aazhiry1/work/src/cli-agent-bridge/bridges/opencode-zen-bridge/server.py:4830) и :8382 idle 15с без guard против Run `not subagent_started_at` :6735 и `STALL_TIMEOUT_S=60` :1903, расхождение путей и есть архитектурный дефект.
-VERDICT: NEEDS WORK

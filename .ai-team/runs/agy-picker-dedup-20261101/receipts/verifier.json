@@ -1,7 +1,0 @@
-{
-  "role": "verifier",
-  "status": "PASS",
-  "verifier_plan_sha256": "bdea3b0b4e6e08b7b8b5e455d21e008be5b2b23086de2b6118741bba7063b05b",
-  "execution_evidence_sha256": "fec0c58e8dee0694430392a064bd37d26d15e4565a9af8cb05c28530f0e48b53",
-  "clean_room_patch_sha256": "4b18c4ecfdaae3594cd15288c9e4c2796fb74302fd9b05df82d4e79f51de0c76"
-}
