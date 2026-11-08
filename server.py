@@ -186,7 +186,7 @@ from core.droid_session_gate import (  # noqa: E402
 )
 from core.effort_policy import (  # noqa: E402
     DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_LEVELS as EFFORT_LEVELS, EFFORT_ORDER,
-    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec, canonical_model_id,
+    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
     catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields, resolve_passthrough_effort,
 )
