@@ -1093,7 +1093,7 @@ def resolve_api_key(env: Mapping[str, str]) -> str:
 def select_manifest(
     manifests: Sequence[ProviderManifest], model_id: str, provider_id: Optional[str]
 ) -> Tuple[Optional[ProviderManifest], Optional[str]]:
-    """Манифест провайдера: `--provider` либо единственный активный, заявивший модель."""
+    """Манифест провайдера: по `--provider` либо единственный, чей include/static матчит модель."""
     cand = _select_core_manifest(manifests, model_id, provider_id, strict_ambiguous=True)
     return cand.manifest, cand.problem
 

@@ -366,6 +366,7 @@ class BridgeCase(unittest.TestCase):
                 "ENTRY_OVERHEAD_BYTES", "GUARD", "GUARD_PROFILES_DIR", "GUARD_CANON",
                 "INSTR_NONKB_MARGIN", "MAX_JSON_STRUCT_TOKENS", "BACKENDS",
                 "_context_max_output", "_PENALTY_TRACKER", "_MODEL_NOTES_FILTER",
+                "RESILIENCE",
             )
         }
         server._canon_seen.clear()
@@ -440,6 +441,8 @@ class BridgeCase(unittest.TestCase):
             max_start_fails=TEST_MAX_START_FAILS,
         )
         server._MODEL_NOTES_FILTER = server.ModelNotesFilter(tmp / "notes.md")
+        # Сработавший circuit breaker не должен отдавать 503 следующему тесту.
+        server.RESILIENCE = server.ResilienceManager()
 
     @staticmethod
     def _restore_env(name: str, value: str | None) -> None:

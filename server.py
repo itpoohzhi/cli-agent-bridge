@@ -181,6 +181,7 @@ from core.effort_policy import (  # noqa: E402
     clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields, resolve_passthrough_effort,
 )
+_PUBLIC_REEXPORTS = (QoSSlotManager, QOS_DEFAULT_QUEUE_TIMEOUT_S, _is_watchdog_enabled)
 CLI_CFG = CliRuntimeConfig.from_env()
 
 
@@ -5674,7 +5675,6 @@ class Handler(BaseHTTPRequestHandler):
         result_ev = {}
         turn_start = time.monotonic()
         last_ka = time.monotonic()
-        is_subagent = self._is_subagent_request()
         # Safety cap is the absolute upper bound (watchdog against infinite loops)
         safety_cap_s = self._effective_safety_cap_s()
         safety_deadline = turn_start + safety_cap_s

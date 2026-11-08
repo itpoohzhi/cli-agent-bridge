@@ -135,16 +135,41 @@ def test_excluded_model_glob_is_not_claimed() -> None:
     assert _pick([excluded, fallback], "other") is None
 
 
-def test_capability_probe_select_manifest_delegates_to_core() -> None:
+def _legacy_cases() -> list[tuple[list[ProviderManifest], str | None, str | None, int | None, str | None]]:
+    """(манифесты, модель, --provider, индекс выбранного, problem) прежнего CLI до волны W1a."""
     off = _manifest("off", enabled=False, static=("m-1",))
     excluded = _manifest("ex", static=("m-1",), exclude=("m-*",))
     on = _manifest("on", priority=300, static=("m-1",))
-    assert cp.select_manifest([off], "m-1", None) == (None, "provider_not_found")
-    assert cp.select_manifest([excluded], "m-1", None) == (None, "provider_not_found")
-    assert cp.select_manifest([off, excluded, on], "m-1", None) == (on, None)
-    assert cp.select_manifest([off], "m-1", "off") == (off, None)
-    assert cp.select_manifest([on, excluded], "m-1", "ex") == (excluded, None)
-    assert cp.select_manifest([on], "m-1", "missing") == (None, "provider_not_found")
+    rule_only = _manifest("rule", overrides=("m-1",))
+    globbed = _manifest("glob", include=("m-*",))
+    return [
+        ([off], "m-1", None, 0, None),
+        ([excluded], "m-1", None, 0, None),
+        ([rule_only], "m-1", None, None, "provider_not_found"),
+        ([off], "m-1", "off", 0, None),
+        ([on, excluded], "m-1", "ex", 1, None),
+        ([on], "m-1", "missing", None, "provider_not_found"),
+        ([off, excluded, on], "m-1", None, None, "provider_ambiguous"),
+        ([globbed], "m-1", None, 0, None),
+    ]
+
+
+@pytest.mark.parametrize("case", _legacy_cases())
+def test_strict_ambiguous_keeps_legacy_cli_contract(case: tuple[Any, ...]) -> None:
+    manifests, model, provider, index, problem = case
+    expected = manifests[index] if index is not None else None
+    strict = pms.select_manifest(manifests, model, provider, strict_ambiguous=True)
+    assert (strict.manifest, strict.problem) == (expected, problem)
+    assert cp.select_manifest(manifests, model, provider) == (expected, problem)
+
+
+def test_default_mode_keeps_new_claim_rules_unlike_strict() -> None:
+    off = _manifest("off", enabled=False, static=("m-1",))
+    excluded = _manifest("ex", static=("m-1",), exclude=("m-*",))
+    rule_only = _manifest("rule", overrides=("m-1",))
+    assert _pick([off, excluded], "m-1") is None
+    assert _pick([off, excluded, rule_only], "m-1") == "rule"
+    assert pms.select_manifest([off, excluded], "m-1", None, strict_ambiguous=True).problem == "provider_ambiguous"
 
 
 def test_capability_probe_keeps_cli_ambiguity_contract() -> None:
