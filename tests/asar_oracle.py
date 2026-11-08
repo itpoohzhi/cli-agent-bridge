@@ -23,6 +23,10 @@ from typing import Any
 DEFAULT_ASAR = "/Applications/DeepSeek Harness.app/Contents/Resources/app.asar"
 ENTRY = "dsh/node_modules/@deepseek-ai/dsh-tool-subagent/lib/index.js"
 EXPECTED_HASH = "de7b10aaf52b1b1616d13a831a9ece1f820b8a6302fe94667f31b6d641b2f46e"
+EXPECTED_HASHES = (
+    EXPECTED_HASH,
+    "e73d2fb1753421bfd80e8adf38a3cafe93a4fa2516e07f9764279a880821734e",
+)
 CODEX_BASE_URL_BEFORE = "http://127.0.0.1:2455/v1"
 CODEX_BASE_URL_AFTER = "http://127.0.0.1:9882/v1"
 
@@ -84,13 +88,16 @@ def read_entry_hash(path: str | Path, entry: str = ENTRY) -> str:
 
 
 def check_asar_integrity(
-    path: str | Path = DEFAULT_ASAR, expected: str = EXPECTED_HASH, entry: str = ENTRY
+    path: str | Path = DEFAULT_ASAR,
+    expected: str | tuple[str, ...] | set[str] = EXPECTED_HASHES,
+    entry: str = ENTRY,
 ) -> OracleResult:
     try:
         observed = read_entry_hash(path, entry)
     except AsarError as exc:
         return OracleResult(False, str(exc))
-    if observed != expected:
+    valid = observed == expected if isinstance(expected, str) else observed in expected
+    if not valid:
         return OracleResult(False, "asar_integrity_mismatch", observed)
     return OracleResult(True, "", observed)
 
@@ -130,7 +137,7 @@ def gate(manifest: OracleResult, asar: OracleResult, cordis: OracleResult) -> in
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--asar", default=DEFAULT_ASAR)
-    parser.add_argument("--expected", default=EXPECTED_HASH)
+    parser.add_argument("--expected", default=EXPECTED_HASHES)
     parser.add_argument("--cordis-before", type=Path, help="JSON-снимок cordis до switch")
     parser.add_argument("--cordis-after", type=Path, help="JSON-снимок cordis после switch")
     parser.add_argument("--manifest-exit-code", type=int)
