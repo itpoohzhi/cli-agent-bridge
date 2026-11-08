@@ -51,6 +51,33 @@
     "note": "резерв байт по заявленному Content-Length ДО чтения тела; семафор исполнения (128) и TCP backlog лимитами HTTP-обработчиков и памяти не считаются"
   },
   "backends": {
+    "agy": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "agy-bridge",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:9887/v1",
+      "api_key_env": "AGY_BRIDGE_KEY"
+    },
+    "claude-p": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "claude-p-bridge",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:9881/v1",
+      "api_key_env": "CLAUDE_P_BRIDGE_KEY"
+    },
+    "codex": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "openai-codex",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:2455/v1",
+      "api_key_env": "CODEX_LB_API_KEY"
+    },
     "droid": {
       "kind": "droid",
       "enabled": true,
@@ -74,23 +101,35 @@
         "streaming_mode": "serve"
       }
     },
-    "codex": {
+    "opencode-go": {
       "kind": "passthrough",
       "enabled": true,
       "required": false,
-      "owned_by": "openai-codex",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:2455/v1",
-      "api_key_env": "CODEX_LB_API_KEY"
-    },
-    "agy": {
-      "kind": "passthrough",
-      "enabled": true,
-      "required": false,
-      "owned_by": "agy-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9887/v1",
-      "api_key_env": "AGY_BRIDGE_KEY"
+      "owned_by": "opencode-go",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "api_key_ref": "file:~/.config/opencode/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "x-opencode-org-id",
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      },
+      "default_body_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
     },
     "opencode-zen": {
       "kind": "passthrough",
@@ -100,23 +139,103 @@
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9883/v1",
       "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
-    },
-    "claude-p": {
-      "kind": "passthrough",
-      "enabled": true,
-      "required": false,
-      "owned_by": "claude-p-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9881/v1",
-      "api_key_env": "CLAUDE_P_BRIDGE_KEY"
     }
   },
   "models": [
     {
+      "id": "gemini-4-argon",
+      "backend": "agy",
+      "name": "Gemini 4 Argon (AGY bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "backend": "claude-p",
+      "name": "Claude Haiku 5.5 (Claude-p bridge)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "claude-opus-5-5",
+      "backend": "claude-p",
+      "name": "Claude Opus 5.5 (Claude-p bridge)",
+      "efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "backend": "codex",
+      "name": "GPT-6.1 Terra (Codex passthrough)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 500000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
       "id": "claude-sonnet-5-5",
       "backend": "droid",
       "name": "Claude Sonnet 5.5 (Droid bridge)",
-      "efforts": ["low", "medium", "high", "max"],
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 128000,
@@ -141,7 +260,11 @@
       "id": "gemini-3.8-flash",
       "backend": "droid",
       "name": "Gemini 3.8 Flash (Droid bridge)",
-      "efforts": ["low", "medium", "high"],
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
@@ -165,7 +288,11 @@
       "id": "gpt-6.1-sol",
       "backend": "droid",
       "name": "GPT-6.1 Sol (Droid bridge)",
-      "efforts": ["low", "medium", "high"],
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
       "default_effort": "high",
       "context_window": 272000,
       "max_tokens": 128000,
@@ -286,37 +413,44 @@
       ]
     },
     {
-      "id": "gpt-6.1-terra",
-      "backend": "codex",
-      "name": "GPT-6.1 Terra (Codex passthrough)",
+      "id": "deepseek-v4.1-flash",
+      "backend": "opencode-go",
+      "name": "DeepSeek V4.1 Flash (OpenCode Go bridge)",
       "efforts": [
+        "off",
         "low",
-        "medium",
-        "high"
+        "high",
+        "max"
       ],
-      "default_effort": "high",
-      "context_window": 500000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "claude-opus-5-5",
-      "backend": "claude-p",
-      "name": "Claude Opus 5.5 (Claude-p bridge)",
-      "efforts": [
-        "high"
-      ],
-      "default_effort": "high",
+      "default_effort": "off",
       "context_window": 1000000,
-      "max_tokens": 128000,
+      "max_tokens": 384000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        106,
+        394,
+        432
+      ]
+    },
+    {
+      "id": "beam-free",
+      "backend": "opencode-zen",
+      "name": "Beam Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
       "input": [
         "text"
       ],
@@ -328,37 +462,16 @@
       }
     },
     {
-      "id": "claude-haiku-5-5",
-      "backend": "claude-p",
-      "name": "Claude Haiku 5.5 (Claude-p bridge)",
+      "id": "big-pickle",
+      "backend": "opencode-zen",
+      "name": "Big Pickle (Zen)",
       "efforts": [
-        "high"
+        "high",
+        "max"
       ],
       "default_effort": "high",
-      "context_window": 1000000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "gemini-4-argon",
-      "backend": "agy",
-      "name": "Gemini 4 Argon (AGY bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 1048576,
-      "max_tokens": 65536,
+      "context_window": 200000,
+      "max_tokens": 32000,
       "input": [
         "text"
       ],
@@ -457,48 +570,6 @@
       "id": "nemotron-3.5-super-vl-free",
       "backend": "opencode-zen",
       "name": "Nemotron 3.5 Super VL Free (Zen)",
-      "efforts": [
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 200000,
-      "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "beam-free",
-      "backend": "opencode-zen",
-      "name": "Beam Free (Zen)",
-      "efforts": [
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 200000,
-      "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "big-pickle",
-      "backend": "opencode-zen",
-      "name": "Big Pickle (Zen)",
       "efforts": [
         "high",
         "max"

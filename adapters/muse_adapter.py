@@ -339,12 +339,12 @@ class _LiveSink:
 
 class MuseAdapter(BackendAdapter):
     kind = "muse"
-    capabilities = Capabilities(SESSIONS_NONE, STREAMING_EMULATED, False, "estimated")
     CONSTRAINTS = KindConstraints(
         max_concurrent_max=1,
         pin_required=True,
         options_schema={"streaming_mode": ("exec", "serve")},
     )
+    capabilities = Capabilities(SESSIONS_NONE, STREAMING_EMULATED, False, "estimated")
 
     def __init__(
         self,

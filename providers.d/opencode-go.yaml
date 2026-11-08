@@ -1,4 +1,5 @@
-# Провайдер opencode-go: только transport.direct (локальный шлюз :10830/go, deepseek-v4.1-flash). transport.bridge нет — в fleet.json не компилируется, только в сайдкар.
+# Провайдер opencode-go: локальный шлюз :10830/go (deepseek-v4.1-flash) через универсальный мост :9882 (kind passthrough).
+# transport.bridge компилирует backends.opencode-go в fleet.json; ключ, заголовки и per-request заголовки берутся из transport.direct.http.
 manifest_version: 1
 provider_id: opencode-go
 kind: passthrough
@@ -6,6 +7,7 @@ enabled: true
 required: false
 owned_by: opencode-go
 transport:
+  bridge: {base_url: 'http://127.0.0.1:10830/go/v1'}
   direct:
     type: http
     http:
@@ -18,12 +20,13 @@ transport:
         path: ~/.config/opencode/opencode.json
         key: provider.opencode-go.options.headers
         required: [x-opencode-org-id]
+        pick: [x-opencode-org-id, User-Agent]
         forbid_ua_prefix: [python]
       per_request_headers: {x-opencode-session: '{uuid4}'}
       stream: false
       response: {field: 'choices[0].message.content'}
 allow_base_url:
-- {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /go}
+- {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /go/v1}
 limits: {max_concurrent: 1, quota_group: opencode-go, timeout_s: 180}
 discovery:
   method: static
@@ -33,9 +36,9 @@ family_rule:
   exact_map: {deepseek-v4.1-flash: DeepSeek}
 models_overrides:
   deepseek-v4.1-flash:
-    name: DeepSeek V4.1 Flash (OpenCode Go, direct)
-    efforts: [high, max]
-    default_effort: high
+    name: DeepSeek V4.1 Flash (OpenCode Go bridge)
+    efforts: ['off', low, high, max]
+    default_effort: 'off'
     context_window: 1000000
     max_tokens: 384000
     input: [text]
