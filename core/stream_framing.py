@@ -4,7 +4,8 @@ import json
 import os
 import re
 import time
-from typing import Any, Mapping, Optional, Union
+from types import EllipsisType
+from typing import Any, Optional, Union
 
 
 def sanitize_error_message(message: str) -> str:
@@ -87,7 +88,7 @@ def build_stream_error_chunk(
     model: Optional[str] = None,
     code: str = "stream_error",
     error_type: str = "stream_error",
-    finish_reason: Optional[str] = ...,  # type: ignore[assignment]
+    finish_reason: Optional[str] | EllipsisType = ...,
     completion_id: Optional[str] = None,
     created: Optional[int] = None,
     choice_indices: Optional[list[int]] = None,
@@ -156,7 +157,7 @@ def format_stream_error_sse(
     model: Optional[str] = None,
     code: str = "stream_error",
     error_type: str = "stream_error",
-    finish_reason: Optional[str] = ...,  # type: ignore[assignment]
+    finish_reason: Optional[str] | EllipsisType = ...,
     completion_id: Optional[str] = None,
     created: Optional[int] = None,
     choice_indices: Optional[list[int]] = None,

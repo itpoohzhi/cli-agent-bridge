@@ -127,6 +127,37 @@ def test_effort_specs_are_cached_until_catalog_or_aliases_change(flag_env: pytes
     assert server._effort_specs() is not fourth
 
 
+DROID_FLAG = "BRIDGE_DROID_CATALOG_ENABLED"
+HAIKU = "claude-haiku-5-5"
+# Эталон из каталога: droid ON даёт haiku [low, medium, high]/low, droid OFF — claude-p [high]/high.
+HAIKU_BY_DROID = {True: (["low", "medium", "high"], "low"), False: (["high"], "high")}
+
+
+def _haiku_card() -> tuple[list[str], str]:
+    card = _cards()[HAIKU]
+    return card["supported_reasoning_efforts"], card["default_reasoning_effort"]
+
+
+@pytest.mark.parametrize("start_on", [True, False])
+def test_models_list_efforts_follow_droid_flag_without_cache_reset(
+    flag_env: pytest.MonkeyPatch, start_on: bool
+) -> None:
+    """F-001: kill-switch droid меняет модели при том же sha256 файла; кэш effort не залипает."""
+    flag_env.setenv(FLAG, "1")
+    states = [start_on, not start_on, start_on]
+    for droid_on in states:
+        flag_env.setenv(DROID_FLAG, "1" if droid_on else "0")
+        assert _haiku_card() == HAIKU_BY_DROID[droid_on]
+        assert server.FLEET["models"][HAIKU]["efforts"] == HAIKU_BY_DROID[droid_on][0]
+
+
+def test_effort_specs_cache_resets_when_catalog_listener_fires(flag_env: pytest.MonkeyPatch) -> None:
+    first = server._effort_specs()
+    server._invalidate_effort_specs_cache({})
+    assert server._EFFORT_SPECS_CACHE == (None, {})
+    assert server._effort_specs() is not first
+
+
 def test_route_does_not_build_effort_spec_when_flag_off(
     route: Any, flag_env: pytest.MonkeyPatch
 ) -> None:

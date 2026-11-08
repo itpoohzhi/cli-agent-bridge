@@ -354,7 +354,7 @@ class AllowEntry:
 
 
 # Дефолтная политика базового URL (env BRIDGE_DEFAULT_BASE_URL_POLICY — regex fullmatch).
-DEFAULT_BASE_URL_POLICY = r"http://127\.0\.0\.1:([0-9]{1,5})/v1"
+DEFAULT_BASE_URL_POLICY = r"http://127\.0\.0\.1:([0-9]{1,5})(?:/[a-z0-9._-]+)*/v1"
 
 
 def kind_constraints(kinds: Mapping[str, Any], kind: str) -> KindConstraints:

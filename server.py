@@ -647,10 +647,29 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
 _EFFORT_SPECS_CACHE: tuple[Any, dict[str, ModelEffortSpec]] = (None, {})
 
 
+def _invalidate_effort_specs_cache(_: Any = None) -> None:
+    """Сбрасывает кэш спек effort: GatedCatalog меняет модели без смены sha256 файла."""
+    global _EFFORT_SPECS_CACHE
+    _EFFORT_SPECS_CACHE = (None, {})
+
+
+_catalog_add_listener = getattr(FLEET, "add_listener", None)  # только у GatedCatalog
+if _catalog_add_listener is not None:
+    _catalog_add_listener(_invalidate_effort_specs_cache)
+
+
 def _effort_specs() -> dict[str, ModelEffortSpec]:
     """Спеки effort каталога с кэшем."""
     global _EFFORT_SPECS_CACHE
-    key = (FLEET.get("sha256"), ADVERTISED_EFFORT_ALIASES, EFFORT_ALIAS_ENABLED, EFFORT_SUFFIXES)
+    # FLEET.get первым: у GatedCatalog он синхронизирует флаг droid до чтения `_st` и models.
+    key = (
+        FLEET.get("sha256"),
+        getattr(FLEET, "_st", None),
+        id(FLEET.get("models")),
+        ADVERTISED_EFFORT_ALIASES,
+        EFFORT_ALIAS_ENABLED,
+        EFFORT_SUFFIXES,
+    )
     if _EFFORT_SPECS_CACHE[0] != key:
         models = FLEET.get("models", {})
         found = {a: r for a in ADVERTISED_EFFORT_ALIASES if (r := _resolve_model_alias(a, models))}

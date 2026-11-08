@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .model_resolver import resolve_model
+from .resident_pool import ResidentSlot, SlotKey
 
 IDLE_TTL_S = float(os.getenv("BRIDGE_IDLE_TTL_S", "300"))
 STARTUP_TIMEOUT_S = float(os.getenv("BRIDGE_STARTUP_TIMEOUT_S", "180"))
@@ -85,6 +88,8 @@ def parse_resident_models(value: Any = None) -> list[Any]:
         entries = value or ()
 
     result: list[Any] = []
+    model_id: Any
+    slots: Any
     for entry in entries:
         if isinstance(entry, ResidentSpec):
             result.append(entry)
@@ -134,14 +139,14 @@ def validate_catalog(
 ) -> Any:
     del resident_models
 
-    models = getattr(catalog, "models", None)
+    models: Any = getattr(catalog, "models", None)
     if models is None:
         if isinstance(catalog, Mapping):
             models = catalog.get("models", catalog)
         else:
             models = catalog
 
-    backends = getattr(catalog, "backends", None)
+    backends: Any = getattr(catalog, "backends", None)
     if not backends and isinstance(catalog, Mapping):
         backends = catalog.get("backends", {})
     backends = backends or {}
@@ -158,10 +163,6 @@ def validate_catalog(
             errors.append(f"model '{mid}' missing backend or route")
 
     return CatalogValidationResult(errors=errors)
-
-
-from .model_resolver import resolve_model
-from .resident_pool import SlotKey, ResidentSlot, SlotState
 
 
 class ReadinessReport:
@@ -202,13 +203,13 @@ class ResidentPool:
         self.slots: dict[str, ResidentSlot] = {}
 
     def key_for(self, model_id: str) -> SlotKey:
-        models = getattr(self.catalog, "models", None)
+        models: Any = getattr(self.catalog, "models", None)
         if models is None and isinstance(self.catalog, Mapping):
             models = self.catalog.get("models", self.catalog)
         elif models is None:
             models = self.catalog
 
-        aliases = getattr(self.catalog, "aliases", None)
+        aliases: Any = getattr(self.catalog, "aliases", None)
         if aliases is None and isinstance(self.catalog, Mapping):
             aliases = self.catalog.get("aliases", {})
         elif aliases is None:
