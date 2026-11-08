@@ -6,7 +6,6 @@ Verifies:
 3. Preservation of code blocks/markdown fences without false positives.
 """
 
-import pytest
 
 def test_repetition_guard_split_boundary_red():
     """Проверка импорта и детекции зацикливания при нарезке токенов по 1 байту."""

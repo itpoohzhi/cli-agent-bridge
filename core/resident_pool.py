@@ -368,10 +368,10 @@ class ResidentPoolManager:
         )
 
     def _resolved_key(self, resolved: Any) -> SlotKey:
-        if isinstance(resolved, Mapping):
-            getter = resolved.get
-        else:
-            getter = lambda name, default=None: getattr(resolved, name, default)
+        def getter(name: str, default: Any = None) -> Any:
+            if isinstance(resolved, Mapping):
+                return resolved.get(name, default)
+            return getattr(resolved, name, default)
 
         adapter = getter("adapter")
         backend_id = getter("backend_id", getter("id"))

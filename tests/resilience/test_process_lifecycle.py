@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import unittest
+from typing import Any
 from unittest import mock
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

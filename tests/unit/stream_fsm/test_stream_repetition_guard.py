@@ -1,8 +1,6 @@
 """Unit-тесты для StreamRepetitionGuard (Wave 1)."""
 
-import math
 import tracemalloc
-import pytest
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
 
 

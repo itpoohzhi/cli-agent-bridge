@@ -1,7 +1,5 @@
 """Unit tests for StreamMachine coordinator and pure step function (F-FSM-I1..I3)."""
 
-import json
-import pytest
 
 from core.stream_fsm.machine import StreamMachine, step
 from core.stream_fsm.types import (
@@ -9,8 +7,6 @@ from core.stream_fsm.types import (
     ChunkReceived,
     EmitChunk,
     EmitSSE,
-    EmitToolCall,
-    ProtocolError,
     RecordMetric,
     StreamState,
     TriggerKillpg,
