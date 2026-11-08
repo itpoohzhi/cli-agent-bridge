@@ -116,7 +116,7 @@ from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
     KEEPALIVE_INTERVAL_S,
-    QoSSlotManager,
+    QoSSlotManager as QoSSlotManager,
     QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
     RESERVED_INTERACTIVE_SLOTS,
     get_qos_manager,
@@ -151,7 +151,7 @@ from core.turn_session_manager import (  # noqa: E402
     TurnSessionManager,
     _is_detached_enabled,
     _is_drain_enabled,
-    _is_watchdog_enabled,
+    _is_watchdog_enabled as _is_watchdog_enabled,
     hash_token,
     validate_turn_id,
 )
@@ -181,7 +181,6 @@ from core.effort_policy import (  # noqa: E402
     clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields, resolve_passthrough_effort,
 )
-_PUBLIC_REEXPORTS = (QoSSlotManager, QOS_DEFAULT_QUEUE_TIMEOUT_S, _is_watchdog_enabled)
 CLI_CFG = CliRuntimeConfig.from_env()
 
 
@@ -623,7 +622,7 @@ _EFFORT_SPECS_CACHE: tuple[Any, dict[str, ModelEffortSpec]] = (None, {})
 
 
 def _effort_specs() -> dict[str, ModelEffortSpec]:
-    """Спеки effort каталога; кэш по sha256 и настройкам алиасов."""
+    """Спеки effort каталога с кэшем."""
     global _EFFORT_SPECS_CACHE
     key = (FLEET.get("sha256"), ADVERTISED_EFFORT_ALIASES, EFFORT_ALIAS_ENABLED, EFFORT_SUFFIXES)
     if _EFFORT_SPECS_CACHE[0] != key:
@@ -7927,7 +7926,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         is_interactive = subagent_id is None or str(subagent_id).strip() == ""
 
-        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", 15.0)
+        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", QOS_DEFAULT_QUEUE_TIMEOUT_S)
         qos = get_qos_manager(
             max_concurrent=MAX_CONCURRENT,
             reserved_interactive=_env_int_nonneg(

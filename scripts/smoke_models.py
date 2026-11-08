@@ -616,7 +616,7 @@ def smoke_test_model_subprocess(
     api_key: str | None = None,
     effort: str = "",
     subagent_id: str = "",
-    return_pgid: Literal[False] = False,
+    return_pgid: Literal[False] = ...,
 ) -> tuple[bool, str, float, int]: ...
 
 

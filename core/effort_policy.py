@@ -3,6 +3,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import cast
 
 FLAG_EFFORT_CATALOG = "BRIDGE_EFFORT_CATALOG_ENABLED"
 EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
@@ -12,7 +13,7 @@ DEFAULT_LOG_EFFORT_MAX_CHARS = 32
 
 
 def clamp_effort_downward(candidate: str, allowed: Sequence[str], default: str) -> tuple[str, bool]:
-    """Кламп вниз к allowed (вне шкалы — default); True — был кламп."""
+    """Кламп вниз к allowed; True — был кламп."""
     key = candidate.lower()
     named = {item.lower(): item for item in reversed(allowed)}
     ranked = {_RANK[name]: item for name, item in named.items() if name in _RANK}
@@ -36,16 +37,16 @@ class ModelEffortSpec:
 
     @classmethod
     def from_catalog_entry(cls, entry: object) -> ModelEffortSpec:
-        """Только уровни шкалы: нижний регистр, без дублей, по рангу."""
-        fields: Mapping[str, object] = entry if isinstance(entry, Mapping) else {}
+        """Уровни шкалы без дублей, по рангу."""
+        fields = cast(Mapping[str, object], entry if isinstance(entry, Mapping) else {})
         raw = fields.get("efforts")
-        listed = raw if isinstance(raw, (list, tuple)) else ()
+        listed = cast(Sequence[object], raw if isinstance(raw, (list, tuple)) else ())
         levels = {item.strip().lower() for item in listed if isinstance(item, str)}
         efforts = tuple(sorted(levels & _RANK.keys(), key=_RANK.__getitem__))
         return cls(efforts, _declared_default(fields.get("default_effort"), efforts))
 
     def pinned_to(self, effort: str) -> ModelEffortSpec:
-        """Спека алиаса: один уровень после клампа."""
+        """Спека алиаса с одним уровнем."""
         allowed = self.efforts or (effort,)
         fallback = next(filter(None, (self.default, *allowed)), allowed[0])
         level, _ = clamp_effort_downward(effort, allowed, fallback)
@@ -87,7 +88,7 @@ def resolve_alias_effort(raw_id: str, catalogue: Mapping[str, object], suffixes:
 
 def catalog_effort_specs(models: object, aliases: Mapping[str, tuple[str, str]]) -> dict[str, ModelEffortSpec]:
     """Спеки моделей и алиасов `alias -> (base, effort)`."""
-    entries = models if isinstance(models, Mapping) else {}
+    entries = cast(Mapping[object, object], models if isinstance(models, Mapping) else {})
     specs = {str(k): s for k, v in entries.items() if (s := ModelEffortSpec.from_catalog_entry(v)).efforts}
     without_efforts = entries.keys() - specs.keys()
     pins = {
@@ -99,7 +100,7 @@ def catalog_effort_specs(models: object, aliases: Mapping[str, tuple[str, str]])
 
 
 def _clamped_resolution(requested: object, alias: str, spec: ModelEffortSpec) -> EffortResolution:
-    """Кламп явного effort (пустого и нестрокового тоже) либо алиаса."""
+    """Кламп явного effort либо алиаса."""
     asked = requested.strip() if isinstance(requested, str) else ""
     text = asked or (alias if requested is None else str(requested))
     fallback = next(filter(None, (spec.default, *spec.efforts)))
@@ -109,7 +110,7 @@ def _clamped_resolution(requested: object, alias: str, spec: ModelEffortSpec) ->
 
 
 def resolve_passthrough_effort(requested: object, alias_effort: str | None, spec: ModelEffortSpec, *, enabled: bool) -> EffortResolution:
-    """`reasoning_effort` passthrough: алиас пинится, кламп — за флагом."""
+    """Passthrough `reasoning_effort`: кламп за флагом."""
     alias = alias_effort.strip() if isinstance(alias_effort, str) else ""
     if enabled and spec.efforts and (requested is not None or alias):
         return _clamped_resolution(requested, alias, spec.pinned_to(alias) if alias else spec)
@@ -118,7 +119,7 @@ def resolve_passthrough_effort(requested: object, alias_effort: str | None, spec
 
 
 def sanitize_effort_for_log(raw: object, limit: int = DEFAULT_LOG_EFFORT_MAX_CHARS) -> str:
-    """Effort для журнала: без управляющих символов, до `limit`."""
+    """Printable-срез effort до `limit` для журнала."""
     return "".join(filter(str.isprintable, str(raw)[: limit * 2]))[:limit]
 
 
