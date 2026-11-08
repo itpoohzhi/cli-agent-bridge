@@ -177,7 +177,7 @@ from core.catalog_flags import (  # noqa: E402
     resolve_fleet_path,
     sidecar_allowlist,
 )
-from core import quarantine_gate as qgate  # noqa: E402
+from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
 from core.droid_session_gate import (  # noqa: E402
     ToolsGateError,
     admit_model,
@@ -491,7 +491,7 @@ def _load_fleet() -> dict:
         raw = None
     if raw is not None:
         try:
-            catalog = _build_catalog(json.loads(raw.decode("utf-8")))
+            catalog = greg.gated_catalog(raw, _build_catalog)
         except FleetViolation:
             raise
         except (ValueError, UnicodeDecodeError):
@@ -500,7 +500,7 @@ def _load_fleet() -> dict:
         sys.stderr.write("fleet_invalid model=- reason=fleet_unreadable\n")
         sys.stderr.flush()
         raise SystemExit(1)
-    for rejected_id, reason in catalog.get("rejected", {}).items():
+    for rejected_id, reason in cast(dict[str, str], catalog.get("rejected", {})).items():
         sys.stderr.write(f"fleet_model_rejected model={rejected_id} reason={reason}\n")
     catalog["path"] = str(FLEET_PATH)
     catalog["sha256"] = hashlib.sha256(raw).hexdigest()
@@ -519,7 +519,7 @@ except FleetViolation as violation:
 MODEL_ID = ENV_MODEL or FLEET["default_model"]
 # Реестр адаптеров включённых бэкендов (ADR 0002): каталог читается лениво, чтобы подмена FLEET
 # стендом тестов действовала и на маршрутизацию; хост адаптеров — этот модуль.
-BACKENDS = AdapterRegistry.from_fleet(
+BACKENDS: AdapterRegistry = greg.GatedRegistry.from_fleet(
     FLEET, ADAPTER_KINDS, lambda: FLEET, sys.modules[__name__]
 )
 

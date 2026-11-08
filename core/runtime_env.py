@@ -120,12 +120,12 @@ class DynamicFlagSource:
     def _truthy(raw: Any) -> bool:
         return raw if isinstance(raw, bool) else str(raw).strip().lower() in _TRUE
 
-    def enabled(self) -> bool:
+    def enabled(self, fallback: bool = False) -> bool:
         path = os.environ.get("BRIDGE_DYNAMIC_CONFIG_PATH") or os.path.expanduser("~/.config/cli-agent-bridge/dynamic_config.json")
         try:
             data = read_config_snapshot(path)
         except ConfigSnapshotError:
-            return False
+            return fallback
         if data is None or self._flag_name not in data:
             return self._truthy(os.environ.get(self._flag_name, "false"))
         return self._truthy(data[self._flag_name])

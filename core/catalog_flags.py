@@ -13,6 +13,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
+import threading
+from collections.abc import ItemsView, Iterator, KeysView, ValuesView
+from itertools import compress
+from typing import cast
 import json
 import os
 from dataclasses import dataclass
@@ -21,7 +27,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from core.backend_adapter import AllowEntry, FleetViolation, build_catalog
 from core.quarantine_gate import SidecarView
-from core.runtime_env import flag_enabled
+from core.runtime_env import DynamicFlagSource, flag_enabled
 
 FLAG_SAFE_CATALOG = "BRIDGE_FLEET_SAFE_CATALOG_ENABLED"
 FLAG_PROVIDER_CONSTRAINTS = "BRIDGE_PROVIDER_CONSTRAINTS_ENABLED"
@@ -70,6 +76,124 @@ def quarantine_gate_enabled(reader: Callable[[str], bool] = flag_enabled) -> boo
         return bool(reader(FLAG_QUARANTINE_GATE))
     except Exception:  # noqa: BLE001 - флаг не должен ронять обработку запроса
         return False
+
+
+FLAG_DROID_CATALOG = "BRIDGE_DROID_CATALOG_ENABLED"
+CatalogDict = dict[str, object]
+Sub = Callable[[CatalogDict], None]
+_F = DynamicFlagSource(FLAG_DROID_CATALOG)
+
+
+def droid_catalog_enabled(reader: Callable[[str], bool] | None = None, fallback: bool = False) -> bool:
+    """Флаг каталога droid."""
+    try:
+        return _F.enabled(fallback) if reader is None else bool(reader(FLAG_DROID_CATALOG))
+    except Exception:
+        return fallback
+
+
+def _patch(ms: object, sp: CatalogDict) -> object:
+    pt = cast(Mapping[object, CatalogDict], sp.get("models") or {})
+    if not isinstance(ms, list):
+        return ms
+    n = [{**m, **(pt.get(m.get("id")) or {})} if isinstance(m, dict) else m for m in ms]
+    return list(compress(n, (pt.get(m.get("id") if isinstance(m, dict) else None, ms) for m in ms)))
+
+
+def apply_droid_catalog_gate(raw: CatalogDict, *, enabled: bool) -> CatalogDict:
+    """Применяет droid_off при выключенном флаге."""
+    out: CatalogDict = copy.deepcopy(raw)
+    if enabled or out.get("schema_version") == 2:
+        return out
+    ref, bk = out.get("technical_ref"), out.get("backends")
+    x = ref.get("droid_off") if isinstance(ref, dict) else None
+    sp: CatalogDict = x if isinstance(x, dict) else {"backend": {"enabled": False}}
+    dr = bk.get("droid") if isinstance(bk, dict) else None
+    if isinstance(dr, dict):
+        dr.update(cast(CatalogDict, sp.get("backend") or {}))
+    if "models" in out:
+        out["models"] = _patch(out["models"], sp)
+    if "aliases" in sp:
+        out["aliases"] = sp["aliases"]
+    return out
+
+
+class GatedCatalog(CatalogDict):
+    """Каталог под флагом droid; снимок потокобезопасен."""
+
+    def __init__(self, on: CatalogDict, off: CatalogDict) -> None:
+        self._sn = {True: on, False: off}
+        self._st = droid_catalog_enabled()
+        super().__init__(copy.deepcopy(self._sn[self._st]))
+        self._lock = threading.RLock()
+        self._b = False
+        self._subs: list[Sub] = []
+
+    def add_listener(self, fn: Sub) -> None:
+        with self._lock:
+            self._subs.append(fn)
+
+    def _cp(self) -> CatalogDict:
+        with self._lock:
+            return dict(dict.items(self.sync()))
+
+    def sync(self) -> CatalogDict:
+        st = droid_catalog_enabled(fallback=self._st)
+        if st != self._st:
+            with self._lock:
+                if st != self._st and not self._b:
+                    sn = copy.deepcopy(self._sn[st])
+                    self._b = True
+                    ok: list[Sub] = []
+                    try:
+                        for fn in list(self._subs):
+                            fn(copy.deepcopy(sn))
+                            ok.append(fn)
+                    except Exception:
+                        for fn in reversed(ok):
+                            with contextlib.suppress(Exception):
+                                fn(copy.deepcopy(self._sn[self._st]))
+                        raise
+                    finally:
+                        self._b = False
+                    for k in dict.keys(self) - sn.keys() - {"path", "sha256"}:
+                        dict.pop(self, k, None)
+                    dict.update(self, sn)
+                    self._st = st
+        return self
+
+    def __getitem__(self, k: str) -> object:
+        return dict.__getitem__(self.sync(), k)
+
+    def __contains__(self, k: object) -> bool:
+        return dict.__contains__(self.sync(), k)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(tuple(self._cp()))
+
+    def __len__(self) -> int:
+        return dict.__len__(self.sync())
+
+    def __eq__(self, o: object) -> bool:
+        return dict.__eq__(self.sync(), o)
+
+    def get(self, k: str, d: object = None) -> object:
+        return dict.get(self.sync(), k, d)
+
+    def __ne__(self, o: object) -> bool:
+        return not self.__eq__(o)
+
+    def keys(self) -> KeysView[str]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self._cp().keys()
+
+    def values(self) -> ValuesView[object]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self._cp().values()
+
+    def items(self) -> ItemsView[str, object]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self._cp().items()
+
+    def copy(self) -> CatalogDict:
+        return copy.deepcopy(self._cp())
 
 
 def sidecar_path(env: Optional[Mapping[str, str]] = None) -> Path:

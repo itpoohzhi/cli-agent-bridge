@@ -1,14 +1,19 @@
 """fleet.json schema 3: парсинг backends, привязка моделей, совместимость со schema 2 (AC-001)."""
-
+from __future__ import annotations
 import copy
 import contextlib
+import importlib
 import io
 import json
+import os
 import sys
 import tempfile
+import time
 import types
 import unittest
+from hashlib import sha256
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,7 +77,8 @@ class TestLiveFleetV3(unittest.TestCase):
             ["droid", "muse", "codex", "agy", "opencode-zen", "claude-p"],
         )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
-        self.assertFalse(catalog["backends"]["droid"]["enabled"])  # ADR 0017: Droid выведен
+        self.assertTrue(catalog["backends"]["droid"]["enabled"])
+        self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 5)
         self.assertFalse(catalog["backends"]["droid"]["required"])
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
@@ -105,10 +111,11 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_models_are_bound_to_backends(self):
         data = raw_v3()
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 18)
-        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
-        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
-        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
+        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["claude-opus-5-5"]["backend"], "claude-p")
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
@@ -121,12 +128,10 @@ class TestLiveFleetV3(unittest.TestCase):
                 self.assertEqual(model["efforts"], ["max"])
                 self.assertEqual(model["default_effort"], "max")
 
-    def test_droid_models_unchanged(self):
+    def test_droid_models_published(self):
         catalog = server._build_catalog(raw_v3())
-        # deepseek-v4.1-flash - неактивная историческая запись за выключенным Droid (ADR 0017)
-        self.assertEqual([mid for mid in catalog["order"] if catalog["models"][mid]["backend"] == "droid"], [])
-        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
-        self.assertFalse(raw_v3()["backends"]["droid"]["enabled"])
+        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "droid")
+        self.assertTrue(raw_v3()["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
         self.assertNotIn("grok-4.7", catalog["models"])
         self.assertNotIn("glm-5.3", catalog["models"])
@@ -140,7 +145,7 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(len(catalog["order"]), 18)
+        self.assertEqual(len(catalog["order"]), 20)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -396,6 +401,12 @@ class TestSchema3Violations(unittest.TestCase):
             "muse-spark-1.3",
         )
 
+    def test_efforts_off_valid(self) -> None:
+        data, levels = raw_v3(), ["off", "low", "medium", "high"]
+        self.find(data, "muse-spark-1.3").update(efforts=levels, default_effort="off")
+        model = server._build_catalog(data)["models"]["muse-spark-1.3"]
+        self.assertEqual((model["efforts"], model["default_effort"]), (levels, "off"))
+
 
 def _import_fleet_check():
     """Импорт fleet_check; PyYAML в .venv отсутствует — для проверки каталога хватает заглушки."""
@@ -412,9 +423,7 @@ def _import_fleet_check():
             def add_multi_constructor(cls, prefix, fn):
                 return None
 
-        shim.SafeLoader = _Loader
-        shim.YAMLError = ValueError
-        shim.load = lambda *args, **kwargs: None
+        vars(shim).update(SafeLoader=_Loader, YAMLError=ValueError, load=lambda *a, **k: None)
         sys.modules["yaml"] = shim
     import fleet_check  # noqa: E402
 
@@ -548,7 +557,7 @@ class TestFleetCheckParity(unittest.TestCase):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 18)
+        self.assertEqual(len(catalog["order"]), 20)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):
@@ -566,16 +575,6 @@ class TestFleetCheckParity(unittest.TestCase):
         self.assertIn("model_invalid", result["checks"][0]["errors"][0])
 
 
-
-
-import importlib
-import os
-import sys
-import time
-from hashlib import sha256
-from unittest import mock
-
-
 class _CredentialsReportRecorder:
     def __init__(self):
         self.calls = []
@@ -590,6 +589,7 @@ class TestProviderCredentialsCheck(unittest.TestCase):
     SECRET_SHELL = "sk-test-SECRET-shell-cccccccccc"
     KEY = "DSH_TEST_FLEET_KEY_A"
     NOT_PI = "DSH_TEST_FLEET_NOT_PI"
+    tmp = Path()
 
     @classmethod
     def setUpClass(cls):
