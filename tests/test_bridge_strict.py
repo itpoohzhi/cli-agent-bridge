@@ -599,8 +599,8 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
-        # 3 подписочных droid и 15 моделей остальных бэкендов.
-        self.assertEqual(len(catalog["order"]), 18)
+        # 3 подписочных droid и 16 моделей остальных бэкендов.
+        self.assertEqual(len(catalog["order"]), 19)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -797,7 +797,7 @@ class TestEffortAndModel(BridgeCase):
             "claude-sonnet-5-5": ["low", "medium", "high", "max"],
             "gemini-3.8-flash": ["low", "medium", "high"],
             "gemini-4-argon": ["low", "medium", "high"],
-            "deepseek-v4.1-flash": ["off", "low", "medium", "high"],
+            "gpt-6.1-sol": ["low", "medium", "high"],
         }
         for model, efforts in wanted.items():
             self.assertEqual(server.FLEET["models"][model]["efforts"], efforts, model)
@@ -829,9 +829,9 @@ class TestEffortAndModel(BridgeCase):
             ("claude-sonnet-5-5", "HIGH", "high"),  # case-insensitive exact
             ("claude-sonnet-5-5", "off", "low"),  # нет нижнего -> upward
             ("claude-sonnet-5-5", "none", "high"),  # unknown -> default (high)
-            ("deepseek-v4.1-flash", "off", "off"),  # отключённый reasoning допустим
-            ("deepseek-v4.1-flash", "xhigh", "high"),  # lower high, не upper max
-            ("deepseek-v4.1-flash", "ultra", "high"),  # nearest lower
+            ("gpt-6.1-sol", "off", "low"),  # нет нижнего -> upward
+            ("gpt-6.1-sol", "xhigh", "high"),  # nearest lower
+            ("gpt-6.1-sol", "max", "high"),  # nearest lower
         ]
         for model, effort, expected in cases:
             before_inits = len(self.hub.inits())
@@ -917,7 +917,7 @@ class TestEffortAndModel(BridgeCase):
         self.addCleanup(changes.undo)
         for level in ("low", "medium", "high", "off"):
             status, init, _, autonomy_source = self._post_logged(
-                chat_body(model="deepseek-v4.1-flash", effort="max", autonomy=level)
+                chat_body(model="gpt-6.1-sol", effort="max", autonomy=level)
             )
             self.assertEqual(status, 200, level)
             self.assertEqual(
@@ -1009,8 +1009,11 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 18 моделей каталога + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3, deepseek-v4.1-flash).
-        self.assertEqual(len(body["data"]), 18 + len(_DROID_LEGACY_MODELS))
+        # 19 моделей каталога + legacy-моки стенда FakeDroid, которых нет в каталоге
+        # (deepseek-v4.1-flash уже входит в каталог как модель opencode-go).
+        catalog_ids = {m["id"] for m in load_raw_fleet()["models"]}
+        legacy_extra = [m for m in _DROID_LEGACY_MODELS if m["id"] not in catalog_ids]
+        self.assertEqual(len(body["data"]), 19 + len(legacy_extra))
         self.assertTrue(
             {"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]}
         )
@@ -1045,14 +1048,14 @@ class TestHealthAndModels(BridgeCase):
 class TestJournal(BridgeCase):
     def test_exec_and_done_lines_bound_by_tag(self):
         with self.capture_logs() as lines:
-            status, _ = self._post(chat_body(model="deepseek-v4.1-flash", effort="off"))
+            status, _ = self._post(chat_body(model="gpt-6.1-sol", effort="low"))
         self.assertEqual(status, 200)
         execs = [m for m in (EXEC_LINE.match(ln) for ln in lines) if m]
         dones = [ln for ln in lines if DONE_LINE.match(ln)]
         self.assertEqual(len(execs), 1)
         self.assertEqual(len(dones), 1)
-        self.assertEqual(execs[0].group("model"), "deepseek-v4.1-flash")
-        self.assertEqual(execs[0].group("effort"), "off")
+        self.assertEqual(execs[0].group("model"), "gpt-6.1-sol")
+        self.assertEqual(execs[0].group("effort"), "low")
         self.assertEqual(execs[0].group("source"), "request")
         self.assertNotIn("--auto", "\n".join(lines))
         joined = "\n".join(lines)
