@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import copy
 import hmac
 import http.client
 import json
@@ -112,6 +113,12 @@ DEFAULT_QUEUE_TIMEOUT_S = (
 )
 
 KIND = "passthrough"
+
+# Loopback-upstream с `/v1` в конце; допустимы вложенные префиксы (`http://127.0.0.1:10830/go/v1`).
+_LOOPBACK_V1_RE = re.compile(
+    r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}(?:/[a-z0-9._-]+)*/v1"
+)
+_NO_EFFORT_VALUES = frozenset({"", "off", "none"})
 
 # Заголовки соединения (RFC 9110 §7.6.1) не пробрасываются; Host/Content-Length ставит шов.
 _HOP_BY_HOP = frozenset(
@@ -1166,10 +1173,10 @@ class PassthroughAdapter(BackendAdapter):
     """Бэкенд `kind=passthrough`: модели каталога, раw-шов исполнения вместо `execute_turn`."""
 
     kind = KIND
+    CONSTRAINTS = KindConstraints(base_url_allowed=True, api_key_env_allowed=True)
     capabilities = Capabilities(
         sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact"
     )
-    CONSTRAINTS = KindConstraints(base_url_allowed=True, api_key_env_allowed=True)
 
     def __init__(
         self,
@@ -1203,9 +1210,7 @@ class PassthroughAdapter(BackendAdapter):
         self._lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(self.max_concurrent)
         base_url = self.config.get("base_url")
-        if not isinstance(base_url, str) or not re.fullmatch(
-            r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}/v1", base_url
-        ):
+        if not isinstance(base_url, str) or not _LOOPBACK_V1_RE.fullmatch(base_url):
             raise ValueError("backend_base_url_invalid")
         parts = urllib.parse.urlsplit(base_url)
         if parts.hostname is None or parts.port is None or not 1 <= parts.port <= 65535:
@@ -1260,6 +1265,76 @@ class PassthroughAdapter(BackendAdapter):
     def shutdown(self) -> None:
         self._pool.close_all()
 
+    # -- upstream-параметры шва (api_key_ref / headers_from_json / per_request_headers) ----
+    def _read_key_ref(self) -> str:
+        """Токен из `api_key_ref` (`file:<путь>`); читается на каждый запрос (ротация ключа)."""
+        ref = self.config.get("api_key_ref")
+        if not isinstance(ref, str) or not ref.startswith("file:"):
+            return ""
+        try:
+            with open(os.path.expanduser(ref[len("file:") :]), encoding="utf-8") as fh:
+                return fh.read().strip()
+        except OSError:
+            self._log("passthrough api_key_ref unreadable")
+            return ""
+
+    def _read_json_headers(self) -> dict[str, str]:
+        """Заголовки `headers_from_json`: узел `json_path` файла, ключи из `pick` (без регистра)."""
+        spec = self.config.get("headers_from_json")
+        if not isinstance(spec, Mapping):
+            return {}
+        json_path = spec.get("json_path")
+        if not isinstance(json_path, list):
+            return {}
+        try:
+            with open(os.path.expanduser(str(spec["file"])), encoding="utf-8") as fh:
+                node: Any = json.load(fh)
+            for part in json_path:
+                node = node[str(part)]
+        except (OSError, ValueError, KeyError, TypeError):
+            self._log("passthrough headers_from_json unreadable")
+            return {}
+        if not isinstance(node, dict):
+            return {}
+        pick = spec.get("pick")
+        if not isinstance(pick, list):
+            return {}
+        by_lower = {str(k).lower(): (str(k), v) for k, v in node.items()}
+        picked: dict[str, str] = {}
+        for name in pick:
+            found = by_lower.get(str(name).lower())
+            if found is not None and isinstance(found[1], str) and found[1]:
+                picked[str(name)] = found[1]
+        return picked
+
+    def _upstream_headers(self) -> dict[str, str]:
+        """Заголовки, принудительно заменяющие клиентские: из файла, затем per-request."""
+        extra = self._read_json_headers()
+        per_request = self.config.get("per_request_headers")
+        if isinstance(per_request, Mapping):
+            for name, template in per_request.items():
+                extra[str(name)] = str(template).replace("{uuid4}", str(uuid.uuid4()))
+        return extra
+
+    def _with_body_defaults(self, raw_body: bytes) -> bytes:
+        """Подставляет `default_body_extra` в JSON-тело для ключей, которых клиент не задал."""
+        extra = self.config.get("default_body_extra")
+        if not isinstance(extra, Mapping) or not extra:
+            return raw_body
+        try:
+            data = json.loads(raw_body)
+        except ValueError:
+            return raw_body
+        if not isinstance(data, dict):
+            return raw_body
+        effort = data.get("reasoning_effort")
+        if isinstance(effort, str) and effort.strip().lower() not in _NO_EFFORT_VALUES:
+            return raw_body  # клиент явно запросил рассуждение: дефолт «выключено» не навязываем
+        missing = {k: copy.deepcopy(v) for k, v in extra.items() if k not in data}
+        if not missing:
+            return raw_body
+        return json.dumps({**data, **missing}, ensure_ascii=False).encode("utf-8")
+
     # -- raw-шов -------------------------------------------------------------------------
     def _log(self, message: str) -> None:
         logger = getattr(self.host, "_log", None)
@@ -1282,6 +1357,7 @@ class PassthroughAdapter(BackendAdapter):
         window: LivenessWindow | None = None,
     ) -> None:
         """One request: body goes upstream unmodified (AD-001: internal stream=true), response goes to `sink`."""
+        raw_body = self._with_body_defaults(raw_body)
         internal = internal_stream_body(path, request, raw_body)
         if internal is not None:
             raw_body, window = internal, window or passthrough_window(self.limits, path, request)
@@ -1516,13 +1592,14 @@ class PassthroughAdapter(BackendAdapter):
             forwarded = {
                 k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP
             }
-            if self._upstream_key:
+            upstream_token = self._upstream_key or self._read_key_ref()
+            if upstream_token:
                 forwarded = {
                     k: v
                     for k, v in forwarded.items()
                     if k.lower() not in ("authorization", "x-api-key")
                 }
-                forwarded["Authorization"] = f"Bearer {self._upstream_key}"
+                forwarded["Authorization"] = f"Bearer {upstream_token}"
             else:
                 client_toks: list[str] = []
                 for k, v in headers.items():
@@ -1551,6 +1628,13 @@ class PassthroughAdapter(BackendAdapter):
                         for k, v in forwarded.items()
                         if k.lower() not in ("authorization", "x-api-key")
                     }
+            upstream_headers = self._upstream_headers()
+            if upstream_headers:
+                replaced = {name.lower() for name in upstream_headers}
+                forwarded = {
+                    k: v for k, v in forwarded.items() if k.lower() not in replaced
+                }
+                forwarded.update(upstream_headers)
             forwarded["Host"] = f"{self._host}:{self._port}"
             forwarded["Content-Length"] = str(len(raw_body))
             forwarded["Accept-Encoding"] = (
