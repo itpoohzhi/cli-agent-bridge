@@ -33,11 +33,12 @@ SPEC = ModelEffortSpec(tuple(LMH), "high")
 # ---- effort: шкала, кламп, passthrough -------------------------------------------------
 
 
-def test_catalog_effort_levels_stay_unchanged_and_off_only_ranks() -> None:
-    levels = backend_adapter.EFFORT_LEVELS
-    assert levels == ("minimal", "low", "medium", "high", "xhigh", "max")
-    assert levels is effort_policy.EFFORT_LEVELS is server.EFFORT_LEVELS
-    assert effort_policy.EFFORT_ORDER == ("off", *levels, "ultra")
+def test_catalog_effort_levels_extend_policy_scale_with_off() -> None:
+    ranked = effort_policy.EFFORT_LEVELS
+    assert ranked == ("minimal", "low", "medium", "high", "xhigh", "max")
+    assert backend_adapter.EFFORT_LEVELS == ("off", *ranked)
+    assert backend_adapter.EFFORT_LEVELS is server.EFFORT_LEVELS
+    assert effort_policy.EFFORT_ORDER == ("off", *ranked, "ultra")
 
 
 def test_clamp_off_maps_to_lowest_allowed() -> None:

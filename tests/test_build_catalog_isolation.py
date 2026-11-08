@@ -177,9 +177,7 @@ def test_not_a_dict_is_fatal_in_isolate() -> None:
 
 def test_models_of_disabled_backend_are_skipped_not_rejected() -> None:
     data = raw_fleet()
-    data["backends"]["droid"]["enabled"] = (
-        False  # droid первичен для deepseek в боевом каталоге
-    )
+    data["backends"]["droid"]["enabled"] = False
     catalog = build(data, "isolate")
     assert "deepseek-v4.1-flash" not in catalog["models"]
     assert "deepseek-v4.1-flash" not in catalog["rejected"]

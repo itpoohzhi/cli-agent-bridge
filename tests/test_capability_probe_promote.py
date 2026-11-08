@@ -72,8 +72,7 @@ def test_select_manifest_on_real_providers() -> None:
     manifests = load_manifests(PROVIDERS, ADAPTER_KINDS).manifests
     for model, provider in (
         ("gpt-6.1-sol", "droid"),
-        ("deepseek-v4.1-flash", "droid"),
-        ("kimi-k3.1-pro", "droid"),
+        ("deepseek-v4.1-flash", "opencode-go"),
         ("gpt-6.1-terra", "codex"),
         ("gemini-4-argon", "agy"),
     ):

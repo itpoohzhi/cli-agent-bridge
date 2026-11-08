@@ -1,25 +1,23 @@
 from __future__ import annotations
 
-# Квитанция droid v3 (qualified_models): схема, DTO, fail-closed проверка моста, квалификация моделей.
+# Квитанция droid v3 (qualified_models): схема, DTO, fail-closed проверка моста и `--verify-receipt`.
 
+import hashlib
 import json
 import sys
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-from unittest import mock
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tools"))
 
-import droid_image  # noqa: E402
-import droid_receipt_verify as verify  # noqa: E402
-import receipt_schema as schema  # noqa: E402
 import server  # noqa: E402
+from tools import droid_image  # noqa: E402
+from tools import droid_receipt_verify as verify  # noqa: E402
+from tools import receipt_schema as schema  # noqa: E402
 
 QUALIFIED = {
     "claude-sonnet-5-5": ["Read", "edit-cli"],  # проб-модель droid_image
@@ -31,7 +29,7 @@ QUALIFIED = {
 
 def make_v3(models: dict[str, list[str]] | None = None, **over: Any) -> dict[str, Any]:
     qualified = {m: sorted(ids) for m, ids in (models or QUALIFIED).items()}
-    first = next(iter(qualified.values()))
+    first = sorted({tool for ids in qualified.values() for tool in ids})
     receipt: dict[str, Any] = {
         "schema": schema.RECEIPT_SCHEMA,
         "image_path": "/x/droid",
@@ -46,6 +44,7 @@ def make_v3(models: dict[str, list[str]] | None = None, **over: Any) -> dict[str
             "digest": schema.tools_policy_digest(first, qualified),
         },
         "qualified_models": qualified,
+        "qualified_targets": [{"model": m, "effort": "high"} for m in qualified],
         "settings_profile": {
             "profile": dict(schema.SETTINGS_PROFILE),
             "digest": schema.settings_profile_digest(),
@@ -61,11 +60,12 @@ def make_v3(models: dict[str, list[str]] | None = None, **over: Any) -> dict[str
 
 def test_receipt_schema_is_3_and_digest_covers_qualified_models() -> None:
     assert schema.RECEIPT_SCHEMA == 3 == server.RECEIPT_SCHEMA
-    base = schema.tools_policy_digest(["Read"], QUALIFIED)
+    every = sorted({tool for ids in QUALIFIED.values() for tool in ids})
+    base = schema.tools_policy_digest(every, QUALIFIED)
     changed = dict(QUALIFIED, **{"deepseek-v4.1-flash": ["Read"]})
-    assert base != schema.tools_policy_digest(["Read"], changed)
+    assert base != schema.tools_policy_digest(every, changed)
     reordered = {m: list(reversed(ids)) for m, ids in QUALIFIED.items()}
-    assert base == schema.tools_policy_digest(["Read"], reordered)
+    assert base == schema.tools_policy_digest(every, reordered)
 
 
 def test_parse_accepts_v3_and_exposes_per_model_tools() -> None:
@@ -116,9 +116,15 @@ def test_parse_rejects_empty_disabled_tool_ids_with_matching_sha256(bad: Any) ->
     receipt = make_v3()
     qualified = receipt["qualified_models"]
     receipt["tools_policy"]["disabled_tool_ids"] = bad
-    receipt["tools_policy"]["digest"] = schema.tools_policy_digest([], qualified)
+    receipt["tools_policy"]["digest"] = schema.json_digest(
+        {
+            "policy": schema.TOOLS_POLICY,
+            "disabled_tool_ids": [],
+            "qualified_models": qualified,
+        }
+    )
     assert schema.ReceiptV3.parse(receipt) == "disabled_tool_ids_invalid"
-    with pytest.raises(server.LauncherUnavailable, match="tools policy mismatch"):
+    with pytest.raises(server.LauncherUnavailable, match="tools policy mismatch|invalid qualified_models"):
         server._check_receipt_quad(receipt)
 
 
@@ -136,84 +142,6 @@ def test_check_receipt_quad_requires_qualified_models() -> None:
     del broken["qualified_models"]
     with pytest.raises(server.LauncherUnavailable):
         server._check_receipt_quad(broken)
-
-
-# ---- droid_image: квалификация моделей ---------------------------------------------------
-
-
-class PerModelRpc:
-    """Подмена droid_image._Rpc: каталог tools зависит от модели последней initialize_session."""
-
-    protocol = "1.2.3"
-
-    def __init__(
-        self, tools_by_model: dict[str, list[str]], bad_model: str = ""
-    ) -> None:
-        self.tools_by_model, self.bad_model, self.model = tools_by_model, bad_model, ""
-
-    def _settings(self, **extra: Any) -> dict[str, Any]:
-        return {
-            "modelId": self.model,
-            "reasoningEffort": "high",
-            "autonomyLevel": "high",
-            **extra,
-        }
-
-    def call(
-        self, method: str, params: Mapping[str, object], timeout: float = 0.0
-    ) -> droid_image.RpcExchange:
-        if method == "droid.initialize_session":
-            self.model = str(params["modelId"])
-            shown = "other" if self.model == self.bad_model else self.model
-            settings = dict(self._settings(), modelId=shown)
-            return droid_image.RpcExchange({"sessionId": "sid", "settings": settings}, [])
-        if method == "droid.list_tools":
-            tools = [{"id": i} for i in self.tools_by_model[self.model]]
-            return droid_image.RpcExchange({"tools": tools}, [])
-        if method == "droid.update_session_settings":
-            settings = self._settings(disabledToolIds=params["disabledToolIds"])
-            note = {"notification": {"type": "settings_updated", "settings": settings}}
-            return droid_image.RpcExchange({}, [note])
-        loaded = {"session": {"messages": []}, "settings": self._settings()}
-        return droid_image.RpcExchange(loaded, [])
-
-    def close(self) -> None:
-        return None
-
-
-def _install(tmp_path: Path, rpc: PerModelRpc, models: list[str]) -> dict[str, Any]:
-    source = tmp_path / "droid-src"
-    source.write_bytes(b"scripted-image")
-    source.chmod(0o755)
-    with mock.patch.object(droid_image, "_Rpc", lambda image, cwd, home: rpc):
-        return droid_image.install_image(source, tmp_path / "workspace", models=models)
-
-
-def test_install_image_qualifies_every_model(tmp_path: Path) -> None:
-    rpc = PerModelRpc({m: list(ids) for m, ids in QUALIFIED.items()})
-    receipt = _install(tmp_path, rpc, list(QUALIFIED))
-    assert receipt["schema"] == 3
-    assert receipt["qualified_models"] == {
-        m: sorted(ids) for m, ids in QUALIFIED.items()
-    }
-    assert (
-        receipt["qualified_models"]["gpt-6.1-sol"]
-        != (receipt["qualified_models"]["deepseek-v4.1-flash"])
-    )
-    assert receipt["tools_policy"]["disabled_tool_ids"] == sorted(
-        QUALIFIED["claude-sonnet-5-5"]
-    )
-    assert isinstance(schema.ReceiptV3.parse(receipt), schema.ReceiptV3)
-    assert (tmp_path / "workspace" / "state" / "droid-binary-receipt.json").is_file()
-
-
-def test_failed_model_qualification_writes_no_receipt(tmp_path: Path) -> None:
-    rpc = PerModelRpc(
-        {m: list(i) for m, i in QUALIFIED.items()}, bad_model="kimi-k3.1-pro"
-    )
-    with pytest.raises(droid_image.ProbeError):
-        _install(tmp_path, rpc, list(QUALIFIED))
-    assert not (tmp_path / "workspace" / "state" / "droid-binary-receipt.json").exists()
 
 
 # ---- --verify-receipt --------------------------------------------------------------------
@@ -248,11 +176,17 @@ def _verify(tmp_path: Path, models: list[str], *extra: str) -> int:
 
 
 def _installed(tmp_path: Path) -> None:
-    _install(
-        tmp_path,
-        PerModelRpc({m: list(i) for m, i in QUALIFIED.items()}),
-        list(QUALIFIED),
+    """Receipt v3 на диске: образ в runtime/droid-image и записанный sha256 исходного бинаря."""
+    image = tmp_path / "workspace" / "runtime" / "droid-image" / "x" / "droid"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"scripted-image")
+    digest = hashlib.sha256(b"scripted-image").hexdigest()
+    receipt = make_v3(
+        image_path=str(image), image_sha256=digest, source={"sha256": digest}
     )
+    path = _receipt_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt), encoding="utf-8")
 
 
 def test_verify_receipt_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -1,4 +1,4 @@
-"""Каталог fleet публикует exact codex-модели (у codex первична terra) только при включённом backend."""
+"""Каталог fleet публикует exact Terra через включённый codex backend."""
 
 import json
 
@@ -13,7 +13,7 @@ def test_codex_models_are_passthrough_and_enabled():
     assert codex["kind"] == "passthrough"
     assert codex["base_url"] == "http://127.0.0.1:2455/v1"
     assert codex["enabled"] is True
-    ids = {"gpt-6.1-terra"}  # gpt-6.1-sol первичен на droid (priority 10)
+    ids = {"gpt-6.1-terra"}
     assert {m["id"] for m in data["models"] if m["backend"] == "codex"} == ids
     for enabled in (False, True):
         codex["enabled"] = enabled

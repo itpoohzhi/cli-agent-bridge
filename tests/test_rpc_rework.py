@@ -4,6 +4,7 @@
 (tests/fake_droid.py), говорящий stream-jsonrpc. Реальный droid и сеть не используются;
 значения ключей в тестах фиктивные. Идентификаторы RW-NNN — в имени метода и docstring.
 """
+
 import hashlib
 import json
 import os
@@ -12,16 +13,17 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402  # tests/ — корень импорта pytest
-from rpc_testlib import FakeClock, RpcCase  # noqa: E402  # tests/ — корень импорта pytest
-from test_images_strict import ImageCase  # noqa: E402  # tests/ — корень импорта pytest
+from tests.gateway_policy_testlib import no_leaks as no_leaks  # noqa: E402
+from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402
+from rpc_testlib import FakeClock, RpcCase  # noqa: E402
+from test_images_strict import ImageCase  # noqa: E402
 
 BODY = {"model": "claude-sonnet-5-5"}
 
@@ -30,19 +32,12 @@ def msg(text, role="user"):
     return {"role": role, "content": text}
 
 
-def post_safely(case, body, timeout=60.0) -> tuple[Any, Any]:
+def post_safely(case, body, timeout=60.0):
     """(status, json) либо (repr(исключения), None): обрыв соединения — провал теста, а не ошибка."""
     try:
         return case._post_json(body, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - диагностический разбор теста
         return repr(exc), None
-
-
-def no_leaks(case):
-    """Процессы/слоты/билеты возвращены: P == число живых процессов."""
-    return wait_until(
-        lambda: server.POOL.used == len(server._rpc_procs) and not server.POOL.queue
-    )
 
 
 class TestTagsSchema(RpcCase):
@@ -83,7 +78,7 @@ class TestSecretsScrub(RpcCase):
     CANARY = "CANARY-REAL-FACTORY-KEY-0123456789abcdef"
 
     def setUp(self):
-        self._pre = os.environ.get("FACTORY_API_KEY")  # состояние создаётся в setUp
+        self._pre = os.environ.get("FACTORY_API_KEY")
         os.environ["FACTORY_API_KEY"] = self.CANARY
         self.addCleanup(self._restore)
         self.addCleanup(
@@ -169,8 +164,9 @@ class TestRetractionCounter(RpcCase):
         self.assertEqual(body["choices"][0]["message"]["content"], "final")
         state = self.chat_of("chat-retract")
         sid = state.sid
-        session_path = self.hub.base / "sessions" / f"{sid}.json"
-        saved = json.loads(session_path.read_text(encoding="utf-8"))
+        saved = json.loads(
+            (self.hub.base / "sessions" / f"{sid}.json").read_text(encoding="utf-8")
+        )
         real_in_droid = sum(
             1 for m in saved["messages"] if not server._is_service_message(m)
         )
@@ -270,6 +266,7 @@ class TestSettingsFailClosed(RpcCase):
         """RW-005: 7 сценариев -> 502 proxy_error/droid_error и ни одного add_user_message."""
         for name, config in self.SCENARIOS.items():
             with self.subTest(name):
+                server._PENALTY_TRACKER.reset_all()
                 self.hub.config.clear()
                 self.hub.configure(**config)
                 before = len(self.hub.rpcs("droid.add_user_message"))
@@ -291,7 +288,7 @@ class TestDroidReceipt(RpcCase):
     def setUp(self):
         super().setUp()
         server.RECEIPT_REQUIRED = True
-        self._env_bin = os.environ.get("DROID_BIN")  # состояние создаётся в setUp
+        self._env_bin = os.environ.get("DROID_BIN")
         self.addCleanup(self._restore_bin)
 
     def _restore_bin(self):
@@ -338,8 +335,9 @@ class TestDroidReceipt(RpcCase):
         os.environ["DROID_BIN"] = "/usr/local/bin/droid-global-updated"
         status, _ = self._ask()
         self.assertEqual(status, 200)
-        spawn = self.hub.spawns()[0]
-        self.assertEqual(spawn["droid_bin"], os.path.realpath(str(image)))
+        self.assertEqual(
+            self.hub.spawns()[0]["droid_bin"], os.path.realpath(str(image))
+        )
 
 
 class TestDroidImageTool(RpcCase):
@@ -355,7 +353,8 @@ class TestDroidImageTool(RpcCase):
             self.hub.launcher.read_bytes()
         )  # fake_droid отвечает на пробы как настоящий
         source.chmod(0o755)
-        receipt = droid_image.install_image(source, server.WORKSPACE)
+        with unittest.mock.patch.dict(os.environ, {"DROID_EXTRA_PROBE_MODELS": ""}):
+            receipt = droid_image.install_image(source, server.WORKSPACE)
         image = Path(receipt["image_path"])
         self.assertEqual(oct(image.stat().st_mode & 0o777), "0o500")
         self.assertEqual(oct(image.parent.stat().st_mode & 0o777), "0o700")
@@ -477,7 +476,7 @@ class TestSpoolEnospc(ImageCase):
         self,
     ):
         """RW-008/RW-004: write_bytes картинки -> OSError(ENOSPC): 502 proxy_error (новых кодов нет), lease/слот/каталог свободны."""
-        from bridge_testlib import image_part, make_png, text_part  # tests/ — корень импорта pytest
+        from bridge_testlib import image_part, make_png, text_part
 
         server.IMAGE_PROBE = True
         self.probe_stand()
@@ -488,7 +487,7 @@ class TestSpoolEnospc(ImageCase):
                 raise OSError(28, "No space left on device")
             return real(self_path, data)
 
-        setattr(Path, "write_bytes", full_disk)
+        Path.write_bytes = full_disk
         try:
             status, body = post_safely(
                 self,
@@ -504,7 +503,7 @@ class TestSpoolEnospc(ImageCase):
                 },
             )
         finally:
-            setattr(Path, "write_bytes", real)
+            Path.write_bytes = real
         self.assertEqual(status, 502)
         self.assertEqual(body["error"]["type"], "proxy_error")
         self.assertEqual(self.hub.spawns(), [])
@@ -600,8 +599,9 @@ class TestRpcWriteDeadline(RpcCase):
         self.hub.configure(stall_after=0)
         body = dict(BODY, messages=[msg(self.BIG, "system"), msg("hi")])
         thread = threading.Thread(
-            target=lambda: results.update(r=post_safely(self, body, 60)), daemon=True
+            target=lambda: results.update(r=post_safely(self, body, 5)), daemon=True
         )
+        self.addCleanup(thread.join, 30)
         thread.start()
         self.assertTrue(wait_until(lambda: len(self.hub.spawns()) == 1, timeout=15))
         time.sleep(0.5)
@@ -624,14 +624,12 @@ class TestRpcWriteDeadline(RpcCase):
         """RW-011: interrupt_quietly при зависшей записи возвращается сразу (пишущий лок не удерживает interrupt)."""
         server.RPC_CALL_TIMEOUT_S = 20.0
         results = {}
-        req_thread = self._stalled_request(results)
+        self._stalled_request(results)
         proc = next(iter(server._rpc_procs.values()))
         thread = threading.Thread(target=proc.interrupt_quietly, daemon=True)
         thread.start()
         thread.join(1.5)
         self.assertFalse(thread.is_alive())
-        server.shutdown_all()
-        req_thread.join(15)
 
     def test_rw011_shutdown_all_within_budget_with_stuck_child(self):
         """RW-011: SIGTERM-путь при зависшей записи: shutdown_all быстро, ребёнок убит (бюджет 4,5 с)."""

@@ -59,16 +59,18 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         return catalog, registry
 
     def assert_state(self, catalog: Any, registry: GatedRegistry, on: bool) -> None:
-        adapter = registry.adapter_for_model("gpt-6.1-sol")
+        adapter = registry.adapter_for_model("claude-sonnet-5-5")
         self.assertIsNotNone(adapter)
-        self.assertEqual(adapter.id if adapter else "", "droid" if on else "codex")
+        self.assertEqual(adapter.id if adapter else "", "droid" if on else "claude-p")
         self.assertEqual(registry.get("droid") is not None, on)
         published = {model.id for _adapter, model in registry.models()}
-        self.assertEqual("kimi-k3.1-pro" in published, on)
+        # gpt-6.1-sol обслуживает только droid: :2455 (codex) его не отдаёт ни в одном состоянии флага.
+        self.assertEqual("gpt-6.1-sol" in published, on)
         self.assertEqual(("droid" in [a.id for a in registry.adapters()]), on)
-        self.assertEqual(len(catalog["aliases"]), 12 if on else 1)
-        backend = catalog["models"]["gpt-6.1-sol"]["backend"]
-        self.assertEqual(backend, "droid" if on else "codex")
+        self.assertEqual(len(catalog["aliases"]), 12 if on else 0)
+        backend = catalog["models"]["claude-sonnet-5-5"]["backend"]
+        self.assertEqual(backend, "droid" if on else "claude-p")
+        self.assertEqual("gpt-6.1-sol" in catalog["models"], on)
 
     def test_toggle_without_reload(self) -> None:
         for start in (False, True):
@@ -112,8 +114,8 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         calls = {
             "get": lambda r: r.get("droid") is not None,
             "adapters": lambda r: "droid" in [a.id for a in r.adapters()],
-            "adapter_for_model": lambda r: r.adapter_for_model("kimi-k3.1-pro") is not None,
-            "models": lambda r: "kimi-k3.1-pro" in {m.id for _a, m in r.models()},
+            "adapter_for_model": lambda r: r.adapter_for_model("gpt-6.1-sol") is not None,
+            "models": lambda r: "gpt-6.1-sol" in {m.id for _a, m in r.models()},
         }
         for name, probe in calls.items():
             for on in (True, False):
@@ -229,20 +231,20 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         names = {
             "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
             "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
-            "gpt-6.1-sol": "GPT-6.1 Sol (Codex passthrough)",
         }
         for model, name in names.items():
             self.assertEqual(catalog["models"][model]["name"], name)
+        self.assertNotIn("gpt-6.1-sol", catalog["models"])
         set_flag(True)
         sol = catalog["models"]["gpt-6.1-sol"]["name"]
-        self.assertEqual(sol, "GPT-6.1 Sol (Factory Droid)")
+        self.assertEqual(sol, "GPT-6.1 Sol (Droid bridge)")
         set_flag(False)
         for model, name in names.items():
             self.assertEqual(catalog["models"][model]["name"], name)
 
     def test_efforts_follow_flag(self) -> None:
         catalog, _registry = self.build(False)
-        for model in ("claude-haiku-5-5", "claude-opus-5-5", "gpt-6.1-sol"):
+        for model in ("claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"):
             self.assertEqual(efforts(catalog, model), (["high"], "high"))
         set_flag(True)
         self.assertEqual(efforts(catalog, "claude-haiku-5-5"), (["low", "medium", "high"], "low"))
@@ -257,10 +259,10 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         self.assertNotIn("probe", catalog)
         self.assertEqual(catalog["path"], str(srv().FLEET_PATH))
         self.assertEqual(len(catalog["sha256"]), 64)
-        self.assertIn("kimi-k3.1-pro", catalog["models"])
-        self.assertIn("kimi-k3.1-pro", list(catalog["models"]))
+        self.assertIn("gpt-6.1-sol", catalog["models"])
+        self.assertIn("gpt-6.1-sol", list(catalog["models"]))
         set_flag(False)
-        self.assertNotIn("kimi-k3.1-pro", catalog["models"])
+        self.assertNotIn("gpt-6.1-sol", catalog["models"])
 
     def test_reconcile_treats_missing_enabled_as_on(self) -> None:
         catalog, registry = self.build(False)

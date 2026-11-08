@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # Быстрые детерминированные проверки критических веток W3: атомарный промоушен, `--promote` пробника,
 # `fleet_compile`, квалификация проб-модели (`core/catalog_promote.py`, `scripts/capability_probe.py`,
-# `tools/fleet_compile.py`, `tools/droid_qualify_models.py`, `tools/droid_receipt_verify.py`, `tools/droid_image.py`).
+# `tools/fleet_compile.py`, `tools/droid_receipt_verify.py`, `tools/droid_image.py`).
 
 import dataclasses
 import hashlib
@@ -11,7 +11,6 @@ import io
 import json
 import sys
 from argparse import Namespace
-from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,17 +21,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tools"))
 
-import droid_image  # noqa: E402
-import droid_qualify_models as qualify  # noqa: E402
-import droid_receipt_verify as verify  # noqa: E402
-import receipt_schema as schema  # noqa: E402
 import server  # noqa: E402
+from tools import droid_image  # noqa: E402
+from tools import droid_receipt_verify as verify  # noqa: E402
+from tools import receipt_schema as schema  # noqa: E402
 from core import catalog_promote as promote  # noqa: E402
 from test_droid_receipt_v3 import (  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]
     QUALIFIED,
-    PerModelRpc,
     make_v3,
     _installed,  # pyright: ignore[reportPrivateUsage]
     _providers_with_droid,  # pyright: ignore[reportPrivateUsage]
@@ -171,34 +167,7 @@ def test_main_stops_on_unreadable_lifecycle(
     assert "lifecycle_unreadable" in capsys.readouterr().err
 
 
-# ---- droid_image / droid_qualify_models -----------------------------------------------
-
-
-def test_qualify_with_probe_sorts_probe_model_tools() -> None:
-    settings = qualify.ProbeSettings(Path("/w"), "high", "high")
-    rpc = PerModelRpc({"m2": ["z", "y"]})
-    got = qualify.qualify_with_probe(lambda: rpc, settings, ("m1", ["b", "a"]), ["m2"])
-    assert got == {"m1": ("a", "b"), "m2": ("z", "y")}
-
-
-def test_install_image_probes_models_with_probe_effort(tmp_path: Path) -> None:
-    seen: list[str] = []
-
-    class Recording(PerModelRpc):
-        def call(
-            self, method: str, params: Mapping[str, object], timeout: float = 0.0
-        ) -> droid_image.RpcExchange:
-            if method == "droid.initialize_session":
-                seen.append(str(params["reasoningEffort"]))
-            return super().call(method, params, timeout)
-
-    source = tmp_path / "droid-src"
-    source.write_bytes(b"scripted-image")
-    source.chmod(0o755)
-    rpc = Recording({m: list(ids) for m, ids in QUALIFIED.items()})
-    with mock.patch.object(droid_image, "_Rpc", lambda image, cwd, home: rpc):
-        droid_image.install_image(source, tmp_path / "ws", models=["gpt-6.1-sol"])
-    assert seen and set(seen) == {droid_image.PROBE_MODEL_EFFORT[1]}
+# ---- droid_image -----------------------------------------------
 
 
 def test_droid_image_help_uses_first_docstring_line(
@@ -215,7 +184,13 @@ def test_droid_image_help_uses_first_docstring_line(
 
 def _empty_disabled(rec: dict[str, Any]) -> None:
     rec["tools_policy"]["disabled_tool_ids"] = []
-    rec["tools_policy"]["digest"] = schema.tools_policy_digest([], rec["qualified_models"])
+    rec["tools_policy"]["digest"] = schema.json_digest(
+        {
+            "policy": schema.TOOLS_POLICY,
+            "disabled_tool_ids": [],
+            "qualified_models": rec["qualified_models"],
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -233,6 +208,11 @@ def _empty_disabled(rec: dict[str, Any]) -> None:
         (lambda r: r["probes"].update(load="fail"), "probes_not_ok"),
         (lambda r: r.pop("probes"), "probes_not_ok"),
         (_empty_disabled, "disabled_tool_ids_invalid"),
+        (lambda r: r.pop("qualified_targets"), "qualified_targets_invalid"),
+        (
+            lambda r: r["qualified_targets"].pop(),
+            "qualified_targets_invalid",
+        ),
     ],
 )
 def test_verify_receipt_matches_runtime_gate(

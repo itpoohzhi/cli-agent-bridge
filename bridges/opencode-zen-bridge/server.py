@@ -35,7 +35,6 @@ if _ZEN_ROOT not in sys.path:
 
 from zen_bridge.adapters.serve_helper_cli import _run_serve_helper_cli
 
-
 if sys.argv[1:2] == ["--serve-helper"]:
     raise SystemExit(_run_serve_helper_cli(sys.argv[2:]))
 else:
@@ -81,6 +80,8 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
     sys.path.insert(0, _p)
 
 import zen_catalog as zc  # noqa: E402
+from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
+from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.tool_emulation import (  # noqa: E402
     DEFAULT_MAX_PARALLEL_CALLS,
     DEFAULT_MAX_PARALLEL_DEPTH,
@@ -88,7 +89,6 @@ from core.tool_emulation import (  # noqa: E402
     build_tool_schemas,
     sanitize_tool_calls_list,
 )
-
 
 def _positive_int(raw: str | None, default: int) -> int:
     """Положительное целое из env-строки; нечисловое/неположительное значение -> default."""
@@ -1156,6 +1156,7 @@ def _stop_proc(proc: subprocess.Popen[str]) -> None:
             os.killpg(pgid, signal.SIGKILL)
         except OSError:
             pass
+    spawn_registered.unregister(proc)
 
 
 _STDOUT_POLL_S = 0.25
@@ -2184,6 +2185,9 @@ def _log(msg: str) -> None:
         pass
 
 
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: max(len(_active), len(live_proc_groups())), log_fn=_log), workspace=WORKSPACE)
+
+
 class _RequestAttempts(_RequestAttemptsBase):
     """Учёт запусков одного HTTP-запроса с динамическим чтением MAX_TOTAL_SPAWNS."""
 
@@ -2539,6 +2543,7 @@ class _ServeLease:
                 _ = self.helper.wait(timeout=max(0.1, _deadline - time.monotonic()))
             except (OSError, subprocess.SubprocessError):
                 pass
+        spawn_registered.unregister(self.helper)
         for stream in (self.helper.stdout, self.helper.stderr):
             try:
                 if stream is not None:
@@ -2660,7 +2665,7 @@ def _spawn_serve(
         lifeline_r, lifeline_w = os.pipe()
         try:
             _check_serve_start(deadline, is_client_gone)
-            helper: subprocess.Popen[str] = subprocess.Popen(
+            helper: subprocess.Popen[str] = spawn_registered(
                 [
                     sys.executable,
                     "-I",
@@ -4015,7 +4020,7 @@ def _spawn_with_stdin(
     глотаются: дочерний мог выйти раньше (напр. остановка через _stop_proc
     при tool call, или ранний отказ) — это наблюдают читатели stdout/stderr.
     """
-    proc = subprocess.Popen(
+    proc = spawn_registered(
         cmd,
         cwd=str(workdir),
         env=env,
@@ -5547,6 +5552,7 @@ class Run:
 from zen_bridge.adapters.locked_wfile import _LockedWfile
 
 
+@_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _zen_prompt: str = ""
     _zen_targeted: bool = False
@@ -8419,13 +8425,7 @@ def main() -> int:
         f"models={sorted(ALLOWED_MODELS)} launcher={_resolve_launcher()}"
     )
     server = Server((HOST, PORT), Handler, resilience=_DEFAULT_RESILIENCE)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-    return 0
+    return _LIFECYCLE.serve_forever(server)
 
 
 if __name__ == "__main__":

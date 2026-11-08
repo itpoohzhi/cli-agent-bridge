@@ -33,15 +33,6 @@ family_rule:
     verified: true
     map: {gemini-: Google}
 models_overrides:
-  gemini-3.8-flash:
-    name: Gemini 3.8 Flash (AGY bridge)
-    efforts: [low, medium, high]
-    default_effort: high
-    context_window: 1048576
-    max_tokens: 65536
-    input: [text]
-    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
-    policy_lines: [100, 142, 174, 431]
   gemini-4-argon:
     name: Gemini 4 Argon (AGY bridge)
     efforts: [low, medium, high]

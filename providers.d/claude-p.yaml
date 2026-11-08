@@ -19,15 +19,6 @@ discovery:
   refresh_interval_s: 900
 family_rule: {type: owned_by, owned_by: Anthropic}
 models_overrides:
-  claude-sonnet-5-5:
-    name: Claude Sonnet 5.5 (Claude-p bridge)
-    efforts: [low, medium, high]
-    default_effort: high
-    context_window: 1000000
-    max_tokens: 128000
-    input: [text]
-    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
-    policy_lines: [26, 88, 390, 407, 435]
   claude-opus-5-5:
     name: Claude Opus 5.5 (Claude-p bridge)
     efforts: [low, medium, high]

@@ -23,12 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 PROVIDERS = ROOT / "providers.d"
 NOW = "2026-11-07T00:00:00+03:00"
 LMH = ["low", "medium", "high"]
-DROID_MODELS = {  # model_id -> (вендор, default_effort)
-    "gpt-6.1-sol": ("OpenAI", "high"),
-    "deepseek-v4.1-flash": ("DeepSeek", "low"),
-    "kimi-k3.1-pro": ("Moonshot", "high"),
-    "claude-sonnet-5-5": ("Anthropic", "high"),
-    "gemini-3.8-flash": ("Google", "high"),
+DROID_MODELS = {  # model_id -> (вендор, default_effort, efforts)
+    "gpt-6.1-sol": ("OpenAI", "high", LMH),
+    "claude-sonnet-5-5": ("Anthropic", "high", [*LMH, "max"]),
+    "gemini-3.8-flash": ("Google", "high", LMH),
 }
 PRIMARY = {
     **{mid: "droid" for mid in DROID_MODELS},
@@ -37,13 +35,12 @@ PRIMARY = {
     "gemini-4-argon": "agy",
     "gpt-6.1-terra": "codex",
 }
-ALTERNATES = {
-    "gpt-6.1-sol": ["codex"],
-    "claude-sonnet-5-5": ["claude-p"],
-    "gemini-3.8-flash": ["agy"],
-    "kimi-k3.1-pro": ["opencode-go"],
-    "deepseek-v4.1-flash": ["opencode-go"],
+ALTERNATES = {  # манифесты claude-p/agy/codex модели подписки не объявляют: альтернатив нет
+    "gpt-6.1-sol": [],
+    "claude-sonnet-5-5": [],
+    "gemini-3.8-flash": [],
 }
+GO_ONLY = ("deepseek-v4.1-flash",)  # вне droid: только прямой opencode-go; kimi-k3.1-pro удалена из каталога
 SUFFIX_ALIASES = {  # алиас -> (базовая модель, бэкенд, effort)
     **{f"gpt-6.1-sol-{e}": ("gpt-6.1-sol", "droid", e) for e in LMH},
     "gemini-4-argon-high": ("gemini-4-argon", "agy", "high"),
@@ -72,7 +69,7 @@ def _aliases() -> dict[str, Any]:
 # ---- манифесты и тай-брейк ------------------------------------------------------------
 
 
-def test_droid_manifest_registers_five_subscription_models() -> None:
+def test_droid_manifest_registers_three_subscription_models() -> None:
     droid = next(
         m
         for m in load_manifests(PROVIDERS, ADAPTER_KINDS).manifests
@@ -87,13 +84,10 @@ def test_droid_manifest_registers_five_subscription_models() -> None:
     )
     assert {r.model_id for r in droid.models_overrides} == set(DROID_MODELS)
     for rule in droid.models_overrides:
-        vendor, default = DROID_MODELS[rule.model_id]
-        assert rule.fields["efforts_pin"] == LMH  # ladder пробника ограничен
-        assert list(droid.models_defaults.efforts) == LMH
-        assert (
-            rule.fields.get("default_effort", droid.models_defaults.default_effort)
-            == default
-        )
+        vendor, default, efforts = DROID_MODELS[rule.model_id]
+        assert rule.fields["efforts_pin"] == efforts  # ladder пробника ограничен
+        assert rule.fields["efforts"] == efforts
+        assert rule.fields["default_effort"] == default
         assert droid.family_rule.exact_map[rule.model_id] == vendor
 
 
@@ -113,6 +107,10 @@ def test_primary_and_alternates_follow_priority(compiled: Any) -> None:
         assert [
             a["provider"] for a in compiled.sidecar["models"][mid]["alternates"]
         ] == alternates
+    for mid in GO_ONLY:
+        assert compiled.sidecar["models"][mid]["provider"] == "opencode-go"
+        assert mid not in backends
+    assert "kimi-k3.1-pro" not in compiled.sidecar["models"]
     assert compiled.rejected == {} and compiled.rejected_providers == {}
 
 
@@ -146,11 +144,10 @@ def test_explain_prints_deterministic_tiebreak(
     assert (doc["model_id"], doc["primary"], doc["alternates"]) == (
         "gpt-6.1-sol",
         "droid",
-        ["codex"],
+        [],  # :2455 не обслуживает gpt-6.1-sol (исключён из discovery codex)
     )
     assert [(c["priority"], c["provider_id"]) for c in doc["candidates"]] == [
         (10, "droid"),
-        (30, "codex"),
     ]
 
 
@@ -192,12 +189,8 @@ def test_suffix_alias_resolves_to_base_with_effort(compiled: Any, alias: str) ->
 
 def test_deepseek_flash_is_not_redirected_to_free(compiled: Any) -> None:
     models = build_catalog(compiled.fleet, ADAPTER_KINDS)["models"]
-    resolved = resolve_model("deepseek-v4.1-flash", models, _aliases())
-    assert (
-        resolved.base_id == "deepseek-v4.1-flash"
-        and not resolved.backend_id.endswith("-free")
-    )
-    assert models["deepseek-v4.1-flash"]["backend"] == "droid"
+    assert "deepseek-v4.1-flash" not in models  # живёт только в opencode-go
+    assert "deepseek-v4.1-flash" not in _aliases()
     assert (
         "deepseek-v4.1-flash-free" in models
     )  # явный бесплатный ID остаётся доступным

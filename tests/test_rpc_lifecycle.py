@@ -5,6 +5,7 @@
 fake stream-jsonrpc subprocess (tests/fake_droid.py). Идентификаторы TM-NNN — в имени
 метода и docstring.
 """
+
 import json
 import os
 import signal
@@ -16,14 +17,15 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
-from bridge_testlib import pid_alive, wait_until  # noqa: E402  # tests/ — корень импорта pytest
-from droid_test_helpers import spawn_detached_orphan  # noqa: E402
-from rpc_testlib import (  # noqa: E402  # tests/ — корень импорта pytest
+from tests.gateway_policy_testlib import baseline_rename_count, orphan_registry_entries  # noqa: E402
+from bridge_testlib import pid_alive, wait_until  # noqa: E402
+from rpc_testlib import (  # noqa: E402
     DONE_LINE,
     EXEC_LINE,
     REJECT_LINE,
@@ -38,7 +40,7 @@ SLOW = {"steps": [{"op": "sleep", "s": 1.0}, {"op": "text", "text": "slow"}]}
 class TestIdleAndRestore(RpcCase):
     def setUp(self):
         super().setUp()
-        self.clock = FakeClock(1000.0)  # состояние создаётся в setUp
+        self.clock = FakeClock(1000.0)
         server._clock = self.clock
 
     def _reap(self):
@@ -201,10 +203,10 @@ class TestIdleAndRestore(RpcCase):
 class TestCapAndQueue(RpcCase):
     def setUp(self):
         super().setUp()
-        self.saved_cap = server.MAX_CONCURRENT  # состояние создаётся в setUp
-        self.saved_queue = server.QUEUE_TIMEOUT_S  # состояние создаётся в setUp
-        self.saved_ka = server.KEEPALIVE_S  # состояние создаётся в setUp
-        self.clock = FakeClock(1000.0)  # состояние создаётся в setUp
+        self.saved_cap = server.MAX_CONCURRENT
+        self.saved_queue = server.QUEUE_TIMEOUT_S
+        self.saved_ka = server.KEEPALIVE_S
+        self.clock = FakeClock(1000.0)
         server._clock = self.clock
 
     def tearDown(self):
@@ -376,16 +378,15 @@ class TestCapAndQueue(RpcCase):
 class TestTimeoutsAndCancel(RpcCase):
     def setUp(self):
         super().setUp()
-        self.saved_ka = server.KEEPALIVE_S  # состояние создаётся в setUp
+        self.saved_ka = server.KEEPALIVE_S
 
     def tearDown(self):
         server.KEEPALIVE_S = self.saved_ka
         super().tearDown()
 
-    def test_tm010_silence_watchdog_interrupts_and_invalidates_chat(self):
+    def test_tm010_silence_watchdog_interrupts_and_invalidates_chat(self) -> None:
         """TM-010: watchdog без прогресса -> interrupt, 504 timeout; чат DIRTY, следующий ход — replay."""
-        self.addCleanup(setattr, server, "IDLE_TIMEOUT_S", server.IDLE_TIMEOUT_S)
-        server.IDLE_TIMEOUT_S = 0.6  # порог молчания хода читается из IDLE_TIMEOUT_S
+        self.enterContext(mock.patch.object(server, "IDLE_TIMEOUT_S", 0.6))
         self.hub.script(
             [{"steps": [{"op": "text", "text": "partial"}, {"op": "hang"}]}]
         )
@@ -661,34 +662,27 @@ class TestPersistenceAndShutdown(RpcCase):
             bystander.kill()
             bystander.wait()
 
-    def test_tm013_reconcile_kills_only_own_orphans_by_start_signature(self):
+    def test_tm013_reconcile_kills_only_own_orphans_by_start_signature(self) -> None:
         """TM-013: на старте проверка PID/PGID/start-signature; чужой PID не убивается; EOF у детей при смерти родителя."""
-        own_pid, bridge_pid = spawn_detached_orphan()
+        self.enterContext(
+            mock.patch.object(server, "has_live_parent", return_value=False)
+        )
+        own = subprocess.Popen(["sleep", "60"], start_new_session=True)
         foreign = subprocess.Popen(["sleep", "60"], start_new_session=True)
         reused = subprocess.Popen(["sleep", "60"], start_new_session=True)
-
-        def known(pid, start):
-            return {"pid": pid, "start": start, "bridge_pid": bridge_pid}
-
         try:
-            entries = [  # own_pid — настоящая сирота: её родитель-посредник уже завершён
-                known(own_pid, server._proc_start_sig(own_pid)),
-                known(reused.pid, "Mon Jan  1 00:00:00 1990"),  # подпись не совпала
-                known(foreign.pid, ""),  # без подписи
-            ]
+            entries = orphan_registry_entries(own, reused, foreign)
             server._atomic_write(server._children_path(), json.dumps(entries).encode())
             self.assertEqual(server.reconcile_children(), 1)
-            self.assertTrue(wait_until(lambda: not pid_alive(own_pid)))
+            self.assertTrue(wait_until(lambda: own.poll() is not None))
             self.assertIsNone(foreign.poll())
             self.assertIsNone(reused.poll())
             self.assertEqual(json.loads(server._children_path().read_text()), [])
         finally:
-            for proc in (foreign, reused):
+            for proc in (own, foreign, reused):
                 if proc.poll() is None:
                     proc.kill()
                 proc.wait()
-            if pid_alive(own_pid):
-                os.kill(own_pid, signal.SIGKILL)
         # SIGKILL родителя -> EOF stdin у детей -> самозавершение (без участия моста).
         parent_code = (
             "import subprocess,sys,os,time\n"
@@ -840,7 +834,9 @@ class TestJournalGolden(RpcCase):
             self.assertEqual(chat.send()[0], 200)
             self.assertEqual(chat.ask("again")[0], 200)
         strict = [
-            ln for ln in lines if ln.startswith(("exec ", "usage ", "done ", "reject "))
+            ln
+            for ln in lines
+            if ln.startswith(("exec ", "usage ", "done ", "reject "))
             and not ln.startswith("done route=")
         ]
         for line in strict:
@@ -929,10 +925,7 @@ class TestBaselineInventory(unittest.TestCase):
             if new not in present
         ]
         self.assertEqual(missing, [])
-        renamed = {
-            old: t for old, t in data["baseline_to_current"].items() if t != [old]
-        }
-        self.assertEqual(len(renamed), 6)  # 4 RPC + 2 effort-clamp oracle_change
+        self.assertEqual(baseline_rename_count(data["baseline_to_current"]), 7)
 
 
 if __name__ == "__main__":

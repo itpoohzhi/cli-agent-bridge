@@ -8,7 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bridge_testlib import BridgeCase  # noqa: E402  # tests/ — корень импорта pytest
-import server  # noqa: E402
 
 VALID = json.dumps(
     {
@@ -44,9 +43,8 @@ class TestFraming(BridgeCase):
         )
 
     def test_body_over_limit_413_and_leftover_not_parsed(self):
-        # Политика каталога: предел тела 67108864 Б (64 MiB); литерал фиксирует значение независимо от прода.
-        self.assertEqual(int(server.FLEET["image_limits"]["max_body_bytes"]), 67108864)
-        raw = self._raw_request(b"", cl=67108865) + self._raw_request(VALID)
+        self.stand(lambda data: data["image_limits"].update(max_body_bytes=33554432))
+        raw = self._raw_request(b"", cl=33554433) + self._raw_request(VALID)
         self._case(raw, 413, "payload_too_large")
 
     def test_json_not_object(self):

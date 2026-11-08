@@ -24,12 +24,11 @@ FLEET_FILE = Path(__file__).resolve().parent.parent / "fleet.json"
 _ZEN = ("high", "max")
 _ALL = ("minimal", "low", "medium", "high", "max")
 _LMH = ("low", "medium", "high")
-# Эталон `fleet.json` базы 5f8f673 (модель, бэкенд, efforts, default_effort), независимый от HEAD.
+# Эталон выключенного гейта (модель, бэкенд, efforts, default_effort), независимый от HEAD: прежняя маршрутизация
+# через claude-p/agy; gpt-6.1-sol и deepseek-v4.1-flash вне каталога (:2455 их не обслуживает, deepseek — в opencode-go).
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
     ("gemini-3.8-flash", "agy", _LMH, "high"),
-    ("deepseek-v4.1-flash", "droid", _ZEN, "high"),
-    ("gpt-6.1-sol", "codex", ("high",), "high"),
     ("muse-spark-1.3", "muse", ("max",), "max"),
     ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
     ("muse-wonder-1.0", "muse", _ALL, "high"),
@@ -46,15 +45,13 @@ BASE_MODELS = (
     ("beam-free", "opencode-zen", _ZEN, "high"),
     ("big-pickle", "opencode-zen", _ZEN, "high"),
 )
-# Имена моделей, переключаемых гейтом, в `fleet.json` базы 5f8f673.
+# Имена моделей, переключаемых гейтом, при выключенном флаге.
 BASE_NAMES = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
     "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
-    "deepseek-v4.1-flash": "DeepSeek V4.1 Flash (Droid legacy, неактивна)",
-    "gpt-6.1-sol": "GPT-6.1 Sol (Codex passthrough)",
 }
 BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=4)
-BASE_ALIAS = {"deepseek-v4.1-flash": dict(backend_id="deepseek-v4.1-flash-free", backend="opencode-zen", effort="high")}
+BASE_ALIAS: dict[str, Any] = {}
 
 
 def srv() -> Any:
@@ -173,7 +170,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         gated: Any = apply_droid_catalog_gate(raw, enabled=True)
         self.assertEqual(gated, raw)
         self.assertTrue(gated["backends"]["droid"]["enabled"])
-        self.assertEqual(list(routes(gated).values()).count("droid"), 5)
+        self.assertEqual(list(routes(gated).values()).count("droid"), 3)
         self.assertEqual(len(gated["aliases"]), 12)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
@@ -212,14 +209,15 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(gated["backends"]["droid"], BASE_DROID_BACKEND)
         self.assertEqual(gated["aliases"], BASE_ALIAS)
         ids = [m["id"] for m in gated["models"]]
-        self.assertEqual(ids, [b[0] for b in BASE_MODELS])
+        self.assertEqual(sorted(ids), sorted(b[0] for b in BASE_MODELS))
 
     def test_schema_gate(self) -> None:
         """F-006.1: схема 2 не трогается, схема 4 под гейтом (fail-closed)."""
         two: dict[str, Any] = {"schema_version": 2, "models": [{"id": "x", "backend": "droid"}]}
         self.assertEqual(apply_droid_catalog_gate(two, enabled=False), two)
         four: dict[str, Any] = {"schema_version": 4, "backends": {"droid": {"enabled": True}}}
-        self.assertFalse(apply_droid_catalog_gate(four, enabled=False)["backends"]["droid"]["enabled"])
+        gated_four: Any = apply_droid_catalog_gate(four, enabled=False)
+        self.assertFalse(gated_four["backends"]["droid"]["enabled"])
 
     def test_reconcile_passes_models_and_order_to_make(self) -> None:
         """F-002: новый бэкенд создаётся с полным каталогом и `backend_order`."""
@@ -249,7 +247,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
             catalog = srv()._load_fleet()
         self.assertIsInstance(catalog, GatedCatalog)
         self.assertFalse(catalog["backends"]["droid"]["enabled"])
-        self.assertNotIn("kimi-k3.1-pro", catalog["models"])
+        self.assertNotIn("gpt-6.1-sol", catalog["models"])
 
     def test_load_fleet_env_fleet_path_keeps_gate(self) -> None:
         """F-005.1: `DROID_DSH_BRIDGE_FLEET` на штатный `fleet.json` не открывает fail-open."""
@@ -260,7 +258,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
             self.assertFalse(catalog["backends"]["droid"]["enabled"])
             os.environ[FLAG_DROID_CATALOG] = "1"
             self.assertTrue(catalog["backends"]["droid"]["enabled"])
-            self.assertIn("kimi-k3.1-pro", catalog["models"])
+            self.assertIn("gpt-6.1-sol", catalog["models"])
 
     def test_load_fleet_synthetic_explicit_catalog_is_plain(self) -> None:
         plain = raw_fleet()
@@ -270,18 +268,18 @@ class DroidCatalogFlagTest(unittest.TestCase):
             catalog = srv()._load_fleet()
         self.assertNotIsInstance(catalog, GatedCatalog)
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
-        self.assertIn("kimi-k3.1-pro", catalog["models"])
+        self.assertIn("gpt-6.1-sol", catalog["models"])
 
     def test_gated_catalog_methods_follow_flag(self) -> None:
         """F-003.1: `len`, `==`, `copy`, `keys` и `items` тоже применяют флаг."""
         built: Any = gated_catalog(FLEET_FILE.read_bytes(), srv()._build_catalog)
-        self.assertNotIn("kimi-k3.1-pro", built["models"])
+        self.assertNotIn("gpt-6.1-sol", built["models"])
         os.environ[FLAG_DROID_CATALOG] = "1"
-        self.assertIn("kimi-k3.1-pro", built.copy()["models"])
+        self.assertIn("gpt-6.1-sol", built.copy()["models"])
         os.environ.pop(FLAG_DROID_CATALOG)
-        self.assertNotIn("kimi-k3.1-pro", dict(built.items())["models"])
+        self.assertNotIn("gpt-6.1-sol", dict(built.items())["models"])
         os.environ[FLAG_DROID_CATALOG] = "1"
-        self.assertIn("kimi-k3.1-pro", list(built.values())[list(built.keys()).index("models")])
+        self.assertIn("gpt-6.1-sol", list(built.values())[list(built.keys()).index("models")])
         self.assertEqual(len(built), len(built.copy()))
         self.assertEqual(built, built.copy())
 
@@ -292,7 +290,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
                 catalog = srv()._load_fleet()
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
                 self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "droid")
-                self.assertIn("kimi-k3.1-pro", catalog["models"])
+                self.assertIn("gpt-6.1-sol", catalog["models"])
                 self.assertEqual(len(catalog["aliases"]), 12)
 
 

@@ -28,10 +28,10 @@ allow_base_url:
 limits: {max_concurrent: 1, quota_group: opencode-go, timeout_s: 180}
 discovery:
   method: static
-  static: [deepseek-v4.1-flash, kimi-k3.1-pro]
+  static: [deepseek-v4.1-flash]
 family_rule:
   type: exact_map
-  exact_map: {deepseek-v4.1-flash: DeepSeek, kimi-k3.1-pro: Moonshot}
+  exact_map: {deepseek-v4.1-flash: DeepSeek}
 models_overrides:
   deepseek-v4.1-flash:
     name: DeepSeek V4.1 Flash (OpenCode Go, direct)
@@ -42,12 +42,6 @@ models_overrides:
     input: [text]
     images: {cli_registry: explicit_supported, status: unverified, method: null, proof: null}
     policy_lines: [106, 394, 432]
-  kimi-k3.1-pro:
-    name: Kimi K3.1 Pro (OpenCode Go, direct)
-    efforts: [high]
-    default_effort: high
-    input: [text]
-    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
 params:
   effort_field: none
   effort_map:
