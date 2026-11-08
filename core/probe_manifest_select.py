@@ -37,7 +37,12 @@ def select_manifest(
     """`--provider` -> по id; иначе лучший заявивший; `strict_ambiguous` — прежний CLI (2+ -> ambiguous)."""
     claims = _lists_model if strict_ambiguous else _claims_model
     pool = [m for m in manifests if (m.provider_id == provider_id if provider_id else claims(m, model_id))]
-    if strict_ambiguous and not provider_id and len(pool) > 1:
-        return ProbeCandidate(None, "provider_ambiguous")
-    best = min(pool[:1] if strict_ambiguous else pool, key=lambda m: (m.transport.bridge is None, m.priority, m.provider_id), default=None)
+    if strict_ambiguous:
+        # 0 -> не найден, 1 -> единственный, 2+ -> неоднозначно; `--provider` берёт первый по id.
+        return (
+            ProbeCandidate(None, "provider_not_found"),
+            ProbeCandidate(pool[0] if pool else None, None),
+            ProbeCandidate(None, "provider_ambiguous"),
+        )[min(len(pool[:1] if provider_id else pool), 2)]
+    best = min(pool, key=lambda m: (m.transport.bridge is None, m.priority, m.provider_id), default=None)
     return ProbeCandidate(best, None if best else "provider_not_found")
