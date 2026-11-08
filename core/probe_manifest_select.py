@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from core.provider_manifest import ProviderManifest
@@ -9,33 +9,37 @@ from core.provider_manifest import ProviderManifest
 
 @dataclass(frozen=True, slots=True)
 class ProbeCandidate:
-    """Выбранный манифест либо причина отказа `provider_not_found`."""
+    """Манифест либо причина отказа: `provider_not_found` / `provider_ambiguous`."""
 
     manifest: ProviderManifest | None = None
     problem: str | None = None
 
 
 def _claims_model(manifest: ProviderManifest, model_id: str) -> bool:
-    """Модель заявлена активным манифестом: `static`, `include` или overrides вне `exclude`."""
+    """Активный манифест заявляет модель вне `exclude`."""
+
+    def matches(globs: Iterable[str]) -> bool:
+        return any(fnmatch.fnmatchcase(model_id, g) for g in globs)
+
     cfg = manifest.discovery
-    excluded = any(fnmatch.fnmatchcase(model_id, g) for g in cfg.exclude)
-    named = (model_id in cfg.static, manifest.rule_for(model_id) is not None)
-    included = any(fnmatch.fnmatchcase(model_id, g) for g in cfg.include)
-    claimed = bool(manifest.enabled) and not excluded and any((*named, included))
-    return claimed
+    named = model_id in cfg.static or manifest.rule_for(model_id) is not None
+    return manifest.enabled and not matches(cfg.exclude) and (named or matches(cfg.include))
 
 
 def select_manifest(
-    manifests: Sequence[ProviderManifest], model_id: str, provider_id: str | None
+    manifests: Sequence[ProviderManifest],
+    model_id: str,
+    provider_id: str | None,
+    *,
+    strict_ambiguous: bool = False,
 ) -> ProbeCandidate:
-    """Манифест по --provider, иначе лучший (bridge, priority, provider_id) среди активных."""
-    active = [m for m in manifests if m.enabled]
-    by_id = [m for m in active if m.provider_id == provider_id]
-    claimed = [m for m in active if _claims_model(m, model_id)]
-    matches = by_id if provider_id else claimed
-    best = min(
-        matches,
-        key=lambda m: (m.transport.bridge is None, m.priority, m.provider_id),
-        default=None,
-    )
-    return ProbeCandidate(best, None if best else "provider_not_found")
+    """`--provider` -> по id; иначе лучший заявивший; `strict_ambiguous` — 2+ -> ambiguous."""
+    if provider_id:
+        pool = [m for m in manifests if m.provider_id == provider_id]
+    else:
+        pool = [m for m in manifests if _claims_model(m, model_id)]
+    best = min(pool, key=lambda m: (m.transport.bridge is None, m.priority, m.provider_id), default=None)
+    problem = None if best else "provider_not_found"
+    if strict_ambiguous and not provider_id and len(pool) > 1:
+        best, problem = None, "provider_ambiguous"
+    return ProbeCandidate(best, problem)

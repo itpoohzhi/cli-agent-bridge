@@ -68,6 +68,7 @@ if str(REPO_ROOT) not in sys.path:
 from core import discovery as _discovery  # noqa: E402
 from core.backend_adapter import EFFORT_LEVELS  # noqa: E402
 from core.param_adapter import resolve_state_dir  # noqa: E402
+from core.probe_manifest_select import select_manifest as _select_core_manifest  # noqa: E402
 from core.provider_manifest import ModelsDefaults, ProviderManifest  # noqa: E402
 
 PROBE_VERSION = 1
@@ -1092,26 +1093,9 @@ def resolve_api_key(env: Mapping[str, str]) -> str:
 def select_manifest(
     manifests: Sequence[ProviderManifest], model_id: str, provider_id: Optional[str]
 ) -> Tuple[Optional[ProviderManifest], Optional[str]]:
-    """Манифест провайдера: по `--provider` либо единственный, чей include/static матчит модель."""
-    import fnmatch
-
-    if provider_id:
-        for manifest in manifests:
-            if manifest.provider_id == provider_id:
-                return manifest, None
-        return None, "provider_not_found"
-    matches = []
-    for manifest in manifests:
-        cfg = manifest.discovery
-        listed = model_id in cfg.static
-        globbed = bool(cfg.include) and any(
-            fnmatch.fnmatchcase(model_id, g) for g in cfg.include
-        )
-        if listed or globbed:
-            matches.append(manifest)
-    if len(matches) == 1:
-        return matches[0], None
-    return None, "provider_ambiguous" if matches else "provider_not_found"
+    """Манифест провайдера: `--provider` либо единственный активный, заявивший модель."""
+    cand = _select_core_manifest(manifests, model_id, provider_id, strict_ambiguous=True)
+    return cand.manifest, cand.problem
 
 
 def probe_cli(

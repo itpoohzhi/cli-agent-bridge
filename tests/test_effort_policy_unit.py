@@ -3,6 +3,7 @@ from __future__ import annotations
 # Прямые детерминированные проверки core/effort_policy.py: границы шкалы, дефолты, неизменяемость.
 
 import sys
+from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,6 @@ from core.effort_policy import (  # noqa: E402
     EffortResolution,
     ModelEffortCardFields,
     ModelEffortSpec,
-    _clamped_resolution,
-    canonical_model_id,
     clamp_effort_downward,
     resolve_alias_effort,
     resolve_passthrough_effort,
@@ -62,7 +61,12 @@ def test_clamp_effort_downward_boundaries(
             ModelEffortSpec(("low", "high"), "high"),
         ),
         ({"efforts": "low"}, ModelEffortSpec()),
-        ({"efforts": [1, "low"]}, ModelEffortSpec(("1", "low"))),
+        ({"efforts": [1, None, "low"]}, ModelEffortSpec(("low",))),
+        ({"efforts": ["bogus", "unknown"]}, ModelEffortSpec()),
+        (
+            {"efforts": [" High ", "high", "LOW", "off"], "default_effort": " HIGH "},
+            ModelEffortSpec(("off", "low", "high"), "high"),
+        ),
         ({}, ModelEffortSpec()),
     ],
 )
@@ -95,7 +99,6 @@ def test_pinned_to_unknown_effort_falls_back_to_lowest_allowed() -> None:
 
 def test_effort_scale_and_catalog_flag_are_single_source() -> None:
     assert policy.EFFORT_LEVELS == EFFORT_LEVELS == (
-        "off",
         "minimal",
         "low",
         "medium",
@@ -103,12 +106,12 @@ def test_effort_scale_and_catalog_flag_are_single_source() -> None:
         "xhigh",
         "max",
     )
-    assert EFFORT_ORDER == (*EFFORT_LEVELS, "ultra")
+    assert EFFORT_ORDER == ("off", *EFFORT_LEVELS, "ultra")
     assert FLAG_EFFORT_CATALOG == "BRIDGE_EFFORT_CATALOG_ENABLED"
 
 
-def test_clamped_resolution_survives_empty_spec_without_index_error() -> None:
-    assert _clamped_resolution("bogus", ModelEffortSpec(), "bogus") == EffortResolution()
+def test_passthrough_empty_spec_never_indexes_efforts() -> None:
+    assert resolve_passthrough_effort("bogus", None, ModelEffortSpec(), enabled=True) == EffortResolution()
 
 
 @pytest.mark.parametrize("default,expected", [(None, "low"), ("medium", "medium")])
@@ -121,19 +124,35 @@ def test_passthrough_unknown_effort_uses_default_or_lowest(
     assert decision == EffortResolution(expected, True, "bogus")
 
 
-def test_passthrough_ignores_non_string_and_blank_effort() -> None:
+def test_passthrough_ignores_absent_effort() -> None:
     spec = ModelEffortSpec(LMH, "high")
-    assert resolve_passthrough_effort(5, "high", spec, enabled=True) == EffortResolution(
-        "high", True
-    )
-    for requested, alias in (("   ", None), (None, "  "), (None, None)):
+    for alias in ("  ", None):
         assert (
-            resolve_passthrough_effort(requested, alias, spec, enabled=True)
+            resolve_passthrough_effort(None, alias, spec, enabled=True)
             == EffortResolution()
         )
     assert resolve_passthrough_effort(
         None, " low ", spec, enabled=False
     ) == EffortResolution("low", True)
+
+
+@pytest.mark.parametrize("requested", ["", "   ", 123])
+def test_passthrough_clamps_blank_or_non_string_explicit_effort(requested: object) -> None:
+    spec = ModelEffortSpec(LMH, "medium")
+    assert resolve_passthrough_effort(requested, None, spec, enabled=True) == EffortResolution(
+        "medium", True, str(requested)
+    )
+    assert resolve_passthrough_effort(requested, None, ModelEffortSpec(LMH), enabled=True) == EffortResolution(
+        "low", True, str(requested)
+    )
+    assert resolve_passthrough_effort(requested, None, spec, enabled=False) == EffortResolution()
+
+
+def test_passthrough_non_string_effort_with_alias_pins_alias_level() -> None:
+    spec = ModelEffortSpec(LMH, "high")
+    assert resolve_passthrough_effort(5, "high", spec, enabled=True) == EffortResolution(
+        "high", True, "5"
+    )
 
 
 def test_passthrough_pins_alias_before_clamping_explicit_effort() -> None:
@@ -205,12 +224,53 @@ def test_resolve_alias_effort_boundaries(raw: str, enabled: bool, expected: tupl
     assert resolve_alias_effort(raw, CAT, ("low", "high"), enabled) == expected
 
 
+def test_from_catalog_entry_rejects_default_outside_unranked_efforts() -> None:
+    entry = {"efforts": ["vendor", "low"], "default_effort": "max"}
+    assert ModelEffortSpec.from_catalog_entry(entry).default is None
+    entry = {"efforts": ["vendor", "low"], "default_effort": "vendor"}
+    assert ModelEffortSpec.from_catalog_entry(entry) == ModelEffortSpec(("low",), None)
+
+
+def test_passthrough_canonicalizes_case_and_pins_stripped_alias() -> None:
+    spec = ModelEffortSpec(("high",), "high")
+    assert resolve_passthrough_effort("HIGH", None, spec, enabled=True) == EffortResolution("high", True)
+    assert resolve_passthrough_effort("high", None, spec, enabled=True) == EffortResolution()
+    pinned = resolve_passthrough_effort(None, " low ", ModelEffortSpec(LMH, "high"), enabled=True)
+    assert (pinned.value, pinned.clamped_from) == ("low", None)
+
+
+class _CountingCatalogue(Mapping[str, object]):
+    """Каталог на 1001 ключ со счётчиками обходов и обращений."""
+
+    def __init__(self) -> None:
+        self.data: Mapping[str, object] = {f"k{i}": {} for i in range(1000)} | {"m": {}}
+        self.iterations = 0
+        self.lookups = 0
+
+    def __iter__(self) -> Iterator[str]:
+        self.iterations += 1
+        return iter(self.data)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, key: str) -> object:
+        self.lookups += 1
+        return self.data[key]
+
+    def __contains__(self, key: object) -> bool:
+        self.lookups += 1
+        return key in self.data
+
+
+def test_resolve_alias_effort_does_not_scan_catalogue() -> None:
+    catalogue = _CountingCatalogue()
+    assert len(catalogue) == 1001
+    assert resolve_alias_effort("m-high", catalogue, ("high",), False) is None
+    assert (catalogue.iterations, catalogue.lookups) == (0, 0)
+    assert resolve_alias_effort("m-high", catalogue, ("high",), True) == ("m", "high")
+    assert catalogue.iterations == 0
+
+
 def test_resolve_alias_effort_exact_catalogue_entry_wins() -> None:
     assert resolve_alias_effort("m-high", {"m": {}, "m-high": {}}, ("high",), True) is None
-    assert canonical_model_id("m-high", {"m": {}, "m-high": {}}, ("high",), True) == "m-high"
-
-
-@pytest.mark.parametrize("raw,expected", [("m-low", "m"), ("m", "m"), ("q-low", "q-low")])
-def test_canonical_model_id_unwraps_or_keeps(raw: str, expected: str) -> None:
-    assert canonical_model_id(raw, CAT, ("low",), True) == expected
-    assert canonical_model_id(raw, CAT, ("low",), False) == raw

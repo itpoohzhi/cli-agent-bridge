@@ -4,7 +4,6 @@ provider_id: opencode-zen
 kind: passthrough
 enabled: true
 required: false
-priority: 50
 owned_by: opencode-zen-bridge
 transport:
   bridge: {base_url: 'http://127.0.0.1:9883/v1', api_key_env: OPENCODE_ZEN_BRIDGE_KEY}

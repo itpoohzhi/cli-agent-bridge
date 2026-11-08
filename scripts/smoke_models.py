@@ -18,10 +18,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Literal, NamedTuple, overload
 
+
 DEFAULT_MODELS_MD = Path(
     os.environ.get("MODELS_MD_PATH") or "~/Мой диск/Context/models.md"
 ).expanduser()
-SMOKE_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "off"})
 DEFAULT_MODEL_NOTES_MD = Path(
     os.environ.get("MODEL_NOTES_MD_PATH") or "~/Мой диск/Context/model-notes.md"
 ).expanduser()
@@ -423,8 +423,9 @@ def _load_fleet_config() -> tuple[frozenset[str], dict[str, str]]:
             if isinstance(target, str):
                 aliases[str(alias)] = target
             elif isinstance(target, dict):
-                target_id = next((target[k] for k in ("model", "target", "id", "backend_id") if target.get(k)), None)
-                aliases.update({str(alias): str(target_id)} if target_id else {})
+                target_id = next(filter(None, map(target.get, ("model", "target", "id", "backend_id"))), None)
+                if target_id:
+                    aliases[str(alias)] = str(target_id)
     return frozenset(models), aliases
 
 
@@ -442,8 +443,7 @@ def build_bridge_payload(
 
     if model_id in aliases:
         wire_model = aliases[model_id]
-        suffix = model_id.rpartition("-")[2].lower()
-        target_effort = target_effort or (suffix if suffix in SMOKE_EFFORT_LEVELS else "")
+        target_effort = target_effort or next((e for e in ("minimal", "low", "medium", "high", "xhigh", "max") if model_id.lower().endswith("-" + e)), "")
     elif model_id not in models and f"{model_id}-free" in models:
         wire_model = f"{model_id}-free"
     elif model_id not in models:
@@ -461,7 +461,7 @@ def build_bridge_payload(
         "max_tokens": max_tokens,
         "stream": stream,
     }
-    if target_effort in SMOKE_EFFORT_LEVELS:
+    if target_effort in {"minimal", "low", "medium", "high", "xhigh", "max", "off"}:
         payload["reasoning_effort"] = target_effort
     if target_effort == "off":
         payload["thinking"] = {"type": "disabled"}

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-# Effort на границе роутинга: шкала с `off`, кламп passthrough, честный `/v1/models`, инварианты гейта.
+# Effort на границе роутинга: шкала, кламп passthrough, честный `/v1/models`, инварианты гейта.
 
-import copy
 import importlib
 import sys
-import unittest
 from pathlib import Path
 from typing import Any
-from unittest import mock
 
 import pytest
 
@@ -28,8 +25,6 @@ from core.effort_policy import (  # noqa: E402
     sanitize_effort_for_log,
 )
 
-testlib = importlib.import_module("bridge_testlib")
-find_model, load_raw_fleet = testlib.find_model, testlib.load_raw_fleet
 route = importlib.import_module("test_passthrough_routing").route  # фикстура do_POST без сети
 LMH = ["low", "medium", "high"]
 SPEC = ModelEffortSpec(tuple(LMH), "high")
@@ -38,10 +33,11 @@ SPEC = ModelEffortSpec(tuple(LMH), "high")
 # ---- effort: шкала, кламп, passthrough -------------------------------------------------
 
 
-def test_effort_levels_start_with_off_and_keep_minimal() -> None:
+def test_catalog_effort_levels_stay_unchanged_and_off_only_ranks() -> None:
     levels = backend_adapter.EFFORT_LEVELS
-    assert levels[0] == "off" and "minimal" in levels and levels[-1] == "max"
-    assert levels is effort_policy.EFFORT_LEVELS
+    assert levels == ("minimal", "low", "medium", "high", "xhigh", "max")
+    assert levels is effort_policy.EFFORT_LEVELS is server.EFFORT_LEVELS
+    assert effort_policy.EFFORT_ORDER == ("off", *levels, "ultra")
 
 
 def test_clamp_off_maps_to_lowest_allowed() -> None:
@@ -97,6 +93,13 @@ def test_passthrough_legacy_when_flag_off_or_no_catalog_efforts() -> None:
     assert not resolve_passthrough_effort("off", None, no_efforts, enabled=True).apply
 
 
+def _widen_terra_efforts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Каталог `gpt-6.1-terra` с efforts [low, medium, high] и сброс кэша спек effort."""
+    terra = server.FLEET["models"]["gpt-6.1-terra"]
+    monkeypatch.setitem(terra, "efforts", ["low", "medium", "high"])
+    monkeypatch.setattr(server, "_EFFORT_SPECS_CACHE", (None, {}))  # кэш не утекает между тестами
+
+
 def _sent_request(handler: Any) -> dict[str, Any]:
     return dict(handler._serve_passthrough.call_args.args[2])
 
@@ -104,70 +107,16 @@ def _sent_request(handler: Any) -> dict[str, Any]:
 def test_route_clamps_effort_only_with_flag(
     route: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _widen_terra_efforts(monkeypatch)
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
     monkeypatch.delenv("BRIDGE_EFFORT_CATALOG_ENABLED", raising=False)
     handler, _ = route({"model": "gpt-6.1-terra", "reasoning_effort": "off"})
-    assert (
-        _sent_request(handler)["reasoning_effort"] == "off"
-    )  # прежнее поведение: дословно
+    assert _sent_request(handler)["reasoning_effort"] == "off"  # прежнее поведение: дословно
     monkeypatch.setenv("BRIDGE_EFFORT_CATALOG_ENABLED", "1")
     handler, _ = route({"model": "gpt-6.1-terra", "reasoning_effort": "off"})
-    assert (
-        _sent_request(handler)["reasoning_effort"] == "low"
-    )  # efforts [low, medium, high]: минимум
+    assert _sent_request(handler)["reasoning_effort"] == "low"  # efforts [low, medium, high]: минимум
     handler, _ = route({"model": "gpt-6.1-terra"})
-    assert "reasoning_effort" not in _sent_request(
-        handler
-    )  # без effort — полностью прозрачно
-
-
-@pytest.fixture
-def raw_fleet(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Сырой каталог без влияния ENV_MODEL/IMAGE_PROBE окружения."""
-    monkeypatch.setattr(server, "ENV_MODEL", "")
-    monkeypatch.setattr(server, "IMAGE_PROBE", False)
-    return copy.deepcopy(load_raw_fleet())
-
-
-def _violation(data: dict[str, Any]) -> Any:
-    with pytest.raises(server.FleetViolation) as caught:
-        server._build_catalog(data)
-    return caught.value
-
-
-def test_catalog_accepts_off_effort_level(raw_fleet: dict[str, Any]) -> None:
-    find_model(raw_fleet, "claude-sonnet-5-5")["efforts"] = ["off", "high"]
-    model = server._build_catalog(raw_fleet)["models"]["claude-sonnet-5-5"]
-    assert model["efforts"] == ["off", "high"]
-
-
-class TestCatalogEfforts(unittest.TestCase):
-    """Инварианты baseline каталога после ввода `off` (имена переехали из test_bridge_strict)."""
-
-    data: dict[str, Any] = {}
-
-    def setUp(self) -> None:
-        for name, value in (("ENV_MODEL", ""), ("IMAGE_PROBE", False)):
-            patcher = mock.patch.object(server, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.data = copy.deepcopy(load_raw_fleet())
-
-    def _expect(self, reason: str, model: str) -> None:
-        with self.assertRaises(server.FleetViolation) as caught:
-            server._build_catalog(self.data)
-        self.assertEqual(
-            (caught.exception.reason, caught.exception.model), (reason, model)
-        )
-
-    def test_unknown_effort_level_is_invalid(self) -> None:
-        find_model(self.data, "claude-sonnet-5-5")["efforts"] = ["bogus", "high"]
-        self._expect("efforts_invalid", "claude-sonnet-5-5")
-
-    def test_default_effort_outside_efforts(self) -> None:
-        # efforts модели - [low, medium, high]; "xhigh" валидный уровень шкалы, но вне efforts.
-        find_model(self.data, "claude-sonnet-5-5")["default_effort"] = "xhigh"
-        self._expect("default_effort_invalid", "claude-sonnet-5-5")
+    assert "reasoning_effort" not in _sent_request(handler)  # без effort — прозрачно
 
 
 # ---- /v1/models ------------------------------------------------------------------------
@@ -198,6 +147,7 @@ def test_models_list_reports_catalog_efforts(
 ) -> None:
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
     monkeypatch.setenv("BRIDGE_EFFORT_CATALOG_ENABLED", "1")
+    monkeypatch.setattr(server, "_EFFORT_SPECS_CACHE", (None, {}))
     cards = {card["id"]: card for card in server._build_models_list()}
     checked = 0
     for mid, entry in server.FLEET["models"].items():
@@ -237,6 +187,7 @@ def test_role_from_subagent_id_handles_dashed_ids(subagent_id: Any, role: str) -
 def test_alias_card_pins_alias_effort(
     route: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _widen_terra_efforts(monkeypatch)
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
     monkeypatch.setenv("BRIDGE_EFFORT_CATALOG_ENABLED", "1")
     aliases = ("gpt-6.1-terra-low", "gpt-6.1-terra-max")
@@ -276,6 +227,7 @@ def test_route_clamp_log_cannot_be_forged(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _widen_terra_efforts(monkeypatch)
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
     monkeypatch.setenv("BRIDGE_EFFORT_CATALOG_ENABLED", "1")
     forged = "bogus\r\n2099-01-01T00:00:00Z FORGED " + "x" * 500

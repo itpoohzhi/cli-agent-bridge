@@ -65,7 +65,7 @@ from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Callable, Mapping, Sequence as Sequence, cast
+from typing import Any, Callable, Mapping, cast
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -116,7 +116,7 @@ from core.lifecycle import (  # noqa: E402
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
     KEEPALIVE_INTERVAL_S,
-    QoSSlotManager as QoSSlotManager,
+    QoSSlotManager,
     QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
     RESERVED_INTERACTIVE_SLOTS,
     get_qos_manager,
@@ -151,7 +151,7 @@ from core.turn_session_manager import (  # noqa: E402
     TurnSessionManager,
     _is_detached_enabled,
     _is_drain_enabled,
-    _is_watchdog_enabled as _is_watchdog_enabled,
+    _is_watchdog_enabled,
     hash_token,
     validate_turn_id,
 )
@@ -176,18 +176,10 @@ from core.catalog_flags import (  # noqa: E402
 )
 from core import quarantine_gate as qgate  # noqa: E402
 from core.effort_policy import (  # noqa: E402
-    DEFAULT_LOG_EFFORT_MAX_CHARS,
-    EFFORT_LEVELS as EFFORT_LEVELS,
-    EFFORT_ORDER,
-    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG,
-    ModelEffortSpec,
-    canonical_model_id,
-    catalog_effort_specs,
-    clamp_effort_downward,
-    describe_clamp,
-    resolve_alias_effort,
-    resolve_model_effort_fields,
-    resolve_passthrough_effort,
+    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_LEVELS as EFFORT_LEVELS, EFFORT_ORDER,
+    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec, catalog_effort_specs,
+    clamp_effort_downward, describe_clamp, resolve_alias_effort,
+    resolve_model_effort_fields, resolve_passthrough_effort,
 )
 CLI_CFG = CliRuntimeConfig.from_env()
 
@@ -380,11 +372,6 @@ def _resolve_model_alias(
     return resolve_alias_effort(raw_id, catalogue, EFFORT_SUFFIXES, EFFORT_ALIAS_ENABLED)
 
 
-def _canonical_model_id(raw_id: str, catalogue: Mapping[str, Any]) -> str:
-    """Базовый id модели: effort-алиас разворачивается, иначе `raw_id`."""
-    return canonical_model_id(raw_id, catalogue, EFFORT_SUFFIXES, EFFORT_ALIAS_ENABLED)
-
-
 def _trace_headers(trace: RequestTrace | None) -> list[tuple[str, str]]:
     """Сформировать заголовки только из проверенного состояния запроса."""
     if not REQUEST_ATTRIBUTION_ENABLED or trace is None:
@@ -507,7 +494,7 @@ def _load_fleet() -> dict:
     for rejected_id, reason in catalog.get("rejected", {}).items():
         sys.stderr.write(f"fleet_model_rejected model={rejected_id} reason={reason}\n")
     catalog["path"] = str(FLEET_PATH)
-    catalog["sha256"] = hashlib.sha256(cast(bytes, raw)).hexdigest()
+    catalog["sha256"] = hashlib.sha256(raw).hexdigest()
     return catalog
 
 
@@ -611,7 +598,7 @@ def _refresh_acquire(key: str, now: float | None = None) -> int | None:
         if last is not None and now - last < _REFRESH_MIN_INTERVAL:
             return max(1, int(math.ceil(_REFRESH_MIN_INTERVAL - (now - last))))
         if key not in _REFRESH_LAST and len(_REFRESH_LAST) >= _REFRESH_MAX_ENTRIES:
-            del _REFRESH_LAST[min(_REFRESH_LAST, key=lambda k: _REFRESH_LAST[k])]
+            del _REFRESH_LAST[min(_REFRESH_LAST, key=_REFRESH_LAST.get)]
         _REFRESH_LAST[key] = now
     return None
 
@@ -631,17 +618,22 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
     return published
 
 
+_EFFORT_SPECS_CACHE: tuple[Any, dict[str, ModelEffortSpec]] = (None, {})
+
+
 def _effort_specs() -> dict[str, ModelEffortSpec]:
-    """Спеки effort моделей и рекламируемых алиасов каталога."""
-    models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
-    found = {a: _resolve_model_alias(a, models) for a in ADVERTISED_EFFORT_ALIASES}
-    return catalog_effort_specs(models, {a: r for a, r in found.items() if r})
+    """Спеки effort каталога; кэш по sha256 и настройкам алиасов."""
+    global _EFFORT_SPECS_CACHE
+    key = (FLEET.get("sha256"), ADVERTISED_EFFORT_ALIASES, EFFORT_ALIAS_ENABLED, EFFORT_SUFFIXES)
+    if _EFFORT_SPECS_CACHE[0] != key:
+        models = FLEET.get("models", {})
+        found = {a: r for a in ADVERTISED_EFFORT_ALIASES if (r := _resolve_model_alias(a, models))}
+        _EFFORT_SPECS_CACHE = (key, catalog_effort_specs(models, found))
+    return _EFFORT_SPECS_CACHE[1]
 
 
 def _advertise_efforts(card: dict[str, Any], mid: str, specs: dict[str, ModelEffortSpec]) -> None:
-    """Каталожные efforts в карточку; без спеки или без efforts — прежняя реклама."""
-    fields = resolve_model_effort_fields(mid, specs)
-    if fields and fields.supported_efforts:
+    if fields := resolve_model_effort_fields(mid, specs):
         card["supported_reasoning_efforts"] = list(fields.supported_efforts)
         card["default_reasoning_effort"] = fields.default_effort
 
@@ -2229,8 +2221,8 @@ _ACTIVE_WRITER_LOCK: Any = None
 
 def release_writer_lock() -> None:
     """Освобождает блокировку реестра для нового экземпляра во время drain."""
-    writer_lock = globals().get("_ACTIVE_WRITER_LOCK")
-    globals()["_ACTIVE_WRITER_LOCK"] = None
+    global _ACTIVE_WRITER_LOCK
+    writer_lock, _ACTIVE_WRITER_LOCK = _ACTIVE_WRITER_LOCK, None
     if writer_lock is not None:
         try:
             fcntl.flock(writer_lock, fcntl.LOCK_UN)
@@ -5157,11 +5149,6 @@ class Handler(BaseHTTPRequestHandler):
     _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
     _trace: RequestTrace | None = None
     _response_status = 0
-    _subagent_slot_held = False
-    _headers_already_sent = False
-    _parsed_req: dict | None = None
-    _instr_truncated = False
-    _resilience_lease: ResilienceLease | None = None
 
     def end_headers(self) -> None:
         if LIFECYCLE.is_draining():
@@ -5243,8 +5230,8 @@ class Handler(BaseHTTPRequestHandler):
     def _effective_turn_timeout_s(self) -> float:
         return self._effective_idle_timeout_s()
 
-    def log_message(self, format: str, *args: Any) -> None:
-        _log("http " + (format % args))
+    def log_message(self, fmt: str, *args: Any) -> None:
+        _log("http " + (fmt % args))
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         _log(f"http accept error from {client_address}")
@@ -5526,7 +5513,7 @@ class Handler(BaseHTTPRequestHandler):
         failed_upstreams: list[str] = []
         status = "complete"
 
-        refresh_fn: Callable[[], list[str]] | None = getattr(sys.modules[__name__], "_refresh_fleet", None)
+        refresh_fn = getattr(sys.modules[__name__], "_refresh_fleet", None)
         try:
             if _REFRESH_LOCK.acquire(blocking=False):
                 try:
@@ -5687,8 +5674,7 @@ class Handler(BaseHTTPRequestHandler):
         result_ev = {}
         turn_start = time.monotonic()
         last_ka = time.monotonic()
-        # Классификация запроса фиксируется на старте хода: от неё зависят часовой и слот.
-        _ = self._is_subagent_request()
+        is_subagent = self._is_subagent_request()
         # Safety cap is the absolute upper bound (watchdog against infinite loops)
         safety_cap_s = self._effective_safety_cap_s()
         safety_deadline = turn_start + safety_cap_s
@@ -7247,8 +7233,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
             # (8a) passthrough (AD-003/AD-007): raw-шов ДО effort-клампа, транскрипции и контекста —
-            # model/reasoning_effort/tools/Authorization уходят upstream дословно, если каталог
-            # effort выключен; кламп reasoning_effort выполняется только при FLAG_EFFORT_CATALOG.
+            # model/reasoning_effort/tools/Authorization уходят upstream дословно.
             passthrough = BACKENDS.get(model["backend"])
             if isinstance(passthrough, PassthroughAdapter):
                 if raw_model != model_id and alias is None:
@@ -7260,18 +7245,19 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 upstream_model = model.get("upstream_model")
                 has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+                effort_on = flag_enabled(FLAG_EFFORT_CATALOG)
                 pt_effort = resolve_passthrough_effort(
                     req.get("reasoning_effort"),
                     alias_effort,
-                    ModelEffortSpec.from_catalog_entry(model),
-                    enabled=flag_enabled(FLAG_EFFORT_CATALOG),
+                    ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
+                    enabled=effort_on,
                 )
                 if has_upstream or alias or pt_effort.apply:
                     target_model = upstream_model.strip() if has_upstream else model_id
                     req = {**req, "model": target_model}
                     if pt_effort.apply:
                         req["reasoning_effort"] = pt_effort.value
-                    if pt_effort.clamped_from:
+                    if pt_effort.clamped_from is not None:
                         _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
                 _log(
@@ -7763,7 +7749,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         if ctx.get("attached_existing") and managed_turn is not None:
             eff_fn = getattr(self, "_effective_turn_timeout_s", None)
-            eff_to = cast(float, eff_fn()) if callable(eff_fn) else TIMEOUT_S
+            eff_to = eff_fn() if callable(eff_fn) else TIMEOUT_S
             managed_turn.done_event.wait(timeout=eff_to)
             if managed_turn.final_dict is not None:
                 return dict(managed_turn.final_dict)
@@ -7941,7 +7927,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         is_interactive = subagent_id is None or str(subagent_id).strip() == ""
 
-        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", QOS_DEFAULT_QUEUE_TIMEOUT_S)
+        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", 15.0)
         qos = get_qos_manager(
             max_concurrent=MAX_CONCURRENT,
             reserved_interactive=_env_int_nonneg(
@@ -8132,10 +8118,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             extra = {"window": window} if live_id else {}
             if live_id:
-                get_registry().register(live_id, _owner_token_hash(self), cast(Any, window))
+                get_registry().register(live_id, _owner_token_hash(self), window)
             adapter.handle(path=self.path, raw_body=raw, request=req, headers=headers, sink=sink, **extra)
             fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
-            canonical_model_id = _canonical_model_id(model_id, fleet_models)
+            canonical_model_id = (
+                _resolve_model_alias(model_id, fleet_models)[0]
+                if _resolve_model_alias(model_id, fleet_models)
+                else model_id
+            )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
@@ -8182,7 +8172,11 @@ class Handler(BaseHTTPRequestHandler):
         backend_err = self._error_body(out)
         raw_m = str(ctx.get("model") or "")
         fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
-        cli_canon_id = _canonical_model_id(raw_m, fleet_models)
+        cli_canon_id = (
+            _resolve_model_alias(raw_m, fleet_models)[0]
+            if _resolve_model_alias(raw_m, fleet_models)
+            else raw_m
+        )
         self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         if err is not None:
@@ -8476,7 +8470,11 @@ class Handler(BaseHTTPRequestHandler):
         backend_err = self._error_body(out)
         raw_m = str(ctx.get("model") or "")
         fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
-        cli_canon_id = _canonical_model_id(raw_m, fleet_models)
+        cli_canon_id = (
+            _resolve_model_alias(raw_m, fleet_models)[0]
+            if _resolve_model_alias(raw_m, fleet_models)
+            else raw_m
+        )
         self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         if err is None:
@@ -8727,7 +8725,7 @@ def main() -> None:
     _budget = _ByteBudget(int(FLEET["admission"]["max_inflight_body_bytes"]))
     try:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
-        globals()["_ACTIVE_WRITER_LOCK"] = acquire_writer_lock()
+        _ACTIVE_WRITER_LOCK = acquire_writer_lock()
     except OSError as exc:
         # Каталог состояния чужой/недоступен/не 0700: старт отклоняется понятным сообщением, а не трассировкой.
         sys.stderr.write(f"state directory is not usable ({exc}); refusing to start\n")

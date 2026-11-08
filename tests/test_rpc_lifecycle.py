@@ -932,7 +932,7 @@ class TestBaselineInventory(unittest.TestCase):
         renamed = {
             old: t for old, t in data["baseline_to_current"].items() if t != [old]
         }
-        self.assertEqual(len(renamed), 8)  # 4 RPC + 2 effort-clamp oracle_change + 2 перенесены (off)
+        self.assertEqual(len(renamed), 6)  # 4 RPC + 2 effort-clamp oracle_change
 
 
 if __name__ == "__main__":

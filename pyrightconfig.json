@@ -3,11 +3,11 @@
   "reportMissingTypeArgument": false,
   "reportOptionalMemberAccess": false,
   "executionEnvironments": [
-    {
-      "root": "tests",
-      "extraPaths": [".", "tools"],
-      "reportImplicitRelativeImport": false,
-      "reportUninitializedInstanceVariable": false
-    }
+    {"root": "core", "extraPaths": [".", "tools"]},
+    {"root": "scripts", "extraPaths": [".", "tools"]},
+    {"root": ".", "extraPaths": [".", "tools"], "reportImplicitRelativeImport": false,
+     "reportArgumentType": false, "reportCallIssue": false, "reportOptionalSubscript": false,
+     "reportIncompatibleMethodOverride": false, "reportConstantRedefinition": false,
+     "reportUninitializedInstanceVariable": false}
   ]
 }

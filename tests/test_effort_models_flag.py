@@ -38,6 +38,7 @@ def _sent_request(handler: Any) -> dict[str, Any]:
 def flag_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
     monkeypatch.setattr(server, "ADVERTISED_EFFORT_ALIASES", ALIASES)
+    monkeypatch.setattr(server, "_EFFORT_SPECS_CACHE", (None, {}))
     return monkeypatch
 
 
@@ -108,3 +109,37 @@ def test_route_alias_call_clamps_explicit_effort_to_alias(
     flag_env.delenv(FLAG, raising=False)
     handler, _ = route({"model": "gpt-6.1-terra-low", "reasoning_effort": "high"})
     assert _sent_request(handler)["reasoning_effort"] == "high"
+
+
+def test_effort_specs_are_cached_until_catalog_or_aliases_change(flag_env: pytest.MonkeyPatch) -> None:
+    first = server._effort_specs()
+    assert server._effort_specs() is first
+    flag_env.setitem(server.FLEET, "sha256", "changed-catalog")
+    second = server._effort_specs()
+    assert second is not first and server._effort_specs() is second
+    flag_env.setattr(server, "ADVERTISED_EFFORT_ALIASES", ())
+    third = server._effort_specs()
+    assert third is not second
+    flag_env.setattr(server, "EFFORT_ALIAS_ENABLED", not server.EFFORT_ALIAS_ENABLED)
+    fourth = server._effort_specs()
+    assert fourth is not third
+    flag_env.setattr(server, "EFFORT_SUFFIXES", ("low",))
+    assert server._effort_specs() is not fourth
+
+
+def test_route_does_not_build_effort_spec_when_flag_off(
+    route: Any, flag_env: pytest.MonkeyPatch
+) -> None:
+    flag_env.delenv(FLAG, raising=False)
+    flag_env.setattr(ModelEffortSpec, "from_catalog_entry", _fail_spec)
+    handler, _ = route({"model": "gpt-6.1-terra-low", "reasoning_effort": "high"})
+    assert _sent_request(handler)["reasoning_effort"] == "high"
+
+
+def _fail_spec(entry: object) -> ModelEffortSpec:
+    raise AssertionError("спека effort строится при выключенном флаге")
+
+
+def test_server_keeps_unrelated_reexports() -> None:
+    assert server.QoSSlotManager and server.QOS_DEFAULT_QUEUE_TIMEOUT_S > 0
+    assert callable(server._is_watchdog_enabled)

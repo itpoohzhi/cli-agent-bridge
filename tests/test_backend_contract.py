@@ -193,23 +193,15 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_server_registry_has_enabled_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        # droid включён первичным (priority 10), passthrough-мосты остаются для alternates
-        expected = {"droid", "muse", "codex", "agy", "opencode-zen", "claude-p"}
-        self.assertEqual(set(ids), expected)
+        # ADR 0017: droid выключен, passthrough-мосты agy/opencode-zen/claude-p включены
+        self.assertEqual(set(ids), {"muse", "codex", "agy", "opencode-zen", "claude-p"})
+        self.assertNotIn("droid", ids)
+        self.assertIn("muse", ids)
 
     def test_model_routing(self):
         reg = server.BACKENDS
-        droid_first = {
-            "gpt-6.1-sol",
-            "deepseek-v4.1-flash",
-            "kimi-k3.1-pro",
-            "claude-sonnet-5-5",
-            "gemini-3.8-flash",
-        }
         for mid in server.FLEET["order"]:
-            if mid in droid_first:
-                expected = "droid"
-            elif mid.startswith("gpt-"):
+            if mid.startswith("gpt-"):
                 expected = "codex"
             elif mid.startswith("muse-"):
                 expected = "muse"

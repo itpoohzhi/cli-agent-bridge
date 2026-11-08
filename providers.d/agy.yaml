@@ -4,7 +4,6 @@ provider_id: agy
 kind: passthrough
 enabled: true
 required: false
-priority: 20
 owned_by: agy-bridge
 transport:
   bridge: {base_url: 'http://127.0.0.1:9887/v1', api_key_env: AGY_BRIDGE_KEY}

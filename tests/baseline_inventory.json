@@ -60,7 +60,7 @@
    "test_bridge_strict.TestCatalogClassI.test_confirmed_without_proof"
   ],
   "test_bridge_strict.TestCatalogClassI.test_default_effort_outside_efforts": [
-   "test_effort_boundary_and_models.TestCatalogEfforts.test_default_effort_outside_efforts"
+   "test_bridge_strict.TestCatalogClassI.test_default_effort_outside_efforts"
   ],
   "test_bridge_strict.TestCatalogClassI.test_default_model_outside_roster": [
    "test_bridge_strict.TestCatalogClassI.test_default_model_outside_roster"
@@ -69,7 +69,7 @@
    "test_bridge_strict.TestCatalogClassI.test_duplicate_id"
   ],
   "test_bridge_strict.TestCatalogClassI.test_efforts_off_invalid": [
-   "test_effort_boundary_and_models.TestCatalogEfforts.test_unknown_effort_level_is_invalid"
+   "test_bridge_strict.TestCatalogClassI.test_efforts_off_invalid"
   ],
   "test_bridge_strict.TestCatalogClassI.test_env_model_outside_roster": [
    "test_bridge_strict.TestCatalogClassI.test_env_model_outside_roster"
