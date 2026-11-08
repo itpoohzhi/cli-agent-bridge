@@ -25,7 +25,8 @@ _ZEN = ("high", "max")
 _ALL = ("minimal", "low", "medium", "high", "max")
 _LMH = ("low", "medium", "high")
 # Эталон выключенного гейта (модель, бэкенд, efforts, default_effort), независимый от HEAD: прежняя маршрутизация
-# через claude-p/agy; gpt-6.1-sol и deepseek-v4.1-flash вне каталога (:2455 их не обслуживает, deepseek — в opencode-go).
+# через claude-p/agy; gpt-6.1-sol вне каталога (:2455 её не обслуживает); deepseek-v4.1-flash не принадлежит droid и
+# обслуживается мостом opencode-go независимо от гейта (онбординг 2b7431f).
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
     ("gemini-3.8-flash", "agy", _LMH, "high"),
@@ -37,6 +38,7 @@ BASE_MODELS = (
     ("claude-opus-5-5", "claude-p", ("high",), "high"),
     ("claude-haiku-5-5", "claude-p", ("high",), "high"),
     ("gemini-4-argon", "agy", _LMH, "high"),
+    ("deepseek-v4.1-flash", "opencode-go", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
     ("mimo-v2.6-flash-free", "opencode-zen", _ZEN, "high"),

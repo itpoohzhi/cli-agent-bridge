@@ -40,7 +40,7 @@ ALTERNATES = {  # манифесты claude-p/agy/codex модели подпи�
     "claude-sonnet-5-5": [],
     "gemini-3.8-flash": [],
 }
-GO_ONLY = ("deepseek-v4.1-flash",)  # вне droid: только прямой opencode-go; kimi-k3.1-pro удалена из каталога
+GO_ONLY = ("deepseek-v4.1-flash",)  # вне droid: только мост opencode-go; kimi-k3.1-pro удалена из каталога
 SUFFIX_ALIASES = {  # алиас -> (базовая модель, бэкенд, effort)
     **{f"gpt-6.1-sol-{e}": ("gpt-6.1-sol", "droid", e) for e in LMH},
     "gemini-4-argon-high": ("gemini-4-argon", "agy", "high"),
@@ -109,7 +109,8 @@ def test_primary_and_alternates_follow_priority(compiled: Any) -> None:
         ] == alternates
     for mid in GO_ONLY:
         assert compiled.sidecar["models"][mid]["provider"] == "opencode-go"
-        assert mid not in backends
+        assert backends[mid] == "opencode-go"
+        assert compiled.sidecar["models"][mid]["alternates"] == []
     assert "kimi-k3.1-pro" not in compiled.sidecar["models"]
     assert compiled.rejected == {} and compiled.rejected_providers == {}
 
@@ -189,7 +190,7 @@ def test_suffix_alias_resolves_to_base_with_effort(compiled: Any, alias: str) ->
 
 def test_deepseek_flash_is_not_redirected_to_free(compiled: Any) -> None:
     models = build_catalog(compiled.fleet, ADAPTER_KINDS)["models"]
-    assert "deepseek-v4.1-flash" not in models  # живёт только в opencode-go
+    assert models["deepseek-v4.1-flash"]["backend"] == "opencode-go"  # не droid
     assert "deepseek-v4.1-flash" not in _aliases()
     assert (
         "deepseek-v4.1-flash-free" in models

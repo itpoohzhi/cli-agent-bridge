@@ -15,9 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import receipt_schema as schema  # noqa: E402
 import server  # noqa: E402
 from core import droid_session_gate as gate  # noqa: E402
+from tools import receipt_schema as schema  # noqa: E402
 from test_droid_receipt_v3 import make_v3  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]
 
 CATALOGS = {
