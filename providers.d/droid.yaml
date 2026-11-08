@@ -1,4 +1,4 @@
-# Провайдер droid: Factory Droid, 5 нативных моделей подписки (ALLOWED_SUBSCRIPTION_ONLY, model-notes.md).
+# Провайдер droid: Factory Droid CLI (3 нативные модели подписки: claude-sonnet-5-5, gemini-3.8-flash, gpt-6.1-sol) — ALLOWED_SUBSCRIPTION_ONLY, model-notes.md.
 # Политика исполнения (autonomy=off по умолчанию, high -> 400, судьи Совета -> 403) — core/gateway_execution_policy.py.
 manifest_version: 1
 provider_id: droid
@@ -15,9 +15,7 @@ family_rule:
   exact_map:
     claude-sonnet-5-5: Anthropic
     gemini-3.8-flash: Google
-    deepseek-v4.1-flash: DeepSeek
     gpt-6.1-sol: OpenAI
-    kimi-k3.1-pro: Moonshot
 models_overrides:
   claude-sonnet-5-5:
     name: Claude Sonnet 5.5 (Droid bridge)
@@ -37,15 +35,6 @@ models_overrides:
     input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
     policy_lines: [100, 142, 174, 431]
-  deepseek-v4.1-flash:
-    name: DeepSeek V4.1 Flash (Droid bridge)
-    efforts: ['off', low, high, max]
-    default_effort: 'off'
-    context_window: 1000000
-    max_tokens: 384000
-    input: [text]
-    images: {cli_registry: explicit_supported, status: unverified, method: null, proof: null}
-    policy_lines: [106, 394, 432]
   gpt-6.1-sol:
     name: GPT-6.1 Sol (Droid bridge)
     efforts: [low, medium, high]
@@ -55,11 +44,3 @@ models_overrides:
     input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
     policy_lines: [111, 398, 406, 436]
-  kimi-k3.1-pro:
-    name: Kimi K3.1 Pro (Droid bridge)
-    efforts: [low, high, max]
-    default_effort: high
-    context_window: 262144
-    max_tokens: 16384
-    input: [text]
-    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}

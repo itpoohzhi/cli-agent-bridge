@@ -112,10 +112,12 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_models_are_bound_to_backends(self):
         data = raw_v3()
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(len(catalog["order"]), 18)
         self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "droid")
         self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "droid")
-        self.assertIn("deepseek-v4.1-flash", catalog["models"])
+        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "droid")
+        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
+        self.assertNotIn("kimi-k3.1-pro", catalog["models"])
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
@@ -131,7 +133,7 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_subscription_droid_models_are_published(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(
-            sum(m["backend"] == "droid" for m in catalog["models"].values()), 5
+            sum(m["backend"] == "droid" for m in catalog["models"].values()), 3
         )
         self.assertTrue(raw_v3()["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
@@ -147,7 +149,7 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(len(catalog["order"]), 18)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -555,7 +557,7 @@ class TestFleetCheckParity(unittest.TestCase):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 20)
+        self.assertEqual(len(catalog["order"]), 18)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):

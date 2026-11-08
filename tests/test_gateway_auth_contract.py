@@ -13,9 +13,9 @@ from tests.test_request_attribution import wire as wire
 
 
 def test_deepseek_fleet_default_is_off() -> None:
-    catalog = server._build_catalog(
-        json.loads((server.ROOT / "fleet.json").read_text())
-    )
+    from tests.bridge_testlib import droidify_raw_fleet, load_raw_fleet
+
+    catalog = server._build_catalog(droidify_raw_fleet(load_raw_fleet()))
     assert catalog["models"]["deepseek-v4.1-flash"]["default_effort"] == "off"
 
 

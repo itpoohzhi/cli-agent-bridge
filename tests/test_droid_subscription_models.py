@@ -213,9 +213,7 @@ def _write_permission_launcher(launcher: Path) -> None:
     [
         "claude-sonnet-5-5",
         "gemini-3.8-flash",
-        "deepseek-v4.1-flash",
         "gpt-6.1-sol",
-        "kimi-k3.1-pro",
     ],
 )
 def test_permission_abort_kills_group_and_prevents_reuse(

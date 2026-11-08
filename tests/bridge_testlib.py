@@ -91,7 +91,7 @@ def load_raw_fleet():
 
 # Модели, которые стенд FakeDroid обслуживает через бэкенд droid (боевой fleet.json
 # переведён на единый мост :9882, Droid там выключен).
-_DROID_STAND_MODELS = ("claude-sonnet-5-5", "deepseek-v4.1-flash", "gemini-3.8-flash")
+_DROID_STAND_MODELS = ("claude-sonnet-5-5", "gemini-3.8-flash", "gpt-6.1-sol")
 _DROID_LEGACY_MODELS = (
     {
         "id": "grok-4.7",
@@ -121,6 +121,22 @@ _DROID_LEGACY_MODELS = (
         "images": {
             "cli_registry": "explicit_unsupported",
             "status": "unsupported",
+            "method": None,
+            "proof": None,
+        },
+    },
+    {
+        "id": "deepseek-v4.1-flash",
+        "backend": "droid",
+        "name": "DeepSeek V4.1 Flash (Droid test stand)",
+        "efforts": ["off", "low", "medium", "high"],
+        "default_effort": "off",
+        "context_window": 1000000,
+        "max_tokens": 384000,
+        "input": ["text"],
+        "images": {
+            "cli_registry": "explicit_supported",
+            "status": "unverified",
             "method": None,
             "proof": None,
         },

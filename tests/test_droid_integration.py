@@ -12,28 +12,18 @@ import pytest
 import server
 from tools import droid_image
 
-DROID_MODEL_IDS = (
-    "claude-sonnet-5-5",
-    "gemini-3.8-flash",
-    "deepseek-v4.1-flash",
-    "gpt-6.1-sol",
-    "kimi-k3.1-pro",
-)
+DROID_MODEL_IDS = ("claude-sonnet-5-5", "gemini-3.8-flash", "gpt-6.1-sol")
 BASE_TOOLS = tuple(f"tool-{index}" for index in range(35))
 EXTRA_TOOL = "wait-for-script-cli"
 MODEL_EFFORTS = (
     ("low", "medium", "high", "max"),
     ("low", "medium", "high"),
-    ("off", "low", "high", "max"),
     ("low", "medium", "high"),
-    ("low", "high", "max"),
 )
 PROBE_PAIRS = [
     (mid, effort)
     for mid, efforts in zip(DROID_MODEL_IDS, MODEL_EFFORTS)
-    for effort in dict.fromkeys(
-        [("off" if mid == "deepseek-v4.1-flash" else "high"), *efforts]
-    )
+    for effort in dict.fromkeys(["high", *efforts])
 ]
 
 
@@ -49,26 +39,18 @@ def test_subscription_catalog(model_id: str, efforts: tuple[str, ...]) -> None:
     model = catalog["models"][model_id]
     assert model["backend"] == "droid"
     assert model["efforts"] == list(efforts)
-    assert model["default_effort"] == (
-        "off" if model_id == "deepseek-v4.1-flash" else "high"
-    )
+    assert model["default_effort"] == "high"
     assert model["name"].endswith("(Droid bridge)")
     assert server.BACKENDS.adapter_for_model(model_id).id == "droid"
 
 
-def test_kimi_limits_and_unverified_images() -> None:
-    model = next(m for m in fleet_data()["models"] if m["id"] == "kimi-k3.1-pro")
-    assert (model["context_window"], model["max_tokens"]) == (262144, 16384)
-    assert model["input"] == ["text"]
-    assert model["images"] == {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": None,
-        "proof": None,
-    }
+def test_removed_droid_models_absent_from_fleet() -> None:
+    model_ids = {model["id"] for model in fleet_data()["models"]}
+    assert "kimi-k3.1-pro" not in model_ids
+    assert "deepseek-v4.1-flash" not in model_ids
 
 
-@pytest.mark.parametrize("model_id", ("kimi-k3.1-pro", "deepseek-v4.1-flash"))
+@pytest.mark.parametrize("model_id", DROID_MODEL_IDS)
 def test_exact_catalog_ids_beat_effort_alias(
     monkeypatch: pytest.MonkeyPatch, model_id: str
 ) -> None:
@@ -87,7 +69,6 @@ def test_deepseek_off_is_validated_by_shared_catalog() -> None:
     catalog = server._build_catalog(fleet_data())
     assert "off" in server.EFFORT_LEVELS
     assert catalog["aliases"] == {}
-    assert "off" in catalog["models"]["deepseek-v4.1-flash"]["efforts"]
 
 
 @pytest.fixture
@@ -220,14 +201,6 @@ def test_probes_union_all_model_tools(
         if method == "droid.initialize_session"
     ]
     assert [(p["modelId"], p["reasoningEffort"]) for p in initializes] == PROBE_PAIRS
-    assert (
-        next(
-            p["reasoningEffort"]
-            for p in initializes
-            if p["modelId"] == "deepseek-v4.1-flash"
-        )
-        == "off"
-    )
     assert facts["protocol_version"] == "test-protocol"
     assert facts["probes"] == {"spawn": "ok", "update": "ok", "load": "ok"}
     assert all(rpc.closed for rpc in fake_probes.instances)
@@ -247,7 +220,7 @@ def test_probes_union_all_model_tools(
     ("extra_models", "expected"),
     [
         ("", []),
-        ("kimi-k3.1-pro, kimi-k3.1-pro,,claude-sonnet-5-5", []),
+        ("gpt-6.1-sol, gpt-6.1-sol,,claude-sonnet-5-5", []),
         ("future-model:low", ["future-model"]),
     ],
 )

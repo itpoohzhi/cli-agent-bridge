@@ -599,8 +599,8 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
-        # 5 подписочных droid и 15 моделей прежних бэкендов.
-        self.assertEqual(len(catalog["order"]), 20)
+        # 3 подписочных droid и 15 моделей остальных бэкендов.
+        self.assertEqual(len(catalog["order"]), 18)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -1009,8 +1009,8 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 20 моделей каталога + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3).
-        self.assertEqual(len(body["data"]), 20 + len(_DROID_LEGACY_MODELS))
+        # 18 моделей каталога + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3, deepseek-v4.1-flash).
+        self.assertEqual(len(body["data"]), 18 + len(_DROID_LEGACY_MODELS))
         self.assertTrue(
             {"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]}
         )

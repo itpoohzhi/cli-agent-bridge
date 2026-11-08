@@ -1,4 +1,4 @@
-"""Регрессия каталога Factory: DeepSeek и Kimi не принимают medium.
+"""Регрессии подписочного каталога Factory и маршрутизации удалённых моделей.
 
 Эталон: https://docs.factory.com/models.md (проверено 2026-11-07),
 подтверждённый read-back установленного Droid при initialize_session.
@@ -48,8 +48,9 @@ class _DroidManifest(TypedDict):
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
-        ("deepseek-v4.1-flash", ["off", "low", "high", "max"]),
-        ("kimi-k3.1-pro", ["low", "high", "max"]),
+        ("claude-sonnet-5-5", ["low", "medium", "high", "max"]),
+        ("gemini-3.8-flash", ["low", "medium", "high"]),
+        ("gpt-6.1-sol", ["low", "medium", "high"]),
     ],
 )
 def test_published_efforts_match_factory_capabilities(
@@ -77,3 +78,30 @@ def test_published_efforts_match_factory_capabilities(
     assert {target.effort for target in targets if target.model == model} == set(
         expected
     )
+
+
+def test_removed_droid_models_absent_or_routed_via_opencode_go() -> None:
+    """Удалённые модели не возвращаются в Droid, а DeepSeek остаётся в Go."""
+    fleet = cast(
+        _FleetConfig,
+        json.loads((ROOT / "fleet.json").read_text(encoding="utf-8")),
+    )
+    droid_manifest = cast(
+        _DroidManifest,
+        yaml.safe_load(
+            (ROOT / "providers.d" / "droid.yaml").read_text(encoding="utf-8")
+        ),
+    )
+    go_manifest = cast(
+        _DroidManifest,
+        yaml.safe_load(
+            (ROOT / "providers.d" / "opencode-go.yaml").read_text(encoding="utf-8")
+        ),
+    )
+    model_ids = {model["id"] for model in fleet["models"]}
+    for model_id in ("kimi-k3.1-pro", "deepseek-v4.1-flash"):
+        assert model_id not in model_ids
+        assert model_id not in droid_manifest["models_overrides"]
+    deepseek = go_manifest["models_overrides"]["deepseek-v4.1-flash"]
+    assert deepseek["efforts"] == ["high", "max"]
+    assert deepseek["default_effort"] == "high"

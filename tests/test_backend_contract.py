@@ -204,9 +204,7 @@ class TestRealAdapters(unittest.TestCase):
         expected = {
             "claude-sonnet-5-5": "droid",
             "gemini-3.8-flash": "droid",
-            "deepseek-v4.1-flash": "droid",
             "gpt-6.1-sol": "droid",
-            "kimi-k3.1-pro": "droid",
             "muse-spark-1.3": "muse",
             "muse-spark-1.3-contributor": "muse",
             "muse-wonder-1.0": "muse",

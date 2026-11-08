@@ -32,7 +32,7 @@ def test_safe_autonomy_at_http_boundary(
     monkeypatch.setattr(server, "_is_detached_enabled", lambda: False)
     h = route(
         {
-            "model": "deepseek-v4.1-flash",
+            "model": "gemini-3.8-flash",
             "autonomy": autonomy,
             "messages": [{"role": "user", "content": "hello"}],
         },
@@ -45,7 +45,7 @@ def test_safe_autonomy_at_http_boundary(
     assert ctx["autonomy_source"] == (
         "request" if autonomy and autonomy.strip() else "default"
     )
-    assert ctx["effort"] == "off"
+    assert ctx["effort"] == "high"
 
 
 @pytest.mark.parametrize("permission", [None, "0", "false", "garbage"])
@@ -58,7 +58,7 @@ def test_high_autonomy_is_rejected_before_spawn(
         monkeypatch.setenv("DROID_ALLOW_HIGH_AUTONOMY", permission)
     spawn = Mock(side_effect=AssertionError("Процесс не должен запускаться"))
     monkeypatch.setattr(server.subprocess, "Popen", spawn)
-    h = route({"model": "deepseek-v4.1-flash", "autonomy": "high"})
+    h = route({"model": "gemini-3.8-flash", "autonomy": "high"})
     assert h._send.call_args.args[0] == 400
     assert h._send.call_args.args[1]["error"]["type"] in {
         "autonomy_forbidden",
@@ -95,7 +95,7 @@ def test_judges_cannot_spawn_droid(
     monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
     spawn = Mock(side_effect=AssertionError("Процесс судьи не должен запускаться"))
     monkeypatch.setattr(server.subprocess, "Popen", spawn)
-    h = route({"model": "deepseek-v4.1-flash"}, {"x-sUbAgEnT-iD": sid})
+    h = route({"model": "gemini-3.8-flash"}, {"x-sUbAgEnT-iD": sid})
     assert h._send.call_args.args[0] == 403
     assert h._send.call_args.args[1]["error"]["type"] == "droid_forbidden_for_role"
     spawn.assert_not_called()
@@ -105,7 +105,7 @@ def test_custom_judge_prefixes(
     route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", " custom-, other- ")
-    h = route({"model": "deepseek-v4.1-flash"}, {"X-Subagent-Id": "CUSTOM-1"})
+    h = route({"model": "gemini-3.8-flash"}, {"X-Subagent-Id": "CUSTOM-1"})
     assert h._send.call_args.args[0] == 403
 
 
