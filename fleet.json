@@ -202,6 +202,36 @@
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9883/v1",
       "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
+    },
+    "opencode-go": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "opencode-go",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "api_key_ref": "file:~/.config/opencode/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "x-opencode-org-id",
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      },
+      "default_body_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
     }
   },
   "models": [
@@ -625,6 +655,34 @@
         "method": null,
         "proof": null
       }
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "backend": "opencode-go",
+      "name": "DeepSeek V4.1 Flash (OpenCode Go bridge)",
+      "efforts": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": "off",
+      "context_window": 1000000,
+      "max_tokens": 384000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        106,
+        394,
+        432
+      ]
     }
   ]
 }

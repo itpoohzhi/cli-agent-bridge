@@ -246,7 +246,16 @@ BACKEND_KEYS = frozenset(
         "api_key_env",
         "api_key",
         "options",
+        "api_key_ref",
+        "headers_from_json",
+        "per_request_headers",
+        "default_body_extra",
     }
+)
+# Необязательные upstream-параметры raw-HTTP шва (только виды с `base_url`): откуда брать ключ и
+# заголовки, какие заголовки генерировать на каждый запрос и какие поля тела подставлять по умолчанию.
+UPSTREAM_PARAM_KEYS = frozenset(
+    {"api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra"}
 )
 TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
 PROXY_PORT_MIN = 1
@@ -257,7 +266,49 @@ _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 PIN_REQUIRED_KINDS = frozenset({"muse"})
 # Вид без собственного процесса: исполнение — raw HTTP-шов к upstream из `base_url` (ADR 0011).
 PASSTHROUGH_KIND = "passthrough"
-_LOOPBACK_BASE_URL = re.compile(r"http://127\.0\.0\.1:([0-9]{1,5})/v1")
+_LOOPBACK_BASE_URL = re.compile(
+    r"http://127\.0\.0\.1:([0-9]{1,5})(?:/[a-z0-9._-]+)*/v1"
+)
+
+
+def _str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+
+
+def upstream_params_error(entry: Mapping[str, Any]) -> str:
+    """Причина отказа необязательных upstream-параметров шва ('' — валидны или не заданы)."""
+    ref = entry.get("api_key_ref")
+    if ref is not None and (
+        not isinstance(ref, str)
+        or not ref.startswith("file:")
+        or not ref[len("file:") :].strip()
+    ):
+        return "backend_api_key_ref_invalid"
+    headers = entry.get("headers_from_json")
+    if headers is not None and (
+        not isinstance(headers, dict)
+        or set(headers) - {"file", "json_path", "pick"}
+        or not isinstance(headers.get("file"), str)
+        or not headers["file"].strip()
+        or not _str_list(headers.get("json_path"))
+        or not _str_list(headers.get("pick"))
+    ):
+        return "backend_headers_from_json_invalid"
+    per_request = entry.get("per_request_headers")
+    if per_request is not None and (
+        not isinstance(per_request, dict)
+        or not all(
+            isinstance(k, str) and k and isinstance(v, str)
+            for k, v in per_request.items()
+        )
+    ):
+        return "backend_per_request_headers_invalid"
+    extra = entry.get("default_body_extra")
+    if extra is not None and (
+        not isinstance(extra, dict) or not all(isinstance(k, str) for k in extra)
+    ):
+        return "backend_default_body_extra_invalid"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -423,8 +474,13 @@ def backend_entry_error(
                 or not PROXY_PORT_MIN <= int(match.group(1)) <= PROXY_PORT_MAX
             ):
                 return "backend_base_url_invalid"
+        reason = upstream_params_error(entry)
+        if reason:
+            return reason
     elif "base_url" in entry:
         return "backend_base_url_unexpected"
+    elif UPSTREAM_PARAM_KEYS & set(entry):
+        return "backend_key_unknown"
     owned_by = entry.get("owned_by", backend_id)
     if not isinstance(owned_by, str) or not owned_by:
         return "backend_invalid"

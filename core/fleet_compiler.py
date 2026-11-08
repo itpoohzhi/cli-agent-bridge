@@ -7,7 +7,9 @@ Pure-ядро `compile_catalog` не читает диск и не исполь�
 расширяются (`FLEET_TOP_KEYS`/`FLEET_MODEL_KEYS` не меняются).
 
 Алгоритм (спецификация §4.4.1):
-1. `backends.<id>` строится из `transport.bridge` манифеста; провайдеры без bridge
+1. `backends.<id>` строится из `transport.bridge` манифеста (для raw-HTTP шва к нему
+   добавляются upstream-параметры из `transport.direct.http`: `api_key_ref`,
+   `headers_from_json`, `per_request_headers`, `default_body_extra`); провайдеры без bridge
    (direct-only) попадают только в сайдкар.
 2. Модели провайдера = `models_overrides ∪ discovery.static ∪ discovery.model_ids`.
    Поля: `models_overrides` ⊕ discovery.meta ⊕ `models_defaults`; для `confirmed`/`stale` с
@@ -148,6 +150,54 @@ def validate_header(header: Any) -> Dict[str, Any]:
 # ---- сборка записей -----------------------------------------------------------------
 
 
+def _upstream_params(manifest: ProviderManifest) -> Dict[str, Any]:
+    """Upstream-параметры raw-HTTP шва из `transport.direct.http` и `params` манифеста.
+
+    Нужны, когда провайдер ходит через мост (`transport.bridge.base_url`), но upstream требует
+    ключ/заголовки из пользовательских файлов. Ссылки на файлы не читаются при компиляции:
+    значения резолвит адаптер на каждом запросе, поэтому `fleet.json` остаётся детерминированным.
+    """
+    bridge = manifest.transport.bridge
+    direct = manifest.transport.direct
+    http = direct.http if direct is not None else None
+    if bridge is None or bridge.base_url is None or not http:
+        return {}
+    out: Dict[str, Any] = {}
+    ref = http.get("api_key_ref")
+    if isinstance(ref, str) and ref.startswith("file:"):
+        out["api_key_ref"] = ref
+    elif isinstance(ref, Mapping):
+        fallback = ref.get("fallback_file")
+        if isinstance(fallback, str) and fallback:
+            out["api_key_ref"] = "file:" + fallback
+    headers = http.get("headers_from_json")
+    if isinstance(headers, Mapping):
+        path = headers.get("path")
+        key = headers.get("key")
+        pick = headers.get("pick") or headers.get("required")
+        if isinstance(path, str) and isinstance(key, str) and isinstance(pick, list):
+            out["headers_from_json"] = {
+                "file": path,
+                "json_path": key.split("."),
+                "pick": [str(name) for name in pick],
+            }
+    per_request = http.get("per_request_headers")
+    if isinstance(per_request, Mapping) and per_request:
+        out["per_request_headers"] = {str(k): str(v) for k, v in per_request.items()}
+    default_off = manifest.params.effort_map.get("off")
+    rules = manifest.models_overrides
+    # Тело запроса общее для всех моделей провайдера, поэтому «выключено» подставляется
+    # только когда его просит каждая модель: иначе дефолт одной модели глушил бы другую.
+    if (
+        isinstance(default_off, Mapping)
+        and default_off
+        and rules
+        and all(rule.fields.get("default_effort") == "off" for rule in rules)
+    ):
+        out["default_body_extra"] = json.loads(json.dumps(default_off))
+    return out
+
+
 def backend_entry(manifest: ProviderManifest) -> Dict[str, Any]:
     """Запись `backends.<id>` fleet.json из манифеста (`transport.bridge` обязателен)."""
     bridge = manifest.transport.bridge
@@ -182,6 +232,7 @@ def backend_entry(manifest: ProviderManifest) -> Dict[str, Any]:
         entry["idle_timeout_s"] = bridge.idle_timeout_s
     if bridge.safety_cap_s is not None:
         entry["safety_cap_s"] = bridge.safety_cap_s
+    entry.update(_upstream_params(manifest))
     return entry
 
 
