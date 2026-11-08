@@ -4,7 +4,6 @@
 клампится вниз по шкале EFFORT_ORDER (clamp_effort_downward), нестроковые
 значения и reasoning-объект отклоняются до запуска droid.
 """
-
 from __future__ import annotations
 
 import copy
@@ -265,6 +264,7 @@ def _capture_passthrough(monkeypatch, handler, adapter, hub_auth_ok):
         record_failure=lambda: None,
         record_discard=lambda *a: None,
     )
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", "/nonexistent/dynamic_config.json")
     handler._current_lease = lambda: lease
     handler._trace_log_fields = lambda: ""
     handler._trace = None

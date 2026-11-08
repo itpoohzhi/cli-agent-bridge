@@ -1,5 +1,5 @@
 """fleet.json schema 3: парсинг backends, привязка моделей, совместимость со schema 2 (AC-001)."""
-
+from __future__ import annotations
 import copy
 import contextlib
 import importlib
@@ -74,10 +74,11 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(catalog["schema_version"], 3)
         self.assertEqual(
             catalog["backend_order"],
-            ["droid", "muse", "codex", "agy", "opencode-zen", "claude-p"],
+            ["droid", "agy", "claude-p", "muse", "codex", "opencode-zen"],
         )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
+        self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 5)
         self.assertFalse(catalog["backends"]["droid"]["required"])
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
@@ -405,6 +406,18 @@ class TestSchema3Violations(unittest.TestCase):
             "muse-spark-1.3",
         )
 
+    def test_efforts_off_valid_and_unknown_level_invalid(self) -> None:
+        data = raw_v3()
+        self.find(data, "muse-spark-1.3").update(efforts=["off"], default_effort="off")
+        self.assertEqual(
+            server._build_catalog(data)["models"]["muse-spark-1.3"]["efforts"], ["off"]
+        )
+        self.expect(
+            lambda d: self.find(d, "muse-spark-1.3").update(efforts=["bogus"]),
+            "efforts_invalid",
+            "muse-spark-1.3",
+        )
+
 
 def _import_fleet_check():
     """Импорт fleet_check; PyYAML в .venv отсутствует — для проверки каталога хватает заглушки."""
@@ -421,9 +434,7 @@ def _import_fleet_check():
             def add_multi_constructor(cls, prefix, fn):
                 return None
 
-        shim.SafeLoader = _Loader
-        shim.YAMLError = ValueError
-        shim.load = lambda *args, **kwargs: None
+        vars(shim).update(SafeLoader=_Loader, YAMLError=ValueError, load=lambda *a, **k: None)
         sys.modules["yaml"] = shim
     import fleet_check  # noqa: E402
 
@@ -589,6 +600,7 @@ class TestProviderCredentialsCheck(unittest.TestCase):
     SECRET_SHELL = "sk-test-SECRET-shell-cccccccccc"
     KEY = "DSH_TEST_FLEET_KEY_A"
     NOT_PI = "DSH_TEST_FLEET_NOT_PI"
+    tmp = Path()
 
     @classmethod
     def setUpClass(cls):

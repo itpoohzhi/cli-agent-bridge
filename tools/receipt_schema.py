@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import TypedDict, cast
 
 from core.gateway_execution_policy import require
 
 RPC_API_VERSION = "1.0.0"
-RECEIPT_SCHEMA = 2
+RECEIPT_SCHEMA = 3  # v3: qualified_models (tools каждой модели) + qualified_targets (пары model/effort)
 TOOLS_POLICY = "disable-all-listed-keep-read-for-images"
 SETTINGS_PROFILE: dict[str, object] = {
     "disableBuiltinSkills": True,
@@ -231,7 +232,7 @@ def _validate_receipt_policy(rec: Mapping[str, object]) -> None:
 
 
 def tools_policy_digest(
-    disabled_ids: list[str], qualified_models: object = None
+    disabled_ids: Sequence[str], qualified_models: object = None
 ) -> str:
     """Schema-2 расширение: отпечаток включает канонические каталоги моделей.
 
@@ -247,6 +248,147 @@ def tools_policy_digest(
             mid: sorted(tools) for mid, tools in qualified.items()
         }
     return json_digest(policy)
+
+
+@dataclass(frozen=True, slots=True)
+class QualifiedModelSpec:
+    """Модель и отсортированные id нативных tools, которые droid показывает ей."""
+
+    model_id: str
+    tool_ids: tuple[str, ...]
+
+
+def _qualified_digest(
+    disabled: tuple[str, ...], qualified: tuple[QualifiedModelSpec, ...]
+) -> str:
+    """Отпечаток политики без валидации формы: совпадает с `tools_policy_digest` на корректных данных."""
+    payload = {
+        "policy": TOOLS_POLICY,
+        "disabled_tool_ids": sorted(disabled),
+        "qualified_models": {q.model_id: sorted(q.tool_ids) for q in qualified},
+    }
+    return json_digest(payload)
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptV3:
+    """Проверенная часть receipt v3: отключаемые id и квалификация по моделям."""
+
+    disabled_tool_ids: tuple[str, ...]
+    qualified: tuple[QualifiedModelSpec, ...]
+
+    def tools_for(self, model_id: str) -> tuple[str, ...] | None:
+        """Каталог tools модели; `None` — вне `qualified_models`."""
+        return {q.model_id: q.tool_ids for q in self.qualified}.get(model_id)
+
+    @classmethod
+    def parse(cls, rec: object) -> ReceiptV3 | str:
+        """`ReceiptV3` либо slug причины отказа (fail-closed)."""
+        top = rec if isinstance(rec, Mapping) else {}
+        raw_policy = top.get("tools_policy")
+        policy = raw_policy if isinstance(raw_policy, Mapping) else {}
+        disabled = _tool_ids(policy.get("disabled_tool_ids"))
+        qualified = parse_qualified(top.get("qualified_models"))
+        digest = _qualified_digest(disabled, qualified)
+        problems = (
+            ("receipt_malformed", not top),
+            ("schema_mismatch", top.get("schema") != RECEIPT_SCHEMA),
+            ("qualified_models_invalid", not qualified),
+            ("tools_policy_invalid", policy.get("policy") != TOOLS_POLICY),
+            ("tools_policy_digest_mismatch", policy.get("digest") != digest),
+            (
+                "disabled_tool_ids_invalid",
+                not disabled,
+            ),  # отпечаток пустого списка вычислим
+        )
+        return next((slug for slug, bad in problems if bad), cls(disabled, qualified))
+
+
+def _protocol_ok(protocol: object) -> bool:
+    """`api_version` совпадает с мостом, `protocol_version` — непустая строка."""
+    fields = protocol if isinstance(protocol, Mapping) else {}
+    version = fields.get("protocol_version")
+    return (
+        fields.get("api_version") == RPC_API_VERSION
+        and isinstance(version, str)
+        and bool(version)
+    )
+
+
+def _profile_ok(profile: object) -> bool:
+    """Профиль настроек и его отпечаток совпадают с профилем моста."""
+    got = (
+        {k: profile.get(k) for k in ("profile", "digest")}
+        if isinstance(profile, Mapping)
+        else None
+    )
+    return got == {"profile": SETTINGS_PROFILE, "digest": settings_profile_digest()}
+
+
+def _probes_ok(probes: object) -> bool:
+    """Все пробы квалификации завершились `ok`."""
+    return isinstance(probes, Mapping) and all(
+        probes.get(n) == "ok" for n in RECEIPT_PROBES
+    )
+
+
+def _targets_ok(top: Mapping[str, object]) -> bool:
+    """Пары (model, effort) корректны и покрывают ровно квалифицированные модели."""
+    qualified = top.get("qualified_models")
+    try:
+        targets = validate_qualified_targets(top.get("qualified_targets"), qualified)
+    except ValueError:
+        return False
+    return {entry["model"] for entry in targets} == set(
+        cast(dict[str, object], qualified)
+    )
+
+
+def receipt_gate_problem(rec: object) -> str:
+    """Slug первой причины отказа допуска (протокол, tools, профиль, пробы) либо ''."""
+    top = rec if isinstance(rec, Mapping) else {}
+    parsed = ReceiptV3.parse(rec)
+    problems = (
+        ("protocol_mismatch", not _protocol_ok(top.get("protocol"))),
+        (parsed if isinstance(parsed, str) else "", isinstance(parsed, str)),
+        (
+            "qualified_targets_invalid",
+            not isinstance(parsed, str) and not _targets_ok(top),
+        ),
+        ("settings_profile_mismatch", not _profile_ok(top.get("settings_profile"))),
+        ("probes_not_ok", not _probes_ok(top.get("probes"))),
+    )
+    return next((slug for slug, bad in problems if bad), "")
+
+
+def canonical_qualified_models(
+    qualified: Mapping[str, Sequence[str]],
+) -> dict[str, list[str]]:
+    """Каноническое `qualified_models`: `model_id -> sorted(tool_id)`."""
+    return {str(model): sorted(map(str, ids)) for model, ids in qualified.items()}
+
+
+def _tool_ids(ids: object) -> tuple[str, ...]:
+    """Непустой список непустых строк -> отсортированный кортеж; иначе `()`."""
+    items = ids if isinstance(ids, list) else []
+    ok = items and all(isinstance(i, str) and i for i in items)
+    return tuple(sorted(map(str, items))) if ok else ()
+
+
+def catalog_tool_ids(listed: object) -> tuple[str, ...]:
+    """id tools из `list_tools` в порядке каталога; битый каталог — `()`."""
+    items = listed if isinstance(listed, list) else []
+    raw = [t.get("id") if isinstance(t, dict) else None for t in items]
+    return tuple(dict.fromkeys(map(str, raw))) if _tool_ids(raw) else ()
+
+
+def parse_qualified(raw: object) -> tuple[QualifiedModelSpec, ...]:
+    """`dict[str, list[str]]` -> DTO по моделям; любое нарушение формы — `()`."""
+    pairs = raw.items() if isinstance(raw, dict) else ()
+    specs = tuple(
+        QualifiedModelSpec(str(model), _tool_ids(ids)) for model, ids in pairs
+    )
+    return specs if specs and all(s.model_id and s.tool_ids for s in specs) else ()
 
 
 def settings_profile_digest() -> str:

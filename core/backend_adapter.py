@@ -28,6 +28,7 @@ from typing import (
     get_type_hints,
 )
 from urllib.parse import urlsplit
+from core.effort_policy import EFFORT_LEVELS as _RANKED_EFFORT_LEVELS
 
 # Версия контракта: адаптер обязан подтверждать её в qualify() (несовпадение = модели недоступны).
 ADAPTER_API = 1
@@ -567,7 +568,8 @@ FLEET_MODEL_KEYS = frozenset(
         "alias_of",
     }
 )
-EFFORT_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+# Шкала каталога: `off` (отключённый reasoning) плюс ранжированные уровни политики effort.
+EFFORT_LEVELS = ("off", *_RANKED_EFFORT_LEVELS)
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 IMPLEMENTED_METHODS = {"workspace-read": 1}
 IMPLICIT_DROID_BACKEND = {

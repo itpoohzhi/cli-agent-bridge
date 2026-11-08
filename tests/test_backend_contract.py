@@ -3,12 +3,11 @@
 Проверяется на фейковом адаптере и на реальных DroidAdapter/MuseAdapter: набор методов,
 маппинг модель -> адаптер, отказ от загрузки кода из конфигурации, изоляция сбоя shutdown.
 """
-
 from __future__ import annotations
 
 import sys
 import unittest
-from typing import Optional
+from typing import Any, Optional
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,7 +41,7 @@ CONTRACT_METHODS = (
 )
 
 
-def catalog():
+def catalog() -> dict[str, Any]:
     models = {
         "a-1": {"id": "a-1", "backend": "alpha", "context_window": 1},
         "a-2": {"id": "a-2", "backend": "alpha", "context_window": 2},
@@ -96,8 +95,9 @@ class ExplodingAdapter(FakeAdapter):
 
 class TestInterface(unittest.TestCase):
     def test_interface_is_abstract(self):
+        abstract: Any = BackendAdapter
         with self.assertRaises(TypeError):
-            BackendAdapter("x", {}, dict)  # type: ignore[abstract]
+            abstract("x", {}, dict)
 
     def test_missing_method_keeps_class_abstract(self):
         for name in CONTRACT_METHODS:
@@ -180,8 +180,8 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(FakeAdapter.stopped, ["beta"])
 
     def test_incompatible_adapter_is_rejected_at_registration(self):
-        class LegacyAdapter(FakeAdapter):
-            capabilities = {}
+        incomplete = {"capabilities": {}}  # заведомо неполные capabilities
+        LegacyAdapter = type("LegacyAdapter", (FakeAdapter,), incomplete)
 
         registry = AdapterRegistry()
         with self.assertRaisesRegex(ValueError, "adapter_contract"):

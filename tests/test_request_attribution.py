@@ -24,6 +24,7 @@ import server  # noqa: E402
 from tests.gateway_policy_testlib import assert_deepseek_defaults, install_route_auth  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
 from core.backend_adapter import AdapterRegistry  # noqa: E402
+from core.model_penalty import ModelPenaltyTracker  # noqa: E402
 
 ALIASES = (
     "gemini-4-argon-high",
@@ -81,19 +82,9 @@ def wire(monkeypatch, tmp_path):
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             with lock:
                 records.append((dict(self.headers.items()), raw))
-            req = json.loads(raw)
-            stream = req.get("stream", False)
-            payload = {
-                "id": "chatcmpl-fake",
-                "object": "chat.completion",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "ok"},
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
+            stream = json.loads(raw).get("stream", False)
+            choice = {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+            payload = {"id": "chatcmpl-fake", "object": "chat.completion", "choices": [choice]}
             body = (
                 b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
                 if stream
@@ -127,6 +118,13 @@ def wire(monkeypatch, tmp_path):
                 api_key_env="",
                 enabled=True,
             )
+    # Passthrough-стенд: droid выключен, статические aliases сняты, модели droid-цепочки идут на upstream.
+    data["backends"]["droid"]["enabled"], data["aliases"] = False, {}
+    for m in data["models"]:
+        m["backend"] = {"gemini-3.8-flash": "agy", "claude-sonnet-5-5": "claude-p"}.get(m["id"], m["backend"])
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "missing-dynamic.json"))
+    monkeypatch.setattr(server, "_PENALTY_TRACKER", ModelPenaltyTracker(storage_path=tmp_path / "penalties.json"))
+    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", server.ModelNotesFilter(tmp_path / "notes.md"))
     fleet = server._build_catalog(data)
     monkeypatch.setattr(server, "FLEET", fleet)
     monkeypatch.setattr(

@@ -2,7 +2,7 @@
 """DEP-09: неизменяемый образ droid и receipt допуска всех моделей fleet.
 
 Копия runtime/droid-image/<sha256>/droid (0500, каталоги 0700) проходит spawn/update/load
-в изолированном Factory home. Только после всех проб атомарно пишется schema-2 receipt
+в изолированном Factory home. Только после всех проб атомарно пишется schema-3 receipt
 с протоколом, точными каталогами моделей и профилем настроек. Глобальный бинарь не меняется.
 """
 
@@ -25,6 +25,7 @@ from typing import IO, cast
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import receipt_schema as schema  # noqa: E402
+from tools.droid_receipt_verify import verify_receipt_cli  # noqa: E402
 from tools.droid_probe_config import (  # noqa: E402
     ProbeError,
     ProbeFacts,
@@ -497,16 +498,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     _ = parser.add_argument(
         "--source",
-        default=os.path.expanduser("~/.local/bin/droid"),
-        help="глобальный бинарь droid (не изменяется)",
+        default=None,
+        help="глобальный бинарь droid (не изменяется; по умолчанию ~/.local/bin/droid)",
     )
     _ = parser.add_argument(
         "--workspace",
         default=str(Path(__file__).resolve().parent.parent / "workspace"),
         help="workspace моста (runtime/droid-image и state/)",
     )
+    _ = parser.add_argument(
+        "--providers-dir",
+        default=str(Path(__file__).resolve().parent.parent / "providers.d"),
+        help="каталог манифестов провайдеров (для --verify-receipt)",
+    )
+    _ = parser.add_argument(
+        "--verify-receipt",
+        default=None,
+        metavar="PATH",
+        help="проверить receipt без запуска образа: 0 — годен, 4 — нет",
+    )
     args = parser.parse_args(argv)
-    source = Path(cast(str, args.source))
+    if args.verify_receipt:
+        explicit = Path(cast(str, args.source)) if args.source else None
+        return verify_receipt_cli(
+            Path(cast(str, args.verify_receipt)),
+            Path(cast(str, args.providers_dir)),
+            explicit,
+        )
+    source = Path(cast(str, args.source or os.path.expanduser("~/.local/bin/droid")))
     if not source.is_file() or not os.access(source, os.X_OK):
         _ = sys.stderr.write(
             f"droid_image: источник не найден или не исполняем: {source}\n"

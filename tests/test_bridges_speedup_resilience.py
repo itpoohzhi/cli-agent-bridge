@@ -1,5 +1,4 @@
 """Поведенческие регрессии ADR-0021: дедлайны, replay и честные ошибки."""
-
 from __future__ import annotations
 
 import importlib.util
@@ -9,7 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -235,7 +234,7 @@ def test_client_gone_safely_handles_none_and_socketless_objects() -> None:
     class DummyObj:
         pass
 
-    assert server._client_gone(DummyObj()) is False
+    assert server._client_gone(cast(Any, DummyObj())) is False
 
 
 def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
@@ -243,7 +242,6 @@ def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
     import json
     from email.message import Message
     import server
-
     captured = []
 
     def _fake_passthrough(self, a, raw, req, model_id, _hub_auth_ok=False):

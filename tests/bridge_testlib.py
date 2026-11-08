@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 
+from typing import cast
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -151,7 +152,7 @@ def _stand_context_max_output(model_id: str) -> int:
     """max_tokens стендовых legacy-моделей (в боевом fleet.json их уже нет)."""
     for legacy in _DROID_LEGACY_MODELS:
         if legacy["id"] == model_id:
-            return legacy["max_tokens"]
+            return cast(int, legacy["max_tokens"])
     return _ORIG_CONTEXT_MAX_OUTPUT(model_id)
 
 
@@ -220,6 +221,8 @@ TEST_FACTORY_KEY = (
     "bridge-test-factory-key-not-real"  # то же значение, что ждёт fake_droid
 )
 _MISSING = object()
+# Сценарии отказа внутри одного теста копят провалы старта: карантин 503 в стенде не включается.
+TEST_MAX_START_FAILS = 1_000_000
 
 
 def legacy_scenario(events):
@@ -429,7 +432,7 @@ class BridgeCase(unittest.TestCase):
             "INSTR_BLOCK_LIMIT FINISHED_TURNS_KEEP DELIVERY_CHUNK_BYTES ENTRY_OVERHEAD_BYTES "
             "GUARD GUARD_PROFILES_DIR GUARD_CANON INSTR_NONKB_MARGIN MAX_JSON_STRUCT_TOKENS "
             "BACKENDS _context_max_output _canon_seen _canon_cache "
-            "_PENALTY_TRACKER _QUOTA_CB_CACHE _MODEL_NOTES_FILTER"
+            "_PENALTY_TRACKER _QUOTA_CB_CACHE _MODEL_NOTES_FILTER RESILIENCE"
         ).split()
         self._saved = {name: getattr(server, name, _MISSING) for name in names}
 
@@ -462,7 +465,14 @@ class BridgeCase(unittest.TestCase):
         )
         server.WORKSPACE = base / "workspace"
         server.WORKSPACE.mkdir(parents=True, exist_ok=True)
-        server._PENALTY_TRACKER = ModelPenaltyTracker(base / "penalties.json")
+        # Флаги GigaRC и штрафы старта живут только в границах теста.
+        dynamic_path = os.environ.get("BRIDGE_DYNAMIC_CONFIG_PATH")
+        self.addCleanup(self._restore_env, "BRIDGE_DYNAMIC_CONFIG_PATH", dynamic_path)
+        os.environ["BRIDGE_DYNAMIC_CONFIG_PATH"] = str(base / "dynamic-config-none.json")
+        server._PENALTY_TRACKER = ModelPenaltyTracker(
+            storage_path=base / "penalties.json", max_start_fails=TEST_MAX_START_FAILS
+        )
+        server.RESILIENCE = server.ResilienceManager()
         server._QUOTA_CB_CACHE = server.QuotaCircuitBreakerCache(base / "quota.json")
         server._MODEL_NOTES_FILTER = server.ModelNotesFilter(base / "notes.md")
         server._budget = None
@@ -489,6 +499,14 @@ class BridgeCase(unittest.TestCase):
             os.environ.pop("FAKE_DROID_DIR", None)
         else:
             os.environ["FAKE_DROID_DIR"] = self._env_fake
+
+    @staticmethod
+    def _restore_env(name: str, value: str | None) -> None:
+        """Вернуть переменную окружения к значению до setUp (None — удалить)."""
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
     def _restore_factory_key(self):
         if self._env_factory_key is None:

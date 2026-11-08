@@ -5,6 +5,7 @@ provider_id: opencode-go
 kind: passthrough
 enabled: true
 required: false
+priority: 40
 owned_by: opencode-go
 transport:
   bridge: {base_url: 'http://127.0.0.1:10830/go/v1'}

@@ -68,7 +68,7 @@ def test_exact_catalog_ids_beat_effort_alias(
 def test_deepseek_off_is_validated_by_shared_catalog() -> None:
     catalog = server._build_catalog(fleet_data())
     assert "off" in server.EFFORT_LEVELS
-    assert catalog["aliases"] == {}
+    assert "deepseek-v4.1-flash" not in catalog["aliases"]
 
 
 @pytest.fixture

@@ -1,5 +1,4 @@
 """Framing-отказы моста (raw-сокеты): CL, короткое тело, 413, JSON, TE (C-02)."""
-
 import json
 import sys
 import unittest
@@ -8,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bridge_testlib import BridgeCase  # noqa: E402
+from bridge_testlib import BridgeCase  # noqa: E402  # tests/ — корень импорта pytest
 
 VALID = json.dumps(
     {

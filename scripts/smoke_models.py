@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Any, NamedTuple, overload
+from typing import Any, Literal, NamedTuple, overload
 
 
 DEFAULT_MODELS_MD = Path(
@@ -423,7 +423,7 @@ def _load_fleet_config() -> tuple[frozenset[str], dict[str, str]]:
             if isinstance(target, str):
                 aliases[str(alias)] = target
             elif isinstance(target, dict):
-                target_id = target.get("model") or target.get("target") or target.get("id")
+                target_id = next(filter(None, map(target.get, ("model", "target", "id", "backend_id"))), None)
                 if target_id:
                     aliases[str(alias)] = str(target_id)
     return frozenset(models), aliases
@@ -437,13 +437,13 @@ def build_bridge_payload(
     stream: bool = True,
 ) -> dict[str, Any]:
     """Build a bridge request using fleet.json as the wire-model authority."""
-    effort_norm = effort.lower().strip()
     models, aliases = _load_fleet_config()
     wire_model = model_id
-    target_effort = effort_norm
+    target_effort = effort.lower().strip()
 
     if model_id in aliases:
         wire_model = aliases[model_id]
+        target_effort = target_effort or next((e for e in ("minimal", "low", "medium", "high", "xhigh", "max") if model_id.lower().endswith("-" + e)), "")
     elif model_id not in models and f"{model_id}-free" in models:
         wire_model = f"{model_id}-free"
     elif model_id not in models:
@@ -616,7 +616,7 @@ def smoke_test_model_subprocess(
     api_key: str | None = None,
     effort: str = "",
     subagent_id: str = "",
-    return_pgid: bool = False,
+    return_pgid: Literal[False] = ...,
 ) -> tuple[bool, str, float, int]: ...
 
 
@@ -629,7 +629,7 @@ def smoke_test_model_subprocess(
     effort: str = "",
     subagent_id: str = "",
     *,
-    return_pgid: bool,
+    return_pgid: Literal[True],
 ) -> tuple[bool, str, float, int, int]: ...
 
 

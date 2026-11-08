@@ -76,7 +76,11 @@ def route(monkeypatch, tmp_path):
     return post
 
 
-@pytest.mark.parametrize("model", ["gpt-6.1-terra"])
+# gpt-6.1-sol первичен на droid (priority 10), поэтому passthrough-маршрут проверяется на моделях codex/agy.
+BACKEND_OF = {"gpt-6.1-terra": "codex", "gemini-4-argon": "agy"}
+
+
+@pytest.mark.parametrize("model", list(BACKEND_OF))
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("auth", ["hub-test-key", "Bearer hub-test-key"])
@@ -88,7 +92,7 @@ def test_exact_route_preserves_body_and_reserves_budget(
     handler._send.assert_not_called()
     handler._serve_passthrough.assert_called_once()
     adapter, raw, request, resolved = handler._serve_passthrough.call_args.args
-    assert adapter.id == "codex"
+    assert adapter.id == BACKEND_OF[model]
     assert resolved == model
     assert request == json.loads(raw) == body
     reserve.assert_called_once_with(len(raw))

@@ -33,6 +33,9 @@ os.environ.setdefault("BRIDGE_TELEMETRY_DB_PATH", os.path.join(_TELEMETRY_TMP, "
 # сессии и живые мосты, поэтому прогон берёт свои (отсутствующие) файлы — иначе тесты зависят от соседей.
 os.environ.setdefault("BRIDGE_MODEL_PENALTIES_PATH", os.path.join(_TELEMETRY_TMP, "model_penalties.json"))
 os.environ.setdefault("BRIDGE_DYNAMIC_CONFIG_PATH", os.path.join(_TELEMETRY_TMP, "dynamic_config.json"))
+# Каталог droid включается GigaRC-флагом (дефолт false); стенды droid-тестов работают с включённым,
+# а тесты самого гейта снимают флаг явно.
+os.environ.setdefault("BRIDGE_DROID_CATALOG_ENABLED", "1")
 atexit.register(shutil.rmtree, _TELEMETRY_TMP, ignore_errors=True)
 
 GUARD_DOMAINS = ("threads", "async_tasks", "sockets", "descriptors", "environment", "singletons")

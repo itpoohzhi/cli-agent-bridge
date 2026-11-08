@@ -56,6 +56,7 @@ from typing import (
     Iterator,
     List,
     Mapping,
+    NamedTuple,
     Optional,
     Sequence,
     Tuple,
@@ -67,7 +68,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from core import discovery as _discovery  # noqa: E402
 from core.backend_adapter import EFFORT_LEVELS  # noqa: E402
+from core.catalog_promote import PromoteRequest, add_promote_arguments, promote_confirmed  # noqa: E402
 from core.param_adapter import resolve_state_dir  # noqa: E402
+from core.probe_manifest_select import select_manifest as _select_core_manifest  # noqa: E402
 from core.provider_manifest import ModelsDefaults, ProviderManifest  # noqa: E402
 
 PROBE_VERSION = 1
@@ -1089,29 +1092,19 @@ def resolve_api_key(env: Mapping[str, str]) -> str:
     return key or env.get("OPENAI_API_KEY") or ""
 
 
+class ManifestChoice(NamedTuple):
+    """Результат выбора: распаковывается как пара и читается по полям."""
+
+    manifest: Optional[ProviderManifest]
+    problem: Optional[str]
+
+
 def select_manifest(
     manifests: Sequence[ProviderManifest], model_id: str, provider_id: Optional[str]
-) -> Tuple[Optional[ProviderManifest], Optional[str]]:
+) -> ManifestChoice:
     """Манифест провайдера: по `--provider` либо единственный, чей include/static матчит модель."""
-    import fnmatch
-
-    if provider_id:
-        for manifest in manifests:
-            if manifest.provider_id == provider_id:
-                return manifest, None
-        return None, "provider_not_found"
-    matches = []
-    for manifest in manifests:
-        cfg = manifest.discovery
-        listed = model_id in cfg.static
-        globbed = bool(cfg.include) and any(
-            fnmatch.fnmatchcase(model_id, g) for g in cfg.include
-        )
-        if listed or globbed:
-            matches.append(manifest)
-    if len(matches) == 1:
-        return matches[0], None
-    return None, "provider_ambiguous" if matches else "provider_not_found"
+    cand = _select_core_manifest(manifests, model_id, provider_id, strict_ambiguous=True)
+    return ManifestChoice(cand.manifest, cand.problem)
 
 
 def probe_cli(
@@ -1125,6 +1118,8 @@ def probe_cli(
     env: Optional[Mapping[str, str]] = None,
     http: Optional[Transport] = None,
     out: Any = None,
+    promote: bool = False,
+    state_dir: Optional[Path] = None,
 ) -> int:
     """Общая точка входа для `capability_probe.py` и `smoke_models.py --probe-model`."""
     source: Mapping[str, str] = os.environ if env is None else env
@@ -1133,7 +1128,8 @@ def probe_cli(
     from core.provider_manifest import load_manifests
 
     loaded = load_manifests(providers_dir, ADAPTER_KINDS, env=source)
-    manifest, problem = select_manifest(loaded.manifests, model_id, provider_id)
+    picked = _select_core_manifest(loaded.manifests, model_id, provider_id)
+    manifest, problem = picked.manifest, picked.problem
     if manifest is None:
         print("USAGE: %s (model=%s)" % (problem, model_id), file=sys.stderr)
         return EXIT_USAGE
@@ -1157,6 +1153,7 @@ def probe_cli(
             http=http,
             env=source,
             force=force,
+            state_dir=state_dir,
         )
     except ProbeBusy as exc:
         print(mask_secret("INCONCLUSIVE: probe busy (%s)" % exc, api_key), file=stream)
@@ -1197,6 +1194,13 @@ def probe_cli(
             ),
             file=stream,
         )
+    if promote and result.verdict == VERDICT_CONFIRMED:
+        request = PromoteRequest.from_probe(result, manifest.provider_id, model_id)
+        target = state_dir or resolve_state_dir(source)
+        failure = promote_confirmed(request, target, providers_dir=providers_dir, env=source)
+        if failure:
+            print("FAIL: promote_failed (%s)" % failure, file=sys.stderr)
+            return EXIT_FAILED
     return result.exit_code
 
 
@@ -1212,6 +1216,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--providers-dir", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", dest="as_json", action="store_true")
+    add_promote_arguments(parser)
     return parser
 
 
@@ -1227,6 +1232,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         force=args.force,
         as_json=args.as_json,
         providers_dir=args.providers_dir,
+        promote=args.promote,
+        state_dir=args.state_dir,
     )
 
 

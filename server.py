@@ -65,7 +65,7 @@ from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, cast
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -76,16 +76,11 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     discover_local_cdp_url,
     is_loopback_cdp_url,
 )
-from tools.receipt_schema import (  # noqa: E402
-    RECEIPT_PROBES as RECEIPT_PROBES,
-    RECEIPT_SCHEMA,
-    RPC_API_VERSION,
-    SETTINGS_PROFILE as SETTINGS_PROFILE,
-    TOOLS_POLICY as TOOLS_POLICY,
-    settings_profile_digest as settings_profile_digest,
-    tools_policy_digest as tools_policy_digest,
-    validate_receipt_components,
-    validate_model_catalog,
+from tools.receipt_schema import (  # noqa: E402,F401
+    RECEIPT_PROBES as RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE as SETTINGS_PROFILE,
+    TOOLS_POLICY as TOOLS_POLICY, ReceiptV3, catalog_tool_ids, receipt_gate_problem,
+    settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest,
+    validate_model_catalog, validate_receipt_components,
 )
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
@@ -119,7 +114,7 @@ from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежн�
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
     KEEPALIVE_INTERVAL_S,
-    QoSSlotManager,
+    QoSSlotManager as QoSSlotManager,
     QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
     RESERVED_INTERACTIVE_SLOTS,
     get_qos_manager,
@@ -200,7 +195,19 @@ from core.catalog_flags import (  # noqa: E402
     resolve_fleet_path,
     sidecar_allowlist,
 )
-from core import quarantine_gate as qgate  # noqa: E402
+from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
+from core.droid_session_gate import (  # noqa: E402
+    ToolsGateError,
+    admit_model,
+    plan_tools_disable,
+    verify_tools_disabled,
+)
+from core.effort_policy import (  # noqa: E402
+    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER,
+    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
+    catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
+    resolve_model_effort_fields, resolve_passthrough_effort,
+)
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
@@ -249,9 +256,6 @@ BRIDGE_SANITIZE_TOOL_CALLS = os.getenv(
 ).lower() in ("true", "1", "yes")
 # ADR 0011 AD-005: лимиты читаются здесь (не в ядре, BND-001) и передаются в ядро аргументами:
 # BRIDGE_MAX_PARALLEL_CALLS (по умолчанию 64), BRIDGE_MAX_PARALLEL_DEPTH, лимиты passthrough.
-# Полная шкала reasoning для клампа запрошенного effort к каталогу модели.
-EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
-
 BRIDGE_LIMITS = PassthroughLimits.from_env()
 
 
@@ -393,12 +397,7 @@ def _resolve_model_alias(
     raw_id: str, catalogue: Mapping[str, Any]
 ) -> tuple[str, str] | None:
     """Разрешить суффикс effort, оставляя точные записи каталога приоритетными."""
-    if not EFFORT_ALIAS_ENABLED or raw_id in catalogue:
-        return None
-    base, _, suffix = raw_id.rpartition("-")
-    if suffix in EFFORT_SUFFIXES and base in catalogue:
-        return base, suffix
-    return None
+    return resolve_alias_effort(raw_id, catalogue, EFFORT_SUFFIXES, EFFORT_ALIAS_ENABLED)
 
 
 def _trace_headers(trace: RequestTrace | None) -> list[tuple[str, str]]:
@@ -441,38 +440,6 @@ LIVE_WRITE_TIMEOUT_S: float = parse_live_write_timeout(30.0)
 FIRST_TOKEN_TIMEOUT_S = CLI_CFG.first_token_timeout_s
 # Окно после успешного хода, в котором лончеру передаётся DROID_SKIP_PREFLIGHT=1.
 PREFLIGHT_SKIP_WINDOW_S = 120.0
-
-
-def clamp_effort_downward(
-    candidate: str, allowed: Sequence[str], default: str
-) -> tuple[str, bool]:
-    """Кламп effort вниз по EFFORT_ORDER к ближайшему уровню из allowed.
-
-    Точное (case-insensitive) совпадение с allowed возвращает сам элемент
-    allowed и False. Иначе — supported с максимальным рангом строго ниже
-    candidate; если нижнего нет — с минимальным рангом выше. Неизвестный
-    шкале candidate или отсутствие ранжируемых allowed — (default, True).
-    """
-    key = candidate.lower()
-    for item in allowed:
-        if item.lower() == key:
-            return item, False
-    rank_of = {name: rank for rank, name in enumerate(EFFORT_ORDER)}
-    if key not in rank_of:
-        return default, True
-    candidate_rank = rank_of[key]
-    rankable = [
-        (rank_of[item.lower()], item) for item in allowed if item.lower() in rank_of
-    ]
-    if not rankable:
-        return default, True
-    lower = [pair for pair in rankable if pair[0] < candidate_rank]
-    if lower:
-        return max(lower, key=lambda pair: pair[0])[1], True
-    upper = [pair for pair in rankable if pair[0] > candidate_rank]
-    if upper:
-        return min(upper, key=lambda pair: pair[0])[1], True
-    return default, True
 
 
 # Автономность RPC сверяется read-back; безопасный дефолт off — read-only.
@@ -541,7 +508,7 @@ def _load_fleet() -> dict:
         raw = None
     if raw is not None:
         try:
-            catalog = _build_catalog(json.loads(raw.decode("utf-8")))
+            catalog = greg.gated_catalog(raw, _build_catalog)
         except FleetViolation:
             raise
         except (ValueError, UnicodeDecodeError):
@@ -550,7 +517,7 @@ def _load_fleet() -> dict:
         sys.stderr.write("fleet_invalid model=- reason=fleet_unreadable\n")
         sys.stderr.flush()
         raise SystemExit(1)
-    for rejected_id, reason in catalog.get("rejected", {}).items():
+    for rejected_id, reason in cast(dict[str, str], catalog.get("rejected", {})).items():
         sys.stderr.write(f"fleet_model_rejected model={rejected_id} reason={reason}\n")
     catalog["path"] = str(FLEET_PATH)
     catalog["sha256"] = hashlib.sha256(raw).hexdigest()
@@ -569,7 +536,7 @@ except FleetViolation as violation:
 MODEL_ID = ENV_MODEL or FLEET["default_model"]
 # Реестр адаптеров включённых бэкендов (ADR 0002): каталог читается лениво, чтобы подмена FLEET
 # стендом тестов действовала и на маршрутизацию; хост адаптеров — этот модуль.
-BACKENDS = AdapterRegistry.from_fleet(
+BACKENDS: AdapterRegistry = greg.GatedRegistry.from_fleet(
     FLEET, ADAPTER_KINDS, lambda: FLEET, sys.modules[__name__]
 )
 
@@ -677,10 +644,31 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
     return published
 
 
+_EFFORT_SPECS_CACHE: tuple[Any, dict[str, ModelEffortSpec]] = (None, {})
+
+
+def _effort_specs() -> dict[str, ModelEffortSpec]:
+    """Спеки effort каталога с кэшем."""
+    global _EFFORT_SPECS_CACHE
+    key = (FLEET.get("sha256"), ADVERTISED_EFFORT_ALIASES, EFFORT_ALIAS_ENABLED, EFFORT_SUFFIXES)
+    if _EFFORT_SPECS_CACHE[0] != key:
+        models = FLEET.get("models", {})
+        found = {a: r for a in ADVERTISED_EFFORT_ALIASES if (r := _resolve_model_alias(a, models))}
+        _EFFORT_SPECS_CACHE = (key, catalog_effort_specs(models, found))
+    return _EFFORT_SPECS_CACHE[1]
+
+
+def _advertise_efforts(card: dict[str, Any], mid: str, specs: dict[str, ModelEffortSpec]) -> None:
+    if fields := resolve_model_effort_fields(mid, specs):
+        card["supported_reasoning_efforts"] = list(fields.supported_efforts)
+        card["default_reasoning_effort"] = fields.default_effort
+
+
 def _build_models_list(
     owner_tuple: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     published = _get_published_models()
+    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else {}
     order = []
     if MODEL_ID in published:
         order.append(MODEL_ID)
@@ -736,6 +724,7 @@ def _build_models_list(
             "available": not is_pen,
             "penalized_until": pen_until,
         }
+        _advertise_efforts(card, mid, specs)
         data.append(card)
         listed.add(mid)
 
@@ -788,6 +777,7 @@ def _build_models_list(
             "available": not is_pen,
             "penalized_until": pen_until,
         }
+        _advertise_efforts(card, alias_id, specs)
         data.append(card)
         listed.add(alias_id)
 
@@ -979,6 +969,7 @@ def _env_int_nonneg(name: str, default: int) -> int:
         return default
 
 
+_LOG_EFFORT_MAX = _env_limit("BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS)
 FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
 FORWARD_ENV_MAX_VALUE = _env_limit("BRIDGE_FORWARD_ENV_MAX_VALUE", 32768)
 _FORWARD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -1223,6 +1214,18 @@ def _load_receipt() -> tuple:
         raise LauncherUnavailable("droid image sha256 does not match receipt")
     _check_receipt_quad(rec)
     return real, rec
+
+
+def _tools_receipt() -> ReceiptV3 | None:
+    """Квалификация tools по моделям из receipt; None — gate выключен."""
+    try:
+        _, rec = _load_receipt()
+    except LauncherUnavailable as exc:
+        raise RpcError(f"droid receipt changed during spawn: {exc}")
+    parsed = ReceiptV3.parse(rec) if rec else None
+    if isinstance(parsed, str):
+        raise RpcError(f"droid receipt invalid: {parsed}")
+    return parsed
 
 
 def _droid_image() -> str:
@@ -4192,7 +4195,7 @@ class Run:
             self._publish(("stream_error", str(exc)[:500]))
         except RpcEof as exc:
             self._publish(("done", (exc.rc or 1, "")))
-        except RpcError as exc:
+        except (RpcError, ToolsGateError) as exc:
             self._publish(("pump_error", str(exc)[:500]))
         except OSError as exc:
             self._publish(("pump_error", repr(exc)))
@@ -4326,7 +4329,7 @@ class Run:
         msgs = raw_msgs if isinstance(raw_msgs, list) else []
         self.sid = sid
         self.droid_real = sum(1 for m in msgs if not _is_service_message(m))
-        self._disable_native_tools(proc)
+        self._disable_native_tools(proc, plan["settings"][0])
 
     @staticmethod
     def _check_protocol(proc: RpcProcess) -> None:
@@ -4343,7 +4346,7 @@ class Run:
                 f"droid protocol {proc.protocol_version or '-'} differs from qualified {expected}"
             )
 
-    def _check_tools_policy(self, listed: list) -> None:
+    def _check_tools_policy(self, listed: list, model: str | None = None) -> None:
         """Точный каталог текущей модели обязан быть квалифицирован в receipt."""
         if not RECEIPT_REQUIRED:
             return
@@ -4352,40 +4355,25 @@ class Run:
         except LauncherUnavailable as exc:
             raise RpcError(f"droid receipt changed during spawn: {exc}")
         validate_model_catalog(
-            rec.get("qualified_models"), self.plan["settings"][0], listed, RpcError
+            rec.get("qualified_models"),
+            model or self.plan["settings"][0],
+            listed,
+            RpcError,
         )
 
-    def _disable_native_tools(self, proc: RpcProcess) -> None:
-        """Нативные tools отключаются по АКТУАЛЬНОМУ list_tools (новые id тоже); сбой — fail-closed."""
+    def _disable_native_tools(self, proc: RpcProcess, model: str) -> None:
+        """Нативные tools модели отключаются по актуальному list_tools; сбой — fail-closed."""
         result, _ = proc.call("droid.list_tools", {}, self.cancel)
-        tools = result.get("tools")
-        if (
-            not isinstance(tools, list)
-            or not tools
-            or not all(
-                isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"]
-                for t in tools
-            )
-        ):
-            raise RpcError("list_tools: invalid catalogue")
-        ids = [t["id"] for t in tools]
-        self._check_tools_policy(ids)
-        keep = set(self.plan.get("keep_tools") or ())
-        ids = [i for i in ids if i not in keep]
-        if not ids:
-            return
-        _, stash = proc.call(
-            "droid.update_session_settings", {"disabledToolIds": ids}, self.cancel
-        )
-        updated = self._wait_settings_updated(proc, stash)
-        if updated is None:
-            raise RpcError("native tools: settings_updated read-back not received")
-        disabled = updated.get("disabledToolIds")
-        if not isinstance(disabled, list):
-            raise RpcError("native tools: disabledToolIds missing in read-back")
-        if not set(ids).issubset(set(map(str, disabled))):
-            raise RpcError("native tools were not disabled (read-back mismatch)")
-        self._check_flags(updated)
+        ids = catalog_tool_ids(result.get("tools"))
+        keep = self.plan.get("keep_tools") or ()
+        plan = plan_tools_disable(ids, _tools_receipt(), model, keep)
+        self._check_tools_policy(list(ids), model)
+        if plan.disabled_ids:
+            params = {"disabledToolIds": list(plan.disabled_ids)}
+            _, stash = proc.call("droid.update_session_settings", params, self.cancel)
+            updated = self._wait_settings_updated(proc, stash)
+            verify_tools_disabled(plan, updated)
+            self._check_flags(updated)
 
     def _wait_settings_updated(
         self, proc: RpcProcess, stash: list, timeout: float = 2.0
@@ -4420,6 +4408,7 @@ class Run:
         if tuple(current) == tuple(desired):
             return
         model, effort, autonomy = desired
+        admit_model(_tools_receipt(), model)
         params = {
             "modelId": model,
             "reasoningEffort": effort,
@@ -4430,6 +4419,8 @@ class Run:
         if settings is None or "modelId" not in settings:
             raise _NeedRebase()  # read-back не подтвердился: безопасно — свежая generation
         self._check_settings(settings)
+        if model != current[0]:
+            self._disable_native_tools(proc, model)
 
     def _load(self, proc: RpcProcess) -> bool:
         """load_session того же SID + проверка целостности; False -> свежая generation."""
@@ -4485,7 +4476,7 @@ class Run:
             if isinstance(settings, dict)
             else ("", "", "")
         )
-        self._disable_native_tools(proc)
+        self._disable_native_tools(proc, str(plan["current_settings"][0] or plan["settings"][0]))
         try:
             self._sync_settings(proc, plan["settings"])
         except _NeedRebase:
@@ -7254,14 +7245,21 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     )
                     return
                 upstream_model = model.get("upstream_model")
-                has_upstream = isinstance(upstream_model, str) and bool(
-                    upstream_model.strip()
+                has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+                effort_on = flag_enabled(FLAG_EFFORT_CATALOG)
+                pt_effort = resolve_passthrough_effort(
+                    req.get("reasoning_effort"),
+                    alias_effort,
+                    ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
+                    enabled=effort_on,
                 )
-                if has_upstream or alias is not None:
+                if has_upstream or alias or pt_effort.apply:
                     target_model = upstream_model.strip() if has_upstream else model_id
                     req = {**req, "model": target_model}
-                    if alias is not None and req.get("reasoning_effort") is None:
-                        req["reasoning_effort"] = alias_effort
+                    if pt_effort.apply:
+                        req["reasoning_effort"] = pt_effort.value
+                    if pt_effort.clamped_from is not None:
+                        _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
                 _log(
                     f"chat route=passthrough model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
@@ -7292,9 +7290,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     )
                     effort_source = "alias" if effort_from_alias else "request"
                     if clamped:
-                        _log(
-                            f"clamp reasoning_effort '{candidate}' -> '{effort}' for model {model_id}"
-                        )
+                        _log(describe_clamp("reasoning_effort", candidate, effort, model_id, _LOG_EFFORT_MAX))
             else:
                 self._reject(
                     400,
@@ -7923,7 +7919,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         )
         is_interactive = subagent_id is None or str(subagent_id).strip() == ""
 
-        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", 15.0)
+        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", QOS_DEFAULT_QUEUE_TIMEOUT_S)
         qos = get_qos_manager(
             max_concurrent=MAX_CONCURRENT,
             reserved_interactive=_env_int_nonneg(
