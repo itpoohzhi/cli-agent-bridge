@@ -3719,6 +3719,7 @@ class L2HarnessTests(unittest.TestCase):
         _ = _ofn(tail, "_finish")()
 
     def test_tc93_l2_harness_parallel_turns_resources_and_deadlines(self) -> None:
+        rss_start = _rss_bytes()
         with _Fixture() as fx:
             fx.patch("_slots", threading.BoundedSemaphore(8))
             fx.patch("SQLITE_POLL_S", 0.5)
@@ -3743,7 +3744,11 @@ class L2HarnessTests(unittest.TestCase):
             )
             self.assertTrue(drains)
             self.assertTrue(all(o in ("complete", "window_complete") for o in drains))
-            self.assertLessEqual(_rss_bytes(), 112 * 1024 * 1024)
+            # ru_maxrss — пожизненный пик процесса: дельта изолирует потребление теста,
+            # абсолютный предел учитывает базовый RSS полного раннера.
+            rss_end = _rss_bytes()
+            self.assertLessEqual(rss_end - rss_start, 64 * 1024 * 1024)
+            self.assertLessEqual(rss_end, 160 * 1024 * 1024)
             health: list[dict[str, object]] = []
 
             def send(_code: int, payload: dict[str, object]) -> None:
