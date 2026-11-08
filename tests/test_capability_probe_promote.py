@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from adapters import ADAPTER_KINDS  # noqa: E402
 from core import catalog_promote  # noqa: E402
 from core.fleet_compiler import CompileResult  # noqa: E402
+from core.probe_manifest_select import select_manifest  # noqa: E402
 from core.provider_manifest import load_manifests  # noqa: E402
 
 _probe_tests = importlib.import_module(
@@ -38,13 +39,13 @@ PROVIDERS = ROOT / "providers.d"
 
 def test_select_manifest_sees_overrides_only_models() -> None:
     manifests = build_manifests(manifest_doc("alpha"))
-    picked = cp.select_manifest(manifests, "alpha-one", None)
+    picked = select_manifest(manifests, "alpha-one", None)
     assert picked.problem is None and picked.manifest is not None
     assert picked.manifest.provider_id == "alpha"
 
 
 def _winner(*docs: Any) -> str | None:
-    picked = cp.select_manifest(build_manifests(*docs), "shared-model", None)
+    picked = select_manifest(build_manifests(*docs), "shared-model", None)
     assert picked.problem is None and picked.manifest is not None
     return picked.manifest.provider_id
 
@@ -76,12 +77,12 @@ def test_select_manifest_on_real_providers() -> None:
         ("gpt-6.1-terra", "codex"),
         ("gemini-4-argon", "agy"),
     ):
-        picked = cp.select_manifest(manifests, model, None)
+        picked = select_manifest(manifests, model, None)
         assert picked.manifest is not None, model
         assert (picked.problem, picked.manifest.provider_id) == (None, provider), model
-    named = cp.select_manifest(manifests, "gpt-6.1-sol", "codex")
+    named = select_manifest(manifests, "gpt-6.1-sol", "codex")
     assert named.manifest is not None and named.manifest.provider_id == "codex"
-    missing = cp.select_manifest(manifests, "no-such-model", None)
+    missing = select_manifest(manifests, "no-such-model", None)
     assert (missing.manifest, missing.problem) == (None, "provider_not_found")
 
 

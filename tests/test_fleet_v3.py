@@ -401,11 +401,12 @@ class TestSchema3Violations(unittest.TestCase):
             "muse-spark-1.3",
         )
 
-    def test_efforts_off_valid(self) -> None:
-        data, levels = raw_v3(), ["off", "low", "medium", "high"]
-        self.find(data, "muse-spark-1.3").update(efforts=levels, default_effort="off")
-        model = server._build_catalog(data)["models"]["muse-spark-1.3"]
-        self.assertEqual((model["efforts"], model["default_effort"]), (levels, "off"))
+    def test_efforts_off_invalid(self) -> None:
+        self.expect(
+            lambda d: self.find(d, "muse-spark-1.3").update(efforts=["off"]),
+            "efforts_invalid",
+            "muse-spark-1.3",
+        )
 
 
 def _import_fleet_check():

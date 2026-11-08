@@ -83,15 +83,17 @@ def test_droid_manifest_registers_five_subscription_models() -> None:
     assert (limits.max_concurrent, limits.quota_group, limits.timeout_s) == (
         5,
         "factory-droid",
-        780,
+        450,
     )
     assert {r.model_id for r in droid.models_overrides} == set(DROID_MODELS)
     for rule in droid.models_overrides:
         vendor, default = DROID_MODELS[rule.model_id]
+        assert rule.fields["efforts_pin"] == LMH  # ladder пробника ограничен
+        assert list(droid.models_defaults.efforts) == LMH
         assert (
-            rule.fields["efforts"] == rule.fields["efforts_pin"] == LMH
-        )  # ladder пробника ограничен
-        assert rule.fields["default_effort"] == default
+            rule.fields.get("default_effort", droid.models_defaults.default_effort)
+            == default
+        )
         assert droid.family_rule.exact_map[rule.model_id] == vendor
 
 
