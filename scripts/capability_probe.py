@@ -56,6 +56,7 @@ from typing import (
     Iterator,
     List,
     Mapping,
+    NamedTuple,
     Optional,
     Sequence,
     Tuple,
@@ -1091,12 +1092,19 @@ def resolve_api_key(env: Mapping[str, str]) -> str:
     return key or env.get("OPENAI_API_KEY") or ""
 
 
+class ManifestChoice(NamedTuple):
+    """Результат выбора: распаковывается как пара и читается по полям."""
+
+    manifest: Optional[ProviderManifest]
+    problem: Optional[str]
+
+
 def select_manifest(
     manifests: Sequence[ProviderManifest], model_id: str, provider_id: Optional[str]
-) -> Tuple[Optional[ProviderManifest], Optional[str]]:
+) -> ManifestChoice:
     """Манифест провайдера: по `--provider` либо единственный, чей include/static матчит модель."""
     cand = _select_core_manifest(manifests, model_id, provider_id, strict_ambiguous=True)
-    return cand.manifest, cand.problem
+    return ManifestChoice(cand.manifest, cand.problem)
 
 
 def probe_cli(
@@ -1120,7 +1128,8 @@ def probe_cli(
     from core.provider_manifest import load_manifests
 
     loaded = load_manifests(providers_dir, ADAPTER_KINDS, env=source)
-    manifest, problem = select_manifest(loaded.manifests, model_id, provider_id)
+    picked = _select_core_manifest(loaded.manifests, model_id, provider_id)
+    manifest, problem = picked.manifest, picked.problem
     if manifest is None:
         print("USAGE: %s (model=%s)" % (problem, model_id), file=sys.stderr)
         return EXIT_USAGE

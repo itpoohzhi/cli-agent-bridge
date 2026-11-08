@@ -629,8 +629,8 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
-        # 5 droid + 4 muse + 2 codex; passthrough-мосты agy/opencode-zen/claude-p выключены (моделей нет)
-        self.assertEqual(len(catalog["order"]), 18)
+        # 5 droid + 1 agy + 2 claude-p + 4 muse + 1 codex + 7 opencode-zen (все бэкенды каталога включены)
+        self.assertEqual(len(catalog["order"]), 20)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -652,7 +652,7 @@ class TestCatalogClassI(unittest.TestCase):
         self._expect("efforts_invalid", "claude-sonnet-5-5")
 
     def test_default_effort_outside_efforts(self):
-        find_model(self.data, "claude-sonnet-5-5")["default_effort"] = "low"
+        find_model(self.data, "claude-sonnet-5-5")["default_effort"] = "xhigh"
         self._expect("default_effort_invalid", "claude-sonnet-5-5")
 
     def test_default_model_outside_roster(self):
@@ -1036,8 +1036,8 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 18 моделей боевого каталога + deepseek-v4.1-flash стенда FakeDroid + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
-        self.assertEqual(len(body["data"]), 19 + len(_DROID_LEGACY_MODELS))
+        # 20 моделей боевого каталога (droid включён) + legacy-моки стенда FakeDroid (grok-4.7, glm-5.3)
+        self.assertEqual(len(body["data"]), 20 + len(_DROID_LEGACY_MODELS))
         self.assertTrue(
             {"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]}
         )
