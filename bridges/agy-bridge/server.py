@@ -1596,6 +1596,60 @@ def _prepare_agy_home() -> Path:
         return clean_home_resolved
 
 
+ALLOWED_MODELS_ENV = "AGY_ALLOWED_MODELS_FILE"
+
+
+def _allowed_models_file() -> str:
+    """Путь к allowlist лончера: env AGY_ALLOWED_MODELS_FILE, иначе файл реального HOME.
+
+    Единственный источник пути: им пользуются и окружение `agy` (`_launch_env`),
+    и фильтр каталога `/v1/models`, поэтому каталог не расходится с guard лончера.
+    """
+    return os.environ.get(ALLOWED_MODELS_ENV) or str(
+        HOME / ".config" / "agy-launch" / "allowed-models.txt"
+    )
+
+
+def _read_allowed_models() -> frozenset[str]:
+    """Разобрать allowlist так же, как лончер: без CR, пробелов, пустых строк и `#`.
+
+    Нет файла, он нечитаем или пуст -> пустое множество (фильтр отключается).
+    """
+    try:
+        text = Path(_allowed_models_file()).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    lines = (line.strip() for line in text.splitlines())
+    return frozenset(line for line in lines if line and not line.startswith("#"))
+
+
+def _model_in_allowlist(model_id: str, allowed: frozenset[str]) -> bool:
+    """Каталог отдаёт только id, которые лончер примет дословно.
+
+    Лончер сверяет запрошенный id с allowlist дословно (иначе rc=64
+    «generation guard» -> HTTP 502). Расширять каталог по базовой форме
+    (`-high`/`-medium`/`-low`) нельзя: такой id лончер отклонит, и вызывающая
+    сторона снова получит ответ другой модели при формальном успехе.
+    """
+    return model_id in allowed
+
+
+def _catalog_model_order() -> list[str]:
+    """Порядок каталога: MODEL_ID первым, затем FLEET["order"]; только разрешённые.
+
+    Нет allowlist или он пуст -> прежний состав без фильтрации и одна строка в лог.
+    """
+    order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
+    allowed = _read_allowed_models()
+    if not allowed:
+        _log(
+            f"models catalog: allowlist {_allowed_models_file()} missing or empty,"
+            " generation-guard filter disabled"
+        )
+        return order
+    return [mid for mid in order if _model_in_allowlist(mid, allowed)]
+
+
 def _launch_env() -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
@@ -1621,10 +1675,7 @@ def _launch_env() -> dict:
         _clean_canon_files(Path(clean_home))
     env["HOME"] = clean_home
     env.setdefault("AGY_BIN", str(AGY_BIN))
-    env.setdefault(
-        "AGY_ALLOWED_MODELS_FILE",
-        str(HOME / ".config" / "agy-launch" / "allowed-models.txt"),
-    )
+    env.setdefault(ALLOWED_MODELS_ENV, _allowed_models_file())
     env["BRIDGE_ZERO_CANON"] = "1"
     env["BROWSER"] = "/usr/bin/false"
     return env
@@ -7343,7 +7394,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/v1/models", "/models"):
             data = []
-            order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
+            order = _catalog_model_order()
             image_flags: list[bool] = []
             fallback_info, effective = _image_fallback_view()
             for mid in order:
