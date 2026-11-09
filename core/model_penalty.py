@@ -11,6 +11,13 @@ import threading
 import time
 from typing import Any, Callable, TypeVar
 
+from core.model_penalty_fsm import (
+    FailureKind,
+    classify_failure,
+    is_penalizing_failure,
+)
+from core.runtime_env import flag_enabled
+
 
 DEFAULT_MAX_START_FAILS = int(os.environ.get("BRIDGE_MAX_START_FAILS", "3"))
 DEFAULT_INITIAL_COOLDOWN_SECONDS = float(
@@ -38,25 +45,9 @@ _DISABLED_MAX_START_FAILS = 999999999
 
 def _is_infrastructure_network_error(error_reason: str | None) -> bool:
     """Identify infrastructure failures that must not penalize a model."""
-    if not error_reason:
-        return False
-    lower = str(error_reason).strip().lower()
-    return any(
-        token in lower
-        for token in (
-            "http_502",
-            "http_504",
-            "connection refused",
-            "connectionrefused",
-            "connect_error",
-            "network_error",
-            "broken pipe",
-            "bad gateway",
-            "gateway timeout",
-            "connection reset",
-            "connectionreset",
-            "econnreset",
-        )
+    return (
+        classify_failure(error_reason, strict_classify=False)
+        == FailureKind.INFRASTRUCTURE_FAILURE
     )
 
 
@@ -435,12 +426,14 @@ class ModelPenaltyTracker:
                     False,
                 )
 
-            if _is_infrastructure_network_error(error_reason):
+            strict = flag_enabled("BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED")
+            failure_kind = classify_failure(error_reason, strict_classify=strict)
+            if not is_penalizing_failure(failure_kind):
                 _LOGGER.info(
-                    "Skipping model failure penalty for "
-                    "infrastructure/network error: %s (model=%s)",
+                    "Skipping model failure penalty for %s (model=%s, kind=%s)",
                     error_reason,
                     norm_id,
+                    failure_kind.name,
                 )
                 return (
                     False,

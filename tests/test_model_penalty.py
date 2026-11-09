@@ -18,6 +18,7 @@ ENVIRONMENT_VARIABLES = (
     "BRIDGE_MAX_START_FAILS",
     "BRIDGE_COOLDOWN_SECONDS",
     "BRIDGE_MODEL_PENALTIES_PATH",
+    "BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED",
 )
 
 
@@ -518,5 +519,39 @@ def test_infrastructure_network_errors_neutral(tmp_path, clock):
             assert until == 0.0
 
     assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
+
+
+def test_strict_classification_disabled_by_default(tmp_path, clock):
+    path = tmp_path / "penalties.json"
+    tracker = _make_tracker(path)
+
+    penalized, fails, _ = tracker.record_start_failure("test-model", "client_gone_502")
+    assert penalized is False
+    assert fails == 1
+
+    penalized, fails, _ = tracker.record_start_failure("test-model", "http_401")
+    assert penalized is False
+    assert fails == 2
+
+
+def test_strict_classification_enabled_filters_client_gone_and_drain(
+    tmp_path, clock, monkeypatch
+):
+    monkeypatch.setenv("BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED", "1")
+    tracker = _make_tracker(tmp_path / "penalties.json")
+
+    for reason in ("client_gone_502", "sigterm drain", "http_401"):
+        penalized, fails, _ = tracker.record_start_failure("test-model", reason)
+        assert penalized is False
+        assert fails == 0
+
+    entry = tracker.get_model_status("test-model")
+    assert entry["fails"] == 0
+
+
+def test_fsm_module_loc():
+    lines = Path("core/model_penalty_fsm.py").read_text(encoding="utf-8").splitlines()
+
+    assert len(lines) <= 300
 
 
