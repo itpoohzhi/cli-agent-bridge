@@ -20,8 +20,8 @@ transport:
       headers_from_json:
         path: ~/.config/opencode/opencode.json
         key: provider.opencode-go.options.headers
-        required: [x-opencode-org-id]
-        pick: [x-opencode-org-id, User-Agent]
+        required: []
+        pick: [User-Agent]
         forbid_ua_prefix: [python]
       per_request_headers: {x-opencode-session: '{uuid4}'}
       stream: false

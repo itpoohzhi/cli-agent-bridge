@@ -107,6 +107,7 @@ from muse_runtime.tool_parser import (  # noqa: E402 # pyright: ignore[reportImp
     ToolCallParser,
     _loads_tolerant,
     _parse_tool_call_block,
+    _parse_tool_call_blocks,
     _recover_trailing_braces,
     _split_tool_call_inner,
     _split_tool_calls as _split_tool_calls_impl,

@@ -14,7 +14,7 @@ aliases:
   claude-sonnet-5-5-high: {backend_id: claude-sonnet-5-5, backend: droid, effort: high}
   claude-opus-5-5-medium: {backend_id: claude-opus-5-5, backend: claude-p, effort: medium}
   claude-opus-5-5-high: {backend_id: claude-opus-5-5, backend: claude-p, effort: high}
-  claude-haiku-5-5-low: {backend_id: claude-haiku-5-5, backend: claude-p, effort: low}
+  claude-haiku-5-5-low: {backend_id: claude-haiku-5-5, backend: opencode-go-claude, effort: low}
 default_model: muse-wonder-full-1.0
 policy_ref:
   path: ~/Мой диск/Context/models.md
