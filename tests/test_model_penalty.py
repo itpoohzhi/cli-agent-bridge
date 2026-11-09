@@ -350,6 +350,7 @@ def test_model_id_normalization(tmp_path, clock):
 
 def test_server_build_models_list_penalized(tmp_path, monkeypatch):
     import server
+
     tracker = model_penalty.ModelPenaltyTracker(
         storage_path=tmp_path / "penalties.json",
         max_start_fails=3,
@@ -370,6 +371,7 @@ def test_server_build_models_list_penalized(tmp_path, monkeypatch):
 
 def test_passthrough_429_trips_penalty(tmp_path, monkeypatch):
     import server
+
     tracker = model_penalty.ModelPenaltyTracker(
         storage_path=tmp_path / "penalties.json",
         max_start_fails=3,
@@ -513,12 +515,27 @@ def test_infrastructure_network_errors_neutral(tmp_path, clock):
         "Gateway Timeout",
     ):
         for _ in range(5):
-            tripped, fails, until = tracker.record_start_failure(MODEL_ID, error_reason=err)
+            tripped, fails, until = tracker.record_start_failure(
+                MODEL_ID, error_reason=err
+            )
             assert not tripped
             assert fails == 0
             assert until == 0.0
 
     assert tracker.is_penalized(MODEL_ID) == (False, 0.0)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ("http_502_retry", "connectionreset_peer", "connect_error_fatal"),
+)
+def test_legacy_infrastructure_substrings_remain_neutral(tmp_path, clock, reason):
+    tracker = _make_tracker(tmp_path / "penalties.json")
+
+    penalized, fails, _ = tracker.record_start_failure(MODEL_ID, reason)
+
+    assert penalized is False
+    assert fails == 0
 
 
 def test_strict_classification_disabled_by_default(tmp_path, clock):
@@ -547,6 +564,23 @@ def test_strict_classification_enabled_filters_client_gone_and_drain(
 
     entry = tracker.get_model_status("test-model")
     assert entry["fails"] == 0
+
+
+def test_strict_classification_requires_exact_shutdown_phrase(
+    tmp_path, clock, monkeypatch
+):
+    monkeypatch.setenv("BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED", "1")
+    tracker = _make_tracker(tmp_path / "penalties.json")
+
+    penalized, fails, _ = tracker.record_start_failure(
+        "bare-sigterm-model", "killed by sigterm"
+    )
+    assert penalized is False
+    assert fails == 1
+
+    penalized, fails, _ = tracker.record_start_failure("drain-model", "sigterm drain")
+    assert penalized is False
+    assert fails == 0
 
 
 def test_strict_classification_negative_cases(tmp_path, clock, monkeypatch):
@@ -589,5 +623,3 @@ def test_fsm_module_loc():
     lines = Path("core/model_penalty_fsm.py").read_text(encoding="utf-8").splitlines()
 
     assert len(lines) <= 300
-
-

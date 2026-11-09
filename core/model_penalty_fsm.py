@@ -36,7 +36,6 @@ CLIENT_GONE_TOKENS = (
     "client_disconnected",
 )
 SHUTDOWN_TOKENS = (
-    "sigterm",
     "sigterm drain",
     "drain_timeout",
     "graceful_shutdown",
@@ -64,7 +63,7 @@ def classify_failure(
     if not error_reason:
         return FailureKind.MODEL_START_FAILURE
     lower = str(error_reason).strip().lower()
-    if _contains_token(lower, INFRASTRUCTURE_TOKENS):
+    if any(token in lower for token in INFRASTRUCTURE_TOKENS):
         return FailureKind.INFRASTRUCTURE_FAILURE
     if not strict_classify:
         return FailureKind.MODEL_START_FAILURE
