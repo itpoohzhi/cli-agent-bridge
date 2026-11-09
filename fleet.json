@@ -59,7 +59,7 @@
     },
     "claude-haiku-5-5-low": {
       "backend_id": "claude-haiku-5-5",
-      "backend": "claude-p",
+      "backend": "opencode-go-claude",
       "effort": "low"
     }
   },
@@ -151,6 +151,30 @@
       "owned_by": "factory-droid",
       "max_concurrent": 5
     },
+    "opencode-go-claude": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "opencode-go-claude",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "api_key_ref": "file:~/.config/opencode/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      }
+    },
     "agy": {
       "kind": "passthrough",
       "enabled": true,
@@ -194,15 +218,6 @@
       "base_url": "http://127.0.0.1:2455/v1",
       "api_key_env": "CODEX_LB_API_KEY"
     },
-    "opencode-zen": {
-      "kind": "passthrough",
-      "enabled": true,
-      "required": false,
-      "owned_by": "opencode-zen-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9883/v1",
-      "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
-    },
     "opencode-go": {
       "kind": "passthrough",
       "enabled": true,
@@ -220,7 +235,6 @@
           "headers"
         ],
         "pick": [
-          "x-opencode-org-id",
           "User-Agent"
         ]
       },
@@ -232,6 +246,15 @@
           "type": "disabled"
         }
       }
+    },
+    "opencode-zen": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "opencode-zen-bridge",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:9883/v1",
+      "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
     }
   },
   "models": [
@@ -322,17 +345,17 @@
       ]
     },
     {
-      "id": "gemini-4-argon",
-      "backend": "agy",
-      "name": "Gemini 4 Argon (AGY bridge)",
+      "id": "claude-haiku-5-5",
+      "backend": "opencode-go-claude",
+      "name": "Claude Haiku 5.5 (OpenCode Go georouter)",
       "efforts": [
         "low",
         "medium",
         "high"
       ],
-      "default_effort": "high",
-      "context_window": 1048576,
-      "max_tokens": 65536,
+      "default_effort": "low",
+      "context_window": 1000000,
+      "max_tokens": 128000,
       "input": [
         "text"
       ],
@@ -344,17 +367,17 @@
       }
     },
     {
-      "id": "claude-haiku-5-5",
-      "backend": "claude-p",
-      "name": "Claude Haiku 5.5 (Claude-p bridge)",
+      "id": "gemini-4-argon",
+      "backend": "agy",
+      "name": "Gemini 4 Argon (AGY bridge)",
       "efforts": [
         "low",
         "medium",
         "high"
       ],
-      "default_effort": "low",
-      "context_window": 1000000,
-      "max_tokens": 128000,
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
       "input": [
         "text"
       ],
@@ -510,6 +533,34 @@
       }
     },
     {
+      "id": "deepseek-v4.1-flash",
+      "backend": "opencode-go",
+      "name": "DeepSeek V4.1 Flash (OpenCode Go bridge)",
+      "efforts": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": "off",
+      "context_window": 1000000,
+      "max_tokens": 384000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        106,
+        394,
+        432
+      ]
+    },
+    {
       "id": "beam-free",
       "backend": "opencode-zen",
       "name": "Beam Free (Zen)",
@@ -655,34 +706,6 @@
         "method": null,
         "proof": null
       }
-    },
-    {
-      "id": "deepseek-v4.1-flash",
-      "backend": "opencode-go",
-      "name": "DeepSeek V4.1 Flash (OpenCode Go bridge)",
-      "efforts": [
-        "off",
-        "low",
-        "high",
-        "max"
-      ],
-      "default_effort": "off",
-      "context_window": 1000000,
-      "max_tokens": 384000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "explicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      },
-      "policy_lines": [
-        106,
-        394,
-        432
-      ]
     }
   ]
 }

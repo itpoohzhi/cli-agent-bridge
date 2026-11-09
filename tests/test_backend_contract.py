@@ -194,7 +194,7 @@ class TestRealAdapters(unittest.TestCase):
     def test_server_registry_has_enabled_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
         self.assertEqual(
-            set(ids), {"droid", "muse", "codex", "agy", "opencode-zen", "claude-p", "opencode-go"}
+            set(ids), {"droid", "muse", "codex", "agy", "opencode-zen", "claude-p", "opencode-go", "opencode-go-claude"}
         )
         self.assertIn("droid", ids)
         self.assertIn("muse", ids)
@@ -211,7 +211,7 @@ class TestRealAdapters(unittest.TestCase):
             "muse-wonder-full-1.0": "muse",
             "gpt-6.1-terra": "codex",
             "claude-opus-5-5": "claude-p",
-            "claude-haiku-5-5": "claude-p",
+            "claude-haiku-5-5": "opencode-go-claude",
             "gemini-4-argon": "agy",
             "deepseek-v4.1-flash-free": "opencode-zen",
             "flint-40b-free": "opencode-zen",

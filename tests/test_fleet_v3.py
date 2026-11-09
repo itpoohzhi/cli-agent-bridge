@@ -69,12 +69,12 @@ def to_schema_2(data):
 
 
 class TestLiveFleetV3(unittest.TestCase):
-    def test_live_catalogue_is_schema_3_with_seven_backends(self):
+    def test_live_catalogue_is_schema_3_with_eight_backends(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
         self.assertEqual(
             catalog["backend_order"],
-            ["droid", "agy", "claude-p", "muse", "codex", "opencode-zen", "opencode-go"],
+            ["droid", "opencode-go-claude", "agy", "claude-p", "muse", "codex", "opencode-go", "opencode-zen"],
         )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
         self.assertTrue(catalog["backends"]["droid"]["enabled"])

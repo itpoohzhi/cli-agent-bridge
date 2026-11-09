@@ -31,7 +31,7 @@ DROID_MODELS = {  # model_id -> (вендор, default_effort, efforts)
 PRIMARY = {
     **{mid: "droid" for mid in DROID_MODELS},
     "claude-opus-5-5": "claude-p",
-    "claude-haiku-5-5": "claude-p",
+    "claude-haiku-5-5": "opencode-go-claude",
     "gemini-4-argon": "agy",
     "gpt-6.1-terra": "codex",
 }
@@ -53,7 +53,7 @@ SUFFIX_ALIASES = {  # алиас -> (базовая модель, бэкенд, 
         f"claude-opus-5-5-{e}": ("claude-opus-5-5", "claude-p", e)
         for e in ("medium", "high")
     },
-    "claude-haiku-5-5-low": ("claude-haiku-5-5", "claude-p", "low"),
+    "claude-haiku-5-5-low": ("claude-haiku-5-5", "opencode-go-claude", "low"),
 }
 
 
@@ -94,7 +94,7 @@ def test_droid_manifest_registers_three_subscription_models() -> None:
 def test_provider_priorities() -> None:
     manifests = load_manifests(PROVIDERS, ADAPTER_KINDS).manifests
     expected = {"droid": 10, "claude-p": 20, "agy": 20, "muse": 20, "codex": 30}
-    expected.update({"opencode-go": 40, "opencode-zen": 50})
+    expected.update({"opencode-go": 40, "opencode-go-claude": 15, "opencode-zen": 50})
     assert {m.provider_id: m.priority for m in manifests} == expected
 
 

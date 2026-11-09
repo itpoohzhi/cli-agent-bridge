@@ -36,7 +36,7 @@ BASE_MODELS = (
     ("muse-wonder-full-1.0", "muse", _ALL, "high"),
     ("gpt-6.1-terra", "codex", _LMH, "high"),
     ("claude-opus-5-5", "claude-p", ("high",), "high"),
-    ("claude-haiku-5-5", "claude-p", ("high",), "high"),
+    ("claude-haiku-5-5", "opencode-go-claude", ("high",), "high"),
     ("gemini-4-argon", "agy", _LMH, "high"),
     ("deepseek-v4.1-flash", "opencode-go", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),

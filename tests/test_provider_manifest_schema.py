@@ -92,6 +92,7 @@ def test_shipped_manifests_all_valid() -> None:
         "droid",
         "muse",
         "opencode-go",
+        "opencode-go-claude",
         "opencode-zen",
     }
 

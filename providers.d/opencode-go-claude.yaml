@@ -1,0 +1,47 @@
+# Провайдер opencode-go-claude: claude-haiku-5-5 напрямую из подписки OpenCode Go через геороутер :10830/go/v1.
+# Выделенный backend не трогает default_body_extra (thinking disabled) провайдера deepseek-v4.1-flash.
+manifest_version: 1
+provider_id: opencode-go-claude
+kind: passthrough
+enabled: true
+required: false
+priority: 15
+owned_by: opencode-go-claude
+transport:
+  bridge: {base_url: 'http://127.0.0.1:10830/go/v1'}
+  direct:
+    type: http
+    http:
+      base_url: http://127.0.0.1:10830/go/v1
+      path: /chat/completions
+      api_key_ref:
+        file_from_json: {path: ~/.config/opencode/opencode.json, key: provider.opencode-go.options.apiKey, unwrap_file_ref: true}
+        fallback_file: ~/.config/opencode/opencode-go.key
+      headers_from_json:
+        path: ~/.config/opencode/opencode.json
+        key: provider.opencode-go.options.headers
+        required: []
+        pick: [User-Agent]
+        forbid_ua_prefix: [python]
+      per_request_headers: {x-opencode-session: '{uuid4}'}
+      stream: false
+      response: {field: 'choices[0].message.content'}
+allow_base_url:
+- {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /go/v1}
+limits: {max_concurrent: 1, quota_group: opencode-go-claude, timeout_s: 180}
+discovery:
+  method: static
+  static: [claude-haiku-5-5]
+family_rule: {type: owned_by, owned_by: Anthropic}
+models_overrides:
+  claude-haiku-5-5:
+    name: Claude Haiku 5.5 (OpenCode Go georouter)
+    efforts: [low, medium, high]
+    default_effort: low
+    context_window: 1000000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+params:
+  effort_field: none
+  adaptive_whitelist: [thinking]
