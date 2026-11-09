@@ -1,7 +1,7 @@
 """Чистая классификация причин сбоя для карантина моделей."""
 
 from enum import Enum, auto
-from typing import Any
+import re
 
 
 class FailureKind(Enum):
@@ -29,14 +29,27 @@ INFRASTRUCTURE_TOKENS = (
     "econnreset",
 )
 
-CLIENT_GONE_TOKENS = ("client_gone", "client_gone_502")
-SHUTDOWN_TOKENS = ("sigterm", "drain")
-AUTH_TOKENS = ("http_401", "unauthorized", "unauthenticated")
+CLIENT_GONE_TOKENS = (
+    "client_gone",
+    "client_gone_502",
+    "client disconnected",
+    "client_disconnected",
+)
+SHUTDOWN_TOKENS = (
+    "sigterm",
+    "sigterm drain",
+    "drain_timeout",
+    "graceful_shutdown",
+)
+AUTH_TOKENS = ("http_401", "unauthenticated", "unauthorized")
 
 
-def _contains_token(value: str, tokens: tuple[Any, ...]) -> bool:
+def _contains_token(value: str, tokens: tuple[str, ...]) -> bool:
     """Проверить наличие хотя бы одного маркера в нормализованной строке."""
-    return any(token in value for token in tokens)
+    return any(
+        re.search(r"\b" + re.escape(token) + r"\b", value) is not None
+        for token in tokens
+    )
 
 
 def classify_failure(
@@ -64,6 +77,16 @@ def classify_failure(
     return FailureKind.MODEL_START_FAILURE
 
 
+NON_PENALIZING_KINDS = frozenset(
+    {
+        FailureKind.INFRASTRUCTURE_FAILURE,
+        FailureKind.CLIENT_GONE,
+        FailureKind.INTENTIONAL_SHUTDOWN,
+        FailureKind.AUTH_FAILURE,
+    }
+)
+
+
 def is_penalizing_failure(kind: FailureKind) -> bool:
-    """Вернуть признак сбоя, за который модель следует штрафовать."""
-    return kind == FailureKind.MODEL_START_FAILURE
+    """Вернуть True, если тип сбоя штрафует модель (fail-closed для новых типов)."""
+    return kind not in NON_PENALIZING_KINDS

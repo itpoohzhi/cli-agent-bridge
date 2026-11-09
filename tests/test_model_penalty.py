@@ -549,6 +549,42 @@ def test_strict_classification_enabled_filters_client_gone_and_drain(
     assert entry["fails"] == 0
 
 
+def test_strict_classification_negative_cases(tmp_path, clock, monkeypatch):
+    monkeypatch.setenv("BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED", "1")
+    tracker = _make_tracker(tmp_path / "penalties.json")
+
+    for index, reason in enumerate(
+        (
+            "drainage_problem",
+            "some_unauthorized_token_in_prompt",
+            "unknown_model_crash",
+        )
+    ):
+        model_id = f"test-model-{index}"
+        penalized, fails, _ = tracker.record_start_failure(model_id, reason)
+        assert penalized is False
+        assert fails == 1
+
+
+def test_strict_classification_dynamic_toggle(tmp_path, clock, monkeypatch):
+    tracker = _make_tracker(tmp_path / "penalties.json")
+
+    monkeypatch.setenv("BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED", "1")
+    penalized, fails, _ = tracker.record_start_failure("test-model", "client_gone_502")
+    assert penalized is False
+    assert fails == 0
+
+    monkeypatch.setenv("BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED", "0")
+    penalized, fails, _ = tracker.record_start_failure("test-model", "client_gone_502")
+    assert penalized is False
+    assert fails == 1
+
+    monkeypatch.setenv("BRIDGE_QUARANTINE_STRICT_CLASSIFY_ENABLED", "1")
+    penalized, fails, _ = tracker.record_start_failure("test-model", "client_gone_502")
+    assert penalized is False
+    assert fails == 1
+
+
 def test_fsm_module_loc():
     lines = Path("core/model_penalty_fsm.py").read_text(encoding="utf-8").splitlines()
 
