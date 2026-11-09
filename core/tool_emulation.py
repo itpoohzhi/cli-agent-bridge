@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import re
 import unicodedata
 import uuid
@@ -18,6 +19,8 @@ from dataclasses import replace
 from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
+
+logger = logging.getLogger(__name__)
 
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
@@ -261,6 +264,7 @@ def _strip_code_fence(text: str) -> str:
 
 
 _MAX_EXTRA_BRACES = 16  # предел лишних `}` после полного объекта вызова
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
 
 def _recover_trailing_braces(text: str) -> dict | None:
@@ -281,14 +285,23 @@ def _recover_trailing_braces(text: str) -> dict | None:
 
 
 def _loads_tolerant(text: str) -> Any:
-    """json.loads, допускающий лишние `}` после полного объекта (модель закрыла скобок больше нужного).
+    """json.loads, допускающий лишние `}` после полного объекта (модель закрыла скобок больше нужного),
+    а также висячие запятые перед закрывающими скобками.
 
     Слишком глубокая вложенность (RecursionError) — невалидный JSON (ValueError).
     """
     try:
         return json.loads(text)
     except (ValueError, RecursionError) as exc:
-        recovered = _recover_trailing_braces(text)
+        cleaned = _TRAILING_COMMA_RE.sub(r"\1", text)
+        if cleaned != text:
+            try:
+                return json.loads(cleaned)
+            except (ValueError, RecursionError):
+                pass
+        recovered = _recover_trailing_braces(cleaned) if cleaned != text else None
+        if recovered is None:
+            recovered = _recover_trailing_braces(text)
         if recovered is None:
             if isinstance(exc, RecursionError):
                 raise ValueError("JSON is nested too deeply") from exc
@@ -312,6 +325,12 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     if "name" not in obj and isinstance(obj.get("function"), dict):
         # OpenAI tool_calls: {"id", "type", "function": {"name", "arguments"}}
         obj = obj["function"]
+    if "name" not in obj:
+        for alt_key in ("tool", "action", "tool_name"):
+            val = obj.get(alt_key)
+            if isinstance(val, str) and val.strip():
+                obj["name"] = val
+                break
     name = obj.get("name")
     if not isinstance(name, str) or not name.strip():
         return None
@@ -1193,9 +1212,15 @@ class ToolCallParser:
                     inner = "".join(self._parts)
                     self._parts.clear()
                     self._active = None
+                    if not inner.strip():
+                        self._buf = text[index + len(close_tag) :]
+                        return
                     calls = self._parse_blocks(inner)
                     if calls is None:
                         if self.strict_live:
+                            logger.warning(
+                                "malformed tool_call block raw=%r", inner[:300]
+                            )
                             raise LiveParserError("malformed tool_call block")
                         self._emit(open_tag + inner + close_tag)
                     else:
