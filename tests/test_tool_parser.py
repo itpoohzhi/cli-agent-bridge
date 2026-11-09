@@ -1447,7 +1447,9 @@ class TestOptimizationContracts(unittest.TestCase):
         response.readline.side_effect = OSError("upstream disconnected after headers")
         connection = Mock()
         connection.getresponse.return_value = response
-        sink = SimpleNamespace(start=Mock(), write=Mock(), client_gone=Mock(return_value=False))
+        sink = SimpleNamespace(
+            start=Mock(), write=Mock(), client_gone=Mock(return_value=False)
+        )
         with patch.object(adapter, "_open", return_value=connection) as opened:
             adapter.handle(
                 path="/v1/chat/completions",
@@ -1534,6 +1536,79 @@ class TestPromptRendering(unittest.TestCase):
     def test_tool_choice_none_omits_section(self):
         prompt = _messages_to_prompt([{"role": "user", "content": "hi"}], TOOLS, "none")
         self.assertNotIn("# Tool calling protocol", prompt)
+
+
+class TestToolCallParserTolerantRecovery(unittest.TestCase):
+    """Регрессионные тесты толерантности разбора tool_call (REQ-001, REQ-002, AD-001)."""
+
+    def test_trailing_comma_in_arguments_parsed(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        raw = (
+            TOOL_CALL_OPEN
+            + '{"name": "bash", "arguments": {"cmd": "ls",}}'
+            + TOOL_CALL_CLOSE
+        )
+        p.feed(raw)
+        p.finish()
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["name"], "bash")
+        self.assertEqual(c.calls[0]["arguments"], {"cmd": "ls"})
+
+    def test_trailing_comma_in_array_arguments_parsed(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        raw = (
+            TOOL_CALL_OPEN
+            + '{"name": "grep", "arguments": {"files": ["a.py", "b.py",],}}'
+            + TOOL_CALL_CLOSE
+        )
+        p.feed(raw)
+        p.finish()
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["name"], "grep")
+        self.assertEqual(c.calls[0]["arguments"], {"files": ["a.py", "b.py"]})
+
+    def test_key_synonyms_normalized_to_name(self):
+        cases = [
+            ('{"tool": "bash", "arguments": {"cmd": "pwd"}}', "bash"),
+            ('{"action": "read_file", "arguments": {"path": "a.txt"}}', "read_file"),
+            ('{"tool_name": "glob", "arguments": {"pattern": "*"}}', "glob"),
+        ]
+        for payload, expected_name in cases:
+            c = Collector()
+            p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+            p.feed(TOOL_CALL_OPEN + payload + TOOL_CALL_CLOSE)
+            p.finish()
+            self.assertEqual(len(c.calls), 1, f"failed for payload: {payload}")
+            self.assertEqual(c.calls[0]["name"], expected_name)
+
+    def test_empty_tool_call_block_ignored_no_error(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed("Pre " + TOOL_CALL_OPEN + "   \n\t  " + TOOL_CALL_CLOSE + "Post")
+        p.finish()
+        self.assertEqual(c.calls, [])
+        self.assertEqual("".join(c.content), "Pre Post")
+
+    def test_empty_tool_call_block_followed_by_valid_call(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed(TOOL_CALL_OPEN + "  " + TOOL_CALL_CLOSE)
+        p.feed(TOOL_CALL_OPEN + '{"name": "bash", "arguments": {}}' + TOOL_CALL_CLOSE)
+        p.finish()
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["name"], "bash")
+
+    def test_malformed_tool_call_logs_warning_before_raise(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        with self.assertLogs("core.tool_emulation", level="WARNING") as cm:
+            with self.assertRaises(LiveParserError):
+                p.feed(TOOL_CALL_OPEN + '{"broken": json here' + TOOL_CALL_CLOSE)
+        self.assertTrue(
+            any("malformed tool_call block raw=" in msg for msg in cm.output)
+        )
 
 
 if __name__ == "__main__":
