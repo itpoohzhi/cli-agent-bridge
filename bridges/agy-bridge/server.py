@@ -1597,7 +1597,6 @@ def _prepare_agy_home() -> Path:
 
 
 ALLOWED_MODELS_ENV = "AGY_ALLOWED_MODELS_FILE"
-_EFFORT_SUFFIXES = ("-high", "-medium", "-low")
 
 
 def _allowed_models_file() -> str:
@@ -1625,18 +1624,14 @@ def _read_allowed_models() -> frozenset[str]:
 
 
 def _model_in_allowlist(model_id: str, allowed: frozenset[str]) -> bool:
-    """Правило каталога: id обслуживается, если он есть в allowlist дословно ИЛИ его
-    базовая форма (id без суффикса `-high`/`-medium`/`-low`) есть в allowlist.
+    """Каталог отдаёт только id, которые лончер примет дословно.
 
-    Лончер сверяет id только дословно; базовая форма нужна, чтобы каталог не терял
-    модель, чьи effort-варианты разрешены, а сам id в файле не перечислен.
+    Лончер сверяет запрошенный id с allowlist дословно (иначе rc=64
+    «generation guard» -> HTTP 502). Расширять каталог по базовой форме
+    (`-high`/`-medium`/`-low`) нельзя: такой id лончер отклонит, и вызывающая
+    сторона снова получит ответ другой модели при формальном успехе.
     """
-    if model_id in allowed:
-        return True
-    return any(
-        model_id.endswith(suffix) and model_id[: -len(suffix)] in allowed
-        for suffix in _EFFORT_SUFFIXES
-    )
+    return model_id in allowed
 
 
 def _catalog_model_order() -> list[str]:

@@ -151,13 +151,18 @@ class CatalogGuardTests(unittest.TestCase):
                     env = self.srv._launch_env()
         self.assertEqual(env[_ENV], self.srv._allowed_models_file())
 
-    def test_matching_rule_exact_or_base_form(self) -> None:
+    def test_matching_rule_is_literal(self) -> None:
+        """Правило каталога — дословное совпадение с allowlist лончера.
+
+        Базовая форма НЕ расширяет каталог: лончер сверяет id дословно, поэтому
+        `gemini-4-argon-high` недопустим, если в файле есть только `gemini-4-argon`.
+        """
         allowed = frozenset({"gemini-4-argon", "gemini-3.8-flash-low"})
         match = self.srv._model_in_allowlist
         self.assertTrue(match("gemini-4-argon", allowed))
-        self.assertTrue(match("gemini-4-argon-high", allowed))
-        self.assertTrue(match("gemini-4-argon-medium", allowed))
         self.assertTrue(match("gemini-3.8-flash-low", allowed))
+        self.assertFalse(match("gemini-4-argon-high", allowed))
+        self.assertFalse(match("gemini-4-argon-medium", allowed))
         self.assertFalse(match("gemini-3.8-flash", allowed))
         self.assertFalse(match("gemini-3.7-flash", allowed))
         self.assertFalse(match("gemini-3.1-pro", allowed))
