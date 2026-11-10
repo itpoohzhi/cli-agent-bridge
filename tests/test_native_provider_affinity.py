@@ -103,3 +103,26 @@ def test_runtime_upstream_model_translation(droid_model, expected_canonical):
     target_model = resolve_target_model(entry, droid_model)
     assert target_model == expected_canonical
     assert resolve_target_model({"id": expected_canonical}, expected_canonical) == expected_canonical
+
+
+def test_canonical_and_droid_effort_aliases():
+    """Проверяет, что canonical effort-алиасы ведут на native backend, а droid-алиасы фиксируют effort."""
+    fleet = _load_fleet()
+    aliases = fleet.get("aliases", {})
+    # Canonical aliases must route to native backends
+    assert aliases["gpt-6.1-sol-low"]["backend"] == "codex"
+    assert aliases["gpt-6.1-sol-medium"]["backend"] == "codex"
+    assert aliases["gpt-6.1-sol-high"]["backend"] == "codex"
+    assert aliases["gemini-3.8-flash-low"]["backend"] == "agy"
+    assert aliases["gemini-3.8-flash-medium"]["backend"] == "agy"
+    assert aliases["gemini-3.8-flash-high"]["backend"] == "agy"
+    assert aliases["claude-sonnet-5-5-medium"]["backend"] == "claude-p"
+    assert aliases["claude-sonnet-5-5-high"]["backend"] == "claude-p"
+
+    # Droid aliases must have backend=droid and matching effort
+    for alias_name, spec in aliases.items():
+        if alias_name.startswith("gemini-3.8-flash-droid-") or alias_name.startswith("gpt-6.1-sol-droid-") or alias_name.startswith("claude-sonnet-5-5-droid-"):
+            suffix = alias_name.rsplit("-", 1)[1]
+            assert isinstance(spec, dict), f"{alias_name} must be a dictionary spec"
+            assert spec["backend"] == "droid"
+            assert spec["effort"] == suffix

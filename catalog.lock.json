@@ -1,11 +1,11 @@
 {
-  "compiled_at": "2026-11-10T05:59:14+0300",
+  "compiled_at": "2026-11-10T06:18:43+0300",
   "compiler_version": 1,
-  "fleet_sha256": "e863cc2394fe85b9bebaa70145af427ae9649f7a11dece23ea96aaa0b8199e3d",
+  "fleet_sha256": "fefc23bacad8545c5e80966e1a0eb9b135da8dfd07f076f1c1dca905fc10a966",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "1a23cd3c6c5aaac74f405540e1e669ccb31222ab18939ef663958719a45ed0bb",
+      "_fleet.yaml": "d000d10c6c635701f58c68c8e4a329e67eb0b0c73edc26683681ba7e6e099aaa",
       "agy.yaml": "c324ec9ead817570ef5e3129d715f6432503dc45530fbed62ac2b4f698086a50",
       "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
       "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
@@ -15,7 +15,7 @@
       "opencode-go.yaml": "c99498b308ad37d74ece1f31d090bc1d7f4d1ca6a4be5af0f43da36194347cea",
       "opencode-zen.yaml": "dcbb5550283b9ffc3b6909e4ce03ee33ce88404490fc3860f8d34b8057a9d900"
     },
-    "manifests_sha256": "b2139d47958762e52cf0e1e45f0da913eba5bff79f4e93ecc174f6f887514880"
+    "manifests_sha256": "05369d19684ae6fb914e16c7acf82053639f7e0bd7fd70cea3ae9f28e917bbd3"
   },
   "models": {
     "beam-free": {

@@ -3,25 +3,25 @@
 schema_version: 3
 catalogue: droid-bridge-fleet
 aliases:
-  gemini-3.8-flash-droid-low: gemini-3.8-flash-droid
-  gemini-3.8-flash-droid-medium: gemini-3.8-flash-droid
-  gemini-3.8-flash-droid-high: gemini-3.8-flash-droid
-  gpt-6.1-sol-droid-low: gpt-6.1-sol-droid
-  gpt-6.1-sol-droid-medium: gpt-6.1-sol-droid
-  gpt-6.1-sol-droid-high: gpt-6.1-sol-droid
-  claude-sonnet-5-5-droid-low: claude-sonnet-5-5-droid
-  claude-sonnet-5-5-droid-medium: claude-sonnet-5-5-droid
-  claude-sonnet-5-5-droid-high: claude-sonnet-5-5-droid
-  claude-sonnet-5-5-droid-max: claude-sonnet-5-5-droid
-  gpt-6.1-sol-low: {backend_id: gpt-6.1-sol, backend: droid, effort: low}
-  gpt-6.1-sol-medium: {backend_id: gpt-6.1-sol, backend: droid, effort: medium}
-  gpt-6.1-sol-high: {backend_id: gpt-6.1-sol, backend: droid, effort: high}
+  gemini-3.8-flash-droid-low: {backend_id: gemini-3.8-flash-droid, backend: droid, effort: low}
+  gemini-3.8-flash-droid-medium: {backend_id: gemini-3.8-flash-droid, backend: droid, effort: medium}
+  gemini-3.8-flash-droid-high: {backend_id: gemini-3.8-flash-droid, backend: droid, effort: high}
+  gpt-6.1-sol-droid-low: {backend_id: gpt-6.1-sol-droid, backend: droid, effort: low}
+  gpt-6.1-sol-droid-medium: {backend_id: gpt-6.1-sol-droid, backend: droid, effort: medium}
+  gpt-6.1-sol-droid-high: {backend_id: gpt-6.1-sol-droid, backend: droid, effort: high}
+  claude-sonnet-5-5-droid-low: {backend_id: claude-sonnet-5-5-droid, backend: droid, effort: low}
+  claude-sonnet-5-5-droid-medium: {backend_id: claude-sonnet-5-5-droid, backend: droid, effort: medium}
+  claude-sonnet-5-5-droid-high: {backend_id: claude-sonnet-5-5-droid, backend: droid, effort: high}
+  claude-sonnet-5-5-droid-max: {backend_id: claude-sonnet-5-5-droid, backend: droid, effort: max}
+  gpt-6.1-sol-low: {backend_id: gpt-6.1-sol, backend: codex, effort: low}
+  gpt-6.1-sol-medium: {backend_id: gpt-6.1-sol, backend: codex, effort: medium}
+  gpt-6.1-sol-high: {backend_id: gpt-6.1-sol, backend: codex, effort: high}
   gemini-4-argon-high: {backend_id: gemini-4-argon, backend: agy, effort: high}
-  gemini-3.8-flash-low: {backend_id: gemini-3.8-flash, backend: droid, effort: low}
-  gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash, backend: droid, effort: medium}
-  gemini-3.8-flash-high: {backend_id: gemini-3.8-flash, backend: droid, effort: high}
-  claude-sonnet-5-5-medium: {backend_id: claude-sonnet-5-5, backend: droid, effort: medium}
-  claude-sonnet-5-5-high: {backend_id: claude-sonnet-5-5, backend: droid, effort: high}
+  gemini-3.8-flash-low: {backend_id: gemini-3.8-flash, backend: agy, effort: low}
+  gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash, backend: agy, effort: medium}
+  gemini-3.8-flash-high: {backend_id: gemini-3.8-flash, backend: agy, effort: high}
+  claude-sonnet-5-5-medium: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: medium}
+  claude-sonnet-5-5-high: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: high}
   claude-opus-5-5-medium: {backend_id: claude-opus-5-5, backend: claude-p, effort: medium}
   claude-opus-5-5-high: {backend_id: claude-opus-5-5, backend: claude-p, effort: high}
   claude-haiku-5-5-low: {backend_id: claude-haiku-5-5, backend: opencode-go-claude, effort: low}
