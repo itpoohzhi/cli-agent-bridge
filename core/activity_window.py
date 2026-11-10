@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, final
+from typing import Callable, final  # noqa: UP035
 
 from core.route_health_policy import advance_sliding_deadline
 

@@ -1,24 +1,14 @@
+# pyright: reportAny=false, reportExplicitAny=false
+# ruff: noqa: I001
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any, Final
 
-from core.route_health_policy import FailureCategory, classify_provider_failure
+from core.route_health_policy import FailureCategory, RetryBudgetConfig, classify_provider_failure, compute_attempt_decision  # fmt: skip  # noqa: E501,I001
 
-_TRANSIENT_PHRASES: tuple[str, ...] = (
-    "stream was interrupted",
-    "please continue the task you were working on",
-    "rst_stream",
-    "http/2 stream",
-    "connection reset",
-    "eof occurred in violation of protocol",
-    "broken pipe",
-    "incomplete chunked read",
-    "peer closed connection",
-    "server disconnected",
-    "currently unavailable",
-)
+_TRANSIENT_PHRASES: tuple[str, ...] = ("stream was interrupted", "please continue the task you were working on", "rst_stream", "http/2 stream", "connection reset", "eof occurred in violation of protocol", "broken pipe", "incomplete chunked read", "peer closed connection", "server disconnected", "currently unavailable")  # fmt: skip  # noqa: E501
 
 TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
@@ -205,8 +195,14 @@ def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     """Оценить допустимость повтора стрима."""
     f = _RetryFacts(**kw)
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
+    adm = compute_attempt_decision(
+        RetryBudgetConfig(max_attempts=max(1, f.max_attempts)),
+        max(0, f.attempt - 1),
+        0.0,
+        None if trans else classify_provider_failure(0, f.error_text).category,
+    )
     quiet = trans and not f.had_tool_side_effects
-    can = all((quiet, not f.delivered, f.attempt < f.max_attempts))
+    can = all((quiet, not f.delivered, f.attempt < f.max_attempts, adm.allow_retry))
     return RetryDecision(
         can, quiet, "transient_pre_delivery_retry" if can else "retry_blocked"
     )

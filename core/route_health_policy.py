@@ -9,23 +9,23 @@ from math import floor, isfinite
 from typing import Final
 
 
-class EffortLevel(str, Enum):
+class EffortLevel(str, Enum):  # noqa: UP042
     LOW = "low"; MEDIUM = "medium"; HIGH = "high"  # fmt: skip  # noqa: E702
 
 
-class FailureCategory(str, Enum):
+class FailureCategory(str, Enum):  # noqa: UP042
     AUTH_REFRESH_EXHAUSTED = "AUTH_REFRESH_EXHAUSTED"; LIMIT_BLOCKED = "LIMIT_BLOCKED"  # fmt: skip  # noqa: E501,E702
     UPSTREAM_TLS_STALL = "UPSTREAM_TLS_STALL"; CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"  # fmt: skip  # noqa: E501,E702
     FATAL_REQUEST_ERROR = "FATAL_REQUEST_ERROR"
 
 
-class HealthReason(str, Enum):
+class HealthReason(str, Enum):  # noqa: UP042
     READY = "READY"; LIMIT_BLOCKED = "LIMIT_BLOCKED"  # fmt: skip  # noqa: E702
     STALE_HEALTH_PROBE = "STALE_HEALTH_PROBE"
     ENV_DRIFT_DETECTED = "ENV_DRIFT_DETECTED"
 
 
-class RetryReason(str, Enum):
+class RetryReason(str, Enum):  # noqa: UP042
     BUDGET_OK = "BUDGET_OK"; BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"  # fmt: skip  # noqa: E702
     NON_RETRYABLE_CATEGORY = "NON_RETRYABLE_CATEGORY"
     MAX_ATTEMPTS_REACHED = "MAX_ATTEMPTS_REACHED"
@@ -36,7 +36,8 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+\S+", r"(?i)\b(?:refresh_token|access_token|client_secret|api_key|password|secret|token|cookie)\s*[:=]\s*\S+", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+[^\s,;\"'}]+", r"(?i)[\"']?\bcookie\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\r\n,}]+)", r"(?i)[\"']?\b(?:refresh_token|access_token|client_secret|api_key|password|secret|token)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;&\"'}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,8 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
 
 def redact_diagnostic_text(raw_text: str) -> str:
     safe = raw_text
-    for pattern in _SECRET_PATTERNS:
-        safe = re.sub(pattern, REDACTED_TOKEN, safe)
+    for regex in _SECRET_REGEXES:
+        safe = regex.sub(REDACTED_TOKEN, safe)
     safe = re.sub(r"[\x00-\x1f\x7f]+", " ", safe)
     return safe[:MAX_DIAGNOSTIC_CHARS]
 
@@ -85,10 +86,10 @@ class FailureClassification:
 
 
 def _is_auth_failure(status_code: int, reason: str) -> bool:
-    terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key")  # fmt: skip  # noqa: E501
+    terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
     if any(term in reason for term in terms):
         return True
-    if status_code == 401:
+    if status_code == 401 or bool(re.search(r"\b401\b", reason)):
         return True
     auth_terms = ("oauth", "refresh", "unauthenticated")
     return status_code == 403 and any(term in reason for term in auth_terms)
@@ -124,9 +125,9 @@ def evaluate_route_health(model_id: str, blocked_models: tuple[str, ...], probe_
     if max_stale_age_s < 0:
         raise ValueError("max_stale_age_s must be non-negative")
     canonical = normalize_model_route(model_id).canonical_model
-    blocked = tuple(normalize_model_route(item).canonical_model for item in blocked_models)  # fmt: skip  # noqa: E501
+    blocked = {normalize_model_route(item).canonical_model.lower() for item in blocked_models}  # fmt: skip  # noqa: E501
     drift = tuple(sorted(env_drift_keys))
-    if canonical in blocked:
+    if canonical.lower() in blocked:
         reason = HealthReason.LIMIT_BLOCKED
     elif probe_age_s > max_stale_age_s or probe_age_s < 0:
         reason = HealthReason.STALE_HEALTH_PROBE
@@ -168,7 +169,7 @@ def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
     _require_finite(config.reserve_s, "reserve_s")
     _require_finite(config.min_attempt_budget_s, "min_attempt_budget_s")
     _require_finite(config.idle_timeout_s, "idle_timeout_s")
-    invalid = (config.total_budget_s <= 0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, config.min_attempt_budget_s <= 0, type(config.max_attempts) is not int or config.max_attempts < 1, config.idle_timeout_s <= 0)  # fmt: skip  # noqa: E501
+    invalid = (not 0 < config.total_budget_s <= 86400.0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, not 0.001 <= config.min_attempt_budget_s <= 86400.0, type(config.max_attempts) is not int or config.max_attempts < 1, not 0 < config.idle_timeout_s <= 86400.0)  # fmt: skip  # noqa: E501
     if any(invalid):
         raise ValueError("invalid retry budget configuration")
     return config
@@ -184,9 +185,9 @@ def compute_attempt_decision(config: RetryBudgetConfig, attempt_index: int, elap
         return AttemptDecision(False, 0.0, RetryReason.MAX_ATTEMPTS_REACHED)
     usable_s = config.total_budget_s - config.reserve_s - elapsed_s
     per_attempt_s = usable_s / (config.max_attempts - attempt_index)
-    if per_attempt_s < config.min_attempt_budget_s:
-        return AttemptDecision(False, 0.0, RetryReason.BUDGET_EXHAUSTED)
     budget_s = floor(per_attempt_s * 1000.0) / 1000.0
+    if budget_s < config.min_attempt_budget_s or budget_s <= 0.0:
+        return AttemptDecision(False, 0.0, RetryReason.BUDGET_EXHAUSTED)
     return AttemptDecision(True, budget_s, RetryReason.BUDGET_OK)
 
 
@@ -197,7 +198,11 @@ def advance_sliding_deadline(now_s: float, start_s: float, idle_timeout_s: float
     _require_finite(safety_cap_s, "safety_cap_s")
     if idle_timeout_s <= 0 or safety_cap_s <= 0 or now_s < start_s:
         raise ValueError("invalid deadline window parameters")
-    return min(now_s + idle_timeout_s, start_s + safety_cap_s)
+    candidate = now_s + idle_timeout_s
+    hard_limit = start_s + safety_cap_s
+    _require_finite(candidate, "candidate")
+    _require_finite(hard_limit, "hard_limit")
+    return min(candidate, hard_limit)
 
 
 @dataclass(frozen=True)

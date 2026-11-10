@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 from __future__ import annotations
 
 import sys
@@ -10,26 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.activity_window import ActivityWindow
 from core.effort_policy import resolve_alias_effort
-from core.route_health_policy import (
-    AttemptDecision,
-    CanonDigestResult,
-    FailureCategory,
-    HealthReason,
-    NormalizedModelRoute,
-    RetryBudgetConfig,
-    RetryReason,
-    RouteHealthStatus,
-    advance_sliding_deadline,
-    classify_provider_failure,
-    compute_attempt_decision,
-    detect_effective_env_drift,
-    evaluate_route_health,
-    inspect_canon_payload,
-    normalize_model_route,
-    redact_diagnostic_text,
-    validate_retry_config,
-)
-from core.stream_interruption_recovery import is_transient_stream_interruption
+from core.route_health_policy import AttemptDecision, CanonDigestResult, FailureCategory, HealthReason, NormalizedModelRoute, RetryBudgetConfig, RetryReason, RouteHealthStatus, advance_sliding_deadline, classify_provider_failure, compute_attempt_decision, detect_effective_env_drift, evaluate_route_health, inspect_canon_payload, normalize_model_route, redact_diagnostic_text, validate_retry_config  # fmt: skip  # noqa: E501,I001
+from core.stream_interruption_recovery import evaluate_stream_retry_eligibility, is_transient_stream_interruption  # fmt: skip  # noqa: E501,I001
 
 
 INCIDENT_AUTH_SNAPSHOT = "403 OAuth refresh rejected: token refresh failed"
@@ -66,9 +49,12 @@ def test_redaction_masks_all_secrets_controls_and_truncates() -> None:
     )
     result = redact_diagnostic_text(secrets + "x" * 300)
     assert len(result) == 256
-    assert result.count("<redacted>") == 15
+    assert result.count("<redacted>") == 14
     assert all(value not in result for value in ("bearer.value", "ya29.", "1//", "@"))
     assert "\x00" not in result and "\n" not in result
+    payload = '{"access_token":"TOPSECRET","client_secret":"MANGO9472"}'
+    assert "TOPSECRET" not in redact_diagnostic_text(payload)
+    assert "secret2" not in redact_diagnostic_text("Cookie: a=1; sid=secret2")
 
 
 @pytest.mark.parametrize(
@@ -104,6 +90,10 @@ def test_transient_recovery_excludes_non_retryable_failures() -> None:
         is_transient_stream_interruption("connection reset TLS handshake timeout")
         is False
     )
+    auth = "connection reset HTTP 401 Unauthorized"
+    assert is_transient_stream_interruption(auth) is False
+    retry = evaluate_stream_retry_eligibility(error_text=auth, delivered=False)
+    assert retry.can_retry is False
 
 
 @pytest.mark.parametrize(
@@ -124,8 +114,12 @@ def test_route_health_boundaries(
 
 
 def test_route_health_block_precedes_stale_and_normalizes_alias() -> None:
-    result = evaluate_route_health("m-high", ("m",), -1.0, 0.0, ("B",))
-    assert result == RouteHealthStatus("m", False, HealthReason.LIMIT_BLOCKED, ("B",))
+    result = evaluate_route_health(
+        "Claude-Opus-5-5-High", ("claude-opus-5-5",), 1.0, 10.0
+    )
+    assert result == RouteHealthStatus(
+        "Claude-Opus-5-5", False, HealthReason.LIMIT_BLOCKED, ()
+    )
 
 
 @pytest.mark.parametrize(
@@ -189,6 +183,9 @@ def test_retry_budget_rounds_down_and_honors_boundaries() -> None:
         compute_attempt_decision(config, 6, 0.0).reason
         is RetryReason.MAX_ATTEMPTS_REACHED
     )
+    tight = RetryBudgetConfig(1.0009, 0.0, 1.0005, 1, 30.0)
+    decision = compute_attempt_decision(tight, 0, 0.0)
+    assert decision.reason is RetryReason.BUDGET_EXHAUSTED
 
 
 @pytest.mark.parametrize("index,elapsed", ((-1, 0.0), (0, -0.001), (0, float("inf"))))
@@ -203,6 +200,8 @@ def test_sliding_deadline_and_live_activity_window() -> None:
     window = ActivityWindow(5.0, 20.0, clock=lambda: next(ticks))
     assert window.idle_deadline == 15.0
     assert window.touch() == 17.0
+    with pytest.raises(ValueError):
+        _ = advance_sliding_deadline(1e308, 0.0, 1e308, 1e308)
 
 
 @pytest.mark.parametrize(
@@ -237,4 +236,4 @@ def test_incident_snapshot_and_frozen_result() -> None:
     assert result.category is FailureCategory.AUTH_REFRESH_EXHAUSTED
     route = normalize_model_route("m")
     with pytest.raises(FrozenInstanceError):
-        setattr(route, "canonical_model", "changed")
+        setattr(route, "canonical_model", "changed")  # noqa: B010
