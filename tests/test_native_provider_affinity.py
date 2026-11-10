@@ -105,57 +105,75 @@ def test_runtime_upstream_model_translation(droid_model, expected_canonical):
     assert resolve_target_model({"id": expected_canonical}, expected_canonical) == expected_canonical
 
 
-def test_canonical_and_droid_effort_aliases():
-    """Проверяет, что canonical effort-алиасы ведут на native backend, а droid-алиасы фиксируют effort."""
+@pytest.mark.parametrize("expected_alias,expected_backend,expected_effort", [
+    ("gemini-3.8-flash-droid-low", "droid", "low"),
+    ("gemini-3.8-flash-droid-medium", "droid", "medium"),
+    ("gemini-3.8-flash-droid-high", "droid", "high"),
+    ("gpt-6.1-sol-droid-low", "droid", "low"),
+    ("gpt-6.1-sol-droid-medium", "droid", "medium"),
+    ("gpt-6.1-sol-droid-high", "droid", "high"),
+    ("claude-sonnet-5-5-droid-low", "droid", "low"),
+    ("claude-sonnet-5-5-droid-medium", "droid", "medium"),
+    ("claude-sonnet-5-5-droid-high", "droid", "high"),
+    ("claude-sonnet-5-5-droid-max", "droid", "max"),
+    ("gpt-6.1-sol-low", "codex", "low"),
+    ("gpt-6.1-sol-medium", "codex", "medium"),
+    ("gpt-6.1-sol-high", "codex", "high"),
+    ("gemini-3.8-flash-low", "agy", "low"),
+    ("gemini-3.8-flash-medium", "agy", "medium"),
+    ("gemini-3.8-flash-high", "agy", "high"),
+    ("claude-sonnet-5-5-low", "claude-p", "low"),
+    ("claude-sonnet-5-5-medium", "claude-p", "medium"),
+    ("claude-sonnet-5-5-high", "claude-p", "high"),
+])
+def test_explicit_effort_alias_contract(expected_alias, expected_backend, expected_effort):
+    """Каждый обязательный алиас строго проверяется на backend и effort."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
-    # Canonical aliases must route to native backends
-    assert aliases["gpt-6.1-sol-low"]["backend"] == "codex"
-    assert aliases["gpt-6.1-sol-medium"]["backend"] == "codex"
-    assert aliases["gpt-6.1-sol-high"]["backend"] == "codex"
-    assert aliases["gemini-3.8-flash-low"]["backend"] == "agy"
-    assert aliases["gemini-3.8-flash-medium"]["backend"] == "agy"
-    assert aliases["gemini-3.8-flash-high"]["backend"] == "agy"
-    assert aliases["claude-sonnet-5-5-low"]["backend"] == "claude-p"
-    assert aliases["claude-sonnet-5-5-medium"]["backend"] == "claude-p"
-    assert aliases["claude-sonnet-5-5-high"]["backend"] == "claude-p"
-
-    # Droid aliases must have backend=droid and matching effort
-    for alias_name, spec in aliases.items():
-        if alias_name.startswith("gemini-3.8-flash-droid-") or alias_name.startswith("gpt-6.1-sol-droid-") or alias_name.startswith("claude-sonnet-5-5-droid-"):
-            suffix = alias_name.rsplit("-", 1)[1]
-            assert isinstance(spec, dict), f"{alias_name} must be a dictionary spec"
-            assert spec["backend"] == "droid"
-            assert spec["effort"] == suffix
+    assert expected_alias in aliases, f"Missing required alias: {expected_alias}"
+    spec = aliases[expected_alias]
+    assert isinstance(spec, dict), f"{expected_alias} must be a dict spec"
+    assert spec["backend"] == expected_backend
+    assert spec["effort"] == expected_effort
 
 
-def test_make_plan_droid_uses_upstream_model():
-    """Проверяет, что runtime _make_plan прокидывает канонический upstream_model в Droid RPC."""
+@pytest.mark.parametrize("droid_model,expected_upstream", [
+    ("gemini-3.8-flash-droid", "gemini-3.8-flash"),
+    ("gpt-6.1-sol-droid", "gpt-6.1-sol"),
+    ("claude-sonnet-5-5-droid", "claude-sonnet-5-5"),
+])
+def test_make_plan_droid_uses_upstream_model(droid_model, expected_upstream):
+    """Проверяет, что runtime _make_plan прокидывает канонический upstream_model в Droid RPC settings."""
     from server import _make_plan, resolve_target_model
     fleet = _load_fleet()
-    entry = next((m for m in fleet.get("models", []) if m.get("id") == "gemini-3.8-flash-droid"), None)
+    entry = next((m for m in fleet.get("models", []) if m.get("id") == droid_model), None)
     assert entry is not None
-    target = resolve_target_model(entry, "gemini-3.8-flash-droid")
-    assert target == "gemini-3.8-flash"
+    target = resolve_target_model(entry, droid_model)
+    assert target == expected_upstream
     ctx = {
         "rpc": {"items": [], "system": ""},
-        "model": "gemini-3.8-flash-droid",
+        "model": droid_model,
         "target_model": target,
         "effort": "low",
         "autonomy": "off",
         "route": "nokey",
     }
     plan = _make_plan(ctx, None, "", "/tmp", [])
-    assert plan["settings"][0] == "gemini-3.8-flash"
+    assert plan["settings"][0] == expected_upstream
 
 
 def test_compiled_catalog_matches_manifests():
-    """Проверяет, что fleet.json строго соответствует компиляции манифестов providers.d."""
-    from core.fleet_compiler import compile_fleet
-    compiled_fleet = compile_fleet(
+    """Проверяет, что fleet.json и catalog.lock.json строго соответствуют компиляции манифестов providers.d."""
+    from core.fleet_compiler import compile_from_disk, default_kinds
+    res = compile_from_disk(
         providers_path=ROOT / "providers.d",
         fleet_meta_path=ROOT / "providers.d" / "_fleet.yaml",
+        kinds=default_kinds(),
     )
     fleet = _load_fleet()
-    assert len(compiled_fleet["models"]) == len(fleet["models"])
-    assert compiled_fleet["aliases"] == fleet["aliases"]
+    catalog = _load_catalog()
+    assert {m["id"] for m in res.fleet["models"]} == {m["id"] for m in fleet["models"]}
+    assert res.fleet["aliases"] == fleet["aliases"]
+    for mid, info in res.sidecar.get("models", {}).items():
+        assert mid in catalog["models"]
+        assert info["provider"] == catalog["models"][mid]["provider"]
