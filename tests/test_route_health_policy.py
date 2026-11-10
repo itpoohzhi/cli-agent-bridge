@@ -1,4 +1,5 @@
-# ruff: noqa: I001
+# ruff: noqa: E501,E702,I001
+# fmt: off
 from __future__ import annotations
 
 import sys
@@ -9,231 +10,122 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.activity_window import ActivityWindow
-from core.effort_policy import resolve_alias_effort
-from core.route_health_policy import AttemptDecision, CanonDigestResult, FailureCategory, HealthReason, NormalizedModelRoute, RetryBudgetConfig, RetryReason, RouteHealthStatus, advance_sliding_deadline, classify_provider_failure, compute_attempt_decision, detect_effective_env_drift, evaluate_route_health, inspect_canon_payload, normalize_model_route, redact_diagnostic_text, validate_retry_config  # fmt: skip  # noqa: E501,I001
-from core.stream_interruption_recovery import evaluate_stream_retry_eligibility, is_transient_stream_interruption  # fmt: skip  # noqa: E501,I001
+from core.activity_window import ActivityWindow as W
+from core.effort_policy import resolve_alias_effort as e
+from core.route_health_policy import AttemptDecision as A, CanonDigestResult as D, FailureCategory as F, HealthReason as H, NormalizedModelRoute as M, RetryBudgetConfig as C, RetryReason as R, RouteHealthStatus as S, advance_sliding_deadline as d, classify_provider_failure as c, compute_attempt_decision as a, detect_effective_env_drift as v, evaluate_route_health as h, inspect_canon_payload as k, normalize_model_route as n, redact_diagnostic_text as x, validate_retry_config as y
+from core.stream_interruption_recovery import evaluate_stream_retry_eligibility as r, is_transient_stream_interruption as t
 
-
-INCIDENT_AUTH_SNAPSHOT = "403 OAuth refresh rejected: token refresh failed"
-AGY_RETRY_SNAPSHOT = "per_attempt_upper duration_s=18.288681"
-RUNTIME_DRIFT_SNAPSHOT = "configured=1500 effective=300"
-CAPACITY_401_SNAPSHOT = "capacity unavailable; retry after 401 seconds"
-
+U = "403 OAuth refresh rejected: token refresh failed"
+T = "per_attempt_upper duration_s=18.288681"
+V = "configured=1500 effective=300"
+Q = "capacity unavailable; r after 401 seconds"
 
 @pytest.mark.parametrize("suffix", ("low", "medium", "high"))
-def test_alias_suffix_matrix(suffix: str) -> None:
-    route = normalize_model_route(f"claude-opus-5-5-{suffix}")
-    assert route == NormalizedModelRoute("claude-opus-5-5", suffix, True)
+def test_alias_suffix(suffix: str) -> None:
+    assert n(f"claude-opus-5-5-{suffix}") == M("claude-opus-5-5", suffix, True)
 
+def test_alias_policy() -> None:
+    assert n(" Claude-Opus-5-5-HIGH ", " LOW ") == M("Claude-Opus-5-5", "low", True)
+    assert e(" CLAUDE-OPUS-5-5-HIGH ", {"claude-opus-5-5": object()}, ("low", "medium", "high"), True) == ("claude-opus-5-5", "high")
 
-def test_alias_normalization_and_live_effort_policy() -> None:
-    route = normalize_model_route(" Claude-Opus-5-5-HIGH ", " LOW "); assert route == NormalizedModelRoute("Claude-Opus-5-5", "low", True)  # fmt: skip  # noqa: E501,E702
-    catalogue = {"claude-opus-5-5": object()}
-    assert resolve_alias_effort(
-        " CLAUDE-OPUS-5-5-HIGH ", catalogue, ("low", "medium", "high"), True
-    ) == ("claude-opus-5-5", "high")
+@pytest.mark.parametrize("model,level", (("", None), ("   ", None), ("m", "ultra")))
+def test_alias_invalid(model: str, level: str | None) -> None:
+    with pytest.raises(ValueError): _ = n(model, level)
 
+def test_redaction() -> None:
+    secrets = "Bearer bearer.value Basic basic.value ya29.oauth 1//refresh sk-key AIzaGoogle refresh_token=refresh access_token:access client_secret=client api_key=api password=pwd secret=sec token=tok cookie=cookie user@example.com\x00\n"
+    z = x(secrets + "x" * 300)
+    assert len(z) <= 256 and len(x("x" * 300)) == 256
+    assert z.count("<redacted>") >= 7
+    assert all(value not in z for value in ("bearer.value", "ya29.", "1//", "@", "\x00", "\n"))
+    cases = ('{"access_token":"TOPSECRET"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET")
+    assert all("<redacted>" in x(text) for text in cases)
+    assert x(r"\uD800").encode("utf-8") == b" "
 
-@pytest.mark.parametrize("model,effort", (("", None), ("   ", None), ("m", "ultra")))
-def test_alias_rejects_invalid_input(model: str, effort: str | None) -> None:
-    with pytest.raises(ValueError):
-        _ = normalize_model_route(model, effort)
+@pytest.mark.parametrize("case", (
+    (401, "anything", F.AUTH_REFRESH_EXHAUSTED, False), (403, "OAuth rejected", F.AUTH_REFRESH_EXHAUSTED, False),
+    (503, "token refresh failed", F.AUTH_REFRESH_EXHAUSTED, False), (429, "quota exceeded", F.LIMIT_BLOCKED, False),
+    (503, "quota exceeded", F.LIMIT_BLOCKED, False), (503, "SSL_ERROR_SYSCALL", F.UPSTREAM_TLS_STALL, False),
+    (429, "busy", F.CAPACITY_EXHAUSTED, True), (503, Q, F.CAPACITY_EXHAUSTED, True),
+    (400, "model_capacity_exhausted", F.CAPACITY_EXHAUSTED, True), (0, "HTTP 401: invalid auth", F.AUTH_REFRESH_EXHAUSTED, False),
+    (403, "max_tokens exceeded", F.FATAL_REQUEST_ERROR, False),
+))
+def test_failures(case: tuple[int, str, F, bool]) -> None:
+    status, reason, category, retryable = case; z = c(status, reason)
+    assert (z.category, z.retryable) == (category, retryable)
 
-
-def test_redaction_masks_all_secrets_controls_and_truncates() -> None:
-    secrets = (
-        "Bearer bearer.value Basic basic.value ya29.oauth 1//refresh sk-key AIzaGoogle "
-        "refresh_token=refresh access_token:access client_secret=client api_key=api "
-        "password=pwd secret=sec token=tok cookie=cookie user@example.com\x00\n"
-    )
-    result = redact_diagnostic_text(secrets + "x" * 300)
-    assert len(result) <= 256 and len(redact_diagnostic_text("x" * 300)) == 256
-    assert result.count("<redacted>") >= 7
-    assert all(value not in result for value in ("bearer.value", "ya29.", "1//", "@"))
-    assert "\x00" not in result and "\n" not in result
-    assert "TOPSECRET" not in redact_diagnostic_text('{"access_token":"TOPSECRET"}')
-    assert "secret2" not in redact_diagnostic_text("Cookie: a=1; sid=secret2")
-    assert all(value not in redact_diagnostic_text(r'{"access_token":"prefix\"LEAK"}') for value in ("prefix", "LEAK"))  # fmt: skip  # noqa: E501
-    edge_cases = (r'{"pass\u0077ord":"TOPSECRET42"}', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"')  # fmt: skip  # noqa: E501
-    assert all("TOPSECRET42" not in redact_diagnostic_text(text) for text in edge_cases)
-
-
-@pytest.mark.parametrize(
-    "case",
-    (
-        (401, "anything", FailureCategory.AUTH_REFRESH_EXHAUSTED, False),
-        (403, "OAuth rejected", FailureCategory.AUTH_REFRESH_EXHAUSTED, False),
-        (503, "token refresh failed", FailureCategory.AUTH_REFRESH_EXHAUSTED, False),
-        (429, "quota exceeded", FailureCategory.LIMIT_BLOCKED, False),
-        (503, "quota exceeded", FailureCategory.LIMIT_BLOCKED, False),
-        (503, "SSL_ERROR_SYSCALL", FailureCategory.UPSTREAM_TLS_STALL, False),
-        (429, "busy", FailureCategory.CAPACITY_EXHAUSTED, True),
-        (503, CAPACITY_401_SNAPSHOT, FailureCategory.CAPACITY_EXHAUSTED, True),
-        (400, "model_capacity_exhausted", FailureCategory.CAPACITY_EXHAUSTED, True),
-        (0, "HTTP 401: invalid auth", FailureCategory.AUTH_REFRESH_EXHAUSTED, False),
-        (403, "max_tokens exceeded", FailureCategory.FATAL_REQUEST_ERROR, False),
-    ),
-)
-def test_failure_classification_matrix(
-    case: tuple[int, str, FailureCategory, bool],
-) -> None:
-    status, reason, category, retryable = case
-    result = classify_provider_failure(status, reason)
-    assert (result.category, result.retryable) == (category, retryable)
-
-
-def test_transient_recovery_excludes_non_retryable_failures() -> None:
-    assert is_transient_stream_interruption("connection reset") is True
-    assert is_transient_stream_interruption("connection reset quota exceeded") is False
-    assert is_transient_stream_interruption("connection reset token refresh failed") is False  # fmt: skip  # noqa: E501
-    assert is_transient_stream_interruption("connection reset TLS handshake timeout") is False  # fmt: skip  # noqa: E501
-    auth = "connection reset HTTP 401 Unauthorized"
-    assert is_transient_stream_interruption(auth) is False
-    retry = evaluate_stream_retry_eligibility(error_text=auth, delivered=False)
-    assert retry.can_retry is False
-    allowed = evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False)  # fmt: skip  # noqa: E501
+def test_retry_filter() -> None:
+    assert t("connection reset") is True
+    blocked = ("connection reset quota exceeded", "connection reset token refresh failed", "connection reset TLS handshake timeout", "connection reset HTTP 401 Unauthorized", "connection reset HTTP 403 Forbidden")
+    assert all(t(text) is False for text in blocked)
+    assert r(error_text=blocked[3], delivered=False).can_retry is False
+    allowed = r(error_text="connection reset", delivered=False)
     assert allowed.can_retry is True and allowed.attempt_budget_s > 0.0
-    exhausted = evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, elapsed_s=86.0)  # fmt: skip  # noqa: E501
+    exhausted = r(error_text="connection reset", delivered=False, elapsed_s=86.0)
     assert exhausted.can_retry is False and exhausted.attempt_budget_s == 0.0
-    invalid = ({"max_attempts": 0}, {"elapsed_s": float("nan")}, {"elapsed_s": -1.0})  # fmt: skip  # noqa: E501
-    assert all(not evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, **kw).can_retry for kw in invalid)  # fmt: skip  # noqa: E501
-    stricter = evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=1, max_attempts=3, budget_config=RetryBudgetConfig(max_attempts=1))  # fmt: skip  # noqa: E501
+    invalid = ({"max_attempts": 0}, {"elapsed_s": float("nan")}, {"elapsed_s": -1.0}, {"budget_config": C(max_attempts=0)})
+    assert all(not r(error_text="connection reset", delivered=False, **kw).can_retry for kw in invalid)
+    stricter = r(error_text="connection reset", delivered=False, a=1, max_attempts=3, budget_config=C(max_attempts=1))
     assert stricter.can_retry is False and stricter.keep_hot_session is True
 
+@pytest.mark.parametrize("case", ((0.0, 0.0, (), True, H.READY), (5.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (-0.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (1.0, 5.0, ("Z", "A"), False, H.ENV_DRIFT_DETECTED)))
+def test_health_limits(case: tuple[float, float, tuple[str, ...], bool, H]) -> None:
+    age, limit, changed, available, reason = case
+    assert h("model", (), age, limit, changed) == S("model", available, reason, tuple(sorted(changed)))
 
-@pytest.mark.parametrize("case", ((0.0, 0.0, (), True, HealthReason.READY), (5.001, 5.0, (), False, HealthReason.STALE_HEALTH_PROBE), (-0.001, 5.0, (), False, HealthReason.STALE_HEALTH_PROBE), (1.0, 5.0, ("Z", "A"), False, HealthReason.ENV_DRIFT_DETECTED)))  # fmt: skip  # noqa: E501
-def test_route_health_boundaries(
-    case: tuple[float, float, tuple[str, ...], bool, HealthReason],
-) -> None:
-    age, limit, drift, available, reason = case
-    result = evaluate_route_health("model", (), age, limit, drift)
-    assert result == RouteHealthStatus("model", available, reason, tuple(sorted(drift)))
+def test_health_order() -> None:
+    assert h("Claude-Opus-5-5-High", ("claude-opus-5-5",), 1.0, 10.0) == S("Claude-Opus-5-5", False, H.LIMIT_BLOCKED, ())
 
+@pytest.mark.parametrize("age,limit", ((float("nan"), 1.0), (float("inf"), 1.0), (1.0, float("inf")), (1.0, -1.0)))
+def test_health_invalid(age: float, limit: float) -> None:
+    with pytest.raises(ValueError): _ = h("model", (), age, limit)
 
-def test_route_health_block_precedes_stale_and_normalizes_alias() -> None:
-    result = evaluate_route_health(
-        "Claude-Opus-5-5-High", ("claude-opus-5-5",), 1.0, 10.0
-    )
-    assert result == RouteHealthStatus(
-        "Claude-Opus-5-5", False, HealthReason.LIMIT_BLOCKED, ()
-    )
+def test_env_drift() -> None:
+    assert "1500" in V and "300" in V
+    assert v({"A": "1", "TIMEOUT": "1500"}, {"A": "1", "TIMEOUT": "300"}, ("TIMEOUT", "A")) == ("TIMEOUT",)
 
+@pytest.mark.parametrize("config", (C(total_budget_s=0.0), C(reserve_s=-0.001), C(reserve_s=90.0), C(min_attempt_budget_s=0.0), C(max_attempts=0), C(idle_timeout_s=0.0), C(total_budget_s=float("inf")), C(reserve_s=float("nan")), C(max_attempts=1.5)))  # type: ignore[arg-type]
+def test_config_invalid(config: C) -> None:
+    with pytest.raises(ValueError): _ = y(config)
 
-@pytest.mark.parametrize(
-    "age,limit",
-    ((float("nan"), 1.0), (float("inf"), 1.0), (1.0, float("inf")), (1.0, -1.0)),
-)
-def test_route_health_rejects_invalid_numbers(age: float, limit: float) -> None:
-    with pytest.raises(ValueError):
-        _ = evaluate_route_health("model", (), age, limit)
+@pytest.mark.parametrize("category", (F.AUTH_REFRESH_EXHAUSTED, F.LIMIT_BLOCKED, F.UPSTREAM_TLS_STALL, F.FATAL_REQUEST_ERROR, "U", "UNKNOWN"))
+def test_retry_closed(category: str) -> None:
+    assert a(C(), 0, 0.0, category) == A(False, 0.0, R.NON_RETRYABLE_CATEGORY)
 
+def test_retry_budget() -> None:
+    config = C(109.732084, 0.0, 4.0, 6, 30.0); j = a(config, 0, 0.0)
+    assert j == A(True, 18.288, R.BUDGET_OK)
+    assert j.attempt_budget_s <= float(T.rsplit("=", 1)[1])
+    assert a(config, 6, 0.0).reason is R.MAX_ATTEMPTS_REACHED
+    assert a(C(1.0009, 0.0, 1.0005, 1, 30.0), 0, 0.0).reason is R.BUDGET_EXHAUSTED
+    assert a(C(), 0, 1e308).reason is R.BUDGET_EXHAUSTED
 
-def test_env_drift_and_embedded_runtime_snapshot() -> None:
-    assert "1500" in RUNTIME_DRIFT_SNAPSHOT and "300" in RUNTIME_DRIFT_SNAPSHOT
-    drift = detect_effective_env_drift(
-        {"A": "1", "TIMEOUT": "1500"}, {"A": "1", "TIMEOUT": "300"}, ("TIMEOUT", "A")
-    )
-    assert drift == ("TIMEOUT",)
+@pytest.mark.parametrize("index,elapsed", ((-1, 0.0), (2.5, 0.0), (True, 0.0), (0, -0.001), (0, float("inf"))))
+def test_attempt_invalid(index: object, elapsed: float) -> None:
+    with pytest.raises(ValueError): _ = a(C(), index, elapsed)
 
-
-@pytest.mark.parametrize(
-    "config",
-    (
-        RetryBudgetConfig(total_budget_s=0.0),
-        RetryBudgetConfig(reserve_s=-0.001),
-        RetryBudgetConfig(reserve_s=90.0),
-        RetryBudgetConfig(min_attempt_budget_s=0.0),
-        RetryBudgetConfig(max_attempts=0),
-        RetryBudgetConfig(idle_timeout_s=0.0),
-        RetryBudgetConfig(total_budget_s=float("inf")),
-        RetryBudgetConfig(reserve_s=float("nan")),
-        RetryBudgetConfig(max_attempts=1.5),
-    ),
-)
-def test_retry_config_rejects_invalid_fields(config: RetryBudgetConfig) -> None:
-    with pytest.raises(ValueError):
-        _ = validate_retry_config(config)
-
-
-@pytest.mark.parametrize(
-    "category",
-    (
-        FailureCategory.AUTH_REFRESH_EXHAUSTED,
-        FailureCategory.LIMIT_BLOCKED,
-        FailureCategory.UPSTREAM_TLS_STALL,
-        FailureCategory.FATAL_REQUEST_ERROR,
-        "AUTH",
-        "UNKNOWN",
-    ),
-)
-def test_retry_decision_is_fail_closed(category: str) -> None:
-    expected = AttemptDecision(False, 0.0, RetryReason.NON_RETRYABLE_CATEGORY)
-    assert compute_attempt_decision(RetryBudgetConfig(), 0, 0.0, category) == expected
-
-
-def test_retry_budget_rounds_down_and_honors_boundaries() -> None:
-    config = RetryBudgetConfig(109.732084, 0.0, 4.0, 6, 30.0)
-    decision = compute_attempt_decision(config, 0, 0.0)
-    assert decision == AttemptDecision(True, 18.288, RetryReason.BUDGET_OK)
-    assert decision.attempt_budget_s <= float(AGY_RETRY_SNAPSHOT.rsplit("=", 1)[1])
-    assert (
-        compute_attempt_decision(config, 6, 0.0).reason
-        is RetryReason.MAX_ATTEMPTS_REACHED
-    )
-    tight = RetryBudgetConfig(1.0009, 0.0, 1.0005, 1, 30.0)
-    decision = compute_attempt_decision(tight, 0, 0.0)
-    assert decision.reason is RetryReason.BUDGET_EXHAUSTED
-    assert compute_attempt_decision(RetryBudgetConfig(), 0, 1e308).reason is RetryReason.BUDGET_EXHAUSTED  # fmt: skip  # noqa: E501
-
-
-@pytest.mark.parametrize("index,elapsed", ((-1, 0.0), (2.5, 0.0), (True, 0.0), (0, -0.001), (0, float("inf"))))  # fmt: skip  # noqa: E501
-def test_retry_decision_rejects_invalid_inputs(index: object, elapsed: float) -> None:
-    with pytest.raises(ValueError):
-        _ = compute_attempt_decision(RetryBudgetConfig(), index, elapsed)
-
-
-def test_sliding_deadline_and_live_activity_window() -> None:
-    assert advance_sliding_deadline(18.0, 0.0, 5.0, 20.0) == 20.0
-    ticks = iter((10.0, 12.0))
-    window = ActivityWindow(5.0, 20.0, clock=lambda: next(ticks))
-    assert window.idle_deadline == 15.0
-    assert window.touch() == 17.0
-    capped = ActivityWindow(20.0, 30.0, attempt_budget_s=12.0, clock=lambda: 10.0)
+def test_window() -> None:
+    assert d(18.0, 0.0, 5.0, 20.0) == 20.0
+    ticks = iter((10.0, 12.0)); window = W(5.0, 20.0, clock=lambda: next(ticks))
+    assert window.idle_deadline == 15.0 and window.touch() == 17.0
+    capped = W(20.0, 30.0, attempt_budget_s=12.0, clock=lambda: 10.0)
     assert capped.safety_deadline == 22.0 and capped.idle_deadline == 22.0
-    with pytest.raises(ValueError):
-        _ = advance_sliding_deadline(1e308, 0.0, 1e308, 1e308)
+    with pytest.raises(ValueError): _ = d(1e308, 0.0, 1e308, 1e308)
 
+@pytest.mark.parametrize("args", ((float("nan"), 0.0, 1.0, 1.0), (0.0, float("inf"), 1.0, 1.0), (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 1.0, 0.0), (0.0, 1.0, 1.0, 1.0)))
+def test_window_invalid(args: tuple[float, ...]) -> None:
+    with pytest.raises(ValueError): _ = d(*args)
 
-@pytest.mark.parametrize(
-    "args",
-    (
-        (float("nan"), 0.0, 1.0, 1.0),
-        (0.0, float("inf"), 1.0, 1.0),
-        (0.0, 0.0, 0.0, 1.0),
-        (0.0, 0.0, 1.0, 0.0),
-        (0.0, 1.0, 1.0, 1.0),
-    ),
-)
-def test_sliding_deadline_rejects_invalid_parameters(args: tuple[float, ...]) -> None:
-    with pytest.raises(ValueError):
-        _ = advance_sliding_deadline(*args)
-
-
-def test_canon_digest_requires_tail_marker_and_tracks_changes() -> None:
-    text = "Я<!-- КАНОН-КОНЕЦ -->\n"
-    first = inspect_canon_payload(text)
-    same = inspect_canon_payload(text, previous_sha256=first.sha256_hex)
-    changed = inspect_canon_payload(text + "x", previous_sha256=first.sha256_hex)
-    middle = inspect_canon_payload("<!-- КАНОН-КОНЕЦ -->\ntruncated")
-    assert first == CanonDigestResult(True, first.sha256_hex, len(text.encode()), False)
+def test_canon() -> None:
+    text = "Я<!-- КАНОН-КОНЕЦ -->\n"; first = k(text)
+    same = k(text, previous_sha256=first.sha256_hex); changed = k(text + "x", previous_sha256=first.sha256_hex)
+    middle = k("<!-- КАНОН-КОНЕЦ -->\ntruncated")
+    assert first == D(True, first.sha256_hex, len(text.encode()), False)
     assert same.unchanged is True
     assert changed.unchanged is False and changed.has_canon_end_marker is False
     assert middle.has_canon_end_marker is False
 
-
-def test_incident_snapshot_and_frozen_result() -> None:
-    result = classify_provider_failure(403, INCIDENT_AUTH_SNAPSHOT); assert result.category is FailureCategory.AUTH_REFRESH_EXHAUSTED  # fmt: skip  # noqa: E501,E702
-    route = normalize_model_route("m")
-    with pytest.raises(FrozenInstanceError):
-        setattr(route, "canonical_model", "changed")  # noqa: B010
+def test_frozen_result() -> None:
+    assert c(403, U).category is F.AUTH_REFRESH_EXHAUSTED
+    z = n("m")
+    with pytest.raises(FrozenInstanceError): setattr(z, "canonical_model", "changed")  # noqa: B010

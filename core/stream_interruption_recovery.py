@@ -5,14 +5,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from math import isfinite
-from typing import Any, Final, cast
+from typing import Any, Final
 
-from core.route_health_policy import FailureCategory, RetryBudgetConfig, classify_provider_failure, compute_attempt_decision  # fmt: skip  # noqa: E501,I001
+from core.route_health_policy import FailureCategory, RetryBudgetConfig, classify_provider_failure, compute_attempt_decision, validate_retry_config  # fmt: skip  # noqa: E501,I001
 
 _TRANSIENT_PHRASES: tuple[str, ...] = ("stream was interrupted", "please continue the task you were working on", "rst_stream", "http/2 stream", "connection reset", "eof occurred in violation of protocol", "broken pipe", "incomplete chunked read", "peer closed connection", "server disconnected", "currently unavailable")  # fmt: skip  # noqa: E501
 
 TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
+)
+_FATAL_HTTP_STATUS_RE = re.compile(
+    r"(?i)\b(?:http[/\s]*\d(?:\.\d)?\s+(?:400|401|403|404|422)|status(?:\s+code)?[\s:=]+(?:400|401|403|404|422)|403\s+forbidden|400\s+bad\s+request)\b"
 )
 
 DEFAULT_INTERRUPTION_NOTICE = (
@@ -26,6 +29,8 @@ def is_transient_stream_interruption(
     """Распознать транзиентный транспортный обрыв."""
     haystack = "" if source == "model_content" else text or ""
     if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
+        return False
+    if _FATAL_HTTP_STATUS_RE.search(haystack):
         return False
     category = classify_provider_failure(0, haystack).category
     blocked = (
@@ -178,6 +183,16 @@ class _RetryFacts:
     budget_config: RetryBudgetConfig | None = None
 
 
+def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
+    """Проверить и ограничить конфигурацию повтора без исключений наружу."""
+    base = f.budget_config or RetryBudgetConfig(max_attempts=f.max_attempts)
+    try:
+        valid = validate_retry_config(base)
+    except ValueError:
+        return None
+    return replace(valid, max_attempts=min(f.max_attempts, valid.max_attempts))
+
+
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     """Оценить допустимость повтора стрима."""
     f = _RetryFacts(**kw)
@@ -187,11 +202,11 @@ def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     valid = all((isfinite(f.elapsed_s), f.elapsed_s >= 0.0, 0 <= f.attempt < f.max_attempts, f.max_attempts > 0))  # fmt: skip  # noqa: E501
     if not valid:
         return RetryDecision(False, False, "retry_blocked", 0.0)
+    cfg = _resolve_retry_cfg(f)
+    if cfg is None:
+        return RetryDecision(False, False, "retry_blocked", 0.0)
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
     quiet = all((trans, not f.had_tool_side_effects))
-    fallback_cfg = RetryBudgetConfig(max_attempts=f.max_attempts)
-    base_cfg = cast(RetryBudgetConfig, (fallback_cfg, f.budget_config)[f.budget_config is not None])  # fmt: skip  # noqa: E501
-    cfg = replace(base_cfg, max_attempts=min(f.max_attempts, base_cfg.max_attempts))
     cat = (classify_provider_failure(0, f.error_text).category, FailureCategory.CAPACITY_EXHAUSTED)[trans]  # fmt: skip  # noqa: E501
     adm = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s), cat)
     can = all((quiet, not f.delivered, f.attempt < cfg.max_attempts, adm.allow_retry))
