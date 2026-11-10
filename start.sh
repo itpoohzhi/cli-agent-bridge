@@ -72,6 +72,7 @@ if [[ -f "$HOME/.dsh/.env" ]]; then
   done < <(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_[A-Za-z0-9_]+=' "$HOME/.dsh/.env" || true)
 fi
 unset _k _name _bkey _bval 2>/dev/null || true
+export BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S="${BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S:-300}"
 
 # Необязательно: Factory-ключ для потомка `droid exec`. Источник — только ~/.zshenv
 # (в ~/.dsh/.env секрет не дублируем: один секрет — один файл).

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -273,6 +274,39 @@ def test_nonstream_defaults_exact() -> None:
         cfg.poll_interval_s,
     ) == (90.0, 300.0, 120.0, 0.05, 3600.0, 0.1)
     assert cfg == NonstreamConfig()
+
+
+def test_nonstream_first_progress_timeout_from_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S", "300")
+    assert NonstreamConfig.from_env().first_progress_timeout_s == 300.0
+
+
+@pytest.mark.parametrize("configured, expected", [(None, "300"), ("451", "451")])
+def test_start_sh_exports_nonstream_first_progress_timeout(
+    monkeypatch: pytest.MonkeyPatch, configured: str | None, expected: str
+) -> None:
+    name = "BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S"
+    if configured is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, configured)
+
+    start_sh = Path(__file__).parents[1] / "start.sh"
+    export_line = next(
+        line
+        for line in start_sh.read_text().splitlines()
+        if line.startswith(f"export {name}=")
+    )
+    result = subprocess.run(
+        ["bash", "-c", f'source /dev/stdin; printf "%s" "${name}"'],
+        input=export_line + "\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout == expected
 
 
 def test_watchdog_defaults_exact() -> None:
