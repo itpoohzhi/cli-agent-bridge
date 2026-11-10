@@ -370,23 +370,14 @@ class BufferedTurnEvent:
             )
             return f"id: {self.seq}\ndata: {data}\n\n"
         if self.kind == "error":
-            err_obj = (
-                self.payload
-                if isinstance(self.payload, dict)
-                else {"message": str(self.payload), "type": "stream_error"}
+            err_obj = self.payload if isinstance(self.payload, dict) else {"message": str(self.payload), "type": "stream_error"}
+            msg = str(err_obj.get("message") or self.payload)
+            from core.stream_framing import build_stream_error_chunk
+            chunk_obj = build_stream_error_chunk(
+                message=msg, model=model, code=str(err_obj.get("code") or "stream_error"),
+                error_type=str(err_obj.get("type") or "stream_error"), completion_id=cid, created=ts_created,
             )
-            data = json.dumps(
-                {
-                    "id": cid,
-                    "object": "chat.completion.chunk",
-                    "created": ts_created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-                    "error": err_obj,
-                },
-                ensure_ascii=False,
-            )
-            return f"id: {self.seq}\ndata: {data}\n\n"
+            return f"id: {self.seq}\ndata: {json.dumps(chunk_obj, ensure_ascii=False)}\n\ndata: [DONE]\n\n"
         if self.kind == "done":
             finish = "stop"
             usage_payload = None
@@ -478,7 +469,8 @@ class TurnBuffer:
             if isinstance(eff, EmitChunk):
                 events.append(self.append("reasoning" if eff.is_reasoning else "content", eff.text))
             elif isinstance(eff, EmitToolCall):
-                events.append(self.append("tool_call", {"function": {"name": eff.name, "arguments": eff.arguments}}))
+                fn_dict = {"name": eff.name, "arguments": eff.arguments} if eff.name else {"arguments": eff.arguments}
+                events.append(self.append("tool_call", {"function": fn_dict}))
             elif isinstance(eff, EmitSSE) and eff.event == "error":
                 events.append(self.append("error", eff.data))
         return events

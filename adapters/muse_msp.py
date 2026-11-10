@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 MAX_TRACKED_ITEMS = 1024
 LIVE_DELTA_MAX_BYTES = 8 << 10
@@ -12,6 +13,24 @@ REASONING_TRUNCATED = "\n[reasoning truncated: reasoning budget reached]\n"
 SNAPSHOT_DIVERGED = "\n[reasoning snapshot diverged; live prefix preserved]\n"
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 _SUMMARY_FIELD = re.compile(r"summary\.([0-9]{1,4})")
+
+
+def _suppress_unknown_tool() -> bool:
+    return os.environ.get("BRIDGE_MUSE_SUPPRESS_UNKNOWN_TOOL", "true").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _extract_tool_name(raw: Mapping[str, Any]) -> str:
+    vals = [str(raw[k]).strip() for k in ("toolName", "tool", "name") if raw.get(k) is not None and str(raw[k]).strip()]
+    valid = next((v for v in vals if _TOOL_NAME.fullmatch(v)), "")
+    return valid or ("unknown_tool" if (vals or not _suppress_unknown_tool()) else "")
+
+
+def _format_tool_started(name: str) -> str:
+    return f"[Вызов инструмента: {name}]\n" if name else ""
+
+
+def _format_tool_completed(name: str) -> str:
+    return f"[Инструмент {name} завершён]\n" if name else ""
 
 
 def utf8_slices(text: str, max_bytes: int = LIVE_DELTA_MAX_BYTES) -> Iterator[str]:
@@ -165,13 +184,7 @@ class MspEvents:
             # ItemKind — открытый enum MSP: новые служебные виды можно игнорировать.
             if not isinstance(kind, str) or not kind or len(kind) > 64:
                 raise ValueError("invalid MSP item kind")
-            name = raw.get("toolName")
-            safe_name = (
-                name
-                if isinstance(name, str) and _TOOL_NAME.fullmatch(name)
-                else "unknown_tool"
-            )
-            item = _Item(kind=kind, tool_name=safe_name)
+            item = _Item(kind=kind, tool_name=_extract_tool_name(raw))
             self._items[iid] = item
         elif method != "item/delta" and kind != item.kind:
             raise ValueError("MSP item kind changed")
@@ -197,11 +210,12 @@ class MspEvents:
                 return ""
             item.started = True
             if item.kind == "toolCall":
-                return self._append(f"[Вызов инструмента: {item.tool_name}]\n")
+                return self._append(_format_tool_started(item.tool_name))
             return ""
         item.completed = True
         if item.kind == "toolCall":
-            return self._append(f"[Инструмент {item.tool_name} завершён]\n")
+            item.tool_name = item.tool_name or _extract_tool_name(raw)
+            return self._append(_format_tool_completed(item.tool_name))
         if item.kind == "agentMessage" and isinstance(raw.get("text"), str):
             self._answer(iid, raw["text"], True)
         if item.kind == "reasoning":

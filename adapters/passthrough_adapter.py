@@ -939,16 +939,10 @@ def relay_sse(
                     flushed_outcome = flush_parser(pending_index, last_chunk)
                     if flushed_outcome is not None:
                         return flushed_outcome
-                if acc.pending_choices() or (trusted_tools and seen - finished):
-                    acc.close()  # [DONE] без finish_reason у choice с вызовами: успеха нет
+                if acc.pending_choices() or (seen - finished):
+                    acc.close()
                     outcome.incomplete = True
-                    write(
-                        _error_frame(
-                            last_chunk,
-                            "upstream_incomplete_stream",
-                            "upstream stream ended before finish_reason",
-                        )
-                    )
+                    write(_error_frame(last_chunk, "upstream_incomplete_stream", "upstream stream ended before finish_reason"))
                     return outcome
                 outcome.done = True
                 write(raw)
@@ -959,13 +953,18 @@ def relay_sse(
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
             if not isinstance(choices, list):
                 if isinstance(chunk, dict):
-                    meta = {
-                        k: chunk.get(k)
-                        for k in ("id", "created", "model")
-                        if chunk.get(k) is not None
-                    }
+                    meta = {k: chunk.get(k) for k in ("id", "created", "model") if chunk.get(k) is not None}
                     if meta:
+                        last_chunk = {**last_chunk, **meta}
                         outcome.last_chunk = {**(outcome.last_chunk or {}), **meta}
+                    err_val = chunk.get("error")
+                    if err_val is not None and (seen - finished or acc.pending_choices()):
+                        acc.close()
+                        outcome.incomplete = True
+                        err_msg = str(err_val.get("message") or err_val) if isinstance(err_val, dict) else str(err_val)
+                        err_code = str(err_val.get("code") or err_val.get("type") or "upstream_stream_error") if isinstance(err_val, dict) else "upstream_stream_error"
+                        write(_error_frame(last_chunk or chunk, err_code, err_msg))
+                        return outcome
                 write(raw)
                 continue
             if not sanitize:
@@ -1103,13 +1102,7 @@ def relay_sse(
         if acc.pending_choices() or unfinished:
             acc.close()
             outcome.incomplete = True
-            write(
-                _error_frame(
-                    last_chunk,
-                    "upstream_incomplete_stream",
-                    "upstream stream ended before finish_reason",
-                )
-            )
+            write(_error_frame(last_chunk, "upstream_incomplete_stream", "upstream stream ended before finish_reason"))
         return outcome
     except AccumulatorOverflow:
         acc.close()
