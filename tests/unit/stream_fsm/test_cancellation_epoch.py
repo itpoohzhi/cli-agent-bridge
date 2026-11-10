@@ -1,10 +1,8 @@
 """F-FSM-I3: Test suite for stream cancellation and session_epoch fencing."""
 
-import pytest
 
 from core.stream_fsm.machine import StreamMachine
 from core.stream_fsm.types import (
-    CancelRequested,
     EmitChunk,
     StreamState,
     TriggerKillpg,

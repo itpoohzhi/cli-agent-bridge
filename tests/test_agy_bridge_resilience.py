@@ -1780,7 +1780,7 @@ class DeliveredReasoningTests(unittest.TestCase):
             _ = fx.write_scenario(self._quota_events())
             ctx = _ctx(
                 hot_resumed=True,
-                sess_key=("m", "", "low"),
+                sess_key=("0123456789abcdef", "m", "", "low"),
                 conversation_id=_CID,
                 tools_count=1,
                 full_prompt="полная история",
@@ -1857,7 +1857,9 @@ class _HttpBridge:
         return response.status, _dict(cast(object, json.loads(raw.decode("utf-8"))))
 
 
-def _agentic_body(text: str, history: bool = False) -> dict[str, object]:
+def _agentic_body(
+    text: str, history: bool = False, chat_id: str = "test-agentic-chat"
+) -> dict[str, object]:
     messages: list[dict[str, object]] = [{"role": "user", "content": "начало диалога"}]
     if history:
         messages.append({"role": "assistant", "content": "ответ"})
@@ -1866,7 +1868,14 @@ def _agentic_body(text: str, history: bool = False) -> dict[str, object]:
         "type": "function",
         "function": {"name": "x", "parameters": {}},
     }
-    return {"messages": messages, "tools": [tool], "stream": False}
+    body: dict[str, object] = {
+        "messages": messages,
+        "tools": [tool],
+        "stream": False,
+    }
+    if chat_id:
+        body["extra_body"] = {"chat_id": chat_id}
+    return body
 
 
 def _plain_body(text: str, history: bool = False) -> dict[str, object]:
@@ -2251,7 +2260,7 @@ class BreakerAndBudgetTests(unittest.TestCase):
             _ = fx.write_scenario([], spawns=[failing, fine])
             ctx = _ctx(
                 hot_resumed=True,
-                sess_key=("m", "", "low"),
+                sess_key=("0123456789abcdef", "m", "", "low"),
                 conversation_id=_CID,
                 tools_count=1,
                 full_prompt="полная история",
@@ -2266,7 +2275,7 @@ class BreakerAndBudgetTests(unittest.TestCase):
             fx.tmp.joinpath("argv.log").unlink()
             ctx2 = _ctx(
                 hot_resumed=True,
-                sess_key=("m", "", "low"),
+                sess_key=("0123456789abcdef", "m", "", "low"),
                 conversation_id=_CID,
                 tools_count=1,
                 full_prompt="полная история",
@@ -2953,7 +2962,7 @@ class ReadOnlyAndAnchorTests(unittest.TestCase):
         self.assertTrue(_bfn("_cid_acquire")(_CID, "turn-b"))
         _ = _bfn("_cid_release")(_CID, "turn-b")
         with _Fixture() as fx:
-            key = ("m", "", "low")
+            key = ("0123456789abcdef", "m", "", "low")
             _ = _bfn("_session_commit")(key, _CID)
             self.assertTrue(_bfn("_cid_acquire")(_CID, "other"))
             self.assertEqual(_bfn("_session_claim")(key, "t2"), "")
@@ -2964,14 +2973,25 @@ class ReadOnlyAndAnchorTests(unittest.TestCase):
             )
             _ = _bfn("_cid_release")(_CID, "t2")
             cast("set[str]", _bval("_in_flight_cids")).discard(_CID)
-            _ = fx.write_scenario([], spawns=[_slow(_CID, 1.2), _quick(_CID_B)])
+            model_id = _str(_bval("MODEL_ID"))
+            effort = _dict(_dict(_bval("FLEET_MODELS"))[model_id])["default_effort"]
+            owned_key = _bfn("_session_key_for")(
+                model_id, "", effort, "test-agentic-chat"
+            )
+            _ = _bfn("_session_commit")(owned_key, _CID_C)
+            _ = fx.write_scenario([], spawns=[_slow(_CID_C, 1.2), _quick(_CID_B)])
             http_bridge = _HttpBridge()
             holders: list[tuple[int, dict[str, object]]] = []
-            explicit: dict[str, object] = {"extra_body": {"conversation_id": _CID_C}}
+            explicit: dict[str, object] = {
+                "extra_body": {
+                    "conversation_id": _CID_C,
+                    "chat_id": "test-agentic-chat",
+                }
+            }
             try:
 
                 def first() -> None:
-                    body = _plain_body("долгий")
+                    body = _agentic_body("долгий")
                     body.update(explicit)
                     holders.append(http_bridge.post(body))
 
@@ -2980,7 +3000,7 @@ class ReadOnlyAndAnchorTests(unittest.TestCase):
                 deadline = time.monotonic() + 10
                 while len(fx.spawns()) < 1 and time.monotonic() < deadline:
                     time.sleep(0.02)
-                body2 = _plain_body("одновременный")
+                body2 = _agentic_body("одновременный")
                 body2.update(explicit)
                 code2, _payload2 = http_bridge.post(body2)
                 worker.join(30)
@@ -3669,7 +3689,7 @@ class L2HarnessTests(unittest.TestCase):
                     conversation_id=cid,
                     tools_count=1,
                     hot_resumed=True,
-                    sess_key=("m", "", "low"),
+                    sess_key=("0123456789abcdef", "m", "", "low"),
                 )
             )
         self.assertEqual(turn.out["state"], "done")
@@ -3699,6 +3719,7 @@ class L2HarnessTests(unittest.TestCase):
         _ = _ofn(tail, "_finish")()
 
     def test_tc93_l2_harness_parallel_turns_resources_and_deadlines(self) -> None:
+        rss_start = _rss_bytes()
         with _Fixture() as fx:
             fx.patch("_slots", threading.BoundedSemaphore(8))
             fx.patch("SQLITE_POLL_S", 0.5)
@@ -3723,7 +3744,11 @@ class L2HarnessTests(unittest.TestCase):
             )
             self.assertTrue(drains)
             self.assertTrue(all(o in ("complete", "window_complete") for o in drains))
-            self.assertLessEqual(_rss_bytes(), 112 * 1024 * 1024)
+            # ru_maxrss — пожизненный пик процесса: дельта изолирует потребление теста,
+            # абсолютный предел учитывает базовый RSS полного раннера.
+            rss_end = _rss_bytes()
+            self.assertLessEqual(rss_end - rss_start, 64 * 1024 * 1024)
+            self.assertLessEqual(rss_end, 160 * 1024 * 1024)
             health: list[dict[str, object]] = []
 
             def send(_code: int, payload: dict[str, object]) -> None:
@@ -5878,7 +5903,9 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                 with _Sock() as sock:
                     handler = cast(object, _make_handler(sock))
                     ctx = _ctx(
-                        stream=True, sess_key=("m", "", "low"), conversation_id=_CID
+                        stream=True,
+                        sess_key=("0123456789abcdef", "m", "", "low"),
+                        conversation_id=_CID,
                     )
                     ctx["finalize_timeout"] = finalize
                     out = _dict(
@@ -6573,6 +6600,9 @@ def _img_body(
             {"type": "function", "function": {"name": "x", "parameters": {}}}
         ]
     extra: dict[str, object] = {}
+    if tools and not cwd:
+        # Hot-сценариям без cwd нужна явная идентичность чата.
+        extra["chat_id"] = "test-image-chat"
     if cwd:
         extra["cwd"] = cwd
     if conv:
@@ -7349,12 +7379,18 @@ class ImageHistoryTests(unittest.TestCase):
                 _img_msg(_img_part("image/jpeg", _IMG_RAW_B)),
             ]
             explicit_cid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            model_id = _str(_bval("MODEL_ID"))
+            effort = _dict(_dict(_bval("FLEET_MODELS"))[model_id])["default_effort"]
+            key = _bfn("_session_key_for")(model_id, "", effort, "test-image-chat")
+            _ = _bfn("_session_commit")(key, explicit_cid)
             bridge = _HttpBridge()
             try:
-                code, _b = bridge.post(_img_body(history, conv=explicit_cid))
+                code, _b = bridge.post(
+                    _img_body(history, tools=True, conv=explicit_cid, model=model_id)
+                )
                 self.assertEqual(code, 200)
-                _ = bridge.post(_img_body(history[:1], tools=True))
-                code2, _b2 = bridge.post(_img_body(history, tools=True))
+                _ = bridge.post(_img_body(history[:1], tools=True, model=model_id))
+                code2, _b2 = bridge.post(_img_body(history, tools=True, model=model_id))
                 self.assertEqual(code2, 200)
             finally:
                 bridge.close()
@@ -8511,7 +8547,7 @@ class AcceptanceOracleTests(unittest.TestCase):
                         over.update(
                             hot_resumed=True,
                             conversation_id=_CID,
-                            sess_key=("gemini-4-argon", "", "low"),
+                            sess_key=("0123456789abcdef", "gemini-4-argon", "", "low"),
                             turn_id="turn-ao09",
                         )
                     ctx = _img_ctx(msgs, over=over)
@@ -9889,7 +9925,10 @@ if __name__ == "__main__":
     unittest.main()
 
 
-from typing import override  # noqa: E402
+try:
+    from typing import override  # noqa: E402
+except ImportError:
+    from typing_extensions import override  # noqa: E402
 
 # ---- Universal image/media fallback: AD-001..AD-005, UF-01..UF-10 --------------------
 # Блок только дописывается после исходных строк файла: все прежние тесты, фикстуры и
@@ -10742,7 +10781,9 @@ class UniversalImageFallbackTests(unittest.TestCase):
                     env.assert_clean(self)
 
     def test_uf06_hot_and_explicit_cid_cold_reset(self) -> None:
-        key = ("gemini-4-argon", "", "low")
+        chat_id = "uf06-chat"
+        token = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16]
+        key = (token, "gemini-4-argon", "", "low")
         msgs: list[dict[str, object]] = [
             _img_msg(_uf_part("image/png")),
             _txt_msg("assistant", "ок"),
@@ -10839,11 +10880,25 @@ class UniversalImageFallbackTests(unittest.TestCase):
                 _img_msg(_uf_bad_part(), text="дальше"),
             ]
             try:
-                self.assertEqual(bridge.post(_img_body(valid[:1], tools=True))[0], 200)
+                headers = {"x-dsh-chat-id": chat_id}
                 self.assertEqual(
-                    bridge.post(_img_body(dirty, tools=True, conv=_CID))[0], 200
+                    _post_with_headers(
+                        bridge, _img_body(valid[:1], tools=True), headers
+                    )[0],
+                    200,
                 )
-                self.assertEqual(bridge.post(_img_body(valid, tools=True))[0], 200)
+                self.assertEqual(
+                    _post_with_headers(
+                        bridge, _img_body(dirty, tools=True, conv=_CID), headers
+                    )[0],
+                    200,
+                )
+                self.assertEqual(
+                    _post_with_headers(
+                        bridge, _img_body(valid, tools=True), headers
+                    )[0],
+                    200,
+                )
             finally:
                 bridge.close()
             first, second, third = env.records()
@@ -12452,8 +12507,6 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
         key_for = _bfn("_session_key_for")
         token_a = hashlib.sha256("chat-A".encode("utf-8")).hexdigest()[:16]
         token_b = hashlib.sha256("chat-B".encode("utf-8")).hexdigest()[:16]
-        self.assertEqual(key_for("m", "/w", "low", ""), ("m", "/w", "low"))
-        self.assertEqual(key_for("m", "/w", "low", "  "), ("m", "/w", "low"))
         self.assertEqual(key_for("m", "/w", "low", "chat-A"), (token_a, "m", "/w", "low"))
         with _Fixture() as fx:
             _ = fx.write_scenario(
@@ -12484,7 +12537,7 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                     _agentic_body("чат Б ход 2", True),
                     {"x-dsh-chat-id": "chat-B"},
                 )
-                legacy = http_bridge.post(_agentic_body("без chat id"))
+                legacy = http_bridge.post(_agentic_body("без chat id", chat_id=""))
             finally:
                 http_bridge.close()
             self.assertEqual(
@@ -12502,11 +12555,12 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
             self.assertNotEqual(a2[1]["conversation_id"], b2[1]["conversation_id"])
             store = cast("dict[tuple[str, ...], dict[str, object]]", _bval("_session_store"))
             by_cid = {entry["cid"]: key for key, entry in store.items()}
-            self.assertEqual(len(store), 3)
+            self.assertEqual(len(store), 2)
             self.assertEqual(by_cid[_CID][0], token_a)
             self.assertEqual(by_cid[_CID_B][0], token_b)
             self.assertEqual(len(by_cid[_CID]), 4)
-            self.assertEqual(len(by_cid[_CID_C]), 3)  # legacy 3-кортеж
+            self.assertNotIn(_CID_C, by_cid)
+            self.assertTrue(all(len(key) == 4 for key in store))
             self.assertNotIn("chat-A", json.dumps([list(k) for k in store]))
             self.assertEqual(len(cast("set[str]", _bval("_in_flight_cids"))), 0)
 
@@ -12517,16 +12571,21 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
             path = fx.tmp / "ws" / "state" / "sessions.json"
             commit = _bfn("_session_commit")
             # Без загрузки при старте запись выключена: импорт не трогает диск.
-            _ = commit(("m", "/w", "low"), _CID)
+            key_low = ("0123456789abcdef", "m", "/w", "low")
+            _ = commit(key_low, _CID)
             self.assertFalse(path.exists())
             cast("dict[object, object]", _bval("_session_store")).clear()
             self.assertEqual(_bfn("_load_persisted_sessions")(), 0)
             self.assertIs(_bval("_sessions_persist_ready"), True)
-            key3 = ("m", "/w", "low")
-            key4 = ("0123456789abcdef", "m", "/w", "high")
-            _ = commit(key3, _CID)
+            key4 = ("fedcba9876543210", "m", "/w", "high")
+            key_no_cwd = cast(
+                "tuple[str, ...]",
+                _bfn("_session_key_for")("m", "", "low", "chat-without-cwd"),
+            )
+            _ = commit(key_low, _CID)
             _ = commit(key4, _CID_B)
             _ = commit(key4, _CID_B)
+            _ = commit(key_no_cwd, _CID_C)
             self.assertTrue(path.exists())
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
@@ -12539,22 +12598,28 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                 tuple(cast("list[str]", item["key"])): item
                 for item in cast("list[dict[str, object]]", doc["sessions"])
             }
-            self.assertEqual(set(saved), {("",) + key3, key4})
+            self.assertEqual(set(saved), {key_low, key4, key_no_cwd})
             self.assertEqual(saved[key4]["turns"], 2)
             # Протухшие и битые записи на диске отсекаются при загрузке.
             now = time.time()
             sessions = cast("list[object]", doc["sessions"])
             sessions.extend(
                 [
-                    {"key": ["", "m", "/idle", "low"], "cid": _CID_C,
+                    {"key": ["0123456789abcdef", "m", "/idle", "low"], "cid": _CID_C,
                      "created": now - 100, "last_used": now - 46 * 60, "turns": 1},
-                    {"key": ["", "m", "/old", "low"], "cid": _CID_C,
+                    {"key": ["0123456789abcdef", "m", "/old", "low"], "cid": _CID_C,
                      "created": now - 25 * 3600, "last_used": now - 10, "turns": 1},
-                    {"key": ["", "m", "/turns", "low"], "cid": _CID_C,
+                    {"key": ["0123456789abcdef", "m", "/turns", "low"], "cid": _CID_C,
                      "created": now - 100, "last_used": now - 10, "turns": 30},
-                    {"key": ["", "m", "/bad-cid", "low"], "cid": "../../etc",
+                    {"key": ["0123456789abcdef", "m", "/bad-cid", "low"], "cid": "../../etc",
                      "created": now - 100, "last_used": now - 10, "turns": 1},
                     {"key": ["m", "/short"], "cid": _CID_C,
+                     "created": now - 100, "last_used": now - 10, "turns": 1},
+                    {"key": ["", "m", "/legacy", "low"], "cid": _CID_C,
+                     "created": now - 100, "last_used": now - 10, "turns": 1},
+                    {"key": [" \t ", "m", "/blank", "low"], "cid": _CID_C,
+                     "created": now - 100, "last_used": now - 10, "turns": 1},
+                    {"key": ["m", " \t ", "low"], "cid": _CID_C,
                      "created": now - 100, "last_used": now - 10, "turns": 1},
                 ]
             )
@@ -12572,16 +12637,18 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                     store = cast(
                         "dict[tuple[str, ...], dict[str, object]]", second._session_store
                     )
-                    self.assertEqual(restored, 2)
-                    self.assertEqual(set(store), {key3, key4})
-                    self.assertEqual(store[key3]["cid"], _CID)
+                    self.assertEqual(restored, 3)
+                    self.assertEqual(set(store), {key_low, key4, key_no_cwd})
+                    self.assertEqual(store[key_low]["cid"], _CID)
                     self.assertEqual(store[key4]["turns"], 2)
+                    self.assertEqual(store[key_no_cwd]["cid"], _CID_C)
                     claim = cast(Callable[[tuple, str], str], second._session_claim)
                     self.assertEqual(claim(key4, "t-1"), _CID_B)
-                    self.assertEqual(claim(key3, "t-2"), _CID)
+                    self.assertEqual(claim(key_low, "t-2"), _CID)
+                    self.assertEqual(claim(key_no_cwd, "t-3"), _CID_C)
                     # Загрузка переписала файл без протухших записей.
                     cleaned = json.loads(path.read_text(encoding="utf-8"))
-                    self.assertEqual(len(cleaned["sessions"]), 2)
+                    self.assertEqual(len(cleaned["sessions"]), 3)
                     # Битый файл: fail-open, старт не падает.
                     _ = path.write_text("{not json", encoding="utf-8")
                     store.clear()
@@ -12613,7 +12680,7 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
         ):
             self.assertFalse(transient(err), err)
         with _Fixture() as fx:
-            key = ("m", "", "low")
+            key = ("0123456789abcdef", "m", "", "low")
             _ = _bfn("_session_commit")(key, _CID)
             self.assertEqual(_bfn("_session_claim")(key, "turn-1"), _CID)
             failing = [
@@ -12661,7 +12728,7 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
             self.assertEqual(_bfn("_session_claim")(key, "turn-2"), "")
         # 502 на обеих попытках: повторы исчерпаны — сессия инвалидируется.
         with _Fixture() as fx:
-            key = ("m", "", "low")
+            key = ("0123456789abcdef", "m", "", "low")
             _ = _bfn("_session_commit")(key, _CID)
             self.assertEqual(_bfn("_session_claim")(key, "turn-3"), _CID)
             _ = fx.write_scenario([], spawns=[failing, failing])
@@ -12685,7 +12752,7 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
             fx.patch("_sessions_persist_ready", True)
             fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
             path = fx.tmp / "ws" / "state" / "sessions.json"
-            key = ("m", "", "low")
+            key = ("0123456789abcdef", "m", "", "low")
             _ = _bfn("_session_commit")(key, _CID)
             self.assertIn(_CID, path.read_text(encoding="utf-8"))
             self.assertEqual(_bfn("_session_claim")(key, "turn-1"), _CID)
@@ -12743,6 +12810,1018 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
             _ = _run_turn(ctx2)
             self.assertEqual(ctx2["conversation_id"], "")
             self.assertNotIn(_CID, json.dumps([e["cid"] for e in store.values()]))
+
+
+class SessionFailClosedTests(unittest.TestCase):
+    """Стор требует токен чата или cwd, явный CID проверяется на владение."""
+
+    def test_request_chat_id_sources_and_length_boundary(self) -> None:
+        """Строковые источники поддерживают trim и предел 256."""
+        chat_id_for = _bfn("_request_chat_id")
+        for source in (
+            "x-dsh-chat-id",
+            "x-session-id",
+            "extra",
+            "chat_id",
+        ):
+            for value, expected in (
+                (" chat-A ", "chat-A"),
+                ("a" * 256, "a" * 256),
+            ):
+                with self.subTest(source=source, value=value):
+                    headers: dict[str, object] = {}
+                    extra: dict[str, object] = {}
+                    req: dict[str, object] = {}
+                    if source.startswith("x-"):
+                        headers[source] = value
+                    elif source == "extra":
+                        extra["chat_id"] = value
+                    else:
+                        req[source] = value
+                    self.assertEqual(
+                        chat_id_for(headers, extra, req), (expected, False)
+                    )
+
+    def test_request_chat_id_rejects_invalid_values(self) -> None:
+        """Пустые, длинные ID и все ASCII control-символы не образуют ключ."""
+        chat_id_for = _bfn("_request_chat_id")
+        invalid = (
+            False,
+            True,
+            0,
+            123,
+            1.5,
+            {},
+            [],
+            "",
+            " \t ",
+            "a" * 257,
+            "\nchat",
+            "chat\t",
+            " " * 257 + "a",
+        ) + tuple(
+            "chat" + chr(code) + "id"
+            for code in (*range(32), 127, 0xD800, 0xDBFF, 0xDC00, 0xDFFF)
+        )
+        for source in (
+            "x-dsh-chat-id",
+            "x-session-id",
+            "extra",
+            "chat_id",
+        ):
+            for value in invalid:
+                with self.subTest(source=source, value=value):
+                    headers: dict[str, object] = {}
+                    extra: dict[str, object] = {}
+                    req: dict[str, object] = {}
+                    if source.startswith("x-"):
+                        headers[source] = value
+                    elif source == "extra":
+                        extra["chat_id"] = value
+                    else:
+                        req[source] = value
+                    self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+
+    def test_request_chat_id_uses_first_provided_source(self) -> None:
+        """Приоритетный невалидный источник запрещает fallback на другой чат."""
+        headers = {"x-dsh-chat-id": "header-A", "x-session-id": "header-B"}
+        extra: dict[str, object] = {"chat_id": "extra"}
+        req: dict[str, object] = {"chat_id": "body", "prompt_cache_key": "cache"}
+        chat_id_for = _bfn("_request_chat_id")
+        self.assertEqual(chat_id_for(headers, extra, req), ("header-A", False))
+        headers["x-dsh-chat-id"] = "bad\x00id"
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        del headers["x-dsh-chat-id"]
+        self.assertEqual(chat_id_for(headers, extra, req), ("header-B", False))
+        headers["x-session-id"] = "x" * 257
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        del headers["x-session-id"]
+        self.assertEqual(chat_id_for(headers, extra, req), ("extra", False))
+        extra["chat_id"] = "\x7f"
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        extra["chat_id"] = None
+        self.assertEqual(chat_id_for(headers, extra, req), ("body", False))
+        req["chat_id"] = ""
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        req["chat_id"] = None
+        self.assertEqual(chat_id_for(headers, extra, req), ("", False))
+        self.assertEqual(chat_id_for({}, {}), ("", False))
+        self.assertEqual(
+            chat_id_for(
+                {"x-dsh-chat-id": None, "x-session-id": None}, {"chat_id": None}
+            ),
+            ("", False),
+        )
+
+    def test_empty_conversation_id_preserves_hot_session(self) -> None:
+        """Пустой или null CID не мешает возобновить сессию валидного chat ID."""
+        for source in ("extra", "body"):
+            for raw in ("", "   ", None):
+                with self.subTest(source=source, raw=raw), _Fixture() as fx:
+                    _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID)])
+                    bridge = _HttpBridge()
+                    try:
+                        self.assertEqual(bridge.post(_agentic_body("первый"))[0], 200)
+                        body = _agentic_body("продолжение", True)
+                        target = (
+                            _dict(body["extra_body"]) if source == "extra" else body
+                        )
+                        target["conversation_id"] = raw
+                        if source == "extra":
+                            body["conversation_id"] = _CID_B
+                        with mock.patch.object(
+                            _bridge(), "_session_claim", wraps=_bfn("_session_claim")
+                        ) as claim:
+                            code, payload = bridge.post(body)
+                            claim.assert_called_once()
+                    finally:
+                        bridge.close()
+                    self.assertEqual(code, 200)
+                    self.assertEqual(payload["conversation_id"], _CID)
+                    argv = fx.spawns()[1]
+                    self.assertEqual(argv[argv.index("--conversation") + 1], _CID)
+                    self.assertEqual(_bval("_in_flight_cids"), set())
+                    self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_invalid_chat_id_forces_cold_without_cwd_fallback(self) -> None:
+        """Испорченный chat ID не читает и не изменяет существующий cwd-бакет."""
+        with _Fixture() as fx:
+            model = _str(_bval("MODEL_ID"))
+            effort = _dict(_dict(_bval("FLEET_MODELS"))[model])["default_effort"]
+            key = (model, str(fx.tmp), effort)
+            _ = _bfn("_session_commit")(key, _CID)
+            store = cast("dict[object, object]", _bval("_session_store"))
+            before = {
+                stored_key: dict(cast(dict, entry))
+                for stored_key, entry in store.items()
+            }
+            captured: list[dict[str, object]] = []
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                for source in ("extra", "body"):
+                    for raw in (
+                        "x" * 257,
+                        False,
+                        123,
+                        {},
+                        [],
+                        "bad\x00id",
+                        "\nchat",
+                        "chat\t",
+                        "\ud800",
+                    ):
+                        with self.subTest(source=source, raw=raw):
+                            body = _agentic_body(
+                                "безопасный холодный ход", True, chat_id=""
+                            )
+                            body["extra_body"] = {"cwd": str(fx.tmp)}
+                            target = (
+                                _dict(body["extra_body"]) if source == "extra" else body
+                            )
+                            target["chat_id"] = raw
+                            with (
+                                mock.patch.object(
+                                    _bval("Handler"), "_serve_json", capture
+                                ),
+                                mock.patch.object(_bridge(), "_session_claim") as claim,
+                                mock.patch.object(
+                                    _bridge(), "_session_commit"
+                                ) as commit,
+                                mock.patch.object(
+                                    _bridge(), "_session_invalidate"
+                                ) as invalidate,
+                                mock.patch.object(_bridge(), "_log") as log,
+                            ):
+                                self.assertEqual(bridge.post(body)[0], 200)
+                                claim.assert_not_called()
+                                commit.assert_not_called()
+                                invalidate.assert_not_called()
+                                log.assert_any_call("chat-id-invalid-rejected")
+                            ctx = captured[-1]
+                            self.assertIsNone(ctx["sess_key"])
+                            self.assertEqual(ctx["conversation_id"], "")
+                            self.assertIs(ctx["hot_resumed"], False)
+                            self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+                            self.assertIn("начало диалога", _str(ctx["prompt"]))
+                            self.assertEqual(store, before)
+            finally:
+                bridge.close()
+            self.assertEqual(_bval("_in_flight_cids"), set())
+            self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_session_isolation_flag_accepts_text_values(self) -> None:
+        """Строковый выключатель безопасен и по умолчанию сохраняет изоляцию."""
+        for raw, expected in (
+            (None, True),
+            ("0", False),
+            ("false", False),
+            ("no", False),
+            ("off", False),
+            (" FALSE ", False),
+            ("1", True),
+            ("true", True),
+            ("", True),
+            ("unexpected", True),
+        ):
+            with self.subTest(raw=raw), _Fixture() as fx:
+                fx.set_env("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", raw)
+                self.assertIs(_bfn("_is_session_isolation_enabled")(), expected)
+
+    def test_plain_explicit_cid_does_not_touch_session_store(self) -> None:
+        """Без tools явный CID запрещён, стор не читается и не меняется."""
+        for source in ("extra", "body"):
+            with self.subTest(source=source), _Fixture() as fx:
+                _ = fx.write_scenario(
+                    [], spawns=[_quick(_CID), _quick(_CID), _quick(_CID)]
+                )
+                bridge = _HttpBridge()
+                try:
+                    first = bridge.post(_agentic_body("первый ход"))
+                    store = cast(
+                        "dict[tuple[str, ...], dict[str, object]]",
+                        _bval("_session_store"),
+                    )
+                    before = {key: dict(entry) for key, entry in store.items()}
+                    body = _plain_body("фоновый заголовок", True)
+                    target = _dict(body["extra_body"]) if source == "extra" else body
+                    target["conversation_id"] = _CID
+                    captured: list[dict[str, object]] = []
+                    handler_cls = _bval("Handler")
+                    serve_json = _ofn(handler_cls, "_serve_json")
+
+                    def capture(handler: object, ctx: dict[str, object]) -> None:
+                        captured.append(dict(ctx))
+                        _ = serve_json(handler, ctx)
+
+                    with (
+                        mock.patch.object(handler_cls, "_serve_json", capture),
+                        mock.patch.object(_bridge(), "_session_claim") as claim,
+                        mock.patch.object(_bridge(), "_session_commit") as commit,
+                        mock.patch.object(
+                            _bridge(), "_session_invalidate"
+                        ) as invalidate,
+                    ):
+                        background = bridge.post(body)
+                        claim.assert_not_called()
+                        commit.assert_not_called()
+                        invalidate.assert_not_called()
+                    self.assertEqual(store, before)
+                    self.assertEqual(captured[0]["conversation_id"], "")
+                    self.assertIsNone(captured[0]["sess_key"])
+                    resumed = bridge.post(_agentic_body("второй ход", True))
+                finally:
+                    bridge.close()
+                self.assertEqual(
+                    [result[0] for result in (first, background, resumed)], [200] * 3
+                )
+                spawns = fx.spawns()
+                self.assertNotIn("--conversation", spawns[1])
+                self.assertEqual(spawns[2][spawns[2].index("--conversation") + 1], _CID)
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_explicit_cid_is_validated_before_resume(self) -> None:
+        """Невалидный CID сбрасывается, валидный с пробелами нормализуется."""
+        cases: tuple[tuple[object, str], ...] = (
+            ("invalid/chars", ""),
+            (" \t ", ""),
+            ("abcdef0", ""),
+            ("a" * 65, ""),
+            (12345678, ""),
+            ({"cid": _CID}, ""),
+            (" \t" + _CID + " \n", _CID),
+            (_CID, _CID),
+        )
+        for source in ("extra", "body"):
+            for raw, expected in cases:
+                with self.subTest(source=source, raw=raw), _Fixture() as fx:
+                    _ = fx.write_scenario(
+                        [], spawns=[_quick(_CID), _quick(_CID_B)]
+                    )
+                    body = _agentic_body("явный CID", True)
+                    target = _dict(body["extra_body"]) if source == "extra" else body
+                    target["conversation_id"] = raw
+                    captured: list[dict[str, object]] = []
+                    handler_cls = _bval("Handler")
+                    serve_json = _ofn(handler_cls, "_serve_json")
+
+                    def capture(handler: object, ctx: dict[str, object]) -> None:
+                        captured.append(dict(ctx))
+                        _ = serve_json(handler, ctx)
+
+                    bridge = _HttpBridge()
+                    try:
+                        if expected:
+                            self.assertEqual(
+                                bridge.post(_agentic_body("владелец CID"))[0], 200
+                            )
+                        with mock.patch.object(handler_cls, "_serve_json", capture):
+                            code, _payload = bridge.post(body)
+                    finally:
+                        bridge.close()
+                    self.assertEqual(code, 200)
+                    self.assertEqual(captured[0]["conversation_id"], expected)
+                    argv = fx.spawns()[-1]
+                    if expected:
+                        self.assertEqual(
+                            argv[argv.index("--conversation") + 1], expected
+                        )
+                    else:
+                        self.assertNotIn("--conversation", argv)
+                    self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_explicit_foreign_cid_is_forced_cold(self) -> None:
+        """Явный CID другого чата не выдаётся и остаётся у исходного владельца."""
+        for source in ("extra", "body"):
+            with self.subTest(source=source), _Fixture() as fx:
+                _ = fx.write_scenario(
+                    [], spawns=[_quick(_CID), _quick(_CID_B), _quick(_CID)]
+                )
+                bridge = _HttpBridge()
+                try:
+                    first = bridge.post(_agentic_body("чат А", chat_id="chat-A"))
+                    store = cast(
+                        "dict[tuple[str, ...], dict[str, object]]",
+                        _bval("_session_store"),
+                    )
+                    owner_key = next(iter(store))
+                    owner_before = dict(store[owner_key])
+                    body = _agentic_body("чужой CID", True, chat_id="chat-B")
+                    target = _dict(body["extra_body"]) if source == "extra" else body
+                    target["conversation_id"] = " " + _CID + " "
+                    captured: list[dict[str, object]] = []
+                    handler_cls = _bval("Handler")
+                    serve_json = _ofn(handler_cls, "_serve_json")
+
+                    def capture(handler: object, ctx: dict[str, object]) -> None:
+                        captured.append(dict(ctx))
+                        _ = serve_json(handler, ctx)
+
+                    with (
+                        mock.patch.object(handler_cls, "_serve_json", capture),
+                        mock.patch.object(_bridge(), "_log") as log,
+                        mock.patch.object(
+                            _bridge(), "_cid_acquire", wraps=_bfn("_cid_acquire")
+                        ) as acquire,
+                    ):
+                        foreign = bridge.post(body)
+                        self.assertNotIn(
+                            mock.call(_CID, mock.ANY), acquire.call_args_list
+                        )
+                        log.assert_any_call(f"cid-unowned-blocked cid={_CID[:8]}")
+                    self.assertEqual(captured[0]["conversation_id"], "")
+                    self.assertEqual(store[owner_key], owner_before)
+                    own_body = _agentic_body("чат А снова", True, chat_id="chat-A")
+                    own_body["conversation_id"] = _CID
+                    resumed = bridge.post(own_body)
+                finally:
+                    bridge.close()
+                self.assertEqual(
+                    [result[0] for result in (first, foreign, resumed)], [200] * 3
+                )
+                spawns = fx.spawns()
+                self.assertNotIn("--conversation", spawns[1])
+                self.assertEqual(spawns[2][spawns[2].index("--conversation") + 1], _CID)
+                self.assertEqual(len(store), 2)
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_malformed_explicit_cid_does_not_claim_cached_session(self) -> None:
+        """Битый CID принудительно выбирает полную историю, а не кешированный CID."""
+        for source, raw in (
+            (source, raw)
+            for source in ("extra", "body")
+            for raw in ("invalid/chars", 123, True, False, 0, {}, [])
+        ):
+            with self.subTest(source=source, raw=raw), _Fixture() as fx:
+                _ = fx.write_scenario(
+                    [], spawns=[_quick(_CID), _quick(_CID_B)]
+                )
+                bridge = _HttpBridge()
+                captured: list[dict[str, object]] = []
+                handler_cls = _bval("Handler")
+                serve_json = _ofn(handler_cls, "_serve_json")
+
+                def capture(handler: object, ctx: dict[str, object]) -> None:
+                    captured.append(dict(ctx))
+                    _ = serve_json(handler, ctx)
+
+                try:
+                    self.assertEqual(bridge.post(_agentic_body("первый ход"))[0], 200)
+                    body = _agentic_body("битый CID", True)
+                    target = _dict(body["extra_body"]) if source == "extra" else body
+                    target["conversation_id"] = raw
+                    if source == "extra":
+                        body["conversation_id"] = _CID
+                    with (
+                        mock.patch.object(handler_cls, "_serve_json", capture),
+                        mock.patch.object(
+                            _bridge(), "_session_claim", wraps=_bfn("_session_claim")
+                        ) as claim,
+                        mock.patch.object(_bridge(), "_log") as log,
+                    ):
+                        code, _ = bridge.post(body)
+                        claim.assert_not_called()
+                        if raw == "invalid/chars":
+                            log.assert_any_call("cid-malformed-rejected cid='invalid/chars'")
+                        else:
+                            log.assert_any_call(
+                                f"cid-nonstring-rejected type={type(raw).__name__}"
+                            )
+                finally:
+                    bridge.close()
+                self.assertEqual(code, 200)
+                self.assertEqual(captured[0]["conversation_id"], "")
+                self.assertIs(captured[0]["hot_resumed"], False)
+                self.assertEqual(captured[0]["prompt"], captured[0]["full_prompt"])
+                self.assertIn("начало диалога", _str(captured[0]["prompt"]))
+                self.assertNotIn("--conversation", fx.spawns()[1])
+
+    def test_request_without_chat_id_does_not_use_session_store(self) -> None:
+        """Без chat ID и cwd каждый ход холодный, даже с prompt_cache_key."""
+        for chat_id, cwd in (
+            ("", ""), (" \t ", " \t "), ("", "."), ("", ".."), ("", "~"),
+            ("", "rel/path"), ("", True), ("", 1), ("", []), ("", {}),
+        ):
+            with _Fixture() as fx:
+                _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID_B)])
+                bridge = _HttpBridge()
+                try:
+                    with (
+                        mock.patch.object(
+                            _bridge(), "_session_claim", wraps=_bfn("_session_claim")
+                        ) as claim,
+                        mock.patch.object(
+                            _bridge(), "_session_commit", wraps=_bfn("_session_commit")
+                        ) as commit,
+                        mock.patch.object(
+                            _bridge(), "_session_invalidate",
+                            wraps=_bfn("_session_invalidate"),
+                        ) as invalidate,
+                    ):
+                        bodies = [
+                            _agentic_body("первый", chat_id=chat_id),
+                            _agentic_body("второй", True, chat_id=chat_id),
+                        ]
+                        bodies[1]["conversation_id"] = _CID
+                        for body in bodies:
+                            body["extra_body"] = {"chat_id": chat_id, "cwd": cwd}
+                            body["prompt_cache_key"] = "shared-prefix-cache"
+                        first = bridge.post(bodies[0])
+                        second = bridge.post(bodies[1])
+                        claim.assert_not_called()
+                        commit.assert_not_called()
+                        invalidate.assert_not_called()
+                finally:
+                    bridge.close()
+                self.assertEqual((first[0], second[0]), (200, 200))
+                self.assertEqual(
+                    (first[1]["conversation_id"], second[1]["conversation_id"]),
+                    (_CID, _CID_B),
+                )
+                self.assertEqual(len(fx.spawns()), 2)
+                self.assertTrue(
+                    all("--conversation" not in argv for argv in fx.spawns())
+                )
+                self.assertEqual(_bval("_session_store"), {})
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_claim_refuses_key_without_chat_token(self) -> None:
+        """Вырожденный ключ не выдаёт CID или lease даже из существующей записи."""
+        invalid = (
+            (),
+            ("m", "", "low"),
+            ("m", " \t ", "low"),
+            ("", "m", "", "low"),
+            (" \t ", "m", "", "low"),
+        )
+        for key in invalid:
+            with _Fixture():
+                now = time.time()
+                store = cast("dict[object, object]", _bval("_session_store"))
+                store[key] = {
+                    "cid": _CID,
+                    "created": now,
+                    "last_used": now,
+                    "turns": 1,
+                }
+                self.assertEqual(
+                    _bfn("_session_claim")(key, "invalid-chat-turn"), ""
+                )
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_commit_refuses_key_without_chat_token(self) -> None:
+        """Ключ без токена и cwd не сохраняется ни в памяти, ни на диске."""
+        with _Fixture() as fx:
+            fx.patch("_sessions_persist_ready", True)
+            fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
+            with mock.patch.object(
+                _bridge(), "_persist_sessions", wraps=_bfn("_persist_sessions")
+            ) as persist:
+                for key in (
+                    (),
+                    ("m", "", "low"),
+                    ("m", " \t ", "low"),
+                    ("", "m", "", "low"),
+                    (" \t ", "m", "", "low"),
+                ):
+                    _ = _bfn("_session_commit")(key, _CID)
+                    self.assertEqual(_bval("_session_store"), {}, repr(key))
+                persist.assert_not_called()
+            self.assertFalse((fx.tmp / "ws" / "state" / "sessions.json").exists())
+
+    def test_session_key_from_json_drops_degenerate_entries(self) -> None:
+        """Восстанавливаются только строковые ключи с токеном или cwd."""
+        decode = _bfn("_session_key_from_json")
+        invalid: tuple[object, ...] = (
+            None, "not-a-key", {}, [], ["m", "", "low"], ["m", " \t ", "low"],
+            ["", "m", "", "low"], ["", "m", ".", "low"],
+            ["", "m", "..", "low"], ["", "m", "~", "low"],
+            ["", "m", "rel/path", "low"], [" \t ", "m", "/w", "low"],
+            ["", "m", "/legacy", "low"],
+            ["m", "/w", 1],
+            ["0123456789abcdef", "m", "/w", 1],
+            ["0123456789abcdef", "m", "/w", "low", "extra"],
+        )
+        for raw in invalid:
+            self.assertIsNone(decode(raw), repr(raw))
+        for cwd in ("", " \t "):
+            self.assertIsNone(decode(["m", cwd, "low"]))
+            self.assertEqual(
+                decode(["0123456789abcdef", "m", cwd, "low"]),
+                ("0123456789abcdef", "m", "", "low"),
+            )
+        for cwd in (".", "..", "~", "rel/path"):
+            for raw in (["m", cwd, "low"], ["0123456789abcdef", "m", cwd, "low"]):
+                self.assertIsNone(decode(raw), repr(raw))
+        for valid in (
+            ("0123456789abcdef", "m", "/w", "low"),
+            ("m", "/w", "low"),
+        ):
+            self.assertEqual(decode(list(valid)), valid)
+        self.assertEqual(
+            decode(["0123456789abcdef", "m", " /w/../abs/./path ", "low"]),
+            ("0123456789abcdef", "m", "/abs/path", "low"),
+        )
+        self.assertEqual(
+            decode(["m", " /w/../abs/./path ", "low"]),
+            ("m", "/abs/path", "low"),
+        )
+
+    def test_session_key_requires_chat_token_or_cwd(self) -> None:
+        """Оба допустимых формата валидны; пустые и пробельные ключи отвергаются."""
+        key_for = _bfn("_session_key_for")
+        valid = _bfn("_session_key_valid")
+        token = hashlib.sha256(b"chat-A").hexdigest()[:16]
+        for chat, cwd, expected in (
+            (" chat-A ", "", (token, "m", "", "low")),
+            ("chat-A", " /w/../abs/./path ", (token, "m", "/abs/path", "low")),
+            ("chat-A", " /w ", (token, "m", "/w", "low")),
+            ("", " /w ", ("m", "/w", "low")),
+            ("", "/w/../abs/./path", ("m", "/abs/path", "low")),
+            (" \t ", "/w", ("m", "/w", "low")),
+            ("", "", ()),
+            (" \t ", " \t ", ()),
+        ):
+            with self.subTest(chat=chat, cwd=cwd):
+                key = key_for("m", cwd, "low", chat)
+                self.assertEqual(key, expected)
+                self.assertEqual(valid(key), bool(expected))
+        # F-002: невалидный (относительный) cwd при chat id ключа не образует.
+        for cwd in ("rel/path", "webaccess", ".", "..", "~", " . "):
+            with self.subTest(chat="chat-A", cwd=cwd):
+                self.assertEqual(key_for("m", cwd, "low", "chat-A"), ())
+        for key in ((), ("m",), ("m", "", "low"), ("m", " \t ", "low"),
+                    ("", "m", "/w", "low"), (" \t ", "m", "/w", "low")):
+            self.assertFalse(valid(key), repr(key))
+
+    def test_session_key_rejects_relative_and_non_string_cwd(self) -> None:
+        """Относительный путь или нестроковый cwd не создаёт общий ключ."""
+        for cwd in (".", "..", "~", "rel/path", " . ", True, 1, [], {}):
+            with self.subTest(cwd=cwd):
+                self.assertEqual(_bfn("_session_key_for")("m", cwd, "low"), ())
+
+    def test_request_cwd_is_normalized_before_length_limit(self) -> None:
+        """HTTP-вход проверяет длину сырой строки и лишь затем нормализует cwd."""
+        limit = _int(_bval("CWD_MAX_LEN"))
+        cases = (
+            (" /w/../abs/./path ", "/abs/path"),
+            ("/" + "a" * (limit - 1), "/" + "a" * (limit - 1)),
+            ("/" + "a" * limit, ""),
+            ("/w/.." * 2, "/"),
+            # F-001: лимит на сырой строке — normpath схлопнул бы её в "/tmp".
+            ("/" * 100_000 + "tmp", ""),
+            ("/w/.." * limit, ""),
+        )
+        with _Fixture():
+            captured: list[dict[str, object]] = []
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with mock.patch.object(_bval("Handler"), "_serve_json", capture):
+                    for raw, expected in cases:
+                        with self.subTest(raw_len=len(raw)):
+                            body = _agentic_body("cwd", chat_id="")
+                            body["extra_body"] = {"cwd": raw}
+                            self.assertEqual(bridge.post(body)[0], 200)
+                            ctx = captured[-1]
+                            self.assertEqual(ctx["cwd"], expected)
+                            self.assertEqual(
+                                ctx["sess_key"],
+                                (ctx["model"], expected, ctx["effort"]) if expected else None,
+                            )
+            finally:
+                bridge.close()
+
+    def test_request_cwd_length_is_checked_before_normalization(self) -> None:
+        """F-001: "/"*N + "tmp" отвергается до normpath, не схлопываясь в "/tmp"."""
+        raw = "/" * 100_000 + "tmp"
+        with _Fixture() as fx:
+            captured: list[dict[str, object]] = []
+            handler_cls = _bval("Handler")
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_serve_json", capture),
+                    mock.patch.object(_bridge(), "_session_claim") as claim,
+                    mock.patch.object(_bridge(), "_session_commit") as commit,
+                    mock.patch.object(_bridge(), "_log") as log,
+                ):
+                    body = _agentic_body("длинный cwd")
+                    body["extra_body"] = {"cwd": raw, "chat_id": "test-agentic-chat"}
+                    self.assertEqual(bridge.post(body)[0], 200)
+                    claim.assert_not_called()
+                    commit.assert_not_called()
+                    log.assert_any_call(f"cwd-invalid-rejected cwd={raw[:32]!r}")
+            finally:
+                bridge.close()
+            self.assertEqual(len(captured), 1)
+            ctx = captured[0]
+            self.assertEqual(ctx["cwd"], "")
+            self.assertIsNone(ctx["sess_key"])  # cwd_invalid: ключ не строится
+            self.assertEqual(ctx["conversation_id"], "")  # force_cold
+            self.assertIs(ctx["hot_resumed"], False)
+            self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+            self.assertEqual(fx.spawns(), [])
+            self.assertEqual(_bval("_session_store"), {})
+
+    def test_relative_cwd_is_fail_closed_without_shared_key(self) -> None:
+        """F-013: невалидный относительный cwd не становится общим ключом ("", ...)."""
+        for cwd in (
+            "webaccess",
+            "aibunker-workshop",
+            "rel/path",
+            " . ",
+            "..",
+            "~",
+        ):
+            with self.subTest(cwd=cwd), _Fixture() as fx:
+                _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID_B)])
+                captured: list[dict[str, object]] = []
+                handler_cls = _bval("Handler")
+
+                def capture(handler: object, ctx: dict[str, object]) -> None:
+                    captured.append(dict(ctx))
+                    _ = _ofn(handler, "_send")(200, {})
+
+                bridge = _HttpBridge()
+                try:
+                    with (
+                        mock.patch.object(handler_cls, "_serve_json", capture),
+                        mock.patch.object(_bridge(), "_session_claim") as claim,
+                        mock.patch.object(_bridge(), "_session_commit") as commit,
+                        mock.patch.object(_bridge(), "_log") as log,
+                    ):
+                        for text in ("первый воркспейс", "второй воркспейс"):
+                            body = _agentic_body(text)
+                            body["extra_body"] = {
+                                "chat_id": "test-agentic-chat",
+                                "cwd": cwd,
+                            }
+                            self.assertEqual(bridge.post(body)[0], 200)
+                        claim.assert_not_called()
+                        commit.assert_not_called()
+                        log.assert_any_call(
+                            f"cwd-invalid-rejected cwd={cwd.strip()[:32]!r}"
+                        )
+                finally:
+                    bridge.close()
+                self.assertEqual(len(captured), 2)
+                for ctx in captured:
+                    self.assertEqual(ctx["cwd"], "")
+                    self.assertIsNone(ctx["sess_key"])
+                    self.assertEqual(ctx["conversation_id"], "")
+                    self.assertIs(ctx["hot_resumed"], False)
+                    self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+                self.assertEqual(_bval("_session_store"), {})
+                self.assertTrue(
+                    all("--conversation" not in argv for argv in fx.spawns())
+                )
+                self.assertEqual(_bval("_in_flight_cids"), set())
+                self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_cwd_control_chars_nul_and_non_string_are_invalid(self) -> None:
+        """F-013: NUL, управляющие символы и нестроковый тип cwd отвергаются."""
+        cases: tuple[tuple[object, str], ...] = tuple(
+            (value, "cwd-invalid-rejected")
+            for value in (
+                "/w\x00/x",
+                "/w/x\x00",
+                "/w/\x01x",
+                "/w/\x1f/x",
+                "/w/\x7f",
+                "/w/\nx",
+                "/w/x\ty",
+            )
+        ) + tuple(
+            (value, "cwd-nonstring-rejected")
+            for value in (123, 1.5, True, False, [], {}, ["/w"])
+        )
+        with _Fixture() as fx:
+            _ = fx.write_scenario([], spawns=[_quick(_CID)] * len(cases))
+            captured: list[dict[str, object]] = []
+            handler_cls = _bval("Handler")
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_serve_json", capture),
+                    mock.patch.object(_bridge(), "_session_claim") as claim,
+                    mock.patch.object(_bridge(), "_session_commit") as commit,
+                    mock.patch.object(_bridge(), "_log") as log,
+                ):
+                    for raw, event in cases:
+                        with self.subTest(cwd=raw):
+                            body = _agentic_body("проверка cwd")
+                            body["extra_body"] = {
+                                "chat_id": "test-agentic-chat",
+                                "cwd": raw,
+                            }
+                            self.assertEqual(bridge.post(body)[0], 200)
+                            ctx = captured[-1]
+                            self.assertEqual(ctx["cwd"], "")
+                            self.assertIsNone(ctx["sess_key"])
+                            self.assertEqual(ctx["conversation_id"], "")
+                            self.assertIs(ctx["hot_resumed"], False)
+                            logged = [str(call.args[0]) for call in log.call_args_list]
+                            self.assertTrue(
+                                any(str(arg).startswith(event) for arg in logged),
+                                logged,
+                            )
+                    claim.assert_not_called()
+                    commit.assert_not_called()
+            finally:
+                bridge.close()
+            self.assertEqual(len(captured), len(cases))
+            self.assertEqual(_bval("_session_store"), {})
+            self.assertTrue(all("--conversation" not in a for a in fx.spawns()))
+
+    def test_isolation_kill_switch_disables_session_store(self) -> None:
+        """F-013: AGY_BRIDGE_SESSION_ISOLATION_ENABLED=0 отключает стор без рестарта."""
+        with _Fixture() as fx:
+            fx.set_env("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", "0")
+            _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID_B)])
+            captured: list[dict[str, object]] = []
+            handler_cls = _bval("Handler")
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = _ofn(handler, "_send")(200, {})
+
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_serve_json", capture),
+                    mock.patch.object(_bridge(), "_session_claim") as claim,
+                    mock.patch.object(_bridge(), "_session_commit") as commit,
+                ):
+                    for history in (False, True):
+                        body = _agentic_body("без изоляции", history)
+                        body["extra_body"] = {
+                            "chat_id": "test-agentic-chat",
+                            "cwd": str(fx.tmp),
+                        }
+                        self.assertEqual(bridge.post(body)[0], 200)
+                    claim.assert_not_called()
+                    commit.assert_not_called()
+            finally:
+                bridge.close()
+            self.assertEqual(len(captured), 2)
+            for ctx in captured:
+                self.assertIsNone(ctx["sess_key"])
+                self.assertEqual(ctx["conversation_id"], "")
+                self.assertIs(ctx["hot_resumed"], False)
+                self.assertEqual(ctx["prompt"], ctx["full_prompt"])
+            self.assertEqual(_bval("_session_store"), {})
+            self.assertTrue(all("--conversation" not in a for a in fx.spawns()))
+
+    def test_session_key_for_non_string_cwd_with_chat_never_raises(self) -> None:
+        """F-002: невалидный cwd при валидном chat ID не роняет ключ, а гасит его."""
+        key_for = _bfn("_session_key_for")
+        token = hashlib.sha256(b"chat-A").hexdigest()[:16]
+        # Fail-closed: любой переданный невалидный cwd ключа не образует.
+        limit = _int(_bval("CWD_MAX_LEN"))
+        invalid_cwd: tuple[object, ...] = (
+            123, 1.5, True, [], {}, object(),
+            "relative/path", "webaccess", ".", "..", "~",
+            "/w\x00/x", "/w/\x01x", "/w/\x1f/x", "/w/\x7f", "/w/\ud800",
+            "/" + "a" * (limit + 1),
+        )
+        for cwd in invalid_cwd:
+            with self.subTest(cwd=cwd):
+                self.assertEqual(key_for("m", cwd, "low", "chat-A"), ())
+        # Штатное отсутствие cwd (None/""/пробелы) даёт ключ без cwd-сегмента.
+        for cwd in (None, "", " \t "):
+            with self.subTest(cwd=cwd):
+                self.assertEqual(
+                    key_for("m", cwd, "low", "chat-A"), (token, "m", "", "low")
+                )
+        self.assertEqual(
+            key_for("m", None, "low", "  chat-A  "),
+            (token, "m", "", "low"),
+        )
+        # Суррогаты и контролы в chat id не доходят до encode("utf-8").
+        for raw_chat in ("chat-\ud800", "chat\x01id", "chat\x7fid", "\udfff"):
+            with self.subTest(raw_chat=raw_chat):
+                self.assertEqual(key_for("m", "/w", "low", raw_chat), ())
+        for raw_chat in (None, 123, False):
+            with self.subTest(raw_chat=raw_chat):
+                self.assertEqual(key_for("m", "/w", "low", raw_chat), ("m", "/w", "low"))
+
+    def test_legacy_cwd_session_key_with_empty_chat_id_is_rejected(self) -> None:
+        """Ключ с пустым chat_id отбрасывается, а не превращается в общий cwd."""
+        with _Fixture() as fx:
+            fx.patch("_sessions_persist_ready", True)
+            fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
+            key = ("m", "/abs/path", "low")
+            _ = _bfn("_session_commit")(key, _CID)
+            path = fx.tmp / "ws" / "state" / "sessions.json"
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            saved["sessions"][0]["key"] = ["", "m", " /abs/./path ", "low"]
+            _ = path.write_text(json.dumps(saved), encoding="utf-8")
+            cast("dict[object, object]", _bval("_session_store")).clear()
+            self.assertEqual(_bfn("_load_persisted_sessions")(), 0)
+            self.assertEqual(list(cast(dict, _bval("_session_store"))), [])
+            self.assertEqual(_bfn("_session_claim")(key, "legacy-turn"), "")
+            cleaned = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(cleaned["sessions"], [])
+
+    def test_cwd_session_persistence_roundtrip(self) -> None:
+        """Трёхкомпонентный ключ сохраняет cwd и восстанавливает доступный CID."""
+        with _Fixture() as fx:
+            fx.patch("_sessions_persist_ready", True)
+            fx.set_env("AGY_BRIDGE_SESSIONS_FILE", None)
+            key = ("m", "/w", "low")
+            _ = _bfn("_session_commit")(key, _CID)
+            path = fx.tmp / "ws" / "state" / "sessions.json"
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["sessions"][0]["key"], list(key))
+            cast("dict[object, object]", _bval("_session_store")).clear()
+            self.assertEqual(_bfn("_load_persisted_sessions")(), 1)
+            self.assertEqual(_bfn("_session_claim")(key, "cwd-turn"), _CID)
+
+    def test_distinct_chat_ids_get_isolated_sessions(self) -> None:
+        """Два чата из extra_body продолжают только собственные разговоры."""
+        with _Fixture() as fx:
+            _ = fx.write_scenario(
+                [],
+                spawns=[
+                    _quick(_CID), _quick(_CID_B),
+                    _quick(_CID), _quick(_CID_B),
+                ],
+            )
+            bridge = _HttpBridge()
+            try:
+                results = [
+                    bridge.post(_agentic_body("А первый", chat_id="chat-A")),
+                    bridge.post(_agentic_body("Б первый", chat_id="chat-B")),
+                    bridge.post(_agentic_body("А второй", True, chat_id="chat-A")),
+                    bridge.post(_agentic_body("Б второй", True, chat_id="chat-B")),
+                ]
+            finally:
+                bridge.close()
+            self.assertEqual([code for code, _body in results], [200] * 4)
+            self.assertEqual(
+                [body["conversation_id"] for _code, body in results],
+                [_CID, _CID_B, _CID, _CID_B],
+            )
+            first_a, first_b, next_a, next_b = fx.spawns()
+            self.assertNotIn("--conversation", first_a)
+            self.assertNotIn("--conversation", first_b)
+            self.assertEqual(next_a[next_a.index("--conversation") + 1], _CID)
+            self.assertEqual(next_b[next_b.index("--conversation") + 1], _CID_B)
+            store = cast(
+                "dict[tuple[str, ...], dict[str, object]]", _bval("_session_store")
+            )
+            self.assertEqual(len(store), 2)
+            for chat_id, cid in (("chat-A", _CID), ("chat-B", _CID_B)):
+                token = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16]
+                keys = [key for key, entry in store.items() if entry["cid"] == cid]
+                self.assertEqual(len(keys), 1)
+                self.assertEqual(len(keys[0]), 4)
+                self.assertEqual(keys[0][0], token)
+                self.assertEqual(store[keys[0]]["turns"], 2)
+            self.assertEqual(_bval("_in_flight_cids"), set())
+            self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_explicit_unowned_cid_with_cwd_is_forced_cold(self) -> None:
+        """Неизвестный стору CID с cwd сбрасывается до запуска процесса."""
+        with _Fixture() as fx:
+            _ = fx.write_scenario(_quick(_CID_B))
+            captured: list[dict[str, object]] = []
+            handler_cls = _bval("Handler")
+            serve_json = _ofn(handler_cls, "_serve_json")
+
+            def capture(handler: object, ctx: dict[str, object]) -> None:
+                captured.append(dict(ctx))
+                _ = serve_json(handler, ctx)
+
+            body = _agentic_body("новый ход", True, chat_id="")
+            body["extra_body"] = {"conversation_id": _CID, "cwd": str(fx.tmp)}
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(handler_cls, "_serve_json", capture),
+                    mock.patch.object(_bridge(), "_log") as log,
+                ):
+                    code, payload = bridge.post(body)
+                    log.assert_any_call(f"cid-unowned-blocked cid={_CID[:8]}")
+            finally:
+                bridge.close()
+            self.assertEqual(code, 200)
+            self.assertEqual(payload["conversation_id"], _CID_B)
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(
+                captured[0]["sess_key"],
+                (_bval("MODEL_ID"), str(fx.tmp), captured[0]["effort"]),
+            )
+            self.assertEqual(captured[0]["conversation_id"], "")
+            self.assertIs(captured[0]["hot_resumed"], False)
+            self.assertEqual(captured[0]["prompt"], captured[0]["full_prompt"])
+            self.assertIn("начало диалога", _str(captured[0]["prompt"]))
+            self.assertNotIn("--conversation", fx.spawns()[0])
+            store = cast("dict[object, dict[str, object]]", _bval("_session_store"))
+            self.assertEqual([entry["cid"] for entry in store.values()], [_CID_B])
+            self.assertEqual(_bval("_active_cid_owners"), {})
+
+    def test_explicit_unowned_conversation_id_forces_cold_without_cached_resume(self) -> None:
+        """Чужой CID не вызывает ни явное, ни автоматическое возобновление."""
+        with _Fixture() as fx:
+            _ = fx.write_scenario(_quick(_CID_B))
+            key = ("0123456789abcdef", "m", "", "low")
+            _ = _bfn("_session_commit")(key, _CID)
+            store = cast(
+                "dict[tuple[str, ...], dict[str, object]]", _bval("_session_store")
+            )
+            before = {stored_key: dict(entry) for stored_key, entry in store.items()}
+            body = _agentic_body("чужой CID", True)
+            body["conversation_id"] = _CID
+            model_id = _str(_bval("MODEL_ID"))
+            effort = _dict(_dict(_bval("FLEET_MODELS"))[model_id])["default_effort"]
+            own_key = cast(
+                "tuple[str, ...]",
+                _bfn("_session_key_for")(model_id, "", effort, "test-agentic-chat"),
+            )
+            _ = _bfn("_session_commit")(own_key, _CID_C)
+            bridge = _HttpBridge()
+            try:
+                with (
+                    mock.patch.object(_bridge(), "_session_claim") as claim,
+                    mock.patch.object(_bridge(), "_log") as log,
+                ):
+                    code, payload = bridge.post(body)
+                    claim.assert_not_called()
+                    log.assert_any_call(f"cid-unowned-blocked cid={_CID[:8]}")
+            finally:
+                bridge.close()
+            self.assertEqual(code, 200)
+            self.assertEqual(payload["conversation_id"], _CID_B)
+            self.assertEqual(len(fx.spawns()), 1)
+            self.assertNotIn("--conversation", fx.spawns()[0])
+            self.assertEqual(store[key], before[key])
+            self.assertEqual(store[own_key]["cid"], _CID_B)
+            self.assertEqual(_bval("_in_flight_cids"), set())
+            self.assertEqual(_bval("_active_cid_owners"), {})
 
 
 class BridgeConfigurabilityTests(unittest.TestCase):

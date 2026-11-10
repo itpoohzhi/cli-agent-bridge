@@ -1,6 +1,138 @@
 {
   "schema_version": 3,
   "catalogue": "droid-bridge-fleet",
+  "aliases": {
+    "gemini-3.8-flash-droid-low": {
+      "backend_id": "gemini-3.8-flash-droid",
+      "backend": "droid",
+      "effort": "low"
+    },
+    "gemini-3.8-flash-droid-medium": {
+      "backend_id": "gemini-3.8-flash-droid",
+      "backend": "droid",
+      "effort": "medium"
+    },
+    "gemini-3.8-flash-droid-high": {
+      "backend_id": "gemini-3.8-flash-droid",
+      "backend": "droid",
+      "effort": "high"
+    },
+    "gpt-6.1-sol-droid-low": {
+      "backend_id": "gpt-6.1-sol-droid",
+      "backend": "droid",
+      "effort": "low"
+    },
+    "gpt-6.1-sol-droid-medium": {
+      "backend_id": "gpt-6.1-sol-droid",
+      "backend": "droid",
+      "effort": "medium"
+    },
+    "gpt-6.1-sol-droid-high": {
+      "backend_id": "gpt-6.1-sol-droid",
+      "backend": "droid",
+      "effort": "high"
+    },
+    "gpt-6.1-sol-droid-max": {
+      "backend_id": "gpt-6.1-sol-droid",
+      "backend": "droid",
+      "effort": "max"
+    },
+    "claude-sonnet-5-5-droid-low": {
+      "backend_id": "claude-sonnet-5-5-droid",
+      "backend": "droid",
+      "effort": "low"
+    },
+    "claude-sonnet-5-5-droid-medium": {
+      "backend_id": "claude-sonnet-5-5-droid",
+      "backend": "droid",
+      "effort": "medium"
+    },
+    "claude-sonnet-5-5-droid-high": {
+      "backend_id": "claude-sonnet-5-5-droid",
+      "backend": "droid",
+      "effort": "high"
+    },
+    "claude-sonnet-5-5-droid-max": {
+      "backend_id": "claude-sonnet-5-5-droid",
+      "backend": "droid",
+      "effort": "max"
+    },
+    "gpt-6.1-sol-low": {
+      "backend_id": "gpt-6.1-sol",
+      "backend": "codex",
+      "effort": "low"
+    },
+    "gpt-6.1-sol-medium": {
+      "backend_id": "gpt-6.1-sol",
+      "backend": "codex",
+      "effort": "medium"
+    },
+    "gpt-6.1-sol-high": {
+      "backend_id": "gpt-6.1-sol",
+      "backend": "codex",
+      "effort": "high"
+    },
+    "gpt-6.1-sol-max": {
+      "backend_id": "gpt-6.1-sol",
+      "backend": "codex",
+      "effort": "max"
+    },
+    "gemini-4-argon-high": {
+      "backend_id": "gemini-4-argon",
+      "backend": "agy",
+      "effort": "high"
+    },
+    "gemini-3.8-flash-low": {
+      "backend_id": "gemini-3.8-flash",
+      "backend": "agy",
+      "effort": "low"
+    },
+    "gemini-3.8-flash-medium": {
+      "backend_id": "gemini-3.8-flash",
+      "backend": "agy",
+      "effort": "medium"
+    },
+    "gemini-3.8-flash-high": {
+      "backend_id": "gemini-3.8-flash",
+      "backend": "agy",
+      "effort": "high"
+    },
+    "claude-sonnet-5-5-low": {
+      "backend_id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "effort": "low"
+    },
+    "claude-sonnet-5-5-medium": {
+      "backend_id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "effort": "medium"
+    },
+    "claude-sonnet-5-5-high": {
+      "backend_id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "effort": "high"
+    },
+    "claude-sonnet-5-5-max": {
+      "backend_id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "effort": "max"
+    },
+    "claude-opus-5-5-medium": {
+      "backend_id": "claude-opus-5-5",
+      "backend": "claude-p",
+      "effort": "medium"
+    },
+    "claude-opus-5-5-high": {
+      "backend_id": "claude-opus-5-5",
+      "backend": "claude-p",
+      "effort": "high"
+    },
+    "claude-haiku-5-5-low": {
+      "backend_id": "claude-haiku-5-5",
+      "backend": "opencode-go-claude",
+      "effort": "low"
+    }
+  },
   "default_model": "muse-wonder-full-1.0",
   "policy_ref": {
     "path": "~/Мой диск/Context/models.md",
@@ -22,10 +154,42 @@
     ]
   },
   "technical_ref": {
-    "droid_version": "0.233.0",
-    "droid_binary_sha256": "0e0bf625f7c45ade78fb5e11efcccaf4bcd00d53414e8e82b76c62969d0c1e34",
+    "droid_version": "1.6.0",
+    "droid_binary_sha256": "baabd0fda72da71f9717867849e6f296e982b2f7e507ed873a53c87ff83dbfdb",
     "efforts_path": "~/.hermes/droid-cli-proxy/model-efforts.json",
-    "droid_binary_path": "~/.local/bin/droid"
+    "droid_binary_path": "~/.local/bin/droid",
+    "droid_off": {
+      "backend": {
+        "enabled": false,
+        "max_concurrent": 4
+      },
+      "models": {
+        "claude-sonnet-5-5": {
+          "backend": "claude-p",
+          "name": "Claude Sonnet 5.5 (Claude-p bridge)",
+          "efforts": [
+            "high"
+          ]
+        },
+        "gemini-3.8-flash": {
+          "backend": "agy",
+          "name": "Gemini 3.8 Flash (AGY bridge)"
+        },
+        "gpt-6.1-sol": null,
+        "claude-opus-5-5": {
+          "efforts": [
+            "high"
+          ]
+        },
+        "claude-haiku-5-5": {
+          "efforts": [
+            "high"
+          ],
+          "default_effort": "high"
+        }
+      },
+      "aliases": {}
+    }
   },
   "image_limits": {
     "max_images": 16,
@@ -50,28 +214,23 @@
     "note": "резерв байт по заявленному Content-Length ДО чтения тела; семафор исполнения (128) и TCP backlog лимитами HTTP-обработчиков и памяти не считаются"
   },
   "backends": {
-    "droid": {
-      "kind": "droid",
-      "enabled": false,
-      "required": false,
-      "owned_by": "factory-droid",
-      "max_concurrent": 4
-    },
-    "muse": {
-      "kind": "muse",
+    "agy": {
+      "kind": "passthrough",
       "enabled": true,
       "required": false,
-      "owned_by": "meta-muse",
-      "max_concurrent": 1,
-      "wrapper": "~/.config/muse-launch/muse-cli.sh",
-      "technical_ref": {
-        "version": "1.4.3",
-        "binary_sha256": "c6db294799a190ca380da274beb3b9c0e160e0da9681a3d364ce8b0e5fa3a4bc",
-        "binary_path": "~/.local/bin/muse"
-      },
-      "options": {
-        "streaming_mode": "serve"
-      }
+      "owned_by": "agy-bridge",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:9887/v1",
+      "api_key_env": "AGY_BRIDGE_KEY"
+    },
+    "claude-p": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "claude-p-bridge",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:9881/v1",
+      "api_key_env": "CLAUDE_P_BRIDGE_KEY"
     },
     "codex": {
       "kind": "passthrough",
@@ -82,14 +241,81 @@
       "base_url": "http://127.0.0.1:2455/v1",
       "api_key_env": "CODEX_LB_API_KEY"
     },
-    "agy": {
+    "muse": {
+      "kind": "muse",
+      "enabled": true,
+      "required": false,
+      "owned_by": "meta-muse",
+      "max_concurrent": 1,
+      "wrapper": "~/.config/muse-launch/muse-cli.sh",
+      "technical_ref": {
+        "version": "1.4.15",
+        "binary_sha256": "c6db294799a190ca380da274beb3b9c0e160e0da9681a3d364ce8b0e5fa3a4bc",
+        "binary_path": "~/.local/bin/muse"
+      },
+      "options": {
+        "streaming_mode": "serve"
+      }
+    },
+    "opencode-go": {
       "kind": "passthrough",
       "enabled": true,
       "required": false,
-      "owned_by": "agy-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9887/v1",
-      "api_key_env": "AGY_BRIDGE_KEY"
+      "owned_by": "opencode-go",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "api_key_ref": "file:~/.config/opencode/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      },
+      "default_body_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    "opencode-go-claude": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "opencode-go-claude",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "api_key_ref": "file:~/.config/opencode/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      }
+    },
+    "droid": {
+      "kind": "droid",
+      "enabled": true,
+      "required": false,
+      "owned_by": "factory-droid",
+      "max_concurrent": 5
     },
     "opencode-zen": {
       "kind": "passthrough",
@@ -99,45 +325,9 @@
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9883/v1",
       "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
-    },
-    "claude-p": {
-      "kind": "passthrough",
-      "enabled": true,
-      "required": false,
-      "owned_by": "claude-p-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9881/v1",
-      "api_key_env": "CLAUDE_P_BRIDGE_KEY"
     }
   },
   "models": [
-    {
-      "id": "claude-sonnet-5-5",
-      "backend": "claude-p",
-      "name": "Claude Sonnet 5.5 (Claude-p bridge)",
-      "efforts": [
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 1000000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      },
-      "policy_lines": [
-        26,
-        88,
-        390,
-        407,
-        435
-      ]
-    },
     {
       "id": "gemini-3.8-flash",
       "backend": "agy",
@@ -158,46 +348,106 @@
         "status": "unverified",
         "method": null,
         "proof": null
-      },
-      "policy_lines": [
-        100,
-        142,
-        174,
-        431
-      ]
+      }
     },
     {
-      "id": "deepseek-v4.1-flash",
-      "backend": "droid",
-      "name": "DeepSeek V4.1 Flash (Droid legacy, неактивна)",
+      "id": "gemini-4-argon",
+      "backend": "agy",
+      "name": "Gemini 4 Argon (AGY bridge)",
       "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "backend": "claude-p",
+      "name": "Claude Haiku 5.5 (Claude-p bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "low",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "claude-opus-5-5",
+      "backend": "claude-p",
+      "name": "Claude Opus 5.5 (Claude-p bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "name": "Claude Sonnet 5.5 (Claude-p bridge)",
+      "efforts": [
+        "low",
+        "medium",
         "high",
         "max"
       ],
       "default_effort": "high",
       "context_window": 1000000,
-      "max_tokens": 384000,
+      "max_tokens": 128000,
       "input": [
         "text"
       ],
       "images": {
-        "cli_registry": "explicit_supported",
+        "cli_registry": "implicit_supported",
         "status": "unverified",
         "method": null,
         "proof": null
-      },
-      "policy_lines": [
-        106,
-        394,
-        432
-      ]
+      }
     },
     {
       "id": "gpt-6.1-sol",
       "backend": "codex",
       "name": "GPT-6.1 Sol (Codex passthrough)",
       "efforts": [
-        "high"
+        "low",
+        "medium",
+        "high",
+        "max"
       ],
       "default_effort": "high",
       "context_window": 272000,
@@ -210,12 +460,56 @@
         "status": "unverified",
         "method": null,
         "proof": null
+      }
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "backend": "codex",
+      "name": "GPT-6.1 Terra (Codex passthrough)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 500000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "muse-ember-1.0",
+      "backend": "muse",
+      "name": "Muse Ember 1.0 (Muse Meta bridge)",
+      "efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 131072,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": null
       },
       "policy_lines": [
-        111,
-        398,
-        406,
-        436
+        321
       ]
     },
     {
@@ -319,33 +613,42 @@
       ]
     },
     {
-      "id": "gpt-6.1-terra",
-      "backend": "codex",
-      "name": "GPT-6.1 Terra (Codex passthrough)",
+      "id": "deepseek-v4.1-flash",
+      "backend": "opencode-go",
+      "name": "DeepSeek V4.1 Flash (OpenCode Go bridge)",
+      "efforts": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": "off",
+      "context_window": 1000000,
+      "max_tokens": 384000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        106,
+        394,
+        432
+      ]
+    },
+    {
+      "id": "claude-sonnet-5-5-droid",
+      "backend": "droid",
+      "name": "Claude Sonnet 5.5 (Droid bridge)",
       "efforts": [
         "low",
         "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 500000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "claude-opus-5-5",
-      "backend": "claude-p",
-      "name": "Claude Opus 5.5 (Claude-p bridge)",
-      "efforts": [
-        "high"
+        "high",
+        "max"
       ],
       "default_effort": "high",
       "context_window": 1000000,
@@ -358,32 +661,20 @@
         "status": "unverified",
         "method": null,
         "proof": null
-      }
+      },
+      "policy_lines": [
+        26,
+        88,
+        390,
+        407,
+        435
+      ],
+      "upstream_model": "claude-sonnet-5-5"
     },
     {
-      "id": "claude-haiku-5-5",
-      "backend": "claude-p",
-      "name": "Claude Haiku 5.5 (Claude-p bridge)",
-      "efforts": [
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 1000000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "gemini-4-argon",
-      "backend": "agy",
-      "name": "Gemini 4 Argon (AGY bridge)",
+      "id": "gemini-3.8-flash-droid",
+      "backend": "droid",
+      "name": "Gemini 3.8 Flash (Droid bridge)",
       "efforts": [
         "low",
         "medium",
@@ -392,6 +683,85 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        100,
+        142,
+        174,
+        431
+      ],
+      "upstream_model": "gemini-3.8-flash"
+    },
+    {
+      "id": "gpt-6.1-sol-droid",
+      "backend": "droid",
+      "name": "GPT-6.1 Sol (Droid bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 272000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        111,
+        398,
+        406,
+        436
+      ],
+      "upstream_model": "gpt-6.1-sol"
+    },
+    {
+      "id": "beam-free",
+      "backend": "opencode-zen",
+      "name": "Beam Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "big-pickle",
+      "backend": "opencode-zen",
+      "name": "Big Pickle (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 200000,
+      "max_tokens": 32000,
       "input": [
         "text"
       ],
@@ -490,48 +860,6 @@
       "id": "nemotron-3.5-super-vl-free",
       "backend": "opencode-zen",
       "name": "Nemotron 3.5 Super VL Free (Zen)",
-      "efforts": [
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 200000,
-      "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "beam-free",
-      "backend": "opencode-zen",
-      "name": "Beam Free (Zen)",
-      "efforts": [
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 200000,
-      "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "big-pickle",
-      "backend": "opencode-zen",
-      "name": "Big Pickle (Zen)",
       "efforts": [
         "high",
         "max"

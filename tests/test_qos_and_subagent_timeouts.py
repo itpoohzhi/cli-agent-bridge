@@ -1,10 +1,8 @@
 """Тесты для Wave 2: QoS очередей, аварийный Watchdog Cap и неблокирующий Drain сабагентов."""
 
 import threading
-import time
 from unittest.mock import MagicMock
 
-import pytest
 
 import core.lifecycle
 import server
@@ -129,7 +127,7 @@ def test_lifecycle_subagent_fast_drain(monkeypatch):
     )
     monkeypatch.setattr(core.lifecycle, "DEFAULT_DRAIN_SUBAGENT_GRACE_S", 0.05)
 
-    res = lifecycle.run_drain_once()
+    lifecycle.run_drain_once()
     assert mock_turn_mgr.interrupt_for_drain.called
     args = mock_turn_mgr.interrupt_for_drain.call_args[0]
     assert args[0].turn_id == "turn-sub-1"

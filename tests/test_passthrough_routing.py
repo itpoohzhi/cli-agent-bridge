@@ -50,14 +50,19 @@ def route(monkeypatch, tmp_path):
         handler.headers["Content-Length"] = str(len(raw))
         if auth is not None:
             handler.headers["Authorization"] = auth
+
         def read(length):
             assert budget._used == initial + length
             return raw[:length]
+
         handler.rfile = Mock(read=Mock(side_effect=read))
         handler._send = Mock()
         handler._log_reject = Mock()
         handler._serve_passthrough = Mock(side_effect=error)
-        with patch.object(budget, "reserve", wraps=budget.reserve) as reserve, patch.object(budget, "release", wraps=budget.release) as release:
+        with (
+            patch.object(budget, "reserve", wraps=budget.reserve) as reserve,
+            patch.object(budget, "release", wraps=budget.release) as release,
+        ):
             try:
                 handler.do_POST()
             finally:
@@ -71,7 +76,11 @@ def route(monkeypatch, tmp_path):
     return post
 
 
-@pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6.1-terra"])
+# gpt-6.1-sol первичен на droid (priority 10), поэтому passthrough-маршрут проверяется на моделях codex/agy.
+BACKEND_OF = {"gpt-6.1-terra": "codex", "gemini-4-argon": "agy"}
+
+
+@pytest.mark.parametrize("model", list(BACKEND_OF))
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("auth", ["hub-test-key", "Bearer hub-test-key"])
@@ -83,7 +92,7 @@ def test_exact_route_preserves_body_and_reserves_budget(
     handler._send.assert_not_called()
     handler._serve_passthrough.assert_called_once()
     adapter, raw, request, resolved = handler._serve_passthrough.call_args.args
-    assert adapter.id == "codex"
+    assert adapter.id == BACKEND_OF[model]
     assert resolved == model
     assert request == json.loads(raw) == body
     reserve.assert_called_once_with(len(raw))
@@ -110,7 +119,9 @@ def test_unknown_and_invalid_models_fail_before_backend(route, model, status):
 
 
 def test_invalid_auth_cannot_execute_cli_backend(route):
-    handler, reserve = route({"model": "muse-wonder-full-1.0"}, auth="Bearer upstream-test-key")
+    handler, reserve = route(
+        {"model": "muse-wonder-full-1.0"}, auth="Bearer upstream-test-key"
+    )
     assert handler._send.call_args.args[0] == 401
     reserve.assert_not_called()
     handler.rfile.read.assert_not_called()
@@ -128,7 +139,7 @@ def test_missing_model_cannot_open_default_passthrough(route, monkeypatch):
 def test_exhausted_body_budget_rejects_before_read(route):
     budget = server._budget
     assert budget.reserve(budget.total - 1)
-    handler, reserve = route({"model": "gpt-6.1-sol"})
+    handler, reserve = route({"model": "gpt-6.1-terra"})
     assert handler._send.call_args.args[0] == 503
     assert handler._send.call_args.args[1]["error"]["type"] == "overloaded"
     handler.rfile.read.assert_not_called()
@@ -145,7 +156,9 @@ def test_invalid_json_releases_body_budget(route, auth):
         handler.rfile.read.assert_not_called()
 
 
-@pytest.mark.parametrize("error", [RuntimeError("upstream"), BrokenPipeError("client disconnected")])
+@pytest.mark.parametrize(
+    "error", [RuntimeError("upstream"), BrokenPipeError("client disconnected")]
+)
 def test_upstream_failure_and_disconnect_release_body_budget(route, error):
     with pytest.raises(type(error)):
-        route({"model": "gpt-6.1-sol"}, error=error)
+        route({"model": "gpt-6.1-terra"}, error=error)

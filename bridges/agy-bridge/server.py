@@ -95,7 +95,6 @@ import random
 import re
 import select
 import shutil
-import signal
 import socket
 import sqlite3
 import subprocess
@@ -153,6 +152,8 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.proc_groups import spawn_registered  # noqa: E402
+from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.stream_interruption_recovery import (  # noqa: E402
     InterruptionTailState,
     evaluate_graceful_interruption,
@@ -183,7 +184,6 @@ FLEET_PATH = Path(os.environ.get("AGY_BRIDGE_FLEET", "") or str(ROOT / "fleet.js
 ENV_MODEL = os.environ.get("AGY_BRIDGE_MODEL", "").strip()
 WORKSPACE = ROOT / "workspace"
 PRINT_TIMEOUT = os.environ.get("AGY_BRIDGE_PRINT_TIMEOUT", "0")
-
 
 def _env_float(name: str, default: float, low: float, high: float) -> float:
     """Float из окружения; пустое/невалидное/неконечное/вне [low, high] -> default."""
@@ -918,6 +918,15 @@ SWEEP_CUTOFF_S = get_bridge_config().sweep_cutoff_s
 
 CWD_MAX_LEN = 4096
 
+
+def _is_session_isolation_enabled() -> bool:
+    """Изоляция включена, пока окружение явно не задаёт выключатель."""
+    val = os.environ.get("AGY_BRIDGE_SESSION_ISOLATION_ENABLED", "1").strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
+AGY_BRIDGE_SESSION_ISOLATION_ENABLED = _is_session_isolation_enabled()
+
 # Ленивые горячие сессии: следующий запрос с тем же (модель, cwd, effort) продолжает
 # разговор agy через --conversation и шлёт только новые сообщения, а не всю историю.
 SESSION_IDLE_TTL_S = 45 * 60.0
@@ -1587,6 +1596,60 @@ def _prepare_agy_home() -> Path:
         return clean_home_resolved
 
 
+ALLOWED_MODELS_ENV = "AGY_ALLOWED_MODELS_FILE"
+
+
+def _allowed_models_file() -> str:
+    """Путь к allowlist лончера: env AGY_ALLOWED_MODELS_FILE, иначе файл реального HOME.
+
+    Единственный источник пути: им пользуются и окружение `agy` (`_launch_env`),
+    и фильтр каталога `/v1/models`, поэтому каталог не расходится с guard лончера.
+    """
+    return os.environ.get(ALLOWED_MODELS_ENV) or str(
+        HOME / ".config" / "agy-launch" / "allowed-models.txt"
+    )
+
+
+def _read_allowed_models() -> frozenset[str]:
+    """Разобрать allowlist так же, как лончер: без CR, пробелов, пустых строк и `#`.
+
+    Нет файла, он нечитаем или пуст -> пустое множество (фильтр отключается).
+    """
+    try:
+        text = Path(_allowed_models_file()).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    lines = (line.strip() for line in text.splitlines())
+    return frozenset(line for line in lines if line and not line.startswith("#"))
+
+
+def _model_in_allowlist(model_id: str, allowed: frozenset[str]) -> bool:
+    """Каталог отдаёт только id, которые лончер примет дословно.
+
+    Лончер сверяет запрошенный id с allowlist дословно (иначе rc=64
+    «generation guard» -> HTTP 502). Расширять каталог по базовой форме
+    (`-high`/`-medium`/`-low`) нельзя: такой id лончер отклонит, и вызывающая
+    сторона снова получит ответ другой модели при формальном успехе.
+    """
+    return model_id in allowed
+
+
+def _catalog_model_order() -> list[str]:
+    """Порядок каталога: MODEL_ID первым, затем FLEET["order"]; только разрешённые.
+
+    Нет allowlist или он пуст -> прежний состав без фильтрации и одна строка в лог.
+    """
+    order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
+    allowed = _read_allowed_models()
+    if not allowed:
+        _log(
+            f"models catalog: allowlist {_allowed_models_file()} missing or empty,"
+            " generation-guard filter disabled"
+        )
+        return order
+    return [mid for mid in order if _model_in_allowlist(mid, allowed)]
+
+
 def _launch_env() -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
@@ -1601,6 +1664,7 @@ def _launch_env() -> dict:
     значения, уже заданные в окружении моста, сохраняются (`setdefault`).
     """
     env = os.environ.copy()
+    env.setdefault("AGY_SKIP_PREFLIGHT", "1")
     env.pop("AGY_BRIDGE_KEY", None)
     clean_home = str(_prepare_agy_home())
     # Per-launch Zero-Canon: канон, появившийся после инициализации, удаляется
@@ -1611,10 +1675,7 @@ def _launch_env() -> dict:
         _clean_canon_files(Path(clean_home))
     env["HOME"] = clean_home
     env.setdefault("AGY_BIN", str(AGY_BIN))
-    env.setdefault(
-        "AGY_ALLOWED_MODELS_FILE",
-        str(HOME / ".config" / "agy-launch" / "allowed-models.txt"),
-    )
+    env.setdefault(ALLOWED_MODELS_ENV, _allowed_models_file())
     env["BRIDGE_ZERO_CANON"] = "1"
     env["BROWSER"] = "/usr/bin/false"
     return env
@@ -2757,36 +2818,87 @@ def _get_resumed_turn_prompt(
 def _session_key_for(
     model: str, cwd: str, effort: str, raw_chat_id: str = ""
 ) -> tuple[str, ...]:
-    """Ключ горячей сессии: 4-кортеж с токеном чата при chat id, иначе 3-кортеж.
+    """Ключ горячей сессии: токен чата, иначе cwd; без обоих ключ пуст.
 
     Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
+    Переданный, но невалидный cwd (не строка, относительный, длиннее
+    CWD_MAX_LEN, с NUL/контролами/суррогатами) — fail-closed: ключа нет.
+    Пустой cwd допустим только при штатном отсутствии cwd (None или "").
     """
-    chat = raw_chat_id.strip()
-    if not chat:
-        return (model, cwd, effort)
-    chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
-    return (chat_token, model, cwd, effort)
+    chat = raw_chat_id.strip() if isinstance(raw_chat_id, str) else ""
+    # Суррогаты и контролы в chat id не должны доходить до encode("utf-8").
+    if any(
+        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in chat
+    ):
+        return ()
+
+    cwd_norm = ""
+    if cwd is not None:
+        if isinstance(cwd, str):
+            val = cwd.strip()
+            if val:
+                if (
+                    len(val) > CWD_MAX_LEN
+                    or not os.path.isabs(val)
+                    or "\x00" in val
+                    or any(
+                        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                        for c in val
+                    )
+                ):
+                    return ()
+                cwd_norm = os.path.normpath(val)
+        else:
+            return ()
+
+    if chat:
+        chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
+        return (chat_token, model, cwd_norm, effort)
+    if cwd_norm:
+        return (model, cwd_norm, effort)
+    return ()
 
 
-def _request_chat_id(headers: Any, extra: dict) -> str:
-    """Идентификатор чата клиента: x-dsh-chat-id, x-session-id или extra_body.chat_id."""
+def _request_chat_id(
+    headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
+) -> tuple[str, bool]:
+    """Первый переданный chat ID и признак невалидного идентификатора."""
     for value in (
         headers.get("x-dsh-chat-id"),
         headers.get("x-session-id"),
         extra.get("chat_id"),
+        (req or {}).get("chat_id"),
     ):
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+        if value is None:
+            continue
+        if not isinstance(value, str) or len(value) > 256 or any(
+            ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+            for c in value
+        ):
+            return "", True
+        val = value.strip()
+        return val, not bool(val)
+    return "", False
 
 
-def _session_claim(sess_key: tuple, turn_id: str = "") -> str:
+def _session_key_valid(sess_key: tuple[str, ...]) -> bool:
+    """Стор принимает только ключ с непустым токеном чата или cwd."""
+    if len(sess_key) == 4:
+        return bool(sess_key[0].strip())
+    if len(sess_key) == 3:
+        return bool(sess_key[1].strip())
+    return False
+
+
+def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
     """Найти живую свободную сессию и занять её; '' — сессии нет.
 
     Проверка и занятие идут под одним замком: два параллельных запроса не
     получат один и тот же conversation_id. При непустом `turn_id` владение cid
     регистрируется в `_active_cid_owners` в той же критической секции.
     """
+    if not _session_key_valid(sess_key):
+        return ""
     now = time.time()
     evicted = False
     try:
@@ -2832,7 +2944,9 @@ def _session_invalidate(sess_key: tuple, cid: str) -> None:
         _persist_sessions()
 
 
-def _session_commit(sess_key: tuple, cid: str) -> None:
+def _session_commit(sess_key: tuple[str, ...], cid: str) -> None:
+    if not _session_key_valid(sess_key):
+        return
     now = time.time()
     with _session_store_lock:
         entry = _session_store.get(sess_key)
@@ -2857,19 +2971,33 @@ def _sessions_file_path() -> Path:
 
 
 def _session_key_to_json(key: tuple) -> list[str]:
-    parts = [str(part) for part in key]
-    return [""] + parts if len(parts) == 3 else parts
+    return [str(part) for part in key]
 
 
 def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
-    """Пустой chat_token -> 3-кортеж (model, cwd, effort), иначе 4-кортеж."""
-    if not isinstance(raw, list) or len(raw) != 4:
+    """Строковый ключ с токеном чата или cwd; вырожденный ключ -> None."""
+    if not isinstance(raw, list) or len(raw) not in (3, 4):
         return None
     items = cast("list[object]", raw)
     if not all(isinstance(part, str) for part in items):
         return None
     parts = cast("list[str]", items)
-    return tuple(parts[1:]) if parts[0] == "" else tuple(parts)
+    if len(parts) == 4 and not parts[0].strip():
+        return None
+    cwd_index = 2 if len(parts) == 4 else 1
+    cwd = parts[cwd_index].strip()
+    if cwd:
+        if not os.path.isabs(cwd):
+            return None
+        parts[cwd_index] = os.path.normpath(cwd)
+    elif len(parts) == 4:
+        parts[cwd_index] = ""
+    else:
+        return None
+    key = tuple(parts)
+    if not _session_key_valid(key):
+        return None
+    return key
 
 
 def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
@@ -3044,7 +3172,7 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
-_kill_all = _supervisor.kill_all
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=lambda: list(_active.copy().values()), cleanup_fn=lambda: _supervisor.kill_all([p for p in _active.copy().values() if p.returncode is None]), log_fn=_log), workspace=WORKSPACE)
 
 
 # ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
@@ -5008,6 +5136,15 @@ def resolve_agy_mode(req: dict) -> str:
     )
 
 
+def _with_pure_text_protocol(prompt: str) -> str:
+    """Инструкция подавления нативных инструментов agy CLI для чисто текстового хода."""
+    suppress = (
+        "[CRITICAL: DO NOT USE ANY TOOLS (no read_file, no grep, no bash, no agent tools). "
+        "Provide your analysis and answer directly as pure text.]"
+    )
+    return f"{suppress}\n\n{prompt}" if prompt else suppress
+
+
 def _with_tools_protocol(prompt: str, tools: list, tool_choice: object) -> str:
     """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
     section = _core_messages_to_prompt([], tools, tool_choice)
@@ -5278,7 +5415,7 @@ class Run:
             plan.anchored = False
             plan.reason = "cid_busy"
         try:
-            self.proc = subprocess.Popen(
+            self.proc = spawn_registered(
                 cmd,
                 cwd=work_dir,
                 stdin=subprocess.PIPE,
@@ -5880,6 +6017,7 @@ class Run:
         _kill_group(self.proc)
         with _active_lock:
             _active.pop(self.proc.pid, None)
+        spawn_registered.unregister(self.proc)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:
@@ -6157,6 +6295,7 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
+@_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _registry_job: _Job | None = None
     protocol_version = "HTTP/1.1"
@@ -7255,7 +7394,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/v1/models", "/models"):
             data = []
-            order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
+            order = _catalog_model_order()
             image_flags: list[bool] = []
             fallback_info, effective = _image_fallback_view()
             for mid in order:
@@ -7535,34 +7674,111 @@ class Handler(BaseHTTPRequestHandler):
                     stripped_full_prompt = _with_tools_protocol(
                         stripped_full_prompt, tools, tool_choice
                     )
+            else:
+                full_prompt = _with_pure_text_protocol(full_prompt)
+                if stripped_full_prompt:
+                    stripped_full_prompt = _with_pure_text_protocol(stripped_full_prompt)
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
-            cwd = str(extra.get("cwd") or "")
-            if len(cwd) > CWD_MAX_LEN:
-                cwd = ""
-            conversation_id = str(
-                extra.get("conversation_id") or req.get("conversation_id") or ""
-            )
+            raw_cwd = extra.get("cwd")
+            cwd = ""
+            cwd_invalid = False
+            # Штатное отсутствие cwd (None/"") и явно невалидный cwd различаются:
+            # невалидный деградирует не молча в "", а в fail-closed холодный ход.
+            # Длина и запрещённые символы проверяются на сырой строке ДО normpath:
+            # иначе "/"*N + "tmp" схлопывается в "/tmp", обходя лимит и аллоцируя O(N).
+            if raw_cwd is not None:
+                if isinstance(raw_cwd, str):
+                    val = raw_cwd.strip()
+                    if val:
+                        if (
+                            len(val) > CWD_MAX_LEN
+                            or not os.path.isabs(val)
+                            or "\x00" in val
+                            or any(
+                                ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                                for c in val
+                            )
+                        ):
+                            _log(f"cwd-invalid-rejected cwd={val[:32]!r}")
+                            cwd_invalid = True
+                            force_cold = True
+                        else:
+                            cwd = os.path.normpath(val)
+                else:
+                    _log(f"cwd-nonstring-rejected type={type(raw_cwd).__name__}")
+                    cwd_invalid = True
+                    force_cold = True
+            # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
+            isolation_enabled = _is_session_isolation_enabled()
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
-            use_session_store = tools_count > 0
+            chat_id, chat_id_invalid = _request_chat_id(
+                self.headers, cast(dict, extra), req if isinstance(req, dict) else None
+            )
             sess_key: tuple[str, ...] | None = (
                 _session_key_for(
                     cast(str, model_id),
                     cwd,
                     cast(str, effort),
-                    _request_chat_id(self.headers, cast(dict, extra)),
+                    chat_id,
                 )
-                if use_session_store
+                if tools_count > 0 and isolation_enabled and not cwd_invalid
                 else None
             )
+            if chat_id_invalid:
+                _log("chat-id-invalid-rejected")
+                sess_key = None
+                force_cold = True
+            if cwd_invalid or not isolation_enabled:
+                sess_key = None
+                force_cold = True
+            if sess_key is not None and not _session_key_valid(sess_key):
+                sess_key = None
+            use_session_store = (
+                tools_count > 0 and sess_key is not None and isolation_enabled
+            )
+            raw_cid = (
+                extra.get("conversation_id")
+                if "conversation_id" in extra
+                else (req.get("conversation_id") if isinstance(req, dict) else None)
+            )
+            cid_clean = ""
+            if raw_cid is not None:
+                if isinstance(raw_cid, str):
+                    val = raw_cid.strip()
+                    if val:
+                        if _CID_RE.fullmatch(val):
+                            cid_clean = val
+                        else:
+                            _log(f"cid-malformed-rejected cid={val[:16]!r}")
+                            force_cold = True
+                else:
+                    _log(f"cid-nonstring-rejected type={type(raw_cid).__name__}")
+                    force_cold = True
+
+            # Явный CID разрешён только при доказанном владении ключом этого чата.
+            if cid_clean:
+                is_owned = False
+                if use_session_store and sess_key is not None:
+                    with _session_store_lock:
+                        entry = _session_store.get(sess_key)
+                        is_owned = entry is not None and entry.get("cid") == cid_clean
+                if not is_owned:
+                    _log(f"cid-unowned-blocked cid={cid_clean[:8]}")
+                    conversation_id = ""
+                    force_cold = True
+                else:
+                    conversation_id = cid_clean
+            else:
+                conversation_id = ""
             is_resumed = False
             prompt = full_prompt
             if force_cold:
-                # Media убраны из истории: «грязный» явный или кэшированный CID
-                # не возобновляем, ход идёт холодным text-only с полной историей.
+                # Media убраны из истории, либо malformed/unowned CID:
+                # ход идёт холодным text-only с полной историей.
                 conversation_id = ""
             elif conversation_id:
                 if _cid_acquire(conversation_id, turn_id):
@@ -7571,7 +7787,7 @@ class Handler(BaseHTTPRequestHandler):
                     # cid занят другим активным ходом: два хода не делят один разговор.
                     _log(f"cid-busy-fresh cid={conversation_id[:8]}")
                     conversation_id = ""
-            elif sess_key is not None:
+            elif use_session_store and sess_key is not None:
                 use_cid = _session_claim(sess_key, turn_id)
                 if use_cid:
                     conversation_id = use_cid
@@ -7579,6 +7795,8 @@ class Handler(BaseHTTPRequestHandler):
                     prompt = _get_resumed_turn_prompt(render_messages, images)
                     if emulate_tools:
                         prompt = _with_tools_protocol(prompt, tools, tool_choice)
+                    else:
+                        prompt = _with_pure_text_protocol(prompt)
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
@@ -8211,8 +8429,6 @@ def main() -> None:
         _launcher()
     except LauncherUnavailable:
         _log(f"launcher_missing path={LAUNCHER} (requests will fail with 503)")
-    signal.signal(signal.SIGTERM, _kill_all)
-    signal.signal(signal.SIGINT, _kill_all)
     api_key_present = "yes" if AUTH_KEY else "no"
     server = Server((HOST, PORT), Handler)
     _log(
@@ -8221,7 +8437,7 @@ def main() -> None:
         f"api_key={api_key_present}"
     )
     print(f"[agy-bridge] listening on http://{HOST}:{PORT}/v1", flush=True)
-    server.serve_forever()
+    raise SystemExit(_LIFECYCLE.serve_forever(server))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,0 @@
-Reading prompt from stdin...
-2026-11-01T22:26:30.636420Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when UnexpectedServerResponse("HTTP 403: {\"error\":{\"code\":\"challenge\",\"message\":\"This request requires a challenge to be completed.\",\"id\":\"fra1::1793571990-CZc9SRFfvRDBbJmRWX2miJIwWk67yNKI\"}}\n")
-2026-11-01T22:26:31.156714Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when UnexpectedServerResponse("HTTP 403: {\"error\":{\"code\":\"challenge\",\"message\":\"This request requires a challenge to be completed.\",\"id\":\"fra1::1793571991-SB5ZO2Ajo82tA5jG8bZ8I3Zg7vlOUNj0\"}}\n")

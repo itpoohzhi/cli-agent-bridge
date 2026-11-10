@@ -66,7 +66,7 @@ class TestRealRun(BridgeCase):
         init = self.hub.inits()[0]["params"]
         self.assertEqual(init["modelId"], "claude-sonnet-5-5")
         self.assertEqual(init["reasoningEffort"], "high")
-        self.assertEqual(init["autonomyLevel"], "high")
+        self.assertEqual(init["autonomyLevel"], "off")
         self.assertEqual(init["cwd"], os.path.realpath(str(server.WORKSPACE)))
         self.assertIs(init["disableBuiltinSkills"], True)
         self.assertIs(init["autoRejectPermissionRequests"], True)
@@ -133,7 +133,8 @@ class TestRealRun(BridgeCase):
                 "reasoning_effort": "high",
                 "autonomy": "low",
                 "messages": [{"role": "user", "content": "hi"}],
-            }
+            },
+            headers={"X-Subagent-Id": "coder-run"},
         )
         self.assertEqual(status, 200)
         inits = self.hub.inits()

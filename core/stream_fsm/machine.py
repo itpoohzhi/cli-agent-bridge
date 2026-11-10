@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import codecs
 import json
-from typing import Any, List, Tuple, Union
+from typing import List, Tuple, Union
 
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
 from core.stream_fsm.tool_call_assembler import ToolCallAssembler

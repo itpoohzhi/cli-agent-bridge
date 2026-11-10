@@ -11,8 +11,8 @@ system/tools/cwd) = новая generation с replay. Idle-процесс гас�
 `DROID_DSH_BRIDGE_IDLE_SECONDS` (по умолчанию 2700 с), SID и файлы остаются, следующий
 ход восстанавливается `load_session` того же SID. Без ключа, для title-запросов и для
 запросов с изображениями — эфемерная чистая сессия с replay истории запроса.
-Автономность даунстрим-исполнителя задаётся top-level полем `autonomy`
-(`low|medium|high|off`, дефолт `high`); иное = 400 `unsupported_autonomy`.
+Поле `autonomy`: `low|medium|high|off`, DROID_DEFAULT_AUTONOMY, безопасный дефолт `off`.
+`high` требует DROID_ALLOW_HIGH_AUTONOMY=1; иное = 400 `unsupported_autonomy`.
 `--skip-permissions-unsafe` не используется никогда; нативные tools droid отключены,
 запросы разрешений отклоняются (`autoRejectPermissionRequests`).
 Вывод хода удерживается до `agent_turn_completed` и затем отдаётся в OpenAI Chat
@@ -65,7 +65,7 @@ from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, cast
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -76,14 +76,11 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     discover_local_cdp_url,
     is_loopback_cdp_url,
 )
-from receipt_schema import (  # noqa: E402
-    RECEIPT_PROBES,
-    RECEIPT_SCHEMA,
-    RPC_API_VERSION,
-    SETTINGS_PROFILE,
-    TOOLS_POLICY,
-    settings_profile_digest,
-    tools_policy_digest,
+from tools.receipt_schema import (  # noqa: E402,F401
+    RECEIPT_PROBES as RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE as SETTINGS_PROFILE,
+    TOOLS_POLICY as TOOLS_POLICY, ReceiptV3, catalog_tool_ids, receipt_gate_problem,
+    settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest,
+    validate_model_catalog, validate_receipt_components,
 )
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
@@ -94,6 +91,7 @@ from adapters.passthrough_adapter import (  # noqa: E402
     ResponseSink,
 )
 from core.backend_adapter import (  # noqa: E402
+    EFFORT_LEVELS as EFFORT_LEVELS,
     AdapterRegistry,
     FleetViolation,
     ImageAttachment,
@@ -112,11 +110,11 @@ from core.resilience import (  # noqa: E402
     ResilienceLease,
     ResilienceManager,
 )
-from core.lifecycle import (  # noqa: E402
+from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежние реэкспорты фасада
     DEFAULT_DRAIN_SECONDS,
     HubLifecycleManager,
     KEEPALIVE_INTERVAL_S,
-    QoSSlotManager,
+    QoSSlotManager as QoSSlotManager,
     QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
     RESERVED_INTERACTIVE_SLOTS,
     get_qos_manager,
@@ -151,7 +149,7 @@ from core.turn_session_manager import (  # noqa: E402
     TurnSessionManager,
     _is_detached_enabled,
     _is_drain_enabled,
-    _is_watchdog_enabled,
+    _is_watchdog_enabled as _is_watchdog_enabled,
     hash_token,
     validate_turn_id,
 )
@@ -163,21 +161,101 @@ from core.watchdog import (  # noqa: E402,F401
     ProcessWatchdog,
 )
 from core.model_penalty import get_penalty_tracker  # noqa: E402
-from core.cli_runtime_config import CliRuntimeConfig, WatchdogConfig, cli_label, cli_number  # noqa: E402
+from core.cli_runtime_config import (  # noqa: E402 - импорт после настройки путей пакетов
+    CliRuntimeConfig,
+    WatchdogConfig,
+    cli_label,
+    cli_number,
+)
 from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa: E402
 from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
+from core.request_telemetry import RequestTelemetryStore  # noqa: E402
+from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note, telemetry_tail  # noqa: E402
+from core.gateway_execution_policy import (  # noqa: E402
+    AUTONOMY_LEVELS as AUTONOMY_LEVELS,
+    AUTONOMY_OFF as AUTONOMY_OFF,
+    AutonomyViolation,
+    RpcError as RpcError,
+    RpcPermissionDenied as RpcPermissionDenied,
+    allow_high_autonomy,
+    default_autonomy,
+    denied_subagent,
+    permission_event,
+    permission_frame,
+    require,
+    resolve_autonomy_decision,
+    validate_autonomy_request,
+    validate_boolean_flags,
+)
+from core.catalog_flags import (  # noqa: E402
+    catalog_flags,
+    load_sidecar_view,
+    quarantine_gate_enabled,
+    resolve_fleet_path,
+    sidecar_allowlist,
+)
+from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
+from core.droid_session_gate import ToolsGateError, admit_model, plan_tools_disable, verify_tools_disabled  # noqa: E402
+from core.effort_policy import (  # noqa: E402
+    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER, FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
+    catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
+    resolve_model_effort_fields, resolve_passthrough_effort,
+)
 CLI_CFG = CliRuntimeConfig.from_env()
+REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
+
+
+def resolve_target_model(model_entry: dict, requested_model_id: str) -> str:
+    """Возвращает каноническую целевую модель для CLI/бэкенда (upstream_model при наличии)."""
+    if not isinstance(model_entry, dict):
+        return requested_model_id
+    upstream = model_entry.get("upstream_model")
+    if isinstance(upstream, str) and upstream.strip():
+        return upstream.strip()
+    return requested_model_id
+
+
+def build_cli_model_selection(ctx: dict) -> str:
+    """Выбирает целевую модель для запуска CLI-процесса (с учётом upstream_model)."""
+    return ctx.get("target_model") or ctx["model"]
+
+
+def prepare_passthrough_request(
+    req: dict,
+    model: dict,
+    model_id: str,
+    alias: tuple[str, str] | None = None,
+    alias_effort: str | None = None,
+    effort_on: bool = False,
+) -> tuple[dict, Any]:
+    """Формирует тело запроса для passthrough-маршрута с трансляцией upstream_model и effort."""
+    upstream_model = model.get("upstream_model")
+    has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+    pt_effort = resolve_passthrough_effort(
+        req.get("reasoning_effort"),
+        alias_effort,
+        ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
+        enabled=effort_on,
+    )
+    if has_upstream or alias or pt_effort.apply:
+        target_model = resolve_target_model(model, model_id)
+        req = {**req, "model": target_model}
+        if pt_effort.apply:
+            req["reasoning_effort"] = pt_effort.value
+    return req, pt_effort
+
+
+def _resolve_backend_topology(backend_id: str, route_mode: str) -> tuple[str, str]:
+    """backend_id -> (outbound_target, egress_proxy) телеметрии; карта настраивается через env."""
+    return resolve_backend_topology(BACKENDS, backend_id, route_mode)
 
 
 HOME = Path.home()
 
 
 def _bridge_env(name: str, default: str = "") -> str:
-    """Читает параметр хаба с legacy fallback; принимает суффикс или полное имя.
-
-    Пустое canonical-значение уступает legacy-параметру.
-    """
+    """Читает параметр хаба с legacy fallback; принимает суффикс или полное имя (пустое canonical уступает legacy)."""
     if name.startswith("BRIDGE_"):
         value = os.environ.get(name) or os.environ.get("DROID_DSH_" + name)
         return value if value is not None else default
@@ -191,9 +269,7 @@ def _bridge_env(name: str, default: str = "") -> str:
 def _log(msg: str) -> None:
     """Диагностика в stderr (файлы вне каталога моста не создаём)."""
     try:
-        sys.stderr.write(
-            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
-        )
+        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")
         sys.stderr.flush()
     except OSError:
         pass
@@ -204,9 +280,8 @@ PORT = int(_bridge_env("PORT", "9882"))
 AUTH_KEY = _bridge_env("KEY")
 BRIDGE_KEY = AUTH_KEY
 LAUNCHER = CLI_CFG.launcher or str(HOME / ".config" / "factory-launch" / "droid-cli.sh")
-FLEET_PATH = Path(
-    os.environ.get("DROID_DSH_BRIDGE_FLEET", "") or str(ROOT / "fleet.json")
-)
+# Явный DROID_DSH_BRIDGE_FLEET приоритетнее флага BRIDGE_COMPILED_FLEET_ENABLED (стенды тестов).
+FLEET_PATH = resolve_fleet_path(ROOT / "fleet.json", ADAPTER_KINDS)
 ENV_MODEL = os.environ.get("DROID_DSH_BRIDGE_MODEL", "").strip()
 IMAGE_PROBE = os.environ.get("DROID_DSH_BRIDGE_IMAGE_PROBE", "") == "1"
 # ADR 0010: санитизация аргументов tool_calls (пустые опциональные строки, распаковка `parallel`).
@@ -215,11 +290,6 @@ BRIDGE_SANITIZE_TOOL_CALLS = os.getenv(
 ).lower() in ("true", "1", "yes")
 # ADR 0011 AD-005: лимиты читаются здесь (не в ядре, BND-001) и передаются в ядро аргументами:
 # BRIDGE_MAX_PARALLEL_CALLS (по умолчанию 64), BRIDGE_MAX_PARALLEL_DEPTH, лимиты passthrough.
-# Уровни reasoning, допустимые в каталоге (dev-контекст выбирает fleet.json).
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
-# Полная шкала reasoning для клампа запрошенного effort к каталогу модели.
-EFFORT_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
-
 BRIDGE_LIMITS = PassthroughLimits.from_env()
 
 
@@ -361,12 +431,7 @@ def _resolve_model_alias(
     raw_id: str, catalogue: Mapping[str, Any]
 ) -> tuple[str, str] | None:
     """Разрешить суффикс effort, оставляя точные записи каталога приоритетными."""
-    if not EFFORT_ALIAS_ENABLED or raw_id in catalogue:
-        return None
-    base, _, suffix = raw_id.rpartition("-")
-    if suffix in EFFORT_SUFFIXES and base in catalogue:
-        return base, suffix
-    return None
+    return resolve_alias_effort(raw_id, catalogue, EFFORT_SUFFIXES, EFFORT_ALIAS_ENABLED)
 
 
 def _trace_headers(trace: RequestTrace | None) -> list[tuple[str, str]]:
@@ -411,44 +476,10 @@ FIRST_TOKEN_TIMEOUT_S = CLI_CFG.first_token_timeout_s
 PREFLIGHT_SKIP_WINDOW_S = 120.0
 
 
-def clamp_effort_downward(
-    candidate: str, allowed: Sequence[str], default: str
-) -> tuple[str, bool]:
-    """Кламп effort вниз по EFFORT_ORDER к ближайшему уровню из allowed.
-
-    Точное (case-insensitive) совпадение с allowed возвращает сам элемент
-    allowed и False. Иначе — supported с максимальным рангом строго ниже
-    candidate; если нижнего нет — с минимальным рангом выше. Неизвестный
-    шкале candidate или отсутствие ранжируемых allowed — (default, True).
-    """
-    key = candidate.lower()
-    for item in allowed:
-        if item.lower() == key:
-            return item, False
-    rank_of = {name: rank for rank, name in enumerate(EFFORT_ORDER)}
-    if key not in rank_of:
-        return default, True
-    candidate_rank = rank_of[key]
-    rankable = [
-        (rank_of[item.lower()], item) for item in allowed if item.lower() in rank_of
-    ]
-    if not rankable:
-        return default, True
-    lower = [pair for pair in rankable if pair[0] < candidate_rank]
-    if lower:
-        return max(lower, key=lambda pair: pair[0])[1], True
-    upper = [pair for pair in rankable if pair[0] > candidate_rank]
-    if upper:
-        return min(upper, key=lambda pair: pair[0])[1], True
-    return default, True
-
-
-# Уровни автономности даунстрим-исполнителя: передаются в `autonomyLevel` RPC
-# (`initialize_session`/`update_session_settings`) и сверяются read-back; дефолт high,
-# `off` — read-only режим droid (Reviewer-пути).
-AUTONOMY_LEVELS = ("low", "medium", "high")
-AUTONOMY_OFF = "off"
-AUTONOMY_DEFAULT = "high"
+# Автономность RPC сверяется read-back; безопасный дефолт off — read-only.
+_allow_high_autonomy = functools.partial(allow_high_autonomy, "DROID")
+_default_autonomy = functools.partial(default_autonomy, "DROID")
+AUTONOMY_DEFAULT = _default_autonomy()
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 # Известные сигнатуры изображений: нужны, чтобы отличить image_type_mismatch
 # от unsupported_image_type (пиксели не декодируются, сторонних библиотек нет).
@@ -470,10 +501,35 @@ IMAGE_EXTENSIONS = {
 }
 
 
+def _quarantine_denial(model_id: str, subagent_id: str | None) -> "qgate.Deny | None":
+    """Решение карантинного гейта (флаг `BRIDGE_QUARANTINE_GATE_ENABLED`): `Deny` или `None`.
+
+    Роль — из `X-Subagent-Id`; сайдкар битый — fail-closed для не-open ролей.
+    """
+    if not quarantine_gate_enabled():
+        return None
+    try:
+        view = load_sidecar_view()
+    except (OSError, ValueError):
+        classes = qgate.RoleClasses.from_env()
+        if classes.is_open(qgate.role_from_subagent_id(subagent_id)):
+            return None
+        return qgate.Deny(model=model_id, status="sidecar_unreadable")
+    decision = qgate.gate(model_id, subagent_id, view)
+    return decision if isinstance(decision, qgate.Deny) else None
+
+
 def _build_catalog(data: Any) -> dict:
     """Общий с fleet_check структурный валидатор; env/probe остаются настройками хоста."""
+    flags = catalog_flags()
     return build_catalog(
-        data, ADAPTER_KINDS, env_model=ENV_MODEL, image_probe=IMAGE_PROBE
+        data,
+        ADAPTER_KINDS,
+        env_model=ENV_MODEL,
+        image_probe=IMAGE_PROBE,
+        mode="isolate" if flags.safe_catalog else "strict",
+        constraints_enabled=flags.provider_constraints,
+        allowlist=sidecar_allowlist() if flags.provider_constraints else None,
     )
 
 
@@ -486,7 +542,7 @@ def _load_fleet() -> dict:
         raw = None
     if raw is not None:
         try:
-            catalog = _build_catalog(json.loads(raw.decode("utf-8")))
+            catalog = greg.gated_catalog(raw, _build_catalog)
         except FleetViolation:
             raise
         except (ValueError, UnicodeDecodeError):
@@ -495,6 +551,8 @@ def _load_fleet() -> dict:
         sys.stderr.write("fleet_invalid model=- reason=fleet_unreadable\n")
         sys.stderr.flush()
         raise SystemExit(1)
+    for rejected_id, reason in cast(dict[str, str], catalog.get("rejected", {})).items():
+        sys.stderr.write(f"fleet_model_rejected model={rejected_id} reason={reason}\n")
     catalog["path"] = str(FLEET_PATH)
     catalog["sha256"] = hashlib.sha256(raw).hexdigest()
     return catalog
@@ -512,7 +570,7 @@ except FleetViolation as violation:
 MODEL_ID = ENV_MODEL or FLEET["default_model"]
 # Реестр адаптеров включённых бэкендов (ADR 0002): каталог читается лениво, чтобы подмена FLEET
 # стендом тестов действовала и на маршрутизацию; хост адаптеров — этот модуль.
-BACKENDS = AdapterRegistry.from_fleet(
+BACKENDS: AdapterRegistry = greg.GatedRegistry.from_fleet(
     FLEET, ADAPTER_KINDS, lambda: FLEET, sys.modules[__name__]
 )
 
@@ -620,10 +678,44 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
     return published
 
 
+_EFFORT_SPECS_CACHE: tuple[Any, dict[str, ModelEffortSpec]] = (None, {})
+
+
+def _invalidate_effort_specs_cache(_: Any = None) -> None:
+    """Сбрасывает кэш спек effort: GatedCatalog меняет модели без смены sha256 файла."""
+    global _EFFORT_SPECS_CACHE
+    _EFFORT_SPECS_CACHE = (None, {})
+
+
+_catalog_add_listener = getattr(FLEET, "add_listener", None)  # только у GatedCatalog
+if _catalog_add_listener is not None:
+    _catalog_add_listener(_invalidate_effort_specs_cache)
+
+
+def _effort_specs() -> dict[str, ModelEffortSpec]:
+    """Спеки effort каталога с кэшем."""
+    global _EFFORT_SPECS_CACHE
+    # FLEET.get первым: у GatedCatalog он синхронизирует флаг droid до чтения `_st` и models.
+    key = (FLEET.get("sha256"), getattr(FLEET, "_st", None), id(FLEET.get("models")),
+           ADVERTISED_EFFORT_ALIASES, EFFORT_ALIAS_ENABLED, EFFORT_SUFFIXES)
+    if _EFFORT_SPECS_CACHE[0] != key:
+        models = FLEET.get("models", {})
+        found = {a: r for a in ADVERTISED_EFFORT_ALIASES if (r := _resolve_model_alias(a, models))}
+        _EFFORT_SPECS_CACHE = (key, catalog_effort_specs(models, found))
+    return _EFFORT_SPECS_CACHE[1]
+
+
+def _advertise_efforts(card: dict[str, Any], mid: str, specs: dict[str, ModelEffortSpec]) -> None:
+    if fields := resolve_model_effort_fields(mid, specs):
+        card["supported_reasoning_efforts"] = list(fields.supported_efforts)
+        card["default_reasoning_effort"] = fields.default_effort
+
+
 def _build_models_list(
     owner_tuple: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     published = _get_published_models()
+    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else {}
     order = []
     if MODEL_ID in published:
         order.append(MODEL_ID)
@@ -679,6 +771,7 @@ def _build_models_list(
             "available": not is_pen,
             "penalized_until": pen_until,
         }
+        _advertise_efforts(card, mid, specs)
         data.append(card)
         listed.add(mid)
 
@@ -731,6 +824,7 @@ def _build_models_list(
             "available": not is_pen,
             "penalized_until": pen_until,
         }
+        _advertise_efforts(card, alias_id, specs)
         data.append(card)
         listed.add(alias_id)
 
@@ -819,8 +913,9 @@ DELIVERY_CHUNK_BYTES = 64 << 10
 # моменту свободны, а медленные клиенты держат `out`. Исчерпан — 502 proxy_error.
 MAX_DELIVERY_BYTES = CLI_CFG.max_delivery_bytes
 MAX_CHATS = CLI_CFG.max_chats
-# Предел блока agent-instructions (REQ-003): больше — отказ до spawn/add (строгая граница).
-# BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 100000, диапазон и валидация — в b_guard (ADR 0015).
+# Предел блока agent-instructions (REQ-003): больше — усечение проектных секций; канон сверх предела — отказ до spawn/add.
+# BRIDGE_INSTR_LIMIT -> DROID_DSH_BRIDGE_INSTR_LIMIT -> 500000, диапазон и валидация — в b_guard (ADR 0015).
+# Сверх предела блок не отклоняется, а мягко усекается (хвостовые проектные секции, канон защищён).
 INSTR_BLOCK_LIMIT = b_guard.resolve_block_limit()
 # Не-KB формы cwd (WA/AB/DW): допустимый блок = maxBytes профиля минус запас (матрица b_guard);
 # жёсткие 60 000 Б относятся только к блокам, целиком состоящим из копий канона (KB, REQ-003).
@@ -921,6 +1016,7 @@ def _env_int_nonneg(name: str, default: int) -> int:
         return default
 
 
+_LOG_EFFORT_MAX = _env_limit("BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS)
 FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
 FORWARD_ENV_MAX_VALUE = _env_limit("BRIDGE_FORWARD_ENV_MAX_VALUE", 32768)
 _FORWARD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -973,7 +1069,6 @@ _MASK_NAME = re.compile(r"TOKEN|KEY|SECRET|AUTH|PASS", re.IGNORECASE)
 
 
 class _ForwardFlagSource(DynamicFlagSource):
-
     _flag_name = FORWARD_FLAG
 
 
@@ -1118,40 +1213,12 @@ def _receipt_path() -> Path:
 # Квалификационный receipt (RW-009): четвёрка «образ + протокол + политика tools + профиль настроек».
 # Любое расхождение с ожиданиями моста запрещает spawn до новой квалификации (tools/droid_image.py).
 # Константы и отпечатки живут в tools/receipt_schema.py: их делят мост и установщик (RW-013).
-def _check_receipt_quad(rec: dict) -> None:
+def _check_receipt_quad(rec: Mapping[str, object]) -> None:
     """Проверка протокола, политики tools и профиля настроек receipt; расхождение — LauncherUnavailable."""
-    protocol = rec.get("protocol")
-    if (
-        not isinstance(protocol, dict)
-        or protocol.get("api_version") != RPC_API_VERSION
-        or not isinstance(protocol.get("protocol_version"), str)
-        or not protocol["protocol_version"]
-    ):
-        raise LauncherUnavailable(
-            "droid receipt: stream-jsonrpc protocol version mismatch"
-        )
-    policy = rec.get("tools_policy")
-    ids = policy.get("disabled_tool_ids") if isinstance(policy, dict) else None
-    if (
-        not isinstance(policy, dict)
-        or policy.get("policy") != TOOLS_POLICY
-        or not isinstance(ids, list)
-        or not ids
-        or policy.get("digest") != tools_policy_digest(ids)
-    ):
-        raise LauncherUnavailable("droid receipt: tools policy mismatch")
-    profile = rec.get("settings_profile")
-    if (
-        not isinstance(profile, dict)
-        or profile.get("profile") != SETTINGS_PROFILE
-        or profile.get("digest") != settings_profile_digest()
-    ):
-        raise LauncherUnavailable("droid receipt: settings profile mismatch")
-    probes = rec.get("probes")
-    if not isinstance(probes, dict) or any(
-        probes.get(name) != "ok" for name in RECEIPT_PROBES
-    ):
-        raise LauncherUnavailable("droid receipt: qualification probes are not all ok")
+    try:
+        validate_receipt_components(rec)
+    except (ValueError, TypeError) as exc:
+        raise LauncherUnavailable(str(exc)) from exc
 
 
 def _load_receipt() -> tuple:
@@ -1194,6 +1261,18 @@ def _load_receipt() -> tuple:
         raise LauncherUnavailable("droid image sha256 does not match receipt")
     _check_receipt_quad(rec)
     return real, rec
+
+
+def _tools_receipt() -> ReceiptV3 | None:
+    """Квалификация tools по моделям из receipt; None — gate выключен."""
+    try:
+        _, rec = _load_receipt()
+    except LauncherUnavailable as exc:
+        raise RpcError(f"droid receipt changed during spawn: {exc}")
+    parsed = ReceiptV3.parse(rec) if rec else None
+    if isinstance(parsed, str):
+        raise RpcError(f"droid receipt invalid: {parsed}")
+    return parsed
 
 
 def _droid_image() -> str:
@@ -1694,6 +1773,7 @@ class _HandlerSink(ResponseSink):
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
+        telemetry_note(self._handler, first_byte=True)
         if getattr(self._handler, "_headers_already_sent", False):
             return
         try:
@@ -1723,6 +1803,8 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
+        telemetry_note(self._handler, len(data), chunk=True)
+        telemetry_tail(self._handler, data)
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
@@ -1937,10 +2019,6 @@ def _kill_all(*_: Any) -> None:
         _log(f"sweep_workspace_failed err={_err_summary(exc, 80)!r}")
     _log(f"shutdown: closed {closed} child process group(s)")
     os._exit(0)
-
-
-class RpcError(Exception):
-    """Ошибка протокола droid: JSON-RPC error, невалидный обязательный ответ."""
 
 
 class RpcEof(RpcError):
@@ -2492,16 +2570,18 @@ class RpcProcess:
             if "id" in msg and ("result" in msg or "error" in msg):
                 self._put("resp", msg, size)
             return
-        if msg.get("id") is not None:
-            # Серверные запросы (разрешения): ответ отрицательный, ход не виснет.
+        if permission_frame(msg):
             self.server_requests += 1
-            if method == "droid.request_permission":
-                self._respond(msg["id"], result={"selectedOption": "cancel"})
-            else:
-                self._respond(
-                    msg["id"],
-                    error={"code": -32601, "message": "not supported by bridge"},
-                )
+            return self._put(
+                "permission", "permission request forbidden by bridge", size
+            )
+        if msg.get("id") is not None:
+            # Запрос разрешения — нарушение безопасного профиля, ход прерывается.
+            self.server_requests += 1
+            self._respond(
+                msg["id"],
+                error={"code": -32601, "message": "not supported by bridge"},
+            )
             return
         if method == "droid.session_notification":
             params = msg.get("params")
@@ -2535,6 +2615,8 @@ class RpcProcess:
         except queue.Empty:
             return None
         self._taken(event)
+        kind, payload, *_ = event
+        require(kind != "permission", RpcPermissionDenied(str(payload)))
         if event[0] == "eof":
             self.eof_rc = event[1]
             self.inbox.put(event)
@@ -3788,10 +3870,125 @@ def _instr_scan(messages: list, kb_cwd: bool = False) -> tuple:
 
 
 def _instr_limit(block: dict, max_bytes: int | None) -> int:
-    """Применимый предел блока: KB-форма (только канон) — INSTR_BLOCK_LIMIT, прочие — maxBytes минус запас."""
+    """Применимый предел блока: KB-форма (только канон) — INSTR_BLOCK_LIMIT, прочие — бюджет минус запас.
+
+    Бюджет non-KB — не меньше INSTR_BLOCK_LIMIT: устаревший maxBytes клиентского профиля DSH
+    (cordis.patch.yml, 118k) предел моста не занижает; больший maxBytes клиента допустим.
+    """
     if block["canon_only"]:
         return INSTR_BLOCK_LIMIT
-    return (max_bytes or b_guard.DEFAULT_MAXBYTES) - INSTR_NONKB_MARGIN
+    return max(INSTR_BLOCK_LIMIT, max_bytes or 0) - INSTR_NONKB_MARGIN
+
+
+_UG_CANON_SUFFIX = "/.dsh/AGENTS.md"
+_REMINDER_CLOSE = "</system-reminder>"
+
+
+def _truncation_marker(limit: int) -> str:
+    return (
+        f"\n\n[... agent-instructions truncated by bridge to limit {limit} bytes ...]\n"
+    )
+
+
+def _truncate_instr_text(text: str, limit: int) -> str:
+    """Мягкое усечение блока agent-instructions до `limit` байт UTF-8 (LIFO по секциям, канон защищён).
+
+    Секции-копии канона и глобальный `~/.dsh/AGENTS.md` не усекаются. Прочие секции режутся с конца:
+    хвост тела обрезается по границе символа, секция, не вмещающаяся даже с заголовком, удаляется
+    целиком. Вставляется маркер усечения; закрывающий `</system-reminder>` сохраняется. Если
+    защищённая часть сама превышает предел, возвращается максимально усечённый текст (вызывающий
+    повторно проверит предел и откажет).
+    """
+    heads = list(_SECTION_RE.finditer(text))
+    total = len(text.encode("utf-8"))
+    if not heads or total <= limit:
+        return text
+    tail = ""
+    last_end = len(text)
+    close = text.find(_REMINDER_CLOSE, heads[-1].end())
+    if close != -1:
+        tail, last_end = text[close:], close
+    canon = {_canon_digest(), *_canon_seen} - {""}
+    spans = []
+    for index, head in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else last_end
+        body = text[head.end() : end]
+        path = head.group(1).strip()
+        protected = (
+            path == b_guard.UG_DISPLAY
+            or path.endswith(_UG_CANON_SUFFIX)
+            or hashlib.sha256(body.strip().encode("utf-8")).hexdigest() in canon
+        )
+        spans.append([head.start(), head.end(), end, protected])
+    marker = _truncation_marker(limit)
+    need = total - limit + len(marker.encode("utf-8"))
+    # Результат по сегментам: (текст секции целиком | её усечённая версия), порядок документа сохраняется.
+    pieces: dict[int, str] = {}
+    marker_at = None
+    for index in range(len(spans) - 1, -1, -1):
+        if need <= 0:
+            break
+        start, body_start, end, protected = spans[index]
+        if protected:
+            continue
+        header_bytes = len(text[start:body_start].encode("utf-8"))
+        body_b = text[body_start:end].encode("utf-8")
+        if need >= len(
+            body_b
+        ):  # от тела ничего не остаётся: заголовок без тела не нужен
+            pieces[index] = ""
+            need -= len(body_b) + header_bytes
+        else:
+            keep = max(0, len(body_b) - need)
+            kept = body_b[:keep].decode("utf-8", "ignore")
+            pieces[index] = text[start:body_start] + kept
+            need = 0  # срезано не меньше нужного (граница символа округляет вверх)
+        marker_at = index
+    if marker_at is None:
+        return text
+    out = [text[: spans[0][0]]]
+    for index, (start, _body_start, end, _protected) in enumerate(spans):
+        if index in pieces:
+            out.append(pieces[index])
+            if index == marker_at:
+                out.append(marker)
+        else:
+            out.append(text[start:end])
+    out.append(tail)
+    return "".join(out)
+
+
+def _soft_truncate_instructions(
+    messages: list, kb_cwd: bool, max_bytes: int | None
+) -> int:
+    """Усекает блоки agent-instructions сверх применимого предела прямо в `messages`; число усечённых блоков."""
+    changed = 0
+    for msg in messages:
+        found = _instr_blocks([msg], kb_cwd)
+        if not found:
+            continue
+        limit = _instr_limit(found[0], max_bytes)
+        if found[0]["bytes"] <= limit:
+            continue
+        content = msg.get("content")
+        text = _flatten_content(content)
+        new_text = _truncate_instr_text(text, limit)
+        if new_text == text:
+            continue
+        if isinstance(content, list):
+            # Нетекстовые части (изображения) сохраняются, текстовые заменяются одной усечённой.
+            rest = [
+                part
+                for part in content
+                if not (
+                    isinstance(part, str) or (isinstance(part, dict) and "text" in part)
+                )
+            ]
+            msg["content"] = [{"type": "text", "text": new_text}, *rest]
+        else:
+            msg["content"] = new_text
+        changed += 1
+    return changed
 
 
 def _instr_violation(blocks: list, max_bytes: int | None) -> tuple | None:
@@ -4045,7 +4242,7 @@ class Run:
             self._publish(("stream_error", str(exc)[:500]))
         except RpcEof as exc:
             self._publish(("done", (exc.rc or 1, "")))
-        except RpcError as exc:
+        except (RpcError, ToolsGateError) as exc:
             self._publish(("pump_error", str(exc)[:500]))
         except OSError as exc:
             self._publish(("pump_error", repr(exc)))
@@ -4148,18 +4345,7 @@ class Run:
             )
         self._check_flags(settings)
 
-    @staticmethod
-    def _check_flags(settings: dict) -> None:
-        """disableBuiltinSkills/autoRejectPermissionRequests: если droid их сообщает, они обязаны быть true.
-
-        Реальный droid (протокол 1.248) эти поля в settings не возвращает, поэтому отсутствие
-        не отказ; присутствующее расхождение — fail-closed.
-        """
-        for flag in ("disableBuiltinSkills", "autoRejectPermissionRequests"):
-            if flag in settings and settings[flag] is not True:
-                raise RpcError(
-                    f"settings read-back: {flag} is {settings[flag]!r}, expected true"
-                )
+    _check_flags = staticmethod(validate_boolean_flags)
 
     def _initialize(self, proc: RpcProcess) -> None:
         plan = self.plan
@@ -4190,7 +4376,7 @@ class Run:
         msgs = raw_msgs if isinstance(raw_msgs, list) else []
         self.sid = sid
         self.droid_real = sum(1 for m in msgs if not _is_service_message(m))
-        self._disable_native_tools(proc)
+        self._disable_native_tools(proc, plan["settings"][0])
 
     @staticmethod
     def _check_protocol(proc: RpcProcess) -> None:
@@ -4207,51 +4393,28 @@ class Run:
                 f"droid protocol {proc.protocol_version or '-'} differs from qualified {expected}"
             )
 
-    @staticmethod
-    def _check_tools_policy(listed: list) -> None:
-        """Каталог tools живого droid обязан совпасть с квалифицированным набором из receipt (RW-009)."""
+    def _check_tools_policy(self, listed: list, model: str | None = None) -> None:
+        """Точный каталог текущей модели обязан быть квалифицирован в receipt."""
         if not RECEIPT_REQUIRED:
             return
         try:
             _, rec = _load_receipt()
         except LauncherUnavailable as exc:
             raise RpcError(f"droid receipt changed during spawn: {exc}")
-        if sorted(listed) != sorted(rec["tools_policy"]["disabled_tool_ids"]):
-            raise RpcError(
-                "native tool catalogue differs from the qualified tools policy"
-            )
+        validate_model_catalog(rec.get("qualified_models"), model or self.plan["settings"][0], listed, RpcError)
 
-    def _disable_native_tools(self, proc: RpcProcess) -> None:
-        """Нативные tools отключаются по АКТУАЛЬНОМУ list_tools (новые id тоже); сбой — fail-closed."""
+    def _disable_native_tools(self, proc: RpcProcess, model: str) -> None:
+        """Нативные tools модели отключаются по актуальному list_tools; сбой — fail-closed."""
         result, _ = proc.call("droid.list_tools", {}, self.cancel)
-        tools = result.get("tools")
-        if (
-            not isinstance(tools, list)
-            or not tools
-            or not all(
-                isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"]
-                for t in tools
-            )
-        ):
-            raise RpcError("list_tools: invalid catalogue")
-        ids = [t["id"] for t in tools]
-        self._check_tools_policy(ids)
-        keep = set(self.plan.get("keep_tools") or ())
-        ids = [i for i in ids if i not in keep]
-        if not ids:
-            return
-        _, stash = proc.call(
-            "droid.update_session_settings", {"disabledToolIds": ids}, self.cancel
-        )
-        updated = self._wait_settings_updated(proc, stash)
-        if updated is None:
-            raise RpcError("native tools: settings_updated read-back not received")
-        disabled = updated.get("disabledToolIds")
-        if not isinstance(disabled, list):
-            raise RpcError("native tools: disabledToolIds missing in read-back")
-        if not set(ids).issubset(set(map(str, disabled))):
-            raise RpcError("native tools were not disabled (read-back mismatch)")
-        self._check_flags(updated)
+        ids = catalog_tool_ids(result.get("tools"))
+        keep = self.plan.get("keep_tools") or ()
+        plan = plan_tools_disable(ids, _tools_receipt(), model, keep)
+        self._check_tools_policy(list(ids), model)
+        if plan.disabled_ids:
+            _, stash = proc.call("droid.update_session_settings", {"disabledToolIds": list(plan.disabled_ids)}, self.cancel)
+            updated = self._wait_settings_updated(proc, stash)
+            verify_tools_disabled(plan, updated)
+            self._check_flags(updated)
 
     def _wait_settings_updated(
         self, proc: RpcProcess, stash: list, timeout: float = 2.0
@@ -4286,6 +4449,7 @@ class Run:
         if tuple(current) == tuple(desired):
             return
         model, effort, autonomy = desired
+        admit_model(_tools_receipt(), model)
         params = {
             "modelId": model,
             "reasoningEffort": effort,
@@ -4296,6 +4460,8 @@ class Run:
         if settings is None or "modelId" not in settings:
             raise _NeedRebase()  # read-back не подтвердился: безопасно — свежая generation
         self._check_settings(settings)
+        if model != current[0]:
+            self._disable_native_tools(proc, model)
 
     def _load(self, proc: RpcProcess) -> bool:
         """load_session того же SID + проверка целостности; False -> свежая generation."""
@@ -4306,7 +4472,7 @@ class Run:
                 {"sessionId": plan["sid"], "disableBuiltinSkills": True},
                 self.cancel,
             )
-        except RpcEof:
+        except (RpcEof, RpcPermissionDenied):
             raise
         except RpcError as exc:
             _log(
@@ -4351,7 +4517,7 @@ class Run:
             if isinstance(settings, dict)
             else ("", "", "")
         )
-        self._disable_native_tools(proc)
+        self._disable_native_tools(proc, str(plan["current_settings"][0] or plan["settings"][0]))
         try:
             self._sync_settings(proc, plan["settings"])
         except _NeedRebase:
@@ -4505,6 +4671,10 @@ class Run:
             self._quarantined += 1  # чужая/устаревшая сессия в карантин
             return False
         ntype = note.get("type")
+        require(
+            not permission_event(ntype),
+            RpcPermissionDenied("permission request forbidden by bridge"),
+        )
         mid = str(note.get("messageId") or "")
         if ntype == "create_message":
             self._on_create(note, mid)
@@ -4821,7 +4991,7 @@ def _make_plan(
         "all_items": items,
         "system": rpc["system"],
         "work_dir": work_dir,
-        "settings": (ctx["model"], ctx["effort"], ctx["autonomy"]),
+        "settings": (build_cli_model_selection(ctx), ctx["effort"], ctx["autonomy"]),
         "current_settings": ("", "", ""),
         "title": "bridge-title" if ctx["route"] == "title" else "droid-dsh-bridge",
         "sid": "",
@@ -5007,7 +5177,7 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
             _qos_lock.notify_all()
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
     _delivery_reserved = 0  # байты, взятые в _DELIVERY_BUDGET текущим запросом (RW-011)
@@ -5085,7 +5255,9 @@ class Handler(BaseHTTPRequestHandler):
     def _effective_idle_timeout_s(self) -> float:
         raw_to = None
         if hasattr(self, "headers") and self.headers:
-            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get("X-Subagent-Timeout")
+            raw_to = self.headers.get("X-Timeout-Seconds") or self.headers.get(
+                "X-Subagent-Timeout"
+            )
         if raw_to:
             try:
                 val = float(raw_to.strip())
@@ -5107,14 +5279,10 @@ class Handler(BaseHTTPRequestHandler):
     def _client_tag(self) -> str:
         return f"{self.client_address[0]}:{self.client_address[1]}"
 
-    def _send(
-        self,
-        code: int,
-        payload: dict,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def _send(self, code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._response_status = int(code)
+        self._telemetry_error_response(int(code), payload, body)
         try:
             self.send_response(int(code))
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -5135,6 +5303,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(data.encode("utf-8"))
             self.wfile.flush()
+            self._telemetry_note(data)
             return True
         except (BrokenPipeError, ConnectionResetError, OSError):
             return False
@@ -5203,17 +5372,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.headers.get("Transfer-Encoding") is not None:
             self.close_connection = True
-            self._reject(
-                400, "invalid_request", "Transfer-Encoding is not supported"
-            )
+            self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
             return
 
         lengths = self.headers.get_all("Content-Length", [])
         if len(lengths) != 1:
             self.close_connection = True
-            self._reject(
-                400, "invalid_request", "A single Content-Length is required"
-            )
+            self._reject(400, "invalid_request", "A single Content-Length is required")
             return
 
         raw_length = lengths[0].strip()
@@ -5255,9 +5420,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "set_enabled":
             enabled = body.get("enabled", True)
             if not isinstance(enabled, bool):
-                self._reject(
-                    400, "invalid_request", "enabled must be a boolean"
-                )
+                self._reject(400, "invalid_request", "enabled must be a boolean")
                 return
 
             res = _PENALTY_TRACKER.set_enabled(enabled)
@@ -5288,9 +5451,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if action == "unban":
                 _PENALTY_TRACKER.unpenalize_model(model)
-                self._send(
-                    200, {"ok": True, "action": "unban", "model": model}
-                )
+                self._send(200, {"ok": True, "action": "unban", "model": model})
                 return
 
             raw_duration = body.get("duration_s", 300.0)
@@ -5433,29 +5594,12 @@ class Handler(BaseHTTPRequestHandler):
             f"model_len={int(model_len)} client={self._client_tag()}"
         )
 
-    def _reject(
-        self,
-        code: int,
-        reason: str,
-        message: str,
-        model: str = "unknown",
-        model_len: int = 0,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def _reject(self, code: int, reason: str, message: str, model: str = "unknown", model_len: int = 0, extra_headers: dict[str, str] | None = None) -> None:
         """Отказ (до SSE): строка `reject …` в журнал и общий формат ошибки."""
         self._log_reject(reason, model, model_len)
+        self._telemetry_meta(model=known_model(model))
         self.close_connection = True
-        self._send(
-            code,
-            {
-                "error": {
-                    "message": message,
-                    "type": reason,
-                    "code": reason if reason == "model_not_found" else int(code),
-                }
-            },
-            extra_headers=extra_headers,
-        )
+        self._send(code, {"error": {"message": message, "type": reason, "code": {"model_not_found": reason}.get(reason, int(code))}}, extra_headers=extra_headers)
 
     def _acquire_slot(self, keepalive):
         """Ждём слот семафора с учётом QoS (резерв слотов для UI и квота сабагентов)."""
@@ -5473,7 +5617,10 @@ class Handler(BaseHTTPRequestHandler):
                         return "client_gone"
                     if time.monotonic() - waited > timeout_budget:
                         return "queue_timeout"
-                    if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
+                    if (
+                        keepalive is not None
+                        and time.monotonic() - last_ka >= KEEPALIVE_S
+                    ):
                         last_ka = time.monotonic()
                         if not keepalive():
                             return "client_gone"
@@ -5542,7 +5689,6 @@ class Handler(BaseHTTPRequestHandler):
         result_ev = {}
         turn_start = time.monotonic()
         last_ka = time.monotonic()
-        is_subagent = self._is_subagent_request()
         # Safety cap is the absolute upper bound (watchdog against infinite loops)
         safety_cap_s = self._effective_safety_cap_s()
         safety_deadline = turn_start + safety_cap_s
@@ -5684,17 +5830,20 @@ class Handler(BaseHTTPRequestHandler):
                 return state("client_gone", 1, "turn cancelled")
             now = time.monotonic()
             if now > safety_deadline:
-                return state("safety_cap", 124, f"proxy safety cap timeout after {safety_cap_s:.1f}s")
-            if (
-                not run.got_event
-                and now - run.started > FIRST_TOKEN_TIMEOUT_S
-            ):
+                return state(
+                    "safety_cap",
+                    124,
+                    f"proxy safety cap timeout after {safety_cap_s:.1f}s",
+                )
+            if not run.got_event and now - run.started > FIRST_TOKEN_TIMEOUT_S:
                 return state(
                     "first_token_timeout",
                     124,
                     f"{cli_label('no_event')} within {FIRST_TOKEN_TIMEOUT_S:g}s",
                 )
-            latest_progress = max(last_activity, getattr(run, "last_progress", 0.0) or 0.0)
+            latest_progress = max(
+                last_activity, getattr(run, "last_progress", 0.0) or 0.0
+            )
             effective_idle = max(idle_timeout_s, 1.0)
             if run.got_event and (now - latest_progress > effective_idle):
                 if (
@@ -5944,7 +6093,7 @@ class Handler(BaseHTTPRequestHandler):
             "request_id": self._trace.request_id if self._trace else None,
             "subagent_id": self._trace.subagent_id if self._trace else None,
         }
-        model = ctx["model"]
+        model = build_cli_model_selection(ctx)
         effort = ctx["effort"]
         autonomy = ctx["autonomy"]
         tag = ctx["tag"]
@@ -6292,7 +6441,8 @@ class Handler(BaseHTTPRequestHandler):
         timeout_s = float(out.get("timeout_s") or TIMEOUT_S)
         if st == "timeout":
             return {
-                "message": out.get("err") or f"{label} exec timed out after {timeout_s:.1f}s",
+                "message": out.get("err")
+                or f"{label} exec timed out after {timeout_s:.1f}s",
                 "type": "timeout",
                 "code": 504,
             }
@@ -6347,7 +6497,9 @@ class Handler(BaseHTTPRequestHandler):
             }
         if st == "droid_error":
             return {
-                "message": str(out.get("err") or f"{cli_label('exec')} reported an error")[:500],
+                "message": str(
+                    out.get("err") or f"{cli_label('exec')} reported an error"
+                )[:500],
                 "type": "droid_error",
                 "code": 502,
             }
@@ -6518,7 +6670,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- HTTP --------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
-        self._trace = None
+        self._trace = self._req_started_mono = None  # GET-ответы (_send) в телеметрию запросов не попадают
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
             # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
@@ -6557,11 +6709,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path == "/v1/resilience":
-            self._send(
-                200,
-                RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()),
-            )
+            self._send(200, RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()))
             return
+        if path == "/v1/telemetry":
+            return self._telemetry_serve_get()
         if path == "/v1/quarantine":
             if not _auth_ok(self):
                 self._send(
@@ -6723,6 +6874,7 @@ class Handler(BaseHTTPRequestHandler):
         self._headers_already_sent = False
         self._trace = None
         self._response_status = 0
+        self._telemetry_begin()
         path = self.path.split("?", 1)[0]
         m_cancel = (
             re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
@@ -6733,7 +6885,9 @@ class Handler(BaseHTTPRequestHandler):
             _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
         ):
             is_sub = self._is_subagent_request()
-            code, drain_headers, drain_body = LIFECYCLE.draining_response(is_subagent=is_sub)
+            code, drain_headers, drain_body = LIFECYCLE.draining_response(
+                is_subagent=is_sub
+            )
             err = drain_body.get("error", {})
             self._reject(
                 code,
@@ -6883,6 +7037,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._reject(400, "invalid_request", "request must be a JSON object")
                 return
             self._parsed_req = req
+            self._telemetry_meta_request(req)
             if REQUEST_ATTRIBUTION_ENABLED:
                 self._trace = _resolve_trace(dict(self.headers.items()), req)
             else:
@@ -7067,16 +7222,41 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             model_id = resolved_id
+            self._telemetry_meta(model=model_id)
             if model_id not in fleet_models:
-                self._reject(
-                    404,
-                    "model_not_found",
-                    "model is not in the catalogue",
-                    "unknown",
-                    model_len,
-                )
+                self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
                 return
             model = fleet_models[model_id]
+            is_droid = str(model.get("backend") or "").strip().lower() == "droid"
+            # denied: объединение raw-заголовка и trace (заголовок/extra_body/body), чтобы
+            # роль судьи нельзя было провести альтернативным источником идентификатора.
+            raw_subagent_id = str(self.headers.get("X-Subagent-Id") or "")
+            # Прочие backend не платят за разбор trace; при выключенной атрибуции
+            # self._trace пуст, поэтому для droid он строится здесь же, иначе запрет
+            # судьям стал бы fail-open и обходился через extra_body/body.
+            trace_subagent_id = None
+            if is_droid:
+                trace = getattr(self, "_trace", None) or _resolve_trace(
+                    dict(self.headers.items()), req
+                )
+                trace_subagent_id = trace.subagent_id
+            denied_role = is_droid and denied_subagent(
+                "DROID", raw_subagent_id, trace_subagent_id
+            )
+            if denied_role:
+                return self._reject(
+                    403,
+                    "droid_forbidden_for_role",
+                    "droid route is forbidden for this subagent role",
+                    model_id,
+                    model_len,
+                )
+            denial = _quarantine_denial(model_id, self.headers.get("X-Subagent-Id"))
+            if denial is not None:
+                self._log_reject(denial.reason, model_id, model_len)
+                self.close_connection = True
+                self._send(denial.http, denial.body())
+                return
             if deferred_passthrough_auth:
                 selected = BACKENDS.get(model["backend"])
                 if not isinstance(
@@ -7105,13 +7285,14 @@ class Handler(BaseHTTPRequestHandler):
                         "passthrough requires an exact model id",
                     )
                     return
-                upstream_model = model.get("upstream_model")
-                has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
-                if has_upstream or alias is not None:
-                    target_model = upstream_model.strip() if has_upstream else model_id
-                    req = {**req, "model": target_model}
-                    if alias is not None and req.get("reasoning_effort") is None:
-                        req["reasoning_effort"] = alias_effort
+                effort_on = flag_enabled(FLAG_EFFORT_CATALOG)
+                req, pt_effort = prepare_passthrough_request(
+                    req, model, model_id, alias, alias_effort, effort_on
+                )
+                target_model = resolve_target_model(model, model_id)
+                if pt_effort.apply or target_model != model_id or alias:
+                    if pt_effort.clamped_from is not None:
+                        _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
                 _log(
                     f"chat route=passthrough model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
@@ -7142,9 +7323,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     effort_source = "alias" if effort_from_alias else "request"
                     if clamped:
-                        _log(
-                            f"clamp reasoning_effort '{candidate}' -> '{effort}' for model {model_id}"
-                        )
+                        _log(describe_clamp("reasoning_effort", candidate, effort, model_id, _LOG_EFFORT_MAX))
             else:
                 self._reject(
                     400,
@@ -7155,37 +7334,28 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             # (9a) autonomy: low|medium|high|off -> `autonomyLevel` RPC
-            # (off — read-only droid, Reviewer-пути); дефолт high (максимум).
-            raw_autonomy = req.get("autonomy")
-            if raw_autonomy is None:
-                autonomy = AUTONOMY_DEFAULT
-                autonomy_source = "default"
-            elif isinstance(raw_autonomy, str):
-                candidate = raw_autonomy.strip()
-                if not candidate:
-                    autonomy = AUTONOMY_DEFAULT
-                    autonomy_source = "default"
-                elif candidate in AUTONOMY_LEVELS or candidate == AUTONOMY_OFF:
-                    autonomy = candidate
-                    autonomy_source = "request"
-                else:
-                    self._reject(
-                        400,
-                        "unsupported_autonomy",
-                        "autonomy is not allowed (low|medium|high|off)",
-                        model_id,
-                        model_len,
+            # (off — read-only droid); дефолт конфигурируемый, fail-closed off.
+            autonomy, autonomy_source = req.get("autonomy"), "request"
+            if is_droid:
+                try:
+                    decision = resolve_autonomy_decision(
+                        req.get("autonomy"),
+                        "DROID",
+                        subagent_id=raw_subagent_id or None,
+                        require_subagent=True,
                     )
+                    autonomy, autonomy_source = decision.value, decision.source
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
                     return
             else:
-                self._reject(
-                    400,
-                    "unsupported_autonomy",
-                    "autonomy must be a string",
-                    model_id,
-                    model_len,
-                )
-                return
+                # Не-Droid маршруты сохраняют прежнюю базовую проверку формата: тип и
+                # значение low|medium|high|off проверяются без Droid-ограничений роли.
+                try:
+                    _ = validate_autonomy_request(req.get("autonomy"))
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
+                    return
             # (10) reasoning-объект не поддерживаем.
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(
@@ -7286,11 +7456,24 @@ class Handler(BaseHTTPRequestHandler):
                 route = "keyed"
             else:
                 route = "nokey"
+            self._instr_truncated = False
             instr = self._prompt_guard(
                 messages, route, raw_key, cwd, model_id, model_len, adapter
             )
             if instr is None:
                 return
+            if self._instr_truncated:
+                # Блок инструкций усечён на месте: prompt и транскрипт строятся заново из обновлённых messages.
+                prompt = _messages_to_prompt(messages, tools, tool_choice, images)
+                transcript = _transcribe(messages, tools, tool_choice, images)
+                if route == "fallback" or not transcript["runnable"]:
+                    transcript = {
+                        "system": None,
+                        "runnable": True,
+                        "items": [
+                            {"role": "user", "text": prompt, "digest": _digest(prompt)}
+                        ],
+                    }
             is_legacy_muse_sleep = (
                 model["backend"] == "muse"
                 and not req_turn_id
@@ -7356,6 +7539,7 @@ class Handler(BaseHTTPRequestHandler):
                 "rpc": transcript,
                 "instr": instr if route in ("keyed", "nokey") else (0, "-", 0),
                 "model": model_id,
+                "target_model": resolve_target_model(model, model_id),
                 "backend": model["backend"],
                 "model_len": model_len,
                 "effort": effort,
@@ -7545,18 +7729,36 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return None
         elif over is not None:
-            # REQ-003: блок agent-instructions сверх применимого предела не доходит ни до spawn, ни до add.
-            _log(
-                f"instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes={over[0]} limit={over[1]}"
-            )
-            self._reject(
-                503,
-                "launcher_unavailable",
-                f"agent-instructions block {over[0]} bytes exceeds {over[1]}: request refused before launch",
-                model_id,
-                model_len,
-            )
-            return None
+            # Сверх предела: мягкое усечение хвостовых проектных секций (канон защищён) вместо отказа.
+            _log(f"instr_gate_truncated bytes={over[0]} limit={over[1]}")
+            try:
+                _soft_truncate_instructions(messages, in_kb, guard_max)
+                blocks = _instr_blocks(messages, in_kb)
+                instr = _instr_scan(messages, in_kb) if blocks else (0, "-", 0)
+            except CanonPersistError:
+                self._reject(
+                    503,
+                    "launcher_unavailable",
+                    "canon history is not persisted: request refused before launch",
+                    model_id,
+                    model_len,
+                )
+                return None
+            self._instr_truncated = True
+            over = _instr_violation(blocks, guard_max)
+            if over is not None:
+                # Усекать нечего (сам канон больше предела): REQ-003 — отказ до spawn/add.
+                _log(
+                    f"instr_gate_alert reason=REQ003_SIZE_EXCEEDED bytes={over[0]} limit={over[1]}"
+                )
+                self._reject(
+                    503,
+                    "launcher_unavailable",
+                    f"agent-instructions block {over[0]} bytes exceeds {over[1]}: request refused before launch",
+                    model_id,
+                    model_len,
+                )
+                return None
         return instr
 
     def _dispatch(
@@ -7751,7 +7953,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         is_interactive = subagent_id is None or str(subagent_id).strip() == ""
 
-        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", 15.0)
+        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", QOS_DEFAULT_QUEUE_TIMEOUT_S)
         qos = get_qos_manager(
             max_concurrent=MAX_CONCURRENT,
             reserved_interactive=_env_int_nonneg(
@@ -7793,17 +7995,21 @@ class Handler(BaseHTTPRequestHandler):
                     return False
             return True
 
+        queue_started = self._telemetry_queue_start(backend_id)
         qos_ok, qos_reason = qos.acquire_slot(
             is_interactive=is_interactive,
             keepalive_cb=_keepalive_cb if is_stream else None,
             timeout=qos_timeout,
             client_gone_fn=lambda: _client_gone(getattr(self, "connection", None)),
         )
+        self._telemetry_queue_done(queue_started)
         if not qos_ok:
             if qos_reason == "client_gone":
                 self.close_connection = True
+                self._record_telemetry(client_gone=True)
                 return
             if headers_sent[0]:
+                self._record_telemetry(status_code=503, error_type="overloaded_error")
                 err_payload = json.dumps(
                     {
                         "error": {
@@ -7865,6 +8071,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.close_connection = True
                 if headers_sent[0]:
+                    self._record_telemetry(status_code=503, error_type=exc.error_type)
                     err_payload = json.dumps(
                         {
                             "error": {
@@ -7918,9 +8125,8 @@ class Handler(BaseHTTPRequestHandler):
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
         lease = self._current_lease()
         started = time.monotonic()
-        _log(
-            f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}"
-        )
+        self._telemetry_meta(route_mode="passthrough", backend_id=adapter.id, model=model_id)
+        _log(f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}")
         raw, req = _strip_passthrough_env(raw, req)
         headers = {key: value for key, value in self.headers.items()}
         trace_headers = _trace_headers(self._trace)
@@ -7934,16 +8140,29 @@ class Handler(BaseHTTPRequestHandler):
             headers = {
                 key: value
                 for key, value in headers.items()
-                if key.lower() not in {"authorization", "x-api-key", "x-turn-owner-token"}
+                if key.lower()
+                not in {"authorization", "x-api-key", "x-turn-owner-token"}
             }
         live_id = new_passthrough_turn_id() if flag_enabled(FLAG_TELEMETRY) else ""
         window = passthrough_window(adapter.limits, self.path, req) if live_id else None
-        sink = _HandlerSink(self, extra_headers=[*trace_headers, ("X-Turn-Id", live_id)] if live_id else trace_headers)
+        sink = _HandlerSink(
+            self,
+            extra_headers=[*trace_headers, ("X-Turn-Id", live_id)]
+            if live_id
+            else trace_headers,
+        )
         try:
             extra = {"window": window} if live_id else {}
             if live_id:
                 get_registry().register(live_id, _owner_token_hash(self), window)
-            adapter.handle(path=self.path, raw_body=raw, request=req, headers=headers, sink=sink, **extra)
+            adapter.handle(
+                path=self.path,
+                raw_body=raw,
+                request=req,
+                headers=headers,
+                sink=sink,
+                **extra,
+            )
             fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
             canonical_model_id = (
                 _resolve_model_alias(model_id, fleet_models)[0]
@@ -7973,19 +8192,18 @@ class Handler(BaseHTTPRequestHandler):
                 )
         finally:
             get_registry().finish(live_id)
-            _log(
-                f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._telemetry_passthrough_done(sink.status)
+            _log(f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json(self, ctx: dict) -> None:
         started = time.monotonic()
         self._response_status = 0
+        self._telemetry_meta(route_mode="cli", backend_id=ctx.get("backend"), model=ctx.get("model"), stream=False)
         try:
             self._serve_json_body(ctx)
         finally:
-            _log(
-                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._record_telemetry()
+            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
@@ -8007,6 +8225,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
+        self._telemetry_usage(usage)
         wire_usage = _wire_usage(
             usage.get("input_tokens", 0),
             usage.get("output_tokens", 0),
@@ -8060,6 +8279,7 @@ class Handler(BaseHTTPRequestHandler):
             for piece in _text_slices(value):
                 total += len(_escape_json_piece(piece))
         self._response_status = 200
+        self._telemetry_note(total, first_byte=True)
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(total))
@@ -8104,12 +8324,12 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_sse(self, ctx: dict) -> None:
         started = time.monotonic()
         self._response_status = 0
+        self._telemetry_meta(route_mode="cli", backend_id=ctx.get("backend"), model=ctx.get("model"), stream=True)
         try:
             self._serve_sse_body(ctx)
         finally:
-            _log(
-                f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}"
-            )
+            self._record_telemetry(client_gone=self._client_write_dead)
+            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_sse_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
@@ -8138,6 +8358,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             _log("client gone before headers")
+            self._telemetry_gone()
             lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
@@ -8239,6 +8460,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not emit(chunk({field: piece})):
                         ok = False
                         break
+                    self._telemetry_note(chunk=True)
                     live_sent[0] += len(piece.encode("utf-8"))
                     if kind == "reasoning":
                         reasoning_live_chars += len(piece)
@@ -8288,6 +8510,7 @@ class Handler(BaseHTTPRequestHandler):
             lease.record_discard("client_disconnected")
             return
         if out.get("state") == "client_gone":
+            self._telemetry_gone()
             _log("client gone mid-stream, child killed")
             lease.record_discard("client_disconnected")
             return
@@ -8301,6 +8524,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
+        self._telemetry_error(err)
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
@@ -8332,6 +8556,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not delivered:
                     _log("client gone during delivery; turn already committed")
                     return
+                self._telemetry_note(chunk=True)
             finish = "tool_calls" if out.get("tool_calls") else "stop"
             emit(chunk({}, finish))
             # Harness считает tok/s и % контекста только из usage в потоке
@@ -8342,6 +8567,7 @@ class Handler(BaseHTTPRequestHandler):
             out_usage = out.get("usage") or {}
             prompt_toks = out_usage.get("input_tokens", 0)
             compl_toks = out_usage.get("output_tokens", 0)
+            self._telemetry_usage(out_usage)
             if prompt_toks or compl_toks:
                 emit(
                     "data: "

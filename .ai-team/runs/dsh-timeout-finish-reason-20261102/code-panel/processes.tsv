@@ -1,9 +1,0 @@
-run_id	slot	role	pid	pgid	start_utc	ps_lstart	status
-code-panel	muse-wonder-full-1.0	panel-probe	62670	62670	2026-11-01T23:32:56.727011+00:00	Mon Nov  2 02:32:56 2026	running
-code-panel	muse-wonder-full-1.0	panel-probe	62670	62670	2026-11-01T23:32:56.727011+00:00	Mon Nov  2 02:32:56 2026	rc=1
-code-panel	gemini-4-argon-high	panel-judge-k1	64805	64805	2026-11-01T23:33:05.507197+00:00	Mon Nov  2 02:33:05 2026	running
-code-panel	gpt-6.1-sol-high	panel-judge-k3	64808	64808	2026-11-01T23:33:05.521282+00:00	Mon Nov  2 02:33:05 2026	running
-code-panel	claude-sonnet-5-5-high	panel-judge-k2	64832	64832	2026-11-01T23:33:05.726286+00:00	Mon Nov  2 02:33:05 2026	running
-code-panel	claude-sonnet-5-5-high	panel-judge-k2	64832	64832	2026-11-01T23:33:05.726286+00:00	Mon Nov  2 02:33:05 2026	rc=0
-code-panel	gpt-6.1-sol-high	panel-judge-k3	64808	64808	2026-11-01T23:33:05.521282+00:00	Mon Nov  2 02:33:05 2026	rc=0
-code-panel	gemini-4-argon-high	panel-judge-k1	64805	64805	2026-11-01T23:33:05.507197+00:00	Mon Nov  2 02:33:05 2026	rc=0

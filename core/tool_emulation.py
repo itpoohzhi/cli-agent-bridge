@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import re
 import unicodedata
 import uuid
@@ -18,6 +19,8 @@ from dataclasses import replace
 from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
+
+logger = logging.getLogger(__name__)
 
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
@@ -261,13 +264,45 @@ def _strip_code_fence(text: str) -> str:
 
 
 _MAX_EXTRA_BRACES = 16  # предел лишних `}` после полного объекта вызова
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+_EXEC_SYNONYMS = frozenset({"execute", "run_command", "shell", "terminal"})
+
+def _canonical_tool_invocation(name: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Приводит вызов инструмента к каноническому имени и схеме аргументов.
+
+    Единая точка нормализации для JSON (_parse_tool_call_block) и XML (_parse_execute_block, _drain_invoke).
+    1. Имена из _EXEC_SYNONYMS нормализуются к "bash".
+    2. Для инструмента "bash":
+       - если 'command' отсутствует, а присутствует 'cmd', 'CommandLine' или 'script', мапим в 'command'.
+       - служебные поля метаданных ('summary', 'toolSummary', 'description') удаляются из arguments,
+         чтобы не нарушать строгую JSON-схему инструмента bash.
+    """
+    clean_name = name.strip() if isinstance(name, str) else ""
+    args = dict(arguments) if isinstance(arguments, dict) else {}
+    if clean_name.casefold() in _EXEC_SYNONYMS:
+        clean_name = "bash"
+    if clean_name == "bash":
+        if "command" not in args:
+            for alt in ("cmd", "CommandLine", "script"):
+                if alt in args:
+                    args["command"] = args.pop(alt)
+                    break
+        for alt in ("cmd", "CommandLine", "script"):
+            args.pop(alt, None)
+        for meta in ("summary", "toolSummary", "description"):
+            args.pop(meta, None)
+    return clean_name, args
+
 
 
 def _recover_trailing_braces(text: str) -> dict | None:
-    """Первый JSON-объект, за которым идут только пробелы и 1..16 лишних `}`; иначе None (холодный путь)."""
+    """Первый JSON-объект, за которым идут только пробелы и 1..16 лишних `}`; иначе None (холодный путь).
+
+    strict=False: сырые управляющие символы (например, переводы строк) внутри строк допустимы.
+    """
     body = text.lstrip()
     try:
-        obj, end = json.JSONDecoder().raw_decode(body)
+        obj, end = json.JSONDecoder(strict=False).raw_decode(body)
     except (ValueError, RecursionError):
         return None
     tail = body[end:]
@@ -281,14 +316,23 @@ def _recover_trailing_braces(text: str) -> dict | None:
 
 
 def _loads_tolerant(text: str) -> Any:
-    """json.loads, допускающий лишние `}` после полного объекта (модель закрыла скобок больше нужного).
+    """json.loads, допускающий лишние `}` после полного объекта (модель закрыла скобок больше нужного),
+    висячие запятые перед закрывающими скобками и сырые управляющие символы внутри строк.
 
     Слишком глубокая вложенность (RecursionError) — невалидный JSON (ValueError).
     """
     try:
-        return json.loads(text)
+        return json.loads(text, strict=False)
     except (ValueError, RecursionError) as exc:
-        recovered = _recover_trailing_braces(text)
+        cleaned = _TRAILING_COMMA_RE.sub(r"\1", text)
+        if cleaned != text:
+            try:
+                return json.loads(cleaned, strict=False)
+            except (ValueError, RecursionError):
+                pass
+        recovered = _recover_trailing_braces(cleaned) if cleaned != text else None
+        if recovered is None:
+            recovered = _recover_trailing_braces(text)
         if recovered is None:
             if isinstance(exc, RecursionError):
                 raise ValueError("JSON is nested too deeply") from exc
@@ -302,6 +346,7 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     Отсутствие ключа arguments — допустимый вызов с {}; присутствующее, но
     не-объектное значение (строка-не-JSON, список, число, null) — вызов
     отклоняем, чтобы не запускать инструмент с пустыми аргументами.
+    Синонимы исполнения команд (_EXEC_SYNONYMS) приводятся к имени "bash".
     """
     try:
         obj = _loads_tolerant(_strip_code_fence(inner))
@@ -312,9 +357,16 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     if "name" not in obj and isinstance(obj.get("function"), dict):
         # OpenAI tool_calls: {"id", "type", "function": {"name", "arguments"}}
         obj = obj["function"]
+    if "name" not in obj:
+        for alt_key in ("tool", "action", "tool_name"):
+            val = obj.get(alt_key)
+            if isinstance(val, str) and val.strip():
+                obj["name"] = val
+                break
     name = obj.get("name")
     if not isinstance(name, str) or not name.strip():
         return None
+    name = name.strip()
     if "arguments" not in obj:
         arguments: dict = {}
     else:
@@ -322,7 +374,8 @@ def _parse_tool_call_block(inner: str) -> dict | None:
         if normalized is None:
             return None
         arguments = normalized
-    return {"name": name.strip(), "arguments": arguments}
+    name, arguments = _canonical_tool_invocation(name, arguments)
+    return {"name": name, "arguments": arguments}
 
 
 class LiveParserError(Exception):
@@ -730,6 +783,10 @@ class RepetitionGuard:
 _INVOKE_CANDIDATE_RE = re.compile(
     r"</invoke(?=[\s>:/])|</parameter(?=[\s>])"
     r"|<invoke(?=[\s>:/])|<parameter(?=[\s>:/])"
+    r"|</execute(?=[\s>])|<execute(?=[\s>:/])"
+    r"|</command(?=[\s>])|<command(?=[\s>])"
+    r"|</summary(?=[\s>])|<summary(?=[\s>])",
+    re.IGNORECASE,
 )
 _INVOKE_CLOSE_RE = re.compile(r"</invoke(?::[A-Za-z0-9_.\-]+)?\s*>")
 _PARAMETER_CLOSE_RE = re.compile(r"</parameter\s*>")
@@ -777,8 +834,40 @@ def _nested_invoke_name(inner: str) -> str:
     return _invoke_tag_name(match.group(0))
 
 
+_COMMAND_TAG_RE = re.compile(r"<\s*command(?:\s+[^>]*)?\s*>(.*?)</\s*command\s*>", re.DOTALL | re.IGNORECASE)
+_COMMAND_OPEN_RE = re.compile(r"<\s*command(?=[\s>])", re.IGNORECASE)
+_COMMAND_CLOSE_RE = re.compile(r"</\s*command\s*>", re.IGNORECASE)
+_SUMMARY_TAG_RE = re.compile(r"<\s*summary(?:\s+[^>]*)?\s*>(.*?)</\s*summary\s*>", re.DOTALL | re.IGNORECASE)
+_EXECUTE_OPEN_RE = re.compile(r"<execute(?::([A-Za-z0-9_.\-]+)|(\s[^>]*))?>", re.IGNORECASE)
+_EXECUTE_CLOSE_RE = re.compile(r"</execute\s*>", re.IGNORECASE)
+
+
+_SUMMARY_TAG_BOUNDARY_RE = re.compile(r"<\s*(/)?\s*summary(?:\s+[^>]*)?\s*>", re.IGNORECASE)
+
+
+def _strip_summary_blocks(text: str) -> str:
+    """Полностью удаляет все блоки <summary>...</summary>, включая вложенные и незакрытые."""
+    res = []
+    depth = 0
+    pos = 0
+    for m in _SUMMARY_TAG_BOUNDARY_RE.finditer(text):
+        if depth == 0:
+            res.append(text[pos:m.start()])
+        is_close = bool(m.group(1))
+        if is_close:
+            if depth > 0:
+                depth -= 1
+        else:
+            depth += 1
+        pos = m.end()
+    if depth == 0:
+        res.append(text[pos:])
+    return "".join(res)
+
+
 def _parse_invoke_arguments(inner: str) -> dict:
     """Содержимое блока `<invoke>` -> словарь аргументов из тегов `<parameter>`."""
+    inner = _strip_summary_blocks(inner)
     arguments: dict[str, Any] = {}
     for match in _PARAMETER_RE.finditer(inner):
         name = (match.group(1) or match.group(2) or "").strip()
@@ -788,6 +877,10 @@ def _parse_invoke_arguments(inner: str) -> dict:
         name = (match.group(1) or match.group(2) or "").strip()
         if name and name not in arguments:
             arguments[name] = ""
+    for key, tag_re in (("command", _COMMAND_TAG_RE), ("summary", _SUMMARY_TAG_RE)):
+        tag_match = tag_re.search(inner)
+        if tag_match is not None and key not in arguments:
+            arguments[key] = tag_match.group(1).strip()
     if not arguments:
         body = inner.strip()
         if body[:1] == "{":
@@ -798,6 +891,37 @@ def _parse_invoke_arguments(inner: str) -> dict:
             if isinstance(parsed, dict):
                 return parsed
     return arguments
+
+
+def _parse_execute_block(buf: str, start: int = 0) -> tuple[dict | None, int] | None:
+    """Разбирает <execute ...>...</execute> с позиции start.
+
+    Возвращает ({"name", "arguments"}, индекс конца закрывающего тега)
+    или (None, индекс конца закрывающего тега) для пустых вызовов,
+    или None, если открывающий тег не распознан либо закрывающий ещё не пришёл.
+    Имя по умолчанию "bash"; атрибут name или суффикс <execute:name> его переопределяют.
+    Имя и аргументы приводятся к канонической форме (_canonical_tool_invocation).
+    """
+    open_match = _EXECUTE_OPEN_RE.match(buf, start)
+    if open_match is None:
+        return None
+    search_from = open_match.end()
+    close_match = _EXECUTE_CLOSE_RE.search(buf, search_from)
+    if close_match is None:
+        return None
+    name = open_match.group(1)
+    if not name and open_match.group(2):
+        attr = _ATTR_NAME_RE.search(open_match.group(2))
+        if attr is not None:
+            name = (attr.group(1) or attr.group(2) or "").strip()
+    raw_name = name or "bash"
+    inner = buf[open_match.end() : close_match.start()]
+    clean_inner = _strip_summary_blocks(inner)
+    raw_args = _parse_invoke_arguments(clean_inner)
+    canonical_name, canonical_args = _canonical_tool_invocation(raw_name, raw_args)
+    if canonical_name == "bash" and "command" not in canonical_args:
+        return None, close_match.end()
+    return {"name": canonical_name, "arguments": canonical_args}, close_match.end()
 
 
 def _find_tool_close_outside_string(text: str, start: int) -> int:
@@ -1040,13 +1164,34 @@ class ToolCallParser:
             self._buf = self._buf[gt + 1 :]
             self._remember(_OPAQUE_BLOCK)
             return True
-        if tag.startswith("<parameter"):
+        tag_lower = tag.lower()
+        if tag_lower.startswith("<execute"):
+            res = _parse_execute_block(self._buf, 0)
+            if res is None:
+                if not final:
+                    return False
+                if self.strict_live:
+                    raise LiveParserError("unclosed execute block")
+                self._buf = ""
+                return False
+            call, next_idx = res
+            self._buf = self._buf[next_idx:]
+            if call is not None:
+                self._emit_invoke_call(call["name"], call["arguments"])
+            return True
+        if tag_lower.startswith(("<parameter", "<command", "<summary")):
             if self.strict_live:
                 raise LiveParserError("parameter outside invoke")
             if tag[:-1].rstrip().endswith("/"):
                 self._buf = self._buf[gt + 1 :]
                 return True
-            close = _PARAMETER_CLOSE_RE.search(self._buf, gt + 1)
+            if tag_lower.startswith("<command"):
+                close_re = re.compile(r"</command\s*>", re.IGNORECASE)
+            elif tag_lower.startswith("<summary"):
+                close_re = re.compile(r"</summary\s*>", re.IGNORECASE)
+            else:
+                close_re = _PARAMETER_CLOSE_RE
+            close = close_re.search(self._buf, gt + 1)
             if close is None:
                 if not final:
                     return False
@@ -1061,7 +1206,8 @@ class ToolCallParser:
                 if self.strict_live:
                     raise LiveParserError("invoke without tool name")
                 return True
-            self._emit_invoke_call(name, {})
+            canon_name, canon_args = _canonical_tool_invocation(name, {})
+            self._emit_invoke_call(canon_name, canon_args)
             return True
         close = _INVOKE_CLOSE_RE.search(self._buf, gt + 1)
         if close is None:
@@ -1079,7 +1225,9 @@ class ToolCallParser:
             if self.strict_live:
                 raise LiveParserError("invoke without tool name")
             return True
-        self._emit_invoke_call(name, _parse_invoke_arguments(inner))
+        raw_args = _parse_invoke_arguments(inner)
+        canon_name, canon_args = _canonical_tool_invocation(name, raw_args)
+        self._emit_invoke_call(canon_name, canon_args)
         return True
 
     def _drain(self, final: bool) -> None:
@@ -1193,9 +1341,15 @@ class ToolCallParser:
                     inner = "".join(self._parts)
                     self._parts.clear()
                     self._active = None
+                    if not inner.strip():
+                        self._buf = text[index + len(close_tag) :]
+                        return
                     calls = self._parse_blocks(inner)
                     if calls is None:
                         if self.strict_live:
+                            logger.warning(
+                                "malformed tool_call block raw=%r", inner[:300]
+                            )
                             raise LiveParserError("malformed tool_call block")
                         self._emit(open_tag + inner + close_tag)
                     else:
@@ -1219,17 +1373,29 @@ class ToolCallParser:
 
     def _pending_prefix(self) -> int:
         """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
-        tags = [open_tag for open_tag, _ in self._tag_pairs]
+        tags = [open_tag.lower() for open_tag, _ in self._tag_pairs]
         if self._invoke_enabled:
-            tags += ["<invoke", "</invoke", "<parameter", "</parameter>"]
+            tags += [
+                "<invoke",
+                "</invoke",
+                "<parameter",
+                "</parameter>",
+                "<execute",
+                "</execute",
+                "<command",
+                "</command>",
+                "<summary",
+                "</summary>",
+            ]
         best = 0
+        buf_low = self._buf.lower()
         for tag in tags:
-            if self._buf.endswith(tag):
+            if buf_low.endswith(tag):
                 best = max(best, len(tag))
                 continue
-            limit = min(len(tag) - 1, len(self._buf))
+            limit = min(len(tag) - 1, len(buf_low))
             for length in range(limit, 0, -1):
-                if self._buf[-length:] == tag[:length]:
+                if buf_low[-length:] == tag[:length]:
                     best = max(best, length)
                     break
         return best

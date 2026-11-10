@@ -1,19 +1,18 @@
 import http.client
 import json
-import math
 import sys
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import pytest
-
-import server
+import server  # noqa: E402  (нужен sys.path с корнем репозитория)
 
 KEY = "test-bridge-key"
 INTERNAL_KEY = "internal-test-key"

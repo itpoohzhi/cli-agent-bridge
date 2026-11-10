@@ -1,7 +1,6 @@
 """Unit tests for ToolCallAssembler (ADR-0020)."""
 
 import json
-import pytest
 
 from core.stream_fsm.tool_call_assembler import ToolCallAssembler
 from core.stream_fsm.types import EmitChunk, EmitToolCall

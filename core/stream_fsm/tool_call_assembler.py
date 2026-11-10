@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from core.stream_fsm.types import EmitChunk, EmitToolCall, StreamEffect
 
@@ -75,10 +75,11 @@ class ToolCallAssembler:
         close_m = THINK_CLOSE_RE.search(text)
         if close_m:
             pre = text[:close_m.start()]
-            eff = [EmitChunk(text=pre, is_reasoning=True)] if pre else []
+            eff: List[StreamEffect] = [EmitChunk(text=pre, is_reasoning=True)] if pre else []
             self._in_reasoning = False
             return text[close_m.end():], eff
-        return "", [EmitChunk(text=text, is_reasoning=True)]
+        tail: List[StreamEffect] = [EmitChunk(text=text, is_reasoning=True)]
+        return "", tail
 
     def _feed_tool_call(self, text: str) -> Tuple[str, List[StreamEffect]]:
         """Накапливает полезную нагрузку tool_call до закрывающего тега."""
@@ -91,8 +92,8 @@ class ToolCallAssembler:
             self._buffer_len = 0
             self._in_tool_call = False
             tc = self._parse_assembled_tool_call(full_payload)
-            effects = [tc] if tc else []
-            return text[close_m.end():], effects
+            done: List[StreamEffect] = [tc] if tc else []
+            return text[close_m.end():], done
         if self._buffer_len + len(text) <= self.max_buffer:
             self._raw_buffer.append(text)
             self._buffer_len += len(text)
@@ -109,6 +110,7 @@ class ToolCallAssembler:
         if tool_m and tool_m.start() < earliest_idx:
             earliest_idx, match_type, match_end = tool_m.start(), "tool", tool_m.end()
 
+        effects: List[StreamEffect] = []
         if match_type == "think":
             pre = text[:earliest_idx]
             effects = [EmitChunk(text=pre, is_reasoning=False)] if pre else []
@@ -122,7 +124,8 @@ class ToolCallAssembler:
             self._buffer_len = 0
             return text[match_end:], effects
 
-        return "", [EmitChunk(text=text, is_reasoning=False)]
+        effects = [EmitChunk(text=text, is_reasoning=False)]
+        return "", effects
 
     def feed(self, piece: str) -> List[StreamEffect]:
         """Обрабатывает поступающий фрагмент текста и возвращает список эффектов."""

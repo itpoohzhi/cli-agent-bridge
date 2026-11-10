@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import copy
 import hmac
 import http.client
 import json
@@ -40,6 +41,7 @@ from core.backend_adapter import (
     BackendModel,
     BackendNotSupported,
     Capabilities,
+    KindConstraints,
     Qualification,
     PreSendTransientError,
     StreamSink,
@@ -72,14 +74,16 @@ except ImportError:
     RepetitionGuard = None  # type: ignore[assignment,misc]
 from core.cli_runtime_config import NonstreamConfig
 from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
-from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, relax_socket_timeout, request_deadlines
-from core.runtime_env import bounded_int as _bounded_int, env_bool, positive_int as _positive_int
+from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
+from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, SlidingDeadline, open_sliding_deadline
+from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
 from core.stream_framing import (
     build_stream_error_chunk,
     format_sse_event,
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
 )
+_SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
 
 # Имена env (таблица AD-005) и значения по умолчанию: defaults — не потолки, переопределяются.
 ENV_MAX_PARALLEL_CALLS = "BRIDGE_MAX_PARALLEL_CALLS"
@@ -110,6 +114,12 @@ DEFAULT_QUEUE_TIMEOUT_S = (
 
 KIND = "passthrough"
 
+# Loopback-upstream с `/v1` в конце; допустимы вложенные префиксы (`http://127.0.0.1:10830/go/v1`).
+_LOOPBACK_V1_RE = re.compile(
+    r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}(?:/[a-z0-9._-]+)*/v1"
+)
+_NO_EFFORT_VALUES = frozenset({"", "off", "none"})
+
 # Заголовки соединения (RFC 9110 §7.6.1) не пробрасываются; Host/Content-Length ставит шов.
 _HOP_BY_HOP = frozenset(
     {
@@ -135,7 +145,6 @@ _REQUEST_DROP = _HOP_BY_HOP | {
 }
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
 
-
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
     try:
         value = float(str(environ.get(name, "")).strip())
@@ -158,6 +167,7 @@ class PassthroughLimits:
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S  # совместимость старого конструктора
     idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S
     total_timeout_s: float = DEFAULT_TOTAL_TIMEOUT_S
+    stream_safety_cap_s: float = 3600.0  # потолок активного stream=True при скользящем окне
     heartbeat_interval_s: float = 12.0
     poll_interval_s: float = 0.1
     reader_join_timeout_s: float = 0.2
@@ -214,6 +224,7 @@ class PassthroughLimits:
             total_timeout_s=_positive_float(
                 env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S
             ),
+            stream_safety_cap_s=_positive_float(env, "BRIDGE_STREAM_SAFETY_CAP_S", 3600.0),
             heartbeat_interval_s=_positive_float(
                 env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
             ),
@@ -705,14 +716,14 @@ class _TimedSseReader:
         readline: Callable[[int], bytes],
         write: Callable[[bytes], None],
         limits: PassthroughLimits,
-        deadline: float,
+        deadline: float | SlidingDeadline,
         window: LivenessWindow | None = None,
         enforce: bool = False,
     ) -> None:
         self.limits = limits
-        self.deadline = deadline
+        self.cell = SlidingDeadline.wrap(deadline)
         self.write = write
-        self.progress = SseProgress(window, enforce)
+        self.progress = SseProgress(window, enforce, self.cell)
         self.items: queue.Queue[bytes | Exception] = queue.Queue(
             maxsize=limits.read_queue_max_entries
         )
@@ -753,7 +764,7 @@ class _TimedSseReader:
         self.request_read.release()
         while True:
             now = time.monotonic()
-            remaining = self.progress.remaining(self.deadline - now)
+            remaining = self.progress.remaining(self.cell.deadline_s - now)
             if self.progress.last_progress is not None:
                 remaining = min(
                     remaining, self.progress.last_progress + self.limits.idle_timeout_s - now
@@ -771,7 +782,7 @@ class _TimedSseReader:
                 )
             except queue.Empty:
                 continue
-            if time.monotonic() >= self.deadline:
+            if time.monotonic() >= self.cell.deadline_s:
                 raise TimeoutError("upstream stream deadline exceeded")
             if isinstance(item, Exception):
                 raise item
@@ -795,7 +806,7 @@ def relay_sse(
     sanitize: bool = True,
     trusted_tools: bool = False,
     state: StreamOutcome | None = None,
-    deadline: float | None = None,
+    deadline: float | SlidingDeadline | None = None,
     window: LivenessWindow | None = None,
 ) -> StreamOutcome:
     """Пробросить SSE-поток upstream клиенту с санитизацией `tool_calls` (AD-005).
@@ -1162,6 +1173,7 @@ class PassthroughAdapter(BackendAdapter):
     """Бэкенд `kind=passthrough`: модели каталога, раw-шов исполнения вместо `execute_turn`."""
 
     kind = KIND
+    CONSTRAINTS = KindConstraints(base_url_allowed=True, api_key_env_allowed=True)
     capabilities = Capabilities(
         sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact"
     )
@@ -1198,9 +1210,7 @@ class PassthroughAdapter(BackendAdapter):
         self._lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(self.max_concurrent)
         base_url = self.config.get("base_url")
-        if not isinstance(base_url, str) or not re.fullmatch(
-            r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}/v1", base_url
-        ):
+        if not isinstance(base_url, str) or not _LOOPBACK_V1_RE.fullmatch(base_url):
             raise ValueError("backend_base_url_invalid")
         parts = urllib.parse.urlsplit(base_url)
         if parts.hostname is None or parts.port is None or not 1 <= parts.port <= 65535:
@@ -1255,6 +1265,76 @@ class PassthroughAdapter(BackendAdapter):
     def shutdown(self) -> None:
         self._pool.close_all()
 
+    # -- upstream-параметры шва (api_key_ref / headers_from_json / per_request_headers) ----
+    def _read_key_ref(self) -> str:
+        """Токен из `api_key_ref` (`file:<путь>`); читается на каждый запрос (ротация ключа)."""
+        ref = self.config.get("api_key_ref")
+        if not isinstance(ref, str) or not ref.startswith("file:"):
+            return ""
+        try:
+            with open(os.path.expanduser(ref[len("file:") :]), encoding="utf-8") as fh:
+                return fh.read().strip()
+        except OSError:
+            self._log("passthrough api_key_ref unreadable")
+            return ""
+
+    def _read_json_headers(self) -> dict[str, str]:
+        """Заголовки `headers_from_json`: узел `json_path` файла, ключи из `pick` (без регистра)."""
+        spec = self.config.get("headers_from_json")
+        if not isinstance(spec, Mapping):
+            return {}
+        json_path = spec.get("json_path")
+        if not isinstance(json_path, list):
+            return {}
+        try:
+            with open(os.path.expanduser(str(spec["file"])), encoding="utf-8") as fh:
+                node: Any = json.load(fh)
+            for part in json_path:
+                node = node[str(part)]
+        except (OSError, ValueError, KeyError, TypeError):
+            self._log("passthrough headers_from_json unreadable")
+            return {}
+        if not isinstance(node, dict):
+            return {}
+        pick = spec.get("pick")
+        if not isinstance(pick, list):
+            return {}
+        by_lower = {str(k).lower(): (str(k), v) for k, v in node.items()}
+        picked: dict[str, str] = {}
+        for name in pick:
+            found = by_lower.get(str(name).lower())
+            if found is not None and isinstance(found[1], str) and found[1]:
+                picked[str(name)] = found[1]
+        return picked
+
+    def _upstream_headers(self) -> dict[str, str]:
+        """Заголовки, принудительно заменяющие клиентские: из файла, затем per-request."""
+        extra = self._read_json_headers()
+        per_request = self.config.get("per_request_headers")
+        if isinstance(per_request, Mapping):
+            for name, template in per_request.items():
+                extra[str(name)] = str(template).replace("{uuid4}", str(uuid.uuid4()))
+        return extra
+
+    def _with_body_defaults(self, raw_body: bytes) -> bytes:
+        """Подставляет `default_body_extra` в JSON-тело для ключей, которых клиент не задал."""
+        extra = self.config.get("default_body_extra")
+        if not isinstance(extra, Mapping) or not extra:
+            return raw_body
+        try:
+            data = json.loads(raw_body)
+        except ValueError:
+            return raw_body
+        if not isinstance(data, dict):
+            return raw_body
+        effort = data.get("reasoning_effort")
+        if isinstance(effort, str) and effort.strip().lower() not in _NO_EFFORT_VALUES:
+            return raw_body  # клиент явно запросил рассуждение: дефолт «выключено» не навязываем
+        missing = {k: copy.deepcopy(v) for k, v in extra.items() if k not in data}
+        if not missing:
+            return raw_body
+        return json.dumps({**data, **missing}, ensure_ascii=False).encode("utf-8")
+
     # -- raw-шов -------------------------------------------------------------------------
     def _log(self, message: str) -> None:
         logger = getattr(self.host, "_log", None)
@@ -1277,10 +1357,12 @@ class PassthroughAdapter(BackendAdapter):
         window: LivenessWindow | None = None,
     ) -> None:
         """One request: body goes upstream unmodified (AD-001: internal stream=true), response goes to `sink`."""
+        raw_body = self._with_body_defaults(raw_body)
         internal = internal_stream_body(path, request, raw_body)
         if internal is not None:
             raw_body, window = internal, window or passthrough_window(self.limits, path, request)
         deadline, open_deadline = request_deadlines(self.limits, internal is not None)
+        slide = open_sliding_deadline(deadline, self.limits, internal is not None, request, _SLIDING_WIN_FLAG.enabled)
         queue_timeout = min(
             float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)),
             self.limits.total_timeout_s,
@@ -1311,10 +1393,8 @@ class PassthroughAdapter(BackendAdapter):
                         continue
 
         def watch() -> None:
-            while not stop.wait(
-                min(self.limits.poll_interval_s, max(0.0, deadline - time.monotonic()))
-            ):
-                if time.monotonic() >= deadline or sink.client_gone():
+            while not stop.wait(min(self.limits.poll_interval_s, max(0.0, slide.deadline_s - time.monotonic()))):
+                if time.monotonic() >= slide.deadline_s or sink.client_gone():
                     abort()
                     return
 
@@ -1355,8 +1435,7 @@ class PassthroughAdapter(BackendAdapter):
                 resp = conn.getresponse()
                 if time.monotonic() >= deadline:
                     raise TimeoutError()
-                if internal is not None:
-                    relax_socket_timeout(conn.sock, deadline, self.limits.read_timeout_s)
+                slide.relax_socket(conn.sock, self.limits.read_timeout_s, internal is not None)
                 if resp.status in (502, 503) and getattr(
                     sink, "accepts_presend_errors", False
                 ):
@@ -1412,7 +1491,7 @@ class PassthroughAdapter(BackendAdapter):
                         sink, 502, "upstream_unavailable", "upstream is unavailable"
                     )
                 return
-            successful = self._respond(resp, request, sink, deadline, on_timeout=abort, window=window)
+            successful = self._respond(resp, request, sink, deadline, on_timeout=abort, window=window, slide=slide)
         except ClientGone:
             abort()
             self._log("passthrough client_gone")
@@ -1513,13 +1592,14 @@ class PassthroughAdapter(BackendAdapter):
             forwarded = {
                 k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP
             }
-            if self._upstream_key:
+            upstream_token = self._upstream_key or self._read_key_ref()
+            if upstream_token:
                 forwarded = {
                     k: v
                     for k, v in forwarded.items()
                     if k.lower() not in ("authorization", "x-api-key")
                 }
-                forwarded["Authorization"] = f"Bearer {self._upstream_key}"
+                forwarded["Authorization"] = f"Bearer {upstream_token}"
             else:
                 client_toks: list[str] = []
                 for k, v in headers.items():
@@ -1548,6 +1628,13 @@ class PassthroughAdapter(BackendAdapter):
                         for k, v in forwarded.items()
                         if k.lower() not in ("authorization", "x-api-key")
                     }
+            upstream_headers = self._upstream_headers()
+            if upstream_headers:
+                replaced = {name.lower() for name in upstream_headers}
+                forwarded = {
+                    k: v for k, v in forwarded.items() if k.lower() not in replaced
+                }
+                forwarded.update(upstream_headers)
             forwarded["Host"] = f"{self._host}:{self._port}"
             forwarded["Content-Length"] = str(len(raw_body))
             forwarded["Accept-Encoding"] = (
@@ -1602,6 +1689,7 @@ class PassthroughAdapter(BackendAdapter):
         *,
         on_timeout: Callable[[], None] | None = None,
         window: LivenessWindow | None = None,
+        slide: SlidingDeadline | None = None,
     ) -> bool:
         content_type = (resp.getheader("Content-Type") or "").lower()
         encoded = (
@@ -1612,9 +1700,7 @@ class PassthroughAdapter(BackendAdapter):
         sse = resp.status == 200 and "text/event-stream" in content_type
         agg = window if sse and window and window.internal_stream else None
         if sse and agg is None:
-            return self._relay_stream(
-                resp, schemas, sink, sanitize, deadline, on_timeout, window
-            )
+            return self._relay_stream(resp, schemas, sink, sanitize, slide or deadline, on_timeout, window)
         try:
             if agg is not None:
                 body = self._aggregate_sse(resp, agg)
@@ -1672,7 +1758,7 @@ class PassthroughAdapter(BackendAdapter):
         schemas: Optional[dict[str, Any]],
         sink: ResponseSink,
         sanitize: bool,
-        deadline: float | None = None,
+        deadline: float | SlidingDeadline | None = None,
         on_timeout: Callable[[], None] | None = None,
         window: LivenessWindow | None = None,
     ) -> bool:

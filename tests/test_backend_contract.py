@@ -3,12 +3,11 @@
 Проверяется на фейковом адаптере и на реальных DroidAdapter/MuseAdapter: набор методов,
 маппинг модель -> адаптер, отказ от загрузки кода из конфигурации, изоляция сбоя shutdown.
 """
-
 from __future__ import annotations
 
 import sys
 import unittest
-from typing import Optional
+from typing import Any, Optional
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,7 +41,7 @@ CONTRACT_METHODS = (
 )
 
 
-def catalog():
+def catalog() -> dict[str, Any]:
     models = {
         "a-1": {"id": "a-1", "backend": "alpha", "context_window": 1},
         "a-2": {"id": "a-2", "backend": "alpha", "context_window": 2},
@@ -96,8 +95,9 @@ class ExplodingAdapter(FakeAdapter):
 
 class TestInterface(unittest.TestCase):
     def test_interface_is_abstract(self):
+        abstract: Any = BackendAdapter
         with self.assertRaises(TypeError):
-            BackendAdapter("x", {}, dict)  # type: ignore[abstract]
+            abstract("x", {}, dict)
 
     def test_missing_method_keeps_class_abstract(self):
         for name in CONTRACT_METHODS:
@@ -180,8 +180,8 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(FakeAdapter.stopped, ["beta"])
 
     def test_incompatible_adapter_is_rejected_at_registration(self):
-        class LegacyAdapter(FakeAdapter):
-            capabilities = {}
+        incomplete = {"capabilities": {}}  # заведомо неполные capabilities
+        LegacyAdapter = type("LegacyAdapter", (FakeAdapter,), incomplete)
 
         registry = AdapterRegistry()
         with self.assertRaisesRegex(ValueError, "adapter_contract"):
@@ -193,26 +193,39 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_server_registry_has_enabled_backends_from_fleet(self):
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        # ADR 0017: droid выключен, passthrough-мосты agy/opencode-zen/claude-p включены
-        self.assertEqual(set(ids), {"muse", "codex", "agy", "opencode-zen", "claude-p"})
-        self.assertNotIn("droid", ids)
+        self.assertEqual(
+            set(ids), {"droid", "muse", "codex", "agy", "opencode-zen", "claude-p", "opencode-go", "opencode-go-claude"}
+        )
+        self.assertIn("droid", ids)
         self.assertIn("muse", ids)
 
     def test_model_routing(self):
         reg = server.BACKENDS
-        for mid in server.FLEET["order"]:
-            if mid.startswith("gpt-"):
-                expected = "codex"
-            elif mid.startswith("muse-"):
-                expected = "muse"
-            elif mid.startswith("claude-"):
-                expected = "claude-p"
-            elif mid.startswith("gemini-"):
-                expected = "agy"
-            else:
-                expected = "opencode-zen"
-            self.assertEqual(reg.adapter_for_model(mid).id, expected, mid)
-            self.assertEqual(server.FLEET["models"][mid]["backend"], expected)
+        expected = {
+            "claude-sonnet-5-5": "droid",
+            "gemini-3.8-flash": "droid",
+            "gpt-6.1-sol": "droid",
+            "muse-spark-1.3": "muse",
+            "muse-spark-1.3-contributor": "muse",
+            "muse-wonder-1.0": "muse",
+            "muse-wonder-full-1.0": "muse",
+            "gpt-6.1-terra": "codex",
+            "claude-opus-5-5": "claude-p",
+            "claude-haiku-5-5": "opencode-go-claude",
+            "gemini-4-argon": "agy",
+            "deepseek-v4.1-flash-free": "opencode-zen",
+            "flint-40b-free": "opencode-zen",
+            "mimo-v2.6-flash-free": "opencode-zen",
+            "nemotron-3.5-lightning-free": "opencode-zen",
+            "nemotron-3.5-super-vl-free": "opencode-zen",
+            "beam-free": "opencode-zen",
+            "big-pickle": "opencode-zen",
+            "deepseek-v4.1-flash": "opencode-go",
+        }
+        self.assertEqual(set(server.FLEET["order"]), set(expected))
+        for mid, backend in expected.items():
+            self.assertEqual(reg.adapter_for_model(mid).id, backend, mid)
+            self.assertEqual(server.FLEET["models"][mid]["backend"], backend)
 
     def test_each_adapter_exposes_contract_and_capabilities(self):
         for adapter in server.BACKENDS.adapters():
@@ -231,7 +244,12 @@ class TestRealAdapters(unittest.TestCase):
             adapter.close_session("no-such-sid")
 
     def test_droid_health_follows_receipt_state(self):
-        droid = DroidAdapter("droid", {"enabled": True, "max_concurrent": 4}, lambda: server.FLEET, server)
+        droid = DroidAdapter(
+            "droid",
+            {"enabled": True, "max_concurrent": 4},
+            lambda: server.FLEET,
+            server,
+        )
         saved = server._receipt_state
         try:
             server._receipt_state = lambda: "invalid"
@@ -244,7 +262,12 @@ class TestRealAdapters(unittest.TestCase):
             server._receipt_state = saved
 
     def test_droid_capacity_is_host_pool_cap(self):
-        droid = DroidAdapter("droid", {"enabled": True, "max_concurrent": server.MAX_CONCURRENT}, lambda: server.FLEET, server)
+        droid = DroidAdapter(
+            "droid",
+            {"enabled": True, "max_concurrent": server.MAX_CONCURRENT},
+            lambda: server.FLEET,
+            server,
+        )
         self.assertEqual(droid.max_concurrent, server.MAX_CONCURRENT)
 
 

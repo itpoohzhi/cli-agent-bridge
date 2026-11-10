@@ -359,13 +359,24 @@ class TestKbScope(GuardCase):
         self.assertEqual(self.hub.spawns(), [])
 
     def test_rw009_kb_cwd_with_extra_section_is_limited_to_60000(self):
-        """RW-009: cwd=KB: блок с дополнительной секцией > 60000 Б отклонён; тот же блок в cwd=WA проходит."""
+        """RW-009: cwd=KB: дополнительная (не канон) секция > 60000 Б мягко усекается до 60000, а не отклоняется;
+        тот же блок в cwd=WA усекается до бюджета non-KB (предел − запас)."""
         block = HEAD + "a" * 69000
         cwds = self.fs["cwds"]
-        status, body = self._ask_block("chat-kb-extra", block, str(cwds["KB"]))
-        self.assertEqual(status, 503, body)
-        self.assertEqual(self.hub.spawns(), [])
-        self.assertEqual(self._ask_block("chat-wa", block, str(cwds["WA"]))[0], 200)
+        with self.capture_logs() as lines:
+            status, body = self._ask_block("chat-kb-extra", block, str(cwds["KB"]))
+        self.assertEqual(status, 200, body)
+        self.assertTrue(
+            any(ln.startswith("instr_gate_truncated ") and "limit=60000" in ln for ln in lines),
+            lines,
+        )
+        wa_limit = server.INSTR_BLOCK_LIMIT - server.INSTR_NONKB_MARGIN  # non-KB: бюджет минус запас
+        with self.capture_logs() as lines:
+            self.assertEqual(self._ask_block("chat-wa", block, str(cwds["WA"]))[0], 200)
+        self.assertTrue(
+            any(ln.startswith("instr_gate_truncated ") and f"limit={wa_limit}" in ln for ln in lines),
+            lines,
+        )
 
 
 class TestStructuralJsonFlood(RpcCase):

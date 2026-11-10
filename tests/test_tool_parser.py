@@ -1447,12 +1447,14 @@ class TestOptimizationContracts(unittest.TestCase):
         response.readline.side_effect = OSError("upstream disconnected after headers")
         connection = Mock()
         connection.getresponse.return_value = response
-        sink = SimpleNamespace(start=Mock(), write=Mock(), client_gone=Mock(return_value=False))
+        sink = SimpleNamespace(
+            start=Mock(), write=Mock(), client_gone=Mock(return_value=False)
+        )
         with patch.object(adapter, "_open", return_value=connection) as opened:
             adapter.handle(
                 path="/v1/chat/completions",
-                raw_body=b"{}",
-                request={},
+                raw_body=b'{"stream": true}',
+                request={"stream": True},
                 headers={},
                 sink=cast(ResponseSink, cast(object, sink)),
             )
@@ -1535,6 +1537,321 @@ class TestPromptRendering(unittest.TestCase):
         prompt = _messages_to_prompt([{"role": "user", "content": "hi"}], TOOLS, "none")
         self.assertNotIn("# Tool calling protocol", prompt)
 
+
+class TestToolCallParserTolerantRecovery(unittest.TestCase):
+    """Регрессионные тесты толерантности разбора tool_call (REQ-001, REQ-002, AD-001)."""
+
+    def test_trailing_comma_in_arguments_parsed(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        raw = (
+            TOOL_CALL_OPEN
+            + '{"name": "bash", "arguments": {"cmd": "ls",}}'
+            + TOOL_CALL_CLOSE
+        )
+        p.feed(raw)
+        p.finish()
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["name"], "bash")
+        self.assertEqual(c.calls[0]["arguments"], {"command": "ls"})
+
+    def test_trailing_comma_in_array_arguments_parsed(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        raw = (
+            TOOL_CALL_OPEN
+            + '{"name": "grep", "arguments": {"files": ["a.py", "b.py",],}}'
+            + TOOL_CALL_CLOSE
+        )
+        p.feed(raw)
+        p.finish()
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["name"], "grep")
+        self.assertEqual(c.calls[0]["arguments"], {"files": ["a.py", "b.py"]})
+
+    def test_key_synonyms_normalized_to_name(self):
+        cases = [
+            ('{"tool": "bash", "arguments": {"cmd": "pwd"}}', "bash"),
+            ('{"action": "read_file", "arguments": {"path": "a.txt"}}', "read_file"),
+            ('{"tool_name": "glob", "arguments": {"pattern": "*"}}', "glob"),
+        ]
+        for payload, expected_name in cases:
+            c = Collector()
+            p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+            p.feed(TOOL_CALL_OPEN + payload + TOOL_CALL_CLOSE)
+            p.finish()
+            self.assertEqual(len(c.calls), 1, f"failed for payload: {payload}")
+            self.assertEqual(c.calls[0]["name"], expected_name)
+
+    def test_empty_tool_call_block_ignored_no_error(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed("Pre " + TOOL_CALL_OPEN + "   \n\t  " + TOOL_CALL_CLOSE + "Post")
+        p.finish()
+        self.assertEqual(c.calls, [])
+        self.assertEqual("".join(c.content), "Pre Post")
+
+    def test_empty_tool_call_block_followed_by_valid_call(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed(TOOL_CALL_OPEN + "  " + TOOL_CALL_CLOSE)
+        p.feed(TOOL_CALL_OPEN + '{"name": "bash", "arguments": {}}' + TOOL_CALL_CLOSE)
+        p.finish()
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["name"], "bash")
+
+    def test_malformed_tool_call_logs_warning_before_raise(self):
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        with self.assertLogs("core.tool_emulation", level="WARNING") as cm:
+            with self.assertRaises(LiveParserError):
+                p.feed(TOOL_CALL_OPEN + '{"broken": json here' + TOOL_CALL_CLOSE)
+        self.assertTrue(
+            any("malformed tool_call block raw=" in msg for msg in cm.output)
+        )
+
+
+
+    def test_unescaped_newlines_in_arguments_parsed(self):
+        from core.tool_emulation import _parse_tool_call_block
+
+        inner = '{"name": "bash", "arguments": {"command": "cat << EOF\nline 1\nline 2\nEOF"}}'
+        assert "\n" in inner
+        parsed = _parse_tool_call_block(inner)
+        assert parsed is not None
+        assert parsed["name"] == "bash"
+        assert parsed["arguments"] == {"command": "cat << EOF\nline 1\nline 2\nEOF"}
+
+    def test_unescaped_newlines_with_trailing_comma_parsed(self):
+        from core.tool_emulation import _parse_tool_call_block
+
+        inner = '{"name": "bash", "arguments": {"command": "echo a\necho b",}}'
+        assert "\n" in inner
+        parsed = _parse_tool_call_block(inner)
+        assert parsed is not None
+        assert parsed["name"] == "bash"
+        assert parsed["arguments"] == {"command": "echo a\necho b"}
+
+    def test_tool_name_execute_alias_normalized_to_bash(self):
+        from core.tool_emulation import _parse_tool_call_block
+
+        execute = _parse_tool_call_block('{"name": "Execute", "arguments": {"command": "pwd"}}')
+        assert execute == {"name": "bash", "arguments": {"command": "pwd"}}
+
+        run_command = _parse_tool_call_block('{"name": "run_command", "arguments": {"cmd": "ls"}}')
+        assert run_command == {"name": "bash", "arguments": {"command": "ls"}}
+
+
+
+    def test_execute_tag_parsed_as_bash_call(self):
+        from core.tool_emulation import _parse_execute_block, _parse_invoke_arguments
+
+        text = (
+            "<execute>"
+            "<command>ls -la</command>"
+            "<summary>list files</summary>"
+            "</execute>tail"
+        )
+        parsed = _parse_execute_block(text)
+        assert parsed is not None
+        call, end = parsed
+        assert call["name"] == "bash"
+        assert call["arguments"] == {"command": "ls -la"}
+        assert text[end:] == "tail"
+
+        named = _parse_execute_block('<execute name="shell"><command>pwd</command></execute>')
+        assert named is not None
+        assert named[0]["name"] == "bash"
+        assert named[0]["arguments"] == {"command": "pwd"}
+
+        assert _parse_execute_block("<execute><command>ls</command>") is None
+
+        explicit = _parse_invoke_arguments(
+            '<parameter name="command">echo hi</parameter><command>ignored</command>'
+        )
+        assert explicit["command"] == "echo hi"
+
+
+    def test_execute_command_block_streamed_in_chunks_emits_bash_call(self) -> None:
+        calls = []
+        parser = ToolCallParser(lambda _: None, calls.append)
+        text = "<execute><command>uname -a</command></execute>"
+        for i in range(0, len(text), 4):
+            parser.feed(text[i : i + 4])
+        parser.finish()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "bash")
+        self.assertEqual(calls[0]["arguments"], {"command": "uname -a"})
+        self.assertTrue(calls[0]["id"].startswith("call_"))
+
+
+    def test_cmd_key_canonicalized_to_command_for_run_command(self) -> None:
+        parsed = _parse_tool_call_block(
+            '{"name": "run_command", "arguments": {"cmd": "ls"}}'
+        )
+        self.assertEqual(parsed, {"name": "bash", "arguments": {"command": "ls"}})
+
+    def test_command_line_key_canonicalized_to_command(self) -> None:
+        parsed = _parse_tool_call_block(
+            '{"name": "run_command", "arguments": {"CommandLine": "echo hi"}}'
+        )
+        self.assertEqual(
+            parsed, {"name": "bash", "arguments": {"command": "echo hi"}}
+        )
+
+    def test_execute_name_shell_canonicalized_to_bash(self) -> None:
+        res = core_emulation._parse_execute_block(
+            '<execute name="shell"><command>pwd</command></execute>'
+        )
+        assert res is not None
+        self.assertEqual(res[0], {"name": "bash", "arguments": {"command": "pwd"}})
+
+    def test_summary_stripped_from_bash_arguments(self) -> None:
+        parsed = _parse_tool_call_block(
+            '{"name": "bash", "arguments": {"command": "ls", "summary": "list", '
+            '"toolSummary": "x", "description": "y"}}'
+        )
+        self.assertEqual(parsed, {"name": "bash", "arguments": {"command": "ls"}})
+
+
+
+    def test_execute_stream_never_leaks_xml_into_content(self) -> None:
+        text = (
+            "Run: <execute><command>printf 'safe'</command>"
+            "<summary>s</summary></execute> done"
+        )
+        for step in (1, 4):
+            with self.subTest(step=step):
+                content: list[str] = []
+                calls: list[dict[str, Any]] = []
+                parser = ToolCallParser(content.append, calls.append)
+                for i in range(0, len(text), step):
+                    parser.feed(text[i : i + step])
+                parser.finish()
+                joined = "".join(content)
+                self.assertNotIn("<execute", joined)
+                self.assertNotIn("<command", joined)
+                self.assertEqual(joined, "Run:  done")
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["name"], "bash")
+                self.assertEqual(calls[0]["arguments"], {"command": "printf 'safe'"})
+
+class TestExecuteBlockSafety(unittest.TestCase):
+    def test_summary_isolation_does_not_execute_command_inside_summary(self) -> None:
+        buf = (
+            "<execute><summary><command>echo PWN_SUMMARY</command></summary>"
+            "<command>echo SAFE</command></execute>"
+        )
+        res = core_emulation._parse_execute_block(buf)
+        assert res is not None
+        call, end = res
+        assert call is not None
+        self.assertEqual(call["name"], "bash")
+        self.assertEqual(call["arguments"]["command"], "echo SAFE")
+        self.assertEqual(end, len(buf))
+
+    def test_summary_only_does_not_emit_command(self) -> None:
+        buf = "<execute><summary><command>echo PWN_SUMMARY</command></summary></execute>"
+        res = core_emulation._parse_execute_block(buf)
+        assert res is not None
+        call, end = res
+        self.assertIsNone(call)
+        self.assertEqual(end, len(buf))
+
+    def test_empty_execute_does_not_emit_call(self) -> None:
+        buf = "<execute></execute>"
+        res = core_emulation._parse_execute_block(buf)
+        assert res is not None
+        call, end = res
+        self.assertIsNone(call)
+        self.assertEqual(end, len(buf))
+
+    def test_execute_parser_drops_orphaned_command_outside_execute(self) -> None:
+        text = "<execute></execute><command>echo PWN</command></execute>"
+        calls: list[dict[str, Any]] = []
+        parser = ToolCallParser(lambda _: None, calls.append)
+        parser.feed(text)
+        parser.finish()
+        self.assertEqual(len(calls), 0)
+
+    def test_alias_cleanup_removes_all_remaining_aliases(self) -> None:
+        name, args = core_emulation._canonical_tool_invocation(
+            "bash",
+            {"cmd": "echo hi", "CommandLine": "x", "script": "y"},
+        )
+        self.assertEqual(name, "bash")
+        self.assertEqual(args["command"], "echo hi")
+        self.assertNotIn("cmd", args)
+        self.assertNotIn("CommandLine", args)
+        self.assertNotIn("script", args)
+
+    def test_case_insensitive_execute(self) -> None:
+        buf = "<EXECUTE><COMMAND>echo hi</COMMAND></EXECUTE>"
+        calls: list[dict[str, Any]] = []
+        parser = ToolCallParser(lambda _: None, calls.append)
+        parser.feed(buf)
+        parser.finish()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "bash")
+        self.assertEqual(calls[0]["arguments"], {"command": "echo hi"})
+
+    def test_nested_summary_isolation(self) -> None:
+        buf = (
+            "<execute><summary><summary>"
+            "<command>echo PWN</command>"
+            "</summary></summary>"
+            "<command>echo SAFE</command></execute>"
+        )
+        calls: list[dict[str, Any]] = []
+        parser = ToolCallParser(lambda _: None, calls.append)
+        parser.feed(buf)
+        parser.finish()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "bash")
+        self.assertEqual(calls[0]["arguments"], {"command": "echo SAFE"})
+
+    def test_unclosed_summary_does_not_execute_command(self) -> None:
+        buf = (
+            "<execute><summary><command>echo PWN</command>"
+            "<command>echo SAFE</command></execute>"
+        )
+        calls: list[dict[str, Any]] = []
+        parser = ToolCallParser(lambda _: None, calls.append)
+        parser.feed(buf)
+        parser.finish()
+        self.assertEqual(calls, [])
+
+    def test_invoke_execute_canonicalized_to_bash(self) -> None:
+        buf = '<invoke name="Execute"><parameter name="cmd">echo hi</parameter></invoke>'
+        calls: list[dict[str, Any]] = []
+        parser = ToolCallParser(lambda _: None, calls.append)
+        parser.feed(buf)
+        parser.finish()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "bash")
+        self.assertEqual(calls[0]["arguments"], {"command": "echo hi"})
+
+    def test_invoke_with_summary_isolation(self) -> None:
+        buf = '<invoke name="Execute"><summary><command>echo PWN</command></summary><command>echo SAFE</command></invoke>'
+        calls: list[dict[str, Any]] = []
+        parser = ToolCallParser(lambda _: None, calls.append)
+        parser.feed(buf)
+        parser.finish()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "bash")
+        self.assertEqual(calls[0]["arguments"], {"command": "echo SAFE"})
+
+    def test_case_insensitive_synonyms(self) -> None:
+        for name in ("EXECUTE", "Shell", "TERMINAL"):
+            with self.subTest(name=name):
+                buf = f'<invoke name="{name}"><parameter name="cmd">echo hi</parameter></invoke>'
+                calls: list[dict[str, Any]] = []
+                parser = ToolCallParser(lambda _: None, calls.append)
+                parser.feed(buf)
+                parser.finish()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["name"], "bash")
+                self.assertEqual(calls[0]["arguments"], {"command": "echo hi"})
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,12 +1,5 @@
-"""Регрессионные тесты cycle-4 для tools/b_guard.py, tools/droid_image.py и tools/receipt_schema.py.
-
-RW-010 (F-B05) - охранник проверяет настоящий user-global файл, а не его синтезированную копию;
-RW-020 (F-B14) - разбор профиля DSH отвергает дубли и «чужой» maxBytes;
-RW-011 (F-B06) - read-back update берётся и из нотификаций, уже вернувшихся из call();
-RW-012 (F-B07) - receipt не подтверждает подменённый профиль, а непроверяемые поля помечает явно;
-RW-013 (F-C05) - droid_image зависит только от receipt_schema и не импортирует мост (server.py).
-Реальный droid, ~/.dsh и боевые каталоги владельца не используются.
-"""
+"""Регрессии cycle-4: канон, read-back и автономная квалификация Droid.
+Без реального droid и боевых каталогов владельца."""
 
 import json
 import os
@@ -16,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,11 +18,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import b_guard as bg  # noqa: E402
-import droid_image  # noqa: E402
+from tools import droid_image  # noqa: E402
+from tests.gateway_policy_testlib import restrict_probe_models  # noqa: E402
 from rpc_testlib import RpcCase  # noqa: E402
 from test_b_guard import PROFILE_YML, build_snapshot_fs  # noqa: E402
 
-MODEL, EFFORT = droid_image.PROBE_MODEL_EFFORT
+MODEL, EFFORT = next(iter(droid_image._probe_models().items()))
 IDS = ["Execute", "Read"]
 DROP = object()
 
@@ -40,16 +35,16 @@ class TestRw010UserGlobal(unittest.TestCase):
     """RW-010: check_installed читает настоящий ~/.dsh/AGENTS.md (наличие, содержимое, цель симлинка)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory()  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
-        self.fs = build_snapshot_fs(self.root)
-        self.canon = self.fs["canon"]
-        self.ug = self.root / "dsh-home" / "AGENTS.md"
+        self.root = Path(self._tmp.name)  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
+        self.fs: dict[str, Any] = build_snapshot_fs(self.root)  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
+        self.canon = self.fs["canon"]  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
+        self.ug = self.root / "dsh-home" / "AGENTS.md"  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
         self.ug.parent.mkdir()
         self.ug.symlink_to(self.canon)
         cwds = self.fs["cwds"]
-        self.default = tuple(
+        self.default = tuple(  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
             (label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW")
         )
         for patcher in (
@@ -129,7 +124,7 @@ class TestRw020Profile(unittest.TestCase):
         text = PROFILE_YML % 106496
         if old is not None:
             self.assertIn(old, text)
-            text = text.replace(old, new, 1)
+            text = text.replace(old, new or "", 1)
         return text
 
     def test_rw020_valid_profile_still_parses(self):
@@ -259,10 +254,11 @@ def scripted(init=None, update=None, load=None, in_notes=False, no_readback=Fals
 
 class ProbeCase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory()  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
         self.workspace = self.tmp / "workspace"
+        restrict_probe_models(self, droid_image, MODEL, EFFORT)
 
     def probes(self, rpc):
         with mock.patch.object(droid_image, "_Rpc", lambda image, cwd, home: rpc):
@@ -391,7 +387,7 @@ class TestRw012VerifiedProfile(ProbeCase):
         self.assertEqual(
             receipt["settings_profile"]["digest"], server.settings_profile_digest()
         )
-        self.assertEqual(receipt["schema"], 2)
+        self.assertEqual(receipt["schema"], 3)
         server._check_receipt_quad(receipt)
 
     def test_rw012_receipt_confirms_reported_flags(self):
@@ -429,8 +425,8 @@ class TestRw012FakeImage(RpcCase):
         super().setUp()
         import server
 
-        self.server = server
-        self.source = Path(self._tmp.name) / "global-droid"
+        self.server = server  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
+        self.source = Path(self._tmp.name) / "global-droid"  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
         self.source.write_bytes(self.hub.launcher.read_bytes())
         self.source.chmod(0o755)
 
@@ -482,11 +478,11 @@ class TestRw013ReceiptSchema(unittest.TestCase):
 
     def test_rw013_schema_values_and_digests_equal_server(self):
         """RW-013: константы и отпечатки receipt_schema те же объекты, что видит server.py."""
-        import receipt_schema as schema
+        from tools import receipt_schema as schema
         import server
 
         self.assertEqual(schema.RPC_API_VERSION, server.RPC_API_VERSION)
-        self.assertEqual(schema.RECEIPT_SCHEMA, 2)
+        self.assertEqual(schema.RECEIPT_SCHEMA, 3)
         self.assertEqual(schema.RECEIPT_SCHEMA, server.RECEIPT_SCHEMA)
         self.assertEqual(schema.TOOLS_POLICY, server.TOOLS_POLICY)
         self.assertEqual(schema.SETTINGS_PROFILE, server.SETTINGS_PROFILE)
@@ -505,7 +501,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
 
     def test_rw013_exported_names(self):
         """RW-013: модуль экспортирует согласованный набор имён."""
-        import receipt_schema as schema
+        from tools import receipt_schema as schema
 
         for name in (
             "RPC_API_VERSION",
@@ -531,7 +527,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
         self.assertEqual(proc.stdout.decode("utf-8", "replace").strip(), "clean")
 
     def test_rw013_qualification_runs_without_fleet_json_or_server(self):
-        """RW-013: пробы и receipt работают в раскладке без server.py; fleet.json отсутствует либо повреждён."""
+        """RW-013: явный fleet работает без server.py при отсутствующем или повреждённом локальном fleet."""
         from bridge_testlib import FakeDroidHub
 
         for fleet in (None, "{broken json"):
@@ -539,7 +535,11 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                 base = Path(tmp)
                 tools = base / "tools"
                 tools.mkdir()
-                for name in ("droid_image.py", "receipt_schema.py"):
+                for name in (
+                    "droid_image.py",
+                    "receipt_schema.py",
+                    "droid_probe_config.py",
+                ):
                     shutil.copy(ROOT / "tools" / name, tools / name)
                 if fleet is not None:
                     (base / "fleet.json").write_text(fleet, encoding="utf-8")
@@ -562,6 +562,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                         os.environ,
                         PYTHONDONTWRITEBYTECODE="1",
                         FAKE_DROID_DIR=str(hub.base),
+                        DROID_DSH_BRIDGE_FLEET=str(ROOT / "fleet.json"),
                     ),
                 )
                 text = proc.stdout.decode("utf-8", "replace")
@@ -571,7 +572,7 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                         encoding="utf-8"
                     )
                 )
-                self.assertEqual(receipt["schema"], 2)
+                self.assertEqual(receipt["schema"], 3)
                 self.assertIn("readback", receipt["settings_profile"])
 
 

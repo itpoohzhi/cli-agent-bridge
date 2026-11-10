@@ -11,10 +11,9 @@ produces bit-for-bit identical stream events whether fed as:
 
 import random
 import time
-import pytest
 
 from core.stream_fsm.machine import StreamMachine
-from core.stream_fsm.types import EmitChunk, EmitSSE, EmitToolCall
+from core.stream_fsm.types import EmitChunk
 
 SAMPLE_SSE_STREAM = (
     'data: {"choices": [{"delta": {"reasoning_content": "Анализирую требования FSM на кириллице..."}}]}\n\n'

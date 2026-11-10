@@ -1,0 +1,81 @@
+# Провайдер opencode-zen: бесплатные модели Zen (-free в override заданы человеком; discovery такие id отбрасывает всегда). family не выведена: quorum_eligible=false.
+manifest_version: 1
+provider_id: opencode-zen
+kind: passthrough
+enabled: true
+required: false
+priority: 50
+owned_by: opencode-zen-bridge
+transport:
+  bridge: {base_url: 'http://127.0.0.1:9883/v1', api_key_env: OPENCODE_ZEN_BRIDGE_KEY}
+allow_base_url:
+- {scheme: http, host: 127.0.0.1, port: 9883, path_prefix: /v1}
+limits: {max_concurrent: 128, quota_group: opencode-zen, timeout_s: 180}
+discovery:
+  method: http
+  http: {path: /models, id_field: 'data[].id'}
+  exclude: []
+  refresh_interval_s: 900
+family_rule:
+  type: exact_map
+  exact_map: {}
+models_overrides:
+  deepseek-v4.1-flash-free:
+    name: DeepSeek V4.1 Flash Free (Zen)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 200000
+    max_tokens: 32000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  flint-40b-free:
+    name: Flint 40B Free (Zen)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 200000
+    max_tokens: 32000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  mimo-v2.6-flash-free:
+    name: Mimo V2.6 Flash Free (Zen)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 200000
+    max_tokens: 32000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  nemotron-3.5-lightning-free:
+    name: Nemotron 3.5 Lightning Free (Zen)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 200000
+    max_tokens: 32000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  nemotron-3.5-super-vl-free:
+    name: Nemotron 3.5 Super VL Free (Zen)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 200000
+    max_tokens: 32000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  beam-free:
+    name: Beam Free (Zen)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 200000
+    max_tokens: 32000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  big-pickle:
+    name: Big Pickle (Zen)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 200000
+    max_tokens: 32000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+params:
+  effort_field: reasoning_effort
+  adaptive_whitelist: [reasoning_effort, thinking, temperature, top_p]

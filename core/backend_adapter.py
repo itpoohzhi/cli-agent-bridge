@@ -10,12 +10,25 @@
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, NamedTuple, Optional, get_type_hints
+from types import MappingProxyType
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    get_type_hints,
+)
+from urllib.parse import urlsplit
+from core.effort_policy import EFFORT_LEVELS as _RANKED_EFFORT_LEVELS
 
 # Версия контракта: адаптер обязан подтверждать её в qualify() (несовпадение = модели недоступны).
 ADAPTER_API = 1
@@ -153,6 +166,7 @@ class TurnContext:
     # Проброшенное окружение extra_body.env (ADR-0016): уже санитизировано мостом; адаптеры без
     # поддержки поле игнорируют; repr скрыт, чтобы секреты не попадали в логи/трейсы.
     fwd_env: dict[str, str] | None = field(default=None, repr=False)
+    target_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -233,7 +247,16 @@ BACKEND_KEYS = frozenset(
         "api_key_env",
         "api_key",
         "options",
+        "api_key_ref",
+        "headers_from_json",
+        "per_request_headers",
+        "default_body_extra",
     }
+)
+# Необязательные upstream-параметры raw-HTTP шва (только виды с `base_url`): откуда брать ключ и
+# заголовки, какие заголовки генерировать на каждый запрос и какие поля тела подставлять по умолчанию.
+UPSTREAM_PARAM_KEYS = frozenset(
+    {"api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra"}
 )
 TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
 PROXY_PORT_MIN = 1
@@ -244,15 +267,142 @@ _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 PIN_REQUIRED_KINDS = frozenset({"muse"})
 # Вид без собственного процесса: исполнение — raw HTTP-шов к upstream из `base_url` (ADR 0011).
 PASSTHROUGH_KIND = "passthrough"
-_LOOPBACK_BASE_URL = re.compile(r"http://127\.0\.0\.1:([0-9]{1,5})/v1")
+_LOOPBACK_BASE_URL = re.compile(
+    r"http://127\.0\.0\.1:([0-9]{1,5})(?:/[a-z0-9._-]+)*/v1"
+)
 
 
-def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -> str:
+def _str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+
+
+def upstream_params_error(entry: Mapping[str, Any]) -> str:
+    """Причина отказа необязательных upstream-параметров шва ('' — валидны или не заданы)."""
+    ref = entry.get("api_key_ref")
+    if ref is not None and (
+        not isinstance(ref, str)
+        or not ref.startswith("file:")
+        or not ref[len("file:") :].strip()
+    ):
+        return "backend_api_key_ref_invalid"
+    headers = entry.get("headers_from_json")
+    if headers is not None and (
+        not isinstance(headers, dict)
+        or set(headers) - {"file", "json_path", "pick"}
+        or not isinstance(headers.get("file"), str)
+        or not headers["file"].strip()
+        or not _str_list(headers.get("json_path"))
+        or not _str_list(headers.get("pick"))
+    ):
+        return "backend_headers_from_json_invalid"
+    per_request = entry.get("per_request_headers")
+    if per_request is not None and (
+        not isinstance(per_request, dict)
+        or not all(
+            isinstance(k, str) and k and isinstance(v, str)
+            for k, v in per_request.items()
+        )
+    ):
+        return "backend_per_request_headers_invalid"
+    extra = entry.get("default_body_extra")
+    if extra is not None and (
+        not isinstance(extra, dict) or not all(isinstance(k, str) for k in extra)
+    ):
+        return "backend_default_body_extra_invalid"
+    return ""
+
+
+@dataclass(frozen=True)
+class KindConstraints:
+    """Жёсткие транспортные ограничения вида; манифест провайдера может только сужать их.
+
+    Объявляется адаптером как атрибут класса `CONSTRAINTS` (замена вендорских литералов
+    `PIN_REQUIRED_KINDS` и `kind == ...` при `BRIDGE_PROVIDER_CONSTRAINTS_ENABLED`).
+    """
+
+    max_concurrent_max: Optional[int] = None  # None = без потолка
+    pin_required: bool = False
+    base_url_allowed: bool = False  # для видов raw-HTTP шва
+    api_key_env_allowed: bool = False
+    # ключ options -> допустимые значения; пустая схема = options запрещены
+    options_schema: Mapping[str, tuple] = MappingProxyType({})
+
+
+@dataclass(frozen=True)
+class AllowEntry:
+    """Запись allowlist базового URL бэкенда (loopback-only по умолчанию)."""
+
+    scheme: str = "http"
+    host: str = "127.0.0.1"
+    port: int = 0
+    path_prefix: str = "/v1"
+
+    def matches(self, url: str) -> bool:
+        """Совпадает ли `url` со схемой, хостом, портом и границей префикса пути."""
+        try:
+            parts = urlsplit(url)
+            port = parts.port
+        except ValueError:
+            return False
+        if parts.query or parts.fragment or parts.username or parts.password:
+            return False
+        if parts.scheme != self.scheme or parts.hostname != self.host:
+            return False
+        if port != self.port:
+            return False
+        prefix = self.path_prefix.rstrip("/")
+        return parts.path == prefix or parts.path.startswith(prefix + "/")
+
+
+# Дефолтная политика базового URL (env BRIDGE_DEFAULT_BASE_URL_POLICY — regex fullmatch).
+DEFAULT_BASE_URL_POLICY = r"http://127\.0\.0\.1:([0-9]{1,5})(?:/[a-z0-9._-]+)*/v1"
+
+
+def kind_constraints(kinds: Mapping[str, Any], kind: str) -> KindConstraints:
+    """Ограничения вида из класса адаптера (нет атрибута — ничего не ограничено)."""
+    found = getattr(kinds.get(kind), "CONSTRAINTS", None)
+    return found if isinstance(found, KindConstraints) else KindConstraints()
+
+
+def _base_url_allowed(
+    backend_id: str,
+    base_url: Any,
+    allowlist: Optional[Mapping[str, Sequence[AllowEntry]]],
+) -> bool:
+    """Базовый URL проходит allowlist бэкенда либо дефолтную loopback-политику."""
+    if not isinstance(base_url, str):
+        return False
+    entries = (allowlist or {}).get(backend_id)
+    if entries:
+        return any(entry.matches(base_url) for entry in entries)
+    policy = os.environ.get("BRIDGE_DEFAULT_BASE_URL_POLICY") or DEFAULT_BASE_URL_POLICY
+    try:
+        match = re.fullmatch(policy, base_url)
+    except re.error:
+        match = None
+    if match is None:
+        return False
+    groups = match.groups()
+    if groups and groups[0] is not None:
+        return PROXY_PORT_MIN <= int(groups[0]) <= PROXY_PORT_MAX
+    return True
+
+
+def backend_entry_error(
+    backend_id: Any,
+    entry: Any,
+    kinds: Mapping[str, Any],
+    *,
+    constraints_enabled: bool = False,
+    allowlist: Optional[Mapping[str, Sequence[AllowEntry]]] = None,
+) -> str:
     """Причина отказа записи `backends[id]` schema 3 ('' — запись валидна).
 
     Короткий slug класса I (без пользовательских данных): его пишут в журнал/отчёт и
     сервер, и `fleet_check`. `kinds` — реестр видов, заданный В КОДЕ
-    (`adapters.ADAPTER_KINDS`), а не конфигурация.
+    (`adapters.ADAPTER_KINDS`), а не конфигурация. При `constraints_enabled` вендорские
+    проверки заменяются `KindConstraints` адаптера и allowlist базовых URL; ветка
+    `# legacy:` физически сохранена до снятия флага.
     """
     if not isinstance(backend_id, str) or not backend_id:
         return "backend_invalid"
@@ -263,9 +413,13 @@ def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -
     kind = entry.get("kind")
     if not isinstance(kind, str) or kind not in kinds:
         return "backend_kind_unknown"
+    constraints = kind_constraints(kinds, kind) if constraints_enabled else None
     for key in ("api_key_env", "api_key"):
         if key in entry:
-            if kind != PASSTHROUGH_KIND:
+            if constraints is not None:
+                if not constraints.api_key_env_allowed:
+                    return "backend_key_unknown"
+            elif kind != PASSTHROUGH_KIND:  # legacy: BRIDGE_PROVIDER_CONSTRAINTS_ENABLED
                 return "backend_key_unknown"
             if not isinstance(entry[key], str):
                 return f"backend_{key}_invalid"
@@ -275,31 +429,59 @@ def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -
     cap = entry.get("max_concurrent", 1)
     if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
         return "backend_max_concurrent_invalid"
-    if kind == "muse" and cap != 1:
+    if constraints is not None:
+        ceiling = constraints.max_concurrent_max
+        if ceiling is not None and cap > ceiling:
+            return "backend_max_concurrent_invalid"
+    elif kind == "muse" and cap != 1:  # legacy: BRIDGE_PROVIDER_CONSTRAINTS_ENABLED
         return "backend_muse_max_concurrent_invalid"
     if "options" in entry:
         options = entry["options"]
-        if (
-            kind != "muse"
-            or not isinstance(options, dict)
-            or set(options) - {"streaming_mode"}
-        ):
-            return "backend_options_invalid"
-        if options.get("streaming_mode", "exec") not in ("exec", "serve"):
-            return "backend_streaming_mode_invalid"
-    if kind == PASSTHROUGH_KIND:
+        if constraints is not None:
+            schema = constraints.options_schema
+            if not schema or not isinstance(options, dict) or set(options) - set(schema):
+                return "backend_options_invalid"
+            for opt_key, opt_value in options.items():
+                if opt_value not in schema[opt_key]:
+                    return f"backend_{opt_key}_invalid"
+        else:
+            # legacy: BRIDGE_PROVIDER_CONSTRAINTS_ENABLED
+            if (
+                kind != "muse"
+                or not isinstance(options, dict)
+                or set(options) - {"streaming_mode"}
+            ):
+                return "backend_options_invalid"
+            if options.get("streaming_mode", "exec") not in ("exec", "serve"):
+                return "backend_streaming_mode_invalid"
+    base_url_kind = (
+        constraints.base_url_allowed if constraints is not None else kind == PASSTHROUGH_KIND
+    )
+    if base_url_kind:
         base_url = entry.get("base_url")
         if base_url is None:
             return "backend_base_url_missing"
-        match = (
-            _LOOPBACK_BASE_URL.fullmatch(base_url)
-            if isinstance(base_url, str)
-            else None
-        )
-        if match is None or not PROXY_PORT_MIN <= int(match.group(1)) <= PROXY_PORT_MAX:
-            return "backend_base_url_invalid"
+        if constraints is not None:
+            if not _base_url_allowed(backend_id, base_url, allowlist):
+                return "backend_base_url_invalid"
+        else:
+            match = (
+                _LOOPBACK_BASE_URL.fullmatch(base_url)
+                if isinstance(base_url, str)
+                else None
+            )
+            if (
+                match is None
+                or not PROXY_PORT_MIN <= int(match.group(1)) <= PROXY_PORT_MAX
+            ):
+                return "backend_base_url_invalid"
+        reason = upstream_params_error(entry)
+        if reason:
+            return reason
     elif "base_url" in entry:
         return "backend_base_url_unexpected"
+    elif UPSTREAM_PARAM_KEYS & set(entry):
+        return "backend_key_unknown"
     owned_by = entry.get("owned_by", backend_id)
     if not isinstance(owned_by, str) or not owned_by:
         return "backend_invalid"
@@ -324,8 +506,11 @@ def backend_entry_error(backend_id: Any, entry: Any, kinds: Mapping[str, Any]) -
                 or timeout_val <= 0
             ):
                 return f"backend_{timeout_key}_invalid"
+    pin_required = (
+        constraints.pin_required if constraints is not None else kind in PIN_REQUIRED_KINDS
+    )
     if "technical_ref" not in entry:
-        return "backend_technical_ref_missing" if kind in PIN_REQUIRED_KINDS else ""
+        return "backend_technical_ref_missing" if pin_required else ""
     ref = entry.get("technical_ref")
     if not isinstance(ref, dict) or set(ref) - TECHNICAL_REF_KEYS:
         return "backend_technical_ref_invalid"
@@ -363,6 +548,7 @@ FLEET_TOP_KEYS = frozenset(
         "admission",
         "backends",
         "models",
+        "aliases",
     }
 )
 FLEET_MODEL_KEYS = frozenset(
@@ -377,9 +563,14 @@ FLEET_MODEL_KEYS = frozenset(
         "input",
         "images",
         "policy_lines",
+        "upstream_model",
+        "resident",
+        "pool_size",
+        "alias_of",
     }
 )
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Шкала каталога: `off` (отключённый reasoning) плюс ранжированные уровни политики effort.
+EFFORT_LEVELS = ("off", *_RANKED_EFFORT_LEVELS)
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 IMPLEMENTED_METHODS = {"workspace-read": 1}
 IMPLICIT_DROID_BACKEND = {
@@ -432,19 +623,114 @@ def _validate_proof(model_id: str, images: dict, method: str, efforts: list) -> 
         raise FleetViolation("confirmed_efforts_proven_invalid", model_id)
 
 
+def _normalize_model(
+    item: dict,
+    mid: str,
+    schema: int,
+    backends: Mapping[str, Any],
+    image_probe: bool,
+) -> Optional[dict]:
+    """Проверка и нормализация одной записи модели; None — бэкенд выключен (модель пропущена)."""
+    if schema == 3:
+        if set(item) - FLEET_MODEL_KEYS:
+            raise FleetViolation("model_key_unknown", mid)
+        backend_id = item.get("backend")
+        if not isinstance(backend_id, str) or backend_id not in backends:
+            raise FleetViolation("model_backend_unknown", mid)
+    else:
+        backend_id = "droid"
+    efforts = item.get("efforts")
+    if (
+        not isinstance(efforts, list)
+        or not efforts
+        or not all(isinstance(e, str) for e in efforts)
+        or any(e not in EFFORT_LEVELS for e in efforts)
+    ):
+        raise FleetViolation("efforts_invalid", mid)
+    if item.get("default_effort") not in efforts:
+        raise FleetViolation("default_effort_invalid", mid)
+    images = item.get("images")
+    if not isinstance(images, dict) or images.get("status") not in IMAGE_STATUSES:
+        raise FleetViolation("status_invalid", mid)
+    status = images["status"]
+    input_types = item.get("input")
+    if not isinstance(input_types, list) or not all(
+        isinstance(t, str) for t in input_types
+    ):
+        raise FleetViolation("status_inconsistent", mid)
+    if images.get("cli_registry") == "explicit_unsupported" and status != "unsupported":
+        raise FleetViolation("status_inconsistent", mid)
+    if status in ("unsupported", "unverified") and (
+        images.get("method") is not None or input_types != ["text"]
+    ):
+        raise FleetViolation("status_inconsistent", mid)
+    method = images.get("method")
+    if status == "confirmed":
+        if method is None:
+            raise FleetViolation("confirmed_method_missing", mid)
+        if "image" not in input_types or "text" not in input_types:
+            raise FleetViolation("confirmed_input_missing", mid)
+        _validate_proof(mid, images, method, efforts)
+    if status == "probe":
+        if method is None or "image" not in input_types or "text" not in input_types:
+            raise FleetViolation("status_inconsistent", mid)
+        if not image_probe:
+            raise FleetViolation("probe_flag_missing", mid)
+    if method is not None and (
+        not isinstance(method, str) or method not in IMPLEMENTED_METHODS
+    ):
+        raise FleetViolation("method_not_implemented", mid)
+    if not backends[backend_id]["enabled"]:
+        return None
+    try:
+        window = int(item.get("context_window") or 0)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise FleetViolation("context_window_invalid", mid) from exc
+    res = {
+        "id": mid,
+        "backend": backend_id,
+        "name": str(item.get("name") or mid),
+        "efforts": [str(e) for e in efforts],
+        "default_effort": str(item["default_effort"]),
+        "context_window": window,
+        "input": [str(t) for t in input_types],
+        "images": {
+            "status": str(status),
+            "cli_registry": str(images.get("cli_registry") or ""),
+            "method": method,
+            "proof": images.get("proof"),
+        },
+    }
+    if "upstream_model" in item and isinstance(item["upstream_model"], str) and item["upstream_model"].strip():
+        res["upstream_model"] = item["upstream_model"].strip()
+    return res
+
+
 def build_catalog(
     data: Any,
     kinds: Mapping[str, Any],
     *,
     env_model: str = "",
     image_probe: bool = False,
+    mode: Literal["strict", "isolate"] = "strict",
+    constraints_enabled: bool = False,
+    allowlist: Optional[Mapping[str, Sequence[AllowEntry]]] = None,
 ) -> dict:
-    """Единая полная структурная проверка и нормализация schema 2/3, без I/O."""
+    """Единая полная структурная проверка и нормализация schema 2/3, без I/O.
+
+    `strict` (дефолт): любой дефект — `FleetViolation`. `isolate`: дефект записи модели или
+    не-`required` бэкенда изолируется (`rejected[mid] = reason`), остальные модели
+    обслуживаются; дефекты глобального уровня (класс I) по-прежнему фатальны. Ключ
+    `rejected` возвращается всегда (в `strict` он пуст).
+    """
+    isolate = mode == "isolate"
     if not isinstance(data, dict):
         raise FleetViolation("fleet_unreadable")
     schema = data.get("schema_version")
     if isinstance(schema, bool) or schema not in (2, 3):
         raise FleetViolation("schema_version_invalid")
+    rejected: dict[str, str] = {}
+    rejected_backends: dict[str, str] = {}
     if schema == 2:
         if "backends" in data:
             raise FleetViolation("backends_in_schema_2")
@@ -457,9 +743,19 @@ def build_catalog(
             raise FleetViolation("backends_invalid")
         backends = {}
         for bid, entry in raw.items():
-            reason = backend_entry_error(bid, entry, kinds)
+            reason = backend_entry_error(
+                bid,
+                entry,
+                kinds,
+                constraints_enabled=constraints_enabled,
+                allowlist=allowlist,
+            )
             if reason:
-                raise FleetViolation(reason, str(bid))
+                required = isinstance(entry, dict) and entry.get("required") is True
+                if not isolate or required or not isinstance(bid, str):
+                    raise FleetViolation(reason, str(bid))
+                rejected_backends[bid] = reason
+                continue
             normalized = dict(entry)
             normalized.update(
                 enabled=entry.get("enabled", True),
@@ -507,92 +803,30 @@ def build_catalog(
     models = {}
     order = []
     seen: set = set()
-    for item in raw_models:
-        if not isinstance(item, dict):
-            raise FleetViolation("model_invalid")
-        mid = item.get("id")
-        if not isinstance(mid, str) or not mid:
-            raise FleetViolation("model_invalid")
-        if mid in seen:
-            raise FleetViolation("duplicate_id", mid)
-        seen.add(mid)
-        if schema == 3:
-            if set(item) - FLEET_MODEL_KEYS:
-                raise FleetViolation("model_key_unknown", mid)
-            backend_id = item.get("backend")
-            if not isinstance(backend_id, str) or backend_id not in backends:
-                raise FleetViolation("model_backend_unknown", mid)
-        else:
-            backend_id = "droid"
-        efforts = item.get("efforts")
-        if (
-            not isinstance(efforts, list)
-            or not efforts
-            or not all(isinstance(e, str) for e in efforts)
-            or any(e not in EFFORT_LEVELS for e in efforts)
-        ):
-            raise FleetViolation("efforts_invalid", mid)
-        if item.get("default_effort") not in efforts:
-            raise FleetViolation("default_effort_invalid", mid)
-        images = item.get("images")
-        if not isinstance(images, dict) or images.get("status") not in IMAGE_STATUSES:
-            raise FleetViolation("status_invalid", mid)
-        status = images["status"]
-        input_types = item.get("input")
-        if not isinstance(input_types, list) or not all(
-            isinstance(t, str) for t in input_types
-        ):
-            raise FleetViolation("status_inconsistent", mid)
-        if (
-            images.get("cli_registry") == "explicit_unsupported"
-            and status != "unsupported"
-        ):
-            raise FleetViolation("status_inconsistent", mid)
-        if status in ("unsupported", "unverified") and (
-            images.get("method") is not None or input_types != ["text"]
-        ):
-            raise FleetViolation("status_inconsistent", mid)
-        method = images.get("method")
-        if status == "confirmed":
-            if method is None:
-                raise FleetViolation("confirmed_method_missing", mid)
-            if "image" not in input_types or "text" not in input_types:
-                raise FleetViolation("confirmed_input_missing", mid)
-            _validate_proof(mid, images, method, efforts)
-        if status == "probe":
-            if (
-                method is None
-                or "image" not in input_types
-                or "text" not in input_types
-            ):
-                raise FleetViolation("status_inconsistent", mid)
-            if not image_probe:
-                raise FleetViolation("probe_flag_missing", mid)
-        if method is not None and (
-            not isinstance(method, str) or method not in IMPLEMENTED_METHODS
-        ):
-            raise FleetViolation("method_not_implemented", mid)
-        if not backends[backend_id]["enabled"]:
-            continue
+    for index, item in enumerate(raw_models):
+        mid = item.get("id") if isinstance(item, dict) else None
         try:
-            window = int(item.get("context_window") or 0)
-        except (ValueError, TypeError, OverflowError) as exc:
-            raise FleetViolation("context_window_invalid", mid) from exc
-        models[mid] = {
-            "id": mid,
-            "backend": backend_id,
-            "name": str(item.get("name") or mid),
-            "efforts": [str(e) for e in efforts],
-            "default_effort": str(item["default_effort"]),
-            "context_window": window,
-            "input": [str(t) for t in input_types],
-            "images": {
-                "status": str(status),
-                "cli_registry": str(images.get("cli_registry") or ""),
-                "method": method,
-                "proof": images.get("proof"),
-            },
-        }
+            if not isinstance(item, dict):
+                raise FleetViolation("model_invalid")
+            if not isinstance(mid, str) or not mid:
+                raise FleetViolation("model_invalid")
+            if mid in seen:
+                raise FleetViolation("duplicate_id", mid)
+            seen.add(mid)
+            owner = item.get("backend") if schema == 3 else None
+            if isinstance(owner, str) and owner in rejected_backends:
+                rejected[mid] = rejected_backends[owner]
+                continue
+            normalized_model = _normalize_model(item, mid, schema, backends, image_probe)
+        except FleetViolation as violation:
+            if not isolate:
+                raise
+            key = mid if isinstance(mid, str) and mid else f"#{index}"
+            rejected[key] = violation.reason
+            continue
+        if normalized_model is None:
+            continue
+        models[mid] = normalized_model
         order.append(mid)
     default_model = data.get("default_model")
     if not isinstance(default_model, str) or default_model not in models:
@@ -610,6 +844,7 @@ def build_catalog(
         "backend_order": list(backends),
         "order": order,
         "models": models,
+        "aliases": data.get("aliases", {}),
         "image_limits": {**limits, "max_types": [t.lower() for t in limits["types"]]},
         "admission": {
             key: int(admission[key])
@@ -619,6 +854,7 @@ def build_catalog(
             key: str(ref.get(key) or "")
             for key in ("droid_version", "droid_binary_sha256", "droid_binary_path")
         },
+        "rejected": rejected,
     }
 
 
@@ -658,6 +894,8 @@ class BackendAdapter(ABC):
     kind: str = ""
     adapter_api: int = ADAPTER_API
     capabilities: Capabilities = Capabilities()
+    # Жёсткие транспортные ограничения вида (замена вендорских литералов каталога).
+    CONSTRAINTS: KindConstraints = KindConstraints()
 
     def __init__(
         self,

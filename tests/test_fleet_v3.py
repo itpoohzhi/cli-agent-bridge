@@ -1,14 +1,19 @@
 """fleet.json schema 3: парсинг backends, привязка моделей, совместимость со schema 2 (AC-001)."""
-
+from __future__ import annotations
 import copy
 import contextlib
+import importlib
 import io
 import json
+import os
 import sys
 import tempfile
+import time
 import types
 import unittest
+from hashlib import sha256
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -64,15 +69,16 @@ def to_schema_2(data):
 
 
 class TestLiveFleetV3(unittest.TestCase):
-    def test_live_catalogue_is_schema_3_with_six_backends(self):
+    def test_live_catalogue_is_schema_3_with_eight_backends(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
         self.assertEqual(
             catalog["backend_order"],
-            ["droid", "muse", "codex", "agy", "opencode-zen", "claude-p"],
+            ["droid", "opencode-go-claude", "agy", "claude-p", "muse", "codex", "opencode-go", "opencode-zen"],
         )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
-        self.assertFalse(catalog["backends"]["droid"]["enabled"])  # ADR 0017: Droid выведен
+        self.assertTrue(catalog["backends"]["droid"]["enabled"])
+        self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 5)
         self.assertFalse(catalog["backends"]["droid"]["required"])
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
@@ -93,7 +99,9 @@ class TestLiveFleetV3(unittest.TestCase):
             self.assertEqual(backend["kind"], "passthrough", name)
             self.assertEqual(backend["base_url"], "http://127.0.0.1:%d/v1" % port, name)
             self.assertFalse(backend["required"], name)
-            self.assertTrue(backend["enabled"], name)  # ADR 0017: passthrough-бэкенды включены
+            self.assertTrue(
+                backend["enabled"], name
+            )  # ADR 0017: passthrough-бэкенды включены
 
     def test_default_model_is_muse_wonder_full(self):
         """ADR 0015: умолчание каталога - активная модель muse, а не выводимый Droid."""
@@ -105,10 +113,13 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_models_are_bound_to_backends(self):
         data = raw_v3()
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 18)
-        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
-        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
-        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
+        self.assertEqual(len(catalog["order"]), len(data["models"]))
+        self.assertEqual(len(catalog["order"]), 19)
+        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "opencode-go")
+        self.assertNotIn("kimi-k3.1-pro", catalog["models"])
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
@@ -121,12 +132,12 @@ class TestLiveFleetV3(unittest.TestCase):
                 self.assertEqual(model["efforts"], ["max"])
                 self.assertEqual(model["default_effort"], "max")
 
-    def test_droid_models_unchanged(self):
+    def test_subscription_droid_models_are_published(self):
         catalog = server._build_catalog(raw_v3())
-        # deepseek-v4.1-flash - неактивная историческая запись за выключенным Droid (ADR 0017)
-        self.assertEqual([mid for mid in catalog["order"] if catalog["models"][mid]["backend"] == "droid"], [])
-        self.assertNotIn("deepseek-v4.1-flash", catalog["models"])
-        self.assertFalse(raw_v3()["backends"]["droid"]["enabled"])
+        self.assertEqual(
+            sum(m["backend"] == "droid" for m in catalog["models"].values()), 3
+        )
+        self.assertTrue(raw_v3()["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
         self.assertNotIn("grok-4.7", catalog["models"])
         self.assertNotIn("glm-5.3", catalog["models"])
@@ -140,7 +151,8 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(len(catalog["order"]), 18)
+        self.assertEqual(len(catalog["order"]), len(raw_v3()["models"]))
+        self.assertEqual(len(catalog["order"]), 19)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -396,6 +408,18 @@ class TestSchema3Violations(unittest.TestCase):
             "muse-spark-1.3",
         )
 
+    def test_efforts_off_valid_and_unknown_level_invalid(self) -> None:
+        data = raw_v3()
+        self.find(data, "muse-spark-1.3").update(efforts=["off"], default_effort="off")
+        self.assertEqual(
+            server._build_catalog(data)["models"]["muse-spark-1.3"]["efforts"], ["off"]
+        )
+        self.expect(
+            lambda d: self.find(d, "muse-spark-1.3").update(efforts=["bogus"]),
+            "efforts_invalid",
+            "muse-spark-1.3",
+        )
+
 
 def _import_fleet_check():
     """Импорт fleet_check; PyYAML в .venv отсутствует — для проверки каталога хватает заглушки."""
@@ -412,9 +436,7 @@ def _import_fleet_check():
             def add_multi_constructor(cls, prefix, fn):
                 return None
 
-        shim.SafeLoader = _Loader
-        shim.YAMLError = ValueError
-        shim.load = lambda *args, **kwargs: None
+        vars(shim).update(SafeLoader=_Loader, YAMLError=ValueError, load=lambda *a, **k: None)
         sys.modules["yaml"] = shim
     import fleet_check  # noqa: E402
 
@@ -548,7 +570,8 @@ class TestFleetCheckParity(unittest.TestCase):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 18)
+        self.assertEqual(len(catalog["order"]), len(data["models"]))
+        self.assertEqual(len(catalog["order"]), 19)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):
@@ -566,16 +589,6 @@ class TestFleetCheckParity(unittest.TestCase):
         self.assertIn("model_invalid", result["checks"][0]["errors"][0])
 
 
-
-
-import importlib
-import os
-import sys
-import time
-from hashlib import sha256
-from unittest import mock
-
-
 class _CredentialsReportRecorder:
     def __init__(self):
         self.calls = []
@@ -590,6 +603,7 @@ class TestProviderCredentialsCheck(unittest.TestCase):
     SECRET_SHELL = "sk-test-SECRET-shell-cccccccccc"
     KEY = "DSH_TEST_FLEET_KEY_A"
     NOT_PI = "DSH_TEST_FLEET_NOT_PI"
+    tmp = Path()
 
     @classmethod
     def setUpClass(cls):
@@ -627,9 +641,7 @@ class TestProviderCredentialsCheck(unittest.TestCase):
     def check(self, env_lines, refs_values, environ=None, profiles=None):
         env_path = self.write(".env", self.lines(*env_lines))
         refs_lines = ["  %s: %s" % kv for kv in refs_values]
-        creds_path = self.write(
-            "credentials.yaml", self.lines("refs:", *refs_lines)
-        )
+        creds_path = self.write("credentials.yaml", self.lines("refs:", *refs_lines))
         report = _CredentialsReportRecorder()
         self.fc.check_provider_credentials(
             profiles or self.profiles(self.KEY),
@@ -647,18 +659,21 @@ class TestProviderCredentialsCheck(unittest.TestCase):
         catalogue = self.write("catalogue.json", "{}")
         profile = self.profiles(*(names or (self.KEY,)))["desktop"]
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.multiple(
-            self.fc,
-            check_catalogue=mock.DEFAULT,
-            droid_scope=mock.MagicMock(side_effect=lambda cat: cat),
-            check_policy=mock.DEFAULT,
-            check_efforts=mock.DEFAULT,
-            check_profile=mock.MagicMock(return_value=profile),
-            check_default_compat=mock.DEFAULT,
-            check_opus=mock.DEFAULT,
-        ), mock.patch.dict(os.environ, env_vars or {}), contextlib.redirect_stdout(
-            out
-        ), contextlib.redirect_stderr(err):
+        with (
+            mock.patch.multiple(
+                self.fc,
+                check_catalogue=mock.DEFAULT,
+                droid_scope=mock.MagicMock(side_effect=lambda cat: cat),
+                check_policy=mock.DEFAULT,
+                check_efforts=mock.DEFAULT,
+                check_profile=mock.MagicMock(return_value=profile),
+                check_default_compat=mock.DEFAULT,
+                check_opus=mock.DEFAULT,
+            ),
+            mock.patch.dict(os.environ, env_vars or {}),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
             code = self.fc.main(["--catalogue", catalogue] + argv)
         return code, out.getvalue(), err.getvalue()
 
@@ -866,6 +881,7 @@ class TestProviderCredentialsCheck(unittest.TestCase):
         self.assertEqual(errs, [])
         self.assertEqual(len(found), 20)
         self.assertLessEqual(elapsed, 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

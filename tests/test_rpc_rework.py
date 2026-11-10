@@ -13,12 +13,14 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from tests.gateway_policy_testlib import no_leaks as no_leaks  # noqa: E402
 from bridge_testlib import make_receipt, pid_alive, wait_until  # noqa: E402
 from rpc_testlib import FakeClock, RpcCase  # noqa: E402
 from test_images_strict import ImageCase  # noqa: E402
@@ -36,13 +38,6 @@ def post_safely(case, body, timeout=60.0):
         return case._post_json(body, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - диагностический разбор теста
         return repr(exc), None
-
-
-def no_leaks(case):
-    """Процессы/слоты/билеты возвращены: P == число живых процессов."""
-    return wait_until(
-        lambda: server.POOL.used == len(server._rpc_procs) and not server.POOL.queue
-    )
 
 
 class TestTagsSchema(RpcCase):
@@ -271,6 +266,7 @@ class TestSettingsFailClosed(RpcCase):
         """RW-005: 7 сценариев -> 502 proxy_error/droid_error и ни одного add_user_message."""
         for name, config in self.SCENARIOS.items():
             with self.subTest(name):
+                server._PENALTY_TRACKER.reset_all()
                 self.hub.config.clear()
                 self.hub.configure(**config)
                 before = len(self.hub.rpcs("droid.add_user_message"))
@@ -357,7 +353,8 @@ class TestDroidImageTool(RpcCase):
             self.hub.launcher.read_bytes()
         )  # fake_droid отвечает на пробы как настоящий
         source.chmod(0o755)
-        receipt = droid_image.install_image(source, server.WORKSPACE)
+        with unittest.mock.patch.dict(os.environ, {"DROID_EXTRA_PROBE_MODELS": ""}):
+            receipt = droid_image.install_image(source, server.WORKSPACE)
         image = Path(receipt["image_path"])
         self.assertEqual(oct(image.stat().st_mode & 0o777), "0o500")
         self.assertEqual(oct(image.parent.stat().st_mode & 0o777), "0o700")
@@ -602,8 +599,9 @@ class TestRpcWriteDeadline(RpcCase):
         self.hub.configure(stall_after=0)
         body = dict(BODY, messages=[msg(self.BIG, "system"), msg("hi")])
         thread = threading.Thread(
-            target=lambda: results.update(r=post_safely(self, body, 60)), daemon=True
+            target=lambda: results.update(r=post_safely(self, body, 5)), daemon=True
         )
+        self.addCleanup(thread.join, 30)
         thread.start()
         self.assertTrue(wait_until(lambda: len(self.hub.spawns()) == 1, timeout=15))
         time.sleep(0.5)
@@ -692,29 +690,34 @@ class TestInstructionBudget(RpcCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(self.hub.spawns()), 1)
 
-    def test_rw002_non_canon_block_is_limited_by_maxbytes_minus_margin(self):
-        """RW-001: блок не из канона: предел maxBytes(106496) − запас; 60 001 Б проходит, на 1 Б больше предела — 503."""
-        limit = server.b_guard.DEFAULT_MAXBYTES - server.INSTR_NONKB_MARGIN
-        self.assertEqual(self._ask(self.other_block(60001))[0], 200)
-        status, body = self._post_json(
-            dict(
-                BODY,
-                prompt_cache_key="chat-instr-2",
-                messages=[msg("hello"), msg(self.other_block(limit + 1))],
-            )
-        )
-        self.assertEqual(status, 503, body)
-        self.assertEqual(body["error"]["type"], "launcher_unavailable")
-        self.assertEqual(
-            self._post_json(
+    def test_rw002_non_canon_block_is_limited_by_budget_minus_margin(self):
+        """RW-001: блок не из канона: бюджет max(предел моста, maxBytes) − запас; блок под пределом и ровно предел проходят
+        без усечения, на 1 Б больше предела — мягкое усечение (200, instr_gate_truncated), а не 503."""
+        # Профили DSH в тесте пусты (maxBytes нет): бюджет = предел моста − запас (в бою 500 000 − 2048).
+        limit = server.INSTR_BLOCK_LIMIT - server.INSTR_NONKB_MARGIN
+        self.assertEqual(self._ask(self.other_block(limit - 1000))[0], 200)
+        with self.capture_logs() as lines:
+            status, body = self._post_json(
                 dict(
                     BODY,
-                    prompt_cache_key="chat-instr-3",
-                    messages=[msg("hello"), msg(self.other_block(limit))],
+                    prompt_cache_key="chat-instr-2",
+                    messages=[msg("hello"), msg(self.other_block(limit + 1))],
                 )
-            )[0],
-            200,
-        )
+            )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(any(ln.startswith("instr_gate_truncated ") for ln in lines))
+        with self.capture_logs() as lines:
+            self.assertEqual(
+                self._post_json(
+                    dict(
+                        BODY,
+                        prompt_cache_key="chat-instr-3",
+                        messages=[msg("hello"), msg(self.other_block(limit))],
+                    )
+                )[0],
+                200,
+            )
+        self.assertFalse(any(ln.startswith("instr_gate_truncated ") for ln in lines))
 
     def test_rw002_small_first_block_does_not_hide_oversized_second(self):
         """RW-002: маленький первый блок и второй 60 001 Б: проверяются ВСЕ блоки, а не первый."""

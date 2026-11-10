@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections import deque
-from typing import Any, Tuple
+from typing import Tuple
 
 DEFAULT_MAX_REPEATS = 4
 DEFAULT_MAX_TOKEN_LEN = 32
