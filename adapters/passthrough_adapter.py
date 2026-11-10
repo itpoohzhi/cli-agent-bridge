@@ -1479,7 +1479,9 @@ class PassthroughAdapter(BackendAdapter):
                 )
                 return
             except (OSError, http.client.HTTPException):
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline or (
+                    window is not None and window.expired()
+                ):
                     self._fail(
                         sink,
                         504,
