@@ -15,7 +15,7 @@ discovery:
   method: http
   http: {path: /models, id_field: 'data[].id'}
   include: [gpt-*]
-  exclude: ['*-free', 'gpt-6.1-sol']
+  exclude: ['*-free']
   refresh_interval_s: 900
 family_rule:
   type: prefix
@@ -23,6 +23,14 @@ family_rule:
     verified: true
     map: {gpt-: OpenAI}
 models_overrides:
+  gpt-6.1-sol:
+    name: GPT-6.1 Sol (Codex passthrough)
+    efforts: [low, medium, high, max]
+    default_effort: high
+    context_window: 272000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   gpt-6.1-terra:
     name: GPT-6.1 Terra (Codex passthrough)
     efforts: [low, medium, high]

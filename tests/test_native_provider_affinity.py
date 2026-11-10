@@ -16,6 +16,7 @@ def _load_fleet():
     ("gemini-3.8-flash", "agy"),
     ("claude-sonnet-5-5", "claude-p"),
     ("deepseek-v4.1-flash", "opencode-go"),
+    ("gpt-6.1-sol", "codex"),
 ])
 def test_native_provider_priority(model_id, expected_provider):
     cat = _load_catalog()
@@ -37,6 +38,7 @@ def test_explicit_droid_models(model_id):
 @pytest.mark.parametrize("model_id", [
     "gemini-3.8-flash",
     "claude-sonnet-5-5",
+    "gpt-6.1-sol",
 ])
 def test_droid_alternates(model_id):
     cat = _load_catalog()
@@ -45,3 +47,15 @@ def test_droid_alternates(model_id):
     alts = models[model_id].get("alternates", [])
     providers = [a.get("provider") if isinstance(a, dict) else a for a in alts]
     assert "droid" in providers
+
+@pytest.mark.parametrize("droid_model,upstream_model", [
+    ("gemini-3.8-flash-droid", "gemini-3.8-flash"),
+    ("gpt-6.1-sol-droid", "gpt-6.1-sol"),
+    ("claude-sonnet-5-5-droid", "claude-sonnet-5-5"),
+])
+def test_droid_upstream_model(droid_model, upstream_model):
+    fleet = _load_fleet()
+    models = fleet.get("models", [])
+    entry = next((m for m in models if m.get("id") == droid_model), None)
+    assert entry is not None, f"{droid_model} not in fleet.json models"
+    assert entry.get("upstream_model") == upstream_model

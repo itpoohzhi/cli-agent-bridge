@@ -380,6 +380,29 @@
       }
     },
     {
+      "id": "gpt-6.1-sol",
+      "backend": "codex",
+      "name": "GPT-6.1 Sol (Codex passthrough)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 272000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
       "id": "gpt-6.1-terra",
       "backend": "codex",
       "name": "GPT-6.1 Terra (Codex passthrough)",
@@ -588,34 +611,6 @@
         431
       ],
       "upstream_model": "gemini-3.8-flash"
-    },
-    {
-      "id": "gpt-6.1-sol",
-      "backend": "droid",
-      "name": "GPT-6.1 Sol (Droid bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 272000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      },
-      "policy_lines": [
-        111,
-        398,
-        406,
-        436
-      ]
     },
     {
       "id": "gpt-6.1-sol-droid",
