@@ -21,7 +21,26 @@ def test_resolve_proxy_port_prefers_explicit_env(monkeypatch: pytest.MonkeyPatch
 
 def test_resolve_proxy_port_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MUSE_PROXY_PORT", raising=False)
-    assert resolve_proxy_port() == DEFAULT_PROXY_PORT
+    monkeypatch.delenv("DE_NODE_PROXY_PORT", raising=False)
+    assert resolve_proxy_port() == DEFAULT_PROXY_PORT == 10820
+
+
+def test_resolve_proxy_port_precedence_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. Explicit config wins over everything
+    monkeypatch.setenv("MUSE_PROXY_PORT", "10830")
+    monkeypatch.setenv("DE_NODE_PROXY_PORT", "10840")
+    assert resolve_proxy_port({"proxy_port": 10850}) == 10850
+
+    # 2. MUSE_PROXY_PORT wins over DE_NODE_PROXY_PORT
+    assert resolve_proxy_port() == 10830
+
+    # 3. DE_NODE_PROXY_PORT used when MUSE_PROXY_PORT absent
+    monkeypatch.delenv("MUSE_PROXY_PORT")
+    assert resolve_proxy_port() == 10840
+
+    # 4. Default 10820 when both absent
+    monkeypatch.delenv("DE_NODE_PROXY_PORT")
+    assert resolve_proxy_port() == 10820
 
 
 def test_resolve_proxy_port_invalid_env_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:

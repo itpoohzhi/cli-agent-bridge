@@ -1398,17 +1398,16 @@ class ServeRun:
             if _exec_dl != float("inf")
             else _now0 + TIMEOUT_S
         )
-        if self.exec_deadline == float("inf"):
-            self.exec_deadline = deadline
-        setup_deadline = min(_now0 + SERVE_SPAWN_TIMEOUT_S, deadline)
-        self._write_until = setup_deadline
+        if self.exec_deadline == float("inf"): self.exec_deadline = deadline
+        from core.activity_window import ActivityWindow; activity_window = ActivityWindow(idle_timeout_s=IDLE_TIMEOUT_S, safety_cap_s=min(TIMEOUT_S, REQUEST_CAP_S))
+        setup_deadline = min(_now0 + SERVE_SPAWN_TIMEOUT_S, deadline); self._write_until = setup_deadline
 
         # Чтение stdout serve — собственным буфером поверх os.read: select по fd не видит строки,
         # уже вычитанные в буфер TextIOWrapper (пачка строк за один write зависала бы).
         rbuf = bytearray()
 
         def read_msg(timeout_at: float) -> dict[str, Any]:
-            while time.monotonic() < timeout_at:
+            while time.monotonic() < min(timeout_at, activity_window.idle_deadline):
                 if self.managed_turn is not None and self.managed_turn.cancel_event.is_set():
                     self.close()
                     raise ServeUnavailable("turn cancelled")
@@ -1444,9 +1443,10 @@ class ServeRun:
                 except ValueError:
                     continue
                 if isinstance(msg, dict):
-                    if self.managed_turn is not None:
-                        from muse_runtime.activity import message_has_useful_data
-                        self.managed_turn.touch_activity("content" if message_has_useful_data(msg) else "protocol")
+                    from muse_runtime.activity import message_has_useful_data
+                    if message_has_useful_data(msg):
+                        activity_window.touch()
+                        if self.managed_turn is not None: self.managed_turn.touch_activity("content")
                     return msg
             raise ServeUnavailable("serve read timeout")
 

@@ -23,9 +23,16 @@ def message_has_useful_data(msg: Any) -> bool:
     for container in ("params", "event"):
         p = msg.get(container)
         if isinstance(p, Mapping):
-            for k in ("content", "reasoning_content", "tool_calls", "text", "delta"):
+            for k in ("content", "reasoning_content", "tool_calls", "text"):
                 if _is_non_empty(p.get(k)):
                     return True
+            delta = p.get("delta")
+            if isinstance(delta, Mapping):
+                for k in ("content", "reasoning_content", "tool_calls", "text"):
+                    if _is_non_empty(delta.get(k)):
+                        return True
+            elif isinstance(delta, str) and delta.strip():
+                return True
     return False
 
 
