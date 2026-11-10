@@ -1,21 +1,21 @@
 {
-  "compiled_at": "2026-11-10T09:21:09+0300",
+  "compiled_at": "2026-11-10T09:41:46+0300",
   "compiler_version": 1,
-  "fleet_sha256": "05c5ac86a9247cb5b7ecd30919dc4b083be94be3637e85c6f4fd188aa651e6f8",
+  "fleet_sha256": "d5499fbf1a2ec0e9c149b00dc7432e0a4001066b3f519514db74085efa0dc811",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "a7e5f08ba10ae5461a761fb5cce8262ac98cccb0ad6198ffb7d6275548dd41fb",
+      "_fleet.yaml": "26cd694e4f2c6b7d05f3041debb8d0b7151f5f5545fd128687f24139792885ee",
       "agy.yaml": "c324ec9ead817570ef5e3129d715f6432503dc45530fbed62ac2b4f698086a50",
       "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
       "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
-      "droid.yaml": "388dc6942104be881be9501a56641fa9e0ebbb084a3d7326dfa3d9942c9cbb18",
+      "droid.yaml": "b9d53f985e8a3bce26ae4a05d9270ec15ee811a43e6fd8b6d504e19642824a97",
       "muse.yaml": "734e71f59eff3ca8a82477bf1e9a84720681d62dbc50503e27d791bb8d3968b8",
       "opencode-go-claude.yaml": "d09898d3253f9a393fa2db1aa15c0154deb5ced1db8a7042b48309a01f0bfa2b",
       "opencode-go.yaml": "c99498b308ad37d74ece1f31d090bc1d7f4d1ca6a4be5af0f43da36194347cea",
       "opencode-zen.yaml": "dcbb5550283b9ffc3b6909e4ce03ee33ce88404490fc3860f8d34b8057a9d900"
     },
-    "manifests_sha256": "31334bab94896a82878b96b3ed812ed937bdabb59a841e8137ec75584fe75409"
+    "manifests_sha256": "8da4104972e7f8ea769d11e9298c90af55dd0b03356d20b136e782bbe47e0845"
   },
   "models": {
     "beam-free": {

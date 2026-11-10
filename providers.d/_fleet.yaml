@@ -9,6 +9,7 @@ aliases:
   gpt-6.1-sol-droid-low: {backend_id: gpt-6.1-sol-droid, backend: droid, effort: low}
   gpt-6.1-sol-droid-medium: {backend_id: gpt-6.1-sol-droid, backend: droid, effort: medium}
   gpt-6.1-sol-droid-high: {backend_id: gpt-6.1-sol-droid, backend: droid, effort: high}
+  gpt-6.1-sol-droid-max: {backend_id: gpt-6.1-sol-droid, backend: droid, effort: max}
   claude-sonnet-5-5-droid-low: {backend_id: claude-sonnet-5-5-droid, backend: droid, effort: low}
   claude-sonnet-5-5-droid-medium: {backend_id: claude-sonnet-5-5-droid, backend: droid, effort: medium}
   claude-sonnet-5-5-droid-high: {backend_id: claude-sonnet-5-5-droid, backend: droid, effort: high}

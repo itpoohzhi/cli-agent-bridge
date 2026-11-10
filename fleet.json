@@ -32,6 +32,11 @@
       "backend": "droid",
       "effort": "high"
     },
+    "gpt-6.1-sol-droid-max": {
+      "backend_id": "gpt-6.1-sol-droid",
+      "backend": "droid",
+      "effort": "max"
+    },
     "claude-sonnet-5-5-droid-low": {
       "backend_id": "claude-sonnet-5-5-droid",
       "backend": "droid",
@@ -674,7 +679,8 @@
       "efforts": [
         "low",
         "medium",
-        "high"
+        "high",
+        "max"
       ],
       "default_effort": "high",
       "context_window": 272000,

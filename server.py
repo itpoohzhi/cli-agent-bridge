@@ -7290,7 +7290,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     req, model, model_id, alias, alias_effort, effort_on
                 )
                 target_model = resolve_target_model(model, model_id)
-                if pt_effort.apply or target_model != model_id:
+                if pt_effort.apply or target_model != model_id or alias:
                     if pt_effort.clamped_from is not None:
                         _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")

@@ -47,8 +47,8 @@ models_overrides:
   gpt-6.1-sol-droid:
     upstream_model: gpt-6.1-sol
     name: GPT-6.1 Sol (Droid bridge)
-    efforts: [low, medium, high]
-    efforts_pin: [low, medium, high]
+    efforts: [low, medium, high, max]
+    efforts_pin: [low, medium, high, max]
     default_effort: high
     context_window: 272000
     max_tokens: 128000
