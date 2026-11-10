@@ -445,7 +445,7 @@ class MuseAdapter(BackendAdapter):
 
     def _normalize_proxy_port(self) -> int:
         """proxy_port бэкенда (иначе env, иначе default) -> int; мусор -> default."""
-        from adapters.muse_config import resolve_proxy_port, get_muse_timeouts
+        from adapters.muse_config import resolve_proxy_port
         return resolve_proxy_port(self.config)
 
     def _proxy_up(self) -> bool:
@@ -693,7 +693,7 @@ class MuseAdapter(BackendAdapter):
         )
         done = threading.Event()
         reader_done = threading.Event()
-        from core.backpressure import BoundedBridgeWriteQueue
+        from core.backpressure import BoundedBridgeWriteQueue, BridgeBackpressureError
         from adapters.muse_config import get_muse_timeouts
         writes = BoundedBridgeWriteQueue(maxsize=get_muse_timeouts().writes_queue_max)
         flags: dict[str, bool] = {}
@@ -753,7 +753,7 @@ class MuseAdapter(BackendAdapter):
                     json.dumps(message, ensure_ascii=False).encode() + b"\n",
                     timeout=put_to,
                 )
-            except Exception as exc:
+            except (queue.Full, BridgeBackpressureError) as exc:
                 raise ValueError("MSP stdin queue full") from exc
 
         def handle(message: Any) -> None:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import math
 import threading
 import time
@@ -17,10 +16,8 @@ class _Writer(Protocol):
 
 
 def _default_write_timeout_s() -> float:
-    try:
-        return float(os.environ.get("MUSE_STREAM_WRITE_TIMEOUT_S", "30.0"))
-    except (TypeError, ValueError):
-        return 30.0
+    from adapters.muse_config import get_muse_timeouts
+    return get_muse_timeouts().stream_write_timeout_s
 
 
 @dataclass(frozen=True)

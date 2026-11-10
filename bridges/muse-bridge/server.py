@@ -107,7 +107,6 @@ from muse_runtime.tool_parser import (  # noqa: E402 # pyright: ignore[reportImp
     ToolCallParser,
     _loads_tolerant,
     _parse_tool_call_block,
-    _parse_tool_call_blocks,
     _recover_trailing_braces,
     _split_tool_call_inner,
     _split_tool_calls as _split_tool_calls_impl,
@@ -263,11 +262,9 @@ TRANSIENT_RETRY_SCOPE = os.environ.get(
 FINISH_RESERVE_S = 35.0
 CLOSE_RESERVE_S = 12.0
 REQUEST_CAP_S = 3600.0
-MIN_ATTEMPT_REMAINING_S = float(os.environ.get("MUSE_BRIDGE_MIN_ATTEMPT_S", "120"))
 from adapters.muse_config import get_muse_timeouts
-
-CONTROL_WRITE_TIMEOUT_S = get_muse_timeouts().control_write_timeout_s
-LIVE_WRITE_TIMEOUT_S = get_muse_timeouts().live_write_timeout_s
+MIN_ATTEMPT_REMAINING_S = float(os.environ.get("MUSE_BRIDGE_MIN_ATTEMPT_S", "120"))
+CONTROL_WRITE_TIMEOUT_S, LIVE_WRITE_TIMEOUT_S = get_muse_timeouts().control_write_timeout_s, get_muse_timeouts().live_write_timeout_s
 APPROVAL_CANCEL_GRACE_S = 15.0
 MAX_APPROVAL_DECIDE = 10
 MAX_USER_INPUT_CANCEL = 3
@@ -1448,7 +1445,8 @@ class ServeRun:
                     continue
                 if isinstance(msg, dict):
                     if self.managed_turn is not None:
-                        self.managed_turn.touch_activity("protocol")
+                        from muse_runtime.activity import message_has_useful_data
+                        self.managed_turn.touch_activity("content" if message_has_useful_data(msg) else "protocol")
                     return msg
             raise ServeUnavailable("serve read timeout")
 

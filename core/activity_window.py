@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 import time
 from typing import Callable
 
@@ -8,8 +7,8 @@ from typing import Callable
 class ActivityWindow:
     def __init__(
         self,
-        idle_timeout_s: float = 5.0,
-        safety_cap_s: float = 3600.0,
+        idle_timeout_s: float,
+        safety_cap_s: float,
         *,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -17,36 +16,30 @@ class ActivityWindow:
         self._idle_timeout_s = float(idle_timeout_s)
         self._safety_cap_s = float(safety_cap_s)
         now = self._clock()
-        self._safety_deadline = now + self._safety_cap_s
-        self._idle_deadline = min(self._safety_deadline, now + self._idle_timeout_s)
-        self._lock = threading.Lock()
+        self._safety_deadline: float = now + self._safety_cap_s
+        self._idle_deadline: float = min(self._safety_deadline, now + self._idle_timeout_s)
 
-    def touch(self) -> None:
-        with self._lock:
-            now = self._clock()
+    @property
+    def idle_deadline(self) -> float:
+        return self._idle_deadline
+
+    @property
+    def safety_deadline(self) -> float:
+        return self._safety_deadline
+
+    def touch(self) -> float:
+        now = self._clock()
+        if now < self._safety_deadline:
             self._idle_deadline = min(self._safety_deadline, now + self._idle_timeout_s)
+        return self._idle_deadline
 
+    def is_expired(self) -> bool:
+        now = self._clock()
+        return now >= self._idle_deadline or now >= self._safety_deadline
+
+    @property
     def expired(self) -> bool:
-        with self._lock:
-            return self._clock() >= self._idle_deadline
-
-    def remaining(self) -> float:
-        with self._lock:
-            return max(0.0, self._idle_deadline - self._clock())
+        return self.is_expired()
 
 
-class MessageReader:
-    def __init__(self, window: ActivityWindow) -> None:
-        self._window = window
-
-    def read(self, chunks: list[bytes]) -> list[bytes]:
-        result: list[bytes] = []
-        for chunk in chunks:
-            if chunk.strip():
-                self._window.touch()
-                result.append(chunk)
-        return result
-
-
-def message_has_useful_data(chunk: bytes) -> bool:
-    return bool(chunk.strip())
+SlidingActivityWindow = ActivityWindow

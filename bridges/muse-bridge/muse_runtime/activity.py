@@ -1,53 +1,41 @@
 from __future__ import annotations
 
 import json
-from typing import Callable, Any
+from typing import Any, Callable, Mapping
+
+
+def _is_non_empty(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return True
 
 
 def message_has_useful_data(msg: Any) -> bool:
-    """Determine whether a parsed Muse serve message contains useful data.
-
-    Useful messages are those that carry payload fields such as text
-    content, tool calls, or explicit result data and are not pure
-    control/keepalive/assignment notifications.
-    """
-    if not isinstance(msg, dict):
+    if not isinstance(msg, Mapping):
         return False
-
-    if "error" in msg:
-        return True
-
-    msg_type = msg.get("type")
-    if isinstance(msg_type, str) and msg_type.lower() in {
-        "keepalive",
-        "heartbeat",
-        "ping",
-        "pong",
-        "assignment",
-        "assign",
-        "ready",
-    }:
-        return False
-
-    for key in (
-        "result",
-        "content",
-        "delta",
-        "text",
-        "tool_calls",
-        "tool_call",
-        "data",
-        "output",
-    ):
-        value = msg.get(key)
-        if value is None:
-            continue
-        if isinstance(value, (str, list, dict)) and len(value) > 0:
+    for k in ("content", "reasoning_content", "tool_calls"):
+        if _is_non_empty(msg.get(k)):
             return True
-        if isinstance(value, (int, float, bool)):
-            return True
-
+    for container in ("params", "event"):
+        p = msg.get(container)
+        if isinstance(p, Mapping):
+            for k in ("content", "reasoning_content", "tool_calls", "text", "delta"):
+                if _is_non_empty(p.get(k)):
+                    return True
     return False
+
+
+def touch_activity(activity: Any, msg: Any) -> bool:
+    if activity is None:
+        return False
+    if not message_has_useful_data(msg):
+        return False
+    activity.touch()
+    return True
 
 
 class MuseServeMessageReader:
