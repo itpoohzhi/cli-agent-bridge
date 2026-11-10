@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import pytest
-from server import resolve_target_model
+from server import prepare_passthrough_request, resolve_target_model
 
 ROOT = Path(__file__).resolve().parent.parent
 

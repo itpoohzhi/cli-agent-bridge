@@ -216,6 +216,31 @@ def resolve_target_model(model_entry: dict, requested_model_id: str) -> str:
     return requested_model_id
 
 
+def prepare_passthrough_request(
+    req: dict,
+    model: dict,
+    model_id: str,
+    alias: tuple[str, str] | None = None,
+    alias_effort: str | None = None,
+    effort_on: bool = False,
+) -> tuple[dict, Any]:
+    """Формирует тело запроса для passthrough-маршрута с трансляцией upstream_model и effort."""
+    upstream_model = model.get("upstream_model")
+    has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+    pt_effort = resolve_passthrough_effort(
+        req.get("reasoning_effort"),
+        alias_effort,
+        ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
+        enabled=effort_on,
+    )
+    if has_upstream or alias or pt_effort.apply:
+        target_model = resolve_target_model(model, model_id)
+        req = {**req, "model": target_model}
+        if pt_effort.apply:
+            req["reasoning_effort"] = pt_effort.value
+    return req, pt_effort
+
+
 def _resolve_backend_topology(backend_id: str, route_mode: str) -> tuple[str, str]:
     """backend_id -> (outbound_target, egress_proxy) телеметрии; карта настраивается через env."""
     return resolve_backend_topology(BACKENDS, backend_id, route_mode)
@@ -7255,20 +7280,11 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                         "passthrough requires an exact model id",
                     )
                     return
-                upstream_model = model.get("upstream_model")
-                has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
                 effort_on = flag_enabled(FLAG_EFFORT_CATALOG)
-                pt_effort = resolve_passthrough_effort(
-                    req.get("reasoning_effort"),
-                    alias_effort,
-                    ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
-                    enabled=effort_on,
+                req, pt_effort = prepare_passthrough_request(
+                    req, model, model_id, alias, alias_effort, effort_on
                 )
-                if has_upstream or alias or pt_effort.apply:
-                    target_model = resolve_target_model(model, model_id)
-                    req = {**req, "model": target_model}
-                    if pt_effort.apply:
-                        req["reasoning_effort"] = pt_effort.value
+                if pt_effort.apply or model.get("upstream_model") or alias:
                     if pt_effort.clamped_from is not None:
                         _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
