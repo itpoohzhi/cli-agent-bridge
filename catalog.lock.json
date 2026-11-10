@@ -1,7 +1,7 @@
 {
-  "compiled_at": "2026-11-10T05:46:37+0300",
+  "compiled_at": "2026-11-10T05:59:14+0300",
   "compiler_version": 1,
-  "fleet_sha256": "c7ca943b1de4288a82ecdf260cd28806f59c5d8f4da08358f84ca4980fb973c7",
+  "fleet_sha256": "e863cc2394fe85b9bebaa70145af427ae9649f7a11dece23ea96aaa0b8199e3d",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
@@ -10,12 +10,12 @@
       "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
       "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
       "droid.yaml": "388dc6942104be881be9501a56641fa9e0ebbb084a3d7326dfa3d9942c9cbb18",
-      "muse.yaml": "a9adfb0aa2dcffef00c30bb24985b70a4f17863d5c856384be0141a15cb98ac0",
+      "muse.yaml": "734e71f59eff3ca8a82477bf1e9a84720681d62dbc50503e27d791bb8d3968b8",
       "opencode-go-claude.yaml": "d09898d3253f9a393fa2db1aa15c0154deb5ced1db8a7042b48309a01f0bfa2b",
       "opencode-go.yaml": "c99498b308ad37d74ece1f31d090bc1d7f4d1ca6a4be5af0f43da36194347cea",
       "opencode-zen.yaml": "dcbb5550283b9ffc3b6909e4ce03ee33ce88404490fc3860f8d34b8057a9d900"
     },
-    "manifests_sha256": "adcba413c3edb937667c7743af8a217395aac8a0b6901da3c0ec5dd42b869dd6"
+    "manifests_sha256": "b2139d47958762e52cf0e1e45f0da913eba5bff79f4e93ecc174f6f887514880"
   },
   "models": {
     "beam-free": {

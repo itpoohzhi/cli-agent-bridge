@@ -4,7 +4,7 @@ provider_id: muse
 kind: muse
 enabled: true
 required: false
-priority: 20
+priority: 10
 owned_by: meta-muse
 transport:
   bridge:

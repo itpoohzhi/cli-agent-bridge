@@ -60,15 +60,46 @@ def test_droid_upstream_model(droid_model, upstream_model):
     assert entry is not None, f"{droid_model} not in fleet.json models"
     assert entry.get("upstream_model") == upstream_model
 
+EXPECTED_FAMILY_PROVIDER = {
+    "Google": "agy",
+    "Anthropic": "claude-p",
+    "OpenAI": "codex",
+    "DeepSeek": "opencode-go",
+    "Meta": "muse",
+}
+
 def test_native_provider_affinity_invariant():
-    """Инвариант RW-010: для любого пересечения native-провайдер выигрывает у droid/opencode-zen."""
+    """Инвариант: родной провайдер всегда побеждает агрегаторы (droid, opencode-zen)."""
     cat = _load_catalog()
     models = cat.get("models", {})
     aggregators = {"droid", "opencode-zen"}
-    native_providers = {"agy", "claude-p", "codex", "opencode-go", "muse"}
 
     for model_id, info in models.items():
         provider = info.get("provider")
+        family = info.get("family")
         alternates = [a.get("provider") if isinstance(a, dict) else a for a in info.get("alternates", [])]
+
+        if model_id.endswith("-droid"):
+            assert provider == "droid", f"{model_id} should be droid, got {provider}"
+        elif family in EXPECTED_FAMILY_PROVIDER:
+            expected = EXPECTED_FAMILY_PROVIDER[family]
+            assert provider == expected, f"{model_id} (family={family}) should be {expected}, got {provider}"
+            assert provider not in aggregators, f"Canonical model {model_id} cannot have aggregator as primary, got {provider}"
+
         if any(alt in aggregators for alt in alternates):
-            assert provider in native_providers, f"Model {model_id} has aggregator alternate but primary is {provider}"
+            assert provider not in aggregators, f"{model_id} has aggregator alternate but primary is {provider}"
+
+@pytest.mark.parametrize("droid_model,expected_canonical", [
+    ("gemini-3.8-flash-droid", "gemini-3.8-flash"),
+    ("gpt-6.1-sol-droid", "gpt-6.1-sol"),
+    ("claude-sonnet-5-5-droid", "claude-sonnet-5-5"),
+])
+def test_runtime_upstream_model_translation(droid_model, expected_canonical):
+    """Runtime-трансляция server.py:7248-7258 подставляет upstream_model."""
+    fleet = _load_fleet()
+    entry = next((m for m in fleet.get("models", []) if m.get("id") == droid_model), None)
+    assert entry is not None, f"{droid_model} not in fleet.json models"
+    upstream_model = entry.get("upstream_model")
+    has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
+    target_model = upstream_model.strip() if has_upstream else droid_model
+    assert target_model == expected_canonical
