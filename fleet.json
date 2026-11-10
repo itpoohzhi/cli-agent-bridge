@@ -5,11 +5,9 @@
     "gemini-3.8-flash-droid-low": "gemini-3.8-flash-droid",
     "gemini-3.8-flash-droid-medium": "gemini-3.8-flash-droid",
     "gemini-3.8-flash-droid-high": "gemini-3.8-flash-droid",
-    "gemini-3.8-flash-droid-max": "gemini-3.8-flash-droid",
     "gpt-6.1-sol-droid-low": "gpt-6.1-sol-droid",
     "gpt-6.1-sol-droid-medium": "gpt-6.1-sol-droid",
     "gpt-6.1-sol-droid-high": "gpt-6.1-sol-droid",
-    "gpt-6.1-sol-droid-max": "gpt-6.1-sol-droid",
     "claude-sonnet-5-5-droid-low": "claude-sonnet-5-5-droid",
     "claude-sonnet-5-5-droid-medium": "claude-sonnet-5-5-droid",
     "claude-sonnet-5-5-droid-high": "claude-sonnet-5-5-droid",
@@ -174,6 +172,15 @@
       "base_url": "http://127.0.0.1:9881/v1",
       "api_key_env": "CLAUDE_P_BRIDGE_KEY"
     },
+    "codex": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "openai-codex",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:2455/v1",
+      "api_key_env": "CODEX_LB_API_KEY"
+    },
     "opencode-go": {
       "kind": "passthrough",
       "enabled": true,
@@ -242,15 +249,6 @@
       "options": {
         "streaming_mode": "serve"
       }
-    },
-    "codex": {
-      "kind": "passthrough",
-      "enabled": true,
-      "required": false,
-      "owned_by": "openai-codex",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:2455/v1",
-      "api_key_env": "CODEX_LB_API_KEY"
     },
     "droid": {
       "kind": "droid",
@@ -370,6 +368,28 @@
       ],
       "default_effort": "high",
       "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "backend": "codex",
+      "name": "GPT-6.1 Terra (Codex passthrough)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 500000,
       "max_tokens": 128000,
       "input": [
         "text"
@@ -510,28 +530,6 @@
       ]
     },
     {
-      "id": "gpt-6.1-terra",
-      "backend": "codex",
-      "name": "GPT-6.1 Terra (Codex passthrough)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 500000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
       "id": "claude-sonnet-5-5-droid",
       "backend": "droid",
       "name": "Claude Sonnet 5.5 (Droid bridge)",
@@ -559,7 +557,8 @@
         390,
         407,
         435
-      ]
+      ],
+      "upstream_model": "claude-sonnet-5-5"
     },
     {
       "id": "gemini-3.8-flash-droid",
@@ -587,7 +586,8 @@
         142,
         174,
         431
-      ]
+      ],
+      "upstream_model": "gemini-3.8-flash"
     },
     {
       "id": "gpt-6.1-sol",
@@ -643,7 +643,8 @@
         398,
         406,
         436
-      ]
+      ],
+      "upstream_model": "gpt-6.1-sol"
     },
     {
       "id": "beam-free",

@@ -23,6 +23,7 @@ family_rule:
     gpt-6.1-sol: OpenAI
 models_overrides:
   claude-sonnet-5-5-droid:
+    upstream_model: claude-sonnet-5-5
     name: Claude Sonnet 5.5 (Droid bridge)
     efforts: [low, medium, high, max]
     efforts_pin: [low, medium, high, max]
@@ -33,6 +34,7 @@ models_overrides:
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
     policy_lines: [26, 88, 390, 407, 435]
   gemini-3.8-flash-droid:
+    upstream_model: gemini-3.8-flash
     name: Gemini 3.8 Flash (Droid bridge)
     efforts: [low, medium, high]
     efforts_pin: [low, medium, high]
@@ -43,6 +45,7 @@ models_overrides:
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
     policy_lines: [100, 142, 174, 431]
   gpt-6.1-sol-droid:
+    upstream_model: gpt-6.1-sol
     name: GPT-6.1 Sol (Droid bridge)
     efforts: [low, medium, high]
     efforts_pin: [low, medium, high]

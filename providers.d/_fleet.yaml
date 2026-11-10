@@ -6,11 +6,9 @@ aliases:
   gemini-3.8-flash-droid-low: gemini-3.8-flash-droid
   gemini-3.8-flash-droid-medium: gemini-3.8-flash-droid
   gemini-3.8-flash-droid-high: gemini-3.8-flash-droid
-  gemini-3.8-flash-droid-max: gemini-3.8-flash-droid
   gpt-6.1-sol-droid-low: gpt-6.1-sol-droid
   gpt-6.1-sol-droid-medium: gpt-6.1-sol-droid
   gpt-6.1-sol-droid-high: gpt-6.1-sol-droid
-  gpt-6.1-sol-droid-max: gpt-6.1-sol-droid
   claude-sonnet-5-5-droid-low: claude-sonnet-5-5-droid
   claude-sonnet-5-5-droid-medium: claude-sonnet-5-5-droid
   claude-sonnet-5-5-droid-high: claude-sonnet-5-5-droid

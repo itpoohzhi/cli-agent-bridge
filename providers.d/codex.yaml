@@ -4,7 +4,7 @@ provider_id: codex
 kind: passthrough
 enabled: true
 required: false
-priority: 30
+priority: 10
 owned_by: openai-codex
 transport:
   bridge: {base_url: 'http://127.0.0.1:2455/v1', api_key_env: CODEX_LB_API_KEY}
