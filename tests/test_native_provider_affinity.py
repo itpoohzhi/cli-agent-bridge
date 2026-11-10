@@ -121,12 +121,14 @@ def test_runtime_upstream_model_translation(droid_model, expected_canonical):
     ("gpt-6.1-sol-low", "gpt-6.1-sol", "codex", "low"),
     ("gpt-6.1-sol-medium", "gpt-6.1-sol", "codex", "medium"),
     ("gpt-6.1-sol-high", "gpt-6.1-sol", "codex", "high"),
+    ("gpt-6.1-sol-max", "gpt-6.1-sol", "codex", "max"),
     ("gemini-3.8-flash-low", "gemini-3.8-flash", "agy", "low"),
     ("gemini-3.8-flash-medium", "gemini-3.8-flash", "agy", "medium"),
     ("gemini-3.8-flash-high", "gemini-3.8-flash", "agy", "high"),
     ("claude-sonnet-5-5-low", "claude-sonnet-5-5", "claude-p", "low"),
     ("claude-sonnet-5-5-medium", "claude-sonnet-5-5", "claude-p", "medium"),
     ("claude-sonnet-5-5-high", "claude-sonnet-5-5", "claude-p", "high"),
+    ("claude-sonnet-5-5-max", "claude-sonnet-5-5", "claude-p", "max"),
 ])
 def test_explicit_effort_alias_contract(expected_alias, expected_backend_id, expected_backend, expected_effort):
     """Каждый обязательный алиас строго проверяется на backend_id, backend и effort."""
@@ -207,12 +209,12 @@ def test_exact_effort_alias_count():
     """Проверяет точное количество effort-алиасов: ровно 19 целевых (10 Droid + 9 native), 23 всего в каталоге."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
-    assert len(aliases) == 23, f"Expected 23 total aliases in fleet, got {len(aliases)}"
+    assert len(aliases) == 25, f"Expected 25 total aliases in fleet, got {len(aliases)}"
     target_aliases = [
         k for k in aliases
         if any(m in k for m in ("gemini-3.8-flash", "gpt-6.1-sol", "claude-sonnet-5-5"))
     ]
-    assert len(target_aliases) == 19, f"Expected exactly 19 target aliases (10 droid + 9 native), got {len(target_aliases)}"
+    assert len(target_aliases) == 21, f"Expected exactly 21 target aliases (10 droid + 11 native), got {len(target_aliases)}"
 
 
 def test_manifest_priority_values():

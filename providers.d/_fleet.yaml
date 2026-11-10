@@ -16,6 +16,7 @@ aliases:
   gpt-6.1-sol-low: {backend_id: gpt-6.1-sol, backend: codex, effort: low}
   gpt-6.1-sol-medium: {backend_id: gpt-6.1-sol, backend: codex, effort: medium}
   gpt-6.1-sol-high: {backend_id: gpt-6.1-sol, backend: codex, effort: high}
+  gpt-6.1-sol-max: {backend_id: gpt-6.1-sol, backend: codex, effort: max}
   gemini-4-argon-high: {backend_id: gemini-4-argon, backend: agy, effort: high}
   gemini-3.8-flash-low: {backend_id: gemini-3.8-flash, backend: agy, effort: low}
   gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash, backend: agy, effort: medium}
@@ -23,6 +24,7 @@ aliases:
   claude-sonnet-5-5-low: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: low}
   claude-sonnet-5-5-medium: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: medium}
   claude-sonnet-5-5-high: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: high}
+  claude-sonnet-5-5-max: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: max}
   claude-opus-5-5-medium: {backend_id: claude-opus-5-5, backend: claude-p, effort: medium}
   claude-opus-5-5-high: {backend_id: claude-opus-5-5, backend: claude-p, effort: high}
   claude-haiku-5-5-low: {backend_id: claude-haiku-5-5, backend: opencode-go-claude, effort: low}

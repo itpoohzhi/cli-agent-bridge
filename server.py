@@ -4991,7 +4991,7 @@ def _make_plan(
         "all_items": items,
         "system": rpc["system"],
         "work_dir": work_dir,
-        "settings": (ctx.get("target_model") or ctx["model"], ctx["effort"], ctx["autonomy"]),
+        "settings": (build_cli_model_selection(ctx), ctx["effort"], ctx["autonomy"]),
         "current_settings": ("", "", ""),
         "title": "bridge-title" if ctx["route"] == "title" else "droid-dsh-bridge",
         "sid": "",
@@ -7289,7 +7289,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 req, pt_effort = prepare_passthrough_request(
                     req, model, model_id, alias, alias_effort, effort_on
                 )
-                if pt_effort.apply or model.get("upstream_model") or alias:
+                target_model = resolve_target_model(model, model_id)
+                if pt_effort.apply or target_model != model_id:
                     if pt_effort.clamped_from is not None:
                         _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")

@@ -67,6 +67,11 @@
       "backend": "codex",
       "effort": "high"
     },
+    "gpt-6.1-sol-max": {
+      "backend_id": "gpt-6.1-sol",
+      "backend": "codex",
+      "effort": "max"
+    },
     "gemini-4-argon-high": {
       "backend_id": "gemini-4-argon",
       "backend": "agy",
@@ -101,6 +106,11 @@
       "backend_id": "claude-sonnet-5-5",
       "backend": "claude-p",
       "effort": "high"
+    },
+    "claude-sonnet-5-5-max": {
+      "backend_id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "effort": "max"
     },
     "claude-opus-5-5-medium": {
       "backend_id": "claude-opus-5-5",
