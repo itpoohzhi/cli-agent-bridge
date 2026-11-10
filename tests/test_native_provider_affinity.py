@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import pytest
-from server import prepare_passthrough_request, resolve_target_model
+from server import build_cli_model_selection, prepare_passthrough_request, resolve_target_model
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -105,34 +105,35 @@ def test_runtime_upstream_model_translation(droid_model, expected_canonical):
     assert resolve_target_model({"id": expected_canonical}, expected_canonical) == expected_canonical
 
 
-@pytest.mark.parametrize("expected_alias,expected_backend,expected_effort", [
-    ("gemini-3.8-flash-droid-low", "droid", "low"),
-    ("gemini-3.8-flash-droid-medium", "droid", "medium"),
-    ("gemini-3.8-flash-droid-high", "droid", "high"),
-    ("gpt-6.1-sol-droid-low", "droid", "low"),
-    ("gpt-6.1-sol-droid-medium", "droid", "medium"),
-    ("gpt-6.1-sol-droid-high", "droid", "high"),
-    ("claude-sonnet-5-5-droid-low", "droid", "low"),
-    ("claude-sonnet-5-5-droid-medium", "droid", "medium"),
-    ("claude-sonnet-5-5-droid-high", "droid", "high"),
-    ("claude-sonnet-5-5-droid-max", "droid", "max"),
-    ("gpt-6.1-sol-low", "codex", "low"),
-    ("gpt-6.1-sol-medium", "codex", "medium"),
-    ("gpt-6.1-sol-high", "codex", "high"),
-    ("gemini-3.8-flash-low", "agy", "low"),
-    ("gemini-3.8-flash-medium", "agy", "medium"),
-    ("gemini-3.8-flash-high", "agy", "high"),
-    ("claude-sonnet-5-5-low", "claude-p", "low"),
-    ("claude-sonnet-5-5-medium", "claude-p", "medium"),
-    ("claude-sonnet-5-5-high", "claude-p", "high"),
+@pytest.mark.parametrize("expected_alias,expected_backend_id,expected_backend,expected_effort", [
+    ("gemini-3.8-flash-droid-low", "gemini-3.8-flash-droid", "droid", "low"),
+    ("gemini-3.8-flash-droid-medium", "gemini-3.8-flash-droid", "droid", "medium"),
+    ("gemini-3.8-flash-droid-high", "gemini-3.8-flash-droid", "droid", "high"),
+    ("gpt-6.1-sol-droid-low", "gpt-6.1-sol-droid", "droid", "low"),
+    ("gpt-6.1-sol-droid-medium", "gpt-6.1-sol-droid", "droid", "medium"),
+    ("gpt-6.1-sol-droid-high", "gpt-6.1-sol-droid", "droid", "high"),
+    ("claude-sonnet-5-5-droid-low", "claude-sonnet-5-5-droid", "droid", "low"),
+    ("claude-sonnet-5-5-droid-medium", "claude-sonnet-5-5-droid", "droid", "medium"),
+    ("claude-sonnet-5-5-droid-high", "claude-sonnet-5-5-droid", "droid", "high"),
+    ("claude-sonnet-5-5-droid-max", "claude-sonnet-5-5-droid", "droid", "max"),
+    ("gpt-6.1-sol-low", "gpt-6.1-sol", "codex", "low"),
+    ("gpt-6.1-sol-medium", "gpt-6.1-sol", "codex", "medium"),
+    ("gpt-6.1-sol-high", "gpt-6.1-sol", "codex", "high"),
+    ("gemini-3.8-flash-low", "gemini-3.8-flash", "agy", "low"),
+    ("gemini-3.8-flash-medium", "gemini-3.8-flash", "agy", "medium"),
+    ("gemini-3.8-flash-high", "gemini-3.8-flash", "agy", "high"),
+    ("claude-sonnet-5-5-low", "claude-sonnet-5-5", "claude-p", "low"),
+    ("claude-sonnet-5-5-medium", "claude-sonnet-5-5", "claude-p", "medium"),
+    ("claude-sonnet-5-5-high", "claude-sonnet-5-5", "claude-p", "high"),
 ])
-def test_explicit_effort_alias_contract(expected_alias, expected_backend, expected_effort):
-    """Каждый обязательный алиас строго проверяется на backend и effort."""
+def test_explicit_effort_alias_contract(expected_alias, expected_backend_id, expected_backend, expected_effort):
+    """Каждый обязательный алиас строго проверяется на backend_id, backend и effort."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
     assert expected_alias in aliases, f"Missing required alias: {expected_alias}"
     spec = aliases[expected_alias]
     assert isinstance(spec, dict), f"{expected_alias} must be a dict spec"
+    assert spec["backend_id"] == expected_backend_id
     assert spec["backend"] == expected_backend
     assert spec["effort"] == expected_effort
 
@@ -172,27 +173,29 @@ def test_compiled_catalog_matches_manifests():
     )
     fleet = _load_fleet()
     catalog = _load_catalog()
-    assert {m["id"] for m in res.fleet["models"]} == {m["id"] for m in fleet["models"]}
+    compiled_models = {m["id"]: m for m in res.fleet["models"]}
+    disk_models = {m["id"]: m for m in fleet["models"]}
+    assert compiled_models == disk_models
     assert res.fleet["aliases"] == fleet["aliases"]
     assert res.sidecar["models"] == catalog["models"]
 
 
 def test_cli_exec_target_model_selection():
-    """Проверяет выбор target_model при формировании запуска CLI в _cli_exec."""
+    """Проверяет выбор target_model через production-функцию build_cli_model_selection в _cli_exec."""
     ctx = {"model": "gemini-3.8-flash-droid", "target_model": "gemini-3.8-flash"}
-    selected_model = ctx.get("target_model") or ctx["model"]
-    assert selected_model == "gemini-3.8-flash"
+    assert build_cli_model_selection(ctx) == "gemini-3.8-flash"
     ctx_plain = {"model": "gemini-3.8-flash"}
-    assert (ctx_plain.get("target_model") or ctx_plain["model"]) == "gemini-3.8-flash"
+    assert build_cli_model_selection(ctx_plain) == "gemini-3.8-flash"
 
 
 def test_passthrough_target_model_rewriting():
-    """Проверяет подстановку target_model в тело запроса passthrough."""
-    from server import resolve_target_model
+    """Проверяет подстановку target_model через production-функцию prepare_passthrough_request."""
     fleet = _load_fleet()
     entry = next((m for m in fleet.get("models", []) if m.get("id") == "gemini-3.8-flash-droid"), None)
     assert entry is not None
-    target_model = resolve_target_model(entry, "gemini-3.8-flash-droid")
-    req = {"model": "gemini-3.8-flash-droid", "messages": []}
-    rewritten_req = {**req, "model": target_model}
-    assert rewritten_req["model"] == "gemini-3.8-flash"
+    req, pt_effort = prepare_passthrough_request(
+        req={"model": "gemini-3.8-flash-droid"},
+        model=entry,
+        model_id="gemini-3.8-flash-droid",
+    )
+    assert req["model"] == "gemini-3.8-flash"

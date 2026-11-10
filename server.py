@@ -216,6 +216,11 @@ def resolve_target_model(model_entry: dict, requested_model_id: str) -> str:
     return requested_model_id
 
 
+def build_cli_model_selection(ctx: dict) -> str:
+    """Выбирает целевую модель для запуска CLI-процесса (с учётом upstream_model)."""
+    return ctx.get("target_model") or ctx["model"]
+
+
 def prepare_passthrough_request(
     req: dict,
     model: dict,
@@ -6088,7 +6093,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             "request_id": self._trace.request_id if self._trace else None,
             "subagent_id": self._trace.subagent_id if self._trace else None,
         }
-        model = ctx.get("target_model") or ctx["model"]
+        model = build_cli_model_selection(ctx)
         effort = ctx["effort"]
         autonomy = ctx["autonomy"]
         tag = ctx["tag"]
