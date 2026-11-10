@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 import pytest
 from server import build_cli_model_selection, prepare_passthrough_request, resolve_target_model
+from core.provider_manifest import read_yaml_file
+from tests.bridge_testlib import BridgeCase
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -199,3 +201,39 @@ def test_passthrough_target_model_rewriting():
         model_id="gemini-3.8-flash-droid",
     )
     assert req["model"] == "gemini-3.8-flash"
+
+
+def test_manifest_priority_values():
+    """Проверяет явные числовые значения priority в providers.d/*.yaml."""
+    native_files = ["agy.yaml", "claude-p.yaml", "codex.yaml", "opencode-go.yaml", "muse.yaml"]
+    for fname in native_files:
+        data = read_yaml_file(ROOT / "providers.d" / fname)
+        assert data.get("priority") == 10, f"{fname} priority must be 10, got {data.get('priority')}"
+    droid_data = read_yaml_file(ROOT / "providers.d" / "droid.yaml")
+    assert droid_data.get("priority") == 30, f"droid priority must be 30, got {droid_data.get('priority')}"
+    zen_data = read_yaml_file(ROOT / "providers.d" / "opencode-zen.yaml")
+    assert zen_data.get("priority") == 50, f"zen priority must be 50, got {zen_data.get('priority')}"
+
+
+class TestDroidModelE2ERouting(BridgeCase):
+    """Сквозной HTTP-тест маршрутизации *-droid через сервер Handler."""
+
+    def test_droid_model_e2e_routing(self):
+        self.hub.legacy(
+            [
+                [
+                    ("text", "pong from droid"),
+                    ("result", {"finalText": "", "usage": {}}),
+                    ("done", (0, "")),
+                ]
+            ]
+        )
+        status, body = self._post_json(
+            {
+                "model": "gemini-3.8-flash-droid",
+                "messages": [{"role": "user", "content": "ping"}],
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["choices"][0]["message"]["content"], "pong from droid")
+        self.assertEqual(body["model"], "gemini-3.8-flash-droid")

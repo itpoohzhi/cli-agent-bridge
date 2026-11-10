@@ -136,6 +136,7 @@ class TurnContext:
     model: str
     effort: str
     prompt: str
+    target_model: str = ""
     backend: str = ""
     route: str = "nokey"
     key_hash: str = ""
