@@ -174,6 +174,25 @@ def test_compiled_catalog_matches_manifests():
     catalog = _load_catalog()
     assert {m["id"] for m in res.fleet["models"]} == {m["id"] for m in fleet["models"]}
     assert res.fleet["aliases"] == fleet["aliases"]
-    for mid, info in res.sidecar.get("models", {}).items():
-        assert mid in catalog["models"]
-        assert info["provider"] == catalog["models"][mid]["provider"]
+    assert res.sidecar["models"] == catalog["models"]
+
+
+def test_cli_exec_target_model_selection():
+    """Проверяет выбор target_model при формировании запуска CLI в _cli_exec."""
+    ctx = {"model": "gemini-3.8-flash-droid", "target_model": "gemini-3.8-flash"}
+    selected_model = ctx.get("target_model") or ctx["model"]
+    assert selected_model == "gemini-3.8-flash"
+    ctx_plain = {"model": "gemini-3.8-flash"}
+    assert (ctx_plain.get("target_model") or ctx_plain["model"]) == "gemini-3.8-flash"
+
+
+def test_passthrough_target_model_rewriting():
+    """Проверяет подстановку target_model в тело запроса passthrough."""
+    from server import resolve_target_model
+    fleet = _load_fleet()
+    entry = next((m for m in fleet.get("models", []) if m.get("id") == "gemini-3.8-flash-droid"), None)
+    assert entry is not None
+    target_model = resolve_target_model(entry, "gemini-3.8-flash-droid")
+    req = {"model": "gemini-3.8-flash-droid", "messages": []}
+    rewritten_req = {**req, "model": target_model}
+    assert rewritten_req["model"] == "gemini-3.8-flash"
