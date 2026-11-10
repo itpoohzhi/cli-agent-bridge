@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import pytest
+from server import resolve_target_model
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -95,11 +96,10 @@ def test_native_provider_affinity_invariant():
     ("claude-sonnet-5-5-droid", "claude-sonnet-5-5"),
 ])
 def test_runtime_upstream_model_translation(droid_model, expected_canonical):
-    """Runtime-трансляция server.py:7248-7258 подставляет upstream_model."""
+    """Runtime-трансляция server.py resolve_target_model подставляет upstream_model."""
     fleet = _load_fleet()
     entry = next((m for m in fleet.get("models", []) if m.get("id") == droid_model), None)
     assert entry is not None, f"{droid_model} not in fleet.json models"
-    upstream_model = entry.get("upstream_model")
-    has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
-    target_model = upstream_model.strip() if has_upstream else droid_model
+    target_model = resolve_target_model(entry, droid_model)
     assert target_model == expected_canonical
+    assert resolve_target_model({"id": expected_canonical}, expected_canonical) == expected_canonical

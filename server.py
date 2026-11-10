@@ -206,6 +206,16 @@ CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
 
+def resolve_target_model(model_entry: dict, requested_model_id: str) -> str:
+    """Возвращает каноническую целевую модель для CLI/бэкенда (upstream_model при наличии)."""
+    if not isinstance(model_entry, dict):
+        return requested_model_id
+    upstream = model_entry.get("upstream_model")
+    if isinstance(upstream, str) and upstream.strip():
+        return upstream.strip()
+    return requested_model_id
+
+
 def _resolve_backend_topology(backend_id: str, route_mode: str) -> tuple[str, str]:
     """backend_id -> (outbound_target, egress_proxy) телеметрии; карта настраивается через env."""
     return resolve_backend_topology(BACKENDS, backend_id, route_mode)
@@ -4951,7 +4961,7 @@ def _make_plan(
         "all_items": items,
         "system": rpc["system"],
         "work_dir": work_dir,
-        "settings": (ctx["model"], ctx["effort"], ctx["autonomy"]),
+        "settings": (ctx.get("target_model") or ctx["model"], ctx["effort"], ctx["autonomy"]),
         "current_settings": ("", "", ""),
         "title": "bridge-title" if ctx["route"] == "title" else "droid-dsh-bridge",
         "sid": "",
@@ -6053,7 +6063,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             "request_id": self._trace.request_id if self._trace else None,
             "subagent_id": self._trace.subagent_id if self._trace else None,
         }
-        model = ctx["model"]
+        model = ctx.get("target_model") or ctx["model"]
         effort = ctx["effort"]
         autonomy = ctx["autonomy"]
         tag = ctx["tag"]
@@ -7255,7 +7265,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     enabled=effort_on,
                 )
                 if has_upstream or alias or pt_effort.apply:
-                    target_model = upstream_model.strip() if has_upstream else model_id
+                    target_model = resolve_target_model(model, model_id)
                     req = {**req, "model": target_model}
                     if pt_effort.apply:
                         req["reasoning_effort"] = pt_effort.value
@@ -7507,6 +7517,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 "rpc": transcript,
                 "instr": instr if route in ("keyed", "nokey") else (0, "-", 0),
                 "model": model_id,
+                "target_model": resolve_target_model(model, model_id),
                 "backend": model["backend"],
                 "model_len": model_len,
                 "effort": effort,
