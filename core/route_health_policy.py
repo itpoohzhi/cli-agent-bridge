@@ -36,7 +36,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+[^\s,;\"'}]+", r"(?i)[\"']?\bcookie\b[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n,}]+)", r"(?i)[\"']?\b(?:refresh_token|access_token|client_secret|x-api-key|api[_-]?key|password|secret|token)\b[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;&\"'}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+(?:\\?\"(?:\\.|[^\"\r\n\\])*(?:\\?\"|$)|\\?'(?:\\.|[^'\r\n\\])*(?:\\?'|$)|[^\s,;\"'}]+)", r"(?i)(?:\\?[\"'])?[a-z0-9_.-]*cookie\b(?:\\?[\"'])?\s*[:=]\s*(?:\\?\"(?:\\.|[^\"\r\n\\])*(?:\\?\"|$)|\\?'(?:\\.|[^'\r\n\\])*(?:\\?'|$)|[^\r\n\"'}]+)", r"(?i)(?:\\?[\"'])?[a-z0-9_.-]*(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\?[\"'])?\s*[:=]\s*(?:\\?\"(?:\\.|[^\"\r\n\\])*(?:\\?\"|$)|\\?'(?:\\.|[^'\r\n\\])*(?:\\?'|$)|[^,;&\r\n\"'}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 
 
@@ -70,7 +70,10 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
-    safe = re.sub(r"[\x00-\x1f\x7f]+", " ", raw_text)
+    safe = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), raw_text)  # fmt: skip  # noqa: E501
+    for regex in _SECRET_REGEXES:
+        safe = regex.sub(REDACTED_TOKEN, safe)
+    safe = re.sub(r"[\x00-\x1f\x7f]+", " ", safe)
     for regex in _SECRET_REGEXES:
         safe = regex.sub(REDACTED_TOKEN, safe)
     return safe[:MAX_DIAGNOSTIC_CHARS]
@@ -124,7 +127,7 @@ def evaluate_route_health(model_id: str, blocked_models: tuple[str, ...], probe_
     if max_stale_age_s < 0:
         raise ValueError("max_stale_age_s must be non-negative")
     canonical = normalize_model_route(model_id).canonical_model
-    blocked = {normalize_model_route(item).canonical_model.lower() for item in blocked_models}  # fmt: skip  # noqa: E501
+    blocked = {normalize_model_route(item).canonical_model.lower() for item in blocked_models if item and item.strip()}  # fmt: skip  # noqa: E501
     drift = tuple(sorted(env_drift_keys))
     if canonical.lower() in blocked:
         reason = HealthReason.LIMIT_BLOCKED
@@ -159,7 +162,7 @@ class AttemptDecision:
 
 
 def _require_finite(value: float, field: str) -> None:
-    if not isfinite(value):
+    if type(value) not in (int, float) or not isfinite(value):
         raise ValueError(f"{field} must be finite")
 
 
@@ -176,7 +179,7 @@ def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
 
 def compute_attempt_decision(config: RetryBudgetConfig, attempt_index: int, elapsed_s: float, last_failure_category: str | None = None) -> AttemptDecision:  # fmt: skip  # noqa: E501
     _ = validate_retry_config(config)
-    if attempt_index < 0 or elapsed_s < 0 or not isfinite(elapsed_s):
+    if type(attempt_index) is not int or attempt_index < 0 or type(elapsed_s) not in (int, float) or not isfinite(elapsed_s) or elapsed_s < 0:  # fmt: skip  # noqa: E501
         raise ValueError("attempt_index and elapsed_s must be non-negative")
     if last_failure_category not in (None, FailureCategory.CAPACITY_EXHAUSTED):
         return AttemptDecision(False, 0.0, RetryReason.NON_RETRYABLE_CATEGORY)
@@ -215,10 +218,11 @@ class CanonDigestResult:
 
 
 def inspect_canon_payload(text: str, marker: str = DEFAULT_CANON_MARKER, previous_sha256: str | None = None) -> CanonDigestResult:  # fmt: skip  # noqa: E501
-    if not marker:
+    clean_marker = marker.strip()
+    if not clean_marker:
         raise ValueError("marker must not be empty")
     payload = text.encode("utf-8")
-    has_marker = text.rstrip().endswith(marker)
+    has_marker = text.rstrip().endswith(clean_marker)
     sha = hashlib.sha256(payload).hexdigest()
-    unchanged = bool(has_marker and previous_sha256 is not None and sha == previous_sha256)  # fmt: skip  # noqa: E501
+    unchanged = bool(has_marker and previous_sha256 is not None and sha == previous_sha256.strip().lower())  # fmt: skip  # noqa: E501
     return CanonDigestResult(has_marker, sha, len(payload), unchanged)

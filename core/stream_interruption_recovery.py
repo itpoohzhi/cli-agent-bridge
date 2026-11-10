@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from math import isfinite
 from typing import Any, Final
 
 from core.route_health_policy import FailureCategory, RetryBudgetConfig, classify_provider_failure, compute_attempt_decision  # fmt: skip  # noqa: E501,I001
@@ -98,28 +99,17 @@ def tail_turn_facts(tail: object, cleared_error: str = "") -> dict[str, Any]:
 class TurnOutcomeResolution:
     """Итог разбора done."""
 
-    state: str
-    rc: int
-    error: str
-    self_healed: bool
-    reason: str
-    final: bool
+    state: str; rc: int; error: str  # fmt: skip  # noqa: E702
+    self_healed: bool; reason: str; final: bool  # fmt: skip  # noqa: E702
 
 
 @dataclass(frozen=True)
 class _TurnFacts:
-    rc: int
-    result_error: str
-    result_status: str
-    final_text: str
-    emitted_text: str
-    completion_done_without_tools: bool = False
-    last_completion_seq: int = -1
-    last_error_seq: int = -1
-    drain_complete: bool = False
-    had_transient_error: bool = False
-    has_unclosed_tool_call: bool = False
-    self_heal_enabled: bool = True
+    rc: int; result_error: str; result_status: str  # fmt: skip  # noqa: E702
+    final_text: str; emitted_text: str  # fmt: skip  # noqa: E702
+    completion_done_without_tools: bool = False; last_completion_seq: int = -1; last_error_seq: int = -1  # fmt: skip  # noqa: E501,E702
+    drain_complete: bool = False; had_transient_error: bool = False  # fmt: skip  # noqa: E702
+    has_unclosed_tool_call: bool = False; self_heal_enabled: bool = True  # fmt: skip  # noqa: E702
 
 
 _DONE_REASONS: Final[frozenset[str]] = frozenset(
@@ -176,20 +166,14 @@ def resolve_done_turn_outcome(**kw: Any) -> TurnOutcomeResolution:
 class RetryDecision:
     """Решение о повторе запроса после обрыва стрима."""
 
-    can_retry: bool
-    keep_hot_session: bool
-    reason: str
+    can_retry: bool; keep_hot_session: bool; reason: str  # fmt: skip  # noqa: E702
     attempt_budget_s: float = 0.0
 
 
 @dataclass(frozen=True)
 class _RetryFacts:
-    error_text: str
-    delivered: bool
-    had_tool_side_effects: bool = False
-    attempt: int = 1
-    max_attempts: int = 2
-    source: str = "cli_error"
+    error_text: str; delivered: bool; had_tool_side_effects: bool = False  # fmt: skip  # noqa: E702
+    attempt: int = 1; max_attempts: int = 2; source: str = "cli_error"  # fmt: skip  # noqa: E702
     elapsed_s: float = 0.0
     budget_config: RetryBudgetConfig | None = None
 
@@ -197,18 +181,27 @@ class _RetryFacts:
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     """Оценить допустимость повтора стрима."""
     f = _RetryFacts(**kw)
+    valid_counts = type(f.attempt) is int and type(f.max_attempts) is int and 0 <= f.attempt < f.max_attempts and f.max_attempts > 0  # fmt: skip  # noqa: E501
+    valid_elapsed = type(f.elapsed_s) in (int, float) and isfinite(f.elapsed_s) and f.elapsed_s >= 0.0  # fmt: skip  # noqa: E501
+    if not (valid_counts and valid_elapsed):
+        return RetryDecision(False, False, "retry_blocked", 0.0)
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
-    cfg = f.budget_config or RetryBudgetConfig(max_attempts=max(1, f.max_attempts))
+    eff_max = min(f.max_attempts, f.budget_config.max_attempts) if f.budget_config else f.max_attempts  # fmt: skip  # noqa: E501
+    cfg = replace(f.budget_config, max_attempts=eff_max) if f.budget_config else RetryBudgetConfig(max_attempts=eff_max)  # fmt: skip  # noqa: E501
+    if f.attempt >= eff_max:
+        return RetryDecision(
+            False, trans and not f.had_tool_side_effects, "retry_blocked", 0.0
+        )
     adm = compute_attempt_decision(
         cfg,
-        max(0, f.attempt - 1),
-        max(0.0, f.elapsed_s),
+        f.attempt,
+        float(f.elapsed_s),
         FailureCategory.CAPACITY_EXHAUSTED
         if trans
         else classify_provider_failure(0, f.error_text).category,
     )
     quiet = trans and not f.had_tool_side_effects
-    can = all((quiet, not f.delivered, f.attempt < cfg.max_attempts, adm.allow_retry))
+    can = all((quiet, not f.delivered, f.attempt < eff_max, adm.allow_retry))
     return RetryDecision(can, quiet, "transient_pre_delivery_retry" if can else "retry_blocked", adm.attempt_budget_s if can else 0.0)  # fmt: skip  # noqa: E501
 
 
@@ -216,21 +209,15 @@ def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
 class GracefulInterruptionDecision:
     """Решение о мягком закрытии стрима с частичным ответом."""
 
-    should_gracefully_close: bool
-    notice_text: str
-    target_channel: str
-    finish_reason: str
-    reason: str
+    should_gracefully_close: bool; notice_text: str; target_channel: str  # fmt: skip  # noqa: E702
+    finish_reason: str; reason: str  # fmt: skip  # noqa: E702
 
 
 @dataclass(frozen=True)
 class _GracefulFacts:
-    error_text: str | None
-    delivered_content: bool = False
-    delivered_reasoning: bool = False
-    delivered_tool_calls: bool = False
-    has_unclosed_tool_call: bool = False
-    graceful_enabled: bool = True
+    error_text: str | None; delivered_content: bool = False  # fmt: skip  # noqa: E702
+    delivered_reasoning: bool = False; delivered_tool_calls: bool = False  # fmt: skip  # noqa: E702
+    has_unclosed_tool_call: bool = False; graceful_enabled: bool = True  # fmt: skip  # noqa: E702
     source: str = "cli_error"
     notice_text: str = DEFAULT_INTERRUPTION_NOTICE
 

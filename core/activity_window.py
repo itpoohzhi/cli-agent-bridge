@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from math import isfinite
 from typing import Callable, final  # noqa: UP035
 
 from core.route_health_policy import advance_sliding_deadline
@@ -13,11 +14,18 @@ class ActivityWindow:
         idle_timeout_s: float,
         safety_cap_s: float,
         *,
+        attempt_budget_s: float | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._clock: Callable[[], float] = clock
         self._idle_timeout_s: float = float(idle_timeout_s)
-        self._safety_cap_s: float = float(safety_cap_s)
+        cap = float(safety_cap_s)
+        if attempt_budget_s is not None:
+            budget = float(attempt_budget_s)
+            if not isfinite(budget) or budget <= 0.0:
+                raise ValueError("attempt_budget_s must be positive and finite")
+            cap = min(cap, budget)
+        self._safety_cap_s: float = cap
         self._start_s: float = self._clock()
         self._safety_deadline: float = self._start_s + self._safety_cap_s
         self._idle_deadline: float = advance_sliding_deadline(
