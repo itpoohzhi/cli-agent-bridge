@@ -433,8 +433,6 @@ def backend_entry_error(
         ceiling = constraints.max_concurrent_max
         if ceiling is not None and cap > ceiling:
             return "backend_max_concurrent_invalid"
-    elif kind == "muse" and cap != 1:  # legacy: BRIDGE_PROVIDER_CONSTRAINTS_ENABLED
-        return "backend_muse_max_concurrent_invalid"
     if "options" in entry:
         options = entry["options"]
         if constraints is not None:

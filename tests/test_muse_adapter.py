@@ -27,6 +27,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from adapters import ADAPTER_KINDS  # noqa: E402
 from adapters.muse_adapter import (  # noqa: E402
     ENV_ALLOWLIST,
     MAX_ERR_CHARS,
@@ -35,8 +36,16 @@ from adapters.muse_adapter import (  # noqa: E402
     MuseAdapter,
     estimate_tokens,
 )
-from core.backend_adapter import BackendNotSupported, TurnContext  # noqa: E402
+from core.backend_adapter import (  # noqa: E402
+    BackendNotSupported,
+    TurnContext,
+    backend_entry_error,
+)
 from test_hub_integration import HubCase as _HubCase  # noqa: E402
+
+FLEET = json.loads(
+    (Path(__file__).resolve().parents[1] / "fleet.json").read_text(encoding="utf-8")
+)
 
 TOOL_JSON = (
     '{"payload_type":"run.output.delta","payload":{"text":"<tool_call>'
@@ -99,7 +108,8 @@ EOF
   bad_utf8)
     printf '\377\n'; ok ;;
   spy)
-    find "$(dirname "$PWD")" -name prompt.txt -exec cat {} \; > "$DIR/seen.$$"
+    cat "$PWD/prompt.txt" > "$DIR/seen.$$"
+    printf '%s\n' "$PWD" > "$DIR/workspace.$$"
     sleep 0.5
     ok ;;
   desc_stdout)
@@ -279,6 +289,13 @@ class TestArgv(MuseCase):
         self.assertEqual(argv[argv.index("--reasoning-effort") + 1], "max")
         self.assertEqual(argv[argv.index("--prompt-file") + 1], "/tmp/p.txt")
         self.assertIn("--no-session-log", argv)
+        self.assertEqual(argv[argv.index("--contributor-mode") + 1], "off")
+
+    def test_argv_contributor_mode_follows_model_suffix(self):
+        argv = self.adapter().build_argv(
+            "muse-spark-1.3-contributor", "max", "/tmp/p.txt"
+        )
+        self.assertEqual(argv[argv.index("--contributor-mode") + 1], "on")
 
     def test_argv_workspace_is_prompt_directory_not_common_parent(self):
         """RW-001: `--workspace` — каталог хода (родитель prompt-файла), не общий workspace/muse."""
@@ -753,9 +770,25 @@ class TestPanelRework(MuseCase):
         self.assertEqual(out.err, "binary_path_not_canonical")
         self.assertEqual(self.fake.count(), 0)
 
-    def test_cap_above_one_is_refused(self):
-        with self.assertRaisesRegex(ValueError, "muse_max_concurrent"):
-            self.adapter(max_concurrent=2)
+    def test_cap_thirty_two_is_accepted(self):
+        adapter = self.adapter(max_concurrent=32)
+        self.assertEqual(adapter.max_concurrent, 32)
+
+    def test_backend_entry_accepts_cap_thirty_two_in_both_branches(self):
+        entry = dict(FLEET["backends"]["muse"])
+        entry["max_concurrent"] = 32
+        self.assertEqual(
+            backend_entry_error(
+                "muse", entry, ADAPTER_KINDS, constraints_enabled=False
+            ),
+            "",
+        )
+        self.assertEqual(
+            backend_entry_error(
+                "muse", entry, ADAPTER_KINDS, constraints_enabled=True
+            ),
+            "",
+        )
 
     def test_untrusted_output_is_bounded(self):
         import adapters.muse_adapter as muse_module
@@ -841,10 +874,14 @@ class TestPanelRework(MuseCase):
         self.assertEqual(out.err, "binary_sha256_mismatch")
         self.assertEqual(self.fake.count(), 0)
 
-    def test_two_backends_serialize_same_uid_workspace_and_cannot_read_neighbor(self):
+    def test_two_backends_have_independent_slots_and_per_turn_workspaces(self):
+        """ADR 0024: адаптеры исполняются параллельно в собственных turn-каталогах."""
         self.fake.set_mode("spy")
-        first = self.adapter()
-        second = self.adapter()
+        first = self.adapter(max_concurrent=32)
+        second = self.adapter(max_concurrent=32)
+        self.assertIsNot(first._slots, second._slots)
+        self.assertEqual(first._slots._value, first.max_concurrent)
+        self.assertEqual(second._slots._value, second.max_concurrent)
         results = []
         workers = [
             threading.Thread(
@@ -857,9 +894,18 @@ class TestPanelRework(MuseCase):
         for worker in workers:
             worker.join(timeout=20)
             self.assertFalse(worker.is_alive())
-        self.assertEqual([r.state for r in results], ["done", "done"])
+        self.assertEqual(sorted(r.state for r in results), ["done", "done"])
         seen = sorted(p.read_text() for p in self.fake.base.glob("seen.*"))
         self.assertEqual(seen, ["prompt-one", "prompt-two"])
+        workspaces = [
+            Path(p.read_text().strip()) for p in self.fake.base.glob("workspace.*")
+        ]
+        self.assertEqual(len(workspaces), 2)
+        self.assertEqual(len(set(workspaces)), 2)
+        for workspace in workspaces:
+            self.assertEqual(workspace.parent.resolve(), first.workspace.resolve())
+            self.assertTrue(workspace.name.startswith("turn-"))
+            self.assertFalse(workspace.exists())
 
 
 FAKE_MSP = r"""

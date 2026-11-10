@@ -109,7 +109,6 @@ STDERR_BUFFER_BYTES = 64 << 10
 from core.defaults import BRIDGE_MUSE_STARTUP_TIMEOUT_S
 
 MSP_SETUP_TIMEOUT_S = float(os.environ.get("BRIDGE_MUSE_STARTUP_TIMEOUT_S", str(BRIDGE_MUSE_STARTUP_TIMEOUT_S)))
-_MUSE_SLOTS = threading.BoundedSemaphore(1)  # один UID: общий слот всех Muse-адаптеров
 # Свидетель группы создаётся ДО exec и подписывается/пишется в реестр ДО открытия gate.
 # Он не держит stdout/stderr, но остаётся жив после выхода лидера и аварии хаба.
 _GROUP_BOOTSTRAP = """
@@ -340,7 +339,7 @@ class _LiveSink:
 class MuseAdapter(BackendAdapter):
     kind = "muse"
     CONSTRAINTS = KindConstraints(
-        max_concurrent_max=1,
+        max_concurrent_max=None,
         pin_required=True,
         options_schema={"streaming_mode": ("exec", "serve")},
     )
@@ -381,9 +380,7 @@ class MuseAdapter(BackendAdapter):
         self.workspace = Path(workspace)
         # proxy_port нормализуется один раз: preflight и child_env получают одно значение (RW-011).
         self.proxy_port = self._normalize_proxy_port()
-        if self.max_concurrent != 1:
-            raise ValueError("muse_max_concurrent_must_be_one")
-        self._slots = _MUSE_SLOTS
+        self._slots = threading.BoundedSemaphore(self.max_concurrent)
         self._active: dict = {}  # pid -> Popen (под _lock): остановка и /health
         self._lock = threading.Lock()
         self._sha_cache: dict = {}
@@ -500,6 +497,8 @@ class MuseAdapter(BackendAdapter):
             str(Path(prompt_path).parent),
             "--json",
             "--no-session-log",
+            "--contributor-mode",
+            "on" if str(model).endswith("-contributor") else "off",
             "--prompt-file",
             prompt_path,
         ]
@@ -891,6 +890,8 @@ class MuseAdapter(BackendAdapter):
                     ctx.model,
                     "--no-session-log",
                     "--trust-workspace",
+                    "--contributor-mode",
+                    "on" if str(ctx.model).endswith("-contributor") else "off",
                 ],
                 cwd=str(turn_dir),
                 env=self.child_env(),

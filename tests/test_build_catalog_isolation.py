@@ -87,16 +87,16 @@ def test_non_dict_model_item_is_rejected_by_index() -> None:
 def test_broken_non_required_backend_rejects_its_models() -> None:
     data = raw_fleet()
     data["default_model"] = "gemini-4-argon"
-    data["backends"]["muse"]["max_concurrent"] = 2
+    data["backends"]["muse"].pop("technical_ref")
     isolated = build(data, "isolate")
     muse_models = {m["id"] for m in data["models"] if m["backend"] == "muse"}
     assert set(isolated["rejected"]) == muse_models
-    assert set(isolated["rejected"].values()) == {"backend_muse_max_concurrent_invalid"}
+    assert set(isolated["rejected"].values()) == {"backend_technical_ref_missing"}
     assert "muse" not in isolated["backends"]
     assert not muse_models & set(isolated["models"])
     with pytest.raises(FleetViolation) as exc:
         build(data, "strict")
-    assert exc.value.reason == "backend_muse_max_concurrent_invalid"
+    assert exc.value.reason == "backend_technical_ref_missing"
 
 
 def test_broken_required_backend_is_fatal_even_in_isolate() -> None:

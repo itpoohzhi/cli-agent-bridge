@@ -177,7 +177,7 @@ AUTH_KEY = os.environ.get("MUSE_BRIDGE_KEY", "").strip()
 
 TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_TIMEOUT_S", "3600"))
 IDLE_TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_IDLE_TIMEOUT_S", "300"))
-MAX_CONCURRENT = _positive_int(os.environ.get("MUSE_BRIDGE_MAX_CONCURRENT"), 2)
+MAX_CONCURRENT = _positive_int(os.environ.get("MUSE_BRIDGE_MAX_CONCURRENT"), 32)
 
 MUSE_WRAPPER = os.environ.get(
     "MUSE_BRIDGE_CLI", str(Path.home() / ".config" / "muse-launch" / "muse-cli.sh")

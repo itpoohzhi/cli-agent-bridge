@@ -280,7 +280,7 @@ from zen_bridge.adapters.sse_filter import _ZenSseFilter
 # Пауза stdout `opencode run` на большом промпте может быть долгой; пока она длится, в SSE уходит
 # пустая дельта раз в KEEPALIVE_INTERVAL_S (0 — выключено), иначе клиент рвёт «молчащий» стрим.
 KEEPALIVE_INTERVAL_S = float(os.environ.get("OPENCODE_ZEN_BRIDGE_KEEPALIVE_S", "15.0"))
-MAX_CONCURRENT = _positive_int(os.environ.get("OPENCODE_ZEN_BRIDGE_MAX_CONCURRENT"), 2)
+MAX_CONCURRENT = _positive_int(os.environ.get("OPENCODE_ZEN_BRIDGE_MAX_CONCURRENT"), 32)
 
 OPENCODE_BIN = os.environ.get(
     "OPENCODE_BIN", str(Path.home() / ".opencode" / "bin" / "opencode")

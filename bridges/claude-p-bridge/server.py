@@ -268,7 +268,7 @@ def _prepare_claude_home() -> Path:
 
         _CLAUDE_HOME_INITIALIZED = True
         return home
-MAX_CONCURRENT = int(os.environ.get("CLAUDE_P_BRIDGE_MAX_CONCURRENT", "8"))
+MAX_CONCURRENT = int(os.environ.get("CLAUDE_P_BRIDGE_MAX_CONCURRENT", "32"))
 QUEUE_TIMEOUT_S = int(os.environ.get("CLAUDE_P_BRIDGE_QUEUE_TIMEOUT", "900"))
 KEEPALIVE_S = float(os.environ.get("CLAUDE_P_BRIDGE_KEEPALIVE", "15"))
 MAX_REQUEST_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_BODY_BYTES", 100 * 1024 * 1024)

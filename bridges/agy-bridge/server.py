@@ -277,7 +277,7 @@ class _BridgeConfig:
     """
 
     port: int = 9887
-    max_concurrent: int = 4  # Дефолт датакласса=4 для обратной совместимости unit-тестов; runtime default=2 в _build_bridge_config (P0-3)
+    max_concurrent: int = 32  # Дефолт датакласса=32 и runtime default=32 в _build_bridge_config
     wal_max_bytes: int = 16 * 1024 * 1024
     queue_timeout_s: int = 900
     timeout_s: int = 1800
@@ -353,7 +353,7 @@ def _build_bridge_config() -> _BridgeConfig:
     """Собрать снимок конфигурации из текущего окружения."""
     return _BridgeConfig(
         port=_env_int("AGY_BRIDGE_PORT", 9887, 1, 65535),
-        max_concurrent=_env_int("AGY_BRIDGE_MAX_CONCURRENT", 2, 1, 128),
+        max_concurrent=_env_int("AGY_BRIDGE_MAX_CONCURRENT", 32, 1, 128),
         wal_max_bytes=_env_int(
             "AGY_BRIDGE_WAL_MAX_BYTES", 16 * 1024 * 1024, 1, 2147483647
         ),
