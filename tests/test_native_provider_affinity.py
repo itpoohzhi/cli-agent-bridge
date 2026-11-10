@@ -59,3 +59,16 @@ def test_droid_upstream_model(droid_model, upstream_model):
     entry = next((m for m in models if m.get("id") == droid_model), None)
     assert entry is not None, f"{droid_model} not in fleet.json models"
     assert entry.get("upstream_model") == upstream_model
+
+def test_native_provider_affinity_invariant():
+    """Инвариант RW-010: для любого пересечения native-провайдер выигрывает у droid/opencode-zen."""
+    cat = _load_catalog()
+    models = cat.get("models", {})
+    aggregators = {"droid", "opencode-zen"}
+    native_providers = {"agy", "claude-p", "codex", "opencode-go", "muse"}
+
+    for model_id, info in models.items():
+        provider = info.get("provider")
+        alternates = [a.get("provider") if isinstance(a, dict) else a for a in info.get("alternates", [])]
+        if any(alt in aggregators for alt in alternates):
+            assert provider in native_providers, f"Model {model_id} has aggregator alternate but primary is {provider}"
