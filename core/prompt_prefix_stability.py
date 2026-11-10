@@ -68,17 +68,21 @@ class PrefixStabilityConfig:
         return cls()
 
 
-def _tool_choice_info(tool_choice: object) -> tuple[bool, str]:
-    """Возвращает ``(is_none, forced_tool_name)`` для параметра ``tool_choice``."""
-    if isinstance(tool_choice, str) and tool_choice.strip().lower() == "none":
-        return True, ""
+def _tool_choice_info(tool_choice: object) -> tuple[bool, bool, str]:
+    """Возвращает ``(is_none, is_required, forced_tool_name)`` для ``tool_choice``."""
+    if isinstance(tool_choice, str):
+        norm = tool_choice.strip().lower()
+        return norm == "none", norm == "required", ""
     if not isinstance(tool_choice, dict):
-        return False, ""
+        return False, False, ""
     choice_map = cast(dict[str, object], tool_choice)
+    ctype = str(choice_map.get("type") or "").strip().lower()
+    if ctype == "none":
+        return True, False, ""
     raw_fn = choice_map.get("function")
     fn = cast(dict[str, object], raw_fn) if isinstance(raw_fn, dict) else {}
     name = fn.get("name") or choice_map.get("name") or ""
-    return False, str(name) if name else ""
+    return False, ctype == "required" and not name, str(name) if name else ""
 
 
 def _render_tools_section(
@@ -87,13 +91,13 @@ def _render_tools_section(
     has_attachments: bool = False,
 ) -> str:
     """Формирует каноническую секцию протокола и схем инструментов."""
-    is_none, forced = _tool_choice_info(tool_choice)
+    is_none, is_required, forced = _tool_choice_info(tool_choice)
     if not tools or is_none:
         return ""
     lines = list(_TOOLS_PROTOCOL_LINES)
     if has_attachments:
         lines[-1] += ", except Read on the attachment files listed under [attachments]."
-    if tool_choice == "required":
+    if is_required:
         lines.append("You MUST call at least one tool now.")
     elif forced:
         lines.append(f'You MUST call the tool "{forced}" now.')
@@ -174,9 +178,9 @@ def _render_message(
     if not isinstance(msg, dict):
         return False, ""
     mmap = cast(dict[str, object], msg)
-    role = str(mmap.get("role") or "user")
+    role = str(mmap.get("role") or "user").strip().lower() or "user"
     raw = _render_content(mmap.get("content"), counter)
-    is_prune = raw.strip() == prune_marker
+    is_prune = bool(prune_marker) and raw.strip() == prune_marker.strip()
     text = escape_role_delimiters(raw) if (escape_roles and not is_prune) else raw
     if role == "tool":
         cid = str(mmap.get("tool_call_id") or mmap.get("id") or "")
@@ -205,6 +209,9 @@ def compute_tools_budget_overhead(
     framing_bytes: int = 2,
 ) -> int:
     """Вычисляет вес секции инструментов в байтах UTF-8 с учётом разделителя блока."""
+    is_none, _, _ = _tool_choice_info(tool_choice)
+    if is_none:
+        return 0
     if isinstance(tools_section, str):
         rendered = tools_section
     elif isinstance(tools_or_section, str):
@@ -234,10 +241,15 @@ def assemble_prompt_blocks(
     """Собирает промпт за один проход со стабильным префиксом ``[System + Tools + History]``."""
     cfg = config if config is not None else PrefixStabilityConfig.from_env()
     stable = cfg.enabled if enabled is None else bool(enabled)
+    is_none, _, _ = _tool_choice_info(tool_choice)
     t_sec = (
-        tools_section
-        if tools_section is not None
-        else _render_tools_section(tools or (), tool_choice, bool(images))
+        ""
+        if is_none
+        else (
+            tools_section
+            if tools_section is not None
+            else _render_tools_section(tools or (), tool_choice, bool(images))
+        )
     )
     counter, sys_b, hist_b, in_sys = [0], list[str](), list[str](), stable
     for msg in messages or ():
