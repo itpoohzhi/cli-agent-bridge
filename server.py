@@ -1749,6 +1749,70 @@ class ModelNotesFilter:
 _MODEL_NOTES_FILTER = ModelNotesFilter()
 _PENALTY_TRACKER = get_penalty_tracker()
 
+# Нейтральные к здоровью бэкенда исходы passthrough: таймаут шага модели и оборванный
+# стрим одного хода не означают недоступность апстрима, поэтому брейкер не штрафуется.
+_PASSTHROUGH_NEUTRAL_ERROR_TYPES = frozenset(
+    {"upstream_timeout", "upstream_incomplete_stream", "client_gone"}
+)
+
+
+_DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES = 8192
+
+
+def _passthrough_error_capture_bytes() -> int:
+    """Лимит захвата тела ошибки для классификации исхода; env с безопасным fallback."""
+    raw = os.environ.get("BRIDGE_PASSTHROUGH_ERROR_CAPTURE_BYTES", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+    return value if value >= 0 else _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+
+
+def _passthrough_error_type(raw: bytes) -> str:
+    """Тип ошибки из тела ответа: JSON error.type/code либо терминальный SSE error-кадр."""
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", "replace")
+    payloads: list[Any] = []
+    try:
+        payloads.append(json.loads(text))
+    except ValueError:
+        pass
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payloads.append(json.loads(data))
+        except ValueError:
+            continue
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            continue
+        # JSON-тело шва: code — HTTP-статус (число), тип ошибки в type;
+        # SSE-кадр: code — строковый код ошибки.
+        for value in (error.get("code"), error.get("type")):
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
+def _passthrough_discard_reason(status: int, error_type: str) -> str:
+    """Причина нейтрального исхода брейкера; '' — исход оценивается как сбой/успех бэкенда.
+
+    record_failure остаётся только для реальной недоступности апстрима (502
+    upstream_unavailable, 503 апстрима и прочие 5xx без признаков таймаута/обрыва).
+    """
+    if error_type in _PASSTHROUGH_NEUTRAL_ERROR_TYPES or status == 504:
+        return "turn_timeout_or_stream_incomplete"
+    return ""
+
 
 class _HandlerSink(ResponseSink):
     """Запись ответа passthrough-шва в сокет клиента; сбой записи — ClientGone."""
@@ -1770,6 +1834,20 @@ class _HandlerSink(ResponseSink):
             )
         self.status = 0
         self._client_gone_flag = False
+        # Тело ошибки захватывается ограниченно: нужно только для классификации исхода lease.
+        self._error_body = bytearray()
+        self._error_limit = _passthrough_error_capture_bytes()
+
+    def error_type(self) -> str:
+        """Тип ошибки ответа (JSON-тело или терминальный SSE-кадр); '' — признаков ошибки нет."""
+        if not self._error_body:
+            return ""
+        return _passthrough_error_type(bytes(self._error_body))
+
+    def _capture_error(self, data: bytes) -> None:
+        room = self._error_limit - len(self._error_body)
+        if room > 0:
+            self._error_body += data[:room]
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
@@ -1803,6 +1881,8 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
+        if self.status >= 400 or b'"error"' in data:
+            self._capture_error(data)
         telemetry_note(self._handler, len(data), chunk=True)
         telemetry_tail(self._handler, data)
 
@@ -8170,8 +8250,15 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 else model_id
             )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
+            # Таймаут шага (504) и оборванный стрим — тоже нейтральны: это не отказ апстрима.
+            error_type = getattr(sink, "error_type", None)
+            discard_reason = _passthrough_discard_reason(
+                sink.status, error_type() if callable(error_type) else ""
+            )
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
+            elif discard_reason:
+                lease.record_discard(discard_reason)
             elif sink.status == 429 or sink.status in (402, 408):
                 # 429 / 402 / 408: модель исчерпала квоту/лимит/таймаут старта
                 lease.record_success()
