@@ -76,6 +76,7 @@ __all__ = [
     "ToolCallParser",
     "_loads_tolerant",
     "_parse_tool_call_block",
+    "_parse_tool_call_blocks",
     "_recover_trailing_braces",
     "_split_tool_call_inner",
     "_split_tool_calls",
@@ -147,14 +148,10 @@ if str(_REPO_ROOT) not in sys.path:
 from core.backend_adapter import ToolCall, ToolFunction, TurnResult, Usage  # noqa: E402
 from core.lifecycle import HubLifecycleManager  # noqa: E402
 from core.tool_emulation import (  # noqa: E402
-    DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH,
-    build_tool_schemas, sanitize_tool_calls_list,
+    DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH, build_tool_schemas, sanitize_tool_calls_list,
 )
 from core.turn_session_manager import (  # noqa: E402
-    GapDetectedError,
-    ManagedTurn,
-    TurnSessionManager,
-    validate_turn_id,
+    GapDetectedError, ManagedTurn, TurnSessionManager, validate_turn_id,
 )
 
 logger = logging.getLogger("muse-bridge")
@@ -189,13 +186,16 @@ ROOT = Path(__file__).resolve().parent
 WORKSPACE = Path(os.environ.get("MUSE_BRIDGE_WORKSPACE", str(ROOT / "workspace")))
 LOG_PATH = Path(os.environ.get("MUSE_BRIDGE_LOG", str(ROOT / "logs" / "bridge.log")))
 
+# Двухуровневый контракт `muse-ember-1.0` (Совет R1): хаб :9882 (`providers.d/muse.yaml` -> fleet.json) — `context_window` 1048576,
+# `max_tokens` 131072 (нормализация 1M-семейства Meta, вендорский каталог 1007997/128000), `default_effort` high, `ultra -> max`;
+# мост :9886/DSH — `context_length` 400_000 (предохранитель от жёсткого порога автокомпакции Meta), `ultra -> xhigh`, MSP `minimal -> low`.
 ALLOWED_MODELS: dict[str, dict[str, Any]] = {
     "muse-spark-1.3": {"context_length": 1048576, "max_output": 131072},
-    # 2026-10-05: контрибьютор-слот (только пикер, по просьбе владельца).
-    # id подтверждён `muse model-profile show` (резолвится); окно/лимит как у spark.
+    # 2026-10-05: контрибьютор-слот (только пикер); id подтверждён `muse model-profile show`, окно как у spark.
     "muse-spark-1.3-contributor": {"context_length": 1048576, "max_output": 131072},
     "muse-wonder-1.0": {"context_length": 400_000, "max_output": 131072},
     "muse-wonder-full-1.0": {"context_length": 400_000, "max_output": 131072},
+    "muse-ember-1.0": {"context_length": 400_000, "max_output": 131072},
 }
 DEFAULT_MODEL = os.environ.get("MUSE_BRIDGE_MODEL", "muse-wonder-full-1.0")
 DEFAULT_CONTEXT_LIMIT = 400_000
@@ -216,9 +216,8 @@ EFFORT_MAP: dict[str, str] = {
     "high": "high",
     "xhigh": "xhigh",
     "max": "max",
-    # 2026-10-08: "none" запрещён meta-провайдером (muse exec RC=2:
-    # "--reasoning-effort none is not supported with --provider meta"),
-    # мост отдавал 502. "Без рассуждений" -> ближайший живой тир minimal.
+    # 2026-10-08: "none" запрещён meta-провайдером (muse exec RC=2: "--reasoning-effort none is not
+    # supported with --provider meta"); мост отдавал 502. "Без рассуждений" -> ближайший живой тир minimal.
     "off": "minimal",
     "none": "minimal",
     "minimal": "minimal",
@@ -230,9 +229,8 @@ DEFAULT_EFFORT = "max"
 # Остальные ошибки (rc=42 прокси DOWN, timeout, terminal_*) не ретраятся.
 NETWORK_RETRY_MARKER = "network connection could not be opened"
 
-# Bridge-тир -> MSP ReasoningEffort (closed-вокабуляр SS3.2). _map_effort уже
-# нормализовал запрос; ultra откатан в xhigh там же (EFFORT_MAP).
-# 2026-10-08: +minimal (низший живой тир meta -> низший известный MSP-тир low);
+# Bridge-тир -> MSP ReasoningEffort (closed-вокабуляр SS3.2): _map_effort уже нормализовал запрос,
+# ultra откатан в xhigh там же (EFFORT_MAP). 2026-10-08: +minimal (низший живой тир meta -> MSP low).
 # "none" оставлен оборонительно (сюда больше не приходит, но MSP-вокабуляр под вопросом).
 _MSP_EFFORT = {
     "low": "low",

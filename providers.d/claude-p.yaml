@@ -4,7 +4,7 @@ provider_id: claude-p
 kind: passthrough
 enabled: true
 required: false
-priority: 20
+priority: 10
 owned_by: claude-p-bridge
 transport:
   bridge: {base_url: 'http://127.0.0.1:9881/v1', api_key_env: CLAUDE_P_BRIDGE_KEY}
@@ -19,6 +19,14 @@ discovery:
   refresh_interval_s: 900
 family_rule: {type: owned_by, owned_by: Anthropic}
 models_overrides:
+  claude-sonnet-5-5:
+    name: Claude Sonnet 5.5 (Claude-p bridge)
+    efforts: [low, medium, high, max]
+    default_effort: high
+    context_window: 1000000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   claude-opus-5-5:
     name: Claude Opus 5.5 (Claude-p bridge)
     efforts: [low, medium, high]
