@@ -36,7 +36,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+[^\s,;\"'}]+", r"(?i)[\"']?\bcookie\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\r\n,}]+)", r"(?i)[\"']?\b(?:refresh_token|access_token|client_secret|api_key|password|secret|token)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;&\"'}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+[^\s,;\"'}]+", r"(?i)[\"']?\bcookie\b[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n,}]+)", r"(?i)[\"']?\b(?:refresh_token|access_token|client_secret|x-api-key|api[_-]?key|password|secret|token)\b[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;&\"'}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 
 
@@ -58,7 +58,7 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
         )
     if explicit_effort is not None:
         explicit = explicit_effort.strip().lower()
-        if explicit not in _EFFORTS:
+        if explicit not in allowed:
             raise ValueError("explicit_effort must be low, medium, or high")
     else:
         explicit = None
@@ -70,10 +70,9 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
-    safe = raw_text
+    safe = re.sub(r"[\x00-\x1f\x7f]+", " ", raw_text)
     for regex in _SECRET_REGEXES:
         safe = regex.sub(REDACTED_TOKEN, safe)
-    safe = re.sub(r"[\x00-\x1f\x7f]+", " ", safe)
     return safe[:MAX_DIAGNOSTIC_CHARS]
 
 
@@ -89,7 +88,7 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
     terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
     if any(term in reason for term in terms):
         return True
-    if status_code == 401 or bool(re.search(r"\b401\b", reason)):
+    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|\bstatus(?:\s+code)?[\s:=]+401\b|^401\b)", reason))):  # fmt: skip  # noqa: E501
         return True
     auth_terms = ("oauth", "refresh", "unauthenticated")
     return status_code == 403 and any(term in reason for term in auth_terms)
@@ -184,9 +183,11 @@ def compute_attempt_decision(config: RetryBudgetConfig, attempt_index: int, elap
     if attempt_index >= config.max_attempts:
         return AttemptDecision(False, 0.0, RetryReason.MAX_ATTEMPTS_REACHED)
     usable_s = config.total_budget_s - config.reserve_s - elapsed_s
+    if usable_s <= 0.0:
+        return AttemptDecision(False, 0.0, RetryReason.BUDGET_EXHAUSTED)
     per_attempt_s = usable_s / (config.max_attempts - attempt_index)
     budget_s = floor(per_attempt_s * 1000.0) / 1000.0
-    if budget_s < config.min_attempt_budget_s or budget_s <= 0.0:
+    if budget_s < config.min_attempt_budget_s:
         return AttemptDecision(False, 0.0, RetryReason.BUDGET_EXHAUSTED)
     return AttemptDecision(True, budget_s, RetryReason.BUDGET_OK)
 

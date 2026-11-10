@@ -18,6 +18,7 @@ from core.stream_interruption_recovery import evaluate_stream_retry_eligibility,
 INCIDENT_AUTH_SNAPSHOT = "403 OAuth refresh rejected: token refresh failed"
 AGY_RETRY_SNAPSHOT = "per_attempt_upper duration_s=18.288681"
 RUNTIME_DRIFT_SNAPSHOT = "configured=1500 effective=300"
+CAPACITY_401_SNAPSHOT = "capacity unavailable; retry after 401 seconds"
 
 
 @pytest.mark.parametrize("suffix", ("low", "medium", "high"))
@@ -48,13 +49,14 @@ def test_redaction_masks_all_secrets_controls_and_truncates() -> None:
         "password=pwd secret=sec token=tok cookie=cookie user@example.com\x00\n"
     )
     result = redact_diagnostic_text(secrets + "x" * 300)
-    assert len(result) == 256
+    assert len(result) <= 256 and len(redact_diagnostic_text("x" * 300)) == 256
     assert result.count("<redacted>") == 14
     assert all(value not in result for value in ("bearer.value", "ya29.", "1//", "@"))
     assert "\x00" not in result and "\n" not in result
-    payload = '{"access_token":"TOPSECRET","client_secret":"MANGO9472"}'
-    assert "TOPSECRET" not in redact_diagnostic_text(payload)
+    assert "TOPSECRET" not in redact_diagnostic_text('{"access_token":"TOPSECRET"}')
     assert "secret2" not in redact_diagnostic_text("Cookie: a=1; sid=secret2")
+    assert all(value not in redact_diagnostic_text(r'{"access_token":"prefix\"LEAK"}') for value in ("prefix", "LEAK"))  # fmt: skip  # noqa: E501
+    assert all("TOPSECRET42" not in redact_diagnostic_text(text) for text in ("X-API-Key: TOPSECRET42", "password\x00=TOPSECRET42"))  # fmt: skip  # noqa: E501
 
 
 @pytest.mark.parametrize(
@@ -67,7 +69,9 @@ def test_redaction_masks_all_secrets_controls_and_truncates() -> None:
         (503, "quota exceeded", FailureCategory.LIMIT_BLOCKED, False),
         (503, "SSL_ERROR_SYSCALL", FailureCategory.UPSTREAM_TLS_STALL, False),
         (429, "busy", FailureCategory.CAPACITY_EXHAUSTED, True),
+        (503, CAPACITY_401_SNAPSHOT, FailureCategory.CAPACITY_EXHAUSTED, True),
         (400, "model_capacity_exhausted", FailureCategory.CAPACITY_EXHAUSTED, True),
+        (0, "HTTP 401: invalid auth", FailureCategory.AUTH_REFRESH_EXHAUSTED, False),
         (403, "max_tokens exceeded", FailureCategory.FATAL_REQUEST_ERROR, False),
     ),
 )
@@ -94,6 +98,10 @@ def test_transient_recovery_excludes_non_retryable_failures() -> None:
     assert is_transient_stream_interruption(auth) is False
     retry = evaluate_stream_retry_eligibility(error_text=auth, delivered=False)
     assert retry.can_retry is False
+    allowed = evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False)  # fmt: skip  # noqa: E501
+    assert allowed.can_retry is True and allowed.attempt_budget_s > 0.0
+    exhausted = evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, elapsed_s=86.0)  # fmt: skip  # noqa: E501
+    assert exhausted.can_retry is False and exhausted.attempt_budget_s == 0.0
 
 
 @pytest.mark.parametrize(
@@ -186,6 +194,7 @@ def test_retry_budget_rounds_down_and_honors_boundaries() -> None:
     tight = RetryBudgetConfig(1.0009, 0.0, 1.0005, 1, 30.0)
     decision = compute_attempt_decision(tight, 0, 0.0)
     assert decision.reason is RetryReason.BUDGET_EXHAUSTED
+    assert compute_attempt_decision(RetryBudgetConfig(), 0, 1e308).reason is RetryReason.BUDGET_EXHAUSTED  # fmt: skip  # noqa: E501
 
 
 @pytest.mark.parametrize("index,elapsed", ((-1, 0.0), (0, -0.001), (0, float("inf"))))

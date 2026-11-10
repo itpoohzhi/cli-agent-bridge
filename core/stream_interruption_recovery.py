@@ -179,6 +179,7 @@ class RetryDecision:
     can_retry: bool
     keep_hot_session: bool
     reason: str
+    attempt_budget_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -189,23 +190,26 @@ class _RetryFacts:
     attempt: int = 1
     max_attempts: int = 2
     source: str = "cli_error"
+    elapsed_s: float = 0.0
+    budget_config: RetryBudgetConfig | None = None
 
 
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     """Оценить допустимость повтора стрима."""
     f = _RetryFacts(**kw)
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
+    cfg = f.budget_config or RetryBudgetConfig(max_attempts=max(1, f.max_attempts))
     adm = compute_attempt_decision(
-        RetryBudgetConfig(max_attempts=max(1, f.max_attempts)),
+        cfg,
         max(0, f.attempt - 1),
-        0.0,
-        None if trans else classify_provider_failure(0, f.error_text).category,
+        max(0.0, f.elapsed_s),
+        FailureCategory.CAPACITY_EXHAUSTED
+        if trans
+        else classify_provider_failure(0, f.error_text).category,
     )
     quiet = trans and not f.had_tool_side_effects
-    can = all((quiet, not f.delivered, f.attempt < f.max_attempts, adm.allow_retry))
-    return RetryDecision(
-        can, quiet, "transient_pre_delivery_retry" if can else "retry_blocked"
-    )
+    can = all((quiet, not f.delivered, f.attempt < cfg.max_attempts, adm.allow_retry))
+    return RetryDecision(can, quiet, "transient_pre_delivery_retry" if can else "retry_blocked", adm.attempt_budget_s if can else 0.0)  # fmt: skip  # noqa: E501
 
 
 @dataclass(frozen=True)
