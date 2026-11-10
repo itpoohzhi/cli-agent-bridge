@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from core.stream_framing import build_stream_error_chunk, format_sse_event  # noqa: E402
 from core.resilience import (  # noqa: E402
     BulkheadCapacityExceeded,
     CircuitBreaker,
@@ -552,7 +553,9 @@ def test_disabled_flags_give_noop_lease():
 @pytest.fixture
 def facade(monkeypatch, tmp_path):
     """Настоящий Handler + управляемый upstream; RESILIENCE подменяется тестом."""
-    state = SimpleNamespace(status=200, hits=0)
+    state = SimpleNamespace(
+        status=200, hits=0, body=None, content_type="application/json"
+    )
     lock = threading.Lock()
 
     class Upstream(BaseHTTPRequestHandler):
@@ -563,9 +566,13 @@ def facade(monkeypatch, tmp_path):
             self.rfile.read(int(self.headers["Content-Length"]))
             with lock:
                 state.hits += 1
-            body = json.dumps({"id": "x", "choices": []}).encode()
+            body = (
+                state.body
+                if state.body is not None
+                else json.dumps({"id": "x", "choices": []}).encode()
+            )
             self.send_response(state.status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", state.content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -752,6 +759,143 @@ def test_facade_resilience_endpoint_requires_auth_and_health_contract_is_frozen(
             "uptime_s",
         ]
     )
+
+
+# --------------------------------------------------------------------------- passthrough: исход lease
+
+
+def _json_error_body(error_type: str, status: int) -> bytes:
+    return json.dumps(
+        {"error": {"message": error_type, "type": error_type, "code": status}}
+    ).encode()
+
+
+def _spy_breaker_outcomes(facade, manager) -> list[str]:
+    """Обёртка брейкера `agy`: журнал фактических исходов lease (discard/failure)."""
+    breaker = manager._breaker_for("agy", manager.settings())
+    outcomes: list[str] = []
+    original_discard, original_failure = breaker.record_discard, breaker.record_failure
+
+    def record_discard(generation, reason=""):
+        outcomes.append("discard")
+        return original_discard(generation, reason)
+
+    def record_failure(generation, exc=None):
+        outcomes.append("failure")
+        return original_failure(generation, exc)
+
+    facade.monkeypatch.setattr(breaker, "record_discard", record_discard)
+    facade.monkeypatch.setattr(breaker, "record_failure", record_failure)
+    return outcomes
+
+
+def test_facade_turn_timeout_does_not_trip_breaker(facade):
+    """504 шага модели: брейкер не штрафуется — таймаут хода не отказ апстрима."""
+    manager, _ = make_manager()
+    facade.monkeypatch.setattr(server, "RESILIENCE", manager)
+    outcomes = _spy_breaker_outcomes(facade, manager)
+    facade.state.status = 504
+    facade.state.body = _json_error_body("upstream_timeout", 504)
+    for _ in range(4):
+        status, _, body = facade.call()
+        assert status == 504
+        assert body["error"]["type"] == "upstream_timeout"
+    assert _wait_until(lambda: len(outcomes) == 4)
+    assert outcomes == ["discard"] * 4
+    assert facade.state.hits == 4
+    snapshot = manager.snapshot()["backends"]["agy"]
+    assert snapshot["state"] == "CLOSED"
+    assert snapshot["failures"] == 0
+
+
+def test_facade_incomplete_stream_does_not_trip_breaker(facade):
+    """Оборванный стрим (502 upstream_incomplete_stream агрегатора) нейтрален для брейкера."""
+    manager, _ = make_manager()
+    facade.monkeypatch.setattr(server, "RESILIENCE", manager)
+    outcomes = _spy_breaker_outcomes(facade, manager)
+    facade.monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    facade.monkeypatch.setenv("BRIDGE_NONSTREAM_TELEMETRY_ENABLED", "true")
+    facade.state.status = 200
+    facade.state.content_type = "text/event-stream"
+    facade.state.body = (
+        b'data: {"id":"x","choices":[{"index":0,"delta":{"content":"hi"},'
+        b'"finish_reason":null}]}\n\n'
+    )
+    for _ in range(4):
+        status, _, body = facade.call()
+        assert status == 502
+        assert body["error"]["type"] == "upstream_incomplete_stream"
+    assert _wait_until(lambda: len(outcomes) == 4)
+    assert outcomes == ["discard"] * 4
+    snapshot = manager.snapshot()["backends"]["agy"]
+    assert snapshot["state"] == "CLOSED"
+    assert snapshot["failures"] == 0
+
+
+def test_facade_upstream_unavailable_trips_breaker(facade):
+    """Реальная недоступность апстрима по-прежнему открывает брейкер после порога."""
+    manager, _ = make_manager()
+    facade.monkeypatch.setattr(server, "RESILIENCE", manager)
+    outcomes = _spy_breaker_outcomes(facade, manager)
+    facade.state.status = 502
+    facade.state.body = _json_error_body("upstream_unavailable", 502)
+    for _ in range(3):
+        assert facade.call()[0] == 502
+    assert _wait_until(lambda: len(outcomes) == 3)
+    assert outcomes == ["failure"] * 3
+    snapshot = manager.snapshot()
+    assert snapshot["backends"]["agy"]["state"] == "OPEN", snapshot
+    status, headers, body = facade.call()
+    assert status == 503
+    assert headers["retry-after"] == "30"
+    assert body["error"]["code"] == "CIRCUIT_BREAKER_OPEN"
+    assert facade.state.hits == 3
+
+
+class _SinkHandler:
+    """Минимальный HTTP-обработчик для проверки захвата типа ошибки в _HandlerSink."""
+
+    _headers_already_sent = False
+    connection = None
+
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self.wfile = SimpleNamespace(write=self.chunks.append, flush=lambda: None)
+        self.status = 0
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, key: str, value: str) -> None:
+        return
+
+    def end_headers(self) -> None:
+        return
+
+
+def test_handler_sink_extracts_error_type_from_json_and_sse_frame():
+    sink = server._HandlerSink(_SinkHandler())
+    sink.start(502, [("Content-Type", "application/json")])
+    sink.write(_json_error_body("upstream_unavailable", 502))
+    assert sink.error_type() == "upstream_unavailable"
+
+    stream_sink = server._HandlerSink(_SinkHandler())
+    stream_sink.start(200, [("Content-Type", "text/event-stream")])
+    stream_sink.write(
+        format_sse_event(
+            build_stream_error_chunk(
+                message="upstream stream ended before finish_reason",
+                code="upstream_incomplete_stream",
+            )
+        ).encode()
+    )
+    assert stream_sink.error_type() == "upstream_incomplete_stream"
+    assert server._passthrough_discard_reason(200, stream_sink.error_type()) == (
+        "turn_timeout_or_stream_incomplete"
+    )
+    assert server._passthrough_discard_reason(502, "upstream_unavailable") == ""
+
+
 # --------------------------------------------------------------------------- Волна 3: QoSSlotManager
 
 from core import lifecycle  # noqa: E402

@@ -381,6 +381,10 @@ class ResponseSink:
         """Необязательный неблокирующий сигнал отмены от HTTP-фасада."""
         return False
 
+    def error_type(self) -> str:
+        """Тип ошибки отданного ответа для классификации исхода lease ('' — ошибки нет)."""
+        return ""
+
 
 def new_call_id() -> str:
     return "call_" + uuid.uuid4().hex[:24]
