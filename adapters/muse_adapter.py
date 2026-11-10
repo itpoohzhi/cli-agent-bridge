@@ -497,6 +497,8 @@ class MuseAdapter(BackendAdapter):
             str(Path(prompt_path).parent),
             "--json",
             "--no-session-log",
+            "--contributor-mode",
+            "on" if str(model).endswith("-contributor") else "off",
             "--prompt-file",
             prompt_path,
         ]
@@ -888,6 +890,8 @@ class MuseAdapter(BackendAdapter):
                     ctx.model,
                     "--no-session-log",
                     "--trust-workspace",
+                    "--contributor-mode",
+                    "on" if str(ctx.model).endswith("-contributor") else "off",
                 ],
                 cwd=str(turn_dir),
                 env=self.child_env(),

@@ -22,11 +22,8 @@ allow_base_url:
 limits: {max_concurrent: 128, quota_group: google-agy, timeout_s: 180}
 fingerprint: {binary_path: ~/.local/bin/agy.real}
 discovery:
-  method: http
-  http: {path: /models, id_field: 'data[].id'}
-  include: [gemini-*]
-  exclude: ['*-free']
-  refresh_interval_s: 900
+  method: static
+  static: [gemini-3.8-flash, gemini-4-argon]
 family_rule:
   type: prefix
   prefix:

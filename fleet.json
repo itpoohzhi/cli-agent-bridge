@@ -246,7 +246,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "meta-muse",
-      "max_concurrent": 32,
+      "max_concurrent": 1,
       "wrapper": "~/.config/muse-launch/muse-cli.sh",
       "technical_ref": {
         "version": "1.4.15",
@@ -254,7 +254,7 @@
         "binary_path": "~/.local/bin/muse"
       },
       "options": {
-        "streaming_mode": "exec"
+        "streaming_mode": "serve"
       },
       "proxy_port": 10816
     },
