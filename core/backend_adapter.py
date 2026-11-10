@@ -136,7 +136,6 @@ class TurnContext:
     model: str
     effort: str
     prompt: str
-    target_model: str = ""
     backend: str = ""
     route: str = "nokey"
     key_hash: str = ""
@@ -167,6 +166,7 @@ class TurnContext:
     # Проброшенное окружение extra_body.env (ADR-0016): уже санитизировано мостом; адаптеры без
     # поддержки поле игнорируют; repr скрыт, чтобы секреты не попадали в логи/трейсы.
     fwd_env: dict[str, str] | None = field(default=None, repr=False)
+    target_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -686,7 +686,7 @@ def _normalize_model(
         window = int(item.get("context_window") or 0)
     except (ValueError, TypeError, OverflowError) as exc:
         raise FleetViolation("context_window_invalid", mid) from exc
-    return {
+    res = {
         "id": mid,
         "backend": backend_id,
         "name": str(item.get("name") or mid),
@@ -701,6 +701,9 @@ def _normalize_model(
             "proof": images.get("proof"),
         },
     }
+    if "upstream_model" in item and isinstance(item["upstream_model"], str):
+        res["upstream_model"] = item["upstream_model"]
+    return res
 
 
 def build_catalog(

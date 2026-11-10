@@ -215,6 +215,23 @@ def test_manifest_priority_values():
     assert zen_data.get("priority") == 50, f"zen priority must be 50, got {zen_data.get('priority')}"
 
 
+def test_fallback_candidate_ranking_to_droid_when_native_fails():
+    """Проверяет, что alternates ранжируют Droid резервным кандидатом (priority 30) при отказе native."""
+    from core.fleet_explain import explain_model
+    from core.provider_manifest import load_manifests
+    from adapters import ADAPTER_KINDS
+    cat = _load_catalog()
+    manifests = load_manifests(ROOT / "providers.d", ADAPTER_KINDS).manifests
+    entry = explain_model(cat, manifests, "gemini-3.8-flash")
+    assert entry is not None
+    assert entry.primary == "agy"
+    assert "droid" in entry.alternates
+    p_map = {pid: p for p, pid in entry.candidates}
+    assert p_map["agy"] == 10
+    assert p_map["droid"] == 30
+    assert p_map["agy"] < p_map["droid"]
+
+
 class TestDroidModelE2ERouting(BridgeCase):
     """Сквозной HTTP-тест маршрутизации *-droid через сервер Handler."""
 
@@ -237,3 +254,22 @@ class TestDroidModelE2ERouting(BridgeCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["choices"][0]["message"]["content"], "pong from droid")
         self.assertEqual(body["model"], "gemini-3.8-flash-droid")
+        # Доказываем, что в Droid RPC фактически ушла каноническая upstream_model:
+        inits = self.hub.inits()
+        self.assertEqual(len(inits), 1, "Должна быть ровно одна инициализация сессии Droid")
+        self.assertEqual(
+            inits[0]["params"]["modelId"],
+            "gemini-3.8-flash",
+            "В Droid должна быть передана каноническая модель без суффикса -droid",
+        )
+
+    def test_turn_context_positional_backward_compatibility(self):
+        """Регрессионный тест: позиционные аргументы TurnContext не ломаются новым полем."""
+        from core.backend_adapter import TurnContext
+        turn = TurnContext("gemini-3.8-flash", "low", "test prompt", "agy", "key123")
+        self.assertEqual(turn.model, "gemini-3.8-flash")
+        self.assertEqual(turn.effort, "low")
+        self.assertEqual(turn.prompt, "test prompt")
+        self.assertEqual(turn.backend, "agy")
+        self.assertEqual(turn.route, "key123")
+        self.assertEqual(turn.target_model, "")
