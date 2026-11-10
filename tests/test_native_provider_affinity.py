@@ -116,6 +116,7 @@ def test_canonical_and_droid_effort_aliases():
     assert aliases["gemini-3.8-flash-low"]["backend"] == "agy"
     assert aliases["gemini-3.8-flash-medium"]["backend"] == "agy"
     assert aliases["gemini-3.8-flash-high"]["backend"] == "agy"
+    assert aliases["claude-sonnet-5-5-low"]["backend"] == "claude-p"
     assert aliases["claude-sonnet-5-5-medium"]["backend"] == "claude-p"
     assert aliases["claude-sonnet-5-5-high"]["backend"] == "claude-p"
 
@@ -126,3 +127,35 @@ def test_canonical_and_droid_effort_aliases():
             assert isinstance(spec, dict), f"{alias_name} must be a dictionary spec"
             assert spec["backend"] == "droid"
             assert spec["effort"] == suffix
+
+
+def test_make_plan_droid_uses_upstream_model():
+    """Проверяет, что runtime _make_plan прокидывает канонический upstream_model в Droid RPC."""
+    from server import _make_plan, resolve_target_model
+    fleet = _load_fleet()
+    entry = next((m for m in fleet.get("models", []) if m.get("id") == "gemini-3.8-flash-droid"), None)
+    assert entry is not None
+    target = resolve_target_model(entry, "gemini-3.8-flash-droid")
+    assert target == "gemini-3.8-flash"
+    ctx = {
+        "rpc": {"items": [], "system": ""},
+        "model": "gemini-3.8-flash-droid",
+        "target_model": target,
+        "effort": "low",
+        "autonomy": "off",
+        "route": "nokey",
+    }
+    plan = _make_plan(ctx, None, "", "/tmp", [])
+    assert plan["settings"][0] == "gemini-3.8-flash"
+
+
+def test_compiled_catalog_matches_manifests():
+    """Проверяет, что fleet.json строго соответствует компиляции манифестов providers.d."""
+    from core.fleet_compiler import compile_fleet
+    compiled_fleet = compile_fleet(
+        providers_path=ROOT / "providers.d",
+        fleet_meta_path=ROOT / "providers.d" / "_fleet.yaml",
+    )
+    fleet = _load_fleet()
+    assert len(compiled_fleet["models"]) == len(fleet["models"])
+    assert compiled_fleet["aliases"] == fleet["aliases"]

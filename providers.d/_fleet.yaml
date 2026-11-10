@@ -20,6 +20,7 @@ aliases:
   gemini-3.8-flash-low: {backend_id: gemini-3.8-flash, backend: agy, effort: low}
   gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash, backend: agy, effort: medium}
   gemini-3.8-flash-high: {backend_id: gemini-3.8-flash, backend: agy, effort: high}
+  claude-sonnet-5-5-low: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: low}
   claude-sonnet-5-5-medium: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: medium}
   claude-sonnet-5-5-high: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: high}
   claude-opus-5-5-medium: {backend_id: claude-opus-5-5, backend: claude-p, effort: medium}

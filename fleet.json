@@ -87,6 +87,11 @@
       "backend": "agy",
       "effort": "high"
     },
+    "claude-sonnet-5-5-low": {
+      "backend_id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "effort": "low"
+    },
     "claude-sonnet-5-5-medium": {
       "backend_id": "claude-sonnet-5-5",
       "backend": "claude-p",
