@@ -244,6 +244,50 @@ def test_fallback_candidate_ranking_to_droid_when_native_fails():
     assert p_map["agy"] < p_map["droid"]
 
 
+class TestNativeProviderE2ERouting(BridgeCase):
+    """Сквозной HTTP-тест маршрутизации к нативному passthrough-провайдеру."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.bridge_testlib import load_raw_fleet
+        from tests.test_passthrough_adapter import FakeUpstream
+        from adapters import ADAPTER_KINDS
+        from core.backend_adapter import AdapterRegistry
+        import server
+        self.upstream = FakeUpstream()
+        self.addCleanup(self.upstream.close)
+        data = load_raw_fleet()
+        data["backends"]["codex"]["enabled"] = True
+        data["backends"]["codex"]["base_url"] = f"http://127.0.0.1:{self.upstream.port}/v1"
+        data["backends"]["codex"].pop("api_key_env", None)
+        server.FLEET = server._build_catalog(data)
+        saved = server.BACKENDS
+        self.addCleanup(setattr, server, "BACKENDS", saved)
+        server.BACKENDS = AdapterRegistry.from_fleet(
+            server.FLEET, ADAPTER_KINDS, lambda: server.FLEET, server
+        )
+        self.upstream.respond = lambda h, b: FakeUpstream.json(
+            h,
+            {
+                "id": "chatcmpl-native-test",
+                "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "pong from native codex"}, "finish_reason": "stop"}],
+                "model": "gpt-6.1-sol",
+            },
+        )
+
+    def test_native_provider_e2e_routing(self):
+        status, body = self._post_json(
+            {
+                "model": "gpt-6.1-sol",
+                "messages": [{"role": "user", "content": "ping"}],
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["choices"][0]["message"]["content"], "pong from native codex")
+        self.assertEqual(body["model"], "gpt-6.1-sol")
+
+
 class TestDroidModelE2ERouting(BridgeCase):
     """Сквозной HTTP-тест маршрутизации *-droid через сервер Handler."""
 

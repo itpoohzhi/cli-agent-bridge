@@ -701,8 +701,8 @@ def _normalize_model(
             "proof": images.get("proof"),
         },
     }
-    if "upstream_model" in item and isinstance(item["upstream_model"], str):
-        res["upstream_model"] = item["upstream_model"]
+    if "upstream_model" in item and isinstance(item["upstream_model"], str) and item["upstream_model"].strip():
+        res["upstream_model"] = item["upstream_model"].strip()
     return res
 
 
