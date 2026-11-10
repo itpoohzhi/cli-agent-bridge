@@ -1,0 +1,646 @@
+{
+  "compiled_at": "2026-11-10T05:26:52+0300",
+  "compiler_version": 1,
+  "fleet_sha256": "8c2fe2ca5689618381dd2238e412b25841535df6232d13ba87d6980fa8008d8b",
+  "inputs": {
+    "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "manifests": {
+      "_fleet.yaml": "d8bd786de236c3229d2d0a7093cced12cd2a2d8eec3eecc33093400b0149d4db",
+      "agy.yaml": "c324ec9ead817570ef5e3129d715f6432503dc45530fbed62ac2b4f698086a50",
+      "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
+      "codex.yaml": "63f18b1f73c0c21009085de065f4c6dfcee5a436a31b2790c5e9ab216537c7c8",
+      "droid.yaml": "88d856df3d554c1b047b85a9b31f8051e15949255c9cb2fe465b39a3f6b96a10",
+      "muse.yaml": "a9adfb0aa2dcffef00c30bb24985b70a4f17863d5c856384be0141a15cb98ac0",
+      "opencode-go-claude.yaml": "d09898d3253f9a393fa2db1aa15c0154deb5ced1db8a7042b48309a01f0bfa2b",
+      "opencode-go.yaml": "c99498b308ad37d74ece1f31d090bc1d7f4d1ca6a4be5af0f43da36194347cea",
+      "opencode-zen.yaml": "dcbb5550283b9ffc3b6909e4ce03ee33ce88404490fc3860f8d34b8057a9d900"
+    },
+    "manifests_sha256": "ea5aa78ee7e87caab3379ebc3f5965049411afc5e8e4bd058f4e822649526e8a"
+  },
+  "models": {
+    "beam-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "big-pickle": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "claude-haiku-5-5": {
+      "alternates": [
+        {
+          "provider": "opencode-go-claude"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Anthropic",
+      "family_source": "owned_by",
+      "history": [],
+      "in_fleet": true,
+      "provider": "claude-p",
+      "quorum_eligible": false,
+      "quota_group": "anthropic-claude",
+      "status": "quarantine"
+    },
+    "claude-opus-5-5": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Anthropic",
+      "family_source": "owned_by",
+      "history": [],
+      "in_fleet": true,
+      "provider": "claude-p",
+      "quorum_eligible": false,
+      "quota_group": "anthropic-claude",
+      "status": "quarantine"
+    },
+    "claude-sonnet-5-5": {
+      "alternates": [
+        {
+          "provider": "droid"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Anthropic",
+      "family_source": "owned_by",
+      "history": [],
+      "in_fleet": true,
+      "provider": "claude-p",
+      "quorum_eligible": false,
+      "quota_group": "anthropic-claude",
+      "status": "quarantine"
+    },
+    "claude-sonnet-5-5-droid": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Anthropic",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "droid",
+      "quorum_eligible": false,
+      "quota_group": "factory-droid",
+      "status": "quarantine"
+    },
+    "deepseek-v4.1-flash": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "DeepSeek",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-go",
+      "quorum_eligible": false,
+      "quota_group": "opencode-go",
+      "status": "quarantine"
+    },
+    "deepseek-v4.1-flash-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "flint-40b-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "gemini-3.8-flash": {
+      "alternates": [
+        {
+          "provider": "droid"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gemini-3.8-flash-droid": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "droid",
+      "quorum_eligible": false,
+      "quota_group": "factory-droid",
+      "status": "quarantine"
+    },
+    "gemini-4-argon": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gpt-6.1-sol": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "OpenAI",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "droid",
+      "quorum_eligible": false,
+      "quota_group": "factory-droid",
+      "status": "quarantine"
+    },
+    "gpt-6.1-sol-droid": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "OpenAI",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "droid",
+      "quorum_eligible": false,
+      "quota_group": "factory-droid",
+      "status": "quarantine"
+    },
+    "gpt-6.1-terra": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "OpenAI",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "codex",
+      "quorum_eligible": false,
+      "quota_group": "openai-codex",
+      "status": "quarantine"
+    },
+    "mimo-v2.6-flash-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "muse-spark-1.3": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Meta",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "muse",
+      "quorum_eligible": false,
+      "quota_group": "meta-muse",
+      "status": "quarantine"
+    },
+    "muse-spark-1.3-contributor": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Meta",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "muse",
+      "quorum_eligible": false,
+      "quota_group": "meta-muse",
+      "status": "quarantine"
+    },
+    "muse-wonder-1.0": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Meta",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "muse",
+      "quorum_eligible": false,
+      "quota_group": "meta-muse",
+      "status": "quarantine"
+    },
+    "muse-wonder-full-1.0": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Meta",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "muse",
+      "quorum_eligible": false,
+      "quota_group": "meta-muse",
+      "status": "quarantine"
+    },
+    "nemotron-3.5-lightning-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "nemotron-3.5-super-vl-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    }
+  },
+  "providers": {
+    "agy": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/v1",
+          "port": 9887,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "argv_by_executable": {
+          "~/.config/agy-launch/agy-cli.sh": [
+            "-p",
+            "{prompt}",
+            "--model",
+            "{slot}",
+            "--output-format",
+            "text"
+          ],
+          "~/.local/bin/agy.real": [
+            "--model",
+            "{slot}",
+            "--effort",
+            "{effort}",
+            "--disable-slash-commands",
+            "--output-format",
+            "text"
+          ]
+        },
+        "executables": [
+          "~/.config/agy-launch/agy-cli.sh",
+          "~/.local/bin/agy.real"
+        ],
+        "output": {
+          "format": "text"
+        },
+        "prompt_via": "argv",
+        "type": "cli"
+      },
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "passthrough",
+      "max_concurrent": 128,
+      "params": {
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "google-agy",
+      "timeout_s": 180.0
+    },
+    "claude-p": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/v1",
+          "port": 9881,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "passthrough",
+      "max_concurrent": 128,
+      "params": {
+        "adaptive_whitelist": [
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "effort_field": "none",
+        "effort_map": {},
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "anthropic-claude",
+      "timeout_s": 180.0
+    },
+    "codex": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/v1",
+          "port": 2455,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "passthrough",
+      "max_concurrent": 128,
+      "params": {
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "openai-codex",
+      "timeout_s": 180.0
+    },
+    "droid": {
+      "allow_base_url": [],
+      "bridge": true,
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "droid",
+      "max_concurrent": 5,
+      "params": {
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "effort",
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "factory-droid",
+      "timeout_s": 450.0
+    },
+    "muse": {
+      "allow_base_url": [],
+      "bridge": true,
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "muse",
+      "max_concurrent": 1,
+      "params": {
+        "adaptive_whitelist": [
+          "reasoning_effort"
+        ],
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "meta-muse",
+      "timeout_s": 180.0
+    },
+    "opencode-go": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/go/v1",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode/opencode-go.key",
+            "file_from_json": {
+              "key": "provider.opencode-go.options.apiKey",
+              "path": "~/.config/opencode/opencode.json",
+              "unwrap_file_ref": true
+            }
+          },
+          "base_url": "http://127.0.0.1:10830/go/v1",
+          "headers_from_json": {
+            "forbid_ua_prefix": [
+              "python"
+            ],
+            "key": "provider.opencode-go.options.headers",
+            "path": "~/.config/opencode/opencode.json",
+            "pick": [
+              "User-Agent"
+            ],
+            "required": []
+          },
+          "path": "/chat/completions",
+          "per_request_headers": {
+            "x-opencode-session": "{uuid4}"
+          },
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": false
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "passthrough",
+      "max_concurrent": 1,
+      "params": {
+        "adaptive_whitelist": [
+          "thinking"
+        ],
+        "effort_field": "none",
+        "effort_map": {
+          "off": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        },
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "opencode-go",
+      "timeout_s": 180.0
+    },
+    "opencode-go-claude": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/go/v1",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode/opencode-go.key",
+            "file_from_json": {
+              "key": "provider.opencode-go.options.apiKey",
+              "path": "~/.config/opencode/opencode.json",
+              "unwrap_file_ref": true
+            }
+          },
+          "base_url": "http://127.0.0.1:10830/go/v1",
+          "headers_from_json": {
+            "forbid_ua_prefix": [
+              "python"
+            ],
+            "key": "provider.opencode-go.options.headers",
+            "path": "~/.config/opencode/opencode.json",
+            "pick": [
+              "User-Agent"
+            ],
+            "required": []
+          },
+          "path": "/chat/completions",
+          "per_request_headers": {
+            "x-opencode-session": "{uuid4}"
+          },
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": false
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "passthrough",
+      "max_concurrent": 1,
+      "params": {
+        "adaptive_whitelist": [
+          "thinking"
+        ],
+        "effort_field": "none",
+        "effort_map": {},
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "opencode-go-claude",
+      "timeout_s": 180.0
+    },
+    "opencode-zen": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/v1",
+          "port": 9883,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "enabled": true,
+      "fingerprint_sha256": "",
+      "kind": "passthrough",
+      "max_concurrent": 128,
+      "params": {
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "strip_always": [],
+        "tool_emulation": true
+      },
+      "probe": {
+        "enabled": true,
+        "max_parallel": 1
+      },
+      "quota_group": "opencode-zen",
+      "timeout_s": 180.0
+    }
+  },
+  "rejected": {},
+  "rejected_providers": {},
+  "schema": "catalog-lock/1"
+}
