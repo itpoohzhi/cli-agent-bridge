@@ -445,12 +445,8 @@ class MuseAdapter(BackendAdapter):
 
     def _normalize_proxy_port(self) -> int:
         """proxy_port бэкенда (иначе env, иначе default) -> int; мусор -> default."""
-        raw = self.config.get("proxy_port") or os.environ.get("MUSE_PROXY_PORT")
-        try:
-            port = int(raw) if raw else DEFAULT_PROXY_PORT
-            return port if 1 <= port <= 65535 else DEFAULT_PROXY_PORT
-        except (TypeError, ValueError):
-            return DEFAULT_PROXY_PORT
+        from adapters.muse_config import resolve_proxy_port
+        return resolve_proxy_port(self.config)
 
     def _proxy_up(self) -> bool:
         try:
@@ -697,7 +693,8 @@ class MuseAdapter(BackendAdapter):
         )
         done = threading.Event()
         reader_done = threading.Event()
-        writes: queue.Queue[bytes] = queue.Queue(maxsize=32)
+        from core.backpressure import BoundedBridgeWriteQueue
+        writes = BoundedBridgeWriteQueue(maxsize=int(os.environ.get("MUSE_WRITES_QUEUE_MAX", "128")))
         flags: dict[str, bool] = {}
         threads: list[threading.Thread] = []
         pending_rpc: dict[int, str] = {}
@@ -750,10 +747,12 @@ class MuseAdapter(BackendAdapter):
                 message["id"] = rpc_id
                 pending_rpc[rpc_id] = method
             try:
-                writes.put_nowait(
-                    json.dumps(message, ensure_ascii=False).encode() + b"\n"
+                put_to = float(os.environ.get("MUSE_WRITES_QUEUE_PUT_TIMEOUT_S", "5.0"))
+                writes.put(
+                    json.dumps(message, ensure_ascii=False).encode() + b"\n",
+                    timeout=put_to,
                 )
-            except queue.Full as exc:
+            except Exception as exc:
                 raise ValueError("MSP stdin queue full") from exc
 
         def handle(message: Any) -> None:
