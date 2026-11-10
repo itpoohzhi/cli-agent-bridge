@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from math import isfinite
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from core.route_health_policy import FailureCategory, RetryBudgetConfig, classify_provider_failure, compute_attempt_decision  # fmt: skip  # noqa: E501,I001
 
@@ -181,28 +181,22 @@ class _RetryFacts:
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     """Оценить допустимость повтора стрима."""
     f = _RetryFacts(**kw)
-    valid_counts = type(f.attempt) is int and type(f.max_attempts) is int and 0 <= f.attempt < f.max_attempts and f.max_attempts > 0  # fmt: skip  # noqa: E501
-    valid_elapsed = type(f.elapsed_s) in (int, float) and isfinite(f.elapsed_s) and f.elapsed_s >= 0.0  # fmt: skip  # noqa: E501
-    if not (valid_counts and valid_elapsed):
+    valid_types = all((type(f.attempt) is int, type(f.max_attempts) is int, type(f.elapsed_s) in (int, float)))  # fmt: skip  # noqa: E501
+    if not valid_types:
+        return RetryDecision(False, False, "retry_blocked", 0.0)
+    valid = all((isfinite(f.elapsed_s), f.elapsed_s >= 0.0, 0 <= f.attempt < f.max_attempts, f.max_attempts > 0))  # fmt: skip  # noqa: E501
+    if not valid:
         return RetryDecision(False, False, "retry_blocked", 0.0)
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
-    eff_max = min(f.max_attempts, f.budget_config.max_attempts) if f.budget_config else f.max_attempts  # fmt: skip  # noqa: E501
-    cfg = replace(f.budget_config, max_attempts=eff_max) if f.budget_config else RetryBudgetConfig(max_attempts=eff_max)  # fmt: skip  # noqa: E501
-    if f.attempt >= eff_max:
-        return RetryDecision(
-            False, trans and not f.had_tool_side_effects, "retry_blocked", 0.0
-        )
-    adm = compute_attempt_decision(
-        cfg,
-        f.attempt,
-        float(f.elapsed_s),
-        FailureCategory.CAPACITY_EXHAUSTED
-        if trans
-        else classify_provider_failure(0, f.error_text).category,
-    )
-    quiet = trans and not f.had_tool_side_effects
-    can = all((quiet, not f.delivered, f.attempt < eff_max, adm.allow_retry))
-    return RetryDecision(can, quiet, "transient_pre_delivery_retry" if can else "retry_blocked", adm.attempt_budget_s if can else 0.0)  # fmt: skip  # noqa: E501
+    quiet = all((trans, not f.had_tool_side_effects))
+    fallback_cfg = RetryBudgetConfig(max_attempts=f.max_attempts)
+    base_cfg = cast(RetryBudgetConfig, (fallback_cfg, f.budget_config)[f.budget_config is not None])  # fmt: skip  # noqa: E501
+    cfg = replace(base_cfg, max_attempts=min(f.max_attempts, base_cfg.max_attempts))
+    cat = (classify_provider_failure(0, f.error_text).category, FailureCategory.CAPACITY_EXHAUSTED)[trans]  # fmt: skip  # noqa: E501
+    adm = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s), cat)
+    can = all((quiet, not f.delivered, f.attempt < cfg.max_attempts, adm.allow_retry))
+    out = ((False, quiet, "retry_blocked", 0.0), (True, quiet, "transient_pre_delivery_retry", adm.attempt_budget_s))[can]  # fmt: skip  # noqa: E501
+    return RetryDecision(*out)
 
 
 @dataclass(frozen=True)
