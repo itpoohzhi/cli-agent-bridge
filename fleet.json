@@ -201,7 +201,7 @@
       "max_concurrent": 1,
       "wrapper": "~/.config/muse-launch/muse-cli.sh",
       "technical_ref": {
-        "version": "1.4.3",
+        "version": "1.4.15",
         "binary_sha256": "c6db294799a190ca380da274beb3b9c0e160e0da9681a3d364ce8b0e5fa3a4bc",
         "binary_path": "~/.local/bin/muse"
       },
@@ -409,6 +409,34 @@
         "method": null,
         "proof": null
       }
+    },
+    {
+      "id": "muse-ember-1.0",
+      "backend": "muse",
+      "name": "Muse Ember 1.0 (Muse Meta bridge)",
+      "efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 131072,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "explicit_unsupported",
+        "status": "unsupported",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        321
+      ]
     },
     {
       "id": "muse-spark-1.3",
