@@ -8,8 +8,6 @@ from enum import Enum
 from math import floor, isfinite
 from typing import Final
 
-from core.dataclass_compat import DC_SLOTS
-
 
 class EffortLevel(str, Enum):
     LOW = "low"; MEDIUM = "medium"; HIGH = "high"  # fmt: skip  # noqa: E702
@@ -41,7 +39,7 @@ _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
 _SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+\S+", r"(?i)\b(?:refresh_token|access_token|client_secret|api_key|password|secret|token|cookie)\s*[:=]\s*\S+", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True)
 class NormalizedModelRoute:
     canonical_model: str
     reasoning_effort: str | None
@@ -78,7 +76,7 @@ def redact_diagnostic_text(raw_text: str) -> str:
     return safe[:MAX_DIAGNOSTIC_CHARS]
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True)
 class FailureClassification:
     category: FailureCategory
     retryable: bool
@@ -112,7 +110,7 @@ def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClass
     return FailureClassification(*values)
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True)
 class RouteHealthStatus:
     model_id: str
     available: bool
@@ -144,7 +142,7 @@ def detect_effective_env_drift(expected_env: Mapping[str, str], live_env: Mappin
     return tuple(sorted(changed))
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True)
 class RetryBudgetConfig:
     total_budget_s: float = 90.0
     reserve_s: float = 5.0
@@ -153,7 +151,7 @@ class RetryBudgetConfig:
     idle_timeout_s: float = 30.0
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True)
 class AttemptDecision:
     allow_retry: bool
     attempt_budget_s: float
@@ -166,8 +164,10 @@ def _require_finite(value: float, field: str) -> None:
 
 
 def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
-    for field in ("total_budget_s", "reserve_s", "min_attempt_budget_s", "idle_timeout_s"):  # fmt: skip  # noqa: E501
-        _require_finite(getattr(config, field), field)
+    _require_finite(config.total_budget_s, "total_budget_s")
+    _require_finite(config.reserve_s, "reserve_s")
+    _require_finite(config.min_attempt_budget_s, "min_attempt_budget_s")
+    _require_finite(config.idle_timeout_s, "idle_timeout_s")
     invalid = (config.total_budget_s <= 0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, config.min_attempt_budget_s <= 0, type(config.max_attempts) is not int or config.max_attempts < 1, config.idle_timeout_s <= 0)  # fmt: skip  # noqa: E501
     if any(invalid):
         raise ValueError("invalid retry budget configuration")
@@ -175,7 +175,7 @@ def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
 
 
 def compute_attempt_decision(config: RetryBudgetConfig, attempt_index: int, elapsed_s: float, last_failure_category: str | None = None) -> AttemptDecision:  # fmt: skip  # noqa: E501
-    validate_retry_config(config)
+    _ = validate_retry_config(config)
     if attempt_index < 0 or elapsed_s < 0 or not isfinite(elapsed_s):
         raise ValueError("attempt_index and elapsed_s must be non-negative")
     if last_failure_category not in (None, FailureCategory.CAPACITY_EXHAUSTED):
@@ -200,7 +200,7 @@ def advance_sliding_deadline(now_s: float, start_s: float, idle_timeout_s: float
     return min(now_s + idle_timeout_s, start_s + safety_cap_s)
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True)
 class CanonDigestResult:
     has_canon_end_marker: bool
     sha256_hex: str

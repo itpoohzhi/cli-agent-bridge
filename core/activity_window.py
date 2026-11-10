@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import time
-from typing import Callable
+from typing import Callable, final
 
 from core.route_health_policy import advance_sliding_deadline
 
 
+@final
 class ActivityWindow:
     def __init__(
         self,
@@ -14,12 +15,12 @@ class ActivityWindow:
         *,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._clock = clock
-        self._idle_timeout_s = float(idle_timeout_s)
-        self._safety_cap_s = float(safety_cap_s)
+        self._clock: Callable[[], float] = clock
+        self._idle_timeout_s: float = float(idle_timeout_s)
+        self._safety_cap_s: float = float(safety_cap_s)
         self._start_s: float = self._clock()
         self._safety_deadline: float = self._start_s + self._safety_cap_s
-        self._idle_deadline = advance_sliding_deadline(
+        self._idle_deadline: float = advance_sliding_deadline(
             self._start_s, self._start_s, self._idle_timeout_s, self._safety_cap_s
         )
 

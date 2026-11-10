@@ -55,7 +55,7 @@ def test_alias_normalization_and_live_effort_policy() -> None:
 @pytest.mark.parametrize("model,effort", (("", None), ("   ", None), ("m", "ultra")))
 def test_alias_rejects_invalid_input(model: str, effort: str | None) -> None:
     with pytest.raises(ValueError):
-        normalize_model_route(model, effort)
+        _ = normalize_model_route(model, effort)
 
 
 def test_redaction_masks_all_secrets_controls_and_truncates() -> None:
@@ -134,7 +134,7 @@ def test_route_health_block_precedes_stale_and_normalizes_alias() -> None:
 )
 def test_route_health_rejects_invalid_numbers(age: float, limit: float) -> None:
     with pytest.raises(ValueError):
-        evaluate_route_health("model", (), age, limit)
+        _ = evaluate_route_health("model", (), age, limit)
 
 
 def test_env_drift_and_embedded_runtime_snapshot() -> None:
@@ -161,7 +161,7 @@ def test_env_drift_and_embedded_runtime_snapshot() -> None:
 )
 def test_retry_config_rejects_invalid_fields(config: RetryBudgetConfig) -> None:
     with pytest.raises(ValueError):
-        validate_retry_config(config)
+        _ = validate_retry_config(config)
 
 
 @pytest.mark.parametrize(
@@ -194,7 +194,7 @@ def test_retry_budget_rounds_down_and_honors_boundaries() -> None:
 @pytest.mark.parametrize("index,elapsed", ((-1, 0.0), (0, -0.001), (0, float("inf"))))
 def test_retry_decision_rejects_invalid_inputs(index: int, elapsed: float) -> None:
     with pytest.raises(ValueError):
-        compute_attempt_decision(RetryBudgetConfig(), index, elapsed)
+        _ = compute_attempt_decision(RetryBudgetConfig(), index, elapsed)
 
 
 def test_sliding_deadline_and_live_activity_window() -> None:
@@ -217,7 +217,7 @@ def test_sliding_deadline_and_live_activity_window() -> None:
 )
 def test_sliding_deadline_rejects_invalid_parameters(args: tuple[float, ...]) -> None:
     with pytest.raises(ValueError):
-        advance_sliding_deadline(*args)
+        _ = advance_sliding_deadline(*args)
 
 
 def test_canon_digest_requires_tail_marker_and_tracks_changes() -> None:
@@ -237,4 +237,4 @@ def test_incident_snapshot_and_frozen_result() -> None:
     assert result.category is FailureCategory.AUTH_REFRESH_EXHAUSTED
     route = normalize_model_route("m")
     with pytest.raises(FrozenInstanceError):
-        route.canonical_model = "changed"  # type: ignore[misc]
+        setattr(route, "canonical_model", "changed")

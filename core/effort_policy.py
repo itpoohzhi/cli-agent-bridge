@@ -5,7 +5,6 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import cast
 
-from core.dataclass_compat import DC_SLOTS
 from core.route_health_policy import normalize_model_route
 
 FLAG_EFFORT_CATALOG = "BRIDGE_EFFORT_CATALOG_ENABLED"
@@ -33,7 +32,7 @@ def clamp_effort_downward(
         return default, True
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True, slots=True)
 class ModelEffortSpec:
     """Effort записи каталога."""
 
@@ -63,13 +62,13 @@ def _declared_default(raw: object, efforts: tuple[str, ...]) -> str | None:
     return next((item for item in efforts if item == name), None)
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True, slots=True)
 class ModelEffortCardFields:
     default_effort: str | None
     supported_efforts: tuple[str, ...]
 
 
-@dataclass(frozen=True, **DC_SLOTS)
+@dataclass(frozen=True, slots=True)
 class EffortResolution:
     """`apply=False` — дословно."""
 
