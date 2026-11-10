@@ -264,8 +264,10 @@ FINISH_RESERVE_S = 35.0
 CLOSE_RESERVE_S = 12.0
 REQUEST_CAP_S = 3600.0
 MIN_ATTEMPT_REMAINING_S = float(os.environ.get("MUSE_BRIDGE_MIN_ATTEMPT_S", "120"))
-CONTROL_WRITE_TIMEOUT_S = float(os.environ.get("MUSE_CONTROL_WRITE_TIMEOUT_S", "15.0"))
-LIVE_WRITE_TIMEOUT_S = float(os.environ.get("MUSE_LIVE_WRITE_TIMEOUT_S", "30.0"))
+from adapters.muse_config import get_muse_timeouts
+
+CONTROL_WRITE_TIMEOUT_S = get_muse_timeouts().control_write_timeout_s
+LIVE_WRITE_TIMEOUT_S = get_muse_timeouts().live_write_timeout_s
 APPROVAL_CANCEL_GRACE_S = 15.0
 MAX_APPROVAL_DECIDE = 10
 MAX_USER_INPUT_CANCEL = 3

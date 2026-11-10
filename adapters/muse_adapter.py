@@ -445,7 +445,7 @@ class MuseAdapter(BackendAdapter):
 
     def _normalize_proxy_port(self) -> int:
         """proxy_port бэкенда (иначе env, иначе default) -> int; мусор -> default."""
-        from adapters.muse_config import resolve_proxy_port
+        from adapters.muse_config import resolve_proxy_port, get_muse_timeouts
         return resolve_proxy_port(self.config)
 
     def _proxy_up(self) -> bool:
@@ -694,7 +694,8 @@ class MuseAdapter(BackendAdapter):
         done = threading.Event()
         reader_done = threading.Event()
         from core.backpressure import BoundedBridgeWriteQueue
-        writes = BoundedBridgeWriteQueue(maxsize=int(os.environ.get("MUSE_WRITES_QUEUE_MAX", "128")))
+        from adapters.muse_config import get_muse_timeouts
+        writes = BoundedBridgeWriteQueue(maxsize=get_muse_timeouts().writes_queue_max)
         flags: dict[str, bool] = {}
         threads: list[threading.Thread] = []
         pending_rpc: dict[int, str] = {}
@@ -747,7 +748,7 @@ class MuseAdapter(BackendAdapter):
                 message["id"] = rpc_id
                 pending_rpc[rpc_id] = method
             try:
-                put_to = float(os.environ.get("MUSE_WRITES_QUEUE_PUT_TIMEOUT_S", "5.0"))
+                put_to = get_muse_timeouts().writes_queue_put_timeout_s
                 writes.put(
                     json.dumps(message, ensure_ascii=False).encode() + b"\n",
                     timeout=put_to,
