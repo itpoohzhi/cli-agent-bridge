@@ -545,8 +545,8 @@ class TestFleetCheckParity(unittest.TestCase):
                 "backend_key_unknown",
             ),
             (
-                lambda d: d["backends"]["muse"].update(max_concurrent=2),
-                "backend_muse_max_concurrent_invalid",
+                lambda d: d["backends"]["muse"].update(max_concurrent=0),
+                "backend_max_concurrent_invalid",
             ),
         )
         for mutate, reason in cases:

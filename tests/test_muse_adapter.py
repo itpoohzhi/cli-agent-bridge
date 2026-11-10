@@ -27,6 +27,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from adapters import ADAPTER_KINDS  # noqa: E402
 from adapters.muse_adapter import (  # noqa: E402
     ENV_ALLOWLIST,
     MAX_ERR_CHARS,
@@ -35,8 +36,16 @@ from adapters.muse_adapter import (  # noqa: E402
     MuseAdapter,
     estimate_tokens,
 )
-from core.backend_adapter import BackendNotSupported, TurnContext  # noqa: E402
+from core.backend_adapter import (  # noqa: E402
+    BackendNotSupported,
+    TurnContext,
+    backend_entry_error,
+)
 from test_hub_integration import HubCase as _HubCase  # noqa: E402
+
+FLEET = json.loads(
+    (Path(__file__).resolve().parents[1] / "fleet.json").read_text(encoding="utf-8")
+)
 
 TOOL_JSON = (
     '{"payload_type":"run.output.delta","payload":{"text":"<tool_call>'
@@ -753,9 +762,25 @@ class TestPanelRework(MuseCase):
         self.assertEqual(out.err, "binary_path_not_canonical")
         self.assertEqual(self.fake.count(), 0)
 
-    def test_cap_above_one_is_refused(self):
-        with self.assertRaisesRegex(ValueError, "muse_max_concurrent"):
-            self.adapter(max_concurrent=2)
+    def test_cap_thirty_two_is_accepted(self):
+        adapter = self.adapter(max_concurrent=32)
+        self.assertEqual(adapter.max_concurrent, 32)
+
+    def test_backend_entry_accepts_cap_thirty_two_in_both_branches(self):
+        entry = dict(FLEET["backends"]["muse"])
+        entry["max_concurrent"] = 32
+        self.assertEqual(
+            backend_entry_error(
+                "muse", entry, ADAPTER_KINDS, constraints_enabled=False
+            ),
+            "",
+        )
+        self.assertEqual(
+            backend_entry_error(
+                "muse", entry, ADAPTER_KINDS, constraints_enabled=True
+            ),
+            "",
+        )
 
     def test_untrusted_output_is_bounded(self):
         import adapters.muse_adapter as muse_module

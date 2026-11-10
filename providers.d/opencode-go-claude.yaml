@@ -28,7 +28,7 @@ transport:
       response: {field: 'choices[0].message.content'}
 allow_base_url:
 - {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /go/v1}
-limits: {max_concurrent: 1, quota_group: opencode-go-claude, timeout_s: 180}
+limits: {max_concurrent: 32, quota_group: opencode-go-claude, timeout_s: 180}
 discovery:
   method: static
   static: [claude-haiku-5-5]
