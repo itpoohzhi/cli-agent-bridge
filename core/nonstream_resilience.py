@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Mapping, Protocol
 
 _MAX_RETRIES_NAME = "BRIDGE_NONSTREAM_INCOMPLETE_RETRY_MAX"
 _MAX_INFLIGHT_NAME = "BRIDGE_NONSTREAM_RETRY_MAX_INFLIGHT"
@@ -15,6 +15,13 @@ _MAX_MAX_RETRIES = 1
 _DEFAULT_MAX_INFLIGHT = 4
 _MIN_MAX_INFLIGHT = 1
 _MAX_MAX_INFLIGHT = 4
+_STATELESS_SESSIONS = "none"
+_NO_RETRY_HEADER = "x-bridge-no-retry"
+_IDEMPOTENCY_HEADERS = (
+    "x-request-id",
+    "idempotency-key",
+    "x-idempotency-key",
+)
 
 
 class _Environment(Protocol):
@@ -39,6 +46,36 @@ def _bulkhead_limit(raw: object) -> int:
     if _MIN_MAX_INFLIGHT <= value <= _MAX_MAX_INFLIGHT:
         return value
     return _DEFAULT_MAX_INFLIGHT
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str:
+    expected = name.casefold()
+    for key, value in headers.items():
+        if key.casefold() == expected:
+            return value.strip()
+    return ""
+
+
+def should_retry_incomplete_nonstream(
+    *,
+    internal_stream: bool,
+    aggregate_signals: int,
+    window_signals: int,
+    sessions: str,
+    headers: Mapping[str, str],
+) -> bool:
+    """Разрешает безопасный повтор до первого семантического сигнала."""
+    has_idempotency_key = any(
+        _header_value(headers, name) for name in _IDEMPOTENCY_HEADERS
+    )
+    return (
+        internal_stream
+        and aggregate_signals == 0
+        and window_signals == 0
+        and sessions == _STATELESS_SESSIONS
+        and _header_value(headers, _NO_RETRY_HEADER) != "1"
+        and has_idempotency_key
+    )
 
 
 @dataclass(frozen=True)
