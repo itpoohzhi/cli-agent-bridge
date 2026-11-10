@@ -203,6 +203,18 @@ def test_passthrough_target_model_rewriting():
     assert req["model"] == "gemini-3.8-flash"
 
 
+def test_exact_effort_alias_count():
+    """Проверяет точное количество effort-алиасов: ровно 19 целевых (10 Droid + 9 native), 23 всего в каталоге."""
+    fleet = _load_fleet()
+    aliases = fleet.get("aliases", {})
+    assert len(aliases) == 23, f"Expected 23 total aliases in fleet, got {len(aliases)}"
+    target_aliases = [
+        k for k in aliases
+        if any(m in k for m in ("gemini-3.8-flash", "gpt-6.1-sol", "claude-sonnet-5-5"))
+    ]
+    assert len(target_aliases) == 19, f"Expected exactly 19 target aliases (10 droid + 9 native), got {len(target_aliases)}"
+
+
 def test_manifest_priority_values():
     """Проверяет явные числовые значения priority в providers.d/*.yaml."""
     native_files = ["agy.yaml", "claude-p.yaml", "codex.yaml", "opencode-go.yaml", "muse.yaml"]
@@ -236,32 +248,37 @@ class TestDroidModelE2ERouting(BridgeCase):
     """Сквозной HTTP-тест маршрутизации *-droid через сервер Handler."""
 
     def test_droid_model_e2e_routing(self):
-        self.hub.legacy(
-            [
+        cases = [
+            ("gemini-3.8-flash-droid", "gemini-3.8-flash"),
+            ("gpt-6.1-sol-droid", "gpt-6.1-sol"),
+            ("claude-sonnet-5-5-droid", "claude-sonnet-5-5"),
+        ]
+        for droid_model, expected_upstream in cases:
+            self.hub.legacy(
                 [
-                    ("text", "pong from droid"),
-                    ("result", {"finalText": "", "usage": {}}),
-                    ("done", (0, "")),
+                    [
+                        ("text", f"pong from {droid_model}"),
+                        ("result", {"finalText": "", "usage": {}}),
+                        ("done", (0, "")),
+                    ]
                 ]
-            ]
-        )
-        status, body = self._post_json(
-            {
-                "model": "gemini-3.8-flash-droid",
-                "messages": [{"role": "user", "content": "ping"}],
-            }
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(body["choices"][0]["message"]["content"], "pong from droid")
-        self.assertEqual(body["model"], "gemini-3.8-flash-droid")
-        # Доказываем, что в Droid RPC фактически ушла каноническая upstream_model:
-        inits = self.hub.inits()
-        self.assertEqual(len(inits), 1, "Должна быть ровно одна инициализация сессии Droid")
-        self.assertEqual(
-            inits[0]["params"]["modelId"],
-            "gemini-3.8-flash",
-            "В Droid должна быть передана каноническая модель без суффикса -droid",
-        )
+            )
+            status, body = self._post_json(
+                {
+                    "model": droid_model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                }
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["choices"][0]["message"]["content"], f"pong from {droid_model}")
+            self.assertEqual(body["model"], droid_model)
+            inits = self.hub.inits()
+            self.assertGreaterEqual(len(inits), 1)
+            self.assertEqual(
+                inits[-1]["params"]["modelId"],
+                expected_upstream,
+                f"В Droid должна быть передана каноническая модель {expected_upstream} для {droid_model}",
+            )
 
     def test_turn_context_positional_backward_compatibility(self):
         """Регрессионный тест: позиционные аргументы TurnContext не ломаются новым полем."""
