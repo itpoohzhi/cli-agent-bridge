@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Callable
 
+from core.route_health_policy import advance_sliding_deadline
+
 
 class ActivityWindow:
     def __init__(
@@ -15,9 +17,11 @@ class ActivityWindow:
         self._clock = clock
         self._idle_timeout_s = float(idle_timeout_s)
         self._safety_cap_s = float(safety_cap_s)
-        now = self._clock()
-        self._safety_deadline: float = now + self._safety_cap_s
-        self._idle_deadline: float = min(self._safety_deadline, now + self._idle_timeout_s)
+        self._start_s: float = self._clock()
+        self._safety_deadline: float = self._start_s + self._safety_cap_s
+        self._idle_deadline = advance_sliding_deadline(
+            self._start_s, self._start_s, self._idle_timeout_s, self._safety_cap_s
+        )
 
     @property
     def idle_deadline(self) -> float:
@@ -30,7 +34,9 @@ class ActivityWindow:
     def touch(self) -> float:
         now = self._clock()
         if now < self._safety_deadline:
-            self._idle_deadline = min(self._safety_deadline, now + self._idle_timeout_s)
+            self._idle_deadline = advance_sliding_deadline(
+                now, self._start_s, self._idle_timeout_s, self._safety_cap_s
+            )
         return self._idle_deadline
 
     def is_expired(self) -> bool:

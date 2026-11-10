@@ -1,143 +1,150 @@
-"""Pure routing, health, retry, and canonical-payload policy primitives."""
-
 from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from math import isfinite
+from enum import Enum
+from math import floor, isfinite
+from typing import Final
+
+from core.dataclass_compat import DC_SLOTS
 
 
-_EFFORTS = frozenset(("low", "medium", "high"))
-_NON_RETRYABLE = frozenset(
-    (
-        "AUTH_REFRESH_EXHAUSTED",
-        "LIMIT_BLOCKED",
-        "UPSTREAM_TLS_STALL",
-        "FATAL_REQUEST_ERROR",
-    )
-)
-_CAPACITY_STATUSES = frozenset((429, 502, 503, 504))
+class EffortLevel(str, Enum):
+    LOW = "low"; MEDIUM = "medium"; HIGH = "high"  # fmt: skip  # noqa: E702
 
 
-@dataclass(frozen=True)
+class FailureCategory(str, Enum):
+    AUTH_REFRESH_EXHAUSTED = "AUTH_REFRESH_EXHAUSTED"; LIMIT_BLOCKED = "LIMIT_BLOCKED"  # fmt: skip  # noqa: E501,E702
+    UPSTREAM_TLS_STALL = "UPSTREAM_TLS_STALL"; CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"  # fmt: skip  # noqa: E501,E702
+    FATAL_REQUEST_ERROR = "FATAL_REQUEST_ERROR"
+
+
+class HealthReason(str, Enum):
+    READY = "READY"; LIMIT_BLOCKED = "LIMIT_BLOCKED"  # fmt: skip  # noqa: E702
+    STALE_HEALTH_PROBE = "STALE_HEALTH_PROBE"
+    ENV_DRIFT_DETECTED = "ENV_DRIFT_DETECTED"
+
+
+class RetryReason(str, Enum):
+    BUDGET_OK = "BUDGET_OK"; BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"  # fmt: skip  # noqa: E702
+    NON_RETRYABLE_CATEGORY = "NON_RETRYABLE_CATEGORY"
+    MAX_ATTEMPTS_REACHED = "MAX_ATTEMPTS_REACHED"
+
+
+DEFAULT_CANON_MARKER: Final[str] = "<!-- КАНОН-КОНЕЦ -->"
+REDACTED_TOKEN: Final[str] = "<redacted>"
+MAX_DIAGNOSTIC_CHARS: Final[int] = 256
+_EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
+_CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+\S+", r"(?i)\b(?:refresh_token|access_token|client_secret|api_key|password|secret|token|cookie)\s*[:=]\s*\S+", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+
+
+@dataclass(frozen=True, **DC_SLOTS)
 class NormalizedModelRoute:
     canonical_model: str
     reasoning_effort: str | None
     alias_applied: bool
 
 
-def normalize_model_route(
-    model_id: str, explicit_effort: str | None = None
-) -> NormalizedModelRoute:
-    """Normalize an optional effort suffix while preserving explicit effort."""
+def normalize_model_route(model_id: str, explicit_effort: str | None = None, allowed_suffixes: Collection[str] | None = None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
     model = model_id.strip()
     if not model:
         raise ValueError("model_id must not be empty")
-    if explicit_effort is not None and explicit_effort not in _EFFORTS:
-        raise ValueError("explicit_effort must be low, medium, or high")
-    for suffix in _EFFORTS:
+    allowed = _EFFORTS
+    if allowed_suffixes is not None:
+        allowed = frozenset(
+            suffix.strip().lower() for suffix in allowed_suffixes if suffix.strip()
+        )
+    if explicit_effort is not None:
+        explicit = explicit_effort.strip().lower()
+        if explicit not in _EFFORTS:
+            raise ValueError("explicit_effort must be low, medium, or high")
+    else:
+        explicit = None
+    for suffix in sorted(allowed, key=len, reverse=True):
         marker = f"-{suffix}"
-        if model.endswith(marker) and len(model) > len(marker):
-            effort = explicit_effort if explicit_effort is not None else suffix
-            return NormalizedModelRoute(model[: -len(marker)], effort, True)
-    return NormalizedModelRoute(model, explicit_effort, False)
+        if len(model) > len(marker) and model.lower().endswith(marker):
+            return NormalizedModelRoute(model[: -len(marker)], explicit or suffix, True)
+    return NormalizedModelRoute(model, explicit, False)
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
-    """Return a bounded diagnostic without common credentials or identities."""
-    safe = re.sub(r"(?i)\bbearer\s+\S+", "<redacted>", raw_text)
-    safe = re.sub(r"\bsk-[A-Za-z0-9._-]+", "<redacted>", safe)
-    safe = re.sub(r"\bAIza[A-Za-z0-9_-]+", "<redacted>", safe)
-    safe = re.sub(
-        r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-        "<redacted>",
-        safe,
-    )
+    safe = raw_text
+    for pattern in _SECRET_PATTERNS:
+        safe = re.sub(pattern, REDACTED_TOKEN, safe)
     safe = re.sub(r"[\x00-\x1f\x7f]+", " ", safe)
-    return safe[:256]
+    return safe[:MAX_DIAGNOSTIC_CHARS]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **DC_SLOTS)
 class FailureClassification:
-    category: str
+    category: FailureCategory
     retryable: bool
     failover_eligible: bool
     sanitized_reason: str
 
 
 def _is_auth_failure(status_code: int, reason: str) -> bool:
-    if "token refresh failed" in reason or "oauth refresh" in reason:
+    terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key")  # fmt: skip  # noqa: E501
+    if any(term in reason for term in terms):
         return True
-    return status_code in (401, 403) and any(
-        token in reason for token in ("oauth", "refresh", "token")
-    )
+    if status_code == 401:
+        return True
+    auth_terms = ("oauth", "refresh", "unauthenticated")
+    return status_code == 403 and any(term in reason for term in auth_terms)
 
 
-def classify_provider_failure(
-    status_code: int, raw_reason: str
-) -> FailureClassification:
-    """Classify a provider failure using ordered, provider-neutral evidence."""
+def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClassification:  # fmt: skip  # noqa: E501
     reason = raw_reason.lower()
     sanitized = redact_diagnostic_text(raw_reason)
     if _is_auth_failure(status_code, reason):
-        return FailureClassification("AUTH_REFRESH_EXHAUSTED", False, True, sanitized)
-    if any(
-        term in reason for term in ("limit-blocked", "quota exceeded", "spending cap")
-    ):
-        return FailureClassification("LIMIT_BLOCKED", False, True, sanitized)
-    if "ssl_error_syscall" in reason or "tls handshake timeout" in reason:
-        return FailureClassification("UPSTREAM_TLS_STALL", False, True, sanitized)
-    if status_code in _CAPACITY_STATUSES or "model_capacity_exhausted" in reason:
-        return FailureClassification("CAPACITY_EXHAUSTED", True, True, sanitized)
-    return FailureClassification("FATAL_REQUEST_ERROR", False, False, sanitized)
+        values = (FailureCategory.AUTH_REFRESH_EXHAUSTED, False, True, sanitized)
+    elif any(term in reason for term in ("limit-blocked", "quota exceeded", "spending cap")):  # fmt: skip  # noqa: E501
+        values = (FailureCategory.LIMIT_BLOCKED, False, True, sanitized)
+    elif "ssl_error_syscall" in reason or "tls handshake timeout" in reason:
+        values = (FailureCategory.UPSTREAM_TLS_STALL, False, True, sanitized)
+    elif status_code in _CAPACITY_STATUSES or "model_capacity_exhausted" in reason:
+        values = (FailureCategory.CAPACITY_EXHAUSTED, True, True, sanitized)
+    else:
+        values = (FailureCategory.FATAL_REQUEST_ERROR, False, False, sanitized)
+    return FailureClassification(*values)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **DC_SLOTS)
 class RouteHealthStatus:
     model_id: str
     available: bool
-    status_reason: str
+    status_reason: HealthReason
     env_drift_keys: tuple[str, ...]
 
 
-def evaluate_route_health(
-    model_id: str,
-    blocked_models: tuple[str, ...],
-    probe_age_s: float,
-    max_stale_age_s: float,
-    env_drift_keys: tuple[str, ...] = (),
-) -> RouteHealthStatus:
-    """Evaluate request admission separately from catalog display state."""
+def evaluate_route_health(model_id: str, blocked_models: tuple[str, ...], probe_age_s: float, max_stale_age_s: float, env_drift_keys: tuple[str, ...] = ()) -> RouteHealthStatus:  # fmt: skip  # noqa: E501
+    _require_finite(probe_age_s, "probe_age_s")
+    _require_finite(max_stale_age_s, "max_stale_age_s")
+    if max_stale_age_s < 0:
+        raise ValueError("max_stale_age_s must be non-negative")
     canonical = normalize_model_route(model_id).canonical_model
-    blocked = tuple(
-        normalize_model_route(item).canonical_model for item in blocked_models
-    )
+    blocked = tuple(normalize_model_route(item).canonical_model for item in blocked_models)  # fmt: skip  # noqa: E501
     drift = tuple(sorted(env_drift_keys))
     if canonical in blocked:
-        return RouteHealthStatus(canonical, False, "LIMIT_BLOCKED", drift)
-    if probe_age_s > max_stale_age_s or probe_age_s < 0:
-        return RouteHealthStatus(canonical, False, "STALE_HEALTH_PROBE", drift)
-    if drift:
-        return RouteHealthStatus(canonical, False, "ENV_DRIFT_DETECTED", drift)
-    return RouteHealthStatus(canonical, True, "READY", drift)
+        reason = HealthReason.LIMIT_BLOCKED
+    elif probe_age_s > max_stale_age_s or probe_age_s < 0:
+        reason = HealthReason.STALE_HEALTH_PROBE
+    elif drift:
+        reason = HealthReason.ENV_DRIFT_DETECTED
+    else:
+        return RouteHealthStatus(canonical, True, HealthReason.READY, drift)
+    return RouteHealthStatus(canonical, False, reason, drift)
 
 
-def detect_effective_env_drift(
-    expected_env: Mapping[str, str],
-    live_env: Mapping[str, str],
-    tracked_keys: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Return tracked keys whose configured and effective values differ."""
-    return tuple(
-        sorted(
-            key for key in tracked_keys if expected_env.get(key) != live_env.get(key)
-        )
-    )
+def detect_effective_env_drift(expected_env: Mapping[str, str], live_env: Mapping[str, str], tracked_keys: tuple[str, ...]) -> tuple[str, ...]:  # fmt: skip  # noqa: E501
+    changed = (key for key in tracked_keys if expected_env.get(key) != live_env.get(key))  # fmt: skip  # noqa: E501
+    return tuple(sorted(changed))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **DC_SLOTS)
 class RetryBudgetConfig:
     total_budget_s: float = 90.0
     reserve_s: float = 5.0
@@ -146,11 +153,11 @@ class RetryBudgetConfig:
     idle_timeout_s: float = 30.0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **DC_SLOTS)
 class AttemptDecision:
     allow_retry: bool
     attempt_budget_s: float
-    reason: str
+    reason: RetryReason
 
 
 def _require_finite(value: float, field: str) -> None:
@@ -159,69 +166,53 @@ def _require_finite(value: float, field: str) -> None:
 
 
 def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
-    """Reject unsafe or nonsensical retry budget fields."""
-    _require_finite(config.total_budget_s, "total_budget_s")
-    _require_finite(config.reserve_s, "reserve_s")
-    _require_finite(config.min_attempt_budget_s, "min_attempt_budget_s")
-    _require_finite(config.idle_timeout_s, "idle_timeout_s")
-    if config.total_budget_s <= 0:
-        raise ValueError("total_budget_s must be positive")
-    if config.reserve_s < 0 or config.reserve_s >= config.total_budget_s:
-        raise ValueError("reserve_s must fit within total_budget_s")
-    if config.min_attempt_budget_s <= 0:
-        raise ValueError("min_attempt_budget_s must be positive")
-    if type(config.max_attempts) is not int or config.max_attempts < 1:
-        raise ValueError("max_attempts must be a positive integer")
-    if config.idle_timeout_s <= 0:
-        raise ValueError("idle_timeout_s must be positive")
+    for field in ("total_budget_s", "reserve_s", "min_attempt_budget_s", "idle_timeout_s"):  # fmt: skip  # noqa: E501
+        _require_finite(getattr(config, field), field)
+    invalid = (config.total_budget_s <= 0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, config.min_attempt_budget_s <= 0, type(config.max_attempts) is not int or config.max_attempts < 1, config.idle_timeout_s <= 0)  # fmt: skip  # noqa: E501
+    if any(invalid):
+        raise ValueError("invalid retry budget configuration")
     return config
 
 
-def compute_attempt_decision(
-    config: RetryBudgetConfig,
-    attempt_index: int,
-    elapsed_s: float,
-    last_failure_category: str | None = None,
-) -> AttemptDecision:
-    """Admit an attempt only when its class and remaining budget permit it."""
+def compute_attempt_decision(config: RetryBudgetConfig, attempt_index: int, elapsed_s: float, last_failure_category: str | None = None) -> AttemptDecision:  # fmt: skip  # noqa: E501
     validate_retry_config(config)
     if attempt_index < 0 or elapsed_s < 0 or not isfinite(elapsed_s):
         raise ValueError("attempt_index and elapsed_s must be non-negative")
-    if last_failure_category in _NON_RETRYABLE:
-        return AttemptDecision(False, 0.0, "NON_RETRYABLE_CATEGORY")
+    if last_failure_category not in (None, FailureCategory.CAPACITY_EXHAUSTED):
+        return AttemptDecision(False, 0.0, RetryReason.NON_RETRYABLE_CATEGORY)
     if attempt_index >= config.max_attempts:
-        return AttemptDecision(False, 0.0, "MAX_ATTEMPTS_REACHED")
+        return AttemptDecision(False, 0.0, RetryReason.MAX_ATTEMPTS_REACHED)
     usable_s = config.total_budget_s - config.reserve_s - elapsed_s
-    remaining_slots = config.max_attempts - attempt_index
-    per_attempt_s = usable_s / remaining_slots
+    per_attempt_s = usable_s / (config.max_attempts - attempt_index)
     if per_attempt_s < config.min_attempt_budget_s:
-        return AttemptDecision(False, 0.0, "BUDGET_EXHAUSTED")
-    return AttemptDecision(True, round(per_attempt_s, 3), "BUDGET_OK")
+        return AttemptDecision(False, 0.0, RetryReason.BUDGET_EXHAUSTED)
+    budget_s = floor(per_attempt_s * 1000.0) / 1000.0
+    return AttemptDecision(True, budget_s, RetryReason.BUDGET_OK)
 
 
-def advance_sliding_deadline(
-    now_s: float, start_s: float, idle_timeout_s: float, safety_cap_s: float
-) -> float:
-    """Advance an idle deadline without exceeding the absolute safety cap."""
-    candidate = now_s + idle_timeout_s
-    hard_limit = start_s + safety_cap_s
-    return min(candidate, hard_limit)
+def advance_sliding_deadline(now_s: float, start_s: float, idle_timeout_s: float, safety_cap_s: float) -> float:  # fmt: skip  # noqa: E501
+    _require_finite(now_s, "now_s")
+    _require_finite(start_s, "start_s")
+    _require_finite(idle_timeout_s, "idle_timeout_s")
+    _require_finite(safety_cap_s, "safety_cap_s")
+    if idle_timeout_s <= 0 or safety_cap_s <= 0 or now_s < start_s:
+        raise ValueError("invalid deadline window parameters")
+    return min(now_s + idle_timeout_s, start_s + safety_cap_s)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **DC_SLOTS)
 class CanonDigestResult:
     has_canon_end_marker: bool
     sha256_hex: str
     byte_length: int
+    unchanged: bool = False
 
 
-def inspect_canon_payload(
-    text: str, marker: str = "<!-- КАНОН-КОНЕЦ -->"
-) -> CanonDigestResult:
-    """Inspect exact UTF-8 bytes and the mandatory canonical end marker."""
+def inspect_canon_payload(text: str, marker: str = DEFAULT_CANON_MARKER, previous_sha256: str | None = None) -> CanonDigestResult:  # fmt: skip  # noqa: E501
     if not marker:
         raise ValueError("marker must not be empty")
     payload = text.encode("utf-8")
-    return CanonDigestResult(
-        marker in text, hashlib.sha256(payload).hexdigest(), len(payload)
-    )
+    has_marker = text.rstrip().endswith(marker)
+    sha = hashlib.sha256(payload).hexdigest()
+    unchanged = bool(has_marker and previous_sha256 is not None and sha == previous_sha256)  # fmt: skip  # noqa: E501
+    return CanonDigestResult(has_marker, sha, len(payload), unchanged)
