@@ -76,6 +76,7 @@ from core.cli_runtime_config import NonstreamConfig
 from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
 from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, SlidingDeadline, open_sliding_deadline
+from core.presend_retry_policy import resolve_presend_response
 from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
 from core.stream_framing import (
     build_stream_error_chunk,
@@ -1413,6 +1414,18 @@ class PassthroughAdapter(BackendAdapter):
                     raise ClientGone() if sink.client_gone() else TimeoutError()
                 transport.append(sock)
 
+        def open_response() -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+            new_conn = self._open(path, raw_body, headers, deadline=open_deadline, on_socket=on_socket, presend_deadline=getattr(sink, "presend_deadline", None), on_pooling=opened_pooling.append)
+            try:
+                if sink.client_gone():
+                    raise ClientGone()
+                new_resp = new_conn.getresponse()
+            except BaseException:
+                new_conn.close()
+                raise
+            slide.relax_socket(new_conn.sock, self.limits.read_timeout_s, internal is not None)
+            return new_conn, new_resp
+
         watcher = threading.Thread(
             target=watch, daemon=True, name="passthrough-deadline"
         )
@@ -1423,45 +1436,18 @@ class PassthroughAdapter(BackendAdapter):
                     raise ClientGone()
                 if aborted.is_set() or time.monotonic() >= deadline:
                     raise TimeoutError()
-                conn = self._open(
-                    path,
-                    raw_body,
-                    headers,
-                    deadline=open_deadline,
-                    on_socket=on_socket,
-                    presend_deadline=getattr(sink, "presend_deadline", None),
-                    on_pooling=opened_pooling.append,
-                )
+                conn, resp = open_response()
                 if sink.client_gone():
                     raise ClientGone()
                 if aborted.is_set() or time.monotonic() >= deadline:
                     raise TimeoutError()
-                resp = conn.getresponse()
-                if time.monotonic() >= deadline:
-                    raise TimeoutError()
-                slide.relax_socket(conn.sock, self.limits.read_timeout_s, internal is not None)
-                if resp.status in (502, 503) and getattr(
-                    sink, "accepts_presend_errors", False
-                ):
-                    try:
-                        body = _read_bounded(resp, self.limits.max_body_bytes)
-                    except UpstreamBodyTooLarge:
-                        self._fail(
-                            sink,
-                            502,
-                            "upstream_response_too_large",
-                            "upstream response exceeds the bridge limit",
-                        )
-                        return
-                    raise PreSendTransientError(
-                        "transient upstream HTTP status",
-                        status_code=resp.status,
-                        response_headers=tuple(
-                            self._response_headers(resp)
-                            + [("Content-Length", str(len(body)))]
-                        ),
-                        response_body=body,
-                    )
+                conn, resp, handled = resolve_presend_response(self, conn, resp, sink, open_response)
+                if handled:
+                    successful = True
+                    return
+            except UpstreamBodyTooLarge:
+                self._fail(sink, 502, "upstream_response_too_large", "upstream response exceeds the bridge limit")
+                return
             except PreSendTransientError as exc:
                 if getattr(sink, "accepts_presend_errors", False):
                     raise
@@ -1681,10 +1667,14 @@ class PassthroughAdapter(BackendAdapter):
         sink.start(status, headers)
         sink.write(body)
 
-    def _response_headers(
-        self, resp: http.client.HTTPResponse
-    ) -> list[tuple[str, str]]:
+    def _response_headers(self, resp: http.client.HTTPResponse) -> list[tuple[str, str]]:
         return [(k, v) for k, v in resp.getheaders() if k.lower() not in _RESPONSE_DROP]
+
+    def _read_presend_body(self, resp: http.client.HTTPResponse) -> bytes:
+        return _read_bounded(resp, self.limits.max_body_bytes)
+
+    def _client_gone_exc(self) -> ClientGone:
+        return ClientGone()
 
     def _respond(
         self,
