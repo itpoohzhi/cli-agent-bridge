@@ -42,7 +42,7 @@ class ActivityWindow:
 
     def touch(self) -> float:
         now = self._clock()
-        if now < self._safety_deadline:
+        if now < self._idle_deadline and now < self._safety_deadline:
             self._idle_deadline = advance_sliding_deadline(
                 now, self._start_s, self._idle_timeout_s, self._safety_cap_s
             )

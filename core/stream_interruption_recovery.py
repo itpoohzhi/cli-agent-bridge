@@ -14,8 +14,8 @@ _TRANSIENT_PHRASES: tuple[str, ...] = ("stream was interrupted", "please continu
 TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
 )
-_FATAL_HTTP_STATUS_RE = re.compile(
-    r"(?i)\b(?:http[/\s]*\d(?:\.\d)?\s+(?:400|401|403|404|422)|status(?:\s+code)?[\s:=]+(?:400|401|403|404|422)|403\s+forbidden|400\s+bad\s+request)\b"
+_FATAL_STATUS_RE = re.compile(
+    r"(?i)\b(?:http(?:[/\s]*\d(?:\.\d)?)?\s+4(?:0\d|1\d|2[0-8]|3\d|51)|status(?:\s+code)?[\s:=]+4(?:0\d|1\d|2[0-8]|3\d|51)|bad\s+request|forbidden|method\s+not\s+allowed|conflict|unprocessable)\b"
 )
 
 DEFAULT_INTERRUPTION_NOTICE = (
@@ -30,7 +30,7 @@ def is_transient_stream_interruption(
     haystack = "" if source == "model_content" else text or ""
     if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
         return False
-    if _FATAL_HTTP_STATUS_RE.search(haystack):
+    if _FATAL_STATUS_RE.search(haystack):
         return False
     category = classify_provider_failure(0, haystack).category
     blocked = (
@@ -195,7 +195,10 @@ def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
 
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     """Оценить допустимость повтора стрима."""
-    f = _RetryFacts(**kw)
+    try:
+        f = _RetryFacts(**kw)
+    except TypeError:
+        return RetryDecision(False, False, "retry_blocked", 0.0)
     valid_types = all((type(f.attempt) is int, type(f.max_attempts) is int, type(f.elapsed_s) in (int, float)))  # fmt: skip  # noqa: E501
     if not valid_types:
         return RetryDecision(False, False, "retry_blocked", 0.0)

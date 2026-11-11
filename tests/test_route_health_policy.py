@@ -18,7 +18,8 @@ from core.stream_interruption_recovery import evaluate_stream_retry_eligibility 
 U = "403 OAuth refresh rejected: token refresh failed"
 T = "per_attempt_upper duration_s=18.288681"
 V = "configured=1500 effective=300"
-Q = "capacity unavailable; r after 401 seconds"
+Q = "capacity unavailable; retry after 401 seconds"
+P = "connection reset"
 
 @pytest.mark.parametrize("suffix", ("low", "medium", "high"))
 def test_alias_suffix(suffix: str) -> None:
@@ -38,7 +39,7 @@ def test_redaction() -> None:
     assert len(z) <= 256 and len(x("x" * 300)) == 256
     assert z.count("<redacted>") >= 7
     assert all(value not in z for value in ("bearer.value", "ya29.", "1//", "@", "\x00", "\n"))
-    cases = ('{"access_token":"TOPSECRET"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET")
+    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET")
     assert all("<redacted>" in x(text) for text in cases)
     assert x(r"\uD800").encode("utf-8") == b" "
 
@@ -55,17 +56,17 @@ def test_failures(case: tuple[int, str, F, bool]) -> None:
     assert (z.category, z.retryable) == (category, retryable)
 
 def test_retry_filter() -> None:
-    assert t("connection reset") is True
-    blocked = ("connection reset quota exceeded", "connection reset token refresh failed", "connection reset TLS handshake timeout", "connection reset HTTP 401 Unauthorized", "connection reset HTTP 403 Forbidden")
+    assert t(P) is True
+    blocked = (P + " quota exceeded", P + " token refresh failed", P + " TLS handshake timeout", P + " HTTP 401 Unauthorized", P + " HTTP 403 Forbidden", "connection reset: Bad Request", "HTTP/1.1 405 Method Not Allowed; connection reset")
     assert all(t(text) is False for text in blocked)
     assert r(error_text=blocked[3], delivered=False).can_retry is False
-    allowed = r(error_text="connection reset", delivered=False)
+    allowed = r(error_text=P, delivered=False)
     assert allowed.can_retry is True and allowed.attempt_budget_s > 0.0
-    exhausted = r(error_text="connection reset", delivered=False, elapsed_s=86.0)
+    exhausted = r(error_text=P, delivered=False, elapsed_s=86.0)
     assert exhausted.can_retry is False and exhausted.attempt_budget_s == 0.0
     invalid = ({"max_attempts": 0}, {"elapsed_s": float("nan")}, {"elapsed_s": -1.0}, {"budget_config": C(max_attempts=0)})
-    assert all(not r(error_text="connection reset", delivered=False, **kw).can_retry for kw in invalid)
-    stricter = r(error_text="connection reset", delivered=False, a=1, max_attempts=3, budget_config=C(max_attempts=1))
+    assert all(not r(error_text=P, delivered=False, **kw).can_retry for kw in invalid)
+    stricter = r(error_text=P, delivered=False, attempt=1, max_attempts=3, budget_config=C(max_attempts=1))
     assert stricter.can_retry is False and stricter.keep_hot_session is True
 
 @pytest.mark.parametrize("case", ((0.0, 0.0, (), True, H.READY), (5.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (-0.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (1.0, 5.0, ("Z", "A"), False, H.ENV_DRIFT_DETECTED)))
