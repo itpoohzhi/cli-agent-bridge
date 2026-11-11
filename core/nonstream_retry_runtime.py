@@ -49,6 +49,7 @@ def retry_incomplete_once(
     state, effect = _initial_decision(runtime, policy_enabled, request_eligible)
     if effect is not RetryEffectKind.ACQUIRE_SLOT:
         return None
+    _require_time(runtime, state, _remaining(runtime.deadline) <= 0)
     acquired = runtime.bulkhead.try_acquire()
     state, effects = transition(
         state,
@@ -56,10 +57,26 @@ def retry_incomplete_once(
     )
     if effects[0].kind is not RetryEffectKind.CHECK_TIME:
         return None
+    held = True
     try:
-        return _retry_with_time_budget(runtime, state)
+        remaining = _remaining(runtime.deadline)
+        _require_time(runtime, state, remaining <= 0)
+        jitter = runtime.poll_interval_s * random.uniform(0.1, 0.5)
+        delay = min(jitter, max(0.0, remaining * 0.25))
+        if delay > 0:
+            runtime.bulkhead.release()
+            held = False
+            time.sleep(delay)
+            if not runtime.bulkhead.try_acquire():
+                return None
+            held = True
+        expired = runtime.deadline is not None and time.monotonic() >= runtime.deadline
+        _require_time(runtime, state, expired)
+        assert runtime.reopen is not None
+        return runtime.read_once(runtime.reopen())
     finally:
-        runtime.bulkhead.release()
+        if held:
+            runtime.bulkhead.release()
 
 
 def _initial_decision(
@@ -77,19 +94,6 @@ def _initial_decision(
         ),
     )
     return state, effects[0].kind
-
-
-def _retry_with_time_budget(runtime: RetryRuntime, state: RetryState) -> bytes:
-    remaining = _remaining(runtime.deadline)
-    _require_time(runtime, state, remaining <= 0)
-    jitter = runtime.poll_interval_s * random.uniform(0.1, 0.5)
-    delay = min(jitter, max(0.0, remaining * 0.25))
-    if delay > 0:
-        time.sleep(delay)
-    expired = runtime.deadline is not None and time.monotonic() >= runtime.deadline
-    _require_time(runtime, state, expired)
-    assert runtime.reopen is not None
-    return runtime.read_once(runtime.reopen())
 
 
 def _remaining(deadline: float | None) -> float:
