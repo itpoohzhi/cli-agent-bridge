@@ -5,14 +5,19 @@ import io
 import json
 import threading
 import time
-from typing import Mapping, cast
+from collections.abc import Iterator, Mapping
+from typing import cast
 
 import pytest
 
+from adapters import passthrough_adapter
+from adapters.passthrough_adapter import PassthroughAdapter
 from core import nonstream_resilience
 from core.liveness_signals import LivenessWindow, WindowSpec
 from core.nonstream_aggregator import NonstreamError
 from tests.test_openai_passthrough import (
+    CollectSink,
+    FakeUpstream,
     content,
     finish,
     make_adapter,
@@ -21,6 +26,13 @@ from tests.test_openai_passthrough import (
 )
 
 DONE = b"data: [DONE]\n\n"
+
+
+@pytest.fixture
+def retry_upstream() -> Iterator[FakeUpstream]:
+    server = FakeUpstream()
+    yield server
+    server.close()
 
 
 def test_nonstream_retry_policy_contract() -> None:
@@ -288,3 +300,81 @@ def test_passthrough_retry_requires_available_bulkhead_slot(
 
     assert error.value.code == "upstream_incomplete_stream"
     assert reopened == 0
+
+
+def _handle_request(
+    adapter: PassthroughAdapter,
+    request: dict[str, object],
+    headers: Mapping[str, str],
+) -> CollectSink:
+    sink = CollectSink()
+    adapter.handle(
+        path="/v1/chat/completions",
+        raw_body=json.dumps(request).encode(),
+        request=request,
+        headers=headers,
+        sink=sink,
+    )
+    return sink
+
+
+def test_handle_retries_zero_signal_eof_before_first_token(
+    monkeypatch: pytest.MonkeyPatch, retry_upstream: FakeUpstream
+) -> None:
+    monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    monkeypatch.setenv("BRIDGE_NONSTREAM_INCOMPLETE_RETRY_MAX", "1")
+    monkeypatch.setenv("BRIDGE_CONNECTION_POOLING_ENABLED", "0")
+    monkeypatch.setattr("core.nonstream_retry_runtime.random.uniform", lambda *_: 0.0)
+    deadline_modes: list[bool] = []
+    real_deadlines = passthrough_adapter.request_deadlines
+
+    def record_deadline_mode(limits: object, aggregate: bool) -> tuple[float, float]:
+        deadline_modes.append(aggregate)
+        return real_deadlines(limits, aggregate)
+
+    monkeypatch.setattr(passthrough_adapter, "request_deadlines", record_deadline_mode)
+    attempts = 0
+
+    def respond(handler: object, body: bytes) -> None:
+        nonlocal attempts
+        attempts += 1
+        payload = b": keepalive\n\n"
+        if attempts == 2:
+            payload = content("retried") + finish(0, "stop") + DONE
+        FakeUpstream.sse(handler, payload)  # type: ignore[arg-type]
+
+    retry_upstream.respond = respond
+    adapter = make_adapter(retry_upstream.port, ns_limits(), sanitize=True)
+    request: dict[str, object] = {"model": "m", "stream": False, "messages": []}
+    try:
+        sink = _handle_request(adapter, request, {"Idempotency-Key": "retry-once"})
+    finally:
+        adapter.shutdown()
+
+    assert (sink.status, attempts, len(retry_upstream.requests)) == (200, 2, 2)
+    assert deadline_modes == [True]
+    assert message_of(json.loads(sink.body))["content"] == "retried"
+
+
+def test_handle_bulkhead_refuses_retry_without_second_upstream_request(
+    monkeypatch: pytest.MonkeyPatch, retry_upstream: FakeUpstream
+) -> None:
+    monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    monkeypatch.setenv("BRIDGE_NONSTREAM_INCOMPLETE_RETRY_MAX", "1")
+    monkeypatch.setenv("BRIDGE_NONSTREAM_RETRY_MAX_INFLIGHT", "1")
+    retry_upstream.respond = lambda handler, body: FakeUpstream.sse(  # type: ignore[arg-type]
+        handler, b": keepalive\n\n"
+    )
+    adapter = make_adapter(retry_upstream.port, ns_limits(), sanitize=True)
+    blocker = adapter._get_retry_bulkhead()
+    assert blocker.try_acquire()
+    request: dict[str, object] = {"model": "m", "stream": False, "messages": []}
+    try:
+        sink = _handle_request(adapter, request, {"X-Request-Id": "bulkhead-full"})
+    finally:
+        blocker.release()
+        adapter.shutdown()
+
+    assert len(retry_upstream.requests) == 1
+    assert sink.status == 502
+    assert json.loads(sink.body)["error"]["type"] == "upstream_incomplete_stream"

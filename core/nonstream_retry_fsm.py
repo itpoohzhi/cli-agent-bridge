@@ -74,7 +74,7 @@ def _error_allows_retry(event: RetryEvent) -> bool:
 
 def transition(
     state: RetryState, event: RetryEvent
-) -> tuple[RetryState, list[RetryEffect]]:
+) -> tuple[RetryState, tuple[RetryEffect, ...]]:
     """Вычисляет новое состояние и декларативный эффект без I/O и часов."""
     if state.phase is RetryPhase.IDLE:
         return _transition_idle(state, event)
@@ -82,39 +82,41 @@ def transition(
         return _transition_slot(state, event)
     if state.phase is RetryPhase.CHECKING_TIME:
         return _transition_time(state, event)
-    return RetryState(RetryPhase.TERMINAL, state.attempts), [
-        RetryEffect(RetryEffectKind.RERAISE)
-    ]
+    return RetryState(RetryPhase.TERMINAL, state.attempts), (
+        RetryEffect(RetryEffectKind.RERAISE),
+    )
 
 
 def _transition_idle(
     state: RetryState, event: RetryEvent
-) -> tuple[RetryState, list[RetryEffect]]:
+) -> tuple[RetryState, tuple[RetryEffect, ...]]:
     allowed = event.kind is RetryEventKind.UPSTREAM_ERROR and _error_allows_retry(event)
     phase = RetryPhase.WAITING_SLOT if allowed else RetryPhase.TERMINAL
     effect = RetryEffectKind.ACQUIRE_SLOT if allowed else RetryEffectKind.RERAISE
-    return RetryState(phase, state.attempts), [RetryEffect(effect)]
+    return RetryState(phase, state.attempts), (RetryEffect(effect),)
 
 
 def _transition_slot(
     state: RetryState, event: RetryEvent
-) -> tuple[RetryState, list[RetryEffect]]:
+) -> tuple[RetryState, tuple[RetryEffect, ...]]:
     acquired = event.kind is RetryEventKind.SLOT_RESULT and event.slot_acquired
     phase = RetryPhase.CHECKING_TIME if acquired else RetryPhase.TERMINAL
     effect = RetryEffectKind.CHECK_TIME if acquired else RetryEffectKind.RERAISE
-    return RetryState(phase, state.attempts), [RetryEffect(effect)]
+    return RetryState(phase, state.attempts), (RetryEffect(effect),)
 
 
 def _transition_time(
     state: RetryState, event: RetryEvent
-) -> tuple[RetryState, list[RetryEffect]]:
+) -> tuple[RetryState, tuple[RetryEffect, ...]]:
     expired = event.kind is not RetryEventKind.TIME_BUDGET or event.deadline_expired
     phase = RetryPhase.TERMINAL if expired else RetryPhase.RETRYING
     effect = RetryEffectKind.TIMEOUT if expired else RetryEffectKind.RETRY
     attempts = state.attempts if expired else state.attempts + 1
-    return RetryState(phase, attempts), [RetryEffect(effect)]
+    return RetryState(phase, attempts), (RetryEffect(effect),)
 
 
-def step(state: RetryState, event: RetryEvent) -> tuple[RetryState, list[RetryEffect]]:
+def step(
+    state: RetryState, event: RetryEvent
+) -> tuple[RetryState, tuple[RetryEffect, ...]]:
     """Каноническое имя шага F-FSM-I1; эквивалентно ``transition``."""
     return transition(state, event)

@@ -43,8 +43,7 @@ class TestHubScalingDefaults(unittest.TestCase):
         self.assertEqual(data["admission"]["max_inflight_body_bytes"], 536870912)
         for name in ("codex", "agy", "opencode-zen", "claude-p"):
             self.assertEqual(data["backends"][name]["max_concurrent"], 128, name)
-        # Muse сериализован инвариантом адаптера (max_concurrent == 1).
-        self.assertEqual(data["backends"]["muse"]["max_concurrent"], 1)
+        self.assertEqual(data["backends"]["muse"]["max_concurrent"], 8)
 
 
 if __name__ == "__main__":

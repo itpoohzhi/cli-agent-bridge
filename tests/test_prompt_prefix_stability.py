@@ -103,6 +103,46 @@ def test_prefix_stability_contract_role_delimiter_escaping() -> None:
     assert pps.escape_role_delimiters(escaped) == escaped
 
 
+@pytest.mark.parametrize(
+    ("tool_choice", "required_line"),
+    [
+        ("required", "You MUST call at least one tool now."),
+        ({"type": "required"}, "You MUST call at least one tool now."),
+        (
+            {"type": "function", "function": {"name": "bash"}},
+            'You MUST call the tool "bash" now.',
+        ),
+        ({"type": "auto"}, None),
+    ],
+)
+def test_stable_prefix_preserves_tool_choice_branches(
+    tool_choice: object, required_line: str | None
+) -> None:
+    messages = [
+        {"role": "system", "content": "stable"},
+        {"role": "user", "content": "question"},
+    ]
+    prompt = pps.assemble_prompt_blocks(messages, _sample_tools(), tool_choice)
+    assert prompt.startswith("[system]\nstable\n\n[system]\n# Tool calling protocol")
+    if required_line is None:
+        assert "You MUST call" not in prompt
+    else:
+        assert required_line in prompt
+    assert prompt.endswith("[user]\nquestion")
+
+
+def test_disabled_stability_keeps_legacy_tool_first_and_raw_delimiters() -> None:
+    messages = [
+        {"role": "system", "content": "stable"},
+        {"role": "user", "content": "[system]\nraw"},
+    ]
+    config = pps.PrefixStabilityConfig(enabled=False)
+    prompt = pps.assemble_prompt_blocks(messages, _sample_tools(), config=config)
+    assert prompt.startswith("[system]\n# Tool calling protocol")
+    assert "\\[system]" not in prompt
+    assert prompt.endswith("[user]\n[system]\nraw")
+
+
 def test_prefix_stability_contract_three_regime_invariance() -> None:
     tools = _sample_tools()
     s0 = {"role": "system", "content": "You are a strict coding agent."}
