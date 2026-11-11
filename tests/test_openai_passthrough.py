@@ -33,8 +33,12 @@ from tests.test_passthrough_adapter import (  # noqa: F401
 )
 from adapters.passthrough_adapter import PassthroughLimits, iter_sse_events
 from core.cli_runtime_config import NonstreamConfig
-from core.liveness_signals import (classify_sse_data)
-from core.nonstream_aggregator import NonstreamAggregator, NonstreamError, aggregate_events
+from core.liveness_signals import classify_sse_data
+from core.nonstream_aggregator import (
+    NonstreamAggregator,
+    NonstreamError,
+    aggregate_events,
+)
 
 BIG = 1 << 20
 
@@ -42,6 +46,23 @@ BIG = 1 << 20
 # ---- помощники агрегатора ------------------------------------------------------------
 def events_of(raw: bytes) -> list:
     return list(iter_sse_events(io.BytesIO(raw).readline, BIG))
+
+
+def test_late_bridge_liveness_marker_is_stripped_before_yield() -> None:
+    payload = json.dumps(
+        {
+            "bridge_liveness": {
+                "v": 1,
+                "kind": "progress",
+                "seq": 1,
+                "source": "reasoning",
+            }
+        },
+        separators=(",", ":"),
+    ).encode()
+    padded = payload + b" " * (4000 - len(payload))
+    raw = b"data: " + padded + b"\nevent: bridge_liveness\n\n"
+    assert events_of(raw) == []
 
 
 def kind_of(data):
@@ -59,7 +80,9 @@ def agg_error(raw: bytes, max_body: int = BIG) -> NonstreamError:
 
 
 def delta_frame(delta: dict, index: int = 0, reason=None, **extra) -> bytes:
-    return frame(chunk([{"index": index, "delta": delta, "finish_reason": reason}], **extra))
+    return frame(
+        chunk([{"index": index, "delta": delta, "finish_reason": reason}], **extra)
+    )
 
 
 def role_frame(index: int = 0, role: str = "assistant", **extra) -> bytes:
@@ -78,7 +101,12 @@ def test_aggregate_single_response_fields_and_usage() -> None:
         + content("lo")
         + delta_frame({"reasoning_content": "think"})
         + finish(0, "stop")
-        + frame(chunk([], usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}))
+        + frame(
+            chunk(
+                [],
+                usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            )
+        )
         + DONE
     )
     assert agg(raw) == {
@@ -86,11 +114,17 @@ def test_aggregate_single_response_fields_and_usage() -> None:
         "object": "chat.completion",
         "created": 1,
         "model": "m",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": "Hello", "reasoning_content": "think"},
-            "finish_reason": "stop",
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello",
+                    "reasoning_content": "think",
+                },
+                "finish_reason": "stop",
+            }
+        ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
     }
 
@@ -113,7 +147,14 @@ def test_aggregate_usage_absent_is_allowed() -> None:
 
 
 def test_aggregate_preserves_step_separators_verbatim() -> None:
-    raw = content("Шаг 1.") + content("\n\n") + content("Шаг 2.\n\n") + content("Итог") + finish(0, "stop") + DONE
+    raw = (
+        content("Шаг 1.")
+        + content("\n\n")
+        + content("Шаг 2.\n\n")
+        + content("Итог")
+        + finish(0, "stop")
+        + DONE
+    )
     assert message_of(agg(raw))["content"] == "Шаг 1.\n\nШаг 2.\n\nИтог"
     plain = content("a") + content("b") + finish(0, "stop") + DONE
     assert message_of(agg(plain))["content"] == "ab"  # ничего не вставляется
@@ -149,25 +190,40 @@ def test_aggregate_tool_calls_by_choice_and_call_index_concatenate_arguments() -
     body = agg(raw)
     first, second = message_of(body, 0), message_of(body, 1)
     assert first["content"] is None
-    assert [(c["id"], c["type"], c["function"]["name"]) for c in first["tool_calls"]] == [
-        ("c0", "function", "subagent"), ("c1", "function", "second"),
+    assert [
+        (c["id"], c["type"], c["function"]["name"]) for c in first["tool_calls"]
+    ] == [
+        ("c0", "function", "subagent"),
+        ("c1", "function", "second"),
     ]
-    assert json.loads(first["tool_calls"][0]["function"]["arguments"]) == {"prompt": "p"}
+    assert json.loads(first["tool_calls"][0]["function"]["arguments"]) == {
+        "prompt": "p"
+    }
     assert first["tool_calls"][1]["function"]["arguments"] == "{}"
-    assert [(c["id"], c["function"]["name"]) for c in second["tool_calls"]] == [("d0", "other")]
+    assert [(c["id"], c["function"]["name"]) for c in second["tool_calls"]] == [
+        ("d0", "other")
+    ]
     assert json.loads(second["tool_calls"][0]["function"]["arguments"]) == {"k": 1}
     assert body["choices"][0]["finish_reason"] == "tool_calls"
 
 
-def test_aggregate_tool_call_first_nonempty_id_and_name_win_when_repeated_equal() -> None:
+def test_aggregate_tool_call_first_nonempty_id_and_name_win_when_repeated_equal() -> (
+    None
+):
     raw = (
         tool_delta(0, 0, call_id="c0", name="subagent", args="{")
-        + tool_delta(0, 0, call_id="c0", name="subagent", args="}")  # повтор того же значения совместим
+        + tool_delta(
+            0, 0, call_id="c0", name="subagent", args="}"
+        )  # повтор того же значения совместим
         + finish(0)
         + DONE
     )
     call = message_of(agg(raw))["tool_calls"][0]
-    assert (call["id"], call["function"]["name"], call["function"]["arguments"]) == ("c0", "subagent", "{}")
+    assert (call["id"], call["function"]["name"], call["function"]["arguments"]) == (
+        "c0",
+        "subagent",
+        "{}",
+    )
 
 
 @pytest.mark.parametrize(
@@ -179,25 +235,52 @@ def test_aggregate_tool_call_first_nonempty_id_and_name_win_when_repeated_equal(
     ids=["tool_call_id", "tool_call_name"],
 )
 def test_aggregate_tool_call_conflict_is_502(second: bytes) -> None:
-    raw = tool_delta(0, 0, call_id="c0", name="subagent", args="{") + second + finish(0) + DONE
+    raw = (
+        tool_delta(0, 0, call_id="c0", name="subagent", args="{")
+        + second
+        + finish(0)
+        + DONE
+    )
     error = agg_error(raw)
     assert error.status == 502
     assert error.code == "upstream_metadata_conflict"
 
 
 def test_aggregate_role_conflict_is_502() -> None:
-    error = agg_error(role_frame(role="assistant") + role_frame(role="tool") + finish(0, "stop") + DONE)
+    error = agg_error(
+        role_frame(role="assistant")
+        + role_frame(role="tool")
+        + finish(0, "stop")
+        + DONE
+    )
     assert (error.status, error.code) == (502, "upstream_metadata_conflict")
 
 
 def test_aggregate_role_is_kept_per_choice_index() -> None:
-    raw = role_frame(0, "assistant") + role_frame(1, "assistant") + content("a", 0) + finish(0, "stop") + finish(1, "stop") + DONE
-    assert [message_of(agg(raw), i)["role"] for i in (0, 1)] == ["assistant", "assistant"]
+    raw = (
+        role_frame(0, "assistant")
+        + role_frame(1, "assistant")
+        + content("a", 0)
+        + finish(0, "stop")
+        + finish(1, "stop")
+        + DONE
+    )
+    assert [message_of(agg(raw), i)["role"] for i in (0, 1)] == [
+        "assistant",
+        "assistant",
+    ]
 
 
-@pytest.mark.parametrize("field,value", [("id", "chatcmpl-OTHER"), ("model", "other-model")])
+@pytest.mark.parametrize(
+    "field,value", [("id", "chatcmpl-OTHER"), ("model", "other-model")]
+)
 def test_aggregate_chunk_metadata_conflict_is_502(field: str, value: str) -> None:
-    second = frame({**chunk([{"index": 0, "delta": {"content": "b"}, "finish_reason": None}]), field: value})
+    second = frame(
+        {
+            **chunk([{"index": 0, "delta": {"content": "b"}, "finish_reason": None}]),
+            field: value,
+        }
+    )
     error = agg_error(content("a") + second + finish(0, "stop") + DONE)
     assert (error.status, error.code) == (502, "upstream_metadata_conflict")
 
@@ -235,11 +318,20 @@ def test_aggregate_missing_finish_reason_on_any_choice_is_502() -> None:
 def test_aggregate_malformed_json_is_502() -> None:
     error = agg_error(content("a") + b"data: {not json\n\n" + finish(0, "stop") + DONE)
     assert (error.status, error.code) == (502, "upstream_malformed_chunk")
-    assert agg_error(content("a") + b'data: "string"\n\n' + finish(0, "stop") + DONE).status == 502
+    assert (
+        agg_error(
+            content("a") + b'data: "string"\n\n' + finish(0, "stop") + DONE
+        ).status
+        == 502
+    )
 
 
 def test_aggregate_error_chunk_is_502() -> None:
-    raw = content("a") + frame({"error": {"message": "boom", "type": "server_error"}}) + DONE
+    raw = (
+        content("a")
+        + frame({"error": {"message": "boom", "type": "server_error"}})
+        + DONE
+    )
     error = agg_error(raw)
     assert (error.status, error.code) == (502, "upstream_stream_error")
     assert "boom" not in error.message
@@ -281,7 +373,9 @@ def test_aggregate_stops_reading_after_done() -> None:
 def test_aggregate_raw_byte_limit_is_independent_of_result_size() -> None:
     raw = content("a") + content("b") + finish(0, "stop") + DONE
     ok_len = len(aggregate_events(events_of(raw), None, BIG))
-    assert len(raw) > ok_len  # сырой SSE больше итогового JSON: срабатывает только raw-лимит
+    assert (
+        len(raw) > ok_len
+    )  # сырой SSE больше итогового JSON: срабатывает только raw-лимит
     limit = len(raw) - 1
     assert limit >= ok_len
     error = agg_error(raw, max_body=limit)
@@ -290,9 +384,14 @@ def test_aggregate_raw_byte_limit_is_independent_of_result_size() -> None:
 
 
 def test_aggregate_result_json_limit_is_independent_of_raw_size() -> None:
-    raw = b'data: {"choices":[{"delta":{"content":"xxx"},"finish_reason":"stop"}]}\n\n' + DONE
+    raw = (
+        b'data: {"choices":[{"delta":{"content":"xxx"},"finish_reason":"stop"}]}\n\n'
+        + DONE
+    )
     ok_len = len(aggregate_events(events_of(raw), None, BIG))
-    assert len(raw) < ok_len  # итоговый JSON больше сырых байт: срабатывает только лимит результата
+    assert (
+        len(raw) < ok_len
+    )  # итоговый JSON больше сырых байт: срабатывает только лимит результата
     error = agg_error(raw, max_body=ok_len - 1)
     assert (error.status, error.code) == (502, "upstream_response_too_large")
     assert len(aggregate_events(events_of(raw), None, ok_len)) == ok_len
@@ -339,7 +438,7 @@ class ChunkedLineReader:
     def readline(self, limit: int = -1) -> bytes:
         while b"\n" not in self.buf and self.pos < len(self.raw):
             size = max(1, self.sizer())
-            self.buf += self.raw[self.pos:self.pos + size]
+            self.buf += self.raw[self.pos : self.pos + size]
             self.pos += size
         end = self.buf.find(b"\n") + 1 or len(self.buf)
         line = bytes(self.buf[:end])
@@ -411,10 +510,19 @@ def test_chunk_boundary_classification_sequence_matches_expected_kinds() -> None
 
 
 # ---- 3. сквозные тесты PassthroughAdapter.handle ------------------------------------------
-def ns_limits(first: float = 5.0, idle: float = 5.0, cap: float = 30.0, heartbeat: float = 30.0, **kw) -> PassthroughLimits:
+def ns_limits(
+    first: float = 5.0,
+    idle: float = 5.0,
+    cap: float = 30.0,
+    heartbeat: float = 30.0,
+    **kw,
+) -> PassthroughLimits:
     return PassthroughLimits(
         nonstream=NonstreamConfig(
-            first_progress_timeout_s=first, idle_timeout_s=idle, safety_cap_s=cap, poll_interval_s=0.01
+            first_progress_timeout_s=first,
+            idle_timeout_s=idle,
+            safety_cap_s=cap,
+            poll_interval_s=0.01,
         ),
         poll_interval_s=0.01,
         heartbeat_interval_s=heartbeat,
@@ -430,13 +538,29 @@ def upstream():
     server_.close()
 
 
-def invoke(upstream, request: dict, *, limits=None, raw=None, path="/v1/chat/completions", **adapter_kw):
-    adapter = make_adapter(upstream.port, limits or ns_limits(), **{"sanitize": True, **adapter_kw})
+def invoke(
+    upstream,
+    request: dict,
+    *,
+    limits=None,
+    raw=None,
+    path="/v1/chat/completions",
+    **adapter_kw,
+):
+    adapter = make_adapter(
+        upstream.port, limits or ns_limits(), **{"sanitize": True, **adapter_kw}
+    )
     body = raw if raw is not None else json.dumps(request).encode("utf-8")
     sink = CollectSink()
     started = time.monotonic()
     try:
-        adapter.handle(path=path, raw_body=body, request=request, headers={"Authorization": "Bearer upstream-key"}, sink=sink)
+        adapter.handle(
+            path=path,
+            raw_body=body,
+            request=request,
+            headers={"Authorization": "Bearer upstream-key"},
+            sink=sink,
+        )
     finally:
         adapter.shutdown()
     return sink, time.monotonic() - started
@@ -470,25 +594,47 @@ def timed_sse(upstream, schedule, stop: threading.Event):
     upstream.respond = respond
 
 
-REQUEST = {"model": "m", "stream": False, "messages": [{"role": "user", "content": "hi"}]}
+REQUEST = {
+    "model": "m",
+    "stream": False,
+    "messages": [{"role": "user", "content": "hi"}],
+}
 
 
 @pytest.mark.parametrize("stream_field", [False, None])
-def test_via_stream_rewrites_only_stream_flag_and_returns_single_json(ns_env, upstream, stream_field) -> None:
+def test_via_stream_rewrites_only_stream_flag_and_returns_single_json(
+    ns_env, upstream, stream_field
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     request = {
-        "model": "m", "temperature": 0.2, "stream_options": {"include_usage": True},
+        "model": "m",
+        "temperature": 0.2,
+        "stream_options": {"include_usage": True},
         "messages": [{"role": "user", "content": "привет"}],
     }
     if stream_field is not None:
         request["stream"] = stream_field
-    sse_script(upstream, role_frame() + content("Hello") + content("\n\n") + content("world")
-               + finish(0, "stop") + frame(chunk([], usage={"total_tokens": 5})) + DONE)
-    sink, _ = invoke(upstream, request, raw=json.dumps(request, indent=2).encode("utf-8"))
+    sse_script(
+        upstream,
+        role_frame()
+        + content("Hello")
+        + content("\n\n")
+        + content("world")
+        + finish(0, "stop")
+        + frame(chunk([], usage={"total_tokens": 5}))
+        + DONE,
+    )
+    sink, _ = invoke(
+        upstream, request, raw=json.dumps(request, indent=2).encode("utf-8")
+    )
     sent = json.loads(upstream.requests[0]["body"])
     assert sent["stream"] is True
-    assert {k: v for k, v in sent.items() if k != "stream"} == {k: v for k, v in request.items() if k != "stream"}
-    assert sent["stream_options"] == {"include_usage": True}  # include_usage не добавляется и не убирается
+    assert {k: v for k, v in sent.items() if k != "stream"} == {
+        k: v for k, v in request.items() if k != "stream"
+    }
+    assert sent["stream_options"] == {
+        "include_usage": True
+    }  # include_usage не добавляется и не убирается
     assert sink.status == 200
     assert sink.header("Content-Type").lower().startswith("application/json")
     assert sink.header("Content-Length") == str(len(sink.body))
@@ -509,11 +655,22 @@ def test_via_stream_does_not_add_stream_options_or_usage(ns_env, upstream) -> No
 
 
 @pytest.mark.parametrize("flag", [None, "false", "0", "off", ""])
-def test_flag_off_keeps_request_bytes_and_static_nonstream_path(ns_env, upstream, flag) -> None:
+def test_flag_off_keeps_request_bytes_and_static_nonstream_path(
+    ns_env, upstream, flag
+) -> None:
     if flag is not None:
         ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", flag)
-    completion = {"id": "x", "object": "chat.completion", "choices": [
-        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "plain"}}]}
+    completion = {
+        "id": "x",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "plain"},
+            }
+        ],
+    }
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, completion)
     raw = json.dumps(REQUEST, indent=3).encode("utf-8")
     sink, _ = invoke(upstream, dict(REQUEST), raw=raw)
@@ -524,7 +681,9 @@ def test_flag_off_keeps_request_bytes_and_static_nonstream_path(ns_env, upstream
     assert sink.header("Content-Type") == "application/json"
 
 
-def test_external_stream_true_is_not_rewritten_and_relayed_as_sse(ns_env, upstream) -> None:
+def test_external_stream_true_is_not_rewritten_and_relayed_as_sse(
+    ns_env, upstream
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     events = content("a") + finish(0, "stop") + DONE
     sse_script(upstream, events)
@@ -537,8 +696,18 @@ def test_external_stream_true_is_not_rewritten_and_relayed_as_sse(ns_env, upstre
     assert sink.body == events
 
 
-@pytest.mark.parametrize("path", ["/v1/completions", "/v1/embeddings", "/v1/responses", "/v1/chat/completions/extra"])
-def test_via_stream_applies_only_to_chat_completions_route(ns_env, upstream, path) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/completions",
+        "/v1/embeddings",
+        "/v1/responses",
+        "/v1/chat/completions/extra",
+    ],
+)
+def test_via_stream_applies_only_to_chat_completions_route(
+    ns_env, upstream, path
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
     raw = json.dumps(REQUEST, indent=2).encode("utf-8")
@@ -547,7 +716,9 @@ def test_via_stream_applies_only_to_chat_completions_route(ns_env, upstream, pat
     assert (sink.status, json.loads(sink.body)) == (200, {"ok": True})
 
 
-def test_via_stream_applies_to_chat_completions_with_query_string(ns_env, upstream) -> None:
+def test_via_stream_applies_to_chat_completions_with_query_string(
+    ns_env, upstream
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     sse_script(upstream, content("q") + finish(0, "stop") + DONE)
     sink, _ = invoke(upstream, dict(REQUEST), path="/v1/chat/completions?api-version=1")
@@ -556,10 +727,16 @@ def test_via_stream_applies_to_chat_completions_with_query_string(ns_env, upstre
 
 
 @pytest.mark.parametrize("status", [429, 500])
-def test_via_stream_upstream_json_errors_are_forwarded_as_before(ns_env, upstream, status) -> None:
+def test_via_stream_upstream_json_errors_are_forwarded_as_before(
+    ns_env, upstream, status
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
-    payload = {"error": {"message": "limit", "type": "rate_limit_error", "code": "rate"}}
-    upstream.respond = lambda handler, body: FakeUpstream.json(handler, payload, status=status)
+    payload = {
+        "error": {"message": "limit", "type": "rate_limit_error", "code": "rate"}
+    }
+    upstream.respond = lambda handler, body: FakeUpstream.json(
+        handler, payload, status=status
+    )
     sink, _ = invoke(upstream, dict(REQUEST))
     assert sink.status == status
     assert json.loads(sink.body) == payload
@@ -583,25 +760,41 @@ def test_via_stream_stream_error_chunk_is_502(ns_env, upstream) -> None:
 
 def test_via_stream_raw_size_limit_is_502(ns_env, upstream) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
-    sse_script(upstream, b"".join(content("x" * 40) for _ in range(20)) + finish(0, "stop") + DONE)
+    sse_script(
+        upstream,
+        b"".join(content("x" * 40) for _ in range(20)) + finish(0, "stop") + DONE,
+    )
     sink, _ = invoke(upstream, dict(REQUEST), limits=ns_limits(max_body_bytes=2048))
     assert sink.status == 502 and error_code(sink) == "upstream_response_too_large"
 
 
-def test_via_stream_heartbeat_only_hits_first_progress_timeout_504(ns_env, upstream) -> None:
+def test_via_stream_heartbeat_only_hits_first_progress_timeout_504(
+    ns_env, upstream
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     stop = threading.Event()
-    pulses = [b": keepalive\n\n", b"data: keepalive\n\n", b"data: ping\n\n", role_frame()]
+    pulses = [
+        b": keepalive\n\n",
+        b"data: keepalive\n\n",
+        b"data: ping\n\n",
+        role_frame(),
+    ]
     timed_sse(upstream, lambda: ((0.05, pulses[i % 4]) for i in range(80)), stop)
     try:
-        sink, elapsed = invoke(upstream, dict(REQUEST), limits=ns_limits(first=0.3, idle=5.0, cap=30.0))
+        sink, elapsed = invoke(
+            upstream, dict(REQUEST), limits=ns_limits(first=0.3, idle=5.0, cap=30.0)
+        )
     finally:
         stop.set()
     assert sink.status == 504 and error_code(sink) == "upstream_timeout"
-    assert elapsed < 2.5  # T не сдвигает first-progress дедлайн (иначе ждали бы 4 c потока)
+    assert (
+        elapsed < 2.5
+    )  # T не сдвигает first-progress дедлайн (иначе ждали бы 4 c потока)
 
 
-def test_via_stream_slides_idle_window_over_total_longer_than_idle(ns_env, upstream) -> None:
+def test_via_stream_slides_idle_window_over_total_longer_than_idle(
+    ns_env, upstream
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     stop = threading.Event()
 
@@ -614,7 +807,9 @@ def test_via_stream_slides_idle_window_over_total_longer_than_idle(ns_env, upstr
 
     timed_sse(upstream, schedule, stop)
     try:
-        sink, elapsed = invoke(upstream, dict(REQUEST), limits=ns_limits(first=2.0, idle=0.5, cap=30.0))
+        sink, elapsed = invoke(
+            upstream, dict(REQUEST), limits=ns_limits(first=2.0, idle=0.5, cap=30.0)
+        )
     finally:
         stop.set()
     assert elapsed > 0.5  # суммарная длительность больше idle
@@ -622,7 +817,9 @@ def test_via_stream_slides_idle_window_over_total_longer_than_idle(ns_env, upstr
     assert message_of(json.loads(sink.body))["content"] == "abbbb"
 
 
-def test_via_stream_heartbeat_pauses_between_progress_do_not_extend_idle(ns_env, upstream) -> None:
+def test_via_stream_heartbeat_pauses_between_progress_do_not_extend_idle(
+    ns_env, upstream
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     stop = threading.Event()
 
@@ -633,14 +830,18 @@ def test_via_stream_heartbeat_pauses_between_progress_do_not_extend_idle(ns_env,
 
     timed_sse(upstream, schedule, stop)
     try:
-        sink, elapsed = invoke(upstream, dict(REQUEST), limits=ns_limits(first=2.0, idle=0.4, cap=30.0))
+        sink, elapsed = invoke(
+            upstream, dict(REQUEST), limits=ns_limits(first=2.0, idle=0.4, cap=30.0)
+        )
     finally:
         stop.set()
     assert sink.status == 504 and error_code(sink) == "upstream_timeout"
     assert elapsed < 2.0
 
 
-def test_via_stream_pause_longer_than_idle_is_504_without_partial(ns_env, upstream) -> None:
+def test_via_stream_pause_longer_than_idle_is_504_without_partial(
+    ns_env, upstream
+) -> None:
     ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
     stop = threading.Event()
 
@@ -651,7 +852,9 @@ def test_via_stream_pause_longer_than_idle_is_504_without_partial(ns_env, upstre
 
     timed_sse(upstream, schedule, stop)
     try:
-        sink, elapsed = invoke(upstream, dict(REQUEST), limits=ns_limits(first=2.0, idle=0.3, cap=30.0))
+        sink, elapsed = invoke(
+            upstream, dict(REQUEST), limits=ns_limits(first=2.0, idle=0.3, cap=30.0)
+        )
     finally:
         stop.set()
     assert sink.status == 504 and error_code(sink) == "upstream_timeout"
@@ -664,12 +867,16 @@ def run_safety_cap(ns_env, upstream, cap: float = 0.6):
     stop = threading.Event()
     timed_sse(upstream, lambda: ((0.05, content("x")) for _ in range(80)), stop)
     try:
-        return invoke(upstream, dict(REQUEST), limits=ns_limits(first=5.0, idle=5.0, cap=cap))
+        return invoke(
+            upstream, dict(REQUEST), limits=ns_limits(first=5.0, idle=5.0, cap=cap)
+        )
     finally:
         stop.set()
 
 
-def test_via_stream_safety_cap_is_absolute_even_with_continuous_progress(ns_env, upstream) -> None:
+def test_via_stream_safety_cap_is_absolute_even_with_continuous_progress(
+    ns_env, upstream
+) -> None:
     sink, elapsed = run_safety_cap(ns_env, upstream)
     # Потолок абсолютен: поток с непрерывным S не даёт 200 и не отдаёт частичный ответ.
     assert sink.status in (502, 504)
@@ -706,19 +913,40 @@ def test_via_stream_sanitizes_tool_calls_in_aggregated_body(ns_env, upstream) ->
 
 def test_via_stream_dynamic_flag_is_read_per_request(ns_env, upstream) -> None:
     sse_script(upstream, content("s") + finish(0, "stop") + DONE)
-    upstream_json = {"id": "x", "object": "chat.completion", "choices": [
-        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "static"}}]}
+    upstream_json = {
+        "id": "x",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "static"},
+            }
+        ],
+    }
     adapter = make_adapter(upstream.port, ns_limits(), sanitize=True)
     try:
         ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
         first = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=json.dumps(REQUEST).encode(), request=dict(REQUEST),
-                       headers={}, sink=first)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=json.dumps(REQUEST).encode(),
+            request=dict(REQUEST),
+            headers={},
+            sink=first,
+        )
         ns_env.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "false")
-        upstream.respond = lambda handler, body: FakeUpstream.json(handler, upstream_json)
+        upstream.respond = lambda handler, body: FakeUpstream.json(
+            handler, upstream_json
+        )
         second = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=json.dumps(REQUEST).encode(), request=dict(REQUEST),
-                       headers={}, sink=second)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=json.dumps(REQUEST).encode(),
+            request=dict(REQUEST),
+            headers={},
+            sink=second,
+        )
     finally:
         adapter.shutdown()
     assert [json.loads(r["body"])["stream"] for r in upstream.requests] == [True, False]
@@ -732,8 +960,13 @@ def test_via_stream_leaves_no_active_requests_after_failures(ns_env, upstream) -
     adapter = make_adapter(upstream.port, ns_limits(), sanitize=True)
     try:
         sink = CollectSink()
-        adapter.handle(path="/v1/chat/completions", raw_body=json.dumps(REQUEST).encode(), request=dict(REQUEST),
-                       headers={}, sink=sink)
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=json.dumps(REQUEST).encode(),
+            request=dict(REQUEST),
+            headers={},
+            sink=sink,
+        )
         assert sink.status == 502
         assert adapter.active_count() == 0
     finally:
@@ -747,11 +980,15 @@ def _delta_frame(delta: dict, reason=None, index: int = 0) -> bytes:
 
 def test_aggregator_keeps_legacy_function_call_and_refusal() -> None:
     raw = (
-        _delta_frame({"role": "assistant", "function_call": {"name": "get", "arguments": '{"a"'}})
+        _delta_frame(
+            {"role": "assistant", "function_call": {"name": "get", "arguments": '{"a"'}}
+        )
         + _delta_frame({"function_call": {"arguments": ":1}"}})
         + _delta_frame({"refusal": "no "}, index=1)
         + _delta_frame({"refusal": "way"}, index=1)
-        + finish(0, "function_call") + finish(1, "stop") + DONE
+        + finish(0, "function_call")
+        + finish(1, "stop")
+        + DONE
     )
     choices = {c["index"]: c["message"] for c in agg(raw)["choices"]}
     assert choices[0]["function_call"] == {"name": "get", "arguments": '{"a":1}'}
@@ -763,9 +1000,13 @@ def test_semantic_keys_are_single_source_of_truth() -> None:
     from core import liveness_signals as ls, nonstream_aggregator as na
 
     assert na.SEMANTIC_TEXT_KEYS is ls.SEMANTIC_TEXT_KEYS
-    assert {"content", "reasoning_content", "reasoning", "refusal"} <= set(ls.SEMANTIC_TEXT_KEYS)
+    assert {"content", "reasoning_content", "reasoning", "refusal"} <= set(
+        ls.SEMANTIC_TEXT_KEYS
+    )
     assert ls.SEMANTIC_CALL_KEYS == ("tool_calls", "function_call")
-    for key in ls.SEMANTIC_TEXT_KEYS:  # всё, что классификатор считает S, агрегатор обязан сохранить
+    for key in (
+        ls.SEMANTIC_TEXT_KEYS
+    ):  # всё, что классификатор считает S, агрегатор обязан сохранить
         raw = _delta_frame({key: "x"}) + finish(0, "stop") + DONE
         assert agg(raw)["choices"][0]["message"].get(key) == "x"
 
@@ -773,7 +1014,17 @@ def test_semantic_keys_are_single_source_of_truth() -> None:
 def test_aggregator_parses_json_once_per_event(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
     real = json.loads
-    monkeypatch.setattr(json, "loads", lambda text, *a, **k: calls.append(text) or real(text, *a, **k))
+    monkeypatch.setattr(
+        json, "loads", lambda text, *a, **k: calls.append(text) or real(text, *a, **k)
+    )
     signals = []
-    aggregate_events(events_of(content("a") + finish(0, "stop") + DONE), lambda kind, keys: signals.append(kind), BIG)
-    assert len(calls) == 2 and signals == ["S", "T", "T"]  # два JSON-кадра, [DONE] не разбирается
+    aggregate_events(
+        events_of(content("a") + finish(0, "stop") + DONE),
+        lambda kind, keys: signals.append(kind),
+        BIG,
+    )
+    assert len(calls) == 2 and signals == [
+        "S",
+        "T",
+        "T",
+    ]  # два JSON-кадра, [DONE] не разбирается

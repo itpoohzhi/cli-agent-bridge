@@ -9,10 +9,24 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from core.liveness_signals import SEMANTIC_TEXT_KEYS, SIGNAL_S, T_LITERALS, classify_chunk, internal_stream_requested, parse_sse_json
+from core.liveness_signals import (
+    SEMANTIC_TEXT_KEYS,
+    SIGNAL_S,
+    T_LITERALS,
+    classify_chunk,
+    internal_stream_requested,
+    parse_sse_json,
+)
+from core.upstream_progress_policy import (
+    DEFAULT_LIVENESS_MAX_FRAME_BYTES,
+    ERROR,
+    PROGRESS,
+    classify_complete_sse_event,
+)
 
 _Obj = dict[str, Any]
 SignalHook = Callable[[str, frozenset[str]], None]
+ProgressHook = Callable[[], bool | None]
 _META_KEYS = ("id", "created", "model", "system_fingerprint")
 
 
@@ -59,7 +73,11 @@ def _apply_call(calls: dict[int, _Obj], call: _Obj) -> None:
 def _apply_delta(state: _Obj, delta: _Obj) -> None:
     _merge_first(state, "role", delta.get("role"), "role")
     if isinstance(delta.get("function_call"), dict):
-        _apply_function(state.setdefault("fcall", {"args": []}), delta["function_call"], "function_call")
+        _apply_function(
+            state.setdefault("fcall", {"args": []}),
+            delta["function_call"],
+            "function_call",
+        )
     for key in SEMANTIC_TEXT_KEYS:
         if isinstance(delta.get(key), str) and delta[key]:
             state["text"].setdefault(key, []).append(delta[key])
@@ -78,19 +96,37 @@ def _render_choice(index: int, state: _Obj) -> _Obj:
     calls: _Obj = {}
     if state["calls"]:
         calls["tool_calls"] = [
-            {"id": c.get("id", ""), "type": c.get("type") or "function", "function": _fn(c)} for _, c in sorted(state["calls"].items())
+            {
+                "id": c.get("id", ""),
+                "type": c.get("type") or "function",
+                "function": _fn(c),
+            }
+            for _, c in sorted(state["calls"].items())
         ]
     if state.get("fcall"):
         calls["function_call"] = _fn(state["fcall"])
-    message = {"role": state.get("role") or "assistant", "content": text.pop("content", "") or (None if calls else ""), **text, **calls}
+    message = {
+        "role": state.get("role") or "assistant",
+        "content": text.pop("content", "") or (None if calls else ""),
+        **text,
+        **calls,
+    }
     return {"index": index, "message": message, "finish_reason": state["finish"]}
 
 
 class NonstreamAggregator:
     """Chunk accumulator for one response."""
 
-    def __init__(self, max_body_bytes: int) -> None:
+    def __init__(
+        self,
+        max_body_bytes: int,
+        progress_max_frame_bytes: int = DEFAULT_LIVENESS_MAX_FRAME_BYTES,
+    ) -> None:
         self._max, self._raw_bytes, self._signals = max_body_bytes, 0, 0
+        self._progress_max_frame_bytes, self._upstream_progress_seq = (
+            progress_max_frame_bytes,
+            0,
+        )
         self._meta: _Obj = {}
         self._choices: dict[int, _Obj] = {}
         self._usage: _Obj | None = None
@@ -99,7 +135,23 @@ class NonstreamAggregator:
     def _too_large(self) -> NonstreamError:
         return _bad("upstream_response_too_large", "response exceeds limit")
 
-    def add_event(self, raw: bytes, data: str | None, on_signal: SignalHook | None = None) -> None:
+    def add_event(
+        self,
+        raw: bytes,
+        data: str | None,
+        on_signal: SignalHook | None = None,
+        on_upstream_progress: ProgressHook | None = None,
+    ) -> None:
+        decision = classify_complete_sse_event(
+            raw, self._upstream_progress_seq, self._progress_max_frame_bytes
+        )
+        if decision.disposition == ERROR:
+            raise _bad("upstream_protocol_error", "malformed bridge liveness event")
+        if decision.reserved:
+            self._upstream_progress_seq = decision.highest_seq
+            if decision.disposition == PROGRESS and on_upstream_progress is not None:
+                _ = on_upstream_progress()
+            return
         self._raw_bytes += len(raw)
         if self._raw_bytes > self._max:
             raise self._too_large()
@@ -126,7 +178,10 @@ class NonstreamAggregator:
         for choice in choices if isinstance(choices, list) else ():
             if not isinstance(choice, dict):
                 continue
-            state = self._choices.setdefault(choice_index(choice.get("index")), {"text": {}, "calls": {}, "finish": None})
+            state = self._choices.setdefault(
+                choice_index(choice.get("index")),
+                {"text": {}, "calls": {}, "finish": None},
+            )
             if isinstance(choice.get("delta"), dict):
                 _apply_delta(state, choice["delta"])
             if isinstance(choice.get("finish_reason"), str) and choice["finish_reason"]:
@@ -144,12 +199,16 @@ class NonstreamAggregator:
         self._check_complete()
         meta = self._meta
         out: _Obj = {
-            "id": meta.get("id") or "chatcmpl-passthrough", "object": "chat.completion",
-            "created": meta.get("created") or int(time.time()), "model": meta.get("model") or "",
+            "id": meta.get("id") or "chatcmpl-passthrough",
+            "object": "chat.completion",
+            "created": meta.get("created") or int(time.time()),
+            "model": meta.get("model") or "",
         }
         if meta.get("system_fingerprint"):
             out["system_fingerprint"] = meta["system_fingerprint"]
-        out["choices"] = [_render_choice(i, self._choices[i]) for i in sorted(self._choices)]
+        out["choices"] = [
+            _render_choice(i, self._choices[i]) for i in sorted(self._choices)
+        ]
         if self._usage is not None:
             out["usage"] = self._usage
         return out
@@ -162,15 +221,19 @@ class NonstreamAggregator:
 
 
 def aggregate_events(
-    events: Iterable[tuple[bytes, str | None]], on_signal: SignalHook | None, max_body_bytes: int,
+    events: Iterable[tuple[bytes, str | None]],
+    on_signal: SignalHook | None,
+    max_body_bytes: int,
     expired: Callable[[], str] | None = None,
+    on_upstream_progress: ProgressHook | None = None,
+    progress_max_frame_bytes: int = DEFAULT_LIVENESS_MAX_FRAME_BYTES,
 ) -> bytes:
     """SSE up to [DONE] -> body; else 502/504 (break/EOF on an expired window is 504)."""
-    agg = NonstreamAggregator(max_body_bytes)
+    agg = NonstreamAggregator(max_body_bytes, progress_max_frame_bytes)
     timeout = NonstreamError(504, "upstream_timeout", "upstream timeout")
     try:
         for raw, data in events:
-            agg.add_event(raw, data, on_signal)
+            agg.add_event(raw, data, on_signal, on_upstream_progress)
             if agg.done:
                 break
         return agg.encode()
@@ -184,10 +247,14 @@ def aggregate_events(
         raise _bad("upstream_stream_error", "stream failed") from None
 
 
-def internal_stream_body(path: str, request: Mapping[str, Any], raw_body: bytes) -> bytes | None:
+def internal_stream_body(
+    path: str, request: Mapping[str, Any], raw_body: bytes
+) -> bytes | None:
     """Body with internal stream=true; None when not applicable."""
     try:
-        data = json.loads(raw_body) if internal_stream_requested(path, request) else None
+        data = (
+            json.loads(raw_body) if internal_stream_requested(path, request) else None
+        )
     except ValueError:
         data = None
     if not isinstance(data, dict):
@@ -202,6 +269,8 @@ def request_deadlines(limits: Any, aggregate: bool) -> tuple[float, float]:
     return cap, min(cap, now + ns.first_progress_timeout_s) if aggregate else cap
 
 
-def relax_socket_timeout(sock: socket.socket | None, deadline: float, read_timeout_s: float) -> None:
+def relax_socket_timeout(
+    sock: socket.socket | None, deadline: float, read_timeout_s: float
+) -> None:
     if sock is not None:
         sock.settimeout(max(0.001, min(read_timeout_s, deadline - time.monotonic())))

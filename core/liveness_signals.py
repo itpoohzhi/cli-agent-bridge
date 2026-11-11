@@ -9,20 +9,32 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
-from core.runtime_env import flag_enabled
+from core.runtime_env import DynamicFlagSource, flag_enabled
 
 SIGNAL_S, SIGNAL_P, SIGNAL_T = "S", "P", "T"
 FLAG_VIA_STREAM = "BRIDGE_NONSTREAM_VIA_STREAM_ENABLED"
 FLAG_SOFT_LIVENESS = "BRIDGE_NONSTREAM_SOFT_LIVENESS_ENABLED"
+FLAG_UPSTREAM_PROGRESS = "BRIDGE_NONSTREAM_UPSTREAM_PROGRESS_ENABLED"
 FLAG_TELEMETRY = "BRIDGE_NONSTREAM_TELEMETRY_ENABLED"
-REASON_FIRST, REASON_IDLE, REASON_CAP = "first_progress_timeout", "idle_timeout", "safety_cap"
+REASON_FIRST, REASON_IDLE, REASON_CAP = (
+    "first_progress_timeout",
+    "idle_timeout",
+    "safety_cap",
+)
 T_LITERALS = frozenset({"ping", "keepalive", "[DONE]"})
-SEMANTIC_TEXT_KEYS = ("content", "reasoning_content", "reasoning", "reasoning_text", "refusal")
+SEMANTIC_TEXT_KEYS = (
+    "content",
+    "reasoning_content",
+    "reasoning",
+    "reasoning_text",
+    "refusal",
+)
 SEMANTIC_CALL_KEYS = ("tool_calls", "function_call")
 _REASONING_KEYS = frozenset(SEMANTIC_TEXT_KEYS[1:4])
 _S_KINDS = frozenset(
     "content reasoning reasoning_content tool_calls function_call text_delta reasoning_delta tool_call text thinking result".split()
 )
+_UPSTREAM_PROGRESS_FLAG = DynamicFlagSource(FLAG_UPSTREAM_PROGRESS)
 
 
 def parse_sse_json(data: str | None) -> Any:
@@ -39,7 +51,9 @@ def classify_chunk(chunk: Any) -> tuple[str, frozenset[str]]:
     for choice in choices if isinstance(choices, list) else ():
         delta = choice.get("delta") if isinstance(choice, dict) else None
         if isinstance(delta, dict):
-            keys.update(k for k in (*SEMANTIC_TEXT_KEYS, *SEMANTIC_CALL_KEYS) if delta.get(k))
+            keys.update(
+                k for k in (*SEMANTIC_TEXT_KEYS, *SEMANTIC_CALL_KEYS) if delta.get(k)
+            )
     return (SIGNAL_S if keys else SIGNAL_T), frozenset(keys)
 
 
@@ -62,6 +76,10 @@ class WindowSpec:
     process_progress: bool = False
     internal_stream: bool = False
     stream_requested: bool | None = None
+    upstream_progress: bool = False
+    upstream_progress_max_events: int = 0
+    upstream_progress_min_interval_s: float = 0.0
+    upstream_progress_cap_s: float = 3600.0
 
 
 @dataclass(frozen=True)
@@ -94,6 +112,8 @@ class _State:
     last_keepalive_at: float | None = None
     kind: str = "none"
     process_alive: bool | None = None
+    upstream_progress_events: int = 0
+    last_upstream_progress_at: float | None = None
 
 
 def _age(now: float, stamp: float | None) -> float | None:
@@ -103,12 +123,23 @@ def _age(now: float, stamp: float | None) -> float | None:
 class LivenessWindow:
     """Turn window: pre-S/post-S, bounded P budget, absolute cap."""
 
-    def __init__(self, spec: WindowSpec, *, clock: Callable[[], float] = time.monotonic, soft_enabled: Callable[[], bool] = lambda: False) -> None:
+    def __init__(
+        self,
+        spec: WindowSpec,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        soft_enabled: Callable[[], bool] = lambda: False,
+    ) -> None:
         self._spec, self._clock, self._soft_enabled = spec, clock, soft_enabled
         self.clock = clock
         self._lock = threading.Lock()
         now = clock()
-        cap = now + spec.safety_cap_s
+        cap_s = (
+            min(spec.safety_cap_s, spec.upstream_progress_cap_s)
+            if spec.upstream_progress
+            else spec.safety_cap_s
+        )
+        cap = now + cap_s
         self._state = _State(min(cap, now + spec.first_timeout_s), cap, now)
 
     @property
@@ -130,7 +161,9 @@ class LivenessWindow:
             else:
                 self._state.last_keepalive_at = now
 
-    def record_process(self, cpu_delta_s: float, new_children: int, alive: bool = True) -> None:
+    def record_process(
+        self, cpu_delta_s: float, new_children: int, alive: bool = True
+    ) -> None:
         soft = self._soft_enabled()
         with self._lock:
             self._state.process_alive = alive
@@ -138,6 +171,13 @@ class LivenessWindow:
                 floor = self._spec.min_cpu_delta_s if soft else 0.0
                 if new_children > 0 or (cpu_delta_s > 0.0 and cpu_delta_s >= floor):
                     self._apply_p(self._clock(), soft)
+
+    def record_upstream_progress(self) -> bool:
+        """Apply one already validated upstream cursor before the first S."""
+        if not self._spec.upstream_progress:
+            return False
+        with self._lock:
+            return self._apply_upstream_progress(self._clock())
 
     def _apply_s(self, now: float, keys: frozenset[str]) -> None:
         st = self._state
@@ -155,9 +195,35 @@ class LivenessWindow:
             return
         st.kind, idle = SIGNAL_P, spec.idle_timeout_s
         if soft:
-            st.accrued_p_s += min(max(0.0, now - st.last_p_at), max(0.0, spec.soft_budget_s - st.accrued_p_s))
+            st.accrued_p_s += min(
+                max(0.0, now - st.last_p_at),
+                max(0.0, spec.soft_budget_s - st.accrued_p_s),
+            )
             idle = min(idle, max(0.0, spec.soft_budget_s - st.accrued_p_s))
-        st.deadline, st.last_p_at = min(st.cap_deadline, max(st.deadline, now + idle)), now
+        st.deadline, st.last_p_at = (
+            min(st.cap_deadline, max(st.deadline, now + idle)),
+            now,
+        )
+
+    def _apply_upstream_progress(self, now: float) -> bool:
+        st, spec = self._state, self._spec
+        cadence_blocked = (
+            st.last_upstream_progress_at is not None
+            and now - st.last_upstream_progress_at
+            < spec.upstream_progress_min_interval_s
+        )
+        if (
+            st.first_s_at is not None
+            or now >= st.deadline
+            or st.upstream_progress_events >= spec.upstream_progress_max_events
+            or cadence_blocked
+        ):
+            return False
+        st.deadline = min(st.cap_deadline, max(st.deadline, now + spec.idle_timeout_s))
+        st.upstream_progress_events += 1
+        st.last_upstream_progress_at = st.last_p_at = now
+        st.kind = SIGNAL_P
+        return True
 
     def expired(self) -> str:
         with self._lock:
@@ -170,7 +236,9 @@ class LivenessWindow:
 
     def stop_reason(self) -> str:
         reason = self.expired()
-        return "absolute_cap" if reason == REASON_CAP else "idle_timeout" if reason else ""
+        return (
+            "absolute_cap" if reason == REASON_CAP else "idle_timeout" if reason else ""
+        )
 
     def remaining_s(self) -> float:
         with self._lock:
@@ -181,22 +249,41 @@ class LivenessWindow:
             now, st, spec = self._clock(), self._state, self._spec
             proc = spec.process_progress
             return LivenessSnapshot(
-                spec.internal_stream, spec.stream_requested, _age(now, st.last_token_at), _age(now, st.last_reasoning_at),
-                st.kind, _age(now, st.last_keepalive_at), st.process_alive if proc else None,
-                round(st.accrued_p_s, 3) if proc else None, spec.soft_budget_s if proc else None,
-                round(max(0.0, st.deadline - now), 3), round(max(0.0, st.cap_deadline - now), 3),
+                spec.internal_stream,
+                spec.stream_requested,
+                _age(now, st.last_token_at),
+                _age(now, st.last_reasoning_at),
+                st.kind,
+                _age(now, st.last_keepalive_at),
+                st.process_alive if proc else None,
+                round(st.accrued_p_s, 3) if proc else None,
+                spec.soft_budget_s if proc else None,
+                round(max(0.0, st.deadline - now), 3),
+                round(max(0.0, st.cap_deadline - now), 3),
             )
 
 
 class DeadlineCell(Protocol):
-    def advance(self, now: float, is_useful_chunk: bool, epoch: int | None = None) -> None: ...
+    def advance(
+        self, now: float, is_useful_chunk: bool, epoch: int | None = None
+    ) -> None: ...
 
 
 class SseProgress:
     """SSE frame S/T tracker; legacy `last_progress` semantics when flags are off."""
 
-    def __init__(self, window: LivenessWindow | None, enforce: bool, cell: DeadlineCell | None = None) -> None:
-        self.window, self.enforce, self.last_progress, self.cell = window, enforce, None, cell
+    def __init__(
+        self,
+        window: LivenessWindow | None,
+        enforce: bool,
+        cell: DeadlineCell | None = None,
+    ) -> None:
+        self.window, self.enforce, self.last_progress, self.cell = (
+            window,
+            enforce,
+            None,
+            cell,
+        )
         self.useful = False  # последний кадр был полезным (S либо легаси-прогресс)
         self.strict = enforce or flag_enabled(FLAG_SOFT_LIVENESS)
 
@@ -208,12 +295,20 @@ class SseProgress:
         kind, keys = classify_chunk(chunk)
         if self.window is not None:
             self.window.record_signal(kind, keys)
-        legacy = chunk is None and not self.strict and (data or "").strip() not in ("", "[DONE]", "null")
+        legacy = (
+            chunk is None
+            and not self.strict
+            and (data or "").strip() not in ("", "[DONE]", "null")
+        )
         self.useful = kind == SIGNAL_S or legacy
         if self.useful:
             self.last_progress = time.monotonic()
-        if self.cell is not None:  # скользящее окно: полезный кадр сдвигает дедлайн стрима
-            self.cell.advance(self.window.clock() if self.window else time.monotonic(), self.useful)
+        if (
+            self.cell is not None
+        ):  # скользящее окно: полезный кадр сдвигает дедлайн стрима
+            self.cell.advance(
+                self.window.clock() if self.window else time.monotonic(), self.useful
+            )
         return chunk
 
 
@@ -222,9 +317,29 @@ def internal_stream_requested(path: str, request: Mapping[str, Any]) -> bool:
     return flag_enabled(FLAG_VIA_STREAM) and not request.get("stream") and route_ok
 
 
-def passthrough_window(limits: Any, path: str, request: Mapping[str, Any]) -> LivenessWindow:
+def passthrough_window(
+    limits: Any, path: str, request: Mapping[str, Any]
+) -> LivenessWindow:
     internal = internal_stream_requested(path, request)
+    upstream_progress = internal and _UPSTREAM_PROGRESS_FLAG.enabled()
     total = limits.total_timeout_s
-    legacy = {} if internal else {"first_timeout_s": total, "idle_timeout_s": limits.idle_timeout_s, "safety_cap_s": total}
-    spec = limits.nonstream.window_spec(False, internal_stream=internal, stream_requested=bool(request.get("stream")), **legacy)
+    legacy = (
+        {}
+        if internal
+        else {
+            "first_timeout_s": total,
+            "idle_timeout_s": limits.idle_timeout_s,
+            "safety_cap_s": total,
+        }
+    )
+    spec = limits.nonstream.window_spec(
+        False,
+        internal_stream=internal,
+        stream_requested=bool(request.get("stream")),
+        upstream_progress=upstream_progress,
+        upstream_progress_max_events=limits.upstream_progress_max_events,
+        upstream_progress_min_interval_s=limits.upstream_progress_min_interval_s,
+        upstream_progress_cap_s=limits.upstream_progress_cap_s,
+        **legacy,
+    )
     return LivenessWindow(spec)

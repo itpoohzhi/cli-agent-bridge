@@ -74,19 +74,48 @@ except ImportError:
     RepetitionGuard = None  # type: ignore[assignment,misc]
 from core.cli_runtime_config import NonstreamConfig
 from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
-from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
-from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, SlidingDeadline, open_sliding_deadline
+from core.nonstream_aggregator import (
+    NonstreamError,
+    aggregate_events,
+    choice_index,
+    internal_stream_body,
+    request_deadlines,
+)
+from core.passthrough_sliding_window import (
+    FLAG_PASSTHROUGH_SLIDING_WINDOW,
+    SlidingDeadline,
+    open_sliding_deadline,
+)
 from core.precommit_timeout_policy import (
     PreCommitFailureClass,
     classify_precommit_generic_failure,
 )
-from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
+from core.runtime_env import (
+    DynamicFlagSource,
+    bounded_int as _bounded_int,
+    env_bool,
+    positive_int as _positive_int,
+)
 from core.stream_framing import (
     build_stream_error_chunk,
     format_sse_event,
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
 )
+from core.upstream_progress_policy import (
+    DEFAULT_LIVENESS_MAX_FRAME_BYTES,
+    DEFAULT_UPSTREAM_PROGRESS_MAX_EVENTS,
+    DEFAULT_UPSTREAM_PROGRESS_MIN_INTERVAL_S,
+    ENV_LIVENESS_MAX_FRAME_BYTES,
+    ERROR as UPSTREAM_PROGRESS_ERROR,
+    MAX_LIVENESS_MAX_FRAME_BYTES,
+    MAX_UPSTREAM_PROGRESS_EVENTS,
+    MIN_LIVENESS_MAX_FRAME_BYTES,
+    MIN_UPSTREAM_PROGRESS_INTERVAL_S,
+    PROGRESS as UPSTREAM_PROGRESS,
+    classify_complete_sse_event,
+)
+
 _SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
 
 # Имена env (таблица AD-005) и значения по умолчанию: defaults — не потолки, переопределяются.
@@ -103,6 +132,9 @@ ENV_REPETITION_MAX_REPEATS = "BRIDGE_REPETITION_MAX_REPEATS"
 ENV_REPETITION_MAX_TOKEN_LEN = "BRIDGE_REPETITION_MAX_TOKEN_LEN"
 ENV_REPETITION_GUARD_ENABLED = "BRIDGE_REPETITION_GUARD_ENABLED"
 ENV_INVOKE_NORMALIZATION_ENABLED = "BRIDGE_INVOKE_NORMALIZATION_ENABLED"
+ENV_UPSTREAM_PROGRESS_MAX_EVENTS = "BRIDGE_NONSTREAM_PRE_FIRST_S_MAX_PROGRESS_EVENTS"
+ENV_UPSTREAM_PROGRESS_MIN_INTERVAL_S = "BRIDGE_UPSTREAM_PROGRESS_MIN_EMIT_INTERVAL_S"
+ENV_UPSTREAM_PROGRESS_CAP_S = "BRIDGE_NONSTREAM_UPSTREAM_PROGRESS_CAP_S"
 
 DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 DEFAULT_ACC_MAX_BYTES = 8 * 1024 * 1024
@@ -112,6 +144,7 @@ DEFAULT_CONNECT_TIMEOUT_S = 10.0
 DEFAULT_READ_TIMEOUT_S = 1800.0
 DEFAULT_IDLE_TIMEOUT_S = 300.0
 DEFAULT_TOTAL_TIMEOUT_S = 420.0
+DEFAULT_UPSTREAM_PROGRESS_CAP_S = 3600.0
 DEFAULT_QUEUE_TIMEOUT_S = (
     900.0  # ожидание слота `max_concurrent`, если хост своего не задал
 )
@@ -149,6 +182,7 @@ _REQUEST_DROP = _HOP_BY_HOP | {
 }
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
 
+
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
     try:
         value = float(str(environ.get(name, "")).strip())
@@ -171,7 +205,9 @@ class PassthroughLimits:
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S  # совместимость старого конструктора
     idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S
     total_timeout_s: float = DEFAULT_TOTAL_TIMEOUT_S
-    stream_safety_cap_s: float = 3600.0  # потолок активного stream=True при скользящем окне
+    stream_safety_cap_s: float = (
+        3600.0  # потолок активного stream=True при скользящем окне
+    )
     heartbeat_interval_s: float = 12.0
     poll_interval_s: float = 0.1
     reader_join_timeout_s: float = 0.2
@@ -182,6 +218,10 @@ class PassthroughLimits:
     invoke_normalization_enabled: bool = False
     max_keepalive_connections: int = 32
     keepalive_expiry_s: float = 30.0
+    liveness_max_frame_bytes: int = DEFAULT_LIVENESS_MAX_FRAME_BYTES
+    upstream_progress_max_events: int = DEFAULT_UPSTREAM_PROGRESS_MAX_EVENTS
+    upstream_progress_min_interval_s: float = DEFAULT_UPSTREAM_PROGRESS_MIN_INTERVAL_S
+    upstream_progress_cap_s: float = DEFAULT_UPSTREAM_PROGRESS_CAP_S
     nonstream: NonstreamConfig = field(default_factory=NonstreamConfig)
 
     @classmethod
@@ -228,7 +268,9 @@ class PassthroughLimits:
             total_timeout_s=_positive_float(
                 env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S
             ),
-            stream_safety_cap_s=_positive_float(env, "BRIDGE_STREAM_SAFETY_CAP_S", 3600.0),
+            stream_safety_cap_s=_positive_float(
+                env, "BRIDGE_STREAM_SAFETY_CAP_S", 3600.0
+            ),
             heartbeat_interval_s=_positive_float(
                 env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
             ),
@@ -249,8 +291,47 @@ class PassthroughLimits:
                 8,
                 512,
             ),
-            repetition_guard_enabled=env_bool(env, (ENV_REPETITION_GUARD_ENABLED,), False),
-            invoke_normalization_enabled=env_bool(env, (ENV_INVOKE_NORMALIZATION_ENABLED,), False),
+            repetition_guard_enabled=env_bool(
+                env, (ENV_REPETITION_GUARD_ENABLED,), False
+            ),
+            invoke_normalization_enabled=env_bool(
+                env, (ENV_INVOKE_NORMALIZATION_ENABLED,), False
+            ),
+            liveness_max_frame_bytes=max(
+                MIN_LIVENESS_MAX_FRAME_BYTES,
+                min(
+                    _positive_int(
+                        env,
+                        ENV_LIVENESS_MAX_FRAME_BYTES,
+                        DEFAULT_LIVENESS_MAX_FRAME_BYTES,
+                    ),
+                    MAX_LIVENESS_MAX_FRAME_BYTES,
+                ),
+            ),
+            upstream_progress_max_events=min(
+                _bounded_int(
+                    env,
+                    ENV_UPSTREAM_PROGRESS_MAX_EVENTS,
+                    DEFAULT_UPSTREAM_PROGRESS_MAX_EVENTS,
+                    0,
+                    math.inf,
+                ),
+                MAX_UPSTREAM_PROGRESS_EVENTS,
+            ),
+            upstream_progress_min_interval_s=max(
+                _positive_float(
+                    env,
+                    ENV_UPSTREAM_PROGRESS_MIN_INTERVAL_S,
+                    DEFAULT_UPSTREAM_PROGRESS_MIN_INTERVAL_S,
+                ),
+                MIN_UPSTREAM_PROGRESS_INTERVAL_S,
+            ),
+            upstream_progress_cap_s=min(
+                _positive_float(
+                    env, ENV_UPSTREAM_PROGRESS_CAP_S, DEFAULT_UPSTREAM_PROGRESS_CAP_S
+                ),
+                DEFAULT_UPSTREAM_PROGRESS_CAP_S,
+            ),
             nonstream=ns,
         )
 
@@ -670,31 +751,62 @@ def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
 
 
 def iter_sse_events(
-    readline: Callable[[int], bytes], max_line_bytes: int
+    readline: Callable[[int], bytes],
+    max_line_bytes: int,
+    on_upstream_progress: Callable[[], bool | None] | None = None,
+    progress_max_frame_bytes: int | None = None,
 ) -> Iterator[tuple[bytes, Optional[str]]]:
     """SSE-события upstream: (сырые байты события, склеенный `data:` либо None)."""
     raw = bytearray()
     data: list[str] = []
+    highest_progress_seq = 0
+    configured_control_limit = (
+        progress_max_frame_bytes
+        if progress_max_frame_bytes is not None
+        else _positive_int(
+            os.environ,
+            ENV_LIVENESS_MAX_FRAME_BYTES,
+            DEFAULT_LIVENESS_MAX_FRAME_BYTES,
+        )
+    )
+    control_limit = max(
+        MIN_LIVENESS_MAX_FRAME_BYTES,
+        min(configured_control_limit, MAX_LIVENESS_MAX_FRAME_BYTES),
+    )
     while True:
         line = readline(max_line_bytes + 1)
         if len(line) > max_line_bytes:
             raise UpstreamBodyTooLarge("sse_line")
         if not line:
             # Оборванная посреди строки (без перевода строки) запись — не событие: клиенту не уходит.
-            if raw and raw.endswith(b"\n"):
-                yield bytes(raw), ("\n".join(data) if data else None)
+            if not raw or not raw.endswith(b"\n"):
+                return
+        else:
+            raw += line
+            if len(raw) > max_line_bytes * 2:
+                raise UpstreamBodyTooLarge("sse_event")
+            text = line.rstrip(b"\r\n")
+            if text != b"":
+                if text.startswith(b"data:"):
+                    value = text[5:].decode("utf-8", errors="replace")
+                    data.append(value[1:] if value.startswith(" ") else value)
+                continue
+        event = bytes(raw)
+        decision = classify_complete_sse_event(
+            event, highest_progress_seq, control_limit
+        )
+        if decision.disposition == UPSTREAM_PROGRESS_ERROR:
+            raise NonstreamError(
+                502, "upstream_protocol_error", "malformed bridge liveness event"
+            )
+        highest_progress_seq = decision.highest_seq
+        if decision.disposition == UPSTREAM_PROGRESS and on_upstream_progress:
+            _ = on_upstream_progress()
+        if not decision.reserved:
+            yield event, ("\n".join(data) if data else None)
+        if not line:
             return
-        raw += line
-        if len(raw) > max_line_bytes * 2:
-            raise UpstreamBodyTooLarge("sse_event")
-        text = line.rstrip(b"\r\n")
-        if text == b"":
-            yield bytes(raw), ("\n".join(data) if data else None)
-            raw = bytearray()
-            data = []
-        elif text.startswith(b"data:"):
-            value = text[5:].decode("utf-8", errors="replace")
-            data.append(value[1:] if value.startswith(" ") else value)
+        raw, data = bytearray(), []
 
 
 @dataclass
@@ -771,7 +883,8 @@ class _TimedSseReader:
             remaining = self.progress.remaining(self.cell.deadline_s - now)
             if self.progress.last_progress is not None:
                 remaining = min(
-                    remaining, self.progress.last_progress + self.limits.idle_timeout_s - now
+                    remaining,
+                    self.progress.last_progress + self.limits.idle_timeout_s - now,
                 )
             if remaining <= 0:
                 raise TimeoutError("upstream stream deadline exceeded")
@@ -933,7 +1046,11 @@ def relay_sse(
         return None
 
     try:
-        for raw, data in iter_sse_events(reader.readline, limits.max_body_bytes):
+        for raw, data in iter_sse_events(
+            reader.readline,
+            limits.max_body_bytes,
+            progress_max_frame_bytes=limits.liveness_max_frame_bytes,
+        ):
             chunk = reader.progress.note(data)
             if data is None:
                 write(raw)  # комментарий/keepalive/event без data — дословно
@@ -1125,6 +1242,10 @@ def relay_sse(
                 "upstream tool_calls exceed the bridge limit",
             )
         )
+        return outcome
+    except NonstreamError as exc:
+        acc.close()
+        write(_error_frame(last_chunk, exc.code, exc.message))
         return outcome
     except UpstreamBodyTooLarge:
         acc.close()
@@ -1364,9 +1485,18 @@ class PassthroughAdapter(BackendAdapter):
         raw_body = self._with_body_defaults(raw_body)
         internal = internal_stream_body(path, request, raw_body)
         if internal is not None:
-            raw_body, window = internal, window or passthrough_window(self.limits, path, request)
+            raw_body, window = (
+                internal,
+                window or passthrough_window(self.limits, path, request),
+            )
         deadline, open_deadline = request_deadlines(self.limits, internal is not None)
-        slide = open_sliding_deadline(deadline, self.limits, internal is not None, request, _SLIDING_WIN_FLAG.enabled)
+        slide = open_sliding_deadline(
+            deadline,
+            self.limits,
+            internal is not None,
+            request,
+            _SLIDING_WIN_FLAG.enabled,
+        )
         queue_timeout = min(
             float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)),
             self.limits.total_timeout_s,
@@ -1397,7 +1527,12 @@ class PassthroughAdapter(BackendAdapter):
                         continue
 
         def watch() -> None:
-            while not stop.wait(min(self.limits.poll_interval_s, max(0.0, slide.deadline_s - time.monotonic()))):
+            while not stop.wait(
+                min(
+                    self.limits.poll_interval_s,
+                    max(0.0, slide.deadline_s - time.monotonic()),
+                )
+            ):
                 if time.monotonic() >= slide.deadline_s or sink.client_gone():
                     abort()
                     return
@@ -1439,7 +1574,9 @@ class PassthroughAdapter(BackendAdapter):
                 resp = conn.getresponse()
                 if time.monotonic() >= deadline:
                     raise TimeoutError()
-                slide.relax_socket(conn.sock, self.limits.read_timeout_s, internal is not None)
+                slide.relax_socket(
+                    conn.sock, self.limits.read_timeout_s, internal is not None
+                )
                 if resp.status in (502, 503) and getattr(
                     sink, "accepts_presend_errors", False
                 ):
@@ -1717,7 +1854,9 @@ class PassthroughAdapter(BackendAdapter):
         sse = resp.status == 200 and "text/event-stream" in content_type
         agg = window if sse and window and window.internal_stream else None
         if sse and agg is None:
-            return self._relay_stream(resp, schemas, sink, sanitize, slide or deadline, on_timeout, window)
+            return self._relay_stream(
+                resp, schemas, sink, sanitize, slide or deadline, on_timeout, window
+            )
         try:
             if agg is not None:
                 body = self._aggregate_sse(resp, agg)
@@ -1773,12 +1912,28 @@ class PassthroughAdapter(BackendAdapter):
         sink.write(body)
         return True
 
-    def _aggregate_sse(self, resp: http.client.HTTPResponse, window: LivenessWindow) -> bytes:
+    def _aggregate_sse(
+        self, resp: http.client.HTTPResponse, window: LivenessWindow
+    ) -> bytes:
         lim = self.limits
-        reader = _TimedSseReader(resp.readline, lambda _f: None, lim, math.inf, window, True)
+        reader = _TimedSseReader(
+            resp.readline, lambda _f: None, lim, math.inf, window, True
+        )
         try:
-            events = iter_sse_events(reader.readline, lim.max_body_bytes)
-            return aggregate_events(events, window.record_signal, lim.max_body_bytes, window.expired)
+            events = iter_sse_events(
+                reader.readline,
+                lim.max_body_bytes,
+                window.record_upstream_progress,
+                lim.liveness_max_frame_bytes,
+            )
+            return aggregate_events(
+                events,
+                window.record_signal,
+                lim.max_body_bytes,
+                window.expired,
+                window.record_upstream_progress,
+                lim.liveness_max_frame_bytes,
+            )
         finally:
             reader.close()
 
