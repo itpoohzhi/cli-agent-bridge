@@ -944,11 +944,14 @@ def _key_hash(key: str) -> str:
 
 
 _WS_URL = re.compile(r"\bwss?://\S+", re.IGNORECASE)
+_FILESYSTEM_PATH = re.compile(r"(?<![\w:/])(?:~?/|[A-Za-z]:[\\/])[^\s\x00]+")
 
 
 def _mask_secrets(text: str) -> str:
-    """Длинные токеноподобные последовательности и WebSocket URL -> ***."""
-    return _SECRET.sub("***", _WS_URL.sub("ws://***", text))
+    """Длинные токены, WebSocket URL и абсолютные пути -> ***."""
+    masked = _WS_URL.sub("ws://***", text)
+    masked = _FILESYSTEM_PATH.sub("***", masked)
+    return _SECRET.sub("***", masked)
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
@@ -6589,9 +6592,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             )
             message = f"{label} exec failed rc={out.get('rc')}"
             if detail:
-                _log(f"backend_error detail={detail!r}")
+                message = f"{message}: {detail}"
+            _log(
+                f"backend_error rc={out.get('rc')} "
+                f"stderr_bytes={len(raw_err.encode('utf-8'))}"
+            )
             return {
                 "message": message,
+                "detail": detail,
                 "type": "proxy_error",
                 "code": 502,
             }

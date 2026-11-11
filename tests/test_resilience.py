@@ -916,18 +916,28 @@ def test_handler_sink_keeps_split_terminal_sse_error_in_bounded_tail(
     assert server._HandlerSink(_SinkHandler())._error_limit == 65536
 
 
-def test_backend_error_message_does_not_expose_stderr():
+def test_backend_error_response_and_log_do_not_expose_sensitive_stderr(monkeypatch):
+    raw_err = "SECRET_STDERR_LEAK_TOKEN /private/internal/path"
+    log_lines: list[str] = []
+    monkeypatch.setattr(server, "_log", log_lines.append)
+
     err = server.Handler._error_body(
         {
             "state": "backend_error",
             "backend_kind": "codex",
             "rc": 1,
-            "err": "SECRET_STDERR_LEAK_TOKEN /private/internal/path",
+            "err": raw_err,
         }
     )
 
-    assert err["message"] == "codex exec failed rc=1"
-    assert "SECRET_STDERR_LEAK_TOKEN" not in err["message"]
+    assert err["message"] == "codex exec failed rc=1: *** ***"
+    assert err["detail"] == "*** ***"
+    assert log_lines == [
+        f"backend_error rc=1 stderr_bytes={len(raw_err.encode('utf-8'))}"
+    ]
+    for rendered in (*err.values(), *log_lines):
+        assert "SECRET_STDERR_LEAK_TOKEN" not in str(rendered)
+        assert "/private/internal/path" not in str(rendered)
 
 
 def test_started_stream_terminal_error_has_null_finish_reason():
