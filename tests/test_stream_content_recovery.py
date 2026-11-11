@@ -9,10 +9,20 @@ import threading
 
 import pytest
 
-from core.backpressure import publish_preserving, stream_content_recovery_enabled
+from core.backpressure import (
+    CoalescingQueue,
+    publish_preserving,
+    stream_content_recovery_enabled,
+)
 
 FLAG = "BRIDGE_STREAM_CONTENT_RECOVERY_ENABLED"
 LIMIT = "BRIDGE_STREAM_CONTENT_RECOVERY_MAX_MERGED_BYTES"
+
+
+@pytest.fixture(autouse=True)
+def _valid_merged_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Валидный лимит по умолчанию; тесты невалидных значений переопределяют."""
+    monkeypatch.setenv(LIMIT, "1048576")
 
 
 def _drain(target: queue.Queue) -> list:
@@ -24,7 +34,7 @@ def _drain(target: queue.Queue) -> list:
 
 def test_overflow_preserves_monotonic_content_and_terminal_rc0() -> None:
     """AC-1: переполнение не даёт пустой успех при terminal rc=0."""
-    run_q: queue.Queue = queue.Queue(maxsize=2)
+    run_q: queue.Queue = CoalescingQueue(maxsize=2)
     run_q.put_nowait(("content", "Hello "))
     run_q.put_nowait(("content", "world"))
     assert run_q.full()
@@ -37,7 +47,7 @@ def test_overflow_preserves_monotonic_content_and_terminal_rc0() -> None:
 
 
 def test_overflow_evicts_only_coalescible_notifications_not_terminal() -> None:
-    run_q: queue.Queue = queue.Queue(maxsize=2)
+    run_q: queue.Queue = CoalescingQueue(maxsize=2)
     run_q.put_nowait(("done", (0, "kept")))
     run_q.put_nowait(("status", "noise"))
     assert publish_preserving(run_q, ("content", "kept-too")) is True
@@ -46,7 +56,7 @@ def test_overflow_evicts_only_coalescible_notifications_not_terminal() -> None:
 
 def test_overflow_without_room_returns_false_and_keeps_queue() -> None:
     """Явный отказ вместо тихого пустого успеха: очередь не искажена."""
-    run_q: queue.Queue = queue.Queue(maxsize=2)
+    run_q: queue.Queue = CoalescingQueue(maxsize=2)
     run_q.put_nowait(("done", (0, "x")))
     run_q.put_nowait(("error", "boom"))
     assert publish_preserving(run_q, ("content", "lost")) is False
@@ -54,7 +64,7 @@ def test_overflow_without_room_returns_false_and_keeps_queue() -> None:
 
 
 def test_coalescible_notification_dropped_without_losing_content() -> None:
-    run_q: queue.Queue = queue.Queue(maxsize=2)
+    run_q: queue.Queue = CoalescingQueue(maxsize=2)
     run_q.put_nowait(("content", "a"))
     run_q.put_nowait(("content", "b"))
     assert publish_preserving(run_q, ("status", "noise")) is True
@@ -80,7 +90,7 @@ def test_config_from_dynamic_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_repeated_delta_content_is_appended_not_deduped() -> None:
     """RW-001: повторяющиеся дельты не схлопываются префиксной эвристикой."""
-    run_q: queue.Queue = queue.Queue(maxsize=1)
+    run_q: queue.Queue = CoalescingQueue(maxsize=1)
     run_q.put_nowait(("content", "ha"))
     assert publish_preserving(run_q, ("content", "ha")) is True
     assert _drain(run_q) == [("content", "haha")]
@@ -88,7 +98,7 @@ def test_repeated_delta_content_is_appended_not_deduped() -> None:
 
 def test_prefix_delta_is_appended_not_treated_as_snapshot() -> None:
     """RW-001: дельта, начинающаяся с прежнего текста, дописывается целиком."""
-    run_q: queue.Queue = queue.Queue(maxsize=1)
+    run_q: queue.Queue = CoalescingQueue(maxsize=1)
     run_q.put_nowait(("content", "ha"))
     assert publish_preserving(run_q, ("content", "haha")) is True
     assert _drain(run_q) == [("content", "hahaha")]
@@ -96,15 +106,15 @@ def test_prefix_delta_is_appended_not_treated_as_snapshot() -> None:
 
 def test_unknown_kind_is_not_merged_on_overflow() -> None:
     """RW-001: неизвестный kind не входит в белый список content и не склеивается."""
-    run_q: queue.Queue = queue.Queue(maxsize=1)
+    run_q: queue.Queue = CoalescingQueue(maxsize=1)
     run_q.put_nowait(("mystery", "a"))
     assert publish_preserving(run_q, ("mystery", "b")) is False
     assert _drain(run_q) == [("mystery", "a")]
 
 
 def test_queue_join_and_unfinished_tasks_after_merge() -> None:
-    """RW-002: публичный API сохраняет счётчик незавершённых задач и join."""
-    run_q: queue.Queue = queue.Queue(maxsize=2)
+    """RW-002: счётчик незавершённых задач и join сохраняются после слияния."""
+    run_q: queue.Queue = CoalescingQueue(maxsize=2)
     run_q.put_nowait(("content", "a"))
     run_q.put_nowait(("content", "b"))
     assert publish_preserving(run_q, ("content", "c")) is True
@@ -121,7 +131,7 @@ def test_queue_join_and_unfinished_tasks_after_merge() -> None:
 
 def test_iteration_freed_slot_is_used_for_terminal_item() -> None:
     """RW-002: освобождённый коалесценцией слот сразу занимает terminal item."""
-    run_q: queue.Queue = queue.Queue(maxsize=4)
+    run_q: queue.Queue = CoalescingQueue(maxsize=4)
     for text in ("a", "b", "c", "d"):
         run_q.put_nowait(("content", text))
     assert publish_preserving(run_q, ("done", (0, "abcd"))) is True
@@ -136,7 +146,7 @@ def test_bound_merged_payload_fails_closed_without_content_loss(
 ) -> None:
     """RW-002: превышение байтового предела — явный False без потери контента."""
     monkeypatch.setenv(LIMIT, "3")
-    run_q: queue.Queue = queue.Queue(maxsize=2)
+    run_q: queue.Queue = CoalescingQueue(maxsize=2)
     run_q.put_nowait(("content", "ab"))
     run_q.put_nowait(("content", "cd"))
     assert publish_preserving(run_q, ("content", "ef")) is False
@@ -145,7 +155,7 @@ def test_bound_merged_payload_fails_closed_without_content_loss(
 
 def test_bound_merged_payload_via_dynamic_config_within_limit() -> None:
     """RW-002: предел из dynamic_config допускает слияние в своих границах."""
-    run_q: queue.Queue = queue.Queue(maxsize=2)
+    run_q: queue.Queue = CoalescingQueue(maxsize=2)
     run_q.put_nowait(("content", "ab"))
     run_q.put_nowait(("content", "cd"))
     assert publish_preserving(run_q, ("content", "ef"), {LIMIT: 10}, {}) is True
@@ -158,7 +168,7 @@ def _make_run(maxsize: int = 2):
 
     run = object.__new__(server.Run)
     run.sse_writer = object()
-    run.q = queue.Queue(maxsize=maxsize)
+    run.q = CoalescingQueue(maxsize=maxsize)
     run.live_invalidated = False
     run._last_error = None
     run.active_turn = ""
@@ -197,3 +207,120 @@ def test_run_publish_integration_flag_false_keeps_old_fail_close(
     assert run.live_invalidated is True
     assert run._last_error
     assert _drain(run.q) == [("content", "Hello "), ("content", "world")]
+
+
+def test_concurrent_producers_atomic_fifo_and_join_not_premature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RW-001: два producer сливают дельты без потерь, join не ранний."""
+    monkeypatch.setenv(FLAG, "true")
+    run_q = CoalescingQueue(maxsize=2)
+    run_q.put_nowait(("content", "a"))
+    run_q.put_nowait(("content", "b"))
+    errors: list[BaseException] = []
+
+    def produce(text: str) -> None:
+        try:
+            run_q.put_nowait(("content", text))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=produce, args=(t,)) for t in ("c", "d")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert run_q.unfinished_tasks == 2
+    joined = threading.Thread(target=run_q.join, daemon=True)
+    joined.start()
+    joined.join(timeout=0.2)
+    assert joined.is_alive()
+    items = []
+    while not run_q.empty():
+        items.append(run_q.get_nowait())
+        run_q.task_done()
+    joined.join(timeout=2)
+    assert not joined.is_alive()
+    texts = [payload for kind, payload in items if kind == "content"]
+    assert "".join(texts) in {"abcd", "abdc"}
+    assert run_q.unfinished_tasks == 0
+
+
+def test_atomic_producer_put_nowait_flag_false_raises_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RW-003: при флаге false поведение как у обычной очереди."""
+    monkeypatch.setenv(FLAG, "false")
+    run_q = CoalescingQueue(maxsize=1)
+    run_q.put_nowait(("content", "a"))
+    with pytest.raises(queue.Full):
+        run_q.put_nowait(("content", "b"))
+    assert _drain(run_q) == [("content", "a")]
+
+
+def test_producer_put_nowait_uncoalescible_full_does_not_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RW-001: несжимаемое переполнение даёт Full сразу, без блокировки."""
+    monkeypatch.setenv(FLAG, "true")
+    run_q = CoalescingQueue(maxsize=2)
+    run_q.put_nowait(("done", (0, "x")))
+    run_q.put_nowait(("error", "boom"))
+    outcome: list[str] = []
+
+    def attempt() -> None:
+        try:
+            run_q.put_nowait(("content", "lost"))
+            outcome.append("ok")
+        except queue.Full:
+            outcome.append("full")
+
+    worker = threading.Thread(target=attempt, daemon=True)
+    worker.start()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert outcome == ["full"]
+    assert _drain(run_q) == [("done", (0, "x")), ("error", "boom")]
+
+
+@pytest.mark.parametrize("raw_limit", ["0", "-5", "oops", ""])
+def test_invalid_merged_limit_fails_closed_without_content_loss(
+    monkeypatch: pytest.MonkeyPatch, raw_limit: str
+) -> None:
+    """RW-002: невалидный лимит запрещает слияние вместо безлимита."""
+    monkeypatch.setenv(LIMIT, raw_limit)
+    run_q = CoalescingQueue(maxsize=2)
+    run_q.put_nowait(("content", "ab"))
+    run_q.put_nowait(("content", "cd"))
+    assert publish_preserving(run_q, ("content", "ef")) is False
+    assert _drain(run_q) == [("content", "ab"), ("content", "cd")]
+
+
+def test_absent_merged_limit_fails_closed_without_content_loss() -> None:
+    """RW-002: отсутствующий лимит без dynamic_config-дефолта — fail-close."""
+    run_q = CoalescingQueue(maxsize=2)
+    run_q.put_nowait(("content", "ab"))
+    run_q.put_nowait(("content", "cd"))
+    assert publish_preserving(run_q, ("content", "ef"), {}, {}) is False
+    assert _drain(run_q) == [("content", "ab"), ("content", "cd")]
+
+
+def test_coalescing_queue_uses_dynamic_config_flag_and_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RW-003: флаг и лимит из dynamic_config, env имеет приоритет."""
+    monkeypatch.delenv(FLAG, raising=False)
+    monkeypatch.delenv(LIMIT, raising=False)
+    run_q = CoalescingQueue(
+        maxsize=1, dynamic_config={FLAG: True, LIMIT: 100}, environ={}
+    )
+    run_q.put_nowait(("content", "a"))
+    run_q.put_nowait(("content", "b"))
+    assert _drain(run_q) == [("content", "ab")]
+    monkeypatch.setenv(FLAG, "false")
+    blocked = CoalescingQueue(maxsize=1, dynamic_config={FLAG: True, LIMIT: 100})
+    blocked.put_nowait(("content", "a"))
+    with pytest.raises(queue.Full):
+        blocked.put_nowait(("content", "b"))

@@ -4267,8 +4267,10 @@ class Run:
         # обогнать consumer'а, отбрасывание здесь — осознанный fail-close. Non-stream копит
         # вывод до terminal, очередь остаётся неограниченной (как до RW-204): terminal-пачка
         # не теряется из-за размера.
+        from core.backpressure import CoalescingQueue as _CoalescingQueue
+
         self.q: queue.Queue = (
-            queue.Queue(maxsize=RUN_QUEUE_MAXSIZE)
+            _CoalescingQueue(maxsize=RUN_QUEUE_MAXSIZE)
             if sse_writer is not None
             else queue.Queue()
         )

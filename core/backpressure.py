@@ -66,8 +66,12 @@ def _loaded_dynamic_config() -> object:
 def _max_merged_bytes(
     dynamic_config: object = None,
     environ: Mapping[str, str] | None = None,
-) -> int | None:
-    """Байтовый предел слитого чанка; None — прежнее поведение без предела."""
+) -> int:
+    """Байтовый предел слитого чанка; 0 — слияние запрещено (fail-close).
+
+    Отсутствующее, нулевое, отрицательное или ошибочное значение не даёт
+    безлимит: безопасный дефолт может прийти только из dynamic_config.
+    """
     env = os.environ if environ is None else environ
     if _LIMIT_NAME in env:
         raw: object = env.get(_LIMIT_NAME)
@@ -75,18 +79,18 @@ def _max_merged_bytes(
         config = dynamic_config if dynamic_config is not None else _loaded_dynamic_config()
         raw = _config_value(config, _LIMIT_NAME)
     if isinstance(raw, bool) or raw is None:
-        return None
+        return 0
     try:
         value = int(str(raw).strip()) if isinstance(raw, str) else int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
+        return 0
+    return value if value > 0 else 0
 
 
-def _exceeds_limit(text: str, limit: int | None) -> bool:
-    """Проверка байтового предела слитого текста."""
-    if limit is None:
-        return False
+def _exceeds_limit(text: str, limit: int) -> bool:
+    """Проверка байтового предела; неположительный предел запрещает слияние."""
+    if limit <= 0:
+        return True
     try:
         return len(text.encode("utf-8")) > limit
     except UnicodeEncodeError:
@@ -139,41 +143,121 @@ def _is_text_pair(item: object) -> bool:
     )
 
 
-def _merge_new_into_tail(items: list[Any], item: object, limit: int | None) -> bool:
-    """Дописать дельту в хвостовой чанк того же вида в снятом списке."""
-    if not items or not _is_text_pair(item) or not _is_text_pair(items[-1]):
+def _merge_new_into_tail(dq: Any, item: object, limit: int) -> bool:
+    """Дописать дельту в хвостовой чанк deque; вызывающий держит mutex."""
+    if not dq or not _is_text_pair(item) or not _is_text_pair(dq[-1]):
         return False
-    last = items[-1]
+    last = dq[-1]
     if last[0] != item[0]:  # type: ignore[index]
         return False
     merged = _merged_text(last[1], item[1])  # type: ignore[index]
     if _exceeds_limit(merged, limit):
         return False
-    items[-1] = (last[0], merged)
+    dq[-1] = (last[0], merged)
     return True
 
 
-def _coalesce_adjacent(items: list[Any], limit: int | None) -> bool:
-    """Слить соседние чанки одного вида в снятом списке, освобождая слот."""
-    for index in range(len(items) - 1):
-        first, second = items[index], items[index + 1]
+def _coalesce_adjacent(dq: Any, limit: int) -> bool:
+    """Слить соседние чанки deque, освобождая слот; вызывающий держит mutex."""
+    for index in range(len(dq) - 1):
+        first, second = dq[index], dq[index + 1]
         if _is_text_pair(first) and _is_text_pair(second) and first[0] == second[0]:
             merged = _merged_text(first[1], second[1])
             if _exceeds_limit(merged, limit):
                 continue
-            items[index] = (first[0], merged)
-            del items[index + 1]
+            dq[index] = (first[0], merged)
+            del dq[index + 1]
             return True
     return False
 
 
-def _requeue(target: queue.Queue, items: list[Any]) -> None:
-    """Вернуть снятые элементы только публичным API очереди."""
-    for existing in items:
+class CoalescingQueue(queue.Queue):
+    """Очередь со слиянием контент-дельт атомарно под собственным mutex.
+
+    При выключенном фичефлаге поведение тождественно queue.Queue.
+    Флаг и лимит перечитываются на каждый вызов — kill-switch без рестарта.
+    """
+
+    def __init__(
+        self,
+        maxsize: int = 0,
+        dynamic_config: object = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(maxsize=maxsize)
+        self._dynamic_config = dynamic_config
+        self._environ = environ
+
+    def _append_locked(self, item: object) -> None:
+        """Добавление элемента; вызывающий держит mutex, слот свободен."""
+        self.queue.append(item)
+        self.unfinished_tasks += 1
+        self.not_empty.notify()
+
+    def _drop_locked(self, index: int) -> None:
+        """Удаление элемента с коррекцией счётчика задач под mutex."""
+        del self.queue[index]
+        self.unfinished_tasks -= 1
+        if self.unfinished_tasks == 0:
+            self.all_tasks_done.notify_all()
+
+    def _coalesce_locked(self, item: object, limit: int) -> bool:
+        """Попытка размещения при полной очереди; вызывающий держит self.mutex."""
+        dq = self.queue
+        if self.maxsize <= 0 or len(dq) < self.maxsize:
+            self._append_locked(item)
+            return True
+        if _kind_of(item) in _COALESCIBLE_KINDS:
+            return True
+        if _merge_new_into_tail(dq, item, limit):
+            return True
+        if _coalesce_adjacent(dq, limit):
+            self.unfinished_tasks -= 1
+            if self.unfinished_tasks == 0:
+                self.all_tasks_done.notify_all()
+            self._append_locked(item)
+            return True
+        for index in range(len(dq)):
+            kind = _kind_of(dq[index])
+            if kind in _TERMINAL_KINDS:
+                continue
+            if kind in _COALESCIBLE_KINDS:
+                self._drop_locked(index)
+                self._append_locked(item)
+                return True
+        return False
+
+    def put_nowait(self, item: object) -> None:  # type: ignore[override]
+        """Неблокирующая запись; слияние только при включённом фичефлаге."""
         try:
-            target.put_nowait(existing)
+            return super().put_nowait(item)
         except queue.Full:
-            target.put(existing)
+            pass
+        if not stream_content_recovery_enabled(self._dynamic_config, self._environ):
+            raise queue.Full
+        limit = _max_merged_bytes(self._dynamic_config, self._environ)
+        with self.mutex:
+            if self._coalesce_locked(item, limit):
+                return None
+        raise queue.Full
+
+    def put_preserving(
+        self,
+        item: object,
+        dynamic_config: object = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> bool:
+        """Явная публикация с сохранением контента; флаг проверяет вызывающий."""
+        try:
+            super().put_nowait(item)
+            return True
+        except queue.Full:
+            pass
+        config = dynamic_config if dynamic_config is not None else self._dynamic_config
+        env = environ if environ is not None else self._environ
+        limit = _max_merged_bytes(config, env)
+        with self.mutex:
+            return self._coalesce_locked(item, limit)
 
 
 def publish_preserving(
@@ -182,50 +266,18 @@ def publish_preserving(
     dynamic_config: object = None,
     environ: Mapping[str, str] | None = None,
 ) -> bool:
-    """Публикация без потери контента при полной очереди, только публичный API.
+    """Публикация без потери контента; слияние умеет только CoalescingQueue.
 
-    Сначала обычный put_nowait. При переполнении элементы снимаются через
-    get_nowait/task_done, дельты сливаются в списке в пределах байтового
-    лимита, освобождённый слот сразу занимает item, затем всё возвращается
-    через put_nowait. Terminal/error/content не вытесняются; если место
-    освободить нельзя — False, прежний fail-close вызывающей стороны.
+    Для обычной очереди — прежний fail-close без извлечения элементов:
+    coalescible-уведомление отбрасывается, остальное даёт False.
     """
+    if isinstance(target, CoalescingQueue):
+        return target.put_preserving(item, dynamic_config, environ)
     try:
         target.put_nowait(item)
         return True
     except queue.Full:
-        pass
-    if _kind_of(item) in _COALESCIBLE_KINDS:
-        return True
-    limit = _max_merged_bytes(dynamic_config, environ)
-    items: list[Any] = []
-    while True:
-        try:
-            existing = target.get_nowait()
-        except queue.Empty:
-            break
-        items.append(existing)
-        target.task_done()
-    maxsize = getattr(target, "maxsize", 0)
-    if not isinstance(maxsize, int) or maxsize <= 0 or len(items) < maxsize:
-        items.append(item)
-        _requeue(target, items)
-        return True
-    if _merge_new_into_tail(items, item, limit):
-        _requeue(target, items)
-        return True
-    if _coalesce_adjacent(items, limit):
-        items.append(item)
-        _requeue(target, items)
-        return True
-    for index, existing in enumerate(items):
-        if _kind_of(existing) in _COALESCIBLE_KINDS:
-            del items[index]
-            items.append(item)
-            _requeue(target, items)
-            return True
-    _requeue(target, items)
-    return False
+        return _kind_of(item) in _COALESCIBLE_KINDS
 
 
 class BridgeBackpressureError(RuntimeError):
