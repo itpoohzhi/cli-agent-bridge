@@ -161,7 +161,7 @@
     "droid_off": {
       "backend": {
         "enabled": false,
-        "max_concurrent": 32
+        "max_concurrent": 64
       },
       "models": {
         "claude-sonnet-5-5": {
@@ -246,7 +246,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "meta-muse",
-      "max_concurrent": 1,
+      "max_concurrent": 64,
       "wrapper": "~/.config/muse-launch/muse-cli.sh",
       "technical_ref": {
         "version": "1.4.15",
@@ -263,7 +263,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "opencode-go",
-      "max_concurrent": 32,
+      "max_concurrent": 64,
       "base_url": "http://127.0.0.1:10830/go/v1",
       "api_key_ref": "file:~/.config/opencode/opencode-go.key",
       "headers_from_json": {
@@ -292,7 +292,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "opencode-go-claude",
-      "max_concurrent": 32,
+      "max_concurrent": 64,
       "base_url": "http://127.0.0.1:10830/go/v1",
       "api_key_ref": "file:~/.config/opencode/opencode-go.key",
       "headers_from_json": {
@@ -316,7 +316,7 @@
       "enabled": true,
       "required": false,
       "owned_by": "factory-droid",
-      "max_concurrent": 32
+      "max_concurrent": 64
     },
     "opencode-zen": {
       "kind": "passthrough",

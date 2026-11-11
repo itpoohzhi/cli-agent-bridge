@@ -11,7 +11,7 @@ transport:
     wrapper: ~/.config/muse-launch/muse-cli.sh
     proxy_port: 10816
     options: {streaming_mode: serve}
-limits: {max_concurrent: 1, quota_group: meta-muse, pin_required: true, timeout_s: 600}
+limits: {max_concurrent: 64, quota_group: meta-muse, pin_required: true, timeout_s: 600}
 # `binary_path` пинит неизменяемый bash-лаунчер `~/.local/bin/muse` (sha256 ниже), который запускает актуальный
 # движок `muse-bin-1.4.15-R8339.1`; версия ниже — версия движка (Muse Code 1.4.15), лаунчер правит только владелец.
 fingerprint:
