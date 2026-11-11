@@ -31,17 +31,19 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_Q_VAL: Final[str] = r"[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)"  # noqa: E501
-def _spaced(value: str) -> str: return r"\s*".join(value).replace(r"\s*_\s*", r"[\s_-]*")
+def _spaced(value: str) -> str:
+    glue = r"(?:[\s\\]|\\[bfnrtv])*"
+    return glue.join(value).replace(f"{glue}_{glue}", r"(?:[\s\\_-]|\\[bfnrtv])*")
+_LEAD: Final[str] = r"(?:\\[bfnrtv]|\\)*"
+_BOUND: Final[str] = r"(?:(?<=\\[bfnrtv])|\b|\\+)"
 _K_SPACED: Final[str] = "|".join(map(_spaced, "private_key secret_key access_key signing_key master_key encryption_key session_key ssh_key passphrase refresh_token access_token id_token client_secret x_api_key api_key password passwd pwd secret token".split()))
-_K_PLAIN: Final[str] = r"api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?key|client[_-]?secret|refresh[_-]?token|access[_-]?token|id[_-]?token|auth[_-]?token|passphrase|password|passwd|pwd|secret|token"  # noqa: E501
-_STOP_TOK: Final[str] = r"b\s*a\s*s\s*i\s*c\b|b\s*e\s*a\s*r\s*e\s*r\b|ya29\.|1//|sk-|AIza|[a-z0-9_.\[\]-]+\s*[:=]|[^\s@]+@[^\s@]+\.[^\W\d_]{2,}"  # noqa: E501
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://(?!\s)(?:(?:[^\r\n\"'@:]{0,512}:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\r\n@]{1,512}|[^\s/\"'@]{1,512})@[^\s/\"']+|[^\s/\"'@:]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i)\b(?:b\s*e\s*a\s*r\s*e\s*r|b\s*a\s*s\s*i\s*c)\s+(?:{_Q_VAL}|[^\s,;\"']+(?:\s+(?!{_STOP_TOK})[^\s,;\"']+)*)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}(?:{_K_SPACED})(?:\\*[\"'\[\]0-9a-z_.-])*\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{{[^\r\n\}}]*(?:\}}|$)|{_Q_VAL}|\([^\r\n\)]*(?:\)|$)|[^\r\n]+)", rf"(?i)\b(?:i\s*n\s*v\s*a\s*l\s*i\s*d|e\s*x\s*p\s*i\s*r\s*e\s*d|b\s*a\s*d|r\s*e\s*v\s*o\s*k\s*e\s*d|l\s*e\s*a\s*k\s*e\s*d)\s+(?:{_K_SPACED})\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+[^\r\n,;\"']+", rf"(?i)(?:^|(?<=[\s\"'\[\(,;]))(?:--?[a-z0-9_-]*(?:{_K_PLAIN})[a-z0-9_-]*|-[pk](?=(?:\\*[\"']\s*,\s*|\s+)(?![0-9]+\b)))(?:\\*[\"']\s*,\s*|[\s=]+)(?:{_Q_VAL}|[^\s,;\"']+(?:\s+(?!--?[a-z0-9]|{_STOP_TOK})[^\s,;\"']+)*)", rf"(?i)<\s*(?:[a-z0-9_.-]+:)?[a-z0-9_.-]*(?:{_K_PLAIN}|cookie|authorization)[a-z0-9_.-]*\b[^>]*>[^\r\n<]*(?:<\s*/[^>]*>|$)", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\b(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b")
+_K_PLAIN: Final[str] = _K_SPACED
+_STOP_TOK: Final[str] = rf"{_spaced('basic')}\b|{_spaced('bearer')}\b|ya29\.|1//|sk-|AIza|[a-z0-9_.\[\]-]+\s*[:=]|[^\s@]+@[^\s@]+\.[^\W\d_]{{2,}}"  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:(?<=\\[bfnrtv])|(?<![/:a-z0-9+.-]))[a-z][a-z0-9+.-]*://(?!\s)(?:[^\s]+(?:\s+(?![a-z][a-z0-9+.-]*://)[^\s]+){0,4}@[^\s/\"']+|[^\s/\"'@:]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}{_LEAD}{_spaced('authorization')}(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i){_BOUND}(?:{_spaced('bearer')}|{_spaced('basic')})\s+\S+(?:\s+(?!{_STOP_TOK})\S+)*", rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}{_LEAD}{_spaced('cookie')}(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}{_LEAD}(?:{_K_SPACED})(?:\\*[\"'\[\]0-9a-z_.-])*\s*%*\s*[:=]\s*[^\r\n]+", rf"(?i){_BOUND}(?:{_spaced('invalid')}|{_spaced('expired')}|{_spaced('bad')}|{_spaced('revoked')}|{_spaced('leaked')})\s+{_LEAD}(?:{_K_SPACED})\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+\S+", rf"(?i)(?:^|(?<=[\s\"'\[\(,;])|(?<=\\[bfnrtv]))(?:--?[a-z0-9_-]*{_LEAD}(?:{_K_PLAIN})[a-z0-9_-]*|-[pk](?=(?:\\*[\"']\s*,\s*|\s+)(?![0-9]+\b)))(?:\\*[\"']\s*,\s*|[\s=]+)\S+(?:\s+(?!--?[a-z0-9]|{_STOP_TOK})\S+)*", rf"(?i)<\s*(?:[a-z0-9_.-]+:)?[a-z0-9_.-]*{_LEAD}(?:{_K_PLAIN}|{_spaced('cookie')}|{_spaced('authorization')})[a-z0-9_.-]*\b[^>]*>[^\r\n]*", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", rf"{_BOUND}eyJ[A-Za-z0-9_-]{{4,}}\.eyJ[A-Za-z0-9_-]{{4,}}\.[A-Za-z0-9._-]*", rf"{_BOUND}(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{{16}}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", r"(?:\\+[bfnrtv]|(?<![\w.!#$%&'*+/=?^`{|}~-]))[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b")
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)
+_URL_SECRET_HINT_RE: Final[re.Pattern[str]] = re.compile(r"://[^\s/\"'@:]*:[^/\s\"'@]", re.IGNORECASE)
 _INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u0300-\u036f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u1ab0-\u1aff\u1dc0-\u1dff\u200b-\u200f\u202a-\u202e\u2060-\u206f\u20d0-\u20ff\u3164\ud800-\udfff\ufe00-\ufe2f\ufeff\uffa0\ufff0-\ufffb]+")
 _WS_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x06\x08-\x1a\x1c-\x20\x7f\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+")  # noqa: E501
-_BLOB_RE: Final[re.Pattern[str]] = re.compile(r"[^\s%\\&]{513,}")
-_LONG_TOK_RE: Final[re.Pattern[str]] = re.compile(r"\S{513,}")
 @dataclass(frozen=True)
 class NormalizedModelRoute:
     canonical_model: str; reasoning_effort: str | None
@@ -74,7 +76,7 @@ _ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:(?:\x1b|\\+(?:u001|x1)[bB])\[
 _PCT_RUN_RE: Final[re.Pattern[str]] = re.compile(r"(?:%[0-9a-fA-F]{2})+")
 _ESCAPE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"(?:\\+|%)[uU]((?<=U)[0-9a-fA-F]{8}|[0-9a-fA-F]{4})|\\+x([0-9a-fA-F]{2})|\\+([0-7]{1,3})|&#(?:[xX]([0-9a-fA-F]{1,6})(?![0-9a-fA-F])|([0-9]{1,7})(?![0-9]));?")
 _BS_STRIP_RE: Final[re.Pattern[str]] = re.compile(r"\\+(?=(?:[^uUx0-7bfnrtv\"'\\]|u(?![0-9a-fA-F]{4})|U(?![0-9a-fA-F]{4})|x(?![0-9a-fA-F]{2})))")  # noqa: E501
-_CTRL_ESC_RE: Final[re.Pattern[str]] = re.compile(r"\\+[bfnrtv]")
+_CTRL_ESC_RE: Final[re.Pattern[str]] = re.compile(r"\\+([bfnrtv])")
 _HTTP_CODE_RE_TPL: Final[str] = r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+{}\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*{}\b|(?:^\s*|\b(?:error|code)\s*:\s*){}\b)"
 def _reject_oversize(fail_closed: bool, text: str, limit: int) -> bool:
     return fail_closed and len(text) > limit
@@ -93,23 +95,29 @@ def _decode_escape(match: re.Match[str]) -> str:
     return chr(code)
 def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_closed: bool = True) -> str:
     if _reject_oversize(fail_closed, raw_text, 4194304): return REDACTED_TOKEN
-    cleaned = _BLOB_RE.sub(lambda m: f"{m.group(0)[:320]}{m.group(0)[-128:]}", _WS_RE.sub(" ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", raw_text[:4194304]))))
-    if _reject_oversize(fail_closed, cleaned, 1048576): return REDACTED_TOKEN
-    safe = f"{cleaned[:1048576]} {cleaned[-65536:]}" if len(cleaned) > 1048576 else cleaned
+    cleaned = _WS_RE.sub(" ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", raw_text[:4194304])))
+    safe = f"{cleaned[:1048576]} {cleaned[-65536:]}" if not fail_closed and len(cleaned) > 1048576 else cleaned
     for _ in range(8):
         previous = safe; safe = _PCT_RUN_RE.sub(_decode_pct, safe); safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe)
-        safe = html.unescape(_BS_STRIP_RE.sub("", _CTRL_ESC_RE.sub(" ", safe)))
+        safe = html.unescape(_BS_STRIP_RE.sub("", _CTRL_ESC_RE.sub(lambda m: f"\\{m.group(1)}", safe)))
         safe = _WS_RE.sub(" ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe)))
         if previous == safe: break
     else:
         if fail_closed: return REDACTED_TOKEN
-    safe = _LONG_TOK_RE.sub(lambda m: f"{m.group(0)[:320]}{m.group(0)[-128:]}", safe)[:max_len]
+    if _reject_oversize(fail_closed, safe, max_len): return REDACTED_TOKEN
     if fail_closed and _has_residual_encoding(safe): return REDACTED_TOKEN
-    return safe
+    return safe[:max_len]
+def _redact_patterns(text: str) -> str:
+    regexes = _SECRET_REGEXES if "@" in text else (_SECRET_REGEXES[:-1] if _URL_SECRET_HINT_RE.search(text) else _SECRET_REGEXES[1:-1])
+    has_kv = ":" in text or "=" in text
+    for regex in regexes:
+        if has_kv or regex not in (_SECRET_REGEXES[1], _SECRET_REGEXES[3], _SECRET_REGEXES[4]): text = regex.sub(REDACTED_TOKEN, text)
+    return text
 def redact_diagnostic_text(raw_text: str) -> str:
-    safe = _LONG_TOK_RE.sub(lambda m: f"{m.group(0)[:320]}{m.group(0)[-128:]}", _normalize_diagnostic_text(raw_text, max_len=65536))
-    for regex in _SECRET_REGEXES:
-        safe = regex.sub(REDACTED_TOKEN, safe)
+    if _reject_oversize(True, raw_text, 4194304): return REDACTED_TOKEN
+    normalized = _normalize_diagnostic_text(raw_text, max_len=1048576, fail_closed=True)
+    safe = _redact_patterns(normalized)
+    safe = _CTRL_ESC_RE.sub(" ", safe)
     return safe[:MAX_DIAGNOSTIC_CHARS] or (" " if raw_text else "")
 @dataclass(frozen=True)
 class FailureClassification:
@@ -121,7 +129,8 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
     code_403 = status_code == 403 or (status_code == 0 and bool(re.search(_HTTP_CODE_RE_TPL.format(403, 403, 403), reason)))
     return bool(re.search(auth_re, reason)) or code_401 or (code_403 and bool(re.search(r"oauth|refresh|unauthenticated", reason)))
 def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClassification:
-    reason = _normalize_diagnostic_text(raw_reason, max_len=1114113, fail_closed=False).lower()  # noqa: E501
+    normalized = _normalize_diagnostic_text(raw_reason, max_len=1114113, fail_closed=False)
+    reason = " ".join((_CTRL_ESC_RE.sub(" ", normalized), _CTRL_ESC_RE.sub(r"\1", normalized), raw_reason[:4194304])).lower()
     sanitized = redact_diagnostic_text(raw_reason)
     if _is_auth_failure(status_code, reason):
         values = (FailureCategory.AUTH_REFRESH_EXHAUSTED, False, True, sanitized)
@@ -138,18 +147,18 @@ def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClass
 class RouteHealthStatus:
     model_id: str; available: bool
     status_reason: HealthReason; env_drift_keys: tuple[str, ...]
-def _route_targets(model_id: str | NormalizedModelRoute) -> tuple[str, frozenset[str]]:
-    route = model_id if isinstance(model_id, NormalizedModelRoute) else normalize_model_route(model_id)
+def _route_targets(model_id: str | NormalizedModelRoute, known_models: Collection[str] | None = None) -> tuple[str, frozenset[str]]:
+    route = model_id if isinstance(model_id, NormalizedModelRoute) else normalize_model_route(model_id, known_models=known_models)
     canon, eff = route.canonical_model.strip(), route.reasoning_effort
     if len(canon.split()) != 1 or _INVISIBLE_RE.search(canon) or (eff is not None and (len(eff.strip().split()) != 1 or bool(_INVISIBLE_RE.search(eff)))): raise ValueError("invalid NormalizedModelRoute")
     alias = f"{canon}-{eff.strip().lower()}".lower() if eff else canon.lower()
     return canon, frozenset((canon.lower(), alias))
-def evaluate_route_health(model_id: str | NormalizedModelRoute, blocked_models: tuple[str, ...], probe_age_s: float, max_stale_age_s: float, env_drift_keys: tuple[str, ...] = ()) -> RouteHealthStatus:
+def evaluate_route_health(model_id: str | NormalizedModelRoute, blocked_models: tuple[str, ...], probe_age_s: float, max_stale_age_s: float, env_drift_keys: tuple[str, ...] = (), known_models: Collection[str] | None = None) -> RouteHealthStatus:
     _require_finite(probe_age_s, "probe_age_s")
     _require_finite(max_stale_age_s, "max_stale_age_s")
     if max_stale_age_s < 0:
         raise ValueError("max_stale_age_s must be non-negative")
-    canonical, targets = _route_targets(model_id)
+    canonical, targets = _route_targets(model_id, known_models)
     blocked = {item.strip().lower() for item in blocked_models if item.strip()}
     drift = tuple(sorted({k for key in env_drift_keys if (k := key.strip())}))
     if targets & blocked:
@@ -184,7 +193,7 @@ def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
     _require_finite(config.reserve_s, "reserve_s")
     _require_finite(config.min_attempt_budget_s, "min_attempt_budget_s")
     _require_finite(config.idle_timeout_s, "idle_timeout_s")
-    invalid = (not 0 < config.total_budget_s <= 86400.0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, not 0.001 <= config.min_attempt_budget_s <= 86400.0, type(config.max_attempts) is not int or not 1 <= config.max_attempts <= 1000, not 0 < config.idle_timeout_s <= 86400.0)
+    invalid = (not 0 < config.total_budget_s <= 86400.0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, not 0.001 <= config.min_attempt_budget_s <= 86400.0, Decimal(str(config.min_attempt_budget_s)) > Decimal(str(config.total_budget_s)) - Decimal(str(config.reserve_s)), type(config.max_attempts) is not int or not 1 <= config.max_attempts <= 1000, not 0 < config.idle_timeout_s <= 86400.0)
     if any(invalid):
         raise ValueError("invalid retry budget configuration")
     return config
