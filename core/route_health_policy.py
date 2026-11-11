@@ -1,9 +1,10 @@
-# ruff: noqa: E501
+# ruff: noqa: E501,E701,E702
 # fmt: off
 from __future__ import annotations
 
 import hashlib
 import html
+import math
 import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
@@ -35,10 +36,10 @@ def _spaced(value: str) -> str: return r"\s*".join(value).replace(r"\s*_\s*", r"
 _K_SPACED: Final[str] = "|".join(map(_spaced, "private_key secret_key access_key signing_key master_key encryption_key session_key ssh_key passphrase refresh_token access_token id_token client_secret x_api_key api_key password passwd pwd secret token".split()))
 _K_PLAIN: Final[str] = r"api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?key|client[_-]?secret|refresh[_-]?token|access[_-]?token|id[_-]?token|auth[_-]?token|passphrase|password|passwd|pwd|secret|token"  # noqa: E501
 _STOP_TOK: Final[str] = r"b\s*a\s*s\s*i\s*c\b|b\s*e\s*a\s*r\s*e\s*r\b|ya29\.|1//|sk-|AIza|[a-z0-9_.\[\]-]+\s*[:=]|[^\s@]+@[^\s@]+\.[^\W\d_]{2,}"  # noqa: E501
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://(?:(?:[^\r\n\"'@]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\r\n@]+|[^\s/\"'@]+)@[^\s/\"']+|[^\s/\"'@]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i)\b(?:b\s*e\s*a\s*r\s*e\s*r|b\s*a\s*s\s*i\s*c)\s+(?:{_Q_VAL}|[^\s,;\"']+(?:\s+(?!{_STOP_TOK})[^\s,;\"']+)*)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}(?:{_K_SPACED})(?:\\*[\"'\[\]0-9a-z_.-])*\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{{[^\r\n\}}]*(?:\}}|$)|{_Q_VAL}|\([^\r\n\)]*(?:\)|$)|[^\r\n]+)", rf"(?i)\b(?:i\s*n\s*v\s*a\s*l\s*i\s*d|e\s*x\s*p\s*i\s*r\s*e\s*d|b\s*a\s*d|r\s*e\s*v\s*o\s*k\s*e\s*d|l\s*e\s*a\s*k\s*e\s*d)\s+(?:{_K_SPACED})\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+[^\r\n,;\"']+", rf"(?i)(?:^|(?<=[\s\"'\[\(,;]))(?:--?[a-z0-9_-]*(?:{_K_PLAIN})[a-z0-9_-]*|-[pk](?=(?:\\*[\"']\s*,\s*|\s+)(?![0-9]+\b)))(?:\\*[\"']\s*,\s*|[\s=]+)(?:{_Q_VAL}|[^\s,;\"']+(?:\s+(?!--?[a-z0-9]|{_STOP_TOK})[^\s,;\"']+)*)", rf"(?i)<\s*(?:[a-z0-9_.-]+:)?[a-z0-9_.-]*(?:{_K_PLAIN}|cookie|authorization)[a-z0-9_.-]*\b[^>]*>[^\r\n<]*(?:<\s*/[^>]*>|$)", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\b(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b")
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://(?!\s)(?:(?:[^\r\n\"'@:]{0,512}:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\r\n@]{1,512}|[^\s/\"'@]{1,512})@[^\s/\"']+|[^\s/\"'@:]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i)\b(?:b\s*e\s*a\s*r\s*e\s*r|b\s*a\s*s\s*i\s*c)\s+(?:{_Q_VAL}|[^\s,;\"']+(?:\s+(?!{_STOP_TOK})[^\s,;\"']+)*)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}(?:{_K_SPACED})(?:\\*[\"'\[\]0-9a-z_.-])*\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{{[^\r\n\}}]*(?:\}}|$)|{_Q_VAL}|\([^\r\n\)]*(?:\)|$)|[^\r\n]+)", rf"(?i)\b(?:i\s*n\s*v\s*a\s*l\s*i\s*d|e\s*x\s*p\s*i\s*r\s*e\s*d|b\s*a\s*d|r\s*e\s*v\s*o\s*k\s*e\s*d|l\s*e\s*a\s*k\s*e\s*d)\s+(?:{_K_SPACED})\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+[^\r\n,;\"']+", rf"(?i)(?:^|(?<=[\s\"'\[\(,;]))(?:--?[a-z0-9_-]*(?:{_K_PLAIN})[a-z0-9_-]*|-[pk](?=(?:\\*[\"']\s*,\s*|\s+)(?![0-9]+\b)))(?:\\*[\"']\s*,\s*|[\s=]+)(?:{_Q_VAL}|[^\s,;\"']+(?:\s+(?!--?[a-z0-9]|{_STOP_TOK})[^\s,;\"']+)*)", rf"(?i)<\s*(?:[a-z0-9_.-]+:)?[a-z0-9_.-]*(?:{_K_PLAIN}|cookie|authorization)[a-z0-9_.-]*\b[^>]*>[^\r\n<]*(?:<\s*/[^>]*>|$)", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\b(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b")
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)
-_INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u0300-\u036f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u1ab0-\u1aff\u1dc0-\u1dff\u200b-\u200f\u202a-\u202e\u2060-\u206f\u20d0-\u20ff\u3164\ufe00-\ufe2f\ufeff\uffa0\ufff0-\ufffb]+")
-_WS_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x06\x08-\x1a\x1c-\x20\x7f\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ud800-\udfff]+")  # noqa: E501
+_INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u0300-\u036f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u1ab0-\u1aff\u1dc0-\u1dff\u200b-\u200f\u202a-\u202e\u2060-\u206f\u20d0-\u20ff\u3164\ud800-\udfff\ufe00-\ufe2f\ufeff\uffa0\ufff0-\ufffb]+")
+_WS_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x06\x08-\x1a\x1c-\x20\x7f\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+")  # noqa: E501
 _BLOB_RE: Final[re.Pattern[str]] = re.compile(r"[^\s%\\&]{513,}")
 _LONG_TOK_RE: Final[re.Pattern[str]] = re.compile(r"\S{513,}")
 @dataclass(frozen=True)
@@ -75,24 +76,35 @@ _ESCAPE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"(?:\\+|%)[uU]((?<=U)[0-9
 _BS_STRIP_RE: Final[re.Pattern[str]] = re.compile(r"\\+(?=(?:[^uUx0-7bfnrtv\"'\\]|u(?![0-9a-fA-F]{4})|U(?![0-9a-fA-F]{4})|x(?![0-9a-fA-F]{2})))")  # noqa: E501
 _CTRL_ESC_RE: Final[re.Pattern[str]] = re.compile(r"\\+[bfnrtv]")
 _HTTP_CODE_RE_TPL: Final[str] = r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+{}\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*{}\b|(?:^\s*|\b(?:error|code)\s*:\s*){}\b)"
+def _reject_oversize(fail_closed: bool, text: str, limit: int) -> bool:
+    return fail_closed and len(text) > limit
+def _has_residual_encoding(safe: str) -> bool:
+    entities = re.search(rf"(?i)(?:{_K_PLAIN})&+=", safe)
+    escapes = re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe)
+    return any((html.unescape(safe) != safe, entities, escapes))
 def _decode_pct(match: re.Match[str]) -> str:
-    return "".join(" " if ch in "\t\r\n\u2028\u2029" else ch if ch in "\x07\x1b" else "" if ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F or _INVISIBLE_RE.fullmatch(ch) else ch for ch in bytes.fromhex(match.group(0).replace("%", "")).decode("utf-8", "replace"))
+    return "".join(" " if ch in "\t\r\n\u2028\u2029" else ch if ch in "\x07\x1b\x9b\x9c" else "" if ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F or _INVISIBLE_RE.fullmatch(ch) else ch for ch in bytes.fromhex(match.group(0).replace("%", "")).decode("utf-8", "replace"))
 def _decode_escape(match: re.Match[str]) -> str:
     hex_s, oct_s, dec_s = match.group(1) or match.group(2) or match.group(4), match.group(3), match.group(5)
     code = int(hex_s, 16) if hex_s else (int(oct_s, 8) if oct_s else int(dec_s, 10))
     if code in (0x09, 0x0A, 0x0D, 0x2028, 0x2029): return " "
-    if code in (0x07, 0x1B): return chr(code)
+    if code in (0x07, 0x1B, 0x9B, 0x9C): return chr(code)
     if code <= 0x1F or 0x7F <= code <= 0x9F or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF or _INVISIBLE_RE.fullmatch(chr(code)): return ""
     return chr(code)
 def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_closed: bool = True) -> str:
+    if _reject_oversize(fail_closed, raw_text, 4194304): return REDACTED_TOKEN
     cleaned = _BLOB_RE.sub(lambda m: f"{m.group(0)[:320]}{m.group(0)[-128:]}", _WS_RE.sub(" ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", raw_text[:4194304]))))
-    safe = (f"{cleaned[:1048576]} {cleaned[-65536:]}" if not fail_closed and len(cleaned) > 1048576 else cleaned)[:max_len]
+    if _reject_oversize(fail_closed, cleaned, 1048576): return REDACTED_TOKEN
+    safe = f"{cleaned[:1048576]} {cleaned[-65536:]}" if len(cleaned) > 1048576 else cleaned
     for _ in range(8):
-        previous = safe; safe = _PCT_RUN_RE.sub(_decode_pct, safe); safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe); safe = html.unescape(safe)
-        safe = _BS_STRIP_RE.sub("", _CTRL_ESC_RE.sub(" ", safe))
+        previous = safe; safe = _PCT_RUN_RE.sub(_decode_pct, safe); safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe)
+        safe = html.unescape(_BS_STRIP_RE.sub("", _CTRL_ESC_RE.sub(" ", safe)))
         safe = _WS_RE.sub(" ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe)))
         if previous == safe: break
-    if fail_closed and re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe): return REDACTED_TOKEN
+    else:
+        if fail_closed: return REDACTED_TOKEN
+    safe = _LONG_TOK_RE.sub(lambda m: f"{m.group(0)[:320]}{m.group(0)[-128:]}", safe)[:max_len]
+    if fail_closed and _has_residual_encoding(safe): return REDACTED_TOKEN
     return safe
 def redact_diagnostic_text(raw_text: str) -> str:
     safe = _LONG_TOK_RE.sub(lambda m: f"{m.group(0)[:320]}{m.group(0)[-128:]}", _normalize_diagnostic_text(raw_text, max_len=65536))
@@ -117,7 +129,7 @@ def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClass
         values = (FailureCategory.LIMIT_BLOCKED, False, True, sanitized)
     elif "ssl_error_syscall" in reason or "tls handshake timeout" in reason:
         values = (FailureCategory.UPSTREAM_TLS_STALL, False, True, sanitized)
-    elif status_code in _CAPACITY_STATUSES or "model_capacity_exhausted" in reason or (status_code == 0 and bool(re.search(r"\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+(?:429|502|503|504)\b", reason))):
+    elif status_code in _CAPACITY_STATUSES or "model_capacity_exhausted" in reason or (status_code == 0 and bool(re.search(_HTTP_CODE_RE_TPL.format(*((r"(?:429|502|503|504)",) * 3)), reason))):
         values = (FailureCategory.CAPACITY_EXHAUSTED, True, True, sanitized)
     else:
         values = (FailureCategory.FATAL_REQUEST_ERROR, False, False, sanitized)
@@ -163,7 +175,9 @@ class AttemptDecision:
     attempt_budget_s: float
     reason: RetryReason
 def _require_finite(value: float, field: str) -> None:
-    if type(value) not in (int, float) or not (-1e308 <= value <= 1e308):
+    try: finite = type(value) in (int, float) and math.isfinite(value)
+    except OverflowError: finite = False
+    if not finite:
         raise ValueError(f"{field} must be finite")
 def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
     _require_finite(config.total_budget_s, "total_budget_s")
@@ -210,7 +224,7 @@ def inspect_canon_payload(text: str, marker: str = DEFAULT_CANON_MARKER, previou
     clean_marker = marker.strip()
     if not clean_marker:
         raise ValueError("marker must not be empty")
-    payload = text.encode("utf-8")
+    payload = text.encode("utf-8", "replace")
     has_marker = text.rstrip().endswith(clean_marker)
     sha = hashlib.sha256(payload).hexdigest()
     unchanged = bool(has_marker and previous_sha256 is not None and sha == previous_sha256.strip().lower())
