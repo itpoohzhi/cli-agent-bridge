@@ -195,55 +195,26 @@ from core.catalog_flags import (  # noqa: E402
     resolve_fleet_path,
     sidecar_allowlist,
 )
+from core.passthrough_autonomy import (  # noqa: E402
+    passthrough_autonomy_validation_enabled,
+    prepare_passthrough_request,
+    resolve_target_model,
+    strip_passthrough_request as _strip_passthrough_env,
+)
 from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
 from core.droid_session_gate import ToolsGateError, admit_model, plan_tools_disable, verify_tools_disabled  # noqa: E402
 from core.effort_policy import (  # noqa: E402
     DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER, FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
     catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
-    resolve_model_effort_fields, resolve_passthrough_effort,
+    resolve_model_effort_fields,
 )
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
 
-def resolve_target_model(model_entry: dict, requested_model_id: str) -> str:
-    """Возвращает каноническую целевую модель для CLI/бэкенда (upstream_model при наличии)."""
-    if not isinstance(model_entry, dict):
-        return requested_model_id
-    upstream = model_entry.get("upstream_model")
-    if isinstance(upstream, str) and upstream.strip():
-        return upstream.strip()
-    return requested_model_id
-
-
 def build_cli_model_selection(ctx: dict) -> str:
     """Выбирает целевую модель для запуска CLI-процесса (с учётом upstream_model)."""
     return ctx.get("target_model") or ctx["model"]
-
-
-def prepare_passthrough_request(
-    req: dict,
-    model: dict,
-    model_id: str,
-    alias: tuple[str, str] | None = None,
-    alias_effort: str | None = None,
-    effort_on: bool = False,
-) -> tuple[dict, Any]:
-    """Формирует тело запроса для passthrough-маршрута с трансляцией upstream_model и effort."""
-    upstream_model = model.get("upstream_model")
-    has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
-    pt_effort = resolve_passthrough_effort(
-        req.get("reasoning_effort"),
-        alias_effort,
-        ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
-        enabled=effort_on,
-    )
-    if has_upstream or alias or pt_effort.apply:
-        target_model = resolve_target_model(model, model_id)
-        req = {**req, "model": target_model}
-        if pt_effort.apply:
-            req["reasoning_effort"] = pt_effort.value
-    return req, pt_effort
 
 
 def _resolve_backend_topology(backend_id: str, route_mode: str) -> tuple[str, str]:
@@ -1152,19 +1123,6 @@ def _redact_values(text: str, values: list) -> str:
         if value:
             text = text.replace(value, "***")
     return text
-
-
-def _strip_passthrough_env(raw: bytes, req: dict) -> "tuple[bytes, dict]":
-    """Вырезать `extra_body.env` из тела, уходящего внешнему upstream (токены/CDP не покидают хост).
-
-    Тело без `extra_body.env` возвращается дословно (побайтово), иначе пересериализуется.
-    """
-    extra = req.get("extra_body")
-    if not isinstance(extra, dict) or "env" not in extra:
-        return raw, req
-    clean_req = dict(req)
-    clean_req["extra_body"] = {k: v for k, v in extra.items() if k != "env"}
-    return json.dumps(clean_req, ensure_ascii=False).encode("utf-8"), clean_req
 
 
 def _launch_env() -> dict:
@@ -7277,6 +7235,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             # (8a) passthrough (AD-003/AD-007): raw-шов ДО effort-клампа, транскрипции и контекста —
             # model/reasoning_effort/tools/Authorization уходят upstream дословно.
             passthrough = BACKENDS.get(model["backend"])
+            if passthrough_autonomy_validation_enabled(
+                isinstance(passthrough, PassthroughAdapter)
+            ):
+                try:
+                    _ = validate_autonomy_request(req.get("autonomy"))
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
+                    return
             if isinstance(passthrough, PassthroughAdapter):
                 if raw_model != model_id and alias is None:
                     self._reject(

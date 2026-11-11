@@ -809,7 +809,7 @@ MAX_REASONING_BYTES_PER_TURN = get_bridge_config().max_reasoning_bytes_per_turn
 MAX_STEP_BLOB_BYTES = get_bridge_config().max_step_blob_bytes
 MAX_STEPS_TRACKED = get_bridge_config().max_steps_tracked
 SQLITE_ROW_LIMIT = get_bridge_config().sqlite_row_limit
-# Константы схемы привязаны к agy 1.4.9 и подтверждаются canary.
+# Константы схемы привязаны к agy 1.5.5 и подтверждаются canary.
 STEP_TYPE_PLANNER = 15
 STEP_STATUS_GENERATING = 8
 STEP_STATUS_DONE = 3

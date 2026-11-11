@@ -85,7 +85,7 @@ def test_native_provider_affinity_invariant():
         if model_id.endswith("-droid"):
             assert provider == "droid", f"{model_id} should be droid, got {provider}"
         elif family in EXPECTED_FAMILY_PROVIDER:
-            expected = EXPECTED_FAMILY_PROVIDER[family]
+            expected = "opencode-go-claude" if model_id == "claude-haiku-5-5" else EXPECTED_FAMILY_PROVIDER[family]
             assert provider == expected, f"{model_id} (family={family}) should be {expected}, got {provider}"
             assert provider not in aggregators, f"Canonical model {model_id} cannot have aggregator as primary, got {provider}"
 
@@ -107,40 +107,30 @@ def test_runtime_upstream_model_translation(droid_model, expected_canonical):
     assert resolve_target_model({"id": expected_canonical}, expected_canonical) == expected_canonical
 
 
-@pytest.mark.parametrize("expected_alias,expected_backend_id,expected_backend,expected_effort", [
-    ("gemini-3.8-flash-droid-low", "gemini-3.8-flash-droid", "droid", "low"),
-    ("gemini-3.8-flash-droid-medium", "gemini-3.8-flash-droid", "droid", "medium"),
-    ("gemini-3.8-flash-droid-high", "gemini-3.8-flash-droid", "droid", "high"),
-    ("gpt-6.1-sol-droid-low", "gpt-6.1-sol-droid", "droid", "low"),
-    ("gpt-6.1-sol-droid-medium", "gpt-6.1-sol-droid", "droid", "medium"),
-    ("gpt-6.1-sol-droid-high", "gpt-6.1-sol-droid", "droid", "high"),
-    ("gpt-6.1-sol-droid-max", "gpt-6.1-sol-droid", "droid", "max"),
-    ("claude-sonnet-5-5-droid-low", "claude-sonnet-5-5-droid", "droid", "low"),
-    ("claude-sonnet-5-5-droid-medium", "claude-sonnet-5-5-droid", "droid", "medium"),
-    ("claude-sonnet-5-5-droid-high", "claude-sonnet-5-5-droid", "droid", "high"),
-    ("claude-sonnet-5-5-droid-max", "claude-sonnet-5-5-droid", "droid", "max"),
-    ("gpt-6.1-sol-low", "gpt-6.1-sol", "codex", "low"),
-    ("gpt-6.1-sol-medium", "gpt-6.1-sol", "codex", "medium"),
-    ("gpt-6.1-sol-high", "gpt-6.1-sol", "codex", "high"),
-    ("gpt-6.1-sol-max", "gpt-6.1-sol", "codex", "max"),
-    ("gemini-3.8-flash-low", "gemini-3.8-flash", "agy", "low"),
-    ("gemini-3.8-flash-medium", "gemini-3.8-flash", "agy", "medium"),
-    ("gemini-3.8-flash-high", "gemini-3.8-flash", "agy", "high"),
-    ("claude-sonnet-5-5-low", "claude-sonnet-5-5", "claude-p", "low"),
-    ("claude-sonnet-5-5-medium", "claude-sonnet-5-5", "claude-p", "medium"),
-    ("claude-sonnet-5-5-high", "claude-sonnet-5-5", "claude-p", "high"),
-    ("claude-sonnet-5-5-max", "claude-sonnet-5-5", "claude-p", "max"),
-])
-def test_explicit_effort_alias_contract(expected_alias, expected_backend_id, expected_backend, expected_effort):
-    """Каждый обязательный алиас строго проверяется на backend_id, backend и effort."""
-    fleet = _load_fleet()
-    aliases = fleet.get("aliases", {})
-    assert expected_alias in aliases, f"Missing required alias: {expected_alias}"
-    spec = aliases[expected_alias]
-    assert isinstance(spec, dict), f"{expected_alias} must be a dict spec"
-    assert spec["backend_id"] == expected_backend_id
-    assert spec["backend"] == expected_backend
-    assert spec["effort"] == expected_effort
+def _backend_aliases(model, backend, efforts):
+    return {f"{model}-{effort}": {"backend_id": model, "backend": backend, "effort": effort} for effort in efforts}
+
+
+def _target_aliases(model, efforts):
+    return {f"{model}-{effort}": {"target": model, "default_effort": effort} for effort in efforts}
+
+
+def test_explicit_effort_alias_contract():
+    """Все 31 effort-алиаса проверяются по точной форме с учётом Carbon и Argon."""
+    expected = {
+        **_backend_aliases("gemini-3.8-flash-droid", "droid", ("low", "medium", "high")),
+        **_backend_aliases("gpt-6.1-sol-droid", "droid", ("low", "medium", "high", "max")),
+        **_backend_aliases("claude-sonnet-5-5-droid", "droid", ("low", "medium", "high", "max")),
+        **_backend_aliases("gpt-6.1-sol", "codex", ("low", "medium", "high", "max")),
+        **_backend_aliases("gemini-3.8-flash", "agy", ("low", "medium", "high")),
+        **_backend_aliases("claude-sonnet-5-5", "claude-p", ("low", "medium", "high", "max")),
+        **_backend_aliases("claude-opus-5-5", "claude-p", ("medium", "high")),
+        **_backend_aliases("claude-haiku-5-5", "opencode-go-claude", ("low",)),
+        **_target_aliases("gemini-4-argon", ("low", "medium")),
+        **_backend_aliases("gemini-4-argon", "agy", ("high",)),
+        **_target_aliases("gemini-4-carbon", ("low", "medium", "high")),
+    }
+    assert _load_fleet().get("aliases", {}) == expected
 
 
 @pytest.mark.parametrize("droid_model,expected_upstream", [
@@ -207,15 +197,15 @@ def test_passthrough_target_model_rewriting():
 
 
 def test_exact_effort_alias_count():
-    """Проверяет точное количество effort-алиасов: ровно 19 целевых (10 Droid + 9 native), 23 всего в каталоге."""
+    """Проверяет ровно 31 effort-алиас, включая три Gemini 4 Carbon."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
-    assert len(aliases) == 26, f"Expected 26 total aliases in fleet, got {len(aliases)}"
+    assert len(aliases) == 31, f"Expected 31 total aliases in fleet, got {len(aliases)}"
     target_aliases = [
         k for k in aliases
-        if any(m in k for m in ("gemini-3.8-flash", "gpt-6.1-sol", "claude-sonnet-5-5"))
+        if any(m in k for m in ("gemini-3.8-flash", "gemini-4-carbon", "gpt-6.1-sol", "claude-sonnet-5-5"))
     ]
-    assert len(target_aliases) == 22, f"Expected exactly 22 target aliases (11 droid + 11 native), got {len(target_aliases)}"
+    assert len(target_aliases) == 25, f"Expected 25 target aliases including Carbon, got {len(target_aliases)}"
 
 
 def test_manifest_priority_values():

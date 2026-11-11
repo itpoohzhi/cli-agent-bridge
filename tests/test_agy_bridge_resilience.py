@@ -6445,7 +6445,7 @@ def _dict_or_empty(value: object) -> dict[str, object]:
 
 # ---- Image input (workspace-read): AD-001..AD-006, F-001..F-010 ---------------------
 
-_IMG_TARGETS = ("gemini-4-argon", "gemini-3.8-flash")
+_IMG_TARGETS = ("gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash")
 _IMG_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 _IMG_MAGIC: dict[str, bytes] = {
     "image/png": b"\x89PNG\r\n\x1a\n",
@@ -7994,12 +7994,9 @@ class ImageResourceTests(unittest.TestCase):
                 )
                 before = len(env.records())
                 with (
-                    mock.patch.dict(
-                        _proof_of("gemini-4-argon"), {"agy_binary_sha256": "f" * 64}
-                    ),
-                    mock.patch.dict(
-                        _proof_of("gemini-3.8-flash"), {"agy_binary_sha256": "f" * 64}
-                    ),
+                    mock.patch.dict(_proof_of("gemini-4-carbon"), {"agy_binary_sha256": "f" * 64}),
+                    mock.patch.dict(_proof_of("gemini-4-argon"), {"agy_binary_sha256": "f" * 64}),
+                    mock.patch.dict(_proof_of("gemini-3.8-flash"), {"agy_binary_sha256": "f" * 64}),
                 ):
                     health = bridge.get("/health")[1]
                     self.assertEqual(health["images"], False)
@@ -8586,7 +8583,7 @@ class AcceptanceOracleTests(unittest.TestCase):
             self.assertEqual(_bval("METHOD_IMPL_VERSION"), 1)
             catalog = _dict(_bval("FLEET"))
             ref = _dict(catalog["technical_ref"])
-            self.assertEqual(ref["agy_version"], "1.4.9")
+            self.assertEqual(ref["agy_version"], "1.5.5")
             sha = _str(ref["agy_binary_sha256"])
             limits = _dict(catalog["image_limits"])
             self.assertEqual(
@@ -13918,7 +13915,7 @@ class BridgeConfigurabilityTests(unittest.TestCase):
     def test_bridge_config_defaults(self) -> None:
         cfg = srv._BridgeConfig()
         self.assertEqual(cfg.port, 9887)
-        self.assertEqual(cfg.max_concurrent, 4)
+        self.assertEqual(cfg.max_concurrent, 32)
         self.assertEqual(cfg.queue_timeout_s, 900)
         self.assertEqual(cfg.timeout_s, 1800)
         self.assertEqual(cfg.keepalive_s, 15.0)

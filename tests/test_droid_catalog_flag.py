@@ -29,7 +29,7 @@ _LMH = ("low", "medium", "high")
 # обслуживается мостом opencode-go независимо от гейта (онбординг 2b7431f).
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
-    ("gemini-3.8-flash", "agy", _LMH, "high"),
+    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", _LMH, "high"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
     ("muse-spark-1.3", "muse", ("max",), "max"),
     ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
     ("muse-wonder-1.0", "muse", _ALL, "high"),
@@ -45,14 +45,14 @@ BASE_MODELS = (
     ("nemotron-3.5-lightning-free", "opencode-zen", _ZEN, "high"),
     ("nemotron-3.5-super-vl-free", "opencode-zen", _ZEN, "high"),
     ("beam-free", "opencode-zen", _ZEN, "high"),
-    ("big-pickle", "opencode-zen", _ZEN, "high"),
+    ("big-pickle", "opencode-zen", _ZEN, "high"), ("iceman-free", "opencode-zen", _ZEN, "high"), ("inkling-2-small-free", "opencode-zen", _ALL, "high"), ("longcat-2.5-free", "opencode-zen", _ZEN, "high"), ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
 )
 # Имена моделей, переключаемых гейтом, при выключенном флаге.
 BASE_NAMES = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
     "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
 }
-BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=4)
+BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=32)
 BASE_ALIAS: dict[str, Any] = {}
 
 
@@ -173,7 +173,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(gated, raw)
         self.assertTrue(gated["backends"]["droid"]["enabled"])
         self.assertEqual(list(routes(gated).values()).count("droid"), 3)
-        self.assertEqual(len(gated["aliases"]), 12)
+        self.assertEqual(len(gated["aliases"]), 31)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -211,7 +211,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(gated["backends"]["droid"], BASE_DROID_BACKEND)
         self.assertEqual(gated["aliases"], BASE_ALIAS)
         ids = [m["id"] for m in gated["models"]]
-        self.assertEqual(sorted(ids), sorted(b[0] for b in BASE_MODELS))
+        self.assertEqual(set(ids), {b[0] for b in BASE_MODELS} | {"claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"})
 
     def test_schema_gate(self) -> None:
         """F-006.1: схема 2 не трогается, схема 4 под гейтом (fail-closed)."""
@@ -291,9 +291,9 @@ class DroidCatalogFlagTest(unittest.TestCase):
             with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
                 catalog = srv()._load_fleet()
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
-                self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "droid")
+                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("codex", "droid"))
                 self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 12)
+                self.assertEqual(len(catalog["aliases"]), 31)
 
 
 if __name__ == "__main__":

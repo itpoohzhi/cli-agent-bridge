@@ -5,7 +5,7 @@ provider_id: opencode-go-claude
 kind: passthrough
 enabled: true
 required: false
-priority: 15
+priority: 5
 owned_by: opencode-go-claude
 transport:
   bridge: {base_url: 'http://127.0.0.1:10830/go/v1'}

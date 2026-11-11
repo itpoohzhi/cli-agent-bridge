@@ -61,15 +61,19 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
     def assert_state(self, catalog: Any, registry: GatedRegistry, on: bool) -> None:
         adapter = registry.adapter_for_model("claude-sonnet-5-5")
         self.assertIsNotNone(adapter)
-        self.assertEqual(adapter.id if adapter else "", "droid" if on else "claude-p")
+        self.assertEqual(adapter.id if adapter else "", "claude-p")
+        droid_adapter = registry.adapter_for_model("claude-sonnet-5-5-droid")
+        self.assertEqual(droid_adapter is not None, on)
+        if droid_adapter is not None:
+            self.assertEqual(droid_adapter.id, "droid")
         self.assertEqual(registry.get("droid") is not None, on)
         published = {model.id for _adapter, model in registry.models()}
-        # gpt-6.1-sol обслуживает только droid: :2455 (codex) его не отдаёт ни в одном состоянии флага.
+        # Профиль OFF скрывает базовый gpt-6.1-sol; при ON он маршрутизируется в codex.
         self.assertEqual("gpt-6.1-sol" in published, on)
         self.assertEqual(("droid" in [a.id for a in registry.adapters()]), on)
-        self.assertEqual(len(catalog["aliases"]), 12 if on else 0)
+        self.assertEqual(len(catalog["aliases"]), 31 if on else 0)
         backend = catalog["models"]["claude-sonnet-5-5"]["backend"]
-        self.assertEqual(backend, "droid" if on else "claude-p")
+        self.assertEqual(backend, "claude-p")
         self.assertEqual("gpt-6.1-sol" in catalog["models"], on)
 
     def test_toggle_without_reload(self) -> None:
@@ -237,7 +241,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         self.assertNotIn("gpt-6.1-sol", catalog["models"])
         set_flag(True)
         sol = catalog["models"]["gpt-6.1-sol"]["name"]
-        self.assertEqual(sol, "GPT-6.1 Sol (Droid bridge)")
+        self.assertEqual(sol, "GPT-6.1 Sol (Codex passthrough)")
         set_flag(False)
         for model, name in names.items():
             self.assertEqual(catalog["models"][model]["name"], name)

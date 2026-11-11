@@ -20,4 +20,6 @@ REPO_ROOT="${CLI_AGENT_BRIDGE_ROOT:-$HOME/work/src/cli-agent-bridge}"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$ROOT/logs" "$ROOT/workspace"
 cd "$ROOT"
-exec /usr/bin/python3 server.py
+PYTHON_BIN="${PYTHON_BIN:-$HOME/.local/bin/python3}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3)"
+exec "$PYTHON_BIN" server.py

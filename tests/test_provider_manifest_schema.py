@@ -169,7 +169,7 @@ def test_max_concurrent_invalid(cap: Any) -> None:
     assert "provider_max_concurrent_invalid" in errors_of(doc)
 
 
-def test_max_concurrent_above_kind_ceiling() -> None:
+def test_max_concurrent_has_no_kind_specific_ceiling() -> None:
     doc = {
         "manifest_version": 1,
         "provider_id": "mus",
@@ -178,7 +178,7 @@ def test_max_concurrent_above_kind_ceiling() -> None:
         "limits": {"max_concurrent": 2},
         "fingerprint": {"binary_path": "~/.local/bin/muse"},
     }
-    assert "provider_max_concurrent_invalid" in errors_of(doc, filename="mus.yaml")
+    assert errors_of(doc, filename="mus.yaml") == ()
 
 
 def test_pin_required_without_binary_path() -> None:

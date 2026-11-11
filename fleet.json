@@ -77,6 +77,26 @@
       "backend": "codex",
       "effort": "max"
     },
+    "gemini-4-carbon-low": {
+      "target": "gemini-4-carbon",
+      "default_effort": "low"
+    },
+    "gemini-4-carbon-medium": {
+      "target": "gemini-4-carbon",
+      "default_effort": "medium"
+    },
+    "gemini-4-carbon-high": {
+      "target": "gemini-4-carbon",
+      "default_effort": "high"
+    },
+    "gemini-4-argon-low": {
+      "target": "gemini-4-argon",
+      "default_effort": "low"
+    },
+    "gemini-4-argon-medium": {
+      "target": "gemini-4-argon",
+      "default_effort": "medium"
+    },
     "gemini-4-argon-high": {
       "backend_id": "gemini-4-argon",
       "backend": "agy",
@@ -214,6 +234,30 @@
     "note": "резерв байт по заявленному Content-Length ДО чтения тела; семафор исполнения (128) и TCP backlog лимитами HTTP-обработчиков и памяти не считаются"
   },
   "backends": {
+    "opencode-go-claude": {
+      "kind": "passthrough",
+      "enabled": true,
+      "required": false,
+      "owned_by": "opencode-go-claude",
+      "max_concurrent": 32,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "api_key_ref": "file:~/.config/opencode/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      }
+    },
     "agy": {
       "kind": "passthrough",
       "enabled": true,
@@ -287,30 +331,6 @@
         }
       }
     },
-    "opencode-go-claude": {
-      "kind": "passthrough",
-      "enabled": true,
-      "required": false,
-      "owned_by": "opencode-go-claude",
-      "max_concurrent": 32,
-      "base_url": "http://127.0.0.1:10830/go/v1",
-      "api_key_ref": "file:~/.config/opencode/opencode-go.key",
-      "headers_from_json": {
-        "file": "~/.config/opencode/opencode.json",
-        "json_path": [
-          "provider",
-          "opencode-go",
-          "options",
-          "headers"
-        ],
-        "pick": [
-          "User-Agent"
-        ]
-      },
-      "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
-      }
-    },
     "droid": {
       "kind": "droid",
       "enabled": true,
@@ -329,6 +349,28 @@
     }
   },
   "models": [
+    {
+      "id": "claude-haiku-5-5",
+      "backend": "opencode-go-claude",
+      "name": "Claude Haiku 5.5 (OpenCode Go georouter)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "low",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
     {
       "id": "gemini-3.8-flash",
       "backend": "agy",
@@ -374,17 +416,17 @@
       }
     },
     {
-      "id": "claude-haiku-5-5",
-      "backend": "claude-p",
-      "name": "Claude Haiku 5.5 (Claude-p bridge)",
+      "id": "gemini-4-carbon",
+      "backend": "agy",
+      "name": "Gemini 4 Carbon (AGY)",
       "efforts": [
         "low",
         "medium",
         "high"
       ],
-      "default_effort": "low",
-      "context_window": 1000000,
-      "max_tokens": 128000,
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
       "input": [
         "text"
       ],
@@ -816,6 +858,72 @@
       }
     },
     {
+      "id": "iceman-free",
+      "backend": "opencode-zen",
+      "name": "Iceman Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 262144,
+      "max_tokens": 131072,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "unsupported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "inkling-2-small-free",
+      "backend": "opencode-zen",
+      "name": "Inkling 2 Small Free (Zen)",
+      "efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 131072,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "unsupported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "longcat-2.5-free",
+      "backend": "opencode-zen",
+      "name": "LongCat 2.5 Free (Zen)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 262144,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "unsupported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
       "id": "mimo-v2.6-flash-free",
       "backend": "opencode-zen",
       "name": "Mimo V2.6 Flash Free (Zen)",
@@ -831,6 +939,30 @@
       ],
       "images": {
         "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "minimax-m3.1-flash-free",
+      "backend": "opencode-zen",
+      "name": "MiniMax M3.1 Flash Free (Zen)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 512000,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "unsupported",
         "status": "unverified",
         "method": null,
         "proof": null
