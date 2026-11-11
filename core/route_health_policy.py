@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
@@ -35,7 +36,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://(?:(?:[^\s\"']*:[^\r\n@]+|[^\s/\"'@]+)@[^\s/\"']+|[^\s/\"'@]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", r"(?i)\b(?:b\s*e\s*a\s*r\s*e\s*r|b\s*a\s*s\s*i\s*c)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+(?:\s+(?!b\s*a\s*s\s*i\s*c\b|b\s*e\s*a\s*r\s*e\s*r\b|ya29\.|1//|sk-|AIza|[a-z0-9_.\[\]-]+\s*[:=]|[^\s@]+@[^\s@]+\.[a-z]{2,})[^\s,;\"']+)*)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:p\s*r\s*i\s*v\s*a\s*t\s*e[\s_-]*k\s*e\s*y|s\s*e\s*c\s*r\s*e\s*t[\s_-]*k\s*e\s*y|a\s*c\s*c\s*e\s*s\s*s[\s_-]*k\s*e\s*y|s\s*i\s*g\s*n\s*i\s*n\s*g[\s_-]*k\s*e\s*y|m\s*a\s*s\s*t\s*e\s*r[\s_-]*k\s*e\s*y|e\s*n\s*c\s*r\s*y\s*p\s*t\s*i\s*o\s*n[\s_-]*k\s*e\s*y|s\s*e\s*s\s*s\s*i\s*o\s*n[\s_-]*k\s*e\s*y|s\s*s\s*h[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*p\s*h\s*r\s*a\s*s\s*e|r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|x[\s_-]*a\s*p\s*i[\s_-]*k\s*e\s*y|a\s*p\s*i[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)(?:\\*[\"'\[\]0-9a-z_.-])*\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n]+)", r"(?i)\b(?:i\s*n\s*v\s*a\s*l\s*i\s*d|e\s*x\s*p\s*i\s*r\s*e\s*d|b\s*a\s*d|r\s*e\s*v\s*o\s*k\s*e\s*d|l\s*e\s*a\s*k\s*e\s*d)\s+(?:p\s*r\s*i\s*v\s*a\s*t\s*e[\s_-]*k\s*e\s*y|s\s*e\s*c\s*r\s*e\s*t[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*p\s*h\s*r\s*a\s*s\s*e|r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|a\s*p\s*i[\s_-]*k\s*e\s*y|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+[^\r\n,;\"']+", r"(?i)(?:^|(?<=\s))(?:--?[a-z0-9_-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?key|client[_-]?secret|refresh[_-]?token|access[_-]?token|id[_-]?token|auth[_-]?token|passphrase|password|passwd|pwd|secret|token)[a-z0-9_-]*|-[pk](?=\s+(?![0-9]+\b)))\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\b(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://(?:(?:[^\r\n\"'@]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\r\n@]+|[^\s/\"'@]+)@[^\s/\"']+|[^\s/\"'@]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", r"(?i)\b(?:b\s*e\s*a\s*r\s*e\s*r|b\s*a\s*s\s*i\s*c)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+(?:\s+(?!b\s*a\s*s\s*i\s*c\b|b\s*e\s*a\s*r\s*e\s*r\b|ya29\.|1//|sk-|AIza|[a-z0-9_.\[\]-]+\s*[:=]|[^\s@]+@[^\s@]+\.[a-z]{2,})[^\s,;\"']+)*)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:p\s*r\s*i\s*v\s*a\s*t\s*e[\s_-]*k\s*e\s*y|s\s*e\s*c\s*r\s*e\s*t[\s_-]*k\s*e\s*y|a\s*c\s*c\s*e\s*s\s*s[\s_-]*k\s*e\s*y|s\s*i\s*g\s*n\s*i\s*n\s*g[\s_-]*k\s*e\s*y|m\s*a\s*s\s*t\s*e\s*r[\s_-]*k\s*e\s*y|e\s*n\s*c\s*r\s*y\s*p\s*t\s*i\s*o\s*n[\s_-]*k\s*e\s*y|s\s*e\s*s\s*s\s*i\s*o\s*n[\s_-]*k\s*e\s*y|s\s*s\s*h[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*p\s*h\s*r\s*a\s*s\s*e|r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|x[\s_-]*a\s*p\s*i[\s_-]*k\s*e\s*y|a\s*p\s*i[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)(?:\\*[\"'\[\]0-9a-z_.-])*\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n]+)", r"(?i)\b(?:i\s*n\s*v\s*a\s*l\s*i\s*d|e\s*x\s*p\s*i\s*r\s*e\s*d|b\s*a\s*d|r\s*e\s*v\s*o\s*k\s*e\s*d|l\s*e\s*a\s*k\s*e\s*d)\s+(?:p\s*r\s*i\s*v\s*a\s*t\s*e[\s_-]*k\s*e\s*y|s\s*e\s*c\s*r\s*e\s*t[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*p\s*h\s*r\s*a\s*s\s*e|r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|a\s*p\s*i[\s_-]*k\s*e\s*y|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+[^\r\n,;\"']+", r"(?i)(?:^|(?<=\s))(?:--?[a-z0-9_-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?key|client[_-]?secret|refresh[_-]?token|access[_-]?token|id[_-]?token|auth[_-]?token|passphrase|password|passwd|pwd|secret|token)[a-z0-9_-]*|-[pk](?=\s+(?![0-9]+\b)))\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+(?:\s+(?!--?[a-z0-9]|b\s*a\s*s\s*i\s*c\b|b\s*e\s*a\s*r\s*e\s*r\b|ya29\.|1//|sk-|AIza|[a-z0-9_.\[\]-]+\s*[:=]|[^\s@]+@[^\s@]+\.[^\W\d_]{2,})[^\s,;\"']+)*)", r"(?i)<\s*(?:[a-z0-9_.-]+:)?[a-z0-9_.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?key|client[_-]?secret|refresh[_-]?token|access[_-]?token|id[_-]?token|auth[_-]?token|passphrase|password|passwd|pwd|secret|token|cookie|authorization)[a-z0-9_.-]*\b[^>]*>[^\r\n<]*(?:<\s*/[^>]*>|$)", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\b(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 _INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u0300-\u036f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u1ab0-\u1aff\u1dc0-\u1dff\u200b-\u200f\u202a-\u202e\u2060-\u206f\u20d0-\u20ff\u3164\ufe00-\ufe2f\ufeff\uffa0\ufff0-\ufffb]+")  # fmt: skip  # noqa: E501
 @dataclass(frozen=True)
@@ -63,33 +64,38 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
         raise ValueError("model_id must not be empty or contain whitespace")
     allowed = _EFFORTS
     if allowed_suffixes is not None:
-        allowed = frozenset(s for suffix in allowed_suffixes if (s := suffix.strip().lower()) and len(s.split()) == 1)  # fmt: skip  # noqa: E501
+        allowed = frozenset(s for suffix in allowed_suffixes if (s := suffix.strip().lower()) and len(s.split()) == 1 and not _INVISIBLE_RE.search(s))  # fmt: skip  # noqa: E501
     explicit = explicit_effort.strip().lower() if explicit_effort is not None else None
     if explicit is not None and explicit not in allowed:
         raise ValueError("explicit_effort is not in allowed_suffixes")
     return _resolve_route_suffix(model, explicit, allowed, known_models)
-_ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:(?:\x1b|\\+(?:u001|x1)[bB])\[|(?:\x9b|\\+(?:u009|x9)[bB]))[0-?]*[ -/]*[@-~]|(?:(?:\x1b|\\+(?:u001|x1)[bB])[\]P_X^]|(?:\x9d|\x90|\x98|\x9e|\x9f|\\+(?:u009|x9)[dD08eEfF]))[^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\|\\+(?:u0007|x07|u009[cC]|x9[cC])|\\+(?:u001|x1)[bB]\\\\|$)")  # fmt: skip  # noqa: E501
-_ESCAPE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"(?:\\+|%)[uU]((?<=U)[0-9a-fA-F]{8}|[0-9a-fA-F]{4})|\\+x([0-9a-fA-F]{2})|\\+([0-7]{1,3})|%([0-9a-fA-F]{2})|&#(?:[xX]([0-9a-fA-F]{1,6})(?![0-9a-fA-F])|([0-9]{1,7})(?![0-9]));?")  # fmt: skip  # noqa: E501
+_ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:(?:\x1b|\\+(?:u001|x1)[bB])\[|(?:\x9b|\\+(?:u009|x9)[bB]))[0-?]*[ -/]*[@-~]|(?:\x1b|\\+(?:u001|x1)[bB])[\]P_X^][^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\|\\+(?:u0007|x07|u009[cC]|x9[cC])|\\+(?:u001|x1)[bB]\\\\)")  # fmt: skip  # noqa: E501
+_PCT_RUN_RE: Final[re.Pattern[str]] = re.compile(r"(?:%[0-9a-fA-F]{2})+")
+_ESCAPE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"(?:\\+|%)[uU]((?<=U)[0-9a-fA-F]{8}|[0-9a-fA-F]{4})|\\+x([0-9a-fA-F]{2})|\\+([0-7]{1,3})|&#(?:[xX]([0-9a-fA-F]{1,6})(?![0-9a-fA-F])|([0-9]{1,7})(?![0-9]));?")  # fmt: skip  # noqa: E501
+def _decode_pct(match: re.Match[str]) -> str:
+    return "".join(" " if ch in "\t\r\n\u2028\u2029" else ch if ch in "\x07\x1b" else "" if ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F or _INVISIBLE_RE.fullmatch(ch) else ch for ch in bytes.fromhex(match.group(0).replace("%", "")).decode("utf-8", "replace"))  # fmt: skip  # noqa: E501
 
 
 def _decode_escape(match: re.Match[str]) -> str:
-    hex_s, oct_s, dec_s = match.group(1) or match.group(2) or match.group(4) or match.group(5), match.group(3), match.group(6)  # fmt: skip  # noqa: E501
+    hex_s, oct_s, dec_s = match.group(1) or match.group(2) or match.group(4), match.group(3), match.group(5)  # fmt: skip  # noqa: E501
     code = int(hex_s, 16) if hex_s else (int(oct_s, 8) if oct_s else int(dec_s, 10))
-    if code in (0x09, 0x0A, 0x0D): return " "  # fmt: skip  # noqa: E701
-    if code in (0x07, 0x1B, 0x90, 0x98, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F): return chr(code)  # fmt: skip  # noqa: E501,E701
+    if code in (0x09, 0x0A, 0x0D, 0x2028, 0x2029): return " "  # fmt: skip  # noqa: E701
+    if code in (0x07, 0x1B): return chr(code)  # fmt: skip  # noqa: E701
     if code <= 0x1F or 0x7F <= code <= 0x9F or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF or _INVISIBLE_RE.fullmatch(chr(code)): return ""  # fmt: skip  # noqa: E501,E701
-    return chr(code) if code <= 0x7E else " "
-
+    return chr(code)
 
 def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_closed: bool = True) -> str:  # fmt: skip  # noqa: E501
-    src = f"{raw_text[:1048576]} {raw_text[-65536:]}" if not fail_closed and len(raw_text) > 1048576 else raw_text[:1048576]  # fmt: skip  # noqa: E501
-    safe = re.sub(r"(.{1,8}?)\1{255,}", lambda m: m.group(1) * 256, re.sub(r"[\t\r\n\u2028\u2029 ]+", " ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", src))))[:max_len]  # fmt: skip  # noqa: E501
+    compressed = re.sub(r"(.{1,8}?)\1{255,}", lambda m: m.group(1) * 256, raw_text[:8388608]); src = f"{compressed[:1048576]} {compressed[-65536:]}" if not fail_closed and len(compressed) > 1048576 else compressed[:1048576]  # fmt: skip  # noqa: E501,E702
+    safe = re.sub(r"[\t\r\n\u2028\u2029 ]+", " ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", src)))[:max_len]  # fmt: skip  # noqa: E501
     for _ in range(8):
-        previous = safe; safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe)  # fmt: skip  # noqa: E702
-        safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", re.sub(r"\\+[bfnrtv]", " ", safe)))  # fmt: skip  # noqa: E501
+        previous = safe; safe = _PCT_RUN_RE.sub(_decode_pct, safe); safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe); safe = html.unescape(safe)  # fmt: skip  # noqa: E501,E702
+        safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", re.sub(r"(?:\\+[bfnrtv]|[\t\r\n\u2028\u2029])+", " ", safe)))  # fmt: skip  # noqa: E501
         if previous == safe: break  # fmt: skip  # noqa: E701
     if fail_closed and re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E501,E701
-    return re.sub(r"[\x00-\x20\x7f\u2028\u2029\ud800-\udfff]+", " ", safe)
+    safe = re.sub(r"\\+(?=[:=A-Za-z0-9_.\s-])", "", safe)
+    whitespace_re = (r"[\x00-\x20\x7f\u00a0\u1680\u2000-\u200a"
+                     r"\u2028\u2029\u202f\u205f\u3000\ud800-\udfff]+")
+    return re.sub(whitespace_re, " ", safe)
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
@@ -146,7 +152,7 @@ def evaluate_route_health(model_id: str | NormalizedModelRoute, blocked_models: 
         raise ValueError("max_stale_age_s must be non-negative")
     canonical, targets = _route_targets(model_id)
     blocked = {item.strip().lower() for item in blocked_models if item.strip()}
-    drift = tuple(sorted(env_drift_keys))
+    drift = tuple(sorted({k for key in env_drift_keys if (k := key.strip())}))
     if targets & blocked:
         reason = HealthReason.LIMIT_BLOCKED
     elif not 0 <= probe_age_s <= max_stale_age_s:
@@ -159,7 +165,7 @@ def evaluate_route_health(model_id: str | NormalizedModelRoute, blocked_models: 
 
 
 def detect_effective_env_drift(expected_env: Mapping[str, str], live_env: Mapping[str, str], tracked_keys: tuple[str, ...]) -> tuple[str, ...]:  # fmt: skip  # noqa: E501
-    changed = (key for key in tracked_keys if expected_env.get(key) != live_env.get(key))  # fmt: skip  # noqa: E501
+    changed = {k for key in tracked_keys if (k := key.strip()) and expected_env.get(k) != live_env.get(k)}  # fmt: skip  # noqa: E501
     return tuple(sorted(changed))
 
 
