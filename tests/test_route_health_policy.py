@@ -30,6 +30,7 @@ def test_alias_policy() -> None:
     assert e(" CLAUDE-OPUS-5-5-HIGH ", {"claude-opus-5-5": object()}, ("low", "medium", "high"), True) == ("claude-opus-5-5", "high")
     assert n("alpha-high", known_models=("alpha", "alpha-high")) == M("alpha-high", None, False); assert e("bad model-high", {"bad model": object()}, ("low", "medium", "high"), True) is None
     assert e("ALPHA-HIGH", {"ALPHA": object(), "alpha-high": object()}, ("high",), True) is None; assert n("alpha", known_models={"alpha", "Alpha"}).canonical_model == "Alpha"
+    assert e("alpha-high", {"alpha": object(), "Alpha-High": object()}, ("high",), True) is None
 
 @pytest.mark.parametrize("model,level", (("", None), ("   ", None), ("m", "ultra"), ("blocked -high", None)))
 def test_alias_invalid(model: str, level: str | None) -> None:
@@ -41,7 +42,7 @@ def test_redaction() -> None:
     assert len(z) <= 256 and len(x("x" * 300)) == 256
     assert z.count("<redacted>") >= 7
     assert all(value not in z for value in ("bearer.value", "ya29.", "1//", "@", "\x00", "\n"))
-    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET", "Authorization: Token TOPSECRET42", '{"authorization": "Digest TOPSECRET42"}', "pass\x01word=TOPSECRET42", "pass\x1fword=TOPSECRET42", "pass\x7fword=TOPSECRET42")
+    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET", "Authorization: Token TOPSECRET42", '{"authorization": "Digest TOPSECRET42"}', 'Authorization: Digest username="alice", response="TOPSECRET42"', "pass\nword=TOPSECRET42", "pass\tword=TOPSECRET42", "pass\x01word=TOPSECRET42", "pass\x1fword=TOPSECRET42", "pass\x7fword=TOPSECRET42")
     assert all("<redacted>" in x(text) for text in cases)
     assert all("TOPSECRET42" not in x(text) for text in (r"pass\u005cu005cu0077ord=TOPSECRET42", r'Bearer \\"TOPSECRET42\\"', r'{\\"access_token\\":\\"TOPSECRET42\\"}'))
     assert all("TOPSECRET42" not in x(text) and "<redacted>" in x(text) for text in (r"pass\u0000word=TOPSECRET42", "pass" + r"\u005c" + "u005c" * 7 + "u0077ord=TOPSECRET42"))
@@ -92,7 +93,7 @@ def test_env_drift() -> None:
     assert "1500" in V and "300" in V
     assert v({"A": "1", "TIMEOUT": "1500"}, {"A": "1", "TIMEOUT": "300"}, ("TIMEOUT", "A")) == ("TIMEOUT",)
 
-@pytest.mark.parametrize("config", (C(total_budget_s=0.0), C(reserve_s=-0.001), C(reserve_s=90.0), C(min_attempt_budget_s=0.0), C(max_attempts=0), C(idle_timeout_s=0.0), C(total_budget_s=float("inf")), C(reserve_s=float("nan")), C(max_attempts=1.5)))  # type: ignore[arg-type]
+@pytest.mark.parametrize("config", (C(total_budget_s=0.0), C(reserve_s=-0.001), C(reserve_s=90.0), C(min_attempt_budget_s=0.0), C(max_attempts=0), C(max_attempts=10**1000), C(idle_timeout_s=0.0), C(total_budget_s=float("inf")), C(reserve_s=float("nan")), C(max_attempts=1.5)))  # type: ignore[arg-type]
 def test_config_invalid(config: C) -> None:
     with pytest.raises(ValueError): _ = y(config)
 

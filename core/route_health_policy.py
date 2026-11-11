@@ -36,7 +36,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*[\"'])?(?:[a-z0-9_.-]+\s+)?|\b(?:bearer|basic)\s+)(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n}]+)", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 
 
@@ -83,8 +83,8 @@ def _decode_escape(match: re.Match[str]) -> str:
 
 
 def _normalize_diagnostic_text(raw_text: str, *, sep_controls: bool = False) -> str:
-    pattern = r"[\x00-\x20\x7f\ud800-\udfff]+" if sep_controls else r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]+"  # fmt: skip  # noqa: E501
-    safe = re.sub(r"[\ud800-\udfff]+", " ", raw_text[:4096]); safe = re.sub(pattern, " " if sep_controls else "", safe)  # fmt: skip  # noqa: E501,E702
+    pattern = r"[\x00-\x20\x7f\ud800-\udfff]+" if sep_controls else r"[\x00-\x1f\x7f]+"  # fmt: skip  # noqa: E501
+    safe = re.sub(pattern, " " if sep_controls else "", raw_text[:4096])
     for _ in range(8):
         previous = safe; safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)  # fmt: skip  # noqa: E702
         if previous == safe: break  # fmt: skip  # noqa: E701
@@ -192,7 +192,7 @@ def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
     _require_finite(config.reserve_s, "reserve_s")
     _require_finite(config.min_attempt_budget_s, "min_attempt_budget_s")
     _require_finite(config.idle_timeout_s, "idle_timeout_s")
-    invalid = (not 0 < config.total_budget_s <= 86400.0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, not 0.001 <= config.min_attempt_budget_s <= 86400.0, type(config.max_attempts) is not int or config.max_attempts < 1, not 0 < config.idle_timeout_s <= 86400.0)  # fmt: skip  # noqa: E501
+    invalid = (not 0 < config.total_budget_s <= 86400.0, config.reserve_s < 0 or config.reserve_s >= config.total_budget_s, not 0.001 <= config.min_attempt_budget_s <= 86400.0, type(config.max_attempts) is not int or not 1 <= config.max_attempts <= 1000, not 0 < config.idle_timeout_s <= 86400.0)  # fmt: skip  # noqa: E501
     if any(invalid):
         raise ValueError("invalid retry budget configuration")
     return config
