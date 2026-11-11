@@ -687,8 +687,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None, paths: Optional[Paths] = None) -> int:
     args = parse_args(argv)
     paths = paths or Paths()
-    def out(message: str) -> None:
-        print(message, flush=True)
+    out = lambda message: print(message, flush=True)
     try:
         if args.verify_dump:
             return run_verify_dump(args.verify_dump, paths, out)

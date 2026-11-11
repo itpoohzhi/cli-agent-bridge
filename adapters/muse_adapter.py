@@ -106,7 +106,7 @@ LIVE_QUEUE_MAX_BYTES = 1 << 20
 LIVE_WRITE_TIMEOUT_S = 3.0
 SINK_JOIN_TIMEOUT_S = 5.0
 STDERR_BUFFER_BYTES = 64 << 10
-from core.defaults import BRIDGE_MUSE_STARTUP_TIMEOUT_S  # noqa: E402
+from core.defaults import BRIDGE_MUSE_STARTUP_TIMEOUT_S
 
 MSP_SETUP_TIMEOUT_S = float(os.environ.get("BRIDGE_MUSE_STARTUP_TIMEOUT_S", str(BRIDGE_MUSE_STARTUP_TIMEOUT_S)))
 # Свидетель группы создаётся ДО exec и подписывается/пишется в реестр ДО открытия gate.

@@ -76,6 +76,7 @@ __all__ = [
     "ToolCallParser",
     "_loads_tolerant",
     "_parse_tool_call_block",
+    "_parse_tool_call_blocks",
     "_recover_trailing_braces",
     "_split_tool_call_inner",
     "_split_tool_calls",
@@ -259,7 +260,7 @@ TRANSIENT_RETRY_SCOPE = os.environ.get(
 FINISH_RESERVE_S = 35.0
 CLOSE_RESERVE_S = 12.0
 REQUEST_CAP_S = 3600.0
-from adapters.muse_config import get_muse_timeouts  # noqa: E402
+from adapters.muse_config import get_muse_timeouts
 MIN_ATTEMPT_REMAINING_S = float(os.environ.get("MUSE_BRIDGE_MIN_ATTEMPT_S", "120"))
 CONTROL_WRITE_TIMEOUT_S, LIVE_WRITE_TIMEOUT_S = get_muse_timeouts().control_write_timeout_s, get_muse_timeouts().live_write_timeout_s
 APPROVAL_CANCEL_GRACE_S = 15.0
@@ -1395,16 +1396,9 @@ class ServeRun:
             if _exec_dl != float("inf")
             else _now0 + TIMEOUT_S
         )
-        if self.exec_deadline == float("inf"):
-            self.exec_deadline = deadline
-        from core.activity_window import ActivityWindow
-
-        activity_window = ActivityWindow(
-            idle_timeout_s=IDLE_TIMEOUT_S,
-            safety_cap_s=min(TIMEOUT_S, REQUEST_CAP_S),
-        )
-        setup_deadline = min(_now0 + SERVE_SPAWN_TIMEOUT_S, deadline)
-        self._write_until = setup_deadline
+        if self.exec_deadline == float("inf"): self.exec_deadline = deadline
+        from core.activity_window import ActivityWindow; activity_window = ActivityWindow(idle_timeout_s=IDLE_TIMEOUT_S, safety_cap_s=min(TIMEOUT_S, REQUEST_CAP_S))
+        setup_deadline = min(_now0 + SERVE_SPAWN_TIMEOUT_S, deadline); self._write_until = setup_deadline
 
         # Чтение stdout serve — собственным буфером поверх os.read: select по fd не видит строки,
         # уже вычитанные в буфер TextIOWrapper (пачка строк за один write зависала бы).
@@ -1450,8 +1444,7 @@ class ServeRun:
                     from muse_runtime.activity import message_has_useful_data
                     if message_has_useful_data(msg):
                         activity_window.touch()
-                        if self.managed_turn is not None:
-                            self.managed_turn.touch_activity("content")
+                        if self.managed_turn is not None: self.managed_turn.touch_activity("content")
                     return msg
             raise ServeUnavailable("serve read timeout")
 

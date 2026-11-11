@@ -688,6 +688,9 @@ def check_image_census(path, cat, profiles, report):
     report.add("image_census", errs, info)
 
 
+
+import hashlib
+
 PI_PROVIDER_KIND = "llm-pi-ai"
 DEFAULT_DSH_ENV = "~/.dsh/.env"
 DEFAULT_DSH_CREDENTIALS = "~/.dsh/.credentials.yaml"

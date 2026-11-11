@@ -17,9 +17,9 @@ from tests._fixtures import install_test_models
 
 install_test_models(server)
 
-TOOL_OPEN, TOOL_CLOSE = server.TOOL_CALL_OPEN, server.TOOL_CALL_CLOSE
-RAW_BLOCK = (TOOL_OPEN + '{"name": "bash", "arguments": {"command": "python3 -c \\"\nimport os\nprint(1)\n\\"", '
-             '"description": "Run multi-line python"}}' + TOOL_CLOSE)
+O, C = server.TOOL_CALL_OPEN, server.TOOL_CALL_CLOSE
+RAW_BLOCK = (O + '{"name": "bash", "arguments": {"command": "python3 -c \\"\nimport os\nprint(1)\n\\"", '
+             '"description": "Run multi-line python"}}' + C)
 
 
 class TestLenientToolCall(unittest.TestCase):
@@ -32,7 +32,7 @@ class TestLenientToolCall(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         args = json.loads(calls[0]["function"]["arguments"])
         self.assertEqual(args["command"], 'python3 -c "\nimport os\nprint(1)\n"')
-        self.assertNotIn(TOOL_OPEN, content)
+        self.assertNotIn(O, content)
 
     def test_raw_control_chars_in_string_arguments(self) -> None:
         inner = '{"name": "bash", "arguments": "{\\"command\\": \\"a\nb\\tc\\"}"}'
@@ -45,7 +45,7 @@ class TestLenientToolCall(unittest.TestCase):
     def test_negative_control_garbage_still_text_and_logged(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            content, calls = server._split_tool_calls([TOOL_OPEN + '{"name": "bash", "arguments": {broken' + TOOL_CLOSE])
+            content, calls = server._split_tool_calls([O + '{"name": "bash", "arguments": {broken' + C])
         self.assertEqual(calls, [])
         self.assertIn("{broken", content)
         self.assertIn("tool_call_unparsed", err.getvalue())
@@ -69,7 +69,7 @@ class TestTrailingBraceRecovery(unittest.TestCase):
 
     def test_production_payload_single_call(self) -> None:
         for label, payload in (("escaped", _PROD_ESCAPED), ("raw_newlines", _PROD_RAW)):
-            for open_tag, close_tag in ((TOOL_OPEN, TOOL_CLOSE), (server.ALT_TOOL_CALL_OPEN, server.ALT_TOOL_CALL_CLOSE)):
+            for open_tag, close_tag in ((O, C), (server.ALT_TOOL_CALL_OPEN, server.ALT_TOOL_CALL_CLOSE)):
                 with self.subTest(payload=label, tag=open_tag):
                     content, calls = server._split_tool_calls(["Запускаю.\n", open_tag + payload + close_tag])
                     self.assertEqual(len(calls), 1)
@@ -125,7 +125,7 @@ class TestTrailingBraceRecovery(unittest.TestCase):
 
     def test_batch_segment_with_extra_brace(self) -> None:
         second = '{"name": "read", "arguments": {"file_path": "/etc/hosts"}}}'
-        content, calls = server._split_tool_calls([TOOL_OPEN + _BASE + " " + TOOL_OPEN + second + TOOL_CLOSE])
+        content, calls = server._split_tool_calls([O + _BASE + " " + O + second + C])
         self.assertEqual([c["function"]["name"] for c in calls], ["bash", "read"])
         self.assertEqual(content, "")
 
