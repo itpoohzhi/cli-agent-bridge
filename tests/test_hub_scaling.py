@@ -49,7 +49,7 @@ class TestHubScalingDefaults(unittest.TestCase):
         self.assertEqual(data["admission"]["max_inflight_body_bytes"], 536870912)
         for name in ("codex", "agy", "opencode-zen", "claude-p"):
             self.assertEqual(data["backends"][name]["max_concurrent"], 128, name)
-        self.assertEqual(data["backends"]["muse"]["max_concurrent"], 8)
+        self.assertEqual(data["backends"]["muse"]["max_concurrent"], 64)
 
     def test_shipped_muse_concurrency_matches_fleet_catalog(self):
         loaded = load_manifests(providers_dir(), ADAPTER_KINDS)
@@ -57,8 +57,8 @@ class TestHubScalingDefaults(unittest.TestCase):
         fleet = json.loads(
             (Path(server.ROOT) / "fleet.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(muse.limits.max_concurrent, 8)
-        self.assertEqual(fleet["backends"]["muse"]["max_concurrent"], 8)
+        self.assertEqual(muse.limits.max_concurrent, 64)
+        self.assertEqual(fleet["backends"]["muse"]["max_concurrent"], 64)
 
     def test_muse_max_concurrent_has_no_kind_ceiling(self):
         for max_concurrent in (2, 8, 32):
