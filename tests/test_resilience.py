@@ -1138,6 +1138,9 @@ def test_bounded_queue_timeout_and_sse_keepalive(facade):
 
 def test_graceful_drain_headers_and_rejection(facade):
     # Unit-уровень: drain_event менеджера отклоняет ожидание как "draining".
+    # Контракт: grace=0 — немедленный отказ (BRIDGE_DRAIN_QOS_GRACE_S); при grace>0
+    # интерактивный ожидающий доживает до слота (test_stream_drain_finish_reason.py).
+    facade.monkeypatch.setenv("BRIDGE_DRAIN_QOS_GRACE_S", "0")
     drain = threading.Event()
     mgr = QoSSlotManager(max_concurrent=1, drain_event=drain)
     assert mgr.acquire_slot(is_interactive=True) == (True, "")
@@ -1163,6 +1166,50 @@ def test_graceful_drain_headers_and_rejection(facade):
     assert headers["retry-after"] == "3"
     assert headers["x-bridge-draining"] in ("1", "true")
     assert facade.state.hits == 0
+
+def test_stream_drain_after_keepalive_frames_sse_error(facade):
+    """F-002 (BLOCKER): отказ QoS при уже отправленных заголовках пишет SSE-ошибку.
+
+    Ветка `headers_sent[0]` в `server.py` вызывает `format_stream_error_sse`;
+    до фикса импорта это был runtime `NameError` (ruff F821) и клиент получал
+    оборванный поток без терминального чанка.
+    """
+    facade.monkeypatch.setenv("BRIDGE_DRAIN_QOS_GRACE_S", "0")
+    drain = threading.Event()
+    mgr = QoSSlotManager(
+        max_concurrent=1,
+        reserved_interactive=0,
+        queue_timeout_s=2.0,
+        keepalive_interval_s=0.1,
+        drain_event=drain,
+    )
+    set_qos_manager(mgr)
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+    conn = http.client.HTTPConnection("127.0.0.1", facade.port, timeout=5)
+    try:
+        conn.request(
+            "POST",
+            "/v1/chat/completions",
+            body=json.dumps({"model": "gemini-4-argon", "stream": True}),
+            headers={
+                "Authorization": "Bearer hub-test-key",
+                "Content-Type": "application/json",
+            },
+        )
+        resp = conn.getresponse()
+        assert resp.status == 200  # 200 ушёл в keepalive, повторных заголовков нет
+        assert resp.read(len(b": keepalive\n\n")) == b": keepalive\n\n"
+        assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1)
+        drain.set()
+        mgr.release_slot(is_interactive=False)  # пробуждение ожидающего -> "draining"
+        rest = resp.read().decode("utf-8")
+        assert "HTTP/1.1" not in rest
+        assert '"overloaded_error"' in rest
+        assert rest.endswith("data: [DONE]\n\n")
+    finally:
+        conn.close()
+        drain.set()
+        reset_qos_manager()
 
 def test_malformed_env_resilience(facade):
     """Защита от некорректных env: нечисло/отрицательные значения откатываются к дефолтам (RW-014)."""
