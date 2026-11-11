@@ -35,21 +35,18 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n}]+)", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@\"']+:[^\s@\"']+@[^\s/\"']+", r"(?i)(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n}]+)", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|client\s*_?\s*secret|x-api-key|api[\s_-]*key|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
-
 
 @dataclass(frozen=True)
 class NormalizedModelRoute:
     canonical_model: str; reasoning_effort: str | None  # fmt: skip  # noqa: E702
     alias_applied: bool
 
-
 def _match_known(target: str, known_models: Collection[str]) -> str | None:
     lowered = target.lower()
     matches = sorted(candidate for item in known_models if (candidate := item.strip()) and candidate.lower() == lowered)  # fmt: skip  # noqa: E501
     return matches[0] if matches else None
-
 
 def _resolve_route_suffix(model: str, explicit: str | None, allowed: frozenset[str], known_models: Collection[str] | None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
     if known_models is not None and (exact := _match_known(model, known_models)) is not None: return NormalizedModelRoute(exact, explicit, False)  # fmt: skip  # noqa: E501,E701
@@ -60,7 +57,6 @@ def _resolve_route_suffix(model: str, explicit: str | None, allowed: frozenset[s
             if known_models is None: return NormalizedModelRoute(base, effort, True)  # fmt: skip  # noqa: E501,E701
             if (canon := _match_known(base, known_models)) is not None: return NormalizedModelRoute(canon, effort, True)  # fmt: skip  # noqa: E501,E701
     return NormalizedModelRoute(model, explicit, False)
-
 
 def normalize_model_route(model_id: str, explicit_effort: str | None = None, allowed_suffixes: Collection[str] | None = None, known_models: Collection[str] | None = None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
     model = model_id.strip()
@@ -74,22 +70,26 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
         raise ValueError("explicit_effort is not in allowed_suffixes")
     return _resolve_route_suffix(model, explicit, allowed, known_models)
 
+_INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u200b-\u200f\u2060\ufeff]+")  # fmt: skip  # noqa: E501
+_ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:\x1b|\\u001[bB])(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\|\\u0007|\\u001[bB]\\\\|$))")  # fmt: skip  # noqa: E501
+
 
 def _decode_escape(match: re.Match[str]) -> str:
     code = int(match.group(1), 16)
+    if code in (0x09, 0x0A, 0x0D): return " "  # fmt: skip  # noqa: E701
     if code <= 0x1F or 0x7F <= code <= 0x9F or code in (0xAD, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF): return ""  # fmt: skip  # noqa: E501,E701
     return chr(code) if code <= 0x7E else " "
 
 
-def _normalize_diagnostic_text(raw_text: str, *, sep_controls: bool = False) -> str:
-    cleaned = re.sub(r"(?:\x1b|\\u001[bB])\[[0-?]*[ -/]*[@-~]", "", raw_text[:4096])
-    pattern = r"[\x00-\x20\x7f-\x9f\u00ad\u200b-\u200f\u2060\ufeff\ud800-\udfff]+" if sep_controls else r"[\x00-\x1f\x7f-\x9f\u00ad\u200b-\u200f\u2060\ufeff]+"  # fmt: skip  # noqa: E501
-    safe = re.sub(pattern, " " if sep_controls else "", cleaned)
+def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096) -> str:
+    safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", raw_text[:max_len]))
+    safe = re.sub(r"[\t\r\n]+", " ", safe)
     for _ in range(8):
         previous = safe; safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)  # fmt: skip  # noqa: E501,E702
         if previous == safe: break  # fmt: skip  # noqa: E701
-    if re.search(r"\\u[0-9a-fA-F]{4}", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E701
-    return re.sub(r"[\x00-\x1f\x7f-\x9f\u00ad\u200b-\u200f\u2060\ufeff\ud800-\udfff]+", " ", safe)  # noqa: E501
+    safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe))
+    if re.search(r"\\u[0-9a-fA-F]{4}|\x1b", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E701
+    return re.sub(r"[\x00-\x20\x7f-\x9f\ud800-\udfff]+", " ", safe)
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
@@ -98,7 +98,6 @@ def redact_diagnostic_text(raw_text: str) -> str:
         safe = regex.sub(REDACTED_TOKEN, safe)
     return safe[:MAX_DIAGNOSTIC_CHARS]
 
-
 @dataclass(frozen=True)
 class FailureClassification:
     category: FailureCategory; retryable: bool  # fmt: skip  # noqa: E702
@@ -106,7 +105,7 @@ class FailureClassification:
 
 
 def _is_auth_failure(status_code: int, reason: str) -> bool:
-    terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key", "api key not valid", "api key expired", "api_key_invalid", "invalid token", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
+    terms = ("token refresh failed", "tokenrefresh failed", "oauth refresh", "invalid_grant", "invalid api key", "api key not valid", "api key expired", "api_key_invalid", "invalid token", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
     if any(term in reason for term in terms):
         return True
     if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|^401\b)", reason))):  # fmt: skip  # noqa: E501
@@ -116,7 +115,7 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
 
 
 def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClassification:  # fmt: skip  # noqa: E501
-    reason = f"{_normalize_diagnostic_text(raw_reason).lower()} {_normalize_diagnostic_text(raw_reason, sep_controls=True).lower()}"  # fmt: skip  # noqa: E501
+    reason = _normalize_diagnostic_text(raw_reason, max_len=16384).lower()
     sanitized = redact_diagnostic_text(raw_reason)
     if _is_auth_failure(status_code, reason):
         values = (FailureCategory.AUTH_REFRESH_EXHAUSTED, False, True, sanitized)
@@ -136,10 +135,11 @@ class RouteHealthStatus:
     model_id: str; available: bool  # fmt: skip  # noqa: E702
     status_reason: HealthReason; env_drift_keys: tuple[str, ...]  # fmt: skip  # noqa: E702
 
-
 def _route_targets(model_id: str | NormalizedModelRoute) -> tuple[str, frozenset[str]]:  # fmt: skip  # noqa: E501
-    route = model_id if isinstance(model_id, NormalizedModelRoute) else normalize_model_route(model_id)  # fmt: skip  # noqa: E501
-    alias = f"{route.canonical_model}-{route.reasoning_effort}".lower() if route.alias_applied and route.reasoning_effort else route.canonical_model.lower()  # fmt: skip  # noqa: E501
+    route = normalize_model_route(model_id.canonical_model, model_id.reasoning_effort) if isinstance(model_id, NormalizedModelRoute) else normalize_model_route(model_id)  # fmt: skip  # noqa: E501
+    route = NormalizedModelRoute(model_id.canonical_model, route.reasoning_effort, False) if isinstance(model_id, NormalizedModelRoute) and not model_id.alias_applied else route  # fmt: skip  # noqa: E501
+    eff = route.reasoning_effort or (model_id.reasoning_effort if isinstance(model_id, NormalizedModelRoute) else None)  # fmt: skip  # noqa: E501
+    alias = f"{route.canonical_model}-{eff}".lower() if (route.alias_applied or isinstance(model_id, NormalizedModelRoute)) and eff else route.canonical_model.lower()  # fmt: skip  # noqa: E501
     raw = alias if isinstance(model_id, NormalizedModelRoute) else model_id.strip().lower()  # noqa: E501
     return route.canonical_model, frozenset((raw, alias, route.canonical_model.lower()))
 

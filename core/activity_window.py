@@ -42,11 +42,14 @@ class ActivityWindow:
 
     def touch(self) -> float:
         now = float(self._clock())
+        new_deadline = advance_sliding_deadline(
+            max(now, self._start_s),
+            self._start_s,
+            self._idle_timeout_s,
+            self._safety_cap_s,
+        )
         if now < self._idle_deadline and now < self._safety_deadline:
-            now = max(now, self._start_s)
-            self._idle_deadline = advance_sliding_deadline(
-                now, self._start_s, self._idle_timeout_s, self._safety_cap_s
-            )
+            self._idle_deadline = max(self._idle_deadline, new_deadline)
         return self._idle_deadline
 
     def is_expired(self) -> bool:

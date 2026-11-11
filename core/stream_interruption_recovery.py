@@ -1,4 +1,4 @@
-# pyright: reportAny=false, reportExplicitAny=false
+# pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
 # ruff: noqa: I001
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
-from core.route_health_policy import FailureCategory, RetryBudgetConfig, classify_provider_failure, compute_attempt_decision, validate_retry_config  # fmt: skip  # noqa: E501,I001
+from core.route_health_policy import FailureCategory, RetryBudgetConfig, _normalize_diagnostic_text, classify_provider_failure, compute_attempt_decision, validate_retry_config  # fmt: skip  # noqa: E501,I001
 
 _TRANSIENT_PHRASES: tuple[str, ...] = ("stream was interrupted", "please continue the task you were working on", "rst_stream", "http/2 stream", "connection reset", "eof occurred in violation of protocol", "broken pipe", "incomplete chunked read", "peer closed connection", "server disconnected", "currently unavailable")  # fmt: skip  # noqa: E501
 
@@ -14,7 +14,7 @@ TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
 )
 _FATAL_STATUS_RE = re.compile(
-    r"(?i)(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+(?!429\b)4\d\d\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*(?!429\b)4\d\d\b|\b(?:bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b)"  # noqa: E501
+    r"(?i)(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s*(?!429\b)4\d\d\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*(?!429\b)4\d\d\b|\b(?:bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b)"  # noqa: E501
 )
 
 DEFAULT_INTERRUPTION_NOTICE = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"  # fmt: skip  # noqa: E501
@@ -26,7 +26,7 @@ def is_transient_stream_interruption(
     """Распознать транзиентный транспортный обрыв."""
     if not isinstance(text, str) or source != "cli_error" or len(text) > 4096:
         return False
-    haystack = re.sub(r"[\x00-\x20\x7f]+", " ", text)
+    haystack = _normalize_diagnostic_text(text)
     if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
         return False
     if _FATAL_STATUS_RE.search(haystack):
@@ -201,7 +201,7 @@ def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
     valid_types = all((isinstance(f.error_text, str), isinstance(f.source, str), type(f.delivered) is bool, type(f.had_tool_side_effects) is bool, type(f.attempt) is int, type(f.max_attempts) is int, type(f.elapsed_s) in (int, float), f.budget_config is None or isinstance(f.budget_config, RetryBudgetConfig)))  # pyright: ignore[reportUnnecessaryIsInstance]  # fmt: skip  # noqa: E501
     if not valid_types:
         return RetryDecision(False, False, "retry_blocked", 0.0)
-    valid = all((0.0 <= f.elapsed_s <= 1e308, 0 <= f.attempt < f.max_attempts, f.max_attempts > 0))  # fmt: skip  # noqa: E501
+    valid = all((0.0 <= f.elapsed_s <= 1e308, 0 <= f.attempt, f.max_attempts > 0))  # fmt: skip  # noqa: E501
     if not valid:
         return RetryDecision(False, False, "retry_blocked", 0.0)
     cfg = _resolve_retry_cfg(f)

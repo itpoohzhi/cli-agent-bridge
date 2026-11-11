@@ -46,11 +46,12 @@ def test_redaction() -> None:
     assert all("<redacted>" in x(text) for text in cases)
     assert all("TOPSECRET42" not in x(text) for text in (r"pass\u005cu005cu0077ord=TOPSECRET42", r'Bearer \\"TOPSECRET42\\"', r'{\\"access_token\\":\\"TOPSECRET42\\"}'))
     assert all("TOPSECRET42" not in x(text) and "<redacted>" in x(text) for text in (r"pass\u0000word=TOPSECRET42", "pass" + r"\u005c" + "u005c" * 7 + "u0077ord=TOPSECRET42"))
+    assert all("TOPSECRET42" not in x(text) and "<redacted>" in x(text) for text in ("error\nBearer TOPSECRET42", "line1\nsk-proj-TOPSECRET42", r"pass\u0020word=TOPSECRET42", "pass\x1b]0;x\x07word=TOPSECRET42", "upstream https://alice:TOPSECRET42@localhost failed", "password=TOP,SECRET42", "password=;TOPSECRET42"))
     assert x(r"\uD800").encode("utf-8") == b" " and x("\ud800").encode("utf-8") == b" "
 
 @pytest.mark.parametrize("case", (
     (401, "anything", F.AUTH_REFRESH_EXHAUSTED, False), (403, "OAuth rejected", F.AUTH_REFRESH_EXHAUSTED, False),
-    (503, "token refresh failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, "token \x1b[31mrefresh\x1b[0m failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, r"token\u0020refresh\u0020failed", F.AUTH_REFRESH_EXHAUSTED, False), (429, "quota exceeded", F.LIMIT_BLOCKED, False),
+    (503, "token refresh failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, "token \x1b[31mrefresh\x1b[0m failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, r"token\u0020refresh\u0020failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, "token ref\x00resh\nfailed", F.AUTH_REFRESH_EXHAUSTED, False), (429, "quota exceeded", F.LIMIT_BLOCKED, False),
     (503, "quota exceeded", F.LIMIT_BLOCKED, False), (503, "SSL_ERROR_SYSCALL", F.UPSTREAM_TLS_STALL, False),
     (429, "busy", F.CAPACITY_EXHAUSTED, True), (503, Q, F.CAPACITY_EXHAUSTED, True),
     (400, "model_capacity_exhausted", F.CAPACITY_EXHAUSTED, True), (0, "HTTP 401: invalid auth", F.AUTH_REFRESH_EXHAUSTED, False),
@@ -62,7 +63,7 @@ def test_failures(case: tuple[int, str, F, bool]) -> None:
 
 def test_retry_filter() -> None:
     assert t(P) is True and t(P + "; HTTP 429 Too Many Requests") is True
-    blocked = (P + " quota exceeded", P + " token refresh failed", P + " TLS handshake timeout", P + " HTTP 401 Unauthorized", P + " HTTP 403 Forbidden", "connection reset: Bad Request", "HTTP/1.1 405 Method Not Allowed; connection reset", P + "; HTTP 440 Login Time-out", P + "; HTTP 498 Invalid Token", P + "; HTTP 499", "connection reset: token\x00refresh failed", "A" * 4096 + P + "; token refresh failed", P + " " + "A" * 4096 + " token refresh failed", "connection reset; HTTP\x01403", 'connection reset; {"status":401}', "connection reset; status_code=404", P + "; API key not valid")
+    blocked = (P + " quota exceeded", P + " token refresh failed", P + " TLS handshake timeout", P + " HTTP 401 Unauthorized", P + " HTTP 403 Forbidden", "connection reset: Bad Request", "HTTP/1.1 405 Method Not Allowed; connection reset", P + "; HTTP 440 Login Time-out", P + "; HTTP 498 Invalid Token", P + "; HTTP 499", "connection reset: token\x00refresh failed", "A" * 4096 + P + "; token refresh failed", P + " " + "A" * 4096 + " token refresh failed", "connection reset; HTTP\x01403", 'connection reset; {"status":401}', "connection reset; status_code=404", P + "; API key not valid", "connection reset; token \x1b[31mrefresh\x1b[0m failed", "connection reset; HTTP 4\u200b03 Forbidden", r"connection reset; HTTP\u0020403 Forbidden")
     assert all(t(text) is False for text in blocked)
     assert all(r(error_text=text, delivered=False).can_retry is False for text in blocked[3:])
     allowed = r(error_text=P, delivered=False)
