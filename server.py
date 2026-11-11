@@ -4358,9 +4358,12 @@ class Run:
                 stream_content_recovery_enabled,
             )
 
+            _dynamic_config = globals().get("dynamic_config") or globals().get(
+                "DYNAMIC_CONFIG"
+            )
             if stream_content_recovery_enabled(
-                globals().get("dynamic_config") or globals().get("DYNAMIC_CONFIG")
-            ) and publish_preserving(self.q, item):
+                _dynamic_config
+            ) and publish_preserving(self.q, item, _dynamic_config):
                 return True
             self.live_invalidated = True
             self._last_error = self._last_error or "Run.q overflow"
