@@ -35,7 +35,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://(?:[^\s/\"']*:[^\s@\"']+@[^\s/\"']+|[^\s/\"'@]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n]+", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|x-api-key|a\s*p\s*i[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n]+)", r"(?i)\b(?:invalid|expired|bad|revoked|leaked)\s+(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|api[\s_-]*key|client\s*_?\s*secret|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|secret|token)\s+[^\s,;\"']+", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://(?:[^\s\"']*:[^\r\n@]+@[^\s/\"']+|[^\s/\"'@]*:(?![0-9]{1,5}(?:[/?#\s\"']|$))[^\s/\"'@]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n]+", r"(?i)\b(?:b\s*e\s*a\s*r\s*e\s*r|b\s*a\s*s\s*i\s*c)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+(?:\s+(?!b\s*a\s*s\s*i\s*c\b|b\s*e\s*a\s*r\s*e\s*r\b|ya29\.|1//|sk-|AIza|[a-z0-9_.-]+\s*[:=]|[^\s@]+@[^\s@]+\.[a-z]{2,})[^\s,;\"']+)*)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*n?t|x[\s_-]*a\s*p\s*i[\s_-]*k\s*e\s*y|a\s*p\s*i[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n]+)", r"(?i)\b(?:i\s*n\s*v\s*a\s*l\s*i\s*d|e\s*x\s*p\s*i\s*r\s*e\s*d|b\s*a\s*d|r\s*e\s*v\s*o\s*k\s*e\s*d|l\s*e\s*a\s*k\s*e\s*d)\s+(?:r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|a\s*p\s*i[\s_-]*k\s*e\s*y|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)\s+[^\r\n,;\"']+", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 @dataclass(frozen=True)
 class NormalizedModelRoute:
@@ -76,25 +76,24 @@ def _decode_escape(match: re.Match[str]) -> str:
     hex_s, oct_s, dec_s = match.group(1) or match.group(2) or match.group(4) or match.group(5), match.group(3), match.group(6)  # fmt: skip  # noqa: E501
     code = int(hex_s, 16) if hex_s else (int(oct_s, 8) if oct_s else int(dec_s, 10))
     if code in (0x09, 0x0A, 0x0D): return " "  # fmt: skip  # noqa: E701
+    if code in (0x07, 0x1B, 0x90, 0x98, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F): return chr(code)  # fmt: skip  # noqa: E501,E701
     if code <= 0x1F or 0x7F <= code <= 0x9F or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF or _INVISIBLE_RE.fullmatch(chr(code)): return ""  # fmt: skip  # noqa: E501,E701
     return chr(code) if code <= 0x7E else " "
 
 
 def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_closed: bool = True) -> str:  # fmt: skip  # noqa: E501
-    compact = re.sub(r"[\t\r\n ]+", " ", raw_text[:65536])
-    safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", compact))[:max_len]
+    compact = re.sub(r"(.)\1{255,}", lambda m: m.group(1) * 256, re.sub(r"[\t\r\n ]+", " ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", raw_text[:262144]))))[:max_len]  # fmt: skip  # noqa: E501
+    safe = compact
     for _ in range(8):
         previous = safe; safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe)  # fmt: skip  # noqa: E702
-        safe = re.sub(r"\\+[bfnrtv]", " ", safe)
+        safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", re.sub(r"\\+[bfnrtv]", " ", safe)))  # fmt: skip  # noqa: E501
         if previous == safe: break  # fmt: skip  # noqa: E701
-    safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe))
     if fail_closed and re.search(r"\\+(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E501,E701
     return re.sub(r"[\x00-\x20\x7f\ud800-\udfff]+", " ", safe)
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
-    pre = _SECRET_REGEXES[0].sub(REDACTED_TOKEN, raw_text[:65536])
-    safe = _normalize_diagnostic_text(pre, max_len=65536)
+    safe = _normalize_diagnostic_text(raw_text, max_len=65536)
     for regex in _SECRET_REGEXES:
         safe = regex.sub(REDACTED_TOKEN, safe)
     return safe[:MAX_DIAGNOSTIC_CHARS] or (" " if raw_text else "")
@@ -108,9 +107,9 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
     terms = ("token refresh failed", "tokenrefresh failed", "oauth refresh", "invalid_grant", "invalid api key", "api key not valid", "api key expired", "api_key_invalid", "invalid token", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
     if any(term in reason for term in terms):
         return True
-    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|^\s*401\b)", reason))):  # fmt: skip  # noqa: E501
+    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|(?:^\s*|:\s*)401\b)", reason))):  # fmt: skip  # noqa: E501
         return True
-    is_403 = status_code == 403 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+403\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*403\b|^\s*403\b)", reason)))  # fmt: skip  # noqa: E501
+    is_403 = status_code == 403 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+403\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*403\b|(?:^\s*|:\s*)403\b)", reason)))  # fmt: skip  # noqa: E501
     return is_403 and any(term in reason for term in ("oauth", "refresh", "unauthenticated"))  # fmt: skip  # noqa: E501
 
 
@@ -210,7 +209,7 @@ def compute_attempt_decision(config: RetryBudgetConfig, attempt_index: int, elap
     if usable_s <= 0.0:
         return AttemptDecision(False, 0.0, RetryReason.BUDGET_EXHAUSTED)
     per_attempt_s = usable_s / (config.max_attempts - attempt_index)
-    budget_s = floor(per_attempt_s * 1000.0) / 1000.0
+    budget_s = floor(round(per_attempt_s * 1000.0, 9)) / 1000.0
     if budget_s < config.min_attempt_budget_s:
         return AttemptDecision(False, 0.0, RetryReason.BUDGET_EXHAUSTED)
     return AttemptDecision(True, budget_s, RetryReason.BUDGET_OK)
