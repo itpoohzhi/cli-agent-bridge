@@ -5,7 +5,7 @@ import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from math import floor, isfinite
+from math import floor
 from typing import Final
 
 
@@ -36,48 +36,54 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:\bauthorization\s*[:=]\s*(?:[a-z0-9_.-]+\s+)?|\b(?:bearer|basic)\s+)(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 
 
 @dataclass(frozen=True)
 class NormalizedModelRoute:
-    canonical_model: str
-    reasoning_effort: str | None
+    canonical_model: str; reasoning_effort: str | None  # fmt: skip  # noqa: E702
     alias_applied: bool
 
 
-def normalize_model_route(model_id: str, explicit_effort: str | None = None, allowed_suffixes: Collection[str] | None = None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
+def _match_known(target: str, known_models: Collection[str]) -> str | None:
+    lowered = target.lower()
+    return next((candidate for item in known_models if (candidate := item.strip()) and candidate.lower() == lowered), None)  # fmt: skip  # noqa: E501
+
+
+def _resolve_route_suffix(model: str, explicit: str | None, allowed: frozenset[str], known_models: Collection[str] | None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
+    if known_models is not None and (exact := _match_known(model, known_models)) is not None: return NormalizedModelRoute(exact, explicit, False)  # fmt: skip  # noqa: E501,E701
+    for suffix in sorted(allowed, key=len, reverse=True):
+        marker = f"-{suffix}"
+        if len(model) > len(marker) and model.lower().endswith(marker):
+            base, effort = model[: -len(marker)], explicit or suffix
+            if known_models is None: return NormalizedModelRoute(base, effort, True)  # fmt: skip  # noqa: E701
+            if (canon := _match_known(base, known_models)) is not None: return NormalizedModelRoute(canon, effort, True)  # fmt: skip  # noqa: E501,E701
+    return NormalizedModelRoute(model, explicit, False)
+
+
+def normalize_model_route(model_id: str, explicit_effort: str | None = None, allowed_suffixes: Collection[str] | None = None, known_models: Collection[str] | None = None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
     model = model_id.strip()
     if len(model.split()) != 1:
         raise ValueError("model_id must not be empty or contain whitespace")
     allowed = _EFFORTS
     if allowed_suffixes is not None:
-        allowed = frozenset(
-            suffix.strip().lower() for suffix in allowed_suffixes if suffix.strip()
-        )
-    if explicit_effort is not None:
-        explicit = explicit_effort.strip().lower()
-        if explicit not in allowed:
-            raise ValueError("explicit_effort must be low, medium, or high")
-    else:
-        explicit = None
-    for suffix in sorted(allowed, key=len, reverse=True):
-        marker = f"-{suffix}"
-        if len(model) > len(marker) and model.lower().endswith(marker):
-            return NormalizedModelRoute(model[: -len(marker)], explicit or suffix, True)
-    return NormalizedModelRoute(model, explicit, False)
+        allowed = frozenset(suffix.strip().lower() for suffix in allowed_suffixes if suffix.strip())  # fmt: skip  # noqa: E501
+    explicit = explicit_effort.strip().lower() if explicit_effort is not None else None
+    if explicit is not None and explicit not in allowed:
+        raise ValueError("explicit_effort is not in allowed_suffixes")
+    return _resolve_route_suffix(model, explicit, allowed, known_models)
 
 
 def _decode_escape(match: re.Match[str]) -> str:
     code = int(match.group(1), 16)
-    if code == 0:
+    if code <= 0x1F or code == 0x7F:
         return ""
-    return chr(code) if 0x20 <= code <= 0x7E else " "
+    return chr(code) if code <= 0x7E else " "
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
-    safe = raw_text[:4096].replace("\x00", "")
+    safe = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+", "", raw_text[:4096])
     for _ in range(8):
         previous = safe
         safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)
@@ -93,14 +99,12 @@ def redact_diagnostic_text(raw_text: str) -> str:
 
 @dataclass(frozen=True)
 class FailureClassification:
-    category: FailureCategory
-    retryable: bool
-    failover_eligible: bool
-    sanitized_reason: str
+    category: FailureCategory; retryable: bool  # fmt: skip  # noqa: E702
+    failover_eligible: bool; sanitized_reason: str  # fmt: skip  # noqa: E702
 
 
 def _is_auth_failure(status_code: int, reason: str) -> bool:
-    terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
+    terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key", "api key not valid", "api key expired", "api_key_invalid", "invalid token", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
     if any(term in reason for term in terms):
         return True
     if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|^401\b)", reason))):  # fmt: skip  # noqa: E501
@@ -127,23 +131,28 @@ def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClass
 
 @dataclass(frozen=True)
 class RouteHealthStatus:
-    model_id: str
-    available: bool
-    status_reason: HealthReason
-    env_drift_keys: tuple[str, ...]
+    model_id: str; available: bool  # fmt: skip  # noqa: E702
+    status_reason: HealthReason; env_drift_keys: tuple[str, ...]  # fmt: skip  # noqa: E702
 
 
-def evaluate_route_health(model_id: str, blocked_models: tuple[str, ...], probe_age_s: float, max_stale_age_s: float, env_drift_keys: tuple[str, ...] = ()) -> RouteHealthStatus:  # fmt: skip  # noqa: E501
+def _route_targets(model_id: str | NormalizedModelRoute) -> tuple[str, frozenset[str]]:  # fmt: skip  # noqa: E501
+    if isinstance(model_id, NormalizedModelRoute):
+        return model_id.canonical_model, frozenset((model_id.canonical_model.lower(),))
+    route = normalize_model_route(model_id)
+    return route.canonical_model, frozenset((model_id.strip().lower(), route.canonical_model.lower()))  # fmt: skip  # noqa: E501
+
+
+def evaluate_route_health(model_id: str | NormalizedModelRoute, blocked_models: tuple[str, ...], probe_age_s: float, max_stale_age_s: float, env_drift_keys: tuple[str, ...] = ()) -> RouteHealthStatus:  # fmt: skip  # noqa: E501
     _require_finite(probe_age_s, "probe_age_s")
     _require_finite(max_stale_age_s, "max_stale_age_s")
     if max_stale_age_s < 0:
         raise ValueError("max_stale_age_s must be non-negative")
-    canonical = normalize_model_route(model_id).canonical_model
-    blocked = {normalize_model_route(item).canonical_model.lower() for item in blocked_models if item and item.strip()}  # fmt: skip  # noqa: E501
+    canonical, targets = _route_targets(model_id)
+    blocked = {item.strip().lower() for item in blocked_models if item.strip()}
     drift = tuple(sorted(env_drift_keys))
-    if canonical.lower() in blocked:
+    if targets & blocked:
         reason = HealthReason.LIMIT_BLOCKED
-    elif probe_age_s > max_stale_age_s or probe_age_s < 0:
+    elif not 0 <= probe_age_s <= max_stale_age_s:
         reason = HealthReason.STALE_HEALTH_PROBE
     elif drift:
         reason = HealthReason.ENV_DRIFT_DETECTED
@@ -159,10 +168,8 @@ def detect_effective_env_drift(expected_env: Mapping[str, str], live_env: Mappin
 
 @dataclass(frozen=True)
 class RetryBudgetConfig:
-    total_budget_s: float = 90.0
-    reserve_s: float = 5.0
-    min_attempt_budget_s: float = 4.0
-    max_attempts: int = 3
+    total_budget_s: float = 90.0; reserve_s: float = 5.0  # fmt: skip  # noqa: E702
+    min_attempt_budget_s: float = 4.0; max_attempts: int = 3  # fmt: skip  # noqa: E702
     idle_timeout_s: float = 30.0
 
 
@@ -174,7 +181,7 @@ class AttemptDecision:
 
 
 def _require_finite(value: float, field: str) -> None:
-    if type(value) not in (int, float) or not isfinite(value):
+    if type(value) not in (int, float) or not (-1e308 <= value <= 1e308):
         raise ValueError(f"{field} must be finite")
 
 
@@ -191,7 +198,8 @@ def validate_retry_config(config: RetryBudgetConfig) -> RetryBudgetConfig:
 
 def compute_attempt_decision(config: RetryBudgetConfig, attempt_index: int, elapsed_s: float, last_failure_category: str | None = None) -> AttemptDecision:  # fmt: skip  # noqa: E501
     _ = validate_retry_config(config)
-    if type(attempt_index) is not int or attempt_index < 0 or type(elapsed_s) not in (int, float) or not isfinite(elapsed_s) or elapsed_s < 0:  # fmt: skip  # noqa: E501
+    _require_finite(elapsed_s, "elapsed_s")
+    if type(attempt_index) is not int or attempt_index < 0 or elapsed_s < 0:
         raise ValueError("attempt_index and elapsed_s must be non-negative")
     if last_failure_category not in (None, FailureCategory.CAPACITY_EXHAUSTED):
         return AttemptDecision(False, 0.0, RetryReason.NON_RETRYABLE_CATEGORY)
@@ -223,10 +231,8 @@ def advance_sliding_deadline(now_s: float, start_s: float, idle_timeout_s: float
 
 @dataclass(frozen=True)
 class CanonDigestResult:
-    has_canon_end_marker: bool
-    sha256_hex: str
-    byte_length: int
-    unchanged: bool = False
+    has_canon_end_marker: bool; sha256_hex: str  # fmt: skip  # noqa: E702
+    byte_length: int; unchanged: bool = False  # fmt: skip  # noqa: E702
 
 
 def inspect_canon_payload(text: str, marker: str = DEFAULT_CANON_MARKER, previous_sha256: str | None = None) -> CanonDigestResult:  # fmt: skip  # noqa: E501

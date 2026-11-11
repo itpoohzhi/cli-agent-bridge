@@ -1,4 +1,4 @@
-# ruff: noqa: E501,E702,I001
+# ruff: noqa: E501,E701,E702,I001
 # fmt: off
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ def test_alias_suffix(suffix: str) -> None:
 def test_alias_policy() -> None:
     assert n(" Claude-Opus-5-5-HIGH ", " LOW ") == M("Claude-Opus-5-5", "low", True)
     assert e(" CLAUDE-OPUS-5-5-HIGH ", {"claude-opus-5-5": object()}, ("low", "medium", "high"), True) == ("claude-opus-5-5", "high")
+    assert n("alpha-high", known_models=("alpha", "alpha-high")) == M("alpha-high", None, False); assert e("bad model-high", {"bad model": object()}, ("low", "medium", "high"), True) is None
 
 @pytest.mark.parametrize("model,level", (("", None), ("   ", None), ("m", "ultra"), ("blocked -high", None)))
 def test_alias_invalid(model: str, level: str | None) -> None:
@@ -39,7 +40,7 @@ def test_redaction() -> None:
     assert len(z) <= 256 and len(x("x" * 300)) == 256
     assert z.count("<redacted>") >= 7
     assert all(value not in z for value in ("bearer.value", "ya29.", "1//", "@", "\x00", "\n"))
-    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET")
+    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET", "Authorization: Token TOPSECRET42", "pass\x01word=TOPSECRET42", "pass\x1fword=TOPSECRET42", "pass\x7fword=TOPSECRET42")
     assert all("<redacted>" in x(text) for text in cases)
     assert all("TOPSECRET42" not in x(text) for text in (r"pass\u005cu005cu0077ord=TOPSECRET42", r'Bearer \\"TOPSECRET42\\"', r'{\\"access_token\\":\\"TOPSECRET42\\"}'))
     assert all("TOPSECRET42" not in x(text) and "<redacted>" in x(text) for text in (r"pass\u0000word=TOPSECRET42", "pass" + r"\u005c" + "u005c" * 7 + "u0077ord=TOPSECRET42"))
@@ -51,7 +52,7 @@ def test_redaction() -> None:
     (503, "quota exceeded", F.LIMIT_BLOCKED, False), (503, "SSL_ERROR_SYSCALL", F.UPSTREAM_TLS_STALL, False),
     (429, "busy", F.CAPACITY_EXHAUSTED, True), (503, Q, F.CAPACITY_EXHAUSTED, True),
     (400, "model_capacity_exhausted", F.CAPACITY_EXHAUSTED, True), (0, "HTTP 401: invalid auth", F.AUTH_REFRESH_EXHAUSTED, False),
-    (403, "max_tokens exceeded", F.FATAL_REQUEST_ERROR, False),
+    (403, "max_tokens exceeded", F.FATAL_REQUEST_ERROR, False), (403, "API key not valid", F.AUTH_REFRESH_EXHAUSTED, False),
 ))
 def test_failures(case: tuple[int, str, F, bool]) -> None:
     status, reason, category, retryable = case; z = c(status, reason)
@@ -59,14 +60,14 @@ def test_failures(case: tuple[int, str, F, bool]) -> None:
 
 def test_retry_filter() -> None:
     assert t(P) is True and t(P + "; HTTP 429 Too Many Requests") is True
-    blocked = (P + " quota exceeded", P + " token refresh failed", P + " TLS handshake timeout", P + " HTTP 401 Unauthorized", P + " HTTP 403 Forbidden", "connection reset: Bad Request", "HTTP/1.1 405 Method Not Allowed; connection reset", P + "; HTTP 440 Login Time-out", P + "; HTTP 498 Invalid Token", P + "; HTTP 499", "connection reset: token\x00refresh failed", "A" * 4096 + P + "; token refresh failed", P + " " + "A" * 4096 + " token refresh failed", "connection reset; HTTP\x01403", 'connection reset; {"status":401}', "connection reset; status_code=404")
+    blocked = (P + " quota exceeded", P + " token refresh failed", P + " TLS handshake timeout", P + " HTTP 401 Unauthorized", P + " HTTP 403 Forbidden", "connection reset: Bad Request", "HTTP/1.1 405 Method Not Allowed; connection reset", P + "; HTTP 440 Login Time-out", P + "; HTTP 498 Invalid Token", P + "; HTTP 499", "connection reset: token\x00refresh failed", "A" * 4096 + P + "; token refresh failed", P + " " + "A" * 4096 + " token refresh failed", "connection reset; HTTP\x01403", 'connection reset; {"status":401}', "connection reset; status_code=404", P + "; API key not valid")
     assert all(t(text) is False for text in blocked)
     assert all(r(error_text=text, delivered=False).can_retry is False for text in blocked[3:])
     allowed = r(error_text=P, delivered=False)
     assert allowed.can_retry is True and allowed.attempt_budget_s > 0.0
     exhausted = r(error_text=P, delivered=False, elapsed_s=86.0)
     assert exhausted.can_retry is False and exhausted.attempt_budget_s == 0.0
-    invalid = ({"max_attempts": 0}, {"elapsed_s": float("nan")}, {"elapsed_s": -1.0}, {"budget_config": C(max_attempts=0)})
+    invalid = ({"max_attempts": 0}, {"elapsed_s": float("nan")}, {"elapsed_s": -1.0}, {"budget_config": C(max_attempts=0)}, {"elapsed_s": 10**1000}, {"budget_config": C(total_budget_s=10**1000)})
     assert all(not r(error_text=P, delivered=False, **kw).can_retry for kw in invalid)
     assert r(error_text=None, delivered=False).can_retry is False and r(error_text=P, delivered=False, budget_config="bad").can_retry is False
     assert t(P, source="MODEL_CONTENT") is False and r(error_text=P, delivered=False, source="MODEL_CONTENT").can_retry is False
@@ -80,6 +81,7 @@ def test_health_limits(case: tuple[float, float, tuple[str, ...], bool, H]) -> N
 
 def test_health_order() -> None:
     assert h("Claude-Opus-5-5-High", ("claude-opus-5-5",), 1.0, 10.0) == S("Claude-Opus-5-5", False, H.LIMIT_BLOCKED, ())
+    assert h(n("alpha-high", known_models=("alpha", "alpha-high")), ("alpha",), 1.0, 10.0) == S("alpha-high", True, H.READY, ()); assert h("alpha", ("alpha-high",), 1.0, 10.0) == S("alpha", True, H.READY, ())
 
 @pytest.mark.parametrize("age,limit", ((float("nan"), 1.0), (float("inf"), 1.0), (1.0, float("inf")), (1.0, -1.0)))
 def test_health_invalid(age: float, limit: float) -> None:
