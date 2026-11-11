@@ -41,8 +41,9 @@ class ActivityWindow:
         return self._safety_deadline
 
     def touch(self) -> float:
-        now = self._clock()
+        now = float(self._clock())
         if now < self._idle_deadline and now < self._safety_deadline:
+            now = max(now, self._start_s)
             self._idle_deadline = advance_sliding_deadline(
                 now, self._start_s, self._idle_timeout_s, self._safety_cap_s
             )

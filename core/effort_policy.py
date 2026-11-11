@@ -93,12 +93,10 @@ def resolve_alias_effort(
 ) -> tuple[str, str] | None:
     """`<id>-<effort>` -> `(id, effort)`; точная запись приоритетнее."""
     trimmed = raw_id.strip()
-    if not enabled or len(trimmed.split()) != 1:
-        return None
-    if trimmed in catalogue:
+    if not enabled or len(trimmed.split()) != 1 or trimmed in catalogue or trimmed.lower() in catalogue:  # fmt: skip  # noqa: E501
         return None
     direct = normalize_model_route(trimmed, allowed_suffixes=suffixes)
-    if direct.alias_applied and direct.canonical_model in catalogue:
+    if trimmed.islower() and direct.alias_applied and direct.canonical_model in catalogue:
         return direct.canonical_model, direct.reasoning_effort or ""
     route = normalize_model_route(
         trimmed, allowed_suffixes=suffixes, known_models=catalogue.keys()

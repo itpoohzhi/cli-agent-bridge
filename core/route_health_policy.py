@@ -36,7 +36,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:\bauthorization\s*[:=]\s*(?:[a-z0-9_.-]+\s+)?|\b(?:bearer|basic)\s+)(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*[\"'])?(?:[a-z0-9_.-]+\s+)?|\b(?:bearer|basic)\s+)(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 
 
@@ -48,7 +48,8 @@ class NormalizedModelRoute:
 
 def _match_known(target: str, known_models: Collection[str]) -> str | None:
     lowered = target.lower()
-    return next((candidate for item in known_models if (candidate := item.strip()) and candidate.lower() == lowered), None)  # fmt: skip  # noqa: E501
+    matches = sorted(candidate for item in known_models if (candidate := item.strip()) and candidate.lower() == lowered)  # fmt: skip  # noqa: E501
+    return matches[0] if matches else None
 
 
 def _resolve_route_suffix(model: str, explicit: str | None, allowed: frozenset[str], known_models: Collection[str] | None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
@@ -77,21 +78,22 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
 
 def _decode_escape(match: re.Match[str]) -> str:
     code = int(match.group(1), 16)
-    if code <= 0x1F or code == 0x7F:
-        return ""
+    if code <= 0x1F or code == 0x7F: return ""  # fmt: skip  # noqa: E701
     return chr(code) if code <= 0x7E else " "
 
 
-def redact_diagnostic_text(raw_text: str) -> str:
-    safe = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+", "", raw_text[:4096])
+def _normalize_diagnostic_text(raw_text: str, *, sep_controls: bool = False) -> str:
+    pattern = r"[\x00-\x20\x7f\ud800-\udfff]+" if sep_controls else r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]+"  # fmt: skip  # noqa: E501
+    safe = re.sub(r"[\ud800-\udfff]+", " ", raw_text[:4096]); safe = re.sub(pattern, " " if sep_controls else "", safe)  # fmt: skip  # noqa: E501,E702
     for _ in range(8):
-        previous = safe
-        safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)
-        if previous == safe:
-            break
-    if re.search(r"\\u[0-9a-fA-F]{4}", safe):
-        return REDACTED_TOKEN
-    safe = re.sub(r"[\x00-\x1f\x7f]+", " ", safe)
+        previous = safe; safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)  # fmt: skip  # noqa: E702
+        if previous == safe: break  # fmt: skip  # noqa: E701
+    if re.search(r"\\u[0-9a-fA-F]{4}", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E701
+    return re.sub(r"[\x00-\x1f\x7f\ud800-\udfff]+", " ", safe)
+
+
+def redact_diagnostic_text(raw_text: str) -> str:
+    safe = _normalize_diagnostic_text(raw_text)
     for regex in _SECRET_REGEXES:
         safe = regex.sub(REDACTED_TOKEN, safe)
     return safe[:MAX_DIAGNOSTIC_CHARS]
@@ -114,7 +116,7 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
 
 
 def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClassification:  # fmt: skip  # noqa: E501
-    reason = re.sub(r"[\x00-\x20\x7f]+", " ", raw_reason[:4096]).lower()
+    reason = f"{_normalize_diagnostic_text(raw_reason).lower()} {_normalize_diagnostic_text(raw_reason, sep_controls=True).lower()}"  # fmt: skip  # noqa: E501
     sanitized = redact_diagnostic_text(raw_reason)
     if _is_auth_failure(status_code, reason):
         values = (FailureCategory.AUTH_REFRESH_EXHAUSTED, False, True, sanitized)

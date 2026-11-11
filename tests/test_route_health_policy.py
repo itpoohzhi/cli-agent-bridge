@@ -29,6 +29,7 @@ def test_alias_policy() -> None:
     assert n(" Claude-Opus-5-5-HIGH ", " LOW ") == M("Claude-Opus-5-5", "low", True)
     assert e(" CLAUDE-OPUS-5-5-HIGH ", {"claude-opus-5-5": object()}, ("low", "medium", "high"), True) == ("claude-opus-5-5", "high")
     assert n("alpha-high", known_models=("alpha", "alpha-high")) == M("alpha-high", None, False); assert e("bad model-high", {"bad model": object()}, ("low", "medium", "high"), True) is None
+    assert e("ALPHA-HIGH", {"ALPHA": object(), "alpha-high": object()}, ("high",), True) is None; assert n("alpha", known_models={"alpha", "Alpha"}).canonical_model == "Alpha"
 
 @pytest.mark.parametrize("model,level", (("", None), ("   ", None), ("m", "ultra"), ("blocked -high", None)))
 def test_alias_invalid(model: str, level: str | None) -> None:
@@ -40,15 +41,15 @@ def test_redaction() -> None:
     assert len(z) <= 256 and len(x("x" * 300)) == 256
     assert z.count("<redacted>") >= 7
     assert all(value not in z for value in ("bearer.value", "ya29.", "1//", "@", "\x00", "\n"))
-    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET", "Authorization: Token TOPSECRET42", "pass\x01word=TOPSECRET42", "pass\x1fword=TOPSECRET42", "pass\x7fword=TOPSECRET42")
+    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET", "Authorization: Token TOPSECRET42", '{"authorization": "Digest TOPSECRET42"}', "pass\x01word=TOPSECRET42", "pass\x1fword=TOPSECRET42", "pass\x7fword=TOPSECRET42")
     assert all("<redacted>" in x(text) for text in cases)
     assert all("TOPSECRET42" not in x(text) for text in (r"pass\u005cu005cu0077ord=TOPSECRET42", r'Bearer \\"TOPSECRET42\\"', r'{\\"access_token\\":\\"TOPSECRET42\\"}'))
     assert all("TOPSECRET42" not in x(text) and "<redacted>" in x(text) for text in (r"pass\u0000word=TOPSECRET42", "pass" + r"\u005c" + "u005c" * 7 + "u0077ord=TOPSECRET42"))
-    assert x(r"\uD800").encode("utf-8") == b" "
+    assert x(r"\uD800").encode("utf-8") == b" " and x("\ud800").encode("utf-8") == b" "
 
 @pytest.mark.parametrize("case", (
     (401, "anything", F.AUTH_REFRESH_EXHAUSTED, False), (403, "OAuth rejected", F.AUTH_REFRESH_EXHAUSTED, False),
-    (503, "token refresh failed", F.AUTH_REFRESH_EXHAUSTED, False), (429, "quota exceeded", F.LIMIT_BLOCKED, False),
+    (503, "token refresh failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, r"token\u0020refresh\u0020failed", F.AUTH_REFRESH_EXHAUSTED, False), (429, "quota exceeded", F.LIMIT_BLOCKED, False),
     (503, "quota exceeded", F.LIMIT_BLOCKED, False), (503, "SSL_ERROR_SYSCALL", F.UPSTREAM_TLS_STALL, False),
     (429, "busy", F.CAPACITY_EXHAUSTED, True), (503, Q, F.CAPACITY_EXHAUSTED, True),
     (400, "model_capacity_exhausted", F.CAPACITY_EXHAUSTED, True), (0, "HTTP 401: invalid auth", F.AUTH_REFRESH_EXHAUSTED, False),
