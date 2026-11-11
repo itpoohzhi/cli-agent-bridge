@@ -12,13 +12,17 @@ import pytest
 import server
 from tools import droid_image
 
-DROID_MODEL_IDS = ("claude-sonnet-5-5", "gemini-3.8-flash", "gpt-6.1-sol")
+DROID_MODEL_IDS = (
+    "claude-sonnet-5-5-droid",
+    "gemini-3.8-flash-droid",
+    "gpt-6.1-sol-droid",
+)
 BASE_TOOLS = tuple(f"tool-{index}" for index in range(35))
 EXTRA_TOOL = "wait-for-script-cli"
 MODEL_EFFORTS = (
     ("low", "medium", "high", "max"),
     ("low", "medium", "high"),
-    ("low", "medium", "high"),
+    ("low", "medium", "high", "max"),
 )
 PROBE_PAIRS = [
     (mid, effort)
@@ -146,7 +150,7 @@ class FakeRpc:
             if self.settings["modelId"] == self.invalid_model:
                 return {"tools": []}, []
             ids = [*BASE_TOOLS]
-            if self.settings["modelId"] == "gpt-6.1-sol":
+            if self.settings["modelId"] == "gpt-6.1-sol-droid":
                 ids.append(EXTRA_TOOL)
             return {"tools": [{"id": tool} for tool in ids]}, []
         if method == "droid.update_session_settings":
@@ -195,7 +199,9 @@ def test_probes_union_all_model_tools(
     assert facts["disabled_tool_ids"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
     assert started_models(fake_probes) == [mid for mid, _ in PROBE_PAIRS]
     assert set(facts["qualified_models"]) == set(DROID_MODEL_IDS)
-    assert facts["qualified_models"]["gpt-6.1-sol"] == sorted([*BASE_TOOLS, EXTRA_TOOL])
+    assert facts["qualified_models"]["gpt-6.1-sol-droid"] == sorted(
+        [*BASE_TOOLS, EXTRA_TOOL]
+    )
     initializes = [
         params
         for rpc in fake_probes.instances
@@ -213,7 +219,11 @@ def test_probes_union_all_model_tools(
         if method == "droid.update_session_settings"
     ]
     assert updates == [
-        sorted([*BASE_TOOLS, EXTRA_TOOL] if mid == "gpt-6.1-sol" else BASE_TOOLS)
+        sorted(
+            [*BASE_TOOLS, EXTRA_TOOL]
+            if mid == "gpt-6.1-sol-droid"
+            else BASE_TOOLS
+        )
         for mid, _ in PROBE_PAIRS
     ]
 
@@ -222,7 +232,7 @@ def test_probes_union_all_model_tools(
     ("extra_models", "expected"),
     [
         ("", []),
-        ("gpt-6.1-sol, gpt-6.1-sol,,claude-sonnet-5-5", []),
+        ("gpt-6.1-sol-droid, gpt-6.1-sol-droid,,claude-sonnet-5-5-droid", []),
         ("future-model:low", ["future-model"]),
     ],
 )
@@ -243,8 +253,8 @@ def test_configured_probe_models_are_deduplicated(
 def test_bad_extra_probe_fails_closed(
     monkeypatch: pytest.MonkeyPatch, fake_probes: type[FakeRpc], tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", "gpt-6.1-sol")
-    monkeypatch.setattr(fake_probes, "invalid_model", "gpt-6.1-sol")
+    monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", "gpt-6.1-sol-droid")
+    monkeypatch.setattr(fake_probes, "invalid_model", "gpt-6.1-sol-droid")
     with pytest.raises(droid_image.ProbeError, match="list_tools"):
         droid_image.run_probes(Path("/fake/droid"), tmp_path)
     assert all(rpc.closed for rpc in fake_probes.instances)

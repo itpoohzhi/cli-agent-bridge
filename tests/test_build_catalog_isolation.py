@@ -179,5 +179,8 @@ def test_models_of_disabled_backend_are_skipped_not_rejected() -> None:
     data = raw_fleet()
     data["backends"]["droid"]["enabled"] = False
     catalog = build(data, "isolate")
-    assert "gpt-6.1-sol" not in catalog["models"]
+    assert "gpt-6.1-sol" in catalog["models"]
+    assert "gpt-6.1-sol-droid" not in catalog["models"]
+    assert "claude-sonnet-5-5-droid" not in catalog["models"]
+    assert "gemini-3.8-flash-droid" not in catalog["models"]
     assert "deepseek-v4.1-flash" not in catalog["rejected"]

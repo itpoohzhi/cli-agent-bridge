@@ -202,9 +202,13 @@ class TestRealAdapters(unittest.TestCase):
     def test_model_routing(self):
         reg = server.BACKENDS
         expected = {
-            "claude-sonnet-5-5": "droid",
-            "gemini-3.8-flash": "droid",
-            "gpt-6.1-sol": "droid",
+            "claude-sonnet-5-5": "claude-p",
+            "gemini-3.8-flash": "agy",
+            "gpt-6.1-sol": "codex",
+            "claude-sonnet-5-5-droid": "droid",
+            "gemini-3.8-flash-droid": "droid",
+            "gpt-6.1-sol-droid": "droid",
+            "muse-ember-1.0": "muse",
             "muse-spark-1.3": "muse",
             "muse-spark-1.3-contributor": "muse",
             "muse-wonder-1.0": "muse",
@@ -213,6 +217,7 @@ class TestRealAdapters(unittest.TestCase):
             "claude-opus-5-5": "claude-p",
             "claude-haiku-5-5": "opencode-go-claude",
             "gemini-4-argon": "agy",
+            "gemini-4-carbon": "agy",
             "deepseek-v4.1-flash-free": "opencode-zen",
             "flint-40b-free": "opencode-zen",
             "mimo-v2.6-flash-free": "opencode-zen",
@@ -220,6 +225,10 @@ class TestRealAdapters(unittest.TestCase):
             "nemotron-3.5-super-vl-free": "opencode-zen",
             "beam-free": "opencode-zen",
             "big-pickle": "opencode-zen",
+            "iceman-free": "opencode-zen",
+            "inkling-2-small-free": "opencode-zen",
+            "longcat-2.5-free": "opencode-zen",
+            "minimax-m3.1-flash-free": "opencode-zen",
             "deepseek-v4.1-flash": "opencode-go",
         }
         self.assertEqual(set(server.FLEET["order"]), set(expected))

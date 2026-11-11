@@ -19,11 +19,11 @@ transport:
       output: {format: text}
 allow_base_url:
 - {scheme: http, host: 127.0.0.1, port: 9887, path_prefix: /v1}
-limits: {max_concurrent: 128, quota_group: google-agy, timeout_s: 180}
+limits: {max_concurrent: 128, quota_group: google-agy, timeout_s: 600}
 fingerprint: {binary_path: ~/.local/bin/agy.real}
 discovery:
   method: static
-  static: [gemini-3.8-flash, gemini-4-argon]
+  static: [gemini-3.8-flash, gemini-4-argon, gemini-4-carbon]
 family_rule:
   type: prefix
   prefix:
@@ -40,6 +40,14 @@ models_overrides:
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   gemini-4-argon:
     name: Gemini 4 Argon (AGY bridge)
+    efforts: [low, medium, high]
+    default_effort: high
+    context_window: 1048576
+    max_tokens: 65536
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  gemini-4-carbon:
+    name: Gemini 4 Carbon (AGY)
     efforts: [low, medium, high]
     default_effort: high
     context_window: 1048576

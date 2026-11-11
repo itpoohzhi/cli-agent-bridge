@@ -72,19 +72,16 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_live_catalogue_is_schema_3_with_eight_backends(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(
-            catalog["backend_order"],
-            ["droid", "opencode-go-claude", "agy", "claude-p", "muse", "codex", "opencode-go", "opencode-zen"],
-        )
+        self.assertEqual(catalog["backend_order"], ["opencode-go-claude", "agy", "claude-p", "codex", "muse", "opencode-go", "droid", "opencode-zen"])
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
-        self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 5)
+        self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 64)
         self.assertFalse(catalog["backends"]["droid"]["required"])
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
         self.assertTrue(muse["enabled"])
         self.assertEqual(muse["wrapper"], "~/.config/muse-launch/muse-cli.sh")
-        self.assertEqual(muse["max_concurrent"], 1)  # RW-001: ходы muse сериализованы
+        self.assertEqual(muse["max_concurrent"], 64)
         codex = catalog["backends"]["codex"]
         self.assertEqual(codex["kind"], "passthrough")
         self.assertTrue(codex["enabled"])
@@ -114,10 +111,12 @@ class TestLiveFleetV3(unittest.TestCase):
         data = raw_v3()
         catalog = server._build_catalog(data)
         self.assertEqual(len(catalog["order"]), len(data["models"]))
-        self.assertEqual(len(catalog["order"]), 19)
-        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "droid")
-        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "droid")
-        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "droid")
+        self.assertEqual(len(catalog["order"]), 28)
+        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
+        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
+        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
+        for model_id in ("claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"):
+            self.assertEqual(catalog["models"][model_id]["backend"], "droid")
         self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "opencode-go")
         self.assertNotIn("kimi-k3.1-pro", catalog["models"])
         for mid in MUSE_MODELS:
@@ -152,7 +151,7 @@ class TestLiveFleetV3(unittest.TestCase):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
         self.assertEqual(len(catalog["order"]), len(raw_v3()["models"]))
-        self.assertEqual(len(catalog["order"]), 19)
+        self.assertEqual(len(catalog["order"]), 28)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -571,7 +570,7 @@ class TestFleetCheckParity(unittest.TestCase):
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
         self.assertEqual(len(catalog["order"]), len(data["models"]))
-        self.assertEqual(len(catalog["order"]), 19)
+        self.assertEqual(len(catalog["order"]), 28)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):

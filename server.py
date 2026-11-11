@@ -142,7 +142,10 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     finalize_turn,
     sanitize_tool_call,
 )
-from core.stream_framing import build_stream_error_chunk  # noqa: E402
+from core.stream_framing import (  # noqa: E402
+    build_stream_error_chunk,
+    format_stream_error_sse,
+)
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
     ManagedTurn,
@@ -195,55 +198,26 @@ from core.catalog_flags import (  # noqa: E402
     resolve_fleet_path,
     sidecar_allowlist,
 )
+from core.passthrough_autonomy import (  # noqa: E402
+    passthrough_autonomy_validation_enabled,
+    prepare_passthrough_request,
+    resolve_target_model,
+    strip_passthrough_request as _strip_passthrough_env,
+)
 from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
 from core.droid_session_gate import ToolsGateError, admit_model, plan_tools_disable, verify_tools_disabled  # noqa: E402
 from core.effort_policy import (  # noqa: E402
     DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER, FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
     catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
-    resolve_model_effort_fields, resolve_passthrough_effort,
+    resolve_model_effort_fields,
 )
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
 
-def resolve_target_model(model_entry: dict, requested_model_id: str) -> str:
-    """Возвращает каноническую целевую модель для CLI/бэкенда (upstream_model при наличии)."""
-    if not isinstance(model_entry, dict):
-        return requested_model_id
-    upstream = model_entry.get("upstream_model")
-    if isinstance(upstream, str) and upstream.strip():
-        return upstream.strip()
-    return requested_model_id
-
-
 def build_cli_model_selection(ctx: dict) -> str:
     """Выбирает целевую модель для запуска CLI-процесса (с учётом upstream_model)."""
     return ctx.get("target_model") or ctx["model"]
-
-
-def prepare_passthrough_request(
-    req: dict,
-    model: dict,
-    model_id: str,
-    alias: tuple[str, str] | None = None,
-    alias_effort: str | None = None,
-    effort_on: bool = False,
-) -> tuple[dict, Any]:
-    """Формирует тело запроса для passthrough-маршрута с трансляцией upstream_model и effort."""
-    upstream_model = model.get("upstream_model")
-    has_upstream = isinstance(upstream_model, str) and bool(upstream_model.strip())
-    pt_effort = resolve_passthrough_effort(
-        req.get("reasoning_effort"),
-        alias_effort,
-        ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
-        enabled=effort_on,
-    )
-    if has_upstream or alias or pt_effort.apply:
-        target_model = resolve_target_model(model, model_id)
-        req = {**req, "model": target_model}
-        if pt_effort.apply:
-            req["reasoning_effort"] = pt_effort.value
-    return req, pt_effort
 
 
 def _resolve_backend_topology(backend_id: str, route_mode: str) -> tuple[str, str]:
@@ -970,11 +944,14 @@ def _key_hash(key: str) -> str:
 
 
 _WS_URL = re.compile(r"\bwss?://\S+", re.IGNORECASE)
+_FILESYSTEM_PATH = re.compile(r"(?<![\w:/])(?:~?/|[A-Za-z]:[\\/])[^\s\x00]+")
 
 
 def _mask_secrets(text: str) -> str:
-    """Длинные токеноподобные последовательности и WebSocket URL -> ***."""
-    return _SECRET.sub("***", _WS_URL.sub("ws://***", text))
+    """Длинные токены, WebSocket URL и абсолютные пути -> ***."""
+    masked = _WS_URL.sub("ws://***", text)
+    masked = _FILESYSTEM_PATH.sub("***", masked)
+    return _SECRET.sub("***", masked)
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
@@ -1152,19 +1129,6 @@ def _redact_values(text: str, values: list) -> str:
         if value:
             text = text.replace(value, "***")
     return text
-
-
-def _strip_passthrough_env(raw: bytes, req: dict) -> "tuple[bytes, dict]":
-    """Вырезать `extra_body.env` из тела, уходящего внешнему upstream (токены/CDP не покидают хост).
-
-    Тело без `extra_body.env` возвращается дословно (побайтово), иначе пересериализуется.
-    """
-    extra = req.get("extra_body")
-    if not isinstance(extra, dict) or "env" not in extra:
-        return raw, req
-    clean_req = dict(req)
-    clean_req["extra_body"] = {k: v for k, v in extra.items() if k != "env"}
-    return json.dumps(clean_req, ensure_ascii=False).encode("utf-8"), clean_req
 
 
 def _launch_env() -> dict:
@@ -1757,6 +1721,7 @@ _PASSTHROUGH_NEUTRAL_ERROR_TYPES = frozenset(
 
 
 _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES = 8192
+_MAX_PASSTHROUGH_ERROR_CAPTURE_BYTES = 65536
 
 
 def _passthrough_error_capture_bytes() -> int:
@@ -1766,7 +1731,9 @@ def _passthrough_error_capture_bytes() -> int:
         value = int(raw)
     except ValueError:
         return _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
-    return value if value >= 0 else _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+    if value < 0:
+        return _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+    return min(value, _MAX_PASSTHROUGH_ERROR_CAPTURE_BYTES)
 
 
 def _passthrough_error_type(raw: bytes) -> str:
@@ -1789,15 +1756,20 @@ def _passthrough_error_type(raw: bytes) -> str:
             payloads.append(json.loads(data))
         except ValueError:
             continue
-    for payload in payloads:
+    for payload in reversed(payloads):
         if not isinstance(payload, dict):
             continue
         error = payload.get("error")
         if not isinstance(error, dict):
             continue
-        # JSON-тело шва: code — HTTP-статус (число), тип ошибки в type;
-        # SSE-кадр: code — строковый код ошибки.
-        for value in (error.get("code"), error.get("type")):
+        values = (error.get("type"), error.get("code"))
+        for value in values:
+            if (
+                isinstance(value, str)
+                and value in _PASSTHROUGH_NEUTRAL_ERROR_TYPES
+            ):
+                return value
+        for value in values:
             if isinstance(value, str) and value:
                 return value
     return ""
@@ -1845,6 +1817,17 @@ class _HandlerSink(ResponseSink):
         return _passthrough_error_type(bytes(self._error_body))
 
     def _capture_error(self, data: bytes) -> None:
+        if self._error_limit <= 0:
+            return
+        if self.status == 200:
+            if len(data) >= self._error_limit:
+                self._error_body[:] = data[-self._error_limit :]
+                return
+            overflow = len(self._error_body) + len(data) - self._error_limit
+            if overflow > 0:
+                del self._error_body[:overflow]
+            self._error_body += data
+            return
         room = self._error_limit - len(self._error_body)
         if room > 0:
             self._error_body += data[:room]
@@ -1881,7 +1864,7 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
-        if self.status >= 400 or b'"error"' in data:
+        if self.status == 200 or self.status >= 400 or b'"error"' in data:
             self._capture_error(data)
         telemetry_note(self._handler, len(data), chunk=True)
         telemetry_tail(self._handler, data)
@@ -6610,6 +6593,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             message = f"{label} exec failed rc={out.get('rc')}"
             if detail:
                 message = f"{message}: {detail}"
+            _log(
+                f"backend_error rc={out.get('rc')} "
+                f"stderr_bytes={len(raw_err.encode('utf-8'))}"
+            )
             return {
                 "message": message,
                 "detail": detail,
@@ -6968,15 +6955,6 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             if _is_detached_enabled()
             else None
         )
-        if not m_cancel and (
-            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
-        ):
-            is_sub = self._is_subagent_request()
-            if _shutting_down or not LIFECYCLE.wait_for_drain_hold(is_subagent=is_sub):
-                code, drain_headers, drain_body = LIFECYCLE.draining_response(is_subagent=is_sub)
-                err = drain_body.get("error", {})
-                self._reject(code, err.get("type", "overloaded"), err.get("message", "bridge is shutting down"), extra_headers=drain_headers)
-                return
         hub_auth_ok = _auth_ok(self)
         deferred_passthrough_auth = False
         if not hub_auth_ok:
@@ -7002,6 +6980,25 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                             "code": 401,
                         }
                     },
+                )
+                return
+        if not m_cancel and (
+            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
+        ):
+            is_sub = self._is_subagent_request()
+            hold_ok = False
+            if not _shutting_down:
+                hold_ok = LIFECYCLE.wait_for_drain_hold(is_subagent=is_sub)
+            if _shutting_down or not hold_ok or LIFECYCLE.is_draining():
+                code, drain_headers, drain_body = LIFECYCLE.draining_response(
+                    is_subagent=is_sub
+                )
+                err = drain_body.get("error", {})
+                self._reject(
+                    code,
+                    err.get("type", "overloaded"),
+                    err.get("message", "bridge is shutting down"),
+                    extra_headers=drain_headers,
                 )
                 return
         if urlparse(self.path).path in (
@@ -7358,6 +7355,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             # (8a) passthrough (AD-003/AD-007): raw-шов ДО effort-клампа, транскрипции и контекста —
             # model/reasoning_effort/tools/Authorization уходят upstream дословно.
             passthrough = BACKENDS.get(model["backend"])
+            if passthrough_autonomy_validation_enabled(
+                isinstance(passthrough, PassthroughAdapter)
+            ):
+                try:
+                    _ = validate_autonomy_request(req.get("autonomy"))
+                except AutonomyViolation as exc:
+                    self._reject(400, exc.reason, str(exc), model_id, model_len)
+                    return
             if isinstance(passthrough, PassthroughAdapter):
                 if raw_model != model_id and alias is None:
                     self._reject(
@@ -8219,9 +8224,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
             # Таймаут шага (504) и оборванный стрим — тоже нейтральны: это не отказ апстрима.
-            error_type = getattr(sink, "error_type", None)
+            error_type_fn = getattr(sink, "error_type", None)
+            error_type = error_type_fn() if callable(error_type_fn) else ""
             discard_reason = _passthrough_discard_reason(
-                sink.status, error_type() if callable(error_type) else ""
+                sink.status, error_type
             )
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
@@ -8232,6 +8238,11 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 lease.record_success()
                 _PENALTY_TRACKER.record_start_failure(
                     canonical_model_id, f"http_{sink.status}"
+                )
+            elif 200 <= sink.status < 300 and error_type:
+                lease.record_failure()
+                _PENALTY_TRACKER.record_start_failure(
+                    canonical_model_id, error_type
                 )
             elif 200 <= sink.status < 300:
                 # 2xx: реальный успешный ответ модели
@@ -8462,7 +8473,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             with sse_lock:
                 return self._emit(frame)
 
-        def stream_error_frame(message: str, code: str = "live_prefix_invalidated", error_type: str = "stream_error", finish_reason: Any = None) -> str:
+        def stream_error_frame(
+            message: str,
+            code: str = "live_prefix_invalidated",
+            error_type: str = "stream_error",
+            finish_reason: str | None = None,
+        ) -> str:
             err_chunk = build_stream_error_chunk(
                 message=message,
                 model=shown_model,
@@ -8652,8 +8668,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     + "\n\n"
                 )
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
-            fin: Any = None if (err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid") else ...
-            emit(stream_error_frame(str(err["message"]), finish_reason=fin))
+            emit(
+                stream_error_frame(
+                    str(err["message"]),
+                    code=str(err.get("code") or err.get("type") or "stream_error"),
+                    error_type=str(err.get("type") or "server_error"),
+                    finish_reason=None,
+                )
+            )
         else:
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")

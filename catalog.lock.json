@@ -1,21 +1,21 @@
 {
-  "compiled_at": "2026-11-11T12:45:30+0300",
+  "compiled_at": "2026-11-11T13:58:32+0300",
   "compiler_version": 1,
-  "fleet_sha256": "e2743ae1ff9509eeb875c795f1734c928705d3e0de96eaa56570be932e63b276",
+  "fleet_sha256": "4cac50b63b3d0858cee7fcbe11a4da8cc1cb579c748ea7a4a694139962643457",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "c712286cd70faef9349759d2003723c4fa7c2351f54ca1afbef5afcf569dcd8c",
-      "agy.yaml": "5190185419b7f710ec639c7a88e8439432f6c29c4488a7d4723fee575fb50f0b",
+      "_fleet.yaml": "6dd3a5f996c76e68986bb09b04f5115e8e8f554c46850665a26fde644186c6a6",
+      "agy.yaml": "cbbb84a91ee76aaecfad67de8d702eb750ce8668dfbea493e3319c159f2bde83",
       "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
       "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
       "droid.yaml": "340ec402a8c4c091fbddb3a77438c56c2263dea8b3d76457ebecd820565c1c53",
       "muse.yaml": "bbe6d2d3b2d967a6f7a1c794411d07a74e7f1040a1bb4641b5a68385e34af79e",
-      "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
+      "opencode-go-claude.yaml": "11c66e81cd053cc874d086faafbe248d5599447254f162f2d93d3b4360654cd3",
       "opencode-go.yaml": "110b75eb68bba08715fc55dfc7fe41d8eda826bef0b5248f81ee3dccfb4810c4",
-      "opencode-zen.yaml": "dcbb5550283b9ffc3b6909e4ce03ee33ce88404490fc3860f8d34b8057a9d900"
+      "opencode-zen.yaml": "269c0fa76c1220c6173f371e10c2f246b1575abd6cb3e7f91f8472f6ef72f4fc"
     },
-    "manifests_sha256": "f6d9866ff51708f67ba07b5eb5163c495813f4a16947ae1062e45d10274f07bf"
+    "manifests_sha256": "92cce5ab5c0629939a76b53822667c7956bd2b892a98dd043c32ad2a847f6f4d"
   },
   "models": {
     "beam-free": {
@@ -45,7 +45,7 @@
     "claude-haiku-5-5": {
       "alternates": [
         {
-          "provider": "opencode-go-claude"
+          "provider": "claude-p"
         }
       ],
       "efforts_proven": [],
@@ -53,9 +53,9 @@
       "family_source": "owned_by",
       "history": [],
       "in_fleet": true,
-      "provider": "claude-p",
+      "provider": "opencode-go-claude",
       "quorum_eligible": false,
-      "quota_group": "anthropic-claude",
+      "quota_group": "opencode-go-claude",
       "status": "quarantine"
     },
     "claude-opus-5-5": {
@@ -174,6 +174,18 @@
       "quota_group": "google-agy",
       "status": "quarantine"
     },
+    "gemini-4-carbon": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
     "gpt-6.1-sol": {
       "alternates": [
         {
@@ -214,7 +226,55 @@
       "quota_group": "openai-codex",
       "status": "quarantine"
     },
+    "iceman-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "inkling-2-small-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "longcat-2.5-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
     "mimo-v2.6-flash-free": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": null,
+      "family_source": "unmapped",
+      "history": [],
+      "in_fleet": true,
+      "provider": "opencode-zen",
+      "quorum_eligible": false,
+      "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "minimax-m3.1-flash-free": {
       "alternates": [],
       "efforts_proven": [],
       "family": null,
@@ -373,7 +433,7 @@
         "max_parallel": 1
       },
       "quota_group": "google-agy",
-      "timeout_s": 180.0
+      "timeout_s": 600.0
     },
     "claude-p": {
       "allow_base_url": [
