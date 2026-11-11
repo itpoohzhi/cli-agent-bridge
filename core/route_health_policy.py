@@ -35,7 +35,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@\"']*:[^\s@\"']+@[^\s/\"']+", r"(?i)(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|client\s*_?\s*secret|x-api-key|api[\s_-]*key|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|passwd|pwd|secret|token)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@\"']*:[^\s@\"']+@[^\s/\"']+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}authorization[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|client\s*_?\s*secret|x-api-key|api[\s_-]*key|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|passwd|pwd|secret|token)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n}]+)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 @dataclass(frozen=True)
 class NormalizedModelRoute:
@@ -53,8 +53,7 @@ def _resolve_route_suffix(model: str, explicit: str | None, allowed: frozenset[s
         if len(model) > len(marker) and model.lower().endswith(marker):
             base, effort = model[: -len(marker)], explicit or suffix
             canon = base if known_models is None else _match_known(base, known_models)
-            if canon is not None:
-                res = NormalizedModelRoute(canon, effort, True); object.__setattr__(res, "_raw", model.lower()); return res  # fmt: skip  # noqa: E501,E702
+            if canon is not None: return NormalizedModelRoute(canon, effort, True)  # fmt: skip  # noqa: E501,E701
     return NormalizedModelRoute(model, explicit, False)
 
 def normalize_model_route(model_id: str, explicit_effort: str | None = None, allowed_suffixes: Collection[str] | None = None, known_models: Collection[str] | None = None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
@@ -121,7 +120,7 @@ def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClass
         values = (FailureCategory.LIMIT_BLOCKED, False, True, sanitized)
     elif "ssl_error_syscall" in reason or "tls handshake timeout" in reason:
         values = (FailureCategory.UPSTREAM_TLS_STALL, False, True, sanitized)
-    elif status_code in _CAPACITY_STATUSES or "model_capacity_exhausted" in reason:
+    elif status_code in _CAPACITY_STATUSES or "model_capacity_exhausted" in reason or (status_code == 0 and bool(re.search(r"\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+(?:429|502|503|504)\b", reason))):  # fmt: skip  # noqa: E501
         values = (FailureCategory.CAPACITY_EXHAUSTED, True, True, sanitized)
     else:
         values = (FailureCategory.FATAL_REQUEST_ERROR, False, False, sanitized)
@@ -137,9 +136,9 @@ def _route_targets(model_id: str | NormalizedModelRoute) -> tuple[str, frozenset
     if isinstance(model_id, NormalizedModelRoute):
         canon, eff = model_id.canonical_model.strip(), model_id.reasoning_effort
         if len(canon.split()) != 1 or (eff is not None and len(eff.strip().split()) != 1): raise ValueError("invalid NormalizedModelRoute")  # fmt: skip  # noqa: E501,E701
-        alias = f"{canon}-{eff.strip().lower()}".lower() if model_id.alias_applied and eff else canon.lower()  # fmt: skip  # noqa: E501
-        raw = str(getattr(model_id, "_raw", alias)).lower()
-        return canon, frozenset((canon.lower(), alias, raw))
+        suffixes = (*_EFFORTS, eff.strip()) if eff else tuple(_EFFORTS)
+        extra: set[str] = {f"{canon}-{s}".lower() for s in suffixes} if model_id.alias_applied else set()  # fmt: skip  # noqa: E501
+        return canon, frozenset((canon.lower(), *extra))
     route = normalize_model_route(model_id)
     return route.canonical_model, frozenset((model_id.strip().lower(), route.canonical_model.lower()))  # fmt: skip  # noqa: E501
 
