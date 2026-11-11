@@ -48,7 +48,7 @@ class ActivityWindow:
             self._idle_timeout_s,
             self._safety_cap_s,
         )
-        if now < self._idle_deadline and now < self._safety_deadline:
+        if now < self._safety_deadline:
             self._idle_deadline = max(self._idle_deadline, new_deadline)
         return self._idle_deadline
 

@@ -85,6 +85,14 @@ def resolve_model_effort_fields(
     return ModelEffortCardFields(spec.default, spec.efforts) if spec.efforts else None
 
 
+def _lookup_catalog_id(target: str, catalogue: Mapping[str, object]) -> str | None:
+    title = "-".join(part.capitalize() for part in target.split("-"))
+    for candidate in dict.fromkeys((target, target.lower(), target.upper(), title)):
+        if candidate in catalogue:
+            return candidate
+    return None
+
+
 def resolve_alias_effort(
     raw_id: str,
     catalogue: Mapping[str, object],
@@ -92,15 +100,23 @@ def resolve_alias_effort(
     enabled: bool,
 ) -> tuple[str, str] | None:
     """`<id>-<effort>` -> `(id, effort)`; точная запись приоритетнее."""
+    if not enabled:
+        return None
     trimmed = raw_id.strip()
-    if not enabled or len(trimmed.split()) != 1:
+    if len(trimmed.split()) != 1 or _lookup_catalog_id(trimmed, catalogue) is not None:
         return None
-    route = normalize_model_route(
-        trimmed, allowed_suffixes=suffixes, known_models=catalogue.keys()
+    try:
+        route = normalize_model_route(trimmed, allowed_suffixes=suffixes)
+    except ValueError:
+        return None
+    if not route.alias_applied or route.reasoning_effort is None:
+        return None
+    canonical_model = _lookup_catalog_id(route.canonical_model, catalogue)
+    return (
+        (canonical_model, route.reasoning_effort)
+        if canonical_model is not None
+        else None
     )
-    if not route.alias_applied:
-        return None
-    return route.canonical_model, route.reasoning_effort or ""
 
 
 def catalog_effort_specs(
