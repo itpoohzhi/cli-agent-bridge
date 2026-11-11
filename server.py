@@ -120,6 +120,7 @@ from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежн�
     get_qos_manager,
     has_live_parent,
 )
+from core.prompt_prefix_stability import compute_tools_budget_overhead  # noqa: E402
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
@@ -3932,15 +3933,12 @@ def _instr_scan(messages: list, kb_cwd: bool = False) -> tuple:
     return top["sections"], top["omitted"], top["bytes"]
 
 
-def _instr_limit(block: dict, max_bytes: int | None) -> int:
-    """Применимый предел блока: KB-форма (только канон) — INSTR_BLOCK_LIMIT, прочие — бюджет минус запас.
-
-    Бюджет non-KB — не меньше INSTR_BLOCK_LIMIT: устаревший maxBytes клиентского профиля DSH
-    (cordis.patch.yml, 118k) предел моста не занижает; больший maxBytes клиента допустим.
-    """
+def _instr_limit(block: dict, max_bytes: int | None, tools_overhead: int = 0) -> int:
+    """Применимый предел блока: KB-форма (только канон) — INSTR_BLOCK_LIMIT, прочие — бюджет минус запас и tools."""
     if block["canon_only"]:
         return INSTR_BLOCK_LIMIT
-    return max(INSTR_BLOCK_LIMIT, max_bytes or 0) - INSTR_NONKB_MARGIN
+    base = max(INSTR_BLOCK_LIMIT, max_bytes or 0) - INSTR_NONKB_MARGIN
+    return max(0, base - max(0, int(tools_overhead)))
 
 
 _UG_CANON_SUFFIX = "/.dsh/AGENTS.md"
@@ -4022,7 +4020,7 @@ def _truncate_instr_text(text: str, limit: int) -> str:
 
 
 def _soft_truncate_instructions(
-    messages: list, kb_cwd: bool, max_bytes: int | None
+    messages: list, kb_cwd: bool, max_bytes: int | None, tools_overhead: int = 0
 ) -> int:
     """Усекает блоки agent-instructions сверх применимого предела прямо в `messages`; число усечённых блоков."""
     changed = 0
@@ -4030,7 +4028,7 @@ def _soft_truncate_instructions(
         found = _instr_blocks([msg], kb_cwd)
         if not found:
             continue
-        limit = _instr_limit(found[0], max_bytes)
+        limit = _instr_limit(found[0], max_bytes, tools_overhead)
         if found[0]["bytes"] <= limit:
             continue
         content = msg.get("content")
@@ -4054,10 +4052,12 @@ def _soft_truncate_instructions(
     return changed
 
 
-def _instr_violation(blocks: list, max_bytes: int | None) -> tuple | None:
+def _instr_violation(
+    blocks: list, max_bytes: int | None, tools_overhead: int = 0
+) -> tuple | None:
     """(байт, предел) первого блока сверх применимого предела либо None."""
     for block in blocks:
-        limit = _instr_limit(block, max_bytes)
+        limit = _instr_limit(block, max_bytes, tools_overhead)
         if block["bytes"] > limit:
             return block["bytes"], limit
     return None
@@ -7495,7 +7495,6 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             )
             tool_choice = req.get("tool_choice")
             emulate_tools = bool(tools) and not _tool_choice_none(tool_choice)
-            prompt = _messages_to_prompt(messages, tools, tool_choice, images)
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -7520,17 +7519,24 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                         model_len,
                     )
                     return
-            # Маршрут хода: нового 400 на ключ нет — плохой/отсутствующий ключ = холодная
-            # изолированная сессия с replay истории запроса.
-            transcript = _transcribe(messages, tools, tool_choice, images)
+            # Маршрут хода и b_guard ДО сериализации промпта (CARD-W2-04: однопроходный рендер).
             raw_key = req.get("prompt_cache_key")
             keyed = isinstance(raw_key, str) and 0 < len(raw_key) <= KEY_MAX_LEN
-            if images:
-                route = "image"
-            elif _is_title_request(messages, tools, req):
-                route = "title"
-            elif not transcript["runnable"]:
-                route = "fallback"
+            route = "keyed" if keyed else "nokey"
+            if images or _is_title_request(messages, tools, req):
+                route = "image" if images else "title"
+            t_over = compute_tools_budget_overhead(tools, tool_choice, bool(images))
+            self._instr_truncated = False
+            instr = self._prompt_guard(
+                messages, route, raw_key, cwd, model_id, model_len, adapter, t_over
+            )
+            if instr is None:
+                return
+            prompt = _messages_to_prompt(messages, tools, tool_choice, images)
+            transcript = _transcribe(messages, tools, tool_choice, images)
+            if not transcript["runnable"]:
+                if route not in ("image", "title"):
+                    route = "fallback"
                 transcript = {
                     "system": None,
                     "runnable": True,
@@ -7538,28 +7544,6 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                         {"role": "user", "text": prompt, "digest": _digest(prompt)}
                     ],
                 }
-            elif keyed:
-                route = "keyed"
-            else:
-                route = "nokey"
-            self._instr_truncated = False
-            instr = self._prompt_guard(
-                messages, route, raw_key, cwd, model_id, model_len, adapter
-            )
-            if instr is None:
-                return
-            if self._instr_truncated:
-                # Блок инструкций усечён на месте: prompt и транскрипт строятся заново из обновлённых messages.
-                prompt = _messages_to_prompt(messages, tools, tool_choice, images)
-                transcript = _transcribe(messages, tools, tool_choice, images)
-                if route == "fallback" or not transcript["runnable"]:
-                    transcript = {
-                        "system": None,
-                        "runnable": True,
-                        "items": [
-                            {"role": "user", "text": prompt, "digest": _digest(prompt)}
-                        ],
-                    }
             is_legacy_muse_sleep = (
                 model["backend"] == "muse"
                 and not req_turn_id
@@ -7767,6 +7751,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         model_id: str,
         model_len: int,
         adapter: Any,
+        tools_overhead: int = 0,
     ) -> Any:
         """Фасадный контур b_guard / REQ-003 для ВСЕХ бэкендов: до выбора процесса и до адаптера.
 
@@ -7789,15 +7774,16 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             )
             return None
         guard_state, guard_reasons, guard_max = GUARD.snapshot()
-        over = _instr_violation(blocks, guard_max)
+        over = _instr_violation(blocks, guard_max, tools_overhead)
         if guard_state == "unsafe" and blocks:
             # Профиль DSH небезопасен (alert уже в журнале): размер не режем немым 400, а явно
             # отказываем только НОВЫМ чатам; живые резидентные чаты продолжают (RW-008).
             refuse = not _chat_known(route, raw_key, adapter)
             if refuse or over is not None:
+                max_b = max(blocks, key=lambda b: b["bytes"])
                 top = over or (
                     instr[2],
-                    _instr_limit(max(blocks, key=lambda b: b["bytes"]), guard_max),
+                    _instr_limit(max_b, guard_max, tools_overhead),
                 )
                 _log(
                     f"instr_gate_alert guard=unsafe refused={int(refuse)} bytes={top[0]} limit={top[1]}"
@@ -7818,7 +7804,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             # Сверх предела: мягкое усечение хвостовых проектных секций (канон защищён) вместо отказа.
             _log(f"instr_gate_truncated bytes={over[0]} limit={over[1]}")
             try:
-                _soft_truncate_instructions(messages, in_kb, guard_max)
+                _soft_truncate_instructions(
+                    messages, in_kb, guard_max, tools_overhead
+                )
                 blocks = _instr_blocks(messages, in_kb)
                 instr = _instr_scan(messages, in_kb) if blocks else (0, "-", 0)
             except CanonPersistError:
@@ -7831,7 +7819,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 )
                 return None
             self._instr_truncated = True
-            over = _instr_violation(blocks, guard_max)
+            over = _instr_violation(blocks, guard_max, tools_overhead)
             if over is not None:
                 # Усекать нечего (сам канон больше предела): REQ-003 — отказ до spawn/add.
                 _log(
