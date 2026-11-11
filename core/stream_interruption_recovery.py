@@ -15,19 +15,19 @@ TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
 )
 _FATAL_STATUS_RE = re.compile(
-    r"(?i)\b(?:http(?:[/\s]*\d(?:\.\d)?)?\s+4(?:0\d|1\d|2[0-8]|3\d|51)|status(?:\s+code)?[\s:=]+4(?:0\d|1\d|2[0-8]|3\d|51)|bad\s+request|forbidden|method\s+not\s+allowed|conflict|unprocessable)\b"
+    r"(?i)\b(?:http(?:[/\s]*\d(?:\.\d)?)?\s+(?!429\b)4\d\d|status(?:\s+code)?[\s:=]+(?!429\b)4\d\d|bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b"
 )
 
-DEFAULT_INTERRUPTION_NOTICE = (
-    "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"
-)
+DEFAULT_INTERRUPTION_NOTICE = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"  # fmt: skip  # noqa: E501
 
 
 def is_transient_stream_interruption(
     text: str | None, *, source: str = "cli_error"
 ) -> bool:
     """Распознать транзиентный транспортный обрыв."""
-    haystack = "" if source == "model_content" else text or ""
+    if not isinstance(text, str) or source == "model_content" or len(text) > 4096:
+        return False
+    haystack = text.replace("\x00", " ")
     if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
         return False
     if _FATAL_STATUS_RE.search(haystack):
@@ -199,7 +199,7 @@ def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
         f = _RetryFacts(**kw)
     except TypeError:
         return RetryDecision(False, False, "retry_blocked", 0.0)
-    valid_types = all((type(f.attempt) is int, type(f.max_attempts) is int, type(f.elapsed_s) in (int, float)))  # fmt: skip  # noqa: E501
+    valid_types = all((isinstance(f.error_text, str), isinstance(f.source, str), type(f.delivered) is bool, type(f.had_tool_side_effects) is bool, type(f.attempt) is int, type(f.max_attempts) is int, type(f.elapsed_s) in (int, float), f.budget_config is None or isinstance(f.budget_config, RetryBudgetConfig)))  # pyright: ignore[reportUnnecessaryIsInstance]  # fmt: skip  # noqa: E501
     if not valid_types:
         return RetryDecision(False, False, "retry_blocked", 0.0)
     valid = all((isfinite(f.elapsed_s), f.elapsed_s >= 0.0, 0 <= f.attempt < f.max_attempts, f.max_attempts > 0))  # fmt: skip  # noqa: E501
