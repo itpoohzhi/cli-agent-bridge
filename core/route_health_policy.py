@@ -49,8 +49,8 @@ class NormalizedModelRoute:
 
 def normalize_model_route(model_id: str, explicit_effort: str | None = None, allowed_suffixes: Collection[str] | None = None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
     model = model_id.strip()
-    if not model:
-        raise ValueError("model_id must not be empty")
+    if not model or any(ch.isspace() for ch in model):
+        raise ValueError("model_id must not be empty or contain whitespace")
     allowed = _EFFORTS
     if allowed_suffixes is not None:
         allowed = frozenset(
@@ -71,6 +71,8 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
 
 def _decode_escape(match: re.Match[str]) -> str:
     code = int(match.group(1), 16)
+    if code == 0:
+        return ""
     return chr(code) if 0x20 <= code <= 0x7E else " "
 
 
@@ -81,6 +83,8 @@ def redact_diagnostic_text(raw_text: str) -> str:
         safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)
         if previous == safe:
             break
+    if re.search(r"\\u[0-9a-fA-F]{4}", safe):
+        return REDACTED_TOKEN
     safe = re.sub(r"[\x00-\x1f\x7f]+", " ", safe)
     for regex in _SECRET_REGEXES:
         safe = regex.sub(REDACTED_TOKEN, safe)
@@ -99,7 +103,7 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
     terms = ("token refresh failed", "oauth refresh", "invalid_grant", "invalid api key", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
     if any(term in reason for term in terms):
         return True
-    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|\bstatus(?:\s+code)?[\s:=]+401\b|^401\b)", reason))):  # fmt: skip  # noqa: E501
+    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|^401\b)", reason))):  # fmt: skip  # noqa: E501
         return True
     auth_terms = ("oauth", "refresh", "unauthenticated")
     return status_code == 403 and any(term in reason for term in auth_terms)

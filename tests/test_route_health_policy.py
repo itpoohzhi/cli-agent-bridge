@@ -29,7 +29,7 @@ def test_alias_policy() -> None:
     assert n(" Claude-Opus-5-5-HIGH ", " LOW ") == M("Claude-Opus-5-5", "low", True)
     assert e(" CLAUDE-OPUS-5-5-HIGH ", {"claude-opus-5-5": object()}, ("low", "medium", "high"), True) == ("claude-opus-5-5", "high")
 
-@pytest.mark.parametrize("model,level", (("", None), ("   ", None), ("m", "ultra")))
+@pytest.mark.parametrize("model,level", (("", None), ("   ", None), ("m", "ultra"), ("blocked -high", None)))
 def test_alias_invalid(model: str, level: str | None) -> None:
     with pytest.raises(ValueError): _ = n(model, level)
 
@@ -42,6 +42,7 @@ def test_redaction() -> None:
     cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET")
     assert all("<redacted>" in x(text) for text in cases)
     assert all("TOPSECRET42" not in x(text) for text in (r"pass\u005cu005cu0077ord=TOPSECRET42", r'Bearer \\"TOPSECRET42\\"', r'{\\"access_token\\":\\"TOPSECRET42\\"}'))
+    assert all("TOPSECRET42" not in x(text) and "<redacted>" in x(text) for text in (r"pass\u0000word=TOPSECRET42", "pass" + r"\u005c" + "u005c" * 7 + "u0077ord=TOPSECRET42"))
     assert x(r"\uD800").encode("utf-8") == b" "
 
 @pytest.mark.parametrize("case", (
@@ -58,7 +59,7 @@ def test_failures(case: tuple[int, str, F, bool]) -> None:
 
 def test_retry_filter() -> None:
     assert t(P) is True and t(P + "; HTTP 429 Too Many Requests") is True
-    blocked = (P + " quota exceeded", P + " token refresh failed", P + " TLS handshake timeout", P + " HTTP 401 Unauthorized", P + " HTTP 403 Forbidden", "connection reset: Bad Request", "HTTP/1.1 405 Method Not Allowed; connection reset", P + "; HTTP 440 Login Time-out", P + "; HTTP 498 Invalid Token", P + "; HTTP 499", "connection reset: token\x00refresh failed", "A" * 4096 + P + "; token refresh failed", P + " " + "A" * 4096 + " token refresh failed")
+    blocked = (P + " quota exceeded", P + " token refresh failed", P + " TLS handshake timeout", P + " HTTP 401 Unauthorized", P + " HTTP 403 Forbidden", "connection reset: Bad Request", "HTTP/1.1 405 Method Not Allowed; connection reset", P + "; HTTP 440 Login Time-out", P + "; HTTP 498 Invalid Token", P + "; HTTP 499", "connection reset: token\x00refresh failed", "A" * 4096 + P + "; token refresh failed", P + " " + "A" * 4096 + " token refresh failed", "connection reset; HTTP\x01403", 'connection reset; {"status":401}', "connection reset; status_code=404")
     assert all(t(text) is False for text in blocked)
     assert all(r(error_text=text, delivered=False).can_retry is False for text in blocked[3:])
     allowed = r(error_text=P, delivered=False)
@@ -68,6 +69,7 @@ def test_retry_filter() -> None:
     invalid = ({"max_attempts": 0}, {"elapsed_s": float("nan")}, {"elapsed_s": -1.0}, {"budget_config": C(max_attempts=0)})
     assert all(not r(error_text=P, delivered=False, **kw).can_retry for kw in invalid)
     assert r(error_text=None, delivered=False).can_retry is False and r(error_text=P, delivered=False, budget_config="bad").can_retry is False
+    assert t(P, source="MODEL_CONTENT") is False and r(error_text=P, delivered=False, source="MODEL_CONTENT").can_retry is False
     stricter = r(error_text=P, delivered=False, attempt=1, max_attempts=3, budget_config=C(max_attempts=1))
     assert stricter.can_retry is False and stricter.keep_hot_session is True
 

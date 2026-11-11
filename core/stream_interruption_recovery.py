@@ -15,7 +15,7 @@ TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
 )
 _FATAL_STATUS_RE = re.compile(
-    r"(?i)\b(?:http(?:[/\s]*\d(?:\.\d)?)?\s+(?!429\b)4\d\d|status(?:\s+code)?[\s:=]+(?!429\b)4\d\d|bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b"
+    r"(?i)(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+(?!429\b)4\d\d\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*(?!429\b)4\d\d\b|\b(?:bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b)"  # noqa: E501
 )
 
 DEFAULT_INTERRUPTION_NOTICE = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"  # fmt: skip  # noqa: E501
@@ -25,9 +25,9 @@ def is_transient_stream_interruption(
     text: str | None, *, source: str = "cli_error"
 ) -> bool:
     """Распознать транзиентный транспортный обрыв."""
-    if not isinstance(text, str) or source == "model_content" or len(text) > 4096:
+    if not isinstance(text, str) or source != "cli_error" or len(text) > 4096:
         return False
-    haystack = text.replace("\x00", " ")
+    haystack = re.sub(r"[\x00-\x20\x7f]+", " ", text)
     if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
         return False
     if _FATAL_STATUS_RE.search(haystack):
@@ -210,11 +210,12 @@ def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
         return RetryDecision(False, False, "retry_blocked", 0.0)
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
     quiet = all((trans, not f.had_tool_side_effects))
-    cat = (classify_provider_failure(0, f.error_text).category, FailureCategory.CAPACITY_EXHAUSTED)[trans]  # fmt: skip  # noqa: E501
-    adm = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s), cat)
-    can = all((quiet, not f.delivered, f.attempt < cfg.max_attempts, adm.allow_retry))
-    out = ((False, quiet, "retry_blocked", 0.0), (True, quiet, "transient_pre_delivery_retry", adm.attempt_budget_s))[can]  # fmt: skip  # noqa: E501
-    return RetryDecision(*out)
+    if not quiet or f.delivered:
+        return RetryDecision(False, quiet, "retry_blocked", 0.0)
+    adm = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s), FailureCategory.CAPACITY_EXHAUSTED)  # fmt: skip  # noqa: E501
+    if not all((f.attempt < cfg.max_attempts, adm.allow_retry)):
+        return RetryDecision(False, quiet, "retry_blocked", 0.0)
+    return RetryDecision(True, quiet, "transient_pre_delivery_retry", adm.attempt_budget_s)  # fmt: skip  # noqa: E501
 
 
 @dataclass(frozen=True)
