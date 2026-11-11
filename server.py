@@ -6603,9 +6603,16 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 "code": 502,
             }
         if st == "backend_error":
+            raw_err = str(out.get("err") or "")
+            detail = " ".join(
+                _err_summary(raw_err, 500).replace("\x00", " ").split()
+            )
+            message = f"{label} exec failed rc={out.get('rc')}"
+            if detail:
+                message = f"{message}: {detail}"
             return {
-                "message": f"{label} exec failed rc={out.get('rc')}",
-                "detail": str(out.get("err"))[:500],
+                "message": message,
+                "detail": detail,
                 "type": "proxy_error",
                 "code": 502,
             }

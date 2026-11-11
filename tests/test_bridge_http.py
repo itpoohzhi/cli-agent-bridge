@@ -425,5 +425,231 @@ class TestSweepWorkspace(unittest.TestCase):
                 leader.wait()
 
 
+class TestErrorBodiesAndMuseServe(unittest.TestCase):
+    @staticmethod
+    def _backend_error_body(err):
+        import server
+
+        return server.Handler._error_body(
+            {
+                "state": "backend_error",
+                "rc": 7,
+                "err": err,
+                "backend": "muse",
+            }
+        )
+
+    def test_backend_error_message_includes_sanitized_detail(self):
+        body = self._backend_error_body(
+            "  auth failed with fk-secret123456\n\tand "
+            "wss://internal.host/ws\r\n\x00tail  "
+        )
+        self.assertEqual(
+            body["detail"],
+            "auth failed with *** and ws://*** tail",
+        )
+        self.assertTrue(
+            body["message"].endswith(
+                "exec failed rc=7: auth failed with *** and ws://*** tail"
+            )
+        )
+        for forbidden in (
+            "\n",
+            "\r",
+            "\x00",
+            "fk-secret123456",
+            "internal.host",
+        ):
+            self.assertNotIn(forbidden, body["detail"])
+            self.assertNotIn(forbidden, body["message"])
+
+        long_err = ("err " * 150).strip()
+        body = self._backend_error_body(long_err)
+        self.assertLessEqual(len(body["detail"]), 500)
+        self.assertEqual(body["detail"], long_err[:500].strip())
+
+        for blank in ("", " \n\t "):
+            with self.subTest(blank=repr(blank)):
+                body = self._backend_error_body(blank)
+                self.assertEqual(body["detail"], "")
+                self.assertTrue(body["message"].endswith("exec failed rc=7"))
+                self.assertNotIn("exec failed rc=7: ", body["message"])
+
+    def test_muse_adapter_run_serve_behavioral_timeouts_and_fallback(self):
+        import os
+        import tempfile
+        import textwrap
+        import threading
+        import types
+        from pathlib import Path
+        from unittest import mock
+
+        from adapters.muse_adapter import AdaptiveTimeoutController, MuseAdapter
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            case_number = 0
+
+            def run_case(script_body, check):
+                nonlocal case_number
+                case_number += 1
+                wrapper = root / f"wrapper-{case_number}.py"
+                wrapper.write_text(
+                    "#!/usr/bin/env python3\n" + textwrap.dedent(script_body),
+                    encoding="utf-8",
+                )
+                wrapper.chmod(0o700)
+
+                adapter = MuseAdapter.__new__(MuseAdapter)
+                adapter.config = {}
+                adapter._log = lambda *_args: None
+                adapter._kill_group = lambda *_args: None
+                adapter.wrapper = str(wrapper)
+                adapter._lock = threading.Lock()
+                adapter._active = {}
+                adapter._shutting_down = False
+                adapter.preflight = lambda: (True, "")
+                adapter.child_env = lambda: dict(os.environ)
+                adapter._setting = lambda _name, default: default
+                adapter._register_child = lambda *_args: None
+                adapter._unregister_child = lambda *_args: None
+                adapter._wait_group_exit = lambda *_args: True
+
+                scratch_dirs = []
+
+                def make_turn_dir():
+                    path = root / f"scratch-{case_number}-{len(scratch_dirs)}"
+                    path.mkdir()
+                    scratch_dirs.append(path)
+                    return path
+
+                adapter._make_turn_dir = make_turn_dir
+                ctx = types.SimpleNamespace(
+                    prompt="behavioral timeout test",
+                    model="muse-test",
+                    effort="minimal",
+                    register_pgid=None,
+                    cancel_event=None,
+                    client_gone=None,
+                    keepalive=None,
+                    detach_on_disconnect=False,
+                    on_activity=None,
+                    timeout_s=30.0,
+                    idle_timeout_s=30.0,
+                    absolute_timeout_s=30.0,
+                    request_id=f"case-{case_number}",
+                    turn_id=f"turn-{case_number}",
+                    stream=False,
+                )
+
+                with mock.patch.object(
+                    AdaptiveTimeoutController,
+                    "check",
+                    new=check,
+                ):
+                    result, fallback = adapter._run_serve(ctx, None)
+
+                self.assertEqual(adapter._active, {})
+                self.assertTrue(scratch_dirs)
+                self.assertTrue(all(not path.exists() for path in scratch_dirs))
+                return result, fallback
+
+            def idle_timeout(_controller, _pgid):
+                return True, "idle_timeout", {}
+
+            result, fallback = run_case(
+                """
+                import time
+                time.sleep(30)
+                """,
+                idle_timeout,
+            )
+            self.assertEqual(result.state, "idle_timeout")
+            self.assertEqual(result.rc, 124)
+            self.assertEqual(result.err, "MSP idle timeout")
+            self.assertIs(fallback, True)
+
+            def absolute_timeout(_controller, _pgid):
+                return True, "absolute_cap", {}
+
+            result, fallback = run_case(
+                """
+                import time
+                time.sleep(30)
+                """,
+                absolute_timeout,
+            )
+            self.assertEqual(result.state, "timeout")
+            self.assertEqual(result.rc, 124)
+            self.assertEqual(result.err, "MSP deadline exceeded")
+            self.assertIs(fallback, True)
+
+            marker = root / "turn-start-received"
+
+            def timeout_after_turn_start(_controller, _pgid):
+                if marker.exists():
+                    return True, "absolute_cap", {}
+                return False, "", {}
+
+            result, fallback = run_case(
+                f"""
+                import json
+                import time
+                from pathlib import Path
+
+                marker = Path({str(marker)!r})
+                for line in __import__("sys").stdin:
+                    message = json.loads(line)
+                    if message.get("id") == 1:
+                        print(json.dumps({{
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {{"schema": {{"version": 1}}}},
+                        }}), flush=True)
+                    elif message.get("id") == 2:
+                        print(json.dumps({{
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "result": {{"session": {{"sessionId": "s1"}}}},
+                        }}), flush=True)
+                    elif message.get("id") == 3:
+                        marker.write_text("received", encoding="utf-8")
+                        time.sleep(30)
+                """,
+                timeout_after_turn_start,
+            )
+            self.assertEqual(result.state, "timeout")
+            self.assertEqual(result.rc, 124)
+            self.assertEqual(result.err, "MSP deadline exceeded")
+            self.assertIs(fallback, False)
+
+            def no_timeout(_controller, _pgid):
+                return False, "", {}
+
+            result, fallback = run_case(
+                """
+                import json
+                import sys
+                import time
+
+                for line in sys.stdin:
+                    message = json.loads(line)
+                    if message.get("id") == 1:
+                        print(json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "error": {"code": -32000},
+                        }), flush=True)
+                        time.sleep(2)
+                        break
+                """,
+                no_timeout,
+            )
+            self.assertEqual(result.state, "backend_error")
+            self.assertEqual(result.rc, 1)
+            self.assertIn("MSP initialize rejected code=-32000", result.err)
+            self.assertIs(fallback, True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
