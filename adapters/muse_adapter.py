@@ -109,7 +109,6 @@ STDERR_BUFFER_BYTES = 64 << 10
 from core.defaults import BRIDGE_MUSE_STARTUP_TIMEOUT_S
 
 MSP_SETUP_TIMEOUT_S = float(os.environ.get("BRIDGE_MUSE_STARTUP_TIMEOUT_S", str(BRIDGE_MUSE_STARTUP_TIMEOUT_S)))
-_MUSE_SLOTS = threading.BoundedSemaphore(1)  # один UID: общий слот всех Muse-адаптеров
 # Свидетель группы создаётся ДО exec и подписывается/пишется в реестр ДО открытия gate.
 # Он не держит stdout/stderr, но остаётся жив после выхода лидера и аварии хаба.
 _GROUP_BOOTSTRAP = """
@@ -340,7 +339,7 @@ class _LiveSink:
 class MuseAdapter(BackendAdapter):
     kind = "muse"
     CONSTRAINTS = KindConstraints(
-        max_concurrent_max=1,
+        max_concurrent_max=None,
         pin_required=True,
         options_schema={"streaming_mode": ("exec", "serve")},
     )
@@ -381,9 +380,7 @@ class MuseAdapter(BackendAdapter):
         self.workspace = Path(workspace)
         # proxy_port нормализуется один раз: preflight и child_env получают одно значение (RW-011).
         self.proxy_port = self._normalize_proxy_port()
-        if self.max_concurrent != 1:
-            raise ValueError("muse_max_concurrent_must_be_one")
-        self._slots = _MUSE_SLOTS
+        self._slots = threading.BoundedSemaphore(self.max_concurrent)
         self._active: dict = {}  # pid -> Popen (под _lock): остановка и /health
         self._lock = threading.Lock()
         self._sha_cache: dict = {}
@@ -445,12 +442,8 @@ class MuseAdapter(BackendAdapter):
 
     def _normalize_proxy_port(self) -> int:
         """proxy_port бэкенда (иначе env, иначе default) -> int; мусор -> default."""
-        raw = self.config.get("proxy_port") or os.environ.get("MUSE_PROXY_PORT")
-        try:
-            port = int(raw) if raw else DEFAULT_PROXY_PORT
-            return port if 1 <= port <= 65535 else DEFAULT_PROXY_PORT
-        except (TypeError, ValueError):
-            return DEFAULT_PROXY_PORT
+        from adapters.muse_config import resolve_proxy_port
+        return resolve_proxy_port(self.config)
 
     def _proxy_up(self) -> bool:
         try:
@@ -504,6 +497,8 @@ class MuseAdapter(BackendAdapter):
             str(Path(prompt_path).parent),
             "--json",
             "--no-session-log",
+            "--contributor-mode",
+            "on" if str(model).endswith("-contributor") else "off",
             "--prompt-file",
             prompt_path,
         ]
@@ -697,7 +692,9 @@ class MuseAdapter(BackendAdapter):
         )
         done = threading.Event()
         reader_done = threading.Event()
-        writes: queue.Queue[bytes] = queue.Queue(maxsize=32)
+        from core.backpressure import BoundedBridgeWriteQueue, BridgeBackpressureError
+        from adapters.muse_config import get_muse_timeouts
+        writes = BoundedBridgeWriteQueue(maxsize=get_muse_timeouts().writes_queue_max)
         flags: dict[str, bool] = {}
         threads: list[threading.Thread] = []
         pending_rpc: dict[int, str] = {}
@@ -750,10 +747,12 @@ class MuseAdapter(BackendAdapter):
                 message["id"] = rpc_id
                 pending_rpc[rpc_id] = method
             try:
-                writes.put_nowait(
-                    json.dumps(message, ensure_ascii=False).encode() + b"\n"
+                put_to = get_muse_timeouts().writes_queue_put_timeout_s
+                writes.put(
+                    json.dumps(message, ensure_ascii=False).encode() + b"\n",
+                    timeout=put_to,
                 )
-            except queue.Full as exc:
+            except (queue.Full, BridgeBackpressureError) as exc:
                 raise ValueError("MSP stdin queue full") from exc
 
         def handle(message: Any) -> None:
@@ -891,6 +890,8 @@ class MuseAdapter(BackendAdapter):
                     ctx.model,
                     "--no-session-log",
                     "--trust-workspace",
+                    "--contributor-mode",
+                    "on" if str(ctx.model).endswith("-contributor") else "off",
                 ],
                 cwd=str(turn_dir),
                 env=self.child_env(),
@@ -1017,7 +1018,8 @@ class MuseAdapter(BackendAdapter):
                     KeyError,
                 ) as exc:
                     # Только наши причины/класс парсера, без stderr и RPC error payload.
-                    error = f"MSP {type(exc).__name__}: {str(exc)[:160]}"
+                    if not error:
+                        error = f"MSP {type(exc).__name__}: {str(exc)[:160]}"
                     flags["protocol"] = True
                 finally:
                     reader_done.set()
@@ -1048,8 +1050,12 @@ class MuseAdapter(BackendAdapter):
                     if now - leader_exited_at >= STDERR_DRAIN_GRACE_S:
                         flags["protocol"] = True
                 stop, why, _ = controller.check(proc.pid)
-                if stop and why in ("idle_timeout", "absolute_cap"):
+                if stop and why == "idle_timeout":
+                    flags["idle_timeout"] = True
+                    error = error or "MSP idle timeout"
+                elif stop and why == "absolute_cap":
                     flags["timeout"] = True
+                    error = error or "MSP deadline exceeded"
                 gone = sink.client_write_dead.is_set() or (
                     callable(ctx.client_gone) and ctx.client_gone()
                 )
@@ -1072,8 +1078,15 @@ class MuseAdapter(BackendAdapter):
                         flags["client_gone"] = True
                 if flags:
                     break
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            subprocess.SubprocessError,
+        ) as exc:
             flags["protocol"] = True
+            if not error:
+                error = f"MSP {type(exc).__name__}: {str(exc)[:160]}"
         finally:
             controller.close()
             done.set()
@@ -1126,18 +1139,21 @@ class MuseAdapter(BackendAdapter):
             state, rc, error = "cancelled", 1, "turn cancelled by user"
         elif flags.get("client_gone"):
             state, rc = "client_gone", 1
+        elif flags.get("idle_timeout"):
+            state, rc, error = "idle_timeout", 124, error or "MSP idle timeout"
         elif flags.get("timeout"):
-            state, rc, error = "timeout", 124, "MSP turn timeout"
+            state, rc, error = "timeout", 124, error or "MSP turn timeout"
         elif flags.get("protocol") or events.terminal != "completed" or not turn_id:
             state, rc, error = (
                 "backend_error",
                 1,
-                error or "MSP protocol or terminal failure",
+                error or (f"MSP terminal {events.terminal}" if events.terminal else "MSP protocol or terminal failure"),
             )
         else:
             state, rc = "done", 0
         fallback = bool(
-            set(flags) == {"protocol"}
+            set(flags) <= {"protocol", "timeout", "idle_timeout"}
+            and bool(flags)
             and not action_possible
             and not events.has_executed_tool
             and group_gone

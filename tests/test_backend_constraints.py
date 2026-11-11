@@ -40,7 +40,7 @@ def test_parity_on_current_fleet(backend_id: str) -> None:
 
 def test_adapters_declare_constraints() -> None:
     assert kind_constraints(ADAPTER_KINDS, "muse") == KindConstraints(
-        max_concurrent_max=1,
+        max_concurrent_max=None,
         pin_required=True,
         options_schema={"streaming_mode": ("exec", "serve")},
     )
@@ -48,11 +48,12 @@ def test_adapters_declare_constraints() -> None:
     assert kind_constraints(ADAPTER_KINDS, "droid") == KindConstraints()
 
 
-def test_muse_max_concurrent_two_rejected_in_both_branches() -> None:
+@pytest.mark.parametrize("max_concurrent", (2, 32))
+def test_muse_max_concurrent_above_one_accepted(max_concurrent: int) -> None:
     entry = copy.deepcopy(FLEET["backends"]["muse"])
-    entry["max_concurrent"] = 2
-    assert error(entry, constraints=False) == "backend_muse_max_concurrent_invalid"
-    assert error(entry, constraints=True) == "backend_max_concurrent_invalid"
+    entry["max_concurrent"] = max_concurrent
+    assert error(entry, constraints=False) == ""
+    assert error(entry, constraints=True) == ""
 
 
 def test_muse_without_pin_rejected_in_both_branches() -> None:

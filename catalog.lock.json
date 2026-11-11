@@ -1,21 +1,21 @@
 {
-  "compiled_at": "2026-11-10T09:45:45+0300",
+  "compiled_at": "2026-11-10T13:23:46+0300",
   "compiler_version": 1,
-  "fleet_sha256": "b00fe1025d94ddffe19ed6eaa62ab8b5d58f6daab659ef1739e723549628f5cc",
+  "fleet_sha256": "8a22b253247f9df6b79423c10c26884a4a942dabb36cfe5a17bb591b14b40c2b",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "26cd694e4f2c6b7d05f3041debb8d0b7151f5f5545fd128687f24139792885ee",
-      "agy.yaml": "c324ec9ead817570ef5e3129d715f6432503dc45530fbed62ac2b4f698086a50",
+      "_fleet.yaml": "d7ddb44b6c88ee7caebec113defc7e4f6f6a49f4fb4bd41f388601639de3a4a7",
+      "agy.yaml": "5190185419b7f710ec639c7a88e8439432f6c29c4488a7d4723fee575fb50f0b",
       "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
       "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
-      "droid.yaml": "b9d53f985e8a3bce26ae4a05d9270ec15ee811a43e6fd8b6d504e19642824a97",
-      "muse.yaml": "65ff2fe6dc46f8c3310ad4c833ffe8d471f66415259dc4f71dd37c471f4b33d6",
-      "opencode-go-claude.yaml": "d09898d3253f9a393fa2db1aa15c0154deb5ced1db8a7042b48309a01f0bfa2b",
-      "opencode-go.yaml": "c99498b308ad37d74ece1f31d090bc1d7f4d1ca6a4be5af0f43da36194347cea",
+      "droid.yaml": "43f89659f114c21c10d3df4fc912e7da169ef1ff7bd19d075bb9cda4450a967d",
+      "muse.yaml": "b639c58598f826b5dfd2168971b1f4aaf9c089ecdc5e2f635c0b803224918829",
+      "opencode-go-claude.yaml": "4347f4b6d389b7a6754c276f79eea72c72ad512cbdaca596d2f7f7afd6871398",
+      "opencode-go.yaml": "876fca36a46851bc059c9cbca3f8619d937a066dd05303e8b55908450cdffa1d",
       "opencode-zen.yaml": "dcbb5550283b9ffc3b6909e4ce03ee33ce88404490fc3860f8d34b8057a9d900"
     },
-    "manifests_sha256": "1bf50030599dca8017be0e2c2d309960b3c371622e8984846e1b7e8837ed6c85"
+    "manifests_sha256": "4db51fb01cc42b55a6b13a1d4868fec1204092561dda36d7250df54c08ae70d4"
   },
   "models": {
     "beam-free": {
@@ -446,7 +446,7 @@
       "enabled": true,
       "fingerprint_sha256": "",
       "kind": "droid",
-      "max_concurrent": 5,
+      "max_concurrent": 32,
       "params": {
         "adaptive_whitelist": [
           "reasoning_effort",
@@ -488,7 +488,7 @@
         "max_parallel": 1
       },
       "quota_group": "meta-muse",
-      "timeout_s": 180.0
+      "timeout_s": 600.0
     },
     "opencode-go": {
       "allow_base_url": [
@@ -536,7 +536,7 @@
       "enabled": true,
       "fingerprint_sha256": "",
       "kind": "passthrough",
-      "max_concurrent": 1,
+      "max_concurrent": 32,
       "params": {
         "adaptive_whitelist": [
           "thinking"
@@ -605,7 +605,7 @@
       "enabled": true,
       "fingerprint_sha256": "",
       "kind": "passthrough",
-      "max_concurrent": 1,
+      "max_concurrent": 32,
       "params": {
         "adaptive_whitelist": [
           "thinking"

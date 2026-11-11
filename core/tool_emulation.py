@@ -2089,8 +2089,8 @@ def _sanitize_call(
 ) -> list[Any]:
     """`budget[0]` — сколько вызовов ещё можно опубликовать из текущего верхнего вызова."""
     name, arguments = _call_name_and_args(tool_call)
-    if not name:
-        return [tool_call]
+    if not name or not str(name).strip():
+        return []
     if name.rsplit(".", 1)[-1] == _PARALLEL_NAME and depth < max_depth:
         unpacked = _unpack_parallel(tool_call, arguments, max(budget[0], 0))
         if unpacked is not None:

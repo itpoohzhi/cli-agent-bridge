@@ -5,7 +5,7 @@ import math
 import threading
 import time
 from _thread import LockType
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Protocol, cast
 
 
@@ -15,13 +15,18 @@ class _Writer(Protocol):
     def flush(self) -> None: ...
 
 
+def _default_write_timeout_s() -> float:
+    from adapters.muse_config import get_muse_timeouts
+    return get_muse_timeouts().stream_write_timeout_s
+
+
 @dataclass(frozen=True)
 class StreamRelayConfig:
     """Пределы буферизации, ожидания записи и периода keepalive."""
 
     chunk_size: int = 1024
     keepalive_interval_s: float = 15.0
-    write_timeout_s: float = 5.0
+    write_timeout_s: float = field(default_factory=_default_write_timeout_s)
 
     def __post_init__(self) -> None:
         if self.chunk_size <= 0:

@@ -1734,6 +1734,46 @@ class TestSeamNonStream(SeamCase):
         )
         self.assertEqual(sink.status, 504)
 
+    def test_upstream_expired_window_oserror_is_504(self):
+        # Окно активности уже истекло (например, first_progress_timeout), но абсолютный
+        # дедлайн запроса ещё не наступил: обрыв соединения — таймаут, а не отказ upstream.
+        self.upstream.respond = lambda h, b: setattr(h, "close_connection", True)
+        adapter = make_adapter(self.upstream.port, sanitize=True)
+        window = LivenessWindow(
+            WindowSpec(first_timeout_s=0.0, idle_timeout_s=0.0, safety_cap_s=30.0)
+        )
+        self.assertTrue(window.expired())
+        sink = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={"model": "m"},
+            headers={"Authorization": "Bearer upstream-key"},
+            sink=sink,
+            window=window,
+        )
+        self.assertEqual(sink.status, 504)
+        self.assertEqual(json.loads(sink.body)["error"]["type"], "upstream_timeout")
+
+    def test_upstream_live_window_oserror_is_502(self):
+        self.upstream.respond = lambda h, b: setattr(h, "close_connection", True)
+        adapter = make_adapter(self.upstream.port, sanitize=True)
+        window = LivenessWindow(
+            WindowSpec(first_timeout_s=60.0, idle_timeout_s=60.0, safety_cap_s=120.0)
+        )
+        self.assertFalse(window.expired())
+        sink = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={"model": "m"},
+            headers={"Authorization": "Bearer upstream-key"},
+            sink=sink,
+            window=window,
+        )
+        self.assertEqual(sink.status, 502)
+        self.assertEqual(json.loads(sink.body)["error"]["type"], "upstream_unavailable")
+
     def test_sanitize_kill_switch_returns_body_untouched(self):
         raw = json.dumps(self.completion({"prompt": "p", "provider": ""})).encode(
             "utf-8"
