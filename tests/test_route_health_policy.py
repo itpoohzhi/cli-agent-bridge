@@ -52,8 +52,13 @@ def test_redaction() -> None:
     assert x("a" * 4194305) == "<redacted>"
     assert x(r"\uD800").encode("utf-8") == b" " and x("\ud800").encode("utf-8") == b" "
 
+def test_redaction_embedded_urls_and_extended_whitespace() -> None:
+    embedded = (f"jdbc:postgresql://alice:{Z}@localhost:5432/mydb", f"proxy:http://alice:{Z}@10.0.0.1:8080", f"dsn:redis://:{Z}@localhost:6379", f"upstream:https://alice:{Z}@10.0.0.1/v1", f"GET /https://alice:{Z}@127.0.0.1:8080/api")
+    whitespace = (f"Bearer\x0b{Z}", f"Bearer\f{Z}", f"Bearer\x85{Z}", f"Bearer%0b{Z}", f"Bearer%0c{Z}", f"Bearer%85{Z}", f"Bearer&#11;{Z}", f"Bearer&#12;{Z}", f"Bearer&#133;{Z}", rf"Bearer\v{Z}", rf"Bearer\f{Z}")
+    assert all(Z not in x(text) for text in (*embedded, *whitespace))
+
 def test_redaction_pathological_url_is_linear() -> None:
-    cases = ("http://" + ":a " * 21840, "http://a " * 20000, "http://" + "a://" * 50000, "https://TOPSECRET42" + "A" * 400000 + "@example.com")
+    cases = ("http://" + ":a " * 21840, "http://a " * 20000, "http://" + "a://" * 50000, "https://TOPSECRET42" + "A" * 900000 + "@example.com", "x://" * 200000 + "@", "<password>TOPSECRET42" + "x" * 999000)
     for text in cases:
         started = time.perf_counter(); assert "TOPSECRET42" not in x(text)
         assert time.perf_counter() - started < 0.2
