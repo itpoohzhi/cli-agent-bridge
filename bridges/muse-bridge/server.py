@@ -209,7 +209,7 @@ COMPACTION_MARKER = (
 )
 _COMPACTION_MARKER_ROLE = "__compaction_marker__"
 
-# OpenAI/DSH effort -> `--reasoning-effort` Muse CLI. Нет/неизвестно -> max (канон слота).
+# OpenAI/DSH effort -> `--reasoning-effort` Muse CLI. Нет/неизвестно -> high (решение владельца 2026-11-11).
 EFFORT_MAP: dict[str, str] = {
     "low": "low",
     "medium": "medium",
@@ -223,7 +223,7 @@ EFFORT_MAP: dict[str, str] = {
     "minimal": "minimal",
     "ultra": "xhigh",  # runtime-гейт ultra откатывается в xhigh
 }
-DEFAULT_EFFORT = "max"
+DEFAULT_EFFORT = "high"
 
 # Однократный ретрай exec — ТОЛЬКО на этот маркер (exec идемпотентен).
 # Остальные ошибки (rc=42 прокси DOWN, timeout, terminal_*) не ретраятся.
