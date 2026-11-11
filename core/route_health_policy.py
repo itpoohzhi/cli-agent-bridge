@@ -35,7 +35,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/\"']*:[^\s@\"']+(?:@[^\s/\"']+)?", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|x-api-key|a\s*p\s*i[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n}]+|\}[^\s,;\"']+)", r"(?i)\b(?:invalid|expired|bad|revoked|leaked)\s+(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|api[\s_-]*key|client\s*_?\s*secret|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|secret|token)\s+[^\s,;\"']+", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/\"']*:[^\s@\"']+@[^\s/\"']+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}a\s*u\s*t\s*h\s*o\s*r\s*i\s*z\s*a\s*t\s*i\s*o\s*n[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}c\s*o\s*o\s*k\s*i\s*e[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:r\s*e\s*f\s*r\s*e\s*s\s*h[\s_]*t\s*o\s*k\s*e\s*n|a\s*c\s*c\s*e\s*s\s*s[\s_]*t\s*o\s*k\s*e\s*n|i\s*d[\s_]*t\s*o\s*k\s*e\s*n|c\s*l\s*i\s*e\s*n\s*t[\s_]*s\s*e\s*c\s*r\s*e\s*t|x-api-key|a\s*p\s*i[\s_-]*k\s*e\s*y|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|p\s*a\s*s\s*s\s*w\s*d|p\s*w\s*d|s\s*e\s*c\s*r\s*e\s*t|t\s*o\s*k\s*e\s*n)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*%*\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n}]+|\}[^\s,;\"']+)", r"(?i)\b(?:invalid|expired|bad|revoked|leaked)\s+(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|api[\s_-]*key|client\s*_?\s*secret|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|secret|token)\s+[^\s,;\"']+", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 @dataclass(frozen=True)
 class NormalizedModelRoute:
@@ -69,14 +69,14 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
     return _resolve_route_suffix(model, explicit, allowed, known_models)
 _INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u0300-\u036f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u1ab0-\u1aff\u1dc0-\u1dff\u200b-\u200f\u202a-\u202e\u2060-\u206f\u20d0-\u20ff\u3164\ufe00-\ufe2f\ufeff\uffa0\ufff0-\ufffb]+")  # fmt: skip  # noqa: E501
 _ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:(?:\x1b|\\+(?:u001|x1)[bB])\[|(?:\x9b|\\+(?:u009|x9)[bB]))[0-?]*[ -/]*[@-~]|(?:(?:\x1b|\\+(?:u001|x1)[bB])[\]P_X^]|(?:\x9d|\x90|\x98|\x9e|\x9f|\\+(?:u009|x9)[dD08eEfF]))[^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\|\\+(?:u0007|x07|u009[cC]|x9[cC])|\\+(?:u001|x1)[bB]\\\\|$)")  # fmt: skip  # noqa: E501
-_ESCAPE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\\+(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2}))|%([0-9a-fA-F]{2})|&#(?:[xX]([0-9a-fA-F]{1,4})|([0-9]{1,5}));?")  # fmt: skip  # noqa: E501
+_ESCAPE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\\+(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([0-7]{1,3}))|%([0-9a-fA-F]{2})|&#(?:[xX]([0-9a-fA-F]{1,6})(?![0-9a-fA-F])|([0-9]{1,7})(?![0-9]));?")  # fmt: skip  # noqa: E501
 
 
 def _decode_escape(match: re.Match[str]) -> str:
-    hex_val = match.group(1) or match.group(2) or match.group(3) or match.group(4)
-    code = int(hex_val, 16) if hex_val else int(match.group(5), 10)
+    hex_s, oct_s, dec_s = match.group(1) or match.group(2) or match.group(4) or match.group(5), match.group(3), match.group(6)  # fmt: skip  # noqa: E501
+    code = int(hex_s, 16) if hex_s else (int(oct_s, 8) if oct_s else int(dec_s, 10))
     if code in (0x09, 0x0A, 0x0D): return " "  # fmt: skip  # noqa: E701
-    if code <= 0x1F or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or _INVISIBLE_RE.fullmatch(chr(min(code, 0x10FFFF))): return ""  # fmt: skip  # noqa: E501,E701
+    if code <= 0x1F or 0x7F <= code <= 0x9F or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF or _INVISIBLE_RE.fullmatch(chr(code)): return ""  # fmt: skip  # noqa: E501,E701
     return chr(code) if code <= 0x7E else " "
 
 
@@ -85,7 +85,7 @@ def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_close
     safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", compact))[:max_len]
     for _ in range(8):
         previous = safe; safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe)  # fmt: skip  # noqa: E702
-        safe = re.sub(r"\\+(?:[bfnrtv]|[0-7]{1,3})", " ", safe)
+        safe = re.sub(r"\\+[bfnrtv]", " ", safe)
         if previous == safe: break  # fmt: skip  # noqa: E701
     safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe))
     if fail_closed and re.search(r"\\+(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E501,E701
@@ -240,7 +240,7 @@ def inspect_canon_payload(text: str, marker: str = DEFAULT_CANON_MARKER, previou
     clean_marker = marker.strip()
     if not clean_marker:
         raise ValueError("marker must not be empty")
-    payload = text.encode("utf-8", errors="replace")
+    payload = text.encode("utf-8")
     has_marker = text.rstrip().endswith(clean_marker)
     sha = hashlib.sha256(payload).hexdigest()
     unchanged = bool(has_marker and previous_sha256 is not None and sha == previous_sha256.strip().lower())  # fmt: skip  # noqa: E501
