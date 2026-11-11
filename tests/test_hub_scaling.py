@@ -9,6 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from adapters import ADAPTER_KINDS  # noqa: E402
+from core.provider_manifest import (  # noqa: E402
+    load_manifests,
+    providers_dir,
+    validate_manifest,
+)
 
 
 class TestHubScalingDefaults(unittest.TestCase):
@@ -44,6 +50,29 @@ class TestHubScalingDefaults(unittest.TestCase):
         for name in ("codex", "agy", "opencode-zen", "claude-p"):
             self.assertEqual(data["backends"][name]["max_concurrent"], 128, name)
         self.assertEqual(data["backends"]["muse"]["max_concurrent"], 8)
+
+    def test_shipped_muse_concurrency_matches_fleet_catalog(self):
+        loaded = load_manifests(providers_dir(), ADAPTER_KINDS)
+        muse = next(item for item in loaded.manifests if item.provider_id == "muse")
+        fleet = json.loads(
+            (Path(server.ROOT) / "fleet.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(muse.limits.max_concurrent, 8)
+        self.assertEqual(fleet["backends"]["muse"]["max_concurrent"], 8)
+
+    def test_muse_max_concurrent_has_no_kind_ceiling(self):
+        for max_concurrent in (2, 8, 32):
+            with self.subTest(max_concurrent=max_concurrent):
+                doc = {
+                    "manifest_version": 1,
+                    "provider_id": "mus",
+                    "kind": "muse",
+                    "owned_by": "m",
+                    "limits": {"max_concurrent": max_concurrent},
+                    "fingerprint": {"binary_path": "~/.local/bin/muse"},
+                }
+                result = validate_manifest(doc, ADAPTER_KINDS, filename="mus.yaml")
+                self.assertEqual(result.errors, ())
 
 
 if __name__ == "__main__":
