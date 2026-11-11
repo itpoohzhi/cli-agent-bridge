@@ -62,7 +62,7 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
         raise ValueError("model_id must not be empty or contain whitespace")
     allowed = _EFFORTS
     if allowed_suffixes is not None:
-        allowed = frozenset(suffix.strip().lower() for suffix in allowed_suffixes if suffix.strip())  # fmt: skip  # noqa: E501
+        allowed = frozenset(s for suffix in allowed_suffixes if (s := suffix.strip().lower()) and len(s.split()) == 1)  # fmt: skip  # noqa: E501
     explicit = explicit_effort.strip().lower() if explicit_effort is not None else None
     if explicit is not None and explicit not in allowed:
         raise ValueError("explicit_effort is not in allowed_suffixes")
@@ -107,9 +107,9 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
     terms = ("token refresh failed", "tokenrefresh failed", "oauth refresh", "invalid_grant", "invalid api key", "api key not valid", "api key expired", "api_key_invalid", "invalid token", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
     if any(term in reason for term in terms):
         return True
-    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|(?:^\s*|:\s*)401\b)", reason))):  # fmt: skip  # noqa: E501
+    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|(?:^\s*|\b(?:error|code)\s*:\s*)401\b)", reason))):  # fmt: skip  # noqa: E501
         return True
-    is_403 = status_code == 403 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+403\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*403\b|(?:^\s*|:\s*)403\b)", reason)))  # fmt: skip  # noqa: E501
+    is_403 = status_code == 403 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+403\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*403\b|(?:^\s*|\b(?:error|code)\s*:\s*)403\b)", reason)))  # fmt: skip  # noqa: E501
     return is_403 and any(term in reason for term in ("oauth", "refresh", "unauthenticated"))  # fmt: skip  # noqa: E501
 
 

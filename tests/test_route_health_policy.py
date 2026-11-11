@@ -35,6 +35,7 @@ def test_alias_policy() -> None:
 @pytest.mark.parametrize("model,level", (("", None), ("   ", None), ("m", "ultra"), ("blocked -high", None)))
 def test_alias_invalid(model: str, level: str | None) -> None:
     with pytest.raises(ValueError): _ = n(model, level)
+    with pytest.raises(ValueError): _ = n("m", "bad suffix", ("bad suffix",))
 
 def test_redaction() -> None:
     secrets = "Bearer bearer.value Basic basic.value ya29.oauth 1//refresh sk-key AIzaGoogle refresh_token=refresh access_token:access client_secret=client api_key=api password=pwd secret=sec token=tok cookie=cookie user@example.com\x00\n"
@@ -53,7 +54,7 @@ def test_redaction() -> None:
     (503, "quota exceeded", F.LIMIT_BLOCKED, False), (503, "SSL_ERROR_SYSCALL", F.UPSTREAM_TLS_STALL, False),
     (429, "busy", F.CAPACITY_EXHAUSTED, True), (503, Q, F.CAPACITY_EXHAUSTED, True),
     (400, "model_capacity_exhausted", F.CAPACITY_EXHAUSTED, True), (0, "HTTP 401: invalid auth", F.AUTH_REFRESH_EXHAUSTED, False), (0, "HTTP 403: OAuth rejected", F.AUTH_REFRESH_EXHAUSTED, False), (0, "\n403 OAuth rejected", F.AUTH_REFRESH_EXHAUSTED, False), (0, "Error:\n403 OAuth rejected", F.AUTH_REFRESH_EXHAUSTED, False),
-    (403, "max_tokens exceeded", F.FATAL_REQUEST_ERROR, False), (403, "API key not valid", F.AUTH_REFRESH_EXHAUSTED, False),
+    (403, "max_tokens exceeded", F.FATAL_REQUEST_ERROR, False), (403, "API key not valid", F.AUTH_REFRESH_EXHAUSTED, False), (0, "retry after: 401 seconds", F.FATAL_REQUEST_ERROR, False),
 ))
 def test_failures(case: tuple[int, str, F, bool]) -> None:
     status, reason, category, retryable = case; z = c(status, reason)
