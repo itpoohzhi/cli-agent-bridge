@@ -896,6 +896,92 @@ def test_handler_sink_extracts_error_type_from_json_and_sse_frame():
     assert server._passthrough_discard_reason(502, "upstream_unavailable") == ""
 
 
+def test_handler_sink_keeps_split_terminal_sse_error_in_bounded_tail(
+    monkeypatch,
+):
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_ERROR_CAPTURE_BYTES", "8192")
+    sink = server._HandlerSink(_SinkHandler())
+    sink.start(200, [("Content-Type", "text/event-stream")])
+    sink.write(b'ordinary text containing "error" ' + b"x" * 9000 + b"\n\n")
+    sink.write(b'data: {"err')
+    sink.write(
+        b'or":{"message":"failed","type":"upstream_unavailable",'
+        b'"code":"upstream_unavailable"}}\n\n'
+    )
+
+    assert sink.error_type() == "upstream_unavailable"
+    assert len(sink._error_body) <= 8192
+
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_ERROR_CAPTURE_BYTES", "999999")
+    assert server._HandlerSink(_SinkHandler())._error_limit == 65536
+
+
+def test_backend_error_message_does_not_expose_stderr():
+    err = server.Handler._error_body(
+        {
+            "state": "backend_error",
+            "backend_kind": "codex",
+            "rc": 1,
+            "err": "SECRET_STDERR_LEAK_TOKEN /private/internal/path",
+        }
+    )
+
+    assert err["message"] == "codex exec failed rc=1"
+    assert "SECRET_STDERR_LEAK_TOKEN" not in err["message"]
+
+
+def test_started_stream_terminal_error_has_null_finish_reason():
+    written: list[str] = []
+
+    class DummyLease:
+        def record_discard(self, _reason: str) -> None:
+            return
+
+        def record_failure(self, _exc=None) -> None:
+            return
+
+    class DummyConnection:
+        def gettimeout(self) -> float:
+            return 30.0
+
+        def settimeout(self, _timeout) -> None:
+            return
+
+    handler = object.__new__(server.Handler)
+    handler._headers_already_sent = True
+    handler._trace = None
+    handler._context_pruned = ""
+    handler._active_managed_turn = None
+    handler.connection = DummyConnection()
+    handler._current_lease = lambda: DummyLease()
+    handler._emit = lambda frame: written.append(frame) or True
+    handler._telemetry_note = lambda **_kwargs: None
+    handler._telemetry_error = lambda _err: None
+    handler._record_turn_outcome = lambda *_args, **_kwargs: None
+    handler._dispatch = lambda _ctx, _keepalive, writer: (
+        writer("content", "partial")
+        and {
+            "state": "backend_error",
+            "rc": 1,
+            "err": "backend failed",
+            "backend_kind": "codex",
+        }
+    )
+
+    handler._serve_sse_body({"model": "test-model"})
+
+    frames = [
+        json.loads(line[6:])
+        for frame in written
+        for line in frame.splitlines()
+        if line.startswith("data: {")
+    ]
+    terminal = next(frame for frame in frames if "error" in frame)
+    assert terminal["choices"][0]["finish_reason"] is None
+    assert terminal["error"]["code"] == "502"
+    assert terminal["error"]["type"] == "proxy_error"
+
+
 # --------------------------------------------------------------------------- Волна 3: QoSSlotManager
 
 from core import lifecycle  # noqa: E402
@@ -1166,6 +1252,24 @@ def test_graceful_drain_headers_and_rejection(facade):
     assert headers["retry-after"] == "3"
     assert headers["x-bridge-draining"] in ("1", "true")
     assert facade.state.hits == 0
+
+
+def test_unauthorized_request_is_rejected_before_drain_hold(facade):
+    wait_calls: list[bool] = []
+    facade.monkeypatch.setattr(server, "_is_drain_enabled", lambda: True)
+    facade.monkeypatch.setattr(server.LIFECYCLE, "is_draining", lambda: True)
+    facade.monkeypatch.setattr(
+        server.LIFECYCLE,
+        "wait_for_drain_hold",
+        lambda *, is_subagent: wait_calls.append(is_subagent) or False,
+    )
+
+    status, _, body = facade.call(auth=False)
+
+    assert status == 401
+    assert body["error"]["type"] == "auth_error"
+    assert wait_calls == []
+
 
 def test_stream_drain_after_keepalive_frames_sse_error(facade):
     """F-002 (BLOCKER): отказ QoS при уже отправленных заголовках пишет SSE-ошибку.

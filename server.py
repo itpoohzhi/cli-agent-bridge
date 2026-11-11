@@ -1718,6 +1718,7 @@ _PASSTHROUGH_NEUTRAL_ERROR_TYPES = frozenset(
 
 
 _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES = 8192
+_MAX_PASSTHROUGH_ERROR_CAPTURE_BYTES = 65536
 
 
 def _passthrough_error_capture_bytes() -> int:
@@ -1727,7 +1728,9 @@ def _passthrough_error_capture_bytes() -> int:
         value = int(raw)
     except ValueError:
         return _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
-    return value if value >= 0 else _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+    if value < 0:
+        return _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+    return min(value, _MAX_PASSTHROUGH_ERROR_CAPTURE_BYTES)
 
 
 def _passthrough_error_type(raw: bytes) -> str:
@@ -1750,15 +1753,20 @@ def _passthrough_error_type(raw: bytes) -> str:
             payloads.append(json.loads(data))
         except ValueError:
             continue
-    for payload in payloads:
+    for payload in reversed(payloads):
         if not isinstance(payload, dict):
             continue
         error = payload.get("error")
         if not isinstance(error, dict):
             continue
-        # JSON-тело шва: code — HTTP-статус (число), тип ошибки в type;
-        # SSE-кадр: code — строковый код ошибки.
-        for value in (error.get("code"), error.get("type")):
+        values = (error.get("type"), error.get("code"))
+        for value in values:
+            if (
+                isinstance(value, str)
+                and value in _PASSTHROUGH_NEUTRAL_ERROR_TYPES
+            ):
+                return value
+        for value in values:
             if isinstance(value, str) and value:
                 return value
     return ""
@@ -1806,6 +1814,17 @@ class _HandlerSink(ResponseSink):
         return _passthrough_error_type(bytes(self._error_body))
 
     def _capture_error(self, data: bytes) -> None:
+        if self._error_limit <= 0:
+            return
+        if self.status == 200:
+            if len(data) >= self._error_limit:
+                self._error_body[:] = data[-self._error_limit :]
+                return
+            overflow = len(self._error_body) + len(data) - self._error_limit
+            if overflow > 0:
+                del self._error_body[:overflow]
+            self._error_body += data
+            return
         room = self._error_limit - len(self._error_body)
         if room > 0:
             self._error_body += data[:room]
@@ -1842,7 +1861,7 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
-        if self.status >= 400 or b'"error"' in data:
+        if self.status == 200 or self.status >= 400 or b'"error"' in data:
             self._capture_error(data)
         telemetry_note(self._handler, len(data), chunk=True)
         telemetry_tail(self._handler, data)
@@ -6570,10 +6589,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             )
             message = f"{label} exec failed rc={out.get('rc')}"
             if detail:
-                message = f"{message}: {detail}"
+                _log(f"backend_error detail={detail!r}")
             return {
                 "message": message,
-                "detail": detail,
                 "type": "proxy_error",
                 "code": 502,
             }
@@ -6929,15 +6947,6 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             if _is_detached_enabled()
             else None
         )
-        if not m_cancel and (
-            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
-        ):
-            is_sub = self._is_subagent_request()
-            if _shutting_down or not LIFECYCLE.wait_for_drain_hold(is_subagent=is_sub):
-                code, drain_headers, drain_body = LIFECYCLE.draining_response(is_subagent=is_sub)
-                err = drain_body.get("error", {})
-                self._reject(code, err.get("type", "overloaded"), err.get("message", "bridge is shutting down"), extra_headers=drain_headers)
-                return
         hub_auth_ok = _auth_ok(self)
         deferred_passthrough_auth = False
         if not hub_auth_ok:
@@ -6963,6 +6972,25 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                             "code": 401,
                         }
                     },
+                )
+                return
+        if not m_cancel and (
+            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
+        ):
+            is_sub = self._is_subagent_request()
+            hold_ok = False
+            if not _shutting_down:
+                hold_ok = LIFECYCLE.wait_for_drain_hold(is_subagent=is_sub)
+            if _shutting_down or not hold_ok or LIFECYCLE.is_draining():
+                code, drain_headers, drain_body = LIFECYCLE.draining_response(
+                    is_subagent=is_sub
+                )
+                err = drain_body.get("error", {})
+                self._reject(
+                    code,
+                    err.get("type", "overloaded"),
+                    err.get("message", "bridge is shutting down"),
+                    extra_headers=drain_headers,
                 )
                 return
         if urlparse(self.path).path in (
@@ -8188,9 +8216,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
             # Таймаут шага (504) и оборванный стрим — тоже нейтральны: это не отказ апстрима.
-            error_type = getattr(sink, "error_type", None)
+            error_type_fn = getattr(sink, "error_type", None)
+            error_type = error_type_fn() if callable(error_type_fn) else ""
             discard_reason = _passthrough_discard_reason(
-                sink.status, error_type() if callable(error_type) else ""
+                sink.status, error_type
             )
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
@@ -8201,6 +8230,11 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 lease.record_success()
                 _PENALTY_TRACKER.record_start_failure(
                     canonical_model_id, f"http_{sink.status}"
+                )
+            elif 200 <= sink.status < 300 and error_type:
+                lease.record_failure()
+                _PENALTY_TRACKER.record_start_failure(
+                    canonical_model_id, error_type
                 )
             elif 200 <= sink.status < 300:
                 # 2xx: реальный успешный ответ модели
@@ -8431,7 +8465,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             with sse_lock:
                 return self._emit(frame)
 
-        def stream_error_frame(message: str, code: str = "live_prefix_invalidated", error_type: str = "stream_error", finish_reason: Any = None) -> str:
+        def stream_error_frame(
+            message: str,
+            code: str = "live_prefix_invalidated",
+            error_type: str = "stream_error",
+            finish_reason: str | None = None,
+        ) -> str:
             err_chunk = build_stream_error_chunk(
                 message=message,
                 model=shown_model,
@@ -8621,8 +8660,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     + "\n\n"
                 )
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
-            fin: Any = None if (err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid") else ...
-            emit(stream_error_frame(str(err["message"]), finish_reason=fin))
+            emit(
+                stream_error_frame(
+                    str(err["message"]),
+                    code=str(err.get("code") or err.get("type") or "stream_error"),
+                    error_type=str(err.get("type") or "server_error"),
+                    finish_reason=None,
+                )
+            )
         else:
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")

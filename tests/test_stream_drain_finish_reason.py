@@ -206,7 +206,7 @@ class StreamDrainFinishReasonTests(unittest.TestCase):
         self.assertEqual(len(evs), 1)
         self.assertNotIn("name", evs[0].payload["function"])
 
-    def test_server_sse_body_skips_duplicate_headers_and_frames_errors_with_stop(self) -> None:
+    def test_server_sse_body_skips_duplicate_headers_and_frames_errors_with_null_finish(self) -> None:
         import server as hub_server
 
         written: list[bytes] = []
@@ -249,7 +249,7 @@ class StreamDrainFinishReasonTests(unittest.TestCase):
 
         self.assertEqual(send_response_calls, [])
         joined = b"".join(written).decode("utf-8")
-        self.assertIn('"finish_reason": "stop"', joined)
+        self.assertIn('"finish_reason": null', joined)
         self.assertIn("backend failed", joined)
         self.assertTrue(joined.endswith("data: [DONE]\n\n"))
 
