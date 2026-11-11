@@ -76,6 +76,7 @@ from core.cli_runtime_config import NonstreamConfig
 from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
 from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, SlidingDeadline, open_sliding_deadline
+from core.presend_retry_policy import resolve_presend_response
 from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
 from core.stream_framing import (
     build_stream_error_chunk,
@@ -380,6 +381,10 @@ class ResponseSink:
     def client_gone(self) -> bool:
         """Необязательный неблокирующий сигнал отмены от HTTP-фасада."""
         return False
+
+    def error_type(self) -> str:
+        """Тип ошибки отданного ответа для классификации исхода lease ('' — ошибки нет)."""
+        return ""
 
 
 def new_call_id() -> str:
@@ -939,16 +944,10 @@ def relay_sse(
                     flushed_outcome = flush_parser(pending_index, last_chunk)
                     if flushed_outcome is not None:
                         return flushed_outcome
-                if acc.pending_choices() or (trusted_tools and seen - finished):
-                    acc.close()  # [DONE] без finish_reason у choice с вызовами: успеха нет
+                if acc.pending_choices() or (seen - finished):
+                    acc.close()
                     outcome.incomplete = True
-                    write(
-                        _error_frame(
-                            last_chunk,
-                            "upstream_incomplete_stream",
-                            "upstream stream ended before finish_reason",
-                        )
-                    )
+                    write(_error_frame(last_chunk, "upstream_incomplete_stream", "upstream stream ended before finish_reason"))
                     return outcome
                 outcome.done = True
                 write(raw)
@@ -959,13 +958,18 @@ def relay_sse(
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
             if not isinstance(choices, list):
                 if isinstance(chunk, dict):
-                    meta = {
-                        k: chunk.get(k)
-                        for k in ("id", "created", "model")
-                        if chunk.get(k) is not None
-                    }
+                    meta = {k: chunk.get(k) for k in ("id", "created", "model") if chunk.get(k) is not None}
                     if meta:
+                        last_chunk = {**last_chunk, **meta}
                         outcome.last_chunk = {**(outcome.last_chunk or {}), **meta}
+                    err_val = chunk.get("error")
+                    if err_val is not None and (seen - finished or acc.pending_choices()):
+                        acc.close()
+                        outcome.incomplete = True
+                        err_msg = str(err_val.get("message") or err_val) if isinstance(err_val, dict) else str(err_val)
+                        err_code = str(err_val.get("code") or err_val.get("type") or "upstream_stream_error") if isinstance(err_val, dict) else "upstream_stream_error"
+                        write(_error_frame(last_chunk or chunk, err_code, err_msg))
+                        return outcome
                 write(raw)
                 continue
             if not sanitize:
@@ -1103,13 +1107,7 @@ def relay_sse(
         if acc.pending_choices() or unfinished:
             acc.close()
             outcome.incomplete = True
-            write(
-                _error_frame(
-                    last_chunk,
-                    "upstream_incomplete_stream",
-                    "upstream stream ended before finish_reason",
-                )
-            )
+            write(_error_frame(last_chunk, "upstream_incomplete_stream", "upstream stream ended before finish_reason"))
         return outcome
     except AccumulatorOverflow:
         acc.close()
@@ -1409,6 +1407,18 @@ class PassthroughAdapter(BackendAdapter):
                     raise ClientGone() if sink.client_gone() else TimeoutError()
                 transport.append(sock)
 
+        def open_response() -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+            new_conn = self._open(path, raw_body, headers, deadline=open_deadline, on_socket=on_socket, presend_deadline=getattr(sink, "presend_deadline", None), on_pooling=opened_pooling.append)
+            try:
+                if sink.client_gone():
+                    raise ClientGone()
+                new_resp = new_conn.getresponse()
+            except BaseException:
+                new_conn.close()
+                raise
+            slide.relax_socket(new_conn.sock, self.limits.read_timeout_s, internal is not None)
+            return new_conn, new_resp
+
         watcher = threading.Thread(
             target=watch, daemon=True, name="passthrough-deadline"
         )
@@ -1419,45 +1429,18 @@ class PassthroughAdapter(BackendAdapter):
                     raise ClientGone()
                 if aborted.is_set() or time.monotonic() >= deadline:
                     raise TimeoutError()
-                conn = self._open(
-                    path,
-                    raw_body,
-                    headers,
-                    deadline=open_deadline,
-                    on_socket=on_socket,
-                    presend_deadline=getattr(sink, "presend_deadline", None),
-                    on_pooling=opened_pooling.append,
-                )
+                conn, resp = open_response()
                 if sink.client_gone():
                     raise ClientGone()
                 if aborted.is_set() or time.monotonic() >= deadline:
                     raise TimeoutError()
-                resp = conn.getresponse()
-                if time.monotonic() >= deadline:
-                    raise TimeoutError()
-                slide.relax_socket(conn.sock, self.limits.read_timeout_s, internal is not None)
-                if resp.status in (502, 503) and getattr(
-                    sink, "accepts_presend_errors", False
-                ):
-                    try:
-                        body = _read_bounded(resp, self.limits.max_body_bytes)
-                    except UpstreamBodyTooLarge:
-                        self._fail(
-                            sink,
-                            502,
-                            "upstream_response_too_large",
-                            "upstream response exceeds the bridge limit",
-                        )
-                        return
-                    raise PreSendTransientError(
-                        "transient upstream HTTP status",
-                        status_code=resp.status,
-                        response_headers=tuple(
-                            self._response_headers(resp)
-                            + [("Content-Length", str(len(body)))]
-                        ),
-                        response_body=body,
-                    )
+                conn, resp, handled = resolve_presend_response(self, conn, resp, sink, open_response)
+                if handled:
+                    successful = True
+                    return
+            except UpstreamBodyTooLarge:
+                self._fail(sink, 502, "upstream_response_too_large", "upstream response exceeds the bridge limit")
+                return
             except PreSendTransientError as exc:
                 if getattr(sink, "accepts_presend_errors", False):
                     raise
@@ -1479,7 +1462,9 @@ class PassthroughAdapter(BackendAdapter):
                 )
                 return
             except (OSError, http.client.HTTPException):
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline or (
+                    window is not None and window.expired()
+                ):
                     self._fail(
                         sink,
                         504,
@@ -1675,10 +1660,14 @@ class PassthroughAdapter(BackendAdapter):
         sink.start(status, headers)
         sink.write(body)
 
-    def _response_headers(
-        self, resp: http.client.HTTPResponse
-    ) -> list[tuple[str, str]]:
+    def _response_headers(self, resp: http.client.HTTPResponse) -> list[tuple[str, str]]:
         return [(k, v) for k, v in resp.getheaders() if k.lower() not in _RESPONSE_DROP]
+
+    def _read_presend_body(self, resp: http.client.HTTPResponse) -> bytes:
+        return _read_bounded(resp, self.limits.max_body_bytes)
+
+    def _client_gone_exc(self) -> ClientGone:
+        return ClientGone()
 
     def _respond(
         self,

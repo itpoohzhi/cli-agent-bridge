@@ -1707,6 +1707,70 @@ class ModelNotesFilter:
 _MODEL_NOTES_FILTER = ModelNotesFilter()
 _PENALTY_TRACKER = get_penalty_tracker()
 
+# Нейтральные к здоровью бэкенда исходы passthrough: таймаут шага модели и оборванный
+# стрим одного хода не означают недоступность апстрима, поэтому брейкер не штрафуется.
+_PASSTHROUGH_NEUTRAL_ERROR_TYPES = frozenset(
+    {"upstream_timeout", "upstream_incomplete_stream", "client_gone"}
+)
+
+
+_DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES = 8192
+
+
+def _passthrough_error_capture_bytes() -> int:
+    """Лимит захвата тела ошибки для классификации исхода; env с безопасным fallback."""
+    raw = os.environ.get("BRIDGE_PASSTHROUGH_ERROR_CAPTURE_BYTES", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+    return value if value >= 0 else _DEFAULT_PASSTHROUGH_ERROR_CAPTURE_BYTES
+
+
+def _passthrough_error_type(raw: bytes) -> str:
+    """Тип ошибки из тела ответа: JSON error.type/code либо терминальный SSE error-кадр."""
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", "replace")
+    payloads: list[Any] = []
+    try:
+        payloads.append(json.loads(text))
+    except ValueError:
+        pass
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payloads.append(json.loads(data))
+        except ValueError:
+            continue
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            continue
+        # JSON-тело шва: code — HTTP-статус (число), тип ошибки в type;
+        # SSE-кадр: code — строковый код ошибки.
+        for value in (error.get("code"), error.get("type")):
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
+def _passthrough_discard_reason(status: int, error_type: str) -> str:
+    """Причина нейтрального исхода брейкера; '' — исход оценивается как сбой/успех бэкенда.
+
+    record_failure остаётся только для реальной недоступности апстрима (502
+    upstream_unavailable, 503 апстрима и прочие 5xx без признаков таймаута/обрыва).
+    """
+    if error_type in _PASSTHROUGH_NEUTRAL_ERROR_TYPES or status == 504:
+        return "turn_timeout_or_stream_incomplete"
+    return ""
+
 
 class _HandlerSink(ResponseSink):
     """Запись ответа passthrough-шва в сокет клиента; сбой записи — ClientGone."""
@@ -1728,6 +1792,20 @@ class _HandlerSink(ResponseSink):
             )
         self.status = 0
         self._client_gone_flag = False
+        # Тело ошибки захватывается ограниченно: нужно только для классификации исхода lease.
+        self._error_body = bytearray()
+        self._error_limit = _passthrough_error_capture_bytes()
+
+    def error_type(self) -> str:
+        """Тип ошибки ответа (JSON-тело или терминальный SSE-кадр); '' — признаков ошибки нет."""
+        if not self._error_body:
+            return ""
+        return _passthrough_error_type(bytes(self._error_body))
+
+    def _capture_error(self, data: bytes) -> None:
+        room = self._error_limit - len(self._error_body)
+        if room > 0:
+            self._error_body += data[:room]
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
@@ -1761,6 +1839,8 @@ class _HandlerSink(ResponseSink):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self._client_gone_flag = True
             raise ClientGone() from exc
+        if self.status >= 400 or b'"error"' in data:
+            self._capture_error(data)
         telemetry_note(self._handler, len(data), chunk=True)
         telemetry_tail(self._handler, data)
 
@@ -6481,9 +6561,16 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 "code": 502,
             }
         if st == "backend_error":
+            raw_err = str(out.get("err") or "")
+            detail = " ".join(
+                _err_summary(raw_err, 500).replace("\x00", " ").split()
+            )
+            message = f"{label} exec failed rc={out.get('rc')}"
+            if detail:
+                message = f"{message}: {detail}"
             return {
-                "message": f"{label} exec failed rc={out.get('rc')}",
-                "detail": str(out.get("err"))[:500],
+                "message": message,
+                "detail": detail,
                 "type": "proxy_error",
                 "code": 502,
             }
@@ -6843,17 +6930,11 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
         ):
             is_sub = self._is_subagent_request()
-            code, drain_headers, drain_body = LIFECYCLE.draining_response(
-                is_subagent=is_sub
-            )
-            err = drain_body.get("error", {})
-            self._reject(
-                code,
-                err.get("type", "overloaded"),
-                err.get("message", "bridge is shutting down"),
-                extra_headers=drain_headers,
-            )
-            return
+            if _shutting_down or not LIFECYCLE.wait_for_drain_hold(is_subagent=is_sub):
+                code, drain_headers, drain_body = LIFECYCLE.draining_response(is_subagent=is_sub)
+                err = drain_body.get("error", {})
+                self._reject(code, err.get("type", "overloaded"), err.get("message", "bridge is shutting down"), extra_headers=drain_headers)
+                return
         hub_auth_ok = _auth_ok(self)
         deferred_passthrough_auth = False
         if not hub_auth_ok:
@@ -7974,27 +8055,21 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 self.close_connection = True
                 self._record_telemetry(client_gone=True)
                 return
+            qos_msg = (
+                "bridge is draining for restart"
+                if qos_reason == "draining"
+                else ("Request queue is full" if qos_reason == "queue_full" else "Queue timeout exceeded waiting for slot")
+            )
             if headers_sent[0]:
                 self._record_telemetry(status_code=503, error_type="overloaded_error")
-                err_payload = json.dumps(
-                    {
-                        "error": {
-                            "message": (
-                                "bridge is draining for restart"
-                                if qos_reason == "draining"
-                                else (
-                                    "Request queue is full"
-                                    if qos_reason == "queue_full"
-                                    else "Queue timeout exceeded waiting for slot"
-                                )
-                            ),
-                            "type": "overloaded_error",
-                            "code": 503,
-                        }
-                    }
+                sse_err = format_stream_error_sse(
+                    message=qos_msg,
+                    model=str((req or {}).get("model") or ""),
+                    code=503,
+                    error_type="overloaded_error",
                 )
                 try:
-                    self.wfile.write(f"data: {err_payload}\n\n".encode("utf-8"))
+                    self.wfile.write(sse_err.encode("utf-8"))
                     self.wfile.flush()
                 except Exception:
                     pass
@@ -8008,21 +8083,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 extra_headers["X-Bridge-Draining"] = "true"
             self._send(
                 503,
-                {
-                    "error": {
-                        "message": (
-                            "bridge is draining for restart"
-                            if qos_reason == "draining"
-                            else (
-                                "Request queue is full"
-                                if qos_reason == "queue_full"
-                                else "Queue timeout exceeded waiting for slot"
-                            )
-                        ),
-                        "type": "overloaded",
-                        "code": 503,
-                    }
-                },
+                {"error": {"message": qos_msg, "type": "overloaded", "code": 503}},
                 extra_headers=extra_headers,
             )
             return
@@ -8031,39 +8092,26 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             try:
                 lease = RESILIENCE.acquire(backend_id)
             except ResilienceError as exc:
-                _log(
-                    f"reject reason=resilience code={exc.error_code} backend={backend_id} "
-                    f"retry_after={exc.retry_after}"
-                )
+                _log(f"reject reason=resilience code={exc.error_code} backend={backend_id} retry_after={exc.retry_after}")
                 self.close_connection = True
+                res_msg = f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}"
                 if headers_sent[0]:
                     self._record_telemetry(status_code=503, error_type=exc.error_type)
-                    err_payload = json.dumps(
-                        {
-                            "error": {
-                                "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
-                                "type": exc.error_type,
-                                "code": exc.error_code,
-                                "retry_after": exc.retry_after,
-                            }
-                        }
+                    sse_err = format_stream_error_sse(
+                        message=res_msg,
+                        model=str((req or {}).get("model") or ""),
+                        code=exc.error_code,
+                        error_type=exc.error_type,
                     )
                     try:
-                        self.wfile.write(f"data: {err_payload}\n\n".encode("utf-8"))
+                        self.wfile.write(sse_err.encode("utf-8"))
                         self.wfile.flush()
                     except Exception:
                         pass
                     return
                 self._send(
                     503,
-                    {
-                        "error": {
-                            "message": f"Backend '{backend_id}' is temporarily unavailable: {exc.reason}",
-                            "type": exc.error_type,
-                            "code": exc.error_code,
-                            "retry_after": exc.retry_after,
-                        }
-                    },
+                    {"error": {"message": res_msg, "type": exc.error_type, "code": exc.error_code, "retry_after": exc.retry_after}},
                     extra_headers={"Retry-After": str(exc.retry_after)},
                 )
                 return
@@ -8136,8 +8184,15 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 else model_id
             )
             # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
+            # Таймаут шага (504) и оборванный стрим — тоже нейтральны: это не отказ апстрима.
+            error_type = getattr(sink, "error_type", None)
+            discard_reason = _passthrough_discard_reason(
+                sink.status, error_type() if callable(error_type) else ""
+            )
             if sink._client_gone_flag:
                 lease.record_discard("client_disconnected")
+            elif discard_reason:
+                lease.record_discard(discard_reason)
             elif sink.status == 429 or sink.status in (402, 408):
                 # 429 / 402 / 408: модель исчерпала квоту/лимит/таймаут старта
                 lease.record_success()
@@ -8309,18 +8364,19 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         )
         try:
             self._response_status = 200
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            if managed_turn is not None:
-                self.send_header("X-Turn-Id", managed_turn.turn_id)
-            for key, value in _trace_headers(self._trace):
-                self.send_header(key, value)
-            if self._context_pruned:
-                # CD-003: сигнал до первого SSE-байта, после старта потока не меняется.
-                self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
-            self.end_headers()
+            if not getattr(self, "_headers_already_sent", False):
+                self._headers_already_sent = True
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                if managed_turn is not None:
+                    self.send_header("X-Turn-Id", managed_turn.turn_id)
+                for key, value in _trace_headers(self._trace):
+                    self.send_header(key, value)
+                if self._context_pruned:
+                    self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
+                self.end_headers()
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             _log("client gone before headers")
@@ -8372,19 +8428,18 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             with sse_lock:
                 return self._emit(frame)
 
-        def stream_error_frame(message: str) -> str:
-            # RW-202/RW-211: fail-close кадр chat.completion.chunk через core.stream_framing
-            # с пустой дельтой и finish_reason=null для отзыва живого префикса Droid.
-            chunk = build_stream_error_chunk(
+        def stream_error_frame(message: str, code: str = "live_prefix_invalidated", error_type: str = "stream_error", finish_reason: Any = None) -> str:
+            err_chunk = build_stream_error_chunk(
                 message=message,
                 model=shown_model,
-                code="live_prefix_invalidated",
-                finish_reason=None,
+                code=code,
+                error_type=error_type,
+                finish_reason=finish_reason,
                 completion_id=completion_id,
                 created=created,
             )
-            chunk["choices"][0]["delta"] = {}
-            return "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+            err_chunk["choices"][0]["delta"] = {}
+            return "data: " + json.dumps(err_chunk, ensure_ascii=False) + "\n\n"
 
         def keepalive() -> bool:
             with sse_lock:
@@ -8456,17 +8511,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     sink_closed.set()
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             if self._client_write_dead:
-                _log(
-                    f"client_write_dead: dispatch error suppressed "
-                    f"err={_err_summary(repr(exc), 160)!r}"
-                )
+                _log(f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}")
                 lease.record_discard("client_disconnected")
                 return
             if not live_sent[0]:
-                raise  # живых байт не было: прежнее поведение (сбой наружу; lease зафиксирует сбой)
+                raise
             _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
             lease.record_failure(exc)
-            emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__))
+            emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__, finish_reason=None))
             emit("data: [DONE]\n\n")
             return
         if self._client_write_dead:
@@ -8566,13 +8618,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     + "\n\n"
                 )
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
-            # RW-202/RW-211/AD-001: fail-close конверт chat.completion.chunk, а не плоский
-            # {"error": ...} — id/created/model совпадают с уже отправленными кадрами,
-            # finish_reason=null; успешного finish/usage после этого не идёт (ветка err —
-            # последний кадр перед [DONE]). Живой префикс уже отдан (live_sent > 0) — любой
-            # терминальный сбой (state=error, ненулевой rc, исключение) тоже fail-close,
-            # без повтора уже отданного префикса.
-            emit(stream_error_frame(str(err["message"])))
+            fin: Any = None if (err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid") else ...
+            emit(stream_error_frame(str(err["message"]), finish_reason=fin))
         else:
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")
