@@ -35,7 +35,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@\"']*:[^\s@\"']+@[^\s/\"']+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}authorization[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|client\s*_?\s*secret|x-api-key|api[\s_-]*key|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|passwd|pwd|secret|token)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n}]+)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@\"']*:[^\s@\"']+(?:@[^\s/\"']+)?", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}authorization[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"']+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*[^\r\n}]+", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh\s*_?\s*token|access\s*_?\s*token|id\s*_?\s*token|client\s*_?\s*secret|x-api-key|api[\s_-]*key|p\s*a\s*s\s*s\s*w\s*o\s*r\s*d|passwd|pwd|secret|token)[a-z0-9_.-]{0,32}\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\{[^\r\n\}]*(?:\}|$)|[bB]?\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|[bB]?\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|\([^\r\n\)]*(?:\)|$)|[^\r\n}]+)", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9._-]*", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 @dataclass(frozen=True)
 class NormalizedModelRoute:
@@ -67,15 +67,14 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
     if explicit is not None and explicit not in allowed:
         raise ValueError("explicit_effort is not in allowed_suffixes")
     return _resolve_route_suffix(model, explicit, allowed, known_models)
-_INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb]+")  # fmt: skip  # noqa: E501
+_INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|[^\x00-\x7f]+")  # fmt: skip  # noqa: E501
 _ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:(?:\x1b|\\(?:u001|x1)[bB])\[|(?:\x9b|\\(?:u009|x9)[bB]))[0-?]*[ -/]*[@-~]|(?:(?:\x1b|\\(?:u001|x1)[bB])\]|(?:\x9d|\\(?:u009|x9)[dD]))[^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\|\\(?:u0007|x07|u009[cC]|x9[cC])|\\(?:u001|x1)[bB]\\\\|$)")  # fmt: skip  # noqa: E501
 
 
 def _decode_escape(match: re.Match[str]) -> str:
     code = int(match.group(1) or match.group(2), 16)
     if code in (0x09, 0x0A, 0x0D): return " "  # fmt: skip  # noqa: E701
-    if code <= 0x1F or 0x7F <= code <= 0x9F or _INVISIBLE_RE.fullmatch(chr(code)): return ""  # fmt: skip  # noqa: E501,E701
-    return chr(code) if code <= 0x7E else " "
+    return chr(code) if 0x20 <= code <= 0x7E else ""
 
 
 def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096) -> str:
@@ -87,11 +86,12 @@ def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096) -> str:
         if previous == safe: break  # fmt: skip  # noqa: E701
     safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe))
     if re.search(r"\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2})|[\x1b\x9b\x9d]", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E501,E701
-    return re.sub(r"[\x00-\x20\x7f-\x9f\ud800-\udfff]+", " ", safe)
+    res = re.sub(r"[\x00-\x20\x7f]+", " ", safe)
+    return res if res else (" " if raw_text else "")
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
-    safe = _normalize_diagnostic_text(raw_text)
+    safe = _normalize_diagnostic_text(raw_text, max_len=65536)
     for regex in _SECRET_REGEXES:
         safe = regex.sub(REDACTED_TOKEN, safe)
     return safe[:MAX_DIAGNOSTIC_CHARS]
@@ -133,14 +133,11 @@ class RouteHealthStatus:
     status_reason: HealthReason; env_drift_keys: tuple[str, ...]  # fmt: skip  # noqa: E702
 
 def _route_targets(model_id: str | NormalizedModelRoute) -> tuple[str, frozenset[str]]:  # fmt: skip  # noqa: E501
-    if isinstance(model_id, NormalizedModelRoute):
-        canon, eff = model_id.canonical_model.strip(), model_id.reasoning_effort
-        if len(canon.split()) != 1 or (eff is not None and len(eff.strip().split()) != 1): raise ValueError("invalid NormalizedModelRoute")  # fmt: skip  # noqa: E501,E701
-        suffixes = (*_EFFORTS, eff.strip()) if eff else tuple(_EFFORTS)
-        extra: set[str] = {f"{canon}-{s}".lower() for s in suffixes} if model_id.alias_applied else set()  # fmt: skip  # noqa: E501
-        return canon, frozenset((canon.lower(), *extra))
-    route = normalize_model_route(model_id)
-    return route.canonical_model, frozenset((model_id.strip().lower(), route.canonical_model.lower()))  # fmt: skip  # noqa: E501
+    route = model_id if isinstance(model_id, NormalizedModelRoute) else normalize_model_route(model_id)  # fmt: skip  # noqa: E501
+    canon, eff = route.canonical_model.strip(), route.reasoning_effort
+    if len(canon.split()) != 1 or (eff is not None and len(eff.strip().split()) != 1): raise ValueError("invalid NormalizedModelRoute")  # fmt: skip  # noqa: E501,E701
+    alias = f"{canon}-{eff.strip().lower()}".lower() if route.alias_applied and eff else canon.lower()  # fmt: skip  # noqa: E501
+    return canon, frozenset((canon.lower(), alias))
 
 
 def evaluate_route_health(model_id: str | NormalizedModelRoute, blocked_models: tuple[str, ...], probe_age_s: float, max_stale_age_s: float, env_drift_keys: tuple[str, ...] = ()) -> RouteHealthStatus:  # fmt: skip  # noqa: E501
