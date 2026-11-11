@@ -4353,6 +4353,15 @@ class Run:
             self.q.put_nowait(item)
             return True
         except queue.Full:
+            from core.backpressure import (
+                publish_preserving,
+                stream_content_recovery_enabled,
+            )
+
+            if stream_content_recovery_enabled(
+                globals().get("dynamic_config") or globals().get("DYNAMIC_CONFIG")
+            ) and publish_preserving(self.q, item):
+                return True
             self.live_invalidated = True
             self._last_error = self._last_error or "Run.q overflow"
             _log(
