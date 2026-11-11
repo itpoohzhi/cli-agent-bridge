@@ -4267,8 +4267,10 @@ class Run:
         # обогнать consumer'а, отбрасывание здесь — осознанный fail-close. Non-stream копит
         # вывод до terminal, очередь остаётся неограниченной (как до RW-204): terminal-пачка
         # не теряется из-за размера.
+        from core.backpressure import CoalescingQueue as _CoalescingQueue
+
         self.q: queue.Queue = (
-            queue.Queue(maxsize=RUN_QUEUE_MAXSIZE)
+            _CoalescingQueue(maxsize=RUN_QUEUE_MAXSIZE)
             if sse_writer is not None
             else queue.Queue()
         )
@@ -4353,6 +4355,18 @@ class Run:
             self.q.put_nowait(item)
             return True
         except queue.Full:
+            from core.backpressure import (
+                publish_preserving,
+                stream_content_recovery_enabled,
+            )
+
+            _dynamic_config = globals().get("dynamic_config") or globals().get(
+                "DYNAMIC_CONFIG"
+            )
+            if stream_content_recovery_enabled(
+                _dynamic_config
+            ) and publish_preserving(self.q, item, _dynamic_config):
+                return True
             self.live_invalidated = True
             self._last_error = self._last_error or "Run.q overflow"
             _log(
