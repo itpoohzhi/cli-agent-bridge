@@ -21,8 +21,7 @@ class FailureCategory(str, Enum):  # noqa: UP042
 
 class HealthReason(str, Enum):  # noqa: UP042
     READY = "READY"; LIMIT_BLOCKED = "LIMIT_BLOCKED"  # fmt: skip  # noqa: E702
-    STALE_HEALTH_PROBE = "STALE_HEALTH_PROBE"
-    ENV_DRIFT_DETECTED = "ENV_DRIFT_DETECTED"
+    STALE_HEALTH_PROBE = "STALE_HEALTH_PROBE"; ENV_DRIFT_DETECTED = "ENV_DRIFT_DETECTED"  # fmt: skip  # noqa: E501,E702
 
 
 class RetryReason(str, Enum):  # noqa: UP042
@@ -36,7 +35,7 @@ REDACTED_TOKEN: Final[str] = "<redacted>"
 MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
-_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n}]+)", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
+_SECRET_PATTERNS: Final[tuple[str, ...]] = (r"(?i)(?:\\*[\"'])?\bauthorization\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n}]+)", r"(?i)\b(?:bearer|basic)\s+(?:\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\s,;\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}cookie\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^\r\n\"'\\}]+)", r"(?i)(?:\\*[\"'])?[a-z0-9_.-]{0,32}(?:refresh_token|access_token|id_token|client_secret|x-api-key|api[_-]?key|password|passwd|pwd|secret|token)\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*\[[^\r\n\]]*(?:\]|$)|\\*\"(?:\\.|[^\"\r\n\\])*\\*(?:\"|$)|\\*'(?:\\.|[^'\r\n\\])*\\*(?:'|$)|[^,;&\r\n\"'\\}]+)", r"\bya29\.[A-Za-z0-9._-]+", r"\b1//[A-Za-z0-9._-]+", r"\bsk-[A-Za-z0-9._-]+", r"\bAIza[A-Za-z0-9_-]+", r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # fmt: skip  # noqa: E501
 _SECRET_REGEXES: Final[tuple[re.Pattern[str], ...]] = tuple(re.compile(pattern) for pattern in _SECRET_PATTERNS)  # fmt: skip  # noqa: E501
 
 
@@ -58,7 +57,7 @@ def _resolve_route_suffix(model: str, explicit: str | None, allowed: frozenset[s
         marker = f"-{suffix}"
         if len(model) > len(marker) and model.lower().endswith(marker):
             base, effort = model[: -len(marker)], explicit or suffix
-            if known_models is None: return NormalizedModelRoute(base, effort, True)  # fmt: skip  # noqa: E701
+            if known_models is None: return NormalizedModelRoute(base, effort, True)  # fmt: skip  # noqa: E501,E701
             if (canon := _match_known(base, known_models)) is not None: return NormalizedModelRoute(canon, effort, True)  # fmt: skip  # noqa: E501,E701
     return NormalizedModelRoute(model, explicit, False)
 
@@ -78,18 +77,19 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
 
 def _decode_escape(match: re.Match[str]) -> str:
     code = int(match.group(1), 16)
-    if code <= 0x1F or code == 0x7F: return ""  # fmt: skip  # noqa: E701
+    if code <= 0x1F or 0x7F <= code <= 0x9F or code in (0xAD, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF): return ""  # fmt: skip  # noqa: E501,E701
     return chr(code) if code <= 0x7E else " "
 
 
 def _normalize_diagnostic_text(raw_text: str, *, sep_controls: bool = False) -> str:
-    pattern = r"[\x00-\x20\x7f\ud800-\udfff]+" if sep_controls else r"[\x00-\x1f\x7f]+"  # fmt: skip  # noqa: E501
-    safe = re.sub(pattern, " " if sep_controls else "", raw_text[:4096])
+    cleaned = re.sub(r"(?:\x1b|\\u001[bB])\[[0-?]*[ -/]*[@-~]", "", raw_text[:4096])
+    pattern = r"[\x00-\x20\x7f-\x9f\u00ad\u200b-\u200f\u2060\ufeff\ud800-\udfff]+" if sep_controls else r"[\x00-\x1f\x7f-\x9f\u00ad\u200b-\u200f\u2060\ufeff]+"  # fmt: skip  # noqa: E501
+    safe = re.sub(pattern, " " if sep_controls else "", cleaned)
     for _ in range(8):
-        previous = safe; safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)  # fmt: skip  # noqa: E702
+        previous = safe; safe = re.sub(r"\\u([0-9a-fA-F]{4})", _decode_escape, safe)  # fmt: skip  # noqa: E501,E702
         if previous == safe: break  # fmt: skip  # noqa: E701
     if re.search(r"\\u[0-9a-fA-F]{4}", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E701
-    return re.sub(r"[\x00-\x1f\x7f\ud800-\udfff]+", " ", safe)
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u00ad\u200b-\u200f\u2060\ufeff\ud800-\udfff]+", " ", safe)  # noqa: E501
 
 
 def redact_diagnostic_text(raw_text: str) -> str:
@@ -138,10 +138,10 @@ class RouteHealthStatus:
 
 
 def _route_targets(model_id: str | NormalizedModelRoute) -> tuple[str, frozenset[str]]:  # fmt: skip  # noqa: E501
-    if isinstance(model_id, NormalizedModelRoute):
-        return model_id.canonical_model, frozenset((model_id.canonical_model.lower(),))
-    route = normalize_model_route(model_id)
-    return route.canonical_model, frozenset((model_id.strip().lower(), route.canonical_model.lower()))  # fmt: skip  # noqa: E501
+    route = model_id if isinstance(model_id, NormalizedModelRoute) else normalize_model_route(model_id)  # fmt: skip  # noqa: E501
+    alias = f"{route.canonical_model}-{route.reasoning_effort}".lower() if route.alias_applied and route.reasoning_effort else route.canonical_model.lower()  # fmt: skip  # noqa: E501
+    raw = alias if isinstance(model_id, NormalizedModelRoute) else model_id.strip().lower()  # noqa: E501
+    return route.canonical_model, frozenset((raw, alias, route.canonical_model.lower()))
 
 
 def evaluate_route_health(model_id: str | NormalizedModelRoute, blocked_models: tuple[str, ...], probe_age_s: float, max_stale_age_s: float, env_drift_keys: tuple[str, ...] = ()) -> RouteHealthStatus:  # fmt: skip  # noqa: E501

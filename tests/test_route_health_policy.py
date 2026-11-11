@@ -42,7 +42,7 @@ def test_redaction() -> None:
     assert len(z) <= 256 and len(x("x" * 300)) == 256
     assert z.count("<redacted>") >= 7
     assert all(value not in z for value in ("bearer.value", "ya29.", "1//", "@", "\x00", "\n"))
-    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET", "Authorization: Token TOPSECRET42", '{"authorization": "Digest TOPSECRET42"}', 'Authorization: Digest username="alice", response="TOPSECRET42"', "pass\nword=TOPSECRET42", "pass\tword=TOPSECRET42", "pass\x01word=TOPSECRET42", "pass\x1fword=TOPSECRET42", "pass\x7fword=TOPSECRET42")
+    cases = ('{"access_token":"TOPSECRET"}', r'{\"access_token\":\"TOPSECRET\"}', '{"cookie":["sid=TOPSECRET42"]}', "pass\u200bword=TOPSECRET42", "pass\x1b[31mword\x1b[0m=TOPSECRET42", "Cookie: a=1; sid=secret2", r'{"access_token":"prefix\"LEAK"}', r'{"pass\u0077ord":"TOPSECRET42"}', r'pass\u005cu0077ord=TOPSECRET42', '{"password":"TOPSECRET42', "id_token=TOPSECRET42", "password=correct horse", "pass\x00word=TOPSECRET42", "password\x00=TOPSECRET42", "password=TOP\x00SECRET42", 'Bearer "TOPSECRET42"', r'Bearer \"TOPSECRET\"', 'password="TOPSECRET\\', r"password=TOP\u000aSECRET", "Authorization: Token TOPSECRET42", '{"authorization": "Digest TOPSECRET42"}', 'Authorization: Digest username="alice", response="TOPSECRET42"', "pass\nword=TOPSECRET42", "pass\tword=TOPSECRET42", "pass\x01word=TOPSECRET42", "pass\x1fword=TOPSECRET42", "pass\x7fword=TOPSECRET42")
     assert all("<redacted>" in x(text) for text in cases)
     assert all("TOPSECRET42" not in x(text) for text in (r"pass\u005cu005cu0077ord=TOPSECRET42", r'Bearer \\"TOPSECRET42\\"', r'{\\"access_token\\":\\"TOPSECRET42\\"}'))
     assert all("TOPSECRET42" not in x(text) and "<redacted>" in x(text) for text in (r"pass\u0000word=TOPSECRET42", "pass" + r"\u005c" + "u005c" * 7 + "u0077ord=TOPSECRET42"))
@@ -50,7 +50,7 @@ def test_redaction() -> None:
 
 @pytest.mark.parametrize("case", (
     (401, "anything", F.AUTH_REFRESH_EXHAUSTED, False), (403, "OAuth rejected", F.AUTH_REFRESH_EXHAUSTED, False),
-    (503, "token refresh failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, r"token\u0020refresh\u0020failed", F.AUTH_REFRESH_EXHAUSTED, False), (429, "quota exceeded", F.LIMIT_BLOCKED, False),
+    (503, "token refresh failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, "token \x1b[31mrefresh\x1b[0m failed", F.AUTH_REFRESH_EXHAUSTED, False), (503, r"token\u0020refresh\u0020failed", F.AUTH_REFRESH_EXHAUSTED, False), (429, "quota exceeded", F.LIMIT_BLOCKED, False),
     (503, "quota exceeded", F.LIMIT_BLOCKED, False), (503, "SSL_ERROR_SYSCALL", F.UPSTREAM_TLS_STALL, False),
     (429, "busy", F.CAPACITY_EXHAUSTED, True), (503, Q, F.CAPACITY_EXHAUSTED, True),
     (400, "model_capacity_exhausted", F.CAPACITY_EXHAUSTED, True), (0, "HTTP 401: invalid auth", F.AUTH_REFRESH_EXHAUSTED, False),
@@ -83,7 +83,7 @@ def test_health_limits(case: tuple[float, float, tuple[str, ...], bool, H]) -> N
 
 def test_health_order() -> None:
     assert h("Claude-Opus-5-5-High", ("claude-opus-5-5",), 1.0, 10.0) == S("Claude-Opus-5-5", False, H.LIMIT_BLOCKED, ())
-    assert h(n("alpha-high", known_models=("alpha", "alpha-high")), ("alpha",), 1.0, 10.0) == S("alpha-high", True, H.READY, ()); assert h("alpha", ("alpha-high",), 1.0, 10.0) == S("alpha", True, H.READY, ())
+    assert h(n("alpha-high", known_models=("alpha", "alpha-high")), ("alpha",), 1.0, 10.0) == S("alpha-high", True, H.READY, ()); assert h("alpha", ("alpha-high",), 1.0, 10.0) == S("alpha", True, H.READY, ()); assert h(n("alpha-high"), ("alpha-high",), 1.0, 10.0).status_reason is H.LIMIT_BLOCKED
 
 @pytest.mark.parametrize("age,limit", ((float("nan"), 1.0), (float("inf"), 1.0), (1.0, float("inf")), (1.0, -1.0)))
 def test_health_invalid(age: float, limit: float) -> None:
