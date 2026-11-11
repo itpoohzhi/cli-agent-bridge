@@ -24,7 +24,6 @@ import json
 import math
 import os
 import queue
-import random
 import re
 import select
 import socket
@@ -67,6 +66,7 @@ from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_i
 from core.nonstream_aggregator import internal_stream_body, request_deadlines
 from core.nonstream_resilience import NonstreamRetryBulkhead, NonstreamRetryPolicy
 from core.nonstream_resilience import should_retry_incomplete_nonstream
+from core.nonstream_retry_runtime import RetryRuntime, retry_incomplete_once
 from core.passthrough_sliding_window import (
     FLAG_PASSTHROUGH_SLIDING_WINDOW,
     SlidingDeadline,
@@ -1686,6 +1686,23 @@ class PassthroughAdapter(BackendAdapter):
         finally:
             reader.close()
 
+    def _retry_runtime(
+        self,
+        error: NonstreamError,
+        window: LivenessWindow,
+        reopen: Any,
+        deadline: float | None,
+    ) -> RetryRuntime:
+        return RetryRuntime(
+            error=error,
+            window=window,
+            reopen=reopen if callable(reopen) else None,
+            deadline=deadline,
+            poll_interval_s=self.limits.poll_interval_s,
+            bulkhead=self._get_retry_bulkhead(),
+            read_once=lambda retry_resp: self._read_agg_once(retry_resp, window, [0]),
+        )
+
     def _aggregate_sse(
         self,
         resp: http.client.HTTPResponse,
@@ -1713,32 +1730,15 @@ class PassthroughAdapter(BackendAdapter):
                 sessions=sess,
                 headers=headers or {},
             )
-            no_retry = (
-                exc.code != "upstream_incomplete_stream"
-                or pol.max_retries < 1
-                or window.expired()
-                or not ok_guard
+            runtime = self._retry_runtime(exc, window, reopen, deadline)
+            result = retry_incomplete_once(
+                runtime,
+                policy_enabled=pol.max_retries >= 1,
+                request_eligible=ok_guard,
             )
-            if no_retry or not callable(reopen):
+            if result is None:
                 raise
-            bulkhead = self._get_retry_bulkhead()
-            if not bulkhead.try_acquire():
-                raise
-            try:
-                rem = math.inf if deadline is None else deadline - time.monotonic()
-                to_msg = "upstream did not respond in time"
-                if rem <= 0 or window.expired():
-                    raise NonstreamError(504, "upstream_timeout", to_msg) from exc
-                jitter = self.limits.poll_interval_s * random.uniform(0.1, 0.5)
-                delay = min(jitter, max(0.0, rem * 0.25))
-                if delay > 0:
-                    time.sleep(delay)
-                dl_exp = deadline is not None and time.monotonic() >= deadline
-                if dl_exp or window.expired():
-                    raise NonstreamError(504, "upstream_timeout", to_msg) from exc
-                return self._read_agg_once(reopen(), window, [0])
-            finally:
-                bulkhead.release()
+            return result
 
     def _relay_stream(
         self,

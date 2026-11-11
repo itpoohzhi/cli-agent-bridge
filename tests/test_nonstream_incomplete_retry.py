@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import http.client
+import io
+import json
 import threading
-from typing import Mapping
+import time
+from typing import Mapping, cast
 
 import pytest
 
 from core import nonstream_resilience
+from core.liveness_signals import LivenessWindow, WindowSpec
+from core.nonstream_aggregator import NonstreamError
+from tests.test_openai_passthrough import (
+    content,
+    finish,
+    make_adapter,
+    message_of,
+    ns_limits,
+)
+
+DONE = b"data: [DONE]\n\n"
 
 
 def test_nonstream_retry_policy_contract() -> None:
@@ -165,3 +180,111 @@ def test_nonstream_retry_bulkhead_caps_sixteen_parallel_large_requests() -> None
     for thread in threads:
         thread.join()
     assert active == 0
+
+
+class _MemoryResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._reader = io.BytesIO(payload)
+
+    def readline(self, limit: int = -1) -> bytes:
+        return self._reader.readline(limit)
+
+
+def _response(payload: bytes) -> http.client.HTTPResponse:
+    return cast(http.client.HTTPResponse, cast(object, _MemoryResponse(payload)))
+
+
+def _internal_window() -> LivenessWindow:
+    spec = WindowSpec(10.0, 10.0, 30.0, internal_stream=True)
+    return LivenessWindow(spec)
+
+
+def test_passthrough_retries_zero_signal_eof_once_before_first_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    monkeypatch.setenv("BRIDGE_NONSTREAM_INCOMPLETE_RETRY_MAX", "1")
+    monkeypatch.setattr("core.nonstream_retry_runtime.random.uniform", lambda *_: 0.0)
+    adapter = make_adapter(1, ns_limits(), sanitize=True)
+    reopened = 0
+
+    def reopen() -> http.client.HTTPResponse:
+        nonlocal reopened
+        reopened += 1
+        return _response(content("retried") + finish(0, "stop") + DONE)
+
+    try:
+        raw = adapter._aggregate_sse(
+            _response(b": keepalive\n\n"),
+            _internal_window(),
+            headers={"Idempotency-Key": "retry-once"},
+            reopen=reopen,
+            deadline=time.monotonic() + 10.0,
+        )
+    finally:
+        adapter.shutdown()
+
+    assert reopened == 1
+    assert message_of(json.loads(raw))["content"] == "retried"
+
+
+def test_passthrough_never_retries_after_first_semantic_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    monkeypatch.setenv("BRIDGE_NONSTREAM_INCOMPLETE_RETRY_MAX", "1")
+    adapter = make_adapter(1, ns_limits(), sanitize=True)
+    reopened = 0
+
+    def reopen() -> http.client.HTTPResponse:
+        nonlocal reopened
+        reopened += 1
+        return _response(content("duplicate") + finish(0, "stop") + DONE)
+
+    try:
+        with pytest.raises(NonstreamError) as error:
+            adapter._aggregate_sse(
+                _response(content("must-not-repeat")),
+                _internal_window(),
+                headers={"Idempotency-Key": "no-repeat"},
+                reopen=reopen,
+                deadline=time.monotonic() + 10.0,
+            )
+    finally:
+        adapter.shutdown()
+
+    assert error.value.code == "upstream_incomplete_stream"
+    assert reopened == 0
+
+
+def test_passthrough_retry_requires_available_bulkhead_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    monkeypatch.setenv("BRIDGE_NONSTREAM_INCOMPLETE_RETRY_MAX", "1")
+    adapter = make_adapter(1, ns_limits(), sanitize=True)
+    blocker = nonstream_resilience.NonstreamRetryBulkhead(max_inflight=1)
+    assert blocker.try_acquire()
+    monkeypatch.setattr(adapter, "_get_retry_bulkhead", lambda: blocker)
+    reopened = 0
+
+    def reopen() -> http.client.HTTPResponse:
+        nonlocal reopened
+        reopened += 1
+        return _response(content("unexpected") + finish(0, "stop") + DONE)
+
+    try:
+        with pytest.raises(NonstreamError) as error:
+            adapter._aggregate_sse(
+                _response(b": keepalive\n\n"),
+                _internal_window(),
+                headers={"X-Request-Id": "bulkhead-full"},
+                reopen=reopen,
+                deadline=time.monotonic() + 10.0,
+            )
+    finally:
+        blocker.release()
+        adapter.shutdown()
+
+    assert error.value.code == "upstream_incomplete_stream"
+    assert reopened == 0

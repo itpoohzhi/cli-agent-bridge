@@ -169,16 +169,17 @@ def test_max_concurrent_invalid(cap: Any) -> None:
     assert "provider_max_concurrent_invalid" in errors_of(doc)
 
 
-def test_max_concurrent_above_kind_ceiling() -> None:
+@pytest.mark.parametrize("max_concurrent", (2, 8, 32))
+def test_muse_max_concurrent_has_no_kind_ceiling(max_concurrent: int) -> None:
     doc = {
         "manifest_version": 1,
         "provider_id": "mus",
         "kind": "muse",
         "owned_by": "m",
-        "limits": {"max_concurrent": 2},
+        "limits": {"max_concurrent": max_concurrent},
         "fingerprint": {"binary_path": "~/.local/bin/muse"},
     }
-    assert "provider_max_concurrent_invalid" in errors_of(doc, filename="mus.yaml")
+    assert errors_of(doc, filename="mus.yaml") == ()
 
 
 def test_pin_required_without_binary_path() -> None:

@@ -28,6 +28,7 @@ if int(getattr(sys, "version_info", (3, 14))[1]) < 10:
     )
 
 from core import prompt_prefix_stability as pps  # noqa: E402
+from core import tool_emulation  # noqa: E402
 import server  # noqa: E402
 
 
@@ -133,6 +134,36 @@ def test_prefix_stability_contract_three_regime_invariance() -> None:
         p_leg.startswith("[system]\n# Tool calling protocol")
         and "\\[system]" not in p_leg
     )
+
+
+def test_tool_emulation_uses_stable_prefix_and_structured_none_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_STABLE_PROMPT_PREFIX_ENABLED", "true")
+    messages = [
+        {"role": "system", "content": "stable"},
+        {"role": "user", "content": "question"},
+    ]
+    tools = _sample_tools()
+
+    prompt = tool_emulation._messages_to_prompt(messages, tools, None, [])
+    assert prompt.startswith("[system]\nstable\n\n[system]\n# Tool calling protocol")
+    assert prompt.endswith("[user]\nquestion")
+
+    without_tools = tool_emulation._messages_to_prompt(
+        messages, tools, {"type": "none"}, []
+    )
+    assert "# Tool calling protocol" not in without_tools
+    assert without_tools == "[system]\nstable\n\n[user]\nquestion"
+
+
+def test_tool_emulation_renders_attachments_once() -> None:
+    images = [{"name": "shot.png", "mime": "image/png", "data": b"abc"}]
+    prompt = tool_emulation._messages_to_prompt(
+        [{"role": "user", "content": "inspect"}], [], None, images
+    )
+    assert prompt.count("[attachments]") == 1
+    assert prompt.count("[image 1] ./shot.png") == 1
 
 
 def _patch_server_guard(monkeypatch: pytest.MonkeyPatch) -> None:
