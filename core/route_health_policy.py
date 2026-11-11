@@ -104,13 +104,10 @@ class FailureClassification:
     failover_eligible: bool; sanitized_reason: str  # fmt: skip  # noqa: E702
 
 def _is_auth_failure(status_code: int, reason: str) -> bool:
-    terms = ("token refresh failed", "tokenrefresh failed", "oauth refresh", "invalid_grant", "invalid api key", "api key not valid", "api key expired", "api_key_invalid", "unauthorized", "unauthenticated")  # fmt: skip  # noqa: E501
-    if any(term in reason for term in terms) or bool(re.search(r"\binvalid\s+token\b(?!\s+(?:count|limit|length|size|budget|number)\b)", reason)):  # fmt: skip  # noqa: E501
-        return True
-    if status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|(?:^\s*|\b(?:error|code)\s*:\s*)401\b)", reason))):  # fmt: skip  # noqa: E501
-        return True
-    is_403 = status_code == 403 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+403\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*403\b|(?:^\s*|\b(?:error|code)\s*:\s*)403\b)", reason)))  # fmt: skip  # noqa: E501
-    return is_403 and any(term in reason for term in ("oauth", "refresh", "unauthenticated"))  # fmt: skip  # noqa: E501
+    auth_re = r"token\s*refresh\s+failed|oauth\s+refresh|invalid_grant|invalid\s+api\s+key|api\s+key\s+(?:not\s+valid|expired)|api_key_invalid|unauthorized|unauthenticated|\binvalid\s+token\b(?!\s+(?:count|limit|length|size|budget|number)\b)"  # fmt: skip  # noqa: E501
+    code_401 = status_code == 401 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+401\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*401\b|(?:^\s*|\b(?:error|code)\s*:\s*)401\b)", reason)))  # fmt: skip  # noqa: E501
+    code_403 = status_code == 403 or (status_code == 0 and bool(re.search(r"(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s+403\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*403\b|(?:^\s*|\b(?:error|code)\s*:\s*)403\b)", reason)))  # fmt: skip  # noqa: E501
+    return bool(re.search(auth_re, reason)) or code_401 or (code_403 and bool(re.search(r"oauth|refresh|unauthenticated", reason)))  # fmt: skip  # noqa: E501
 
 
 def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClassification:  # fmt: skip  # noqa: E501
