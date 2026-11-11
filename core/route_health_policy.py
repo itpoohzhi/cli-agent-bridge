@@ -68,11 +68,11 @@ def normalize_model_route(model_id: str, explicit_effort: str | None = None, all
         raise ValueError("explicit_effort is not in allowed_suffixes")
     return _resolve_route_suffix(model, explicit, allowed, known_models)
 _INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|[^\x00-\x7f]+")  # fmt: skip  # noqa: E501
-_ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:(?:\x1b|\\(?:u001|x1)[bB])\[|(?:\x9b|\\(?:u009|x9)[bB]))[0-?]*[ -/]*[@-~]|(?:(?:\x1b|\\(?:u001|x1)[bB])\]|(?:\x9d|\\(?:u009|x9)[dD]))[^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\|\\(?:u0007|x07|u009[cC]|x9[cC])|\\(?:u001|x1)[bB]\\\\|$)")  # fmt: skip  # noqa: E501
+_ANSI_RE: Final[re.Pattern[str]] = re.compile(r"(?:(?:\x1b|\\(?:u001|x1)[bB])\[|(?:\x9b|\\(?:u009|x9)[bB]))[0-?]*[ -/]*[@-~]|(?:(?:\x1b|\\(?:u001|x1)[bB])[\]P_X^]|(?:\x9d|\x90|\x98|\x9e|\x9f|\\(?:u009|x9)[dD08eEfF]))[^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\|\\(?:u0007|x07|u009[cC]|x9[cC])|\\(?:u001|x1)[bB]\\\\|$)")  # fmt: skip  # noqa: E501
 
 
 def _decode_escape(match: re.Match[str]) -> str:
-    code = int(match.group(1) or match.group(2), 16)
+    code = int(match.group(1) or match.group(2) or match.group(3), 16)
     if code in (0x09, 0x0A, 0x0D): return " "  # fmt: skip  # noqa: E701
     return chr(code) if 0x20 <= code <= 0x7E else ""
 
@@ -81,11 +81,11 @@ def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096) -> str:
     compact = re.sub(r"[\t\r\n ]+", " ", raw_text[:65536])
     safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", compact))[:max_len]
     for _ in range(8):
-        previous = safe; safe = re.sub(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2}))", _decode_escape, safe)  # fmt: skip  # noqa: E501,E702
-        safe = re.sub(r"(?<!\\)\\[nrt]", " ", safe)
+        previous = safe; safe = re.sub(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2}))|%([0-9a-fA-F]{2})", _decode_escape, safe)  # fmt: skip  # noqa: E501,E702
+        safe = re.sub(r"(?<!\\)\\(?:[bfnrtv]|[0-7]{1,3})", " ", safe)
         if previous == safe: break  # fmt: skip  # noqa: E701
     safe = _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe))
-    if re.search(r"\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2})|[\x1b\x9b\x9d]", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E501,E701
+    if re.search(r"\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2})|[\x1b\x90\x98\x9b-\x9f]", safe): return REDACTED_TOKEN  # fmt: skip  # noqa: E501,E701
     res = re.sub(r"[\x00-\x20\x7f]+", " ", safe)
     return res if res else (" " if raw_text else "")
 
@@ -136,7 +136,7 @@ def _route_targets(model_id: str | NormalizedModelRoute) -> tuple[str, frozenset
     route = model_id if isinstance(model_id, NormalizedModelRoute) else normalize_model_route(model_id)  # fmt: skip  # noqa: E501
     canon, eff = route.canonical_model.strip(), route.reasoning_effort
     if len(canon.split()) != 1 or (eff is not None and len(eff.strip().split()) != 1): raise ValueError("invalid NormalizedModelRoute")  # fmt: skip  # noqa: E501,E701
-    alias = f"{canon}-{eff.strip().lower()}".lower() if route.alias_applied and eff else canon.lower()  # fmt: skip  # noqa: E501
+    alias = f"{canon}-{eff.strip().lower()}".lower() if eff else canon.lower()
     return canon, frozenset((canon.lower(), alias))
 
 
