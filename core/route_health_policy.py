@@ -49,7 +49,7 @@ class NormalizedModelRoute:
 
 def normalize_model_route(model_id: str, explicit_effort: str | None = None, allowed_suffixes: Collection[str] | None = None) -> NormalizedModelRoute:  # fmt: skip  # noqa: E501
     model = model_id.strip()
-    if not model or any(ch.isspace() for ch in model):
+    if len(model.split()) != 1:
         raise ValueError("model_id must not be empty or contain whitespace")
     allowed = _EFFORTS
     if allowed_suffixes is not None:
