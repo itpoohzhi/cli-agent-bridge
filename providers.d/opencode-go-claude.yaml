@@ -5,7 +5,7 @@ provider_id: opencode-go-claude
 kind: passthrough
 enabled: true
 required: false
-priority: 15
+priority: 5
 owned_by: opencode-go-claude
 transport:
   bridge: {base_url: 'http://127.0.0.1:10830/go/v1'}
@@ -28,7 +28,7 @@ transport:
       response: {field: 'choices[0].message.content'}
 allow_base_url:
 - {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /go/v1}
-limits: {max_concurrent: 32, quota_group: opencode-go-claude, timeout_s: 180}
+limits: {max_concurrent: 64, quota_group: opencode-go-claude, timeout_s: 180}
 discovery:
   method: static
   static: [claude-haiku-5-5]

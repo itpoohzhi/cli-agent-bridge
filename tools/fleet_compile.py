@@ -61,6 +61,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--providers-dir", type=Path, default=None)
     parser.add_argument("--fleet-meta", type=Path, default=None, help="_fleet.yaml")
     parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=None,
+        help="каталог состояния (переопределяет BRIDGE_STATE_DIR)",
+    )
+    parser.add_argument(
         "--output", type=Path, default=None, help="путь fleet.compiled.json"
     )
     parser.add_argument(
@@ -158,7 +164,7 @@ def _check(args: argparse.Namespace, output: Path, result: CompileResult) -> int
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    state = resolve_state_dir()
+    state = args.state_dir or resolve_state_dir()
     output = args.output or state / FLEET_FILE
     sidecar_path = args.sidecar or state / SIDECAR_FILE
     result = _compile_state(args, state)

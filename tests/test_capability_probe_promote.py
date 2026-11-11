@@ -71,7 +71,7 @@ def test_select_manifest_tiebreak_matches_compiler() -> None:
 def test_select_manifest_on_real_providers() -> None:
     manifests = load_manifests(PROVIDERS, ADAPTER_KINDS).manifests
     for model, provider in (
-        ("gpt-6.1-sol", "droid"),
+        ("gpt-6.1-sol", "codex"),
         ("deepseek-v4.1-flash", "opencode-go"),
         ("gpt-6.1-terra", "codex"),
         ("gemini-4-argon", "agy"),
@@ -129,7 +129,7 @@ def test_promote_confirmed_updates_lifecycle(
     promote_env: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     summary, state = _promoted(promote_env, capsys)
-    assert summary["provider_id"] == "droid" and summary["verdict"] == "confirmed"
+    assert summary["provider_id"] == "codex" and summary["verdict"] == "confirmed"
     records = json.loads((state / "model-lifecycle.json").read_text())["records"]
     assert len(records) == 1 and records[0]["status"] == "confirmed"
     assert records[0]["receipt_sha256"] == summary["receipt_sha256"]
@@ -146,7 +146,7 @@ def test_promote_confirmed_updates_sidecar_and_compiled(
     assert (entry["status"], entry["quorum_eligible"], entry["provider"]) == (
         "confirmed",
         True,
-        "droid",
+        "codex",
     )
     compiled = json.loads((state / "fleet.compiled.json").read_text())
     efforts = {m["id"]: m["efforts"] for m in compiled["models"]}
@@ -154,7 +154,9 @@ def test_promote_confirmed_updates_sidecar_and_compiled(
         "low",
         "medium",
         "high",
-    ]  # efforts_pin не расширяется
+        "xhigh",
+        "max",
+    ]
 
 
 def test_promote_honours_explicit_state_dir(promote_env: Any, tmp_path: Path) -> None:

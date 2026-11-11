@@ -9,7 +9,7 @@ priority: 30
 owned_by: factory-droid
 transport:
   bridge: {}
-limits: {max_concurrent: 32, quota_group: factory-droid, timeout_s: 450}
+limits: {max_concurrent: 64, quota_group: factory-droid, timeout_s: 450}
 discovery: {method: static}
 models_defaults: {efforts: [low, medium, high]}
 family_rule:
