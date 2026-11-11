@@ -143,7 +143,7 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     finalize_turn,
     sanitize_tool_call,
 )
-from core.stream_framing import build_stream_error_chunk  # noqa: E402
+from core.stream_framing import build_stream_error_chunk, format_stream_error_sse  # noqa: E402
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
     ManagedTurn,

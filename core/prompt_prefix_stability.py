@@ -141,7 +141,7 @@ def _assemble_message_blocks(
         is_system, block = _render_message(
             message,
             counter,
-            escape_roles=stable,
+            escape_roles=True,
             prune_marker=config.prune_marker,
         )
         if block:

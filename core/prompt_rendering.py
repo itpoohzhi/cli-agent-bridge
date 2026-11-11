@@ -11,6 +11,8 @@ _TOOL_CALL_CLOSE = "</tool_call>"
 _SPOOFED_ROLE_LINE_RE = re.compile(
     r"(?im)^([ \t]*)\[(system|user|assistant|developer|tool(?:\s+result[^\n\]]*)?|attachments)\]"
 )
+_TOOL_CALL_MARKER_RE = re.compile(r"</?tool_call\s*>", re.I)
+_HEADER_TOKEN_RE = re.compile(r"[\r\n\[\]<>]+")
 _TOOLS_PROTOCOL_LINES: tuple[str, ...] = (
     "[system]",
     "# Tool calling protocol",
@@ -62,7 +64,7 @@ def _render_tools_section(
     if is_required:
         lines.append("You MUST call at least one tool now.")
     elif forced:
-        lines.append(f'You MUST call the tool "{forced}" now.')
+        lines.append(f'You MUST call the tool "{_sanitize_header_token(forced)}" now.')
     lines.extend(("", "Available tools:"))
     for item in tools:
         lines.extend(_render_tool_schema(item))
@@ -86,7 +88,9 @@ def _render_tool_schema(item: object) -> tuple[str, ...]:
         else {}
     )
     label = f"- {function.get('name') or ''}: {function.get('description') or ''}"
-    return label, "  parameters: " + json.dumps(parameters, ensure_ascii=False)
+    return escape_role_delimiters(label), "  parameters: " + json.dumps(
+        parameters, ensure_ascii=False
+    )
 
 
 def _render_content(content: object, counter: list[int]) -> str:
@@ -144,15 +148,22 @@ def _render_tool_call(item: object) -> str:
     return f"{_TOOL_CALL_OPEN}{encoded}{_TOOL_CALL_CLOSE}"
 
 
+def _sanitize_header_token(value: str) -> str:
+    return " ".join(_HEADER_TOKEN_RE.sub(" ", value).split())
+
+
 def escape_role_delimiters(text: str) -> str:
-    if not text or "[" not in text:
+    if not text:
         return text
-    return _SPOOFED_ROLE_LINE_RE.sub(r"\1\\[\2]", text)
+    escaped = _SPOOFED_ROLE_LINE_RE.sub(r"\1\\[\2]", text) if "[" in text else text
+    return _TOOL_CALL_MARKER_RE.sub(lambda m: "\\" + m.group(0), escaped)
 
 
 def _render_tool_result(message: dict[str, object], text: str) -> str:
-    call_id = str(message.get("tool_call_id") or message.get("id") or "")
-    name = str(message.get("name") or "")
+    call_id = _sanitize_header_token(
+        str(message.get("tool_call_id") or message.get("id") or "")
+    )
+    name = _sanitize_header_token(str(message.get("name") or ""))
     header = f"[tool result {call_id}]" + (f" ({name})" if name else "")
     return f"{header}\n{text}" if text.strip() else header
 
@@ -173,6 +184,8 @@ def _render_message(
         return False, ""
     message_map = cast(dict[str, object], message)
     role = str(message_map.get("role") or "user").strip().lower() or "user"
+    if role not in ("system", "developer", "user", "assistant", "tool"):
+        role = "user"
     raw = _render_content(message_map.get("content"), counter)
     is_prune = bool(prune_marker) and raw.strip() == prune_marker.strip()
     text = escape_role_delimiters(raw) if escape_roles and not is_prune else raw
@@ -198,7 +211,8 @@ def _append_attachments(
         return text
     head = f"[attachments]\nThis request includes {len(images)} image(s) as local files in the working directory. The markers [image N] in the conversation refer to them in order."
     items = [
-        f"- [image {index}] ./{image.get('name', '')} ({image.get('mime', '')}, {len(str(image.get('data', '')))} bytes)"
+        f"- [image {index}] ./{_sanitize_header_token(str(image.get('name', '')))}"
+        f" ({_sanitize_header_token(str(image.get('mime', '')))}, {len(str(image.get('data', '')))} bytes)"
         for index, image in enumerate(images, 1)
     ]
     return "\n\n".join((text, "\n".join([head, *items, _ATTACHMENTS_FOOTER])))
