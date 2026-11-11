@@ -220,3 +220,32 @@ def test_handle_bulkhead_refuses_retry_without_second_upstream_request(
     assert len(retry_upstream.requests) == 1
     assert sink.status == 502
     assert json.loads(sink.body)["error"]["type"] == "upstream_incomplete_stream"
+
+
+def test_passthrough_kill_switch_zero_never_retries_zero_signal_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    monkeypatch.setenv("BRIDGE_NONSTREAM_INCOMPLETE_RETRY_MAX", "0")
+    adapter = make_adapter(1, ns_limits(), sanitize=True)
+    reopened = 0
+
+    def reopen() -> http.client.HTTPResponse:
+        nonlocal reopened
+        reopened += 1
+        return _response(content("retried") + finish(0, "stop") + DONE)
+
+    try:
+        with pytest.raises(NonstreamError) as error:
+            adapter._aggregate_sse(
+                _response(b": keepalive\n\n"),
+                _internal_window(),
+                headers={"Idempotency-Key": "retry-kill-switch"},
+                reopen=reopen,
+                deadline=time.monotonic() + 10.0,
+            )
+    finally:
+        adapter.shutdown()
+
+    assert error.value.code == "upstream_incomplete_stream"
+    assert reopened == 0
