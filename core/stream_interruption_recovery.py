@@ -27,7 +27,7 @@ def is_transient_stream_interruption(
     if not isinstance(text, str) or source != "cli_error" or len(text) > 4096:
         return False
     haystack = _normalize_diagnostic_text(text, fail_closed=False)
-    if re.search(r"\\+(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+", haystack) or re.search(r"(?:%25)+[0-9a-fA-F]{2}", text, re.IGNORECASE): return False  # fmt: skip  # noqa: E501,E701
+    if re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+", haystack) or re.search(r"(?:%25)+[0-9a-fA-F]{2}", text, re.IGNORECASE): return False  # fmt: skip  # noqa: E501,E701
     if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
         return False
     if _FATAL_STATUS_RE.search(haystack):
