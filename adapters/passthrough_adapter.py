@@ -76,6 +76,10 @@ from core.cli_runtime_config import NonstreamConfig
 from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
 from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, SlidingDeadline, open_sliding_deadline
+from core.precommit_timeout_policy import (
+    PreCommitFailureClass,
+    classify_precommit_generic_failure,
+)
 from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
 from core.stream_framing import (
     build_stream_error_chunk,
@@ -1479,7 +1483,20 @@ class PassthroughAdapter(BackendAdapter):
                 )
                 return
             except (OSError, http.client.HTTPException):
-                if time.monotonic() >= deadline:
+                now_s = time.monotonic()
+                state_ref = slide.state
+                current_deadline_s = slide.deadline_s
+                cap_deadline_s = (
+                    current_deadline_s
+                    if state_ref is None
+                    else state_ref.cap_deadline_s
+                )
+                failure_class = classify_precommit_generic_failure(
+                    now_s=now_s,
+                    current_deadline_s=current_deadline_s,
+                    cap_deadline_s=cap_deadline_s,
+                )
+                if failure_class is PreCommitFailureClass.TIMEOUT:
                     self._fail(
                         sink,
                         504,
@@ -1726,7 +1743,20 @@ class PassthroughAdapter(BackendAdapter):
             )
             return False
         except (OSError, http.client.HTTPException):
-            if deadline is not None and time.monotonic() >= deadline:
+            now_s = time.monotonic()
+            state_ref = None if slide is None else slide.state
+            current_deadline_s = deadline if slide is None else slide.deadline_s
+            cap_deadline_s = (
+                current_deadline_s
+                if state_ref is None
+                else state_ref.cap_deadline_s
+            )
+            failure_class = classify_precommit_generic_failure(
+                now_s=now_s,
+                current_deadline_s=current_deadline_s,
+                cap_deadline_s=cap_deadline_s,
+            )
+            if failure_class is PreCommitFailureClass.TIMEOUT:
                 self._fail(
                     sink, 504, "upstream_timeout", "upstream did not respond in time"
                 )

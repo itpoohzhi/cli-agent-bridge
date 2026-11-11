@@ -38,6 +38,13 @@ from bridge_testlib import BridgeCase, load_raw_fleet  # noqa: E402
 from core.backend_adapter import (
     AdapterRegistry,
 )  # noqa: E402
+from core.passthrough_sliding_window import (  # noqa: E402
+    SlidingDeadline,
+    init_sliding_stream,
+)
+from core.precommit_timeout_policy import (  # noqa: E402
+    classify_precommit_generic_failure,
+)
 
 
 from tests.passthrough_stream_testlib import (
@@ -1053,6 +1060,176 @@ def test_reused_connection_race_retries_once_on_fresh_socket(
     finally:
         adapter.shutdown()
         upstream.close()
+
+
+@pytest.mark.parametrize(
+    ("armed", "now_s", "expected_status", "expected_type"),
+    [
+        (False, 109.0, 502, "upstream_unavailable"),
+        (False, 110.0, 504, "upstream_timeout"),
+        (True, 120.0, 502, "upstream_unavailable"),
+        (True, 165.0, 504, "upstream_timeout"),
+        (True, 200.0, 504, "upstream_timeout"),
+    ],
+    ids=[
+        "unarmed-live",
+        "unarmed-equality",
+        "armed-after-static-live",
+        "armed-current-equality",
+        "armed-cap-equality",
+    ],
+)
+def test_generic_failure_uses_sliding_deadline_once(
+    monkeypatch: pytest.MonkeyPatch,
+    armed: bool,
+    now_s: float,
+    expected_status: int,
+    expected_type: str,
+) -> None:
+    adapter = make_adapter(1234)
+    static_deadline_s = 110.0
+    cell = SlidingDeadline(static_deadline_s)
+    if armed:
+        cell.arm(
+            init_sliding_stream(
+                now=100.0,
+                initial_timeout_s=10.0,
+                idle_timeout_s=50.0,
+                safety_cap_s=100.0,
+                enabled=True,
+            )
+        )
+        cell.advance(now=115.0, is_useful_chunk=True)
+        assert cell.state is not None
+        assert static_deadline_s < 120.0 < cell.deadline_s < cell.state.cap_deadline_s
+
+    clock = unittest.mock.Mock(return_value=min(now_s, static_deadline_s - 1.0))
+
+    def fail_open(*_args, **_kwargs):
+        clock.reset_mock()
+        clock.return_value = now_s
+        raise OSError("generic upstream failure")
+
+    monkeypatch.setattr(
+        "adapters.passthrough_adapter.request_deadlines",
+        lambda _limits, _internal: (static_deadline_s, static_deadline_s),
+    )
+    monkeypatch.setattr(
+        "adapters.passthrough_adapter.open_sliding_deadline",
+        lambda *_args, **_kwargs: cell,
+    )
+    monkeypatch.setattr("adapters.passthrough_adapter.time.monotonic", clock)
+    monkeypatch.setattr(adapter, "_open", fail_open)
+    window = unittest.mock.MagicMock()
+    window.expired.side_effect = AssertionError(
+        "generic pre-commit handler must not call LivenessWindow.expired()"
+    )
+    try:
+        with unittest.mock.patch(
+            "adapters.passthrough_adapter.classify_precommit_generic_failure",
+            wraps=classify_precommit_generic_failure,
+        ) as classifier_spy:
+            sink = CollectSink()
+            adapter.handle(
+                path="/v1/chat/completions",
+                raw_body=b"{}",
+                request={"stream": True},
+                headers={},
+                sink=sink,
+                window=window,
+            )
+    finally:
+        adapter.shutdown()
+
+    assert sink.status == expected_status
+    assert json.loads(sink.body)["error"]["type"] == expected_type
+    classifier_spy.assert_called_once()
+    assert classifier_spy.call_args.args == ()
+    assert set(classifier_spy.call_args.kwargs) == {
+        "now_s",
+        "current_deadline_s",
+        "cap_deadline_s",
+    }
+    assert classifier_spy.call_args.kwargs["now_s"] == now_s
+    window.expired.assert_not_called()
+
+
+def test_precommit_socket_timeout_stays_504(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = make_adapter(1234)
+    connection = unittest.mock.MagicMock()
+    connection.getresponse.side_effect = socket.timeout("upstream read timed out")
+    monkeypatch.setattr(adapter, "_open", lambda *_args, **_kwargs: connection)
+    try:
+        sink = CollectSink()
+        adapter.handle(
+            path="/v1/chat/completions",
+            raw_body=b"{}",
+            request={"stream": True},
+            headers={},
+            sink=sink,
+        )
+    finally:
+        adapter.shutdown()
+
+    assert sink.status == 504
+    assert json.loads(sink.body)["error"]["type"] == "upstream_timeout"
+
+
+def test_postcommit_sse_generic_failure_stays_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = make_adapter(1234)
+    response = unittest.mock.MagicMock()
+    response.getheaders.return_value = [("Content-Type", "text/event-stream")]
+    response.getheader.return_value = None
+    sink = CollectSink()
+    monkeypatch.setattr(
+        "adapters.passthrough_adapter.relay_sse",
+        unittest.mock.Mock(side_effect=OSError("stream failed after commit")),
+    )
+    try:
+        assert not adapter._relay_stream(response, None, sink, False)
+    finally:
+        adapter.shutdown()
+
+    assert sink.status == 200
+    assert b"upstream_stream_error" in sink.body
+
+
+@pytest.mark.parametrize(
+    ("now_s", "expected_status", "expected_type"),
+    [
+        (109.0, 502, "upstream_unavailable"),
+        (110.0, 504, "upstream_timeout"),
+    ],
+    ids=["live", "equality"],
+)
+def test_response_body_generic_failure_uses_one_clock_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    now_s: float,
+    expected_status: int,
+    expected_type: str,
+) -> None:
+    adapter = make_adapter(1234)
+    response = unittest.mock.MagicMock()
+    response.status = 200
+    response.getheader.side_effect = lambda name: {
+        "Content-Type": "application/json"
+    }.get(name)
+    response.read.side_effect = OSError("generic response-body failure")
+    sink = CollectSink()
+    clock = unittest.mock.Mock(return_value=now_s)
+    monkeypatch.setattr("adapters.passthrough_adapter.time.monotonic", clock)
+    try:
+        assert not adapter._respond(response, {}, sink, 110.0)
+    finally:
+        adapter.shutdown()
+
+    assert sink.status == expected_status
+    assert json.loads(sink.body)["error"]["type"] == expected_type
+    assert clock.call_count == 1
 
 
 @pytest.mark.parametrize(
