@@ -62,6 +62,10 @@ def _build_openai_usage(
     }
     if cached_tokens > 0:
         # Единый нормализатор core.usage_wire; несогласованный кэш на wire не выдаётся.
+        # Исключение из политики нуля: аккумуляторы usage opencode-native не различают
+        # «апстрим сообщил 0» и «данных нет» (инициализация нулями), поэтому 0 здесь
+        # трактуется как «неизвестно» и не выдаётся. Верхний `cached_tokens` —
+        # историческое поле zen-wire, оставлено для совместимости.
         details, _inconsistent = normalize_prompt_cache_details(
             prompt_tokens, cached_tokens
         )

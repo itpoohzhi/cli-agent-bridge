@@ -8325,25 +8325,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        # Идентичность чата (prompt_cache_key / x-dsh-chat-id): единый core.chat_key.
+        # Идентичность чата (x-dsh-chat-id / prompt_cache_key): единый core.chat_key.
         # Опенкод-сессия создаётся на запрос; ключ — корреляция в логе, не влияет на генерацию.
+        # Невалидный ключ — как без ключа (без 400).
         extra_body = req.get("extra_body")
         chat = resolve_chat_key(
             req, self.headers, extra_body if isinstance(extra_body, dict) else None
         )
-        if chat.invalid:
-            xs["exit_reason"] = "bad_request"
-            self._send(
-                400,
-                {
-                    "error": {
-                        "message": "invalid chat key",
-                        "type": "invalid_request",
-                        "code": 400,
-                    }
-                },
-            )
-            return
         if chat.keyed:
             _log(f"chat key={chat.digest[:16]} source={chat.source}")
 

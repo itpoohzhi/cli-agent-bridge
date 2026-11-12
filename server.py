@@ -157,7 +157,11 @@ from core.turn_session_manager import (  # noqa: E402
     hash_token,
     validate_turn_id,
 )
-from core.chat_key import digest_of, resolve_chat_key  # noqa: E402
+from core.chat_key import (  # noqa: E402
+    SOURCES_CACHE_KEY_ONLY,
+    digest_of,
+    resolve_chat_key,
+)
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
@@ -7520,9 +7524,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     )
                     return
             # Маршрут хода и b_guard ДО сериализации промпта (CARD-W2-04: однопроходный рендер).
-            # Фасад читает только prompt_cache_key; невалидный ключ — маршрут nokey (прежнее поведение).
+            # Осознанное исключение из единого набора источников: фасад DSH читает только
+            # prompt_cache_key и в «мягком» режиме (прежнее поведение: ключ с пробелами/
+            # контролами шёл в keyed по длине). Невалидный ключ — маршрут nokey, как во всех мостах.
             chat = resolve_chat_key(
-                req, namespace=RPC_NAMESPACE, sources=("prompt_cache_key",)
+                req,
+                namespace=RPC_NAMESPACE,
+                sources=SOURCES_CACHE_KEY_ONLY,
+                lenient=True,
             )
             raw_key = chat.value if chat.keyed else req.get("prompt_cache_key")
             keyed = chat.keyed

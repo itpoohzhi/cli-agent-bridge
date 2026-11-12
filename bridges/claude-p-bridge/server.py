@@ -64,8 +64,9 @@ from core.chat_key import resolve_chat_key  # noqa: E402
 from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.usage_wire import (  # noqa: E402
+    build_wire_usage,
+    extract_cache_creation_tokens,
     extract_cache_read_tokens,
-    normalize_prompt_cache_details,
 )
 
 try:
@@ -100,38 +101,20 @@ except ImportError as exc:
 
 
 def _wire_usage(usage: dict) -> dict:
-    """OpenAI-`usage` из result-события `claude -p`.
+    """OpenAI-`usage` из result-события `claude -p` (арифметика кэша — core.usage_wire).
 
-    `input_tokens` Claude исключает cache-read, поэтому при известном cache-read
-    `prompt_tokens` = input + cache_read (OpenAI-семантика: cached входит в prompt).
-    Нет данных кэша — прежние значения и без `prompt_tokens_details`.
+    `input_tokens` Claude исключает cache-read и cache-creation (семантика Anthropic
+    API), поэтому они прибавляются к `prompt_tokens` в общем модуле.
     """
-    prompt = usage.get("input_tokens", 0)
-    completion = usage.get("output_tokens", 0)
-    cache_read = extract_cache_read_tokens(usage)
-    details = None
-    if (
-        cache_read is not None
-        and isinstance(prompt, int)
-        and not isinstance(prompt, bool)
-    ):
-        details, inconsistent = normalize_prompt_cache_details(
-            prompt + cache_read, cache_read
-        )
-        if details is not None:
-            prompt += cache_read
-        if inconsistent:
-            _log(
-                f"usage_cache_inconsistent prompt_tokens={prompt!r} "
-                f"cache_read_tokens={cache_read!r}"
-            )
-    wire = {
-        "prompt_tokens": prompt,
-        "completion_tokens": completion,
-        "total_tokens": prompt + completion,
-    }
-    if details is not None:
-        wire["prompt_tokens_details"] = details
+    wire, inconsistent = build_wire_usage(
+        usage.get("input_tokens", 0),
+        usage.get("output_tokens", 0),
+        extract_cache_read_tokens(usage),
+        extract_cache_creation_tokens(usage),
+        input_includes_cache=False,
+    )
+    if inconsistent:
+        _log("usage_cache_inconsistent in claude result usage")
     return wire
 
 
@@ -943,25 +926,13 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/chat/completions"):
             self._send(404, {"error": {"message": f"not found: {path}"}})
             return
-        # Идентичность чата (prompt_cache_key / x-dsh-chat-id) — для лога и корреляции;
-        # генерация от неё не зависит. Невалидный ключ — 400 до спавна.
+        # Идентичность чата (x-dsh-chat-id / prompt_cache_key) — только для лога и
+        # корреляции; генерация от неё не зависит. Невалидный ключ — как без ключа (без 400).
         body = req if isinstance(req, dict) else {}
         extra_body = body.get("extra_body")
         chat = resolve_chat_key(
             body, self.headers, extra_body if isinstance(extra_body, dict) else None
         )
-        if chat.invalid:
-            self._send(
-                400,
-                {
-                    "error": {
-                        "message": "invalid chat key",
-                        "type": "invalid_request",
-                        "code": 400,
-                    }
-                },
-            )
-            return
         if chat.keyed:
             _log(f"chat key={chat.digest[:16]} source={chat.source}")
         # Невалидную модель отсекаем до SSE-заголовков, иначе 400 уже не отправить.
@@ -1021,12 +992,15 @@ class Handler(BaseHTTPRequestHandler):
             _log("client gone before headers")
             return
 
-        def chunk(delta: dict, finish=None) -> str:
-            return "data: " + json.dumps({
+        def chunk(delta: dict, finish=None, usage: dict | None = None) -> str:
+            payload = {
                 "id": completion_id, "object": "chat.completion.chunk", "created": created,
                 "model": shown_model,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-            }, ensure_ascii=False) + "\n\n"
+            }
+            if usage is not None:
+                payload["usage"] = usage
+            return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
         def on_text(value: str) -> bool:
             return self._emit(chunk({"content": value}))
@@ -1049,7 +1023,7 @@ class Handler(BaseHTTPRequestHandler):
         err = self._error_body(out)
         if err is None:
             finish = "tool_calls" if out.get("tool_calls") else "stop"
-            self._emit(chunk({}, finish))
+            self._emit(chunk({}, finish, _wire_usage(out.get("usage") or {})))
         else:
             error_msg = str(err.get("message") or "") if isinstance(err, dict) else str(err)
             error_chunk = format_stream_error_sse(str(error_msg), finish_reason="stop")

@@ -146,7 +146,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from core.backend_adapter import ToolCall, ToolFunction, TurnResult, Usage  # noqa: E402
-from core.chat_key import resolve_chat_key  # noqa: E402
+from core.chat_key import SOURCES_CACHE_KEY_ONLY, resolve_chat_key  # noqa: E402
 from core.usage_wire import (  # noqa: E402
     extract_cache_read_tokens,
     normalize_prompt_cache_details,
@@ -2908,20 +2908,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
-        # Ключ чата (prompt_cache_key) — единый разбор core.chat_key; невалидный — 400.
-        chat = resolve_chat_key(req, sources=("prompt_cache_key",))
-        if chat.invalid:
-            self._send(
-                400,
-                {
-                    "error": {
-                        "message": "invalid chat key",
-                        "type": "invalid_request",
-                        "code": 400,
-                    }
-                },
-            )
-            return
+        # Ключ чата — единый разбор core.chat_key. Осознанное исключение из набора
+        # источников: muse и до унификации читал только prompt_cache_key как идентичность
+        # сессии; расширение заголовками сменило бы её у существующих клиентов.
+        # Невалидный ключ — как без ключа (nokey), без 400.
+        chat = resolve_chat_key(req, sources=SOURCES_CACHE_KEY_ONLY)
 
         raw_tools = req.get("tools")
         tool_schemas = build_tool_schemas(raw_tools)

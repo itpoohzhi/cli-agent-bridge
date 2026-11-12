@@ -9,7 +9,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import chat_key  # noqa: E402
-from core.chat_key import ChatKey, digest_of, resolve_chat_key  # noqa: E402
+from core.chat_key import (  # noqa: E402
+    SOURCES_CACHE_KEY_ONLY,
+    SOURCES_DEFAULT,
+    SOURCES_SESSION_ID,
+    ChatKey,
+    digest_of,
+    resolve_chat_key,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -57,22 +64,62 @@ def test_env_limit_and_fallback(monkeypatch):
 
 
 def test_source_priority_and_no_fallback_after_invalid():
+    # Явные chat-id приоритетнее prompt_cache_key (аффинность кэша — не идентичность чата).
     headers = {"x-dsh-chat-id": "h1", "x-session-id": "h2"}
     extra = {"chat_id": "ex"}
     req = {"prompt_cache_key": "pck", "chat_id": "body"}
     res = resolve_chat_key(req, headers, extra)
-    assert (res.value, res.source) == ("pck", "prompt_cache_key")
-    del req["prompt_cache_key"]
-    assert resolve_chat_key(req, headers, extra).value == "h1"
+    assert (res.value, res.source) == ("h1", "x-dsh-chat-id")
     del headers["x-dsh-chat-id"]
     assert resolve_chat_key(req, headers, extra).value == "h2"
     del headers["x-session-id"]
     assert resolve_chat_key(req, headers, extra).value == "ex"
     extra["chat_id"] = None
     assert resolve_chat_key(req, headers, extra).value == "body"
+    del req["chat_id"]
+    assert resolve_chat_key(req, headers, extra).value == "pck"
     # Невалидный приоритетный источник не отдаёт чат следующему.
-    bad = resolve_chat_key({"prompt_cache_key": "", "chat_id": "body"})
+    bad = resolve_chat_key({"chat_id": "", "prompt_cache_key": "pck"})
     assert bad.invalid and not bad.keyed
+    # Битый prompt_cache_key не отравляет валидный явный chat-id.
+    ok = resolve_chat_key({"prompt_cache_key": "a\x00b"}, {"x-dsh-chat-id": "good"})
+    assert ok.keyed and ok.value == "good"
+
+
+def test_session_id_sources_exclude_prompt_cache_key():
+    req = {"prompt_cache_key": "shared-prefix-cache"}
+    assert SOURCES_SESSION_ID == tuple(s for s in SOURCES_DEFAULT if s != "prompt_cache_key")
+    res = resolve_chat_key(req, sources=SOURCES_SESSION_ID)
+    assert (res.keyed, res.invalid, res.route) == (False, False, "nokey")
+    # Битый prompt_cache_key для набора сессий вообще не источник.
+    res = resolve_chat_key({"prompt_cache_key": "a\x00b"}, sources=SOURCES_SESSION_ID)
+    assert (res.keyed, res.invalid) == (False, False)
+    only = resolve_chat_key(req, {"x-dsh-chat-id": "h"}, sources=SOURCES_CACHE_KEY_ONLY)
+    assert only.value == "shared-prefix-cache"
+
+
+def test_strict_mode_strips_value_and_digest_consistently():
+    a = resolve_chat_key({"prompt_cache_key": "  chat1  "})
+    b = resolve_chat_key({"prompt_cache_key": "chat1"})
+    assert a.value == b.value == "chat1" and a.digest == b.digest
+
+
+def test_lenient_mode_is_legacy_facade_compat():
+    # Прежнее поведение фасада: str, 0 < len <= max, значение как есть (пробелы/контролы).
+    for raw in ("a b", " k ", "a\tb", "   "):
+        res = resolve_chat_key(
+            {"prompt_cache_key": raw},
+            namespace="ns",
+            sources=SOURCES_CACHE_KEY_ONLY,
+            lenient=True,
+        )
+        assert res.keyed and res.value == raw and not res.invalid
+        assert res.digest == hashlib.sha256(f"ns\0{raw}".encode()).hexdigest()
+    for raw in ("", "k" * 513, 5, "a\ud800b"):
+        res = resolve_chat_key(
+            {"prompt_cache_key": raw}, sources=SOURCES_CACHE_KEY_ONLY, lenient=True
+        )
+        assert res.invalid and not res.keyed and res.route == "nokey"
 
 
 def test_headers_case_insensitive_plain_dict():
@@ -82,7 +129,7 @@ def test_headers_case_insensitive_plain_dict():
 
 def test_sources_narrowing():
     req = {"chat_id": "body"}
-    assert resolve_chat_key(req, sources=("prompt_cache_key",)).route == "nokey"
+    assert resolve_chat_key(req, sources=SOURCES_CACHE_KEY_ONLY).route == "nokey"
     assert resolve_chat_key(req).route == "keyed"
 
 

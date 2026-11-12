@@ -16,7 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from tests.bridge_testlib import BridgeCase  # noqa: E402
-from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.usage_wire import (  # noqa: E402
+    build_wire_usage,
+    extract_cache_creation_tokens,
+    normalize_prompt_cache_details,
+)
 from tests.rpc_testlib import USAGE_LINE  # noqa: E402
 
 MODEL = "claude-sonnet-5-5"
@@ -315,3 +319,60 @@ class TestCacheUsageHttp(BridgeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuildWireUsageTests(unittest.TestCase):
+    """Единая арифметика кэша `build_wire_usage` (REQ-CACHE-001)."""
+
+    def test_input_excludes_cache_adds_read_and_creation(self) -> None:
+        wire, bad = build_wire_usage(
+            3, 2, 40, 7, input_includes_cache=False
+        )
+        self.assertFalse(bad)
+        self.assertEqual(
+            wire,
+            {
+                "prompt_tokens": 50,
+                "completion_tokens": 2,
+                "total_tokens": 52,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+        )
+
+    def test_input_includes_cache_does_not_double_count(self) -> None:
+        wire, bad = build_wire_usage(100, 5, 40, 7, input_includes_cache=True)
+        self.assertFalse(bad)
+        self.assertEqual(wire["prompt_tokens"], 100)
+        self.assertEqual(wire["total_tokens"], 105)
+        self.assertEqual(wire["prompt_tokens_details"], {"cached_tokens": 40})
+
+    def test_inconsistent_cache_is_dropped_without_clamp(self) -> None:
+        wire, bad = build_wire_usage(10, 5, 50, input_includes_cache=True)
+        self.assertTrue(bad)
+        self.assertNotIn("prompt_tokens_details", wire)
+        self.assertEqual(wire["prompt_tokens"], 10)
+
+    def test_zero_policy_explicit_zero_emitted_unknown_suppressed(self) -> None:
+        for includes in (True, False):
+            wire, _ = build_wire_usage(10, 1, 0, input_includes_cache=includes)
+            self.assertEqual(wire["prompt_tokens_details"], {"cached_tokens": 0})
+            wire, _ = build_wire_usage(10, 1, None, input_includes_cache=includes)
+            self.assertNotIn("prompt_tokens_details", wire)
+
+    def test_creation_counts_even_without_cache_read(self) -> None:
+        wire, _ = build_wire_usage(3, 2, None, 7, input_includes_cache=False)
+        self.assertEqual(wire["prompt_tokens"], 10)
+        self.assertNotIn("prompt_tokens_details", wire)
+
+    def test_bad_types_become_zero(self) -> None:
+        wire, _ = build_wire_usage(True, "x", None, input_includes_cache=False)
+        self.assertEqual(
+            wire, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
+
+    def test_extract_cache_creation_tokens(self) -> None:
+        self.assertEqual(
+            extract_cache_creation_tokens({"cache_creation_input_tokens": 7}), 7
+        )
+        self.assertIsNone(extract_cache_creation_tokens({"cacheCreationTokens": True}))
+        self.assertIsNone(extract_cache_creation_tokens(None))

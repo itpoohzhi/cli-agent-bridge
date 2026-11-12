@@ -10779,7 +10779,7 @@ class UniversalImageFallbackTests(unittest.TestCase):
 
     def test_uf06_hot_and_explicit_cid_cold_reset(self) -> None:
         chat_id = "uf06-chat"
-        token = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16]
+        token = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()
         key = (token, "gemini-4-argon", "", "low")
         msgs: list[dict[str, object]] = [
             _img_msg(_uf_part("image/png")),
@@ -12502,8 +12502,8 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
 
     def test_chat_id_isolation_different_conversations(self) -> None:
         key_for = _bfn("_session_key_for")
-        token_a = hashlib.sha256("chat-A".encode("utf-8")).hexdigest()[:16]
-        token_b = hashlib.sha256("chat-B".encode("utf-8")).hexdigest()[:16]
+        token_a = hashlib.sha256("chat-A".encode("utf-8")).hexdigest()
+        token_b = hashlib.sha256("chat-B".encode("utf-8")).hexdigest()
         self.assertEqual(key_for("m", "/w", "low", "chat-A"), (token_a, "m", "/w", "low"))
         with _Fixture() as fx:
             _ = fx.write_scenario(
@@ -12885,10 +12885,10 @@ class SessionFailClosedTests(unittest.TestCase):
         extra: dict[str, object] = {"chat_id": "extra"}
         req: dict[str, object] = {"chat_id": "body", "prompt_cache_key": "cache"}
         chat_id_for = _bfn("_request_chat_id")
-        # prompt_cache_key — первый источник (единый core.chat_key).
-        self.assertEqual(chat_id_for(headers, extra, req), ("cache", False))
+        # prompt_cache_key — аффинность кэша, не chat id: источником не является.
+        self.assertEqual(chat_id_for(headers, extra, req), ("header-A", False))
         req["prompt_cache_key"] = "bad\x00id"
-        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        self.assertEqual(chat_id_for(headers, extra, req), ("header-A", False))
         del req["prompt_cache_key"]
         self.assertEqual(chat_id_for(headers, extra, req), ("header-A", False))
         headers["x-dsh-chat-id"] = "bad\x00id"
@@ -13245,7 +13245,7 @@ class SessionFailClosedTests(unittest.TestCase):
                 self.assertNotIn("--conversation", fx.spawns()[1])
 
     def test_request_without_chat_id_does_not_use_session_store(self) -> None:
-        """Без chat ID, prompt_cache_key и cwd каждый ход холодный."""
+        """Без chat ID и cwd каждый ход холодный, даже с prompt_cache_key."""
         for chat_id, cwd in (
             ("", ""), (" \t ", " \t "), ("", "."), ("", ".."), ("", "~"),
             ("", "rel/path"), ("", True), ("", 1), ("", []), ("", {}),
@@ -13273,6 +13273,7 @@ class SessionFailClosedTests(unittest.TestCase):
                         bodies[1]["conversation_id"] = _CID
                         for body in bodies:
                             body["extra_body"] = {"chat_id": chat_id, "cwd": cwd}
+                            body["prompt_cache_key"] = "shared-prefix-cache"
                         first = bridge.post(bodies[0])
                         second = bridge.post(bodies[1])
                         claim.assert_not_called()
@@ -13380,7 +13381,7 @@ class SessionFailClosedTests(unittest.TestCase):
         """Оба допустимых формата валидны; пустые и пробельные ключи отвергаются."""
         key_for = _bfn("_session_key_for")
         valid = _bfn("_session_key_valid")
-        token = hashlib.sha256(b"chat-A").hexdigest()[:16]
+        token = hashlib.sha256(b"chat-A").hexdigest()
         for chat, cwd, expected in (
             (" chat-A ", "", (token, "m", "", "low")),
             ("chat-A", " /w/../abs/./path ", (token, "m", "/abs/path", "low")),
@@ -13639,7 +13640,7 @@ class SessionFailClosedTests(unittest.TestCase):
     def test_session_key_for_non_string_cwd_with_chat_never_raises(self) -> None:
         """F-002: невалидный cwd при валидном chat ID не роняет ключ, а гасит его."""
         key_for = _bfn("_session_key_for")
-        token = hashlib.sha256(b"chat-A").hexdigest()[:16]
+        token = hashlib.sha256(b"chat-A").hexdigest()
         # Fail-closed: любой переданный невалидный cwd ключа не образует.
         limit = _int(_bval("CWD_MAX_LEN"))
         invalid_cwd: tuple[object, ...] = (
@@ -13736,7 +13737,7 @@ class SessionFailClosedTests(unittest.TestCase):
             )
             self.assertEqual(len(store), 2)
             for chat_id, cid in (("chat-A", _CID), ("chat-B", _CID_B)):
-                token = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16]
+                token = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()
                 keys = [key for key, entry in store.items() if entry["cid"] == cid]
                 self.assertEqual(len(keys), 1)
                 self.assertEqual(len(keys[0]), 4)

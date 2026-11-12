@@ -1,8 +1,9 @@
 """Единый ключ чата (`prompt_cache_key`) и cache-usage в суб-мостах.
 
 Регрессии по одному на мост: ключ доходит до идентичности чата/сессии, запрос
-без ключа ведёт себя по-прежнему, невалидный ключ -> 400 (agy сохраняет прежний
-контракт: невалидный chat id -> холодный ход без сессии, см. test_agy_*).
+без ключа ведёт себя по-прежнему. Единый контракт на невалидный ключ во ВСЕХ
+мостах: запрос обслуживается как без ключа (nokey), без 400. `prompt_cache_key` —
+аффинность кэша, а не идентичность чата: agy его как chat id не читает.
 Реальные внешние процессы не запускаются.
 """
 
@@ -25,6 +26,7 @@ from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 
 KEY = "chat-key-under-test"
 DIGEST16 = hashlib.sha256(KEY.encode()).hexdigest()[:16]
+DIGEST_FULL = hashlib.sha256(KEY.encode()).hexdigest()
 BODY_LONG_KEY = "k" * 513
 
 
@@ -128,16 +130,29 @@ def test_muse_without_key_keeps_empty_session(muse, live, monkeypatch):
 
 
 @pytest.mark.parametrize("bad", ["", "   ", BODY_LONG_KEY, 7, "a\x00b"])
-def test_muse_invalid_key_is_400(muse, live, monkeypatch, bad):
-    monkeypatch.setattr(
-        muse.TURN_MANAGER,
-        "create_or_attach_turn",
-        lambda **_k: pytest.fail("invalid key must not reach the turn manager"),
-    )
-    status, payload = live(muse).post(_muse_body(prompt_cache_key=bad))
-    assert status == 400
-    assert payload["error"]["type"] == "invalid_request"
-    assert "chat key" in payload["error"]["message"]
+def test_muse_invalid_key_is_treated_as_no_key(muse, live, monkeypatch, bad):
+    seen: list[str] = []
+
+    def fake_create(**kwargs: Any) -> Any:
+        seen.append(kwargs["session_id"])
+        raise PermissionError("stop after identity")
+
+    monkeypatch.setattr(muse.TURN_MANAGER, "create_or_attach_turn", fake_create)
+    status, _ = live(muse).post(_muse_body(prompt_cache_key=bad))
+    assert status == 403 and seen == [""]
+
+
+def test_muse_reads_only_prompt_cache_key_documented_exception(muse, live, monkeypatch):
+    """Осознанное исключение: заголовок chat-id не меняет идентичность сессии muse."""
+    seen: list[str] = []
+
+    def fake_create(**kwargs: Any) -> Any:
+        seen.append(kwargs["session_id"])
+        raise PermissionError("stop after identity")
+
+    monkeypatch.setattr(muse.TURN_MANAGER, "create_or_attach_turn", fake_create)
+    status, _ = live(muse).post(_muse_body(), headers={"x-dsh-chat-id": "hdr"})
+    assert status == 403 and seen == [""]
 
 
 def test_muse_cache_read_goes_through_normalizer(muse):
@@ -216,10 +231,16 @@ def test_claude_without_key_is_unchanged(claude, live):
 
 
 @pytest.mark.parametrize("bad", ["", BODY_LONG_KEY, 5, "a\tb"])
-def test_claude_invalid_key_is_400_before_spawn(claude, live, bad):
-    status, payload = live(claude).post(_claude_body(prompt_cache_key=bad))
-    assert status == 400 and _FakeRun.calls == 0
-    assert payload["error"]["type"] == "invalid_request"
+def test_claude_invalid_key_is_treated_as_no_key(claude, live, bad):
+    status, _ = live(claude).post(_claude_body(prompt_cache_key=bad))
+    assert status == 200 and _FakeRun.calls == 1
+    assert "chat key=" not in "\n".join(claude.captured_logs)
+
+
+@pytest.mark.parametrize("bad", ["", BODY_LONG_KEY, "a\tb"])
+def test_claude_invalid_header_does_not_break_request(claude, live, bad):
+    status, _ = live(claude).post(_claude_body(), headers={"x-session-id": bad})
+    assert status == 200 and _FakeRun.calls == 1
 
 
 def test_claude_cache_read_goes_to_prompt_tokens_details(claude, live):
@@ -233,6 +254,69 @@ def test_claude_cache_read_goes_to_prompt_tokens_details(claude, live):
         "total_tokens": 45,
         "prompt_tokens_details": {"cached_tokens": 40},
     }
+
+
+def test_claude_cache_creation_counts_in_prompt_tokens(claude, live):
+    _FakeRun.script = _claude_script(
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "cache_read_input_tokens": 40,
+            "cache_creation_input_tokens": 7,
+        }
+    )
+    _, payload = live(claude).post(_claude_body())
+    assert payload["usage"]["prompt_tokens"] == 50
+    assert payload["usage"]["total_tokens"] == 52
+    assert payload["usage"]["prompt_tokens_details"] == {"cached_tokens": 40}
+
+
+def _sse_usage_frames(raw: str) -> list[dict]:
+    frames = []
+    for line in raw.splitlines():
+        if line.startswith("data: ") and line != "data: [DONE]":
+            frame = json.loads(line[6:])
+            if "usage" in frame:
+                frames.append(frame)
+    return frames
+
+
+def _post_sse(live_server: _Live, payload: dict) -> str:
+    conn = http.client.HTTPConnection("127.0.0.1", live_server.port, timeout=30)
+    try:
+        conn.request(
+            "POST",
+            "/v1/chat/completions",
+            json.dumps(payload),
+            {"Content-Type": "application/json", "Authorization": "Bearer t"},
+        )
+        return conn.getresponse().read().decode("utf-8", "replace")
+    finally:
+        conn.close()
+
+
+def test_claude_sse_final_chunk_carries_cached_tokens(claude, live):
+    _FakeRun.script = _claude_script(
+        {"input_tokens": 3, "output_tokens": 2, "cache_read_input_tokens": 40}
+    )
+    raw = _post_sse(live(claude), _claude_body(stream=True))
+    frames = _sse_usage_frames(raw)
+    assert len(frames) == 1
+    assert frames[0]["choices"][0]["finish_reason"] == "stop"
+    assert frames[0]["usage"] == {
+        "prompt_tokens": 43,
+        "completion_tokens": 2,
+        "total_tokens": 45,
+        "prompt_tokens_details": {"cached_tokens": 40},
+    }
+    assert raw.rstrip().endswith("data: [DONE]")
+
+
+def test_claude_sse_without_cache_has_no_details(claude, live):
+    raw = _post_sse(live(claude), _claude_body(stream=True))
+    (frame,) = _sse_usage_frames(raw)
+    assert "prompt_tokens_details" not in frame["usage"]
+    assert frame["usage"]["total_tokens"] == 5
 
 
 def test_claude_upstream_without_cache_has_no_details_key(claude, live):
@@ -273,12 +357,13 @@ def test_zen_without_key_keeps_previous_route(zen, live):
 
 
 @pytest.mark.parametrize("bad", ["", BODY_LONG_KEY, 5, "a\nb"])
-def test_zen_invalid_key_is_400(zen, live, bad):
+def test_zen_invalid_key_is_treated_as_no_key(zen, live, bad):
+    # Не 400 invalid_request: дальше срабатывает прежний гейт «no user content».
     status, payload = live(zen).post(
         {"model": _zen_model(zen), "messages": [], "prompt_cache_key": bad}
     )
-    assert status == 400
-    assert payload["error"]["type"] == "invalid_request"
+    assert status == 400 and "no user content" in payload["error"]["message"]
+    assert "chat key=" not in "\n".join(zen.captured_logs)
 
 
 def test_zen_usage_uses_shared_normalizer(zen, monkeypatch):
@@ -313,27 +398,45 @@ def agy(monkeypatch):
     return _load("agy-bridge", "agy", monkeypatch)
 
 
-def test_agy_prompt_cache_key_is_first_chat_source(agy):
+def test_agy_prompt_cache_key_is_not_a_chat_source(agy):
+    """prompt_cache_key — аффинность кэша, не идентичность чата: сессии не склеиваются."""
     extra = {"chat_id": "extra-chat"}
     req = {"prompt_cache_key": KEY, "chat_id": "body-chat"}
     headers = {"x-dsh-chat-id": "header-chat"}
-    assert agy._request_chat_id(headers, extra, req) == (KEY, False)
-    assert agy._request_chat_id(headers, extra, {"chat_id": "body-chat"}) == (
-        "header-chat",
-        False,
-    )
-    # Без ключа прежний приоритет и результат.
+    assert agy._request_chat_id(headers, extra, req) == ("header-chat", False)
+    assert agy._request_chat_id({}, extra, req) == ("extra-chat", False)
+    assert agy._request_chat_id({}, {}, req) == ("body-chat", False)
+    # Только prompt_cache_key (валидный или битый) -> нет chat id, холодный ход.
+    assert agy._request_chat_id({}, {}, {"prompt_cache_key": KEY}) == ("", False)
+    assert agy._request_chat_id({}, {}, {"prompt_cache_key": "a\x00b"}) == ("", False)
     assert agy._request_chat_id({}, {}, {}) == ("", False)
+
+
+def test_agy_two_chats_sharing_cache_key_get_distinct_sessions(agy):
+    shared = {"prompt_cache_key": "shared-prefix-cache"}
+    a, _ = agy._request_chat_id({"x-dsh-chat-id": "chat-A"}, {}, shared)
+    b, _ = agy._request_chat_id({"x-dsh-chat-id": "chat-B"}, {}, shared)
+    assert agy._session_key_for("m", "/tmp", "low", a) != agy._session_key_for(
+        "m", "/tmp", "low", b
+    )
+    # Без chat-id общий cache-key сессию не создаёт (ключ только по cwd).
+    no_chat, _ = agy._request_chat_id({}, {}, shared)
+    assert agy._session_key_for("m", "/tmp", "low", no_chat) == ("m", "/tmp", "low")
 
 
 def test_agy_key_becomes_session_token_not_raw(agy):
     key = agy._session_key_for("m", "/tmp", "low", KEY)
-    assert key == (DIGEST16, "m", "/tmp", "low")
+    # Полный sha256 — идентичность сессии, не усечённый префикс.
+    assert key == (DIGEST_FULL, "m", "/tmp", "low")
     assert KEY not in "".join(key)
 
 
+def test_agy_invalid_explicit_chat_id_is_cold_not_error(agy):
+    assert agy._request_chat_id({"x-dsh-chat-id": "a\tb"}, {}, {}) == ("", True)
+
+
 def test_agy_limit_comes_from_shared_config(agy, monkeypatch):
-    assert agy._request_chat_id({}, {}, {"prompt_cache_key": "k" * 512})[1] is False
-    assert agy._request_chat_id({}, {}, {"prompt_cache_key": "k" * 513}) == ("", True)
+    assert agy._request_chat_id({}, {}, {"chat_id": "k" * 512})[1] is False
+    assert agy._request_chat_id({}, {}, {"chat_id": "k" * 513}) == ("", True)
     monkeypatch.setenv("BRIDGE_CHAT_KEY_MAX_LEN", "16")
-    assert agy._request_chat_id({}, {}, {"prompt_cache_key": "k" * 17}) == ("", True)
+    assert agy._request_chat_id({}, {}, {"chat_id": "k" * 17}) == ("", True)
