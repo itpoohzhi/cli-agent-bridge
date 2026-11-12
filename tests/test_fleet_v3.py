@@ -113,6 +113,7 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(len(catalog["order"]), len(data["models"]))
         self.assertEqual(len(catalog["order"]), 28)
         self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
+        self.assertEqual(catalog["models"]["claude-haiku-5-5"]["backend"], "claude-p")
         self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
         self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
         for model_id in ("claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"):
