@@ -151,6 +151,7 @@ from core.watchdog import (  # noqa: E402
     WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
     AdaptiveTimeoutController,
 )
+from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 from core.proc_groups import spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
@@ -2852,7 +2853,8 @@ def _session_key_for(
             return ()
 
     if chat:
-        chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
+        # Полный sha256: токен — идентичность сессии, усечённый дайджест допускал бы коллизии.
+        chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()
         return (chat_token, model, cwd_norm, effort)
     if cwd_norm:
         return (model, cwd_norm, effort)
@@ -2862,23 +2864,18 @@ def _session_key_for(
 def _request_chat_id(
     headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
 ) -> tuple[str, bool]:
-    """Первый переданный chat ID и признак невалидного идентификатора."""
-    for value in (
-        headers.get("x-dsh-chat-id"),
-        headers.get("x-session-id"),
-        extra.get("chat_id"),
-        (req or {}).get("chat_id"),
-    ):
-        if value is None:
-            continue
-        if not isinstance(value, str) or len(value) > 256 or any(
-            ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
-            for c in value
-        ):
-            return "", True
-        val = value.strip()
-        return val, not bool(val)
-    return "", False
+    """Первый переданный chat ID и признак невалидного идентификатора.
+
+    Источники и валидация — единый `core.chat_key`, набор SOURCES_SESSION_ID
+    (только явные chat-id). `prompt_cache_key` намеренно НЕ источник: по
+    OpenAI-семантике это аффинность кэша префикса, его шарят разные чаты, и
+    как идентичность сессии он склеил бы чужие диалоги. Предел длины — из
+    BRIDGE_CHAT_KEY_MAX_LEN (по умолчанию 512).
+    """
+    chat = resolve_chat_key(req, headers, extra, sources=SOURCES_SESSION_ID)
+    if chat.invalid:
+        return "", True
+    return chat.value, False
 
 
 def _session_key_valid(sess_key: tuple[str, ...]) -> bool:

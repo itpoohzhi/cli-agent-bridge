@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- **`prompt_cache_key` во всех мостах (единый `core/chat_key.py`) и cache-usage:** честная матрица уровней поддержки (`keyed-session` — фасад и muse; `log-only` — claude-p и opencode-zen; `ignored` — agy) — `docs/prompt-cache-key-support.md`. Один контракт маршрута (invalid → nokey, без 400), два профиля валидности (strict/lenient); lenient — только muse и фасад (обратная совместимость).
 - **Zero-Friction Model Onboarding (Волны 1–4, спека `ARCH-SPEC-ZF-ONBOARDING`):** манифесты провайдеров `providers.d/*.yaml` + закрытая JSON Schema, `core/provider_manifest.py`, компилятор `fleet.json` (`core/fleet_compiler.py`, `tools/fleet_compile.py --check|--write`), `build_catalog(mode="isolate")` и `KindConstraints` адаптеров, узкий адаптер параметров `core/param_adapter.py`, жизненный цикл модели `core/model_lifecycle.py`, discovery `core/discovery.py`, пробник `scripts/capability_probe.py` (`smoke_models.py --probe-model`), Quarantine Role Gate `core/quarantine_gate.py`, резолвер пулов `scripts/resolve_pool.py`. Всё за флагами (дефолт `false` = прежнее поведение): `BRIDGE_FLEET_SAFE_CATALOG_ENABLED`, `BRIDGE_PROVIDER_CONSTRAINTS_ENABLED`, `BRIDGE_COMPILED_FLEET_ENABLED`.
 - **ADR-0015:** non-stream через внутренний SSE, живость S/P/T, `BRIDGE_CLI_*` (fallback `DROID_*`) за флагами GigaRC; неверный конфиг — `ConfigError`, `start.sh` exit 78.
 - **Проброс `extra_body.env` и CLI `agent-browser` (ADR-0016):** за флагом GigaRC
