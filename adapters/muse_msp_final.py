@@ -1,12 +1,4 @@
-"""Чистые функции фаз MSP: только finalAnswer главного хода попадает в content.
-
-Главный ход — turnId первого userMessage (в реальном MSP-потоке приходит первым).
-commentary главного хода зеркалится в reasoning вызывающим кодом через базовый
-_summary, финалы подагентов копятся в PhaseState и уходят одной строкой в
-reasoning на своём item/completed либо на turn/completed (реальные финалы
-подагентов completed могут не получать). Модуль не импортирует вызывающий
-модуль: все нужные данные принимает аргументами.
-"""
+"""Фазы MSP: только finalAnswer главного хода попадает в content."""
 
 from __future__ import annotations
 
@@ -25,11 +17,7 @@ from adapters.muse_msp_hints import (
 
 @dataclass
 class PhaseState:
-    """Состояние маршрутизации фаз одного хода MSP.
-
-    main_turn якорится только на userMessage с непустым turnId; каждый реестр
-    ограничен limit (вызывающий передаёт MAX_TRACKED_ITEMS базы).
-    """
+    """Состояние фаз; main_turn требует непустых userMessage itemId и turnId."""
 
     main_turn: str = ""
     anchored: bool = False
@@ -41,14 +29,11 @@ class PhaseState:
     mirror_indices: dict[str, int] = field(default_factory=dict)
     sub_texts: dict[str, list[str]] = field(default_factory=dict)
     flushed: set[str] = field(default_factory=set)
+    quarantined: set[str] = field(default_factory=set)
 
 
 def trackable(container: Any, iid: str, limit: int) -> bool:
-    """Запись iid заводить можно: уже есть либо реестр и длина iid — в пределах базы.
-
-    Для set подписка даёт TypeError: вызывающий flush_chunk проверяет членство
-    сам, здесь для set остаётся только предел длины реестра.
-    """
+    """Проверить, что реестр и длина iid остаются в пределах базы."""
     allowed = True
     try:
         container[iid]
@@ -92,6 +77,8 @@ def _reject_collision(state: PhaseState, iid: str, scope: str) -> None:
     routes = {"main": state.routes}.get(scope, state.sub_routes)
     routes[iid] = "ignore"
     state.sub_texts.pop(iid, None)
+    if trackable(state.quarantined, iid, state.limit):
+        state.quarantined.add(iid)
     if trackable(state.flushed, iid, state.limit):
         state.flushed.add(iid)
 
@@ -150,23 +137,40 @@ def _agent_route(
     return route
 
 
+def _ignore_untyped(state: PhaseState, iid: str, kind: object, turn: object) -> bool:
+    if not iid:
+        return False
+    if kind in ("userMessage", "agentMessage"):
+        return False
+    if kind is not None:
+        return kind not in ("toolCall", "reasoning")
+    if isinstance(turn, str) and turn and state.anchored and turn != state.main_turn:
+        return True
+    return False
+
+
 def route_for(state: PhaseState, method: str, raw: dict[str, Any]) -> tuple[str, str]:
     """Маршрут события; пустые метаданные используют лишь проверенный itemId."""
     iid_value = raw.get("itemId")
     iid = iid_value if isinstance(iid_value, str) else ""
+    if iid and state.quarantined.__contains__(iid):
+        return iid, "ignore"
     route = state.routes.get(iid, state.sub_routes.get(iid, ""))
     kind = raw.get("kind")
+    turn = raw.get("turnId")
+    if _ignore_untyped(state, iid, kind, turn):
+        return iid, "ignore"
     if {"userMessage": True}.get(kind, False):
-        turn = raw.get("turnId")
-        if isinstance(turn, str):
-            if turn:
-                if not state.anchored:
-                    state.anchored = True
-                    state.main_turn = turn
+        if isinstance(turn, str) and turn and iid:
+            if not state.anchored:
+                state.anchored = True
+                state.main_turn = turn
     if {"agentMessage": True}.get(kind, False):
-        if iid:
+        if iid and state.anchored:
             route = _agent_route(state, method, raw, iid, route)
         else:
+            if iid and trackable(state.quarantined, iid, state.limit):
+                state.quarantined.add(iid)
             route = "ignore"
     return iid, route
 
@@ -224,11 +228,7 @@ def store_sub(state: PhaseState, iid: str, text: str, snapshot: bool) -> None:
 
 
 def flush_chunk(state: PhaseState, iid: str, reasoning: str) -> str:
-    """Однострочный финал подагента для append в reasoning; повторно не выдаётся.
-
-    После выдачи накопленный текст освобождается; реестр flushed ограничен
-    тем же пределом, при его исчерпании идемпотентность держит освобождение.
-    """
+    """Выдать однострочный финал подагента в reasoning не более одного раза."""
     line = one_line("".join(state.sub_texts.pop(iid, [])))
     chunk = ""
     if line:

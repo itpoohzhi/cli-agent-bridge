@@ -79,7 +79,7 @@ def test_first_subagent_event_does_not_anchor_main_turn() -> None:
     user_message(events)
     message(events, "f1", MAIN, "finalAnswer", "Финал главного.")
     assert events.text == "Финал главного."
-    assert events.reasoning.count("Финал подагента.") == 1
+    assert "Финал подагента." not in events.reasoning
 
 
 def test_agent_message_without_turn_id_before_anchor_stays_out_of_content() -> None:
@@ -98,7 +98,7 @@ def test_agent_message_without_turn_id_before_anchor_stays_out_of_content() -> N
     user_message(events)
     message(events, "f1", MAIN, "finalAnswer", "Финал главного.")
     assert events.text == "Финал главного."
-    assert "Финал без turnId." in events.reasoning
+    assert "Финал без turnId." not in events.reasoning
 
 
 def test_user_message_without_turn_id_keeps_subagent_out_of_content() -> None:
@@ -109,7 +109,7 @@ def test_user_message_without_turn_id_keeps_subagent_out_of_content() -> None:
     )
     message(events, "s1", SUB, "finalAnswer", "Финал подагента.")
     assert "Финал подагента." not in events.text
-    assert events.reasoning.count("Финал подагента.") == 1
+    assert "Финал подагента." not in events.reasoning
 
 
 def test_foreign_final_route_rejects_later_explicit_main_metadata() -> None:

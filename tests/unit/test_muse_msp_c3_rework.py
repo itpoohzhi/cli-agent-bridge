@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from adapters.muse_msp import MAX_TRACKED_ITEMS
-from adapters.muse_msp_final import choose_text
+from adapters.muse_msp_final import PhaseState, choose_text, route_for
 from tests.unit.msp_testlib import (
     MAIN,
     SUB,
@@ -270,3 +270,58 @@ def test_rw007_failure_without_kind_uses_stored_tool_display_once() -> None:
     )
     assert events.feed("item/completed", params) == ""
     assert events.reasoning.count("Ошибка инструмента: bash — List files") == 1
+
+
+@pytest.mark.parametrize("item", [{}, {"itemId": ""}])
+def test_f001_user_message_without_item_id_does_not_anchor(
+    item: dict[str, str],
+) -> None:
+    state = PhaseState()
+
+    route_for(state, "item/started", {**item, "kind": "userMessage", "turnId": MAIN})
+
+    assert state.anchored is False
+    assert state.main_turn == ""
+
+
+def test_f002_unknown_kind_and_explicit_foreign_turn_are_ignored() -> None:
+    state = PhaseState(main_turn=MAIN, anchored=True, routes={"unknown": "answer"})
+
+    assert route_for(
+        state, "item/started", {"itemId": "unknown", "kind": "status"}
+    ) == (
+        "unknown",
+        "ignore",
+    )
+    assert route_for(state, "item/delta", {"itemId": "foreign", "turnId": SUB}) == (
+        "foreign",
+        "ignore",
+    )
+
+
+def test_f004_colliding_item_id_stays_quarantined() -> None:
+    state = PhaseState(main_turn=MAIN, anchored=True)
+    main = {
+        "itemId": "shared",
+        "kind": "agentMessage",
+        "turnId": MAIN,
+        "messagePhase": "finalAnswer",
+    }
+
+    assert route_for(state, "item/started", main) == ("shared", "answer")
+    assert route_for(state, "item/completed", {**main, "turnId": SUB}) == (
+        "shared",
+        "ignore",
+    )
+    assert route_for(state, "item/completed", main) == ("shared", "ignore")
+    assert "shared" in state.quarantined
+
+
+def test_f005_agent_message_before_anchor_never_reaches_reasoning() -> None:
+    events = parser()
+
+    message(events, "early", SUB, "finalAnswer", "FOREIGN")
+
+    assert events.text == ""
+    assert events.reasoning == ""
+    assert "early" not in events._phase.sub_texts
