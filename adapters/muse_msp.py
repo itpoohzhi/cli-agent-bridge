@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping
 
+from adapters.muse_msp_hints import tool_hint
+
 MAX_TRACKED_ITEMS = 1024
 LIVE_DELTA_MAX_BYTES = 8 << 10
 REASONING_TRUNCATED = "\n[reasoning truncated: reasoning budget reached]\n"
@@ -16,13 +18,29 @@ _SUMMARY_FIELD = re.compile(r"summary\.([0-9]{1,4})")
 
 
 def _suppress_unknown_tool() -> bool:
-    return os.environ.get("BRIDGE_MUSE_SUPPRESS_UNKNOWN_TOOL", "true").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get(
+        "BRIDGE_MUSE_SUPPRESS_UNKNOWN_TOOL", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _plain_tool_name(raw: Mapping[str, Any]) -> str:
+    vals = [
+        str(raw[k]).strip()
+        for k in ("toolName", "tool", "name")
+        if raw.get(k) is not None and str(raw[k]).strip()
+    ]
+    valid = next((v for v in vals if _TOOL_NAME.fullmatch(v)), "")
+    return valid or ("unknown_tool" if (vals or not _suppress_unknown_tool()) else "")
 
 
 def _extract_tool_name(raw: Mapping[str, Any]) -> str:
-    vals = [str(raw[k]).strip() for k in ("toolName", "tool", "name") if raw.get(k) is not None and str(raw[k]).strip()]
-    valid = next((v for v in vals if _TOOL_NAME.fullmatch(v)), "")
-    return valid or ("unknown_tool" if (vals or not _suppress_unknown_tool()) else "")
+    """Отображаемое имя инструмента; с подсказкой из allowlist args — «имя — подсказка»."""
+    display = _plain_tool_name(raw)
+    if display:
+        hint = tool_hint(raw)
+        if hint:
+            display = f"{display} — {hint}"
+    return display
 
 
 def _format_tool_started(name: str) -> str:
@@ -30,7 +48,10 @@ def _format_tool_started(name: str) -> str:
 
 
 def _format_tool_completed(name: str) -> str:
-    return f"[Инструмент {name} завершён]\n" if name else ""
+    out = f"[Инструмент {name} завершён]\n" if name else ""
+    if " — " in name:
+        out = ""
+    return out
 
 
 def utf8_slices(text: str, max_bytes: int = LIVE_DELTA_MAX_BYTES) -> Iterator[str]:
@@ -55,12 +76,13 @@ class _Item:
     parts: dict[int, list[str]] = field(default_factory=dict)
 
 
-class MspEvents:
+class _MspCore:
     """Один ход MSP. Возвращаемая из feed строка — только новый хвост reasoning.
 
     Порядок — порядок поступления событий, ключ сверки snapshot — (itemId, summary.N).
     Уже опубликованные символы никогда не перезаписываются; повторный completed
-    идемпотентен. Аргументы toolCall не сохраняются и не форматируются.
+    идемпотентен. Аргументы toolCall не сохраняются; в маркер идёт только подсказка
+    из allowlist полей args.
     """
 
     def __init__(self, *, reasoning_cap: int, answer_cap: int) -> None:
@@ -228,3 +250,13 @@ class MspEvents:
                 self._summary(item, idx, text, True) for idx, text in enumerate(summary)
             )
         return ""
+
+
+# Фазовая обёртка живёт отдельным модулем из-за лимита 300 строк на файл;
+# ленивый реэкспорт (PEP 562) не создаёт цикла импорта с muse_msp_final.
+def __getattr__(name: str) -> Any:
+    if name == "MspEvents":
+        import importlib
+
+        return importlib.import_module("adapters.muse_msp_final").MspEvents
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
