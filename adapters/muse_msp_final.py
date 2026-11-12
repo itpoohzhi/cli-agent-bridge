@@ -20,8 +20,6 @@ _ITEM_KINDS = ("userMessage", "agentMessage", "toolCall", "reasoning")
 
 @dataclass
 class PhaseState:
-    """Состояние фаз; main_turn требует непустых userMessage itemId и turnId."""
-
     main_turn: str = ""
     anchored: bool = False
     limit: int = 1024
@@ -88,7 +86,7 @@ def _reject_collision(state: PhaseState, iid: str, scope: str) -> None:
 def _event_scope(
     state: PhaseState, turn: str, cached_scope: str, cached_route: str
 ) -> str:
-    scope = "foreign"
+    scope = "main" if not state.anchored and not turn else "foreign"
     if state.anchored:
         if {state.main_turn: True}.get(turn, False):
             scope = "main"
@@ -160,7 +158,8 @@ def _anchor_user_turn(state: PhaseState, iid: str, kind: object, turn: object) -
 def _handle_agent_route(
     state: PhaseState, method: str, raw: dict[str, Any], iid: str, route: str
 ) -> str:
-    if iid and state.anchored:
+    scope_fields = (raw.get("turnId"), raw.get("messagePhase"))
+    if iid and (state.anchored or not any(scope_fields)):
         return _agent_route(state, method, raw, iid, route)
     if iid and trackable(state.quarantined, iid, state.limit):
         state.quarantined.add(iid)
