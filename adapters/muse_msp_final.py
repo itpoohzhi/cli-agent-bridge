@@ -36,6 +36,8 @@ class PhaseState:
     limit: int = 1024
     routes: dict[str, str] = field(default_factory=dict)
     phases: dict[str, str] = field(default_factory=dict)
+    sub_routes: dict[str, str] = field(default_factory=dict)
+    sub_phases: dict[str, str] = field(default_factory=dict)
     mirror_indices: dict[str, int] = field(default_factory=dict)
     sub_texts: dict[str, list[str]] = field(default_factory=dict)
     flushed: set[str] = field(default_factory=set)
@@ -70,36 +72,102 @@ def choose_text(answers: dict[str, list[str]], phases: dict[str, str]) -> str:
     return "\n\n".join(finals if finals else fallback)
 
 
-def route_for(state: PhaseState, raw: dict[str, Any]) -> tuple[str, str]:
-    """Маршрут события; главный ход якорится только на userMessage с turnId.
+def _remember_route(
+    state: PhaseState, iid: str, scope: str, phase: str, route: str
+) -> str:
+    routes = {"main": state.routes}.get(scope, state.sub_routes)
+    phases = {"main": state.phases}.get(scope, state.sub_phases)
+    allowed = trackable(routes, iid, state.limit)
+    if allowed:
+        allowed = trackable(phases, iid, state.limit)
+    remembered = "ignore"
+    if allowed:
+        routes[iid] = route
+        phases[iid] = phase
+        remembered = route
+    return remembered
 
-    До якоря agentMessage с фазой считается чужим (fail-closed); безфазовый
-    поток без turnId остаётся главным ради fallback choose_text. После якоря
-    пустые метаданные безопасны только для уже классифицированного itemId.
-    """
-    iid = raw.get("itemId")
-    iid = iid if isinstance(iid, str) else ""
+
+def _reject_collision(state: PhaseState, iid: str, scope: str) -> None:
+    routes = {"main": state.routes}.get(scope, state.sub_routes)
+    routes[iid] = "ignore"
+    state.sub_texts.pop(iid, None)
+    if trackable(state.flushed, iid, state.limit):
+        state.flushed.add(iid)
+
+
+def _event_scope(
+    state: PhaseState, turn: str, cached_scope: str, cached_route: str
+) -> str:
+    scope = "foreign"
+    if state.anchored:
+        if {state.main_turn: True}.get(turn, False):
+            scope = "main"
+    if cached_route:
+        if not turn:
+            scope = cached_scope
+    return scope
+
+
+def _route_compatible(
+    phases: dict[str, str], iid: str, phase: str, cached_scope: str, scope: str
+) -> bool:
+    compatible = {cached_scope: True}.get(scope, False)
+    if compatible:
+        stored_phase = phases.get(iid, "")
+        if stored_phase:
+            if phase:
+                compatible = {stored_phase: True}.get(phase, False)
+    return compatible
+
+
+def _agent_route(
+    state: PhaseState, method: str, raw: dict[str, Any], iid: str, route: str
+) -> str:
+    """Классифицировать agentMessage с учётом проверенного кэша itemId."""
+    main_route = state.routes.get(iid, "")
+    cached_scope = "main" if main_route else "foreign"
+    phases = state.phases if main_route else state.sub_phases
     turn = raw.get("turnId")
     turn = turn if isinstance(turn, str) else ""
-    if raw.get("kind") == "userMessage":
-        if turn:
-            if not state.anchored:
-                state.anchored = True
-                state.main_turn = turn
-    route = state.routes.get(iid, "")
+    phase = raw.get("messagePhase")
+    phase = phase if isinstance(phase, str) else ""
+    scope = _event_scope(state, turn, cached_scope, route)
     if route:
-        return iid, route
-    if raw.get("kind") == "agentMessage":
-        phase = raw.get("messagePhase")
-        phase = phase if isinstance(phase, str) else ""
-        scope = {
-            (True, state.main_turn, phase): "main",
-            (False, "", ""): "main",
-        }.get((state.anchored, turn, phase), "foreign")
+        if not _route_compatible(phases, iid, phase, cached_scope, scope):
+            _reject_collision(state, iid, cached_scope)
+            route = "ignore"
+        elif phase:
+            route = _remember_route(
+                state, iid, scope, phase, classify_route(scope, phase)
+            )
+    else:
         route = classify_route(scope, phase)
-        if trackable(state.routes, iid, state.limit):
-            state.routes[iid] = route
-            state.phases[iid] = phase
+        if not phase:
+            pending = {"main": "pending"}.get(scope, "ignore")
+            route = {"item/completed": route}.get(method, pending)
+        route = _remember_route(state, iid, scope, phase, route)
+    return route
+
+
+def route_for(state: PhaseState, method: str, raw: dict[str, Any]) -> tuple[str, str]:
+    """Маршрут события; пустые метаданные используют лишь проверенный itemId."""
+    iid_value = raw.get("itemId")
+    iid = iid_value if isinstance(iid_value, str) else ""
+    route = state.routes.get(iid, state.sub_routes.get(iid, ""))
+    kind = raw.get("kind")
+    if {"userMessage": True}.get(kind, False):
+        turn = raw.get("turnId")
+        if isinstance(turn, str):
+            if turn:
+                if not state.anchored:
+                    state.anchored = True
+                    state.main_turn = turn
+    if {"agentMessage": True}.get(kind, False):
+        if iid:
+            route = _agent_route(state, method, raw, iid, route)
+        else:
+            route = "ignore"
     return iid, route
 
 
@@ -127,24 +195,32 @@ def mirror_index_for(state: PhaseState, iid: str) -> int:
     return index
 
 
-def sub_payload(method: str, raw: dict[str, Any]) -> tuple[str | None, bool]:
-    """Текст финала подагента (delta или snapshot) и признак completed."""
+def sub_payload(method: str, raw: dict[str, Any]) -> tuple[str | None, bool, bool]:
+    """Текст финала подагента, признаки snapshot и completed."""
     text = raw.get("delta")
-    if not isinstance(text, str):
+    snapshot = not isinstance(text, str)
+    if snapshot:
         text = raw.get("text")
-    return (text if isinstance(text, str) else None), method == "item/completed"
+    completed = {"item/completed": True}.get(method, False)
+    return (text if isinstance(text, str) else None, snapshot, completed)
 
 
 def store_sub(state: PhaseState, iid: str, text: str, snapshot: bool) -> None:
     """Накопить текст финала подагента с запасным бюджетом под однострочную обрезку."""
-    if trackable(state.sub_texts, iid, state.limit):
-        pieces = state.sub_texts.setdefault(iid, [])
-        if snapshot:
-            pieces.clear()
-        cap = subagent_final_limit() * 8
-        stored = sum(len(piece) for piece in pieces)
-        if stored < cap:
-            pieces.append(text[: cap - stored])
+    if state.flushed.__contains__(iid):
+        state.sub_texts.pop(iid, None)
+    else:
+        if trackable(state.sub_texts, iid, state.limit):
+            pieces = state.sub_texts.setdefault(iid, [])
+            if snapshot:
+                if text:
+                    pieces.clear()
+            cap = subagent_final_limit() * 8
+            stored = sum(len(piece) for piece in pieces)
+            if text:
+                remaining = cap - stored
+                if remaining:
+                    pieces.append(text[:remaining])
 
 
 def flush_chunk(state: PhaseState, iid: str, reasoning: str) -> str:
@@ -153,15 +229,34 @@ def flush_chunk(state: PhaseState, iid: str, reasoning: str) -> str:
     После выдачи накопленный текст освобождается; реестр flushed ограничен
     тем же пределом, при его исчерпании идемпотентность держит освобождение.
     """
-    line = one_line("".join(state.sub_texts.get(iid, [])))
+    line = one_line("".join(state.sub_texts.pop(iid, [])))
     chunk = ""
     if line:
-        if iid not in state.flushed:
+        if not state.flushed.__contains__(iid):
             if trackable(state.flushed, iid, state.limit):
                 state.flushed.add(iid)
-            state.sub_texts.pop(iid, None)
-            chunk = sep_for(reasoning) + line + "\n"
+                chunk = sep_for(reasoning) + line + "\n"
     return chunk
+
+
+def normalize_tool_event(
+    method: str, params: dict[str, Any], raw: dict[str, Any], item: Any
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Восстановить kind завершения из стабильного состояния toolCall."""
+    normalized_params = params
+    normalized_raw = raw
+    if {"item/completed": True}.get(method, False):
+        if item:
+            if {"toolCall": True}.get(item.kind, False):
+                if not raw.get("kind"):
+                    normalized_raw = dict(raw)
+                    normalized_raw["kind"] = "toolCall"
+                    normalized_params = dict(params)
+                    if normalized_params.get("item"):
+                        normalized_params["item"] = normalized_raw
+                    else:
+                        normalized_params = normalized_raw
+    return normalized_params, normalized_raw
 
 
 def refresh_tool_item(item: Any, raw: Any) -> bool:
@@ -173,7 +268,14 @@ def refresh_tool_item(item: Any, raw: Any) -> bool:
     was_completed = item.completed if item else False
     if item:
         if isinstance(raw, dict):
-            item.tool_name = merge_tool_display(extract_tool_name(raw), item.tool_name)
+            fresh = extract_tool_name(raw)
+            should_merge = is_failed_status(raw.get("status"))
+            if not should_merge:
+                _, separator, _ = fresh.partition(" — ")
+                if not separator:
+                    should_merge = True
+            if should_merge:
+                item.tool_name = merge_tool_display(fresh, item.tool_name)
     return was_completed
 
 

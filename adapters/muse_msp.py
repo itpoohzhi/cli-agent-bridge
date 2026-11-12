@@ -43,10 +43,9 @@ class _Item:
 class _MspCore:
     """Один ход MSP. Возвращаемая из feed строка — только новый хвост reasoning.
 
-    Порядок — порядок поступления событий, ключ сверки snapshot — (itemId, summary.N).
-    Уже опубликованные символы никогда не перезаписываются; повторный completed
-    идемпотентен. Аргументы toolCall не сохраняются; в маркер идёт только подсказка
-    из allowlist полей args.
+    Порядок — поступление событий; ключ snapshot — (itemId, summary.N).
+    Опубликованное не перезаписывается, повторный completed идемпотентен.
+    Аргументы toolCall не сохраняются.
     """
 
     def __init__(self, *, reasoning_cap: int, answer_cap: int) -> None:
@@ -217,11 +216,7 @@ class _MspCore:
 
 
 class MspEvents(_MspCore):
-    """MspEvents с маршрутизацией фаз agentMessage по главному ходу.
-
-    Логика фаз — чистые функции adapters.muse_msp_final над PhaseState;
-    здесь только тонкие делегаты к базовым _summary/_append.
-    """
+    """Маршрутизация фаз agentMessage по главному ходу поверх _MspCore."""
 
     def __init__(self, *, reasoning_cap: int, answer_cap: int) -> None:
         super().__init__(reasoning_cap=reasoning_cap, answer_cap=answer_cap)
@@ -239,6 +234,8 @@ class MspEvents(_MspCore):
             super().tracked_count,
             len(phase.routes),
             len(phase.phases),
+            len(phase.sub_routes),
+            len(phase.sub_phases),
             len(phase.mirror_indices),
             len(phase.sub_texts),
             len(phase.flushed),
@@ -249,14 +246,24 @@ class MspEvents(_MspCore):
         """Принять уведомление MSP: чужие agentMessage отрезать, остальные — в базу."""
         raw = params.get("item", params)
         iid, route = (
-            _final.route_for(self._phase, raw) if isinstance(raw, dict) else ("", "")
+            _final.route_for(self._phase, method, raw)
+            if isinstance(raw, dict)
+            else ("", "")
         )
         if route == "ignore":
             return ""
         if route == "sub_final":
             return self._sub_event(method, raw, iid)
-        was_completed = _final.refresh_tool_item(self._items.get(iid), raw)
-        out = super().feed(method, params)
+        if route == "pending":
+            if {"item/started": True}.get(method, False):
+                return super().feed(method, params)
+            return ""
+        item = self._items.get(iid)
+        params, raw = _final.normalize_tool_event(method, params, raw, item)
+        was_completed = _final.refresh_tool_item(item, raw)
+        out = ""
+        if not {"commentary": True}.get(route, False):
+            out = super().feed(method, params)
         if isinstance(raw, dict):
             out += self._mirror(method, raw, iid, route)
             done_item = self._items.get(iid)
@@ -281,10 +288,13 @@ class MspEvents(_MspCore):
         return mirrored
 
     def _sub_event(self, method: str, raw: dict[str, Any], iid: str) -> str:
-        text, snapshot = _final.sub_payload(method, raw)
+        text, snapshot, completed = _final.sub_payload(method, raw)
         if text is not None:
             _final.store_sub(self._phase, iid, text, snapshot)
-        return self._flush(iid) if snapshot else ""
+        out = ""
+        if completed:
+            out = self._flush(iid)
+        return out
 
     def _flush(self, iid: str) -> str:
         return self._append(_final.flush_chunk(self._phase, iid, self.reasoning))

@@ -47,7 +47,7 @@ def test_main_turn_comes_from_user_message_not_first_agent_message() -> None:
     assert events.text == "Финал главного."
 
 
-def test_text_fallback_joins_phaseless_messages_with_blank_line() -> None:
+def test_preanchor_phaseless_messages_are_fail_closed() -> None:
     events = parser()
     events.feed(
         "item/completed",
@@ -57,14 +57,16 @@ def test_text_fallback_joins_phaseless_messages_with_blank_line() -> None:
         "item/completed",
         {"item": {"itemId": "b", "kind": "agentMessage", "text": "Вторая часть."}},
     )
-    assert events.text == "Первая часть.\n\nВторая часть."
+    assert events.text == ""
+    assert events.reasoning == ""
 
 
-def test_text_fallback_when_no_final_includes_commentary() -> None:
+def test_text_never_falls_back_to_commentary() -> None:
     events = parser()
     user_message(events)
     message(events, "c1", MAIN, "commentary", "Только статус.")
-    assert events.text == "Только статус."
+    assert events.text == ""
+    assert events.reasoning == "Только статус."
 
 
 def test_empty_final_does_not_hide_fallback() -> None:
@@ -94,15 +96,24 @@ def test_unknown_message_without_turn_id_after_anchor_is_ignored() -> None:
     )
     assert events.text == ""
     assert events.reasoning == ""
-    assert events._phase.routes["a"] == "ignore"
+    assert events._phase.sub_routes["a"] == "ignore"
 
 
 def test_answer_cap_still_enforced() -> None:
     events = parser(answer_cap=4)
+    user_message(events)
     with pytest.raises(ValueError):
         events.feed(
             "item/completed",
-            {"item": {"itemId": "a", "kind": "agentMessage", "text": "слишком длинно"}},
+            {
+                "item": {
+                    "itemId": "a",
+                    "kind": "agentMessage",
+                    "turnId": MAIN,
+                    "messagePhase": "finalAnswer",
+                    "text": "слишком длинно",
+                }
+            },
         )
 
 

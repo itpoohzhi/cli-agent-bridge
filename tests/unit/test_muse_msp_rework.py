@@ -112,7 +112,7 @@ def test_user_message_without_turn_id_keeps_subagent_out_of_content() -> None:
     assert events.reasoning.count("Финал подагента.") == 1
 
 
-def test_foreign_final_route_stays_sticky_without_later_turn_metadata() -> None:
+def test_foreign_final_route_rejects_later_explicit_main_metadata() -> None:
     events = parser()
     user_message(events)
     started(events, "foreign-final", SUB, "finalAnswer")
@@ -130,8 +130,8 @@ def test_foreign_final_route_stays_sticky_without_later_turn_metadata() -> None:
     completed(events, "foreign-final", MAIN, "finalAnswer", "SECRET")
     assert events.text == ""
     assert events.reasoning.count("SECRET") == 1
-    assert events._phase.routes["foreign-final"] == "sub_final"
-    assert events._phase.phases["foreign-final"] == "finalAnswer"
+    assert events._phase.sub_routes["foreign-final"] == "ignore"
+    assert events._phase.sub_phases["foreign-final"] == "finalAnswer"
 
 
 def test_unknown_final_without_turn_id_after_anchor_stays_out_of_content() -> None:
@@ -173,12 +173,12 @@ def test_failed_hinted_tool_args_only_on_completed() -> None:
     assert events.reasoning.count("Ошибка инструмента:") == 1
 
 
-def test_success_hinted_tool_args_only_on_completed_has_no_line() -> None:
+def test_success_hinted_tool_args_only_on_completed_keeps_legacy_line() -> None:
     events = parser()
     tool_started(events, "t1", "bash")
     tail = tool_completed(events, "t1", "bash", {"description": "List files"})
-    assert tail == ""
-    assert "завершён]" not in events.reasoning
+    assert tail == "[Инструмент bash завершён]\n"
+    assert events.reasoning.count("[Инструмент bash завершён]\n") == 1
 
 
 def test_unknown_status_hinted_tool_gets_completed_line() -> None:

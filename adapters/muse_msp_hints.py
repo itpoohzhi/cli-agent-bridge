@@ -65,9 +65,7 @@ def _parse_args(raw: Mapping[str, Any]) -> Mapping[str, Any]:
 def _clean_hint(name: str, value: str) -> str:
     text = " ".join(value.split())
     if name in _PATH_FIELDS:
-        base = PureWindowsPath(text).name
-        if base:
-            text = base
+        text = PureWindowsPath(text).name
     return text[: hint_max_chars()]
 
 
@@ -75,12 +73,16 @@ def tool_hint(raw: Mapping[str, Any]) -> str:
     """Первая подсказка из allowlist полей args; значения вне allowlist не выходят."""
     args = _parse_args(raw)
     hint = ""
+    value_limit = args_max_chars()
     for name in hint_fields():
         value = args.get(name)
         if isinstance(value, str):
-            if value.strip():
-                if not hint:
-                    hint = _clean_hint(name, value)
+            bounded = value[: value_limit + 1]
+            if not bounded[value_limit:]:
+                if bounded.strip():
+                    hint = _clean_hint(name, bounded)
+                    if hint:
+                        break
     return hint
 
 
