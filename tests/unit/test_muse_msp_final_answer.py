@@ -47,7 +47,7 @@ def test_main_turn_comes_from_user_message_not_first_agent_message() -> None:
     assert events.text == "Финал главного."
 
 
-def test_preanchor_phaseless_messages_are_fail_closed() -> None:
+def test_text_fallback_joins_phaseless_messages_with_blank_line() -> None:
     events = parser()
     events.feed(
         "item/completed",
@@ -57,8 +57,7 @@ def test_preanchor_phaseless_messages_are_fail_closed() -> None:
         "item/completed",
         {"item": {"itemId": "b", "kind": "agentMessage", "text": "Вторая часть."}},
     )
-    assert events.text == ""
-    assert events.reasoning == ""
+    assert events.text == "Первая часть.\n\nВторая часть."
 
 
 def test_text_never_falls_back_to_commentary() -> None:
