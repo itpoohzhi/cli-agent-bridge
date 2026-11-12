@@ -255,20 +255,19 @@ class MspEvents(_MspCore):
         if route == "sub_final":
             return self._sub_event(method, raw, iid)
         if route == "pending":
-            if {"item/started": True}.get(method, False):
-                return super().feed(method, params)
-            return ""
+            return super().feed(method, params) if method == "item/started" else ""
+        return self._routed(method, params, iid, route)
+
+    def _routed(self, method: str, params: dict[str, Any], iid: str, route: str) -> str:
+        raw = params.get("item", params)
         item = self._items.get(iid)
         params, raw = _final.normalize_tool_event(method, params, raw, item)
         was_completed = _final.refresh_tool_item(item, raw)
-        out = ""
-        if not {"commentary": True}.get(route, False):
-            out = super().feed(method, params)
+        out = "" if route == "commentary" else super().feed(method, params)
         if isinstance(raw, dict):
             out += self._mirror(method, raw, iid, route)
             done_item = self._items.get(iid)
-            display = done_item.tool_name if done_item else ""
-            display = "" if was_completed else display
+            display = "" if was_completed or done_item is None else done_item.tool_name
             out += self._append(_final.tool_failure_line(method, raw, display))
         if method == "turn/completed":
             out += "".join(self._flush(i) for i in list(self._phase.sub_texts))

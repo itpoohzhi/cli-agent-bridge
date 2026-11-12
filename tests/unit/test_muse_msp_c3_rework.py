@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from adapters.muse_msp import MAX_TRACKED_ITEMS
+from adapters.muse_msp_final import choose_text
 from tests.unit.msp_testlib import (
     MAIN,
     SUB,
@@ -148,6 +149,13 @@ def test_rw004_commentary_does_not_spend_answer_cap() -> None:
     assert events.text == "FINAL"
     assert "12345" not in events.text
     assert "12345" in events.reasoning
+
+
+def test_rw004_content_excludes_non_final_answers_when_final_exists() -> None:
+    answers = {"final": ["FINAL"], "commentary": ["STATUS"]}
+    phases = {"final": "finalAnswer", "commentary": "commentary"}
+
+    assert choose_text(answers, phases) == "FINAL"
 
 
 def test_rw005_late_main_commentary_phase_routes_to_reasoning() -> None:
