@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.usage_wire import normalize_prompt_cache_details
+
 GOOGLE_STOP_SEQUENCES = (
     "<|im_end|>",
     "<|endoftext|>",
@@ -59,8 +61,13 @@ def _build_openai_usage(
         "total_tokens": prompt_tokens + completion_tokens,
     }
     if cached_tokens > 0:
-        usage_obj["cached_tokens"] = cached_tokens
-        usage_obj["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+        # Единый нормализатор core.usage_wire; несогласованный кэш на wire не выдаётся.
+        details, _inconsistent = normalize_prompt_cache_details(
+            prompt_tokens, cached_tokens
+        )
+        if details is not None:
+            usage_obj["cached_tokens"] = cached_tokens
+            usage_obj["prompt_tokens_details"] = details
     if reasoning_tokens > 0:
         usage_obj["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
     return usage_obj

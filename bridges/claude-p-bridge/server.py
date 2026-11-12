@@ -60,8 +60,13 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from core.chat_key import resolve_chat_key  # noqa: E402
 from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
+from core.usage_wire import (  # noqa: E402
+    extract_cache_read_tokens,
+    normalize_prompt_cache_details,
+)
 
 try:
     from core.watchdog import AdaptiveTimeoutController
@@ -92,6 +97,42 @@ except ImportError as exc:
         f"(repo root {_REPO_ROOT}): {exc}\n"
     )
     raise SystemExit(1) from exc
+
+
+def _wire_usage(usage: dict) -> dict:
+    """OpenAI-`usage` из result-события `claude -p`.
+
+    `input_tokens` Claude исключает cache-read, поэтому при известном cache-read
+    `prompt_tokens` = input + cache_read (OpenAI-семантика: cached входит в prompt).
+    Нет данных кэша — прежние значения и без `prompt_tokens_details`.
+    """
+    prompt = usage.get("input_tokens", 0)
+    completion = usage.get("output_tokens", 0)
+    cache_read = extract_cache_read_tokens(usage)
+    details = None
+    if (
+        cache_read is not None
+        and isinstance(prompt, int)
+        and not isinstance(prompt, bool)
+    ):
+        details, inconsistent = normalize_prompt_cache_details(
+            prompt + cache_read, cache_read
+        )
+        if details is not None:
+            prompt += cache_read
+        if inconsistent:
+            _log(
+                f"usage_cache_inconsistent prompt_tokens={prompt!r} "
+                f"cache_read_tokens={cache_read!r}"
+            )
+    wire = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+    if details is not None:
+        wire["prompt_tokens_details"] = details
+    return wire
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -902,6 +943,27 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/chat/completions"):
             self._send(404, {"error": {"message": f"not found: {path}"}})
             return
+        # Идентичность чата (prompt_cache_key / x-dsh-chat-id) — для лога и корреляции;
+        # генерация от неё не зависит. Невалидный ключ — 400 до спавна.
+        body = req if isinstance(req, dict) else {}
+        extra_body = body.get("extra_body")
+        chat = resolve_chat_key(
+            body, self.headers, extra_body if isinstance(extra_body, dict) else None
+        )
+        if chat.invalid:
+            self._send(
+                400,
+                {
+                    "error": {
+                        "message": "invalid chat key",
+                        "type": "invalid_request",
+                        "code": 400,
+                    }
+                },
+            )
+            return
+        if chat.keyed:
+            _log(f"chat key={chat.digest[:16]} source={chat.source}")
         # Невалидную модель отсекаем до SSE-заголовков, иначе 400 уже не отправить.
         _model, model_err = _resolve_model(req)
         if model_err is not None:
@@ -929,6 +991,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
+        wire_usage = _wire_usage(usage)
         message = {"role": "assistant", "content": out["text"]}
         if out.get("reasoning"):
             message["reasoning_content"] = out["reasoning"]
@@ -940,11 +1003,7 @@ class Handler(BaseHTTPRequestHandler):
             "id": f"chatcmpl-claudep-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
             "created": int(time.time()), "model": req.get("model") or MODEL_ID,
             "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-            "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-            },
+            "usage": wire_usage,
         })
 
     def _serve_sse(self, req: dict) -> None:

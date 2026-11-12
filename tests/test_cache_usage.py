@@ -70,6 +70,40 @@ class TestNormalizePromptCacheDetails(unittest.TestCase):
         self.assertEqual(normalize_prompt_cache_details(100, None, 7), (None, False))
 
 
+class TestExtractCacheReadTokens(unittest.TestCase):
+    """Общий разбор cache-read токенов апстрима: нет данных -> None, ключа на wire нет."""
+
+    def test_known_keys(self):
+        from core.usage_wire import extract_cache_read_tokens
+
+        for key in (
+            "cacheReadTokens",
+            "cache_read_tokens",
+            "cache_read_input_tokens",
+            "cachedTokens",
+        ):
+            self.assertEqual(extract_cache_read_tokens({key: 7}), 7, key)
+
+    def test_upstream_without_cache_read_gives_no_wire_key(self):
+        from core.usage_wire import extract_cache_read_tokens
+
+        for usage in (None, {}, {"promptTokens": 10}, {"cacheReadTokens": None}):
+            cache = extract_cache_read_tokens(usage)
+            self.assertIsNone(cache)
+            self.assertEqual(normalize_prompt_cache_details(10, cache), (None, False))
+
+    def test_invalid_values_are_not_invented(self):
+        from core.usage_wire import extract_cache_read_tokens
+
+        for bad in (True, -1, 1.5, "3", [], {}):
+            self.assertIsNone(extract_cache_read_tokens({"cacheReadTokens": bad}))
+
+    def test_zero_is_a_real_value(self):
+        from core.usage_wire import extract_cache_read_tokens
+
+        self.assertEqual(extract_cache_read_tokens({"cachedTokens": 0}), 0)
+
+
 class TestMapUsage(unittest.TestCase):
     """AD-002: `_map_usage` извлекает кэш как `int | None`."""
 

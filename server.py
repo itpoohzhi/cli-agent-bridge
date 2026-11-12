@@ -157,6 +157,7 @@ from core.turn_session_manager import (  # noqa: E402
     hash_token,
     validate_turn_id,
 )
+from core.chat_key import digest_of, resolve_chat_key  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
@@ -850,7 +851,6 @@ def _configured_shutdown_grace_s() -> float:
 
 SHUTDOWN_GRACE_S = _configured_shutdown_grace_s()
 TERM_WAIT_S = 2.0
-KEY_MAX_LEN = 512
 # Структурные признаки title-запроса DSH (F-512): размер сообщения не критерий.
 TITLE_SYSTEM_PREFIX = (
     "Create a concise title for an AI coding-assistant session "
@@ -941,7 +941,7 @@ def _chain(head: str, digest: str) -> str:
 
 def _key_hash(key: str) -> str:
     """Идентичность чата: sha256(namespace + ключ); сам ключ нигде не хранится."""
-    return hashlib.sha256((RPC_NAMESPACE + "\0" + key).encode("utf-8")).hexdigest()
+    return digest_of(key, RPC_NAMESPACE)
 
 
 _WS_URL = re.compile(r"\bwss?://\S+", re.IGNORECASE)
@@ -7520,9 +7520,13 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     )
                     return
             # Маршрут хода и b_guard ДО сериализации промпта (CARD-W2-04: однопроходный рендер).
-            raw_key = req.get("prompt_cache_key")
-            keyed = isinstance(raw_key, str) and 0 < len(raw_key) <= KEY_MAX_LEN
-            route = "keyed" if keyed else "nokey"
+            # Фасад читает только prompt_cache_key; невалидный ключ — маршрут nokey (прежнее поведение).
+            chat = resolve_chat_key(
+                req, namespace=RPC_NAMESPACE, sources=("prompt_cache_key",)
+            )
+            raw_key = chat.value if chat.keyed else req.get("prompt_cache_key")
+            keyed = chat.keyed
+            route = chat.route
             if images or _is_title_request(messages, tools, req):
                 route = "image" if images else "title"
             t_over = compute_tools_budget_overhead(tools, tool_choice, bool(images))

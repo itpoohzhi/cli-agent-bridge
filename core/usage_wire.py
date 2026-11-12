@@ -6,6 +6,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+# Ключи cache-read токенов в usage апстримов (порядок = приоритет).
+CACHE_READ_KEYS: tuple[str, ...] = (
+    "cacheReadTokens",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+    "cachedTokens",
+)
+
 
 def _is_count(value: object) -> bool:
     """Целое счётное значение; `bool` допустимым числом не является."""
@@ -40,3 +50,18 @@ def normalize_prompt_cache_details(
     if cache_read_tokens > prompt_tokens:
         return None, True
     return {"cached_tokens": cache_read_tokens}, False
+
+
+def extract_cache_read_tokens(usage: Mapping | None) -> int | None:
+    """Cache-read токены из usage апстрима; нет валидного значения — `None`.
+
+    Берётся первый ключ из `CACHE_READ_KEYS` с неотрицательным `int` (не `bool`).
+    Значений не выдумываем: отсутствие данных — `None`, ключ на wire не появится.
+    """
+    if not isinstance(usage, Mapping):
+        return None
+    for key in CACHE_READ_KEYS:
+        value = usage.get(key)
+        if _is_count(value) and value >= 0:
+            return value
+    return None

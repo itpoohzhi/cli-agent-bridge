@@ -12813,7 +12813,7 @@ class SessionFailClosedTests(unittest.TestCase):
     """Стор требует токен чата или cwd, явный CID проверяется на владение."""
 
     def test_request_chat_id_sources_and_length_boundary(self) -> None:
-        """Строковые источники поддерживают trim и предел 256."""
+        """Строковые источники поддерживают trim и предел 512 (BRIDGE_CHAT_KEY_MAX_LEN)."""
         chat_id_for = _bfn("_request_chat_id")
         for source in (
             "x-dsh-chat-id",
@@ -12852,10 +12852,10 @@ class SessionFailClosedTests(unittest.TestCase):
             [],
             "",
             " \t ",
-            "a" * 257,
+            "a" * 513,
             "\nchat",
             "chat\t",
-            " " * 257 + "a",
+            " " * 513 + "a",
         ) + tuple(
             "chat" + chr(code) + "id"
             for code in (*range(32), 127, 0xD800, 0xDBFF, 0xDC00, 0xDFFF)
@@ -12885,12 +12885,17 @@ class SessionFailClosedTests(unittest.TestCase):
         extra: dict[str, object] = {"chat_id": "extra"}
         req: dict[str, object] = {"chat_id": "body", "prompt_cache_key": "cache"}
         chat_id_for = _bfn("_request_chat_id")
+        # prompt_cache_key — первый источник (единый core.chat_key).
+        self.assertEqual(chat_id_for(headers, extra, req), ("cache", False))
+        req["prompt_cache_key"] = "bad\x00id"
+        self.assertEqual(chat_id_for(headers, extra, req), ("", True))
+        del req["prompt_cache_key"]
         self.assertEqual(chat_id_for(headers, extra, req), ("header-A", False))
         headers["x-dsh-chat-id"] = "bad\x00id"
         self.assertEqual(chat_id_for(headers, extra, req), ("", True))
         del headers["x-dsh-chat-id"]
         self.assertEqual(chat_id_for(headers, extra, req), ("header-B", False))
-        headers["x-session-id"] = "x" * 257
+        headers["x-session-id"] = "x" * 513
         self.assertEqual(chat_id_for(headers, extra, req), ("", True))
         del headers["x-session-id"]
         self.assertEqual(chat_id_for(headers, extra, req), ("extra", False))
@@ -12962,7 +12967,7 @@ class SessionFailClosedTests(unittest.TestCase):
             try:
                 for source in ("extra", "body"):
                     for raw in (
-                        "x" * 257,
+                        "x" * 513,
                         False,
                         123,
                         {},
@@ -13240,7 +13245,7 @@ class SessionFailClosedTests(unittest.TestCase):
                 self.assertNotIn("--conversation", fx.spawns()[1])
 
     def test_request_without_chat_id_does_not_use_session_store(self) -> None:
-        """Без chat ID и cwd каждый ход холодный, даже с prompt_cache_key."""
+        """Без chat ID, prompt_cache_key и cwd каждый ход холодный."""
         for chat_id, cwd in (
             ("", ""), (" \t ", " \t "), ("", "."), ("", ".."), ("", "~"),
             ("", "rel/path"), ("", True), ("", 1), ("", []), ("", {}),
@@ -13268,7 +13273,6 @@ class SessionFailClosedTests(unittest.TestCase):
                         bodies[1]["conversation_id"] = _CID
                         for body in bodies:
                             body["extra_body"] = {"chat_id": chat_id, "cwd": cwd}
-                            body["prompt_cache_key"] = "shared-prefix-cache"
                         first = bridge.post(bodies[0])
                         second = bridge.post(bodies[1])
                         claim.assert_not_called()
