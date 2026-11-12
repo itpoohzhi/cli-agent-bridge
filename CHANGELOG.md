@@ -81,6 +81,15 @@
   `0cecaf0` — 13, без вывода «0 новых» из одинаковых totals (RW-011 Cycle 2).
 
 ### Fixed
+- Muse MSP (`adapters/muse_msp.py`, обёртка `adapters/muse_msp_final.py`): в `content` хода
+  попадает только `finalAnswer` главного хода (turnId первого `userMessage`); `commentary`
+  главного хода идёт в `reasoning` отдельными абзацами, сообщения подагентов в `content`
+  не попадают (финал подагента — одна строка в `reasoning`, обрезка
+  `BRIDGE_MUSE_SUBAGENT_FINAL_MAX_CHARS`, дефолт 300). Маркеры инструментов различимы:
+  подсказка из allowlist полей args (`BRIDGE_MUSE_TOOL_HINT_FIELDS`, дефолт
+  `description,path,file_path,pattern`; длина `BRIDGE_MUSE_TOOL_HINT_MAX_CHARS`, дефолт 80;
+  пути — basename), без подсказки формат маркеров прежний. Восстановлен re-export
+  `_parse_tool_call_blocks` в `bridges/muse-bridge/server.py`.
 - Cycle 2 хаба: полный структурный `build_catalog` используется загрузчиком и `fleet_check.py`;
   неподдерживаемые `transport`/`tool_policy` отвергаются. Muse допускает только cap=1,
   общий семафор сериализует все Muse-адаптеры одного хаба; канонический pin перепроверяется

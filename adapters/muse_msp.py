@@ -2,35 +2,20 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator
+
+import adapters.muse_msp_final as _final
+from adapters.muse_msp_hints import extract_tool_name as _extract_tool_name
+from adapters.muse_msp_hints import format_tool_completed as _format_tool_completed
+from adapters.muse_msp_hints import format_tool_started as _format_tool_started
 
 MAX_TRACKED_ITEMS = 1024
 LIVE_DELTA_MAX_BYTES = 8 << 10
 REASONING_TRUNCATED = "\n[reasoning truncated: reasoning budget reached]\n"
 SNAPSHOT_DIVERGED = "\n[reasoning snapshot diverged; live prefix preserved]\n"
-_TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 _SUMMARY_FIELD = re.compile(r"summary\.([0-9]{1,4})")
-
-
-def _suppress_unknown_tool() -> bool:
-    return os.environ.get("BRIDGE_MUSE_SUPPRESS_UNKNOWN_TOOL", "true").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _extract_tool_name(raw: Mapping[str, Any]) -> str:
-    vals = [str(raw[k]).strip() for k in ("toolName", "tool", "name") if raw.get(k) is not None and str(raw[k]).strip()]
-    valid = next((v for v in vals if _TOOL_NAME.fullmatch(v)), "")
-    return valid or ("unknown_tool" if (vals or not _suppress_unknown_tool()) else "")
-
-
-def _format_tool_started(name: str) -> str:
-    return f"[Вызов инструмента: {name}]\n" if name else ""
-
-
-def _format_tool_completed(name: str) -> str:
-    return f"[Инструмент {name} завершён]\n" if name else ""
 
 
 def utf8_slices(text: str, max_bytes: int = LIVE_DELTA_MAX_BYTES) -> Iterator[str]:
@@ -55,12 +40,12 @@ class _Item:
     parts: dict[int, list[str]] = field(default_factory=dict)
 
 
-class MspEvents:
+class _MspCore:
     """Один ход MSP. Возвращаемая из feed строка — только новый хвост reasoning.
 
-    Порядок — порядок поступления событий, ключ сверки snapshot — (itemId, summary.N).
-    Уже опубликованные символы никогда не перезаписываются; повторный completed
-    идемпотентен. Аргументы toolCall не сохраняются и не форматируются.
+    Порядок — поступление событий; ключ snapshot — (itemId, summary.N).
+    Опубликованное не перезаписывается, повторный completed идемпотентен.
+    Аргументы toolCall не сохраняются.
     """
 
     def __init__(self, *, reasoning_cap: int, answer_cap: int) -> None:
@@ -228,3 +213,88 @@ class MspEvents:
                 self._summary(item, idx, text, True) for idx, text in enumerate(summary)
             )
         return ""
+
+
+class MspEvents(_MspCore):
+    """Маршрутизация фаз agentMessage по главному ходу поверх _MspCore."""
+
+    def __init__(self, *, reasoning_cap: int, answer_cap: int) -> None:
+        super().__init__(reasoning_cap=reasoning_cap, answer_cap=answer_cap)
+        self._phase = _final.PhaseState(limit=MAX_TRACKED_ITEMS)
+        self._mirror_items: dict[str, _Item] = {}
+
+    @property
+    def text(self) -> str:
+        return _final.choose_text(self._answers, self._phase.phases)
+
+    @property
+    def tracked_count(self) -> int:
+        phase = self._phase
+        return max(
+            super().tracked_count,
+            len(phase.routes),
+            len(phase.phases),
+            len(phase.sub_routes),
+            len(phase.sub_phases),
+            len(phase.mirror_indices),
+            len(phase.sub_texts),
+            len(phase.flushed),
+            len(self._mirror_items),
+        )
+
+    def feed(self, method: str, params: dict[str, Any]) -> str:
+        """Принять уведомление MSP: чужие agentMessage отрезать, остальные — в базу."""
+        raw = params.get("item", params)
+        iid, route = (
+            _final.route_for(self._phase, method, raw)
+            if isinstance(raw, dict)
+            else ("", "")
+        )
+        base_feed = super().feed
+        forwarded = {"item/started": method}.get(method, "")
+        handlers = {
+            "ignore": lambda: "",
+            "sub_final": lambda: self._sub_event(method, raw, iid),
+            "pending": lambda: base_feed(forwarded, params),
+        }
+        return handlers.get(route, lambda: self._routed(method, params, iid, route))()
+
+    def _routed(self, method: str, params: dict[str, Any], iid: str, route: str) -> str:
+        raw = params.get("item", params)
+        item = self._items.get(iid)
+        params, raw = _final.normalize_tool_event(method, params, raw, item)
+        was_completed = _final.refresh_tool_item(item, raw)
+        out = "" if route == "commentary" else super().feed(method, params)
+        if isinstance(raw, dict):
+            out += self._mirror(method, raw, iid, route)
+            done_item = self._items.get(iid)
+            display = "" if was_completed or done_item is None else done_item.tool_name
+            out += self._append(_final.tool_failure_line(method, raw, display))
+        if method == "turn/completed":
+            out += "".join(self._flush(i) for i in list(self._phase.sub_texts))
+        return out
+
+    def _mirror(self, method: str, raw: dict[str, Any], iid: str, route: str) -> str:
+        payload = _final.mirror_payload(method, raw, route)
+        if payload is None:
+            return ""
+        text, snapshot = payload
+        mirrored = ""
+        if _final.trackable(self._mirror_items, iid, MAX_TRACKED_ITEMS):
+            item = self._mirror_items.setdefault(iid, _Item(kind="reasoning"))
+            mirrored = self._summary(
+                item, _final.mirror_index_for(self._phase, iid), text, snapshot
+            )
+        return mirrored
+
+    def _sub_event(self, method: str, raw: dict[str, Any], iid: str) -> str:
+        text, snapshot, completed = _final.sub_payload(method, raw)
+        if text is not None:
+            _final.store_sub(self._phase, iid, text, snapshot)
+        out = ""
+        if completed:
+            out = self._flush(iid)
+        return out
+
+    def _flush(self, iid: str) -> str:
+        return self._append(_final.flush_chunk(self._phase, iid, self.reasoning))
