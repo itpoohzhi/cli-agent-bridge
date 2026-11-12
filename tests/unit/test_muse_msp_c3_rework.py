@@ -299,6 +299,17 @@ def test_f002_unknown_kind_and_explicit_foreign_turn_are_ignored() -> None:
     )
 
 
+def test_ignore_untyped_empty_iid_returns_false() -> None:
+    state = PhaseState(main_turn=MAIN, anchored=True)
+    assert route_for(state, "item/delta", {"kind": "status"}) == ("", "")
+
+
+def test_early_agent_message_without_item_id_does_not_quarantine_empty() -> None:
+    state = PhaseState()
+    route_for(state, "item/delta", {"kind": "agentMessage"})
+    assert "" not in state.quarantined
+
+
 def test_f004_colliding_item_id_stays_quarantined() -> None:
     state = PhaseState(main_turn=MAIN, anchored=True)
     main = {
