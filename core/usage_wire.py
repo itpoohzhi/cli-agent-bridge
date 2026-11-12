@@ -94,24 +94,39 @@ def build_wire_usage(
     """Wire-`usage` OpenAI-контракта и флаг несогласованности кэша.
 
     Единственное место арифметики кэша для мостов. OpenAI-семантика: cached
-    входит в `prompt_tokens`. Если апстрим считает `input_tokens` БЕЗ кэша
-    (Anthropic/claude: `input_includes_cache=False`), известные cache-read и
-    cache-creation прибавляются к `prompt_tokens`; иначе (`True`) `input_tokens`
-    уже полный.
+    входит в `prompt_tokens`. Возвращает `(wire, inconsistent)`.
+
+    `input_includes_cache=True` (апстрим уже включил кэш в `input_tokens`):
+    `prompt_tokens = input_tokens`; реальная проверка апстрима —
+    `cache_read <= input_tokens`; нарушение -> `inconsistent=True`, детали на
+    wire не выдаются (clamp запрещён), вызывающий слой логирует
+    `usage_cache_inconsistent`.
+
+    `input_includes_cache=False` (Anthropic/claude: `input_tokens` БЕЗ кэша):
+    `prompt_tokens = input_tokens + cache_read + cache_creation`,
+    `cached_tokens = cache_read`. Проверка `cached > prompt` здесь невозможна by
+    construction (cache_read сам слагаемое prompt) и НЕ вычисляется; кэш-чтение
+    выдаётся как есть. `inconsistent=True` только для заданного, но
+    нечислового/отрицательного `cache_read` (мусор апстрима).
 
     Политика нуля единая: `cached_tokens=0` выдаётся, когда апстрим явно сообщил
     нулевой cache-read; отсутствие данных (`None`) — `prompt_tokens_details`
-    не выдаётся. Несогласованный кэш (> prompt) на wire не выдаётся.
+    не выдаётся. `cache_creation` на wire не выдаётся (AD-004).
     """
     prompt = input_tokens if _is_count(input_tokens) and input_tokens >= 0 else 0
-    completion = (
-        output_tokens if _is_count(output_tokens) and output_tokens >= 0 else 0
-    )
-    if not input_includes_cache:
+    completion = output_tokens if _is_count(output_tokens) and output_tokens >= 0 else 0
+    read_valid = _is_count(cache_read_tokens) and cache_read_tokens >= 0
+    inconsistent = cache_read_tokens is not None and not read_valid
+    details: dict[str, int] | None = None
+    if input_includes_cache:
+        details, mismatch = normalize_prompt_cache_details(prompt, cache_read_tokens)
+        inconsistent = inconsistent or mismatch
+    else:
         for extra in (cache_read_tokens, cache_creation_tokens):
             if _is_count(extra) and extra >= 0:
                 prompt += extra
-    details, inconsistent = normalize_prompt_cache_details(prompt, cache_read_tokens)
+        if read_valid:
+            details = {"cached_tokens": cache_read_tokens}
     wire: dict = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,

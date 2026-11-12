@@ -299,7 +299,10 @@ def test_claude_sse_final_chunk_carries_cached_tokens(claude, live):
     _FakeRun.script = _claude_script(
         {"input_tokens": 3, "output_tokens": 2, "cache_read_input_tokens": 40}
     )
-    raw = _post_sse(live(claude), _claude_body(stream=True))
+    raw = _post_sse(
+        live(claude),
+        _claude_body(stream=True, stream_options={"include_usage": True}),
+    )
     frames = _sse_usage_frames(raw)
     assert len(frames) == 1
     assert frames[0]["choices"][0]["finish_reason"] == "stop"
@@ -313,7 +316,10 @@ def test_claude_sse_final_chunk_carries_cached_tokens(claude, live):
 
 
 def test_claude_sse_without_cache_has_no_details(claude, live):
-    raw = _post_sse(live(claude), _claude_body(stream=True))
+    raw = _post_sse(
+        live(claude),
+        _claude_body(stream=True, stream_options={"include_usage": True}),
+    )
     (frame,) = _sse_usage_frames(raw)
     assert "prompt_tokens_details" not in frame["usage"]
     assert frame["usage"]["total_tokens"] == 5

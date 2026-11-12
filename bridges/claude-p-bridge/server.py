@@ -103,8 +103,10 @@ except ImportError as exc:
 def _wire_usage(usage: dict) -> dict:
     """OpenAI-`usage` из result-события `claude -p` (арифметика кэша — core.usage_wire).
 
-    `input_tokens` Claude исключает cache-read и cache-creation (семантика Anthropic
-    API), поэтому они прибавляются к `prompt_tokens` в общем модуле.
+    `input_tokens` Claude исключает cache-read и cache-creation (подтверждено живым
+    result-событием, tests/fixtures/claude_result_usage.json), поэтому они
+    прибавляются к `prompt_tokens` в общем модуле; несогласованность — только
+    мусорные значения кэша.
     """
     wire, inconsistent = build_wire_usage(
         usage.get("input_tokens", 0),
@@ -1023,7 +1025,11 @@ class Handler(BaseHTTPRequestHandler):
         err = self._error_body(out)
         if err is None:
             finish = "tool_calls" if out.get("tool_calls") else "stop"
-            self._emit(chunk({}, finish, _wire_usage(out.get("usage") or {})))
+            # Как в OpenAI API: usage в финальном чанке — только по include_usage.
+            opts = req.get("stream_options")
+            wants_usage = isinstance(opts, dict) and opts.get("include_usage") is True
+            final_usage = _wire_usage(out.get("usage") or {}) if wants_usage else None
+            self._emit(chunk({}, finish, final_usage))
         else:
             error_msg = str(err.get("message") or "") if isinstance(err, dict) else str(err)
             error_chunk = format_stream_error_sse(str(error_msg), finish_reason="stop")
