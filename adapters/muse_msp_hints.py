@@ -10,9 +10,7 @@ from typing import Any, Mapping
 
 _DEFAULT_HINT_FIELDS = ("description", "path", "file_path", "pattern")
 _PATH_FIELDS = frozenset({"path", "file_path"})
-_FAILED_STATUSES = frozenset(
-    {"failed", "failure", "error", "errored", "cancelled", "canceled", "timeout"}
-)
+_SUCCESS_STATUSES = frozenset({"completed", "success"})
 _ROUTES = {"main:commentary": "commentary", "foreign:finalAnswer": "sub_final"}
 _SCOPE_DEFAULTS = {"main": "answer", "foreign": "ignore"}
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
@@ -90,8 +88,9 @@ def classify_route(scope: str, phase: str) -> str:
 
 
 def is_failed_status(status: Any) -> bool:
+    """Неуспех — всё вне allowlist успеха: неизвестный/пустой статус не молчит."""
     text = status.strip().lower() if isinstance(status, str) else ""
-    return text in _FAILED_STATUSES
+    return text not in _SUCCESS_STATUSES
 
 
 def one_line(text: str) -> str:

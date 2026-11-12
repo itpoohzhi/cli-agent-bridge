@@ -24,14 +24,36 @@ from adapters.muse_msp_hints import (
 
 @dataclass
 class PhaseState:
-    """Состояние маршрутизации фаз одного хода MSP."""
+    """Состояние маршрутизации фаз одного хода MSP.
+
+    main_turn якорится только на userMessage с непустым turnId; каждый реестр
+    ограничен limit (вызывающий передаёт MAX_TRACKED_ITEMS базы).
+    """
 
     main_turn: str = ""
+    anchored: bool = False
+    limit: int = 1024
     routes: dict[str, str] = field(default_factory=dict)
     phases: dict[str, str] = field(default_factory=dict)
     mirror_indices: dict[str, int] = field(default_factory=dict)
     sub_texts: dict[str, list[str]] = field(default_factory=dict)
     flushed: set[str] = field(default_factory=set)
+
+
+def trackable(container: Any, iid: str, limit: int) -> bool:
+    """Запись iid заводить можно: уже есть либо реестр и длина iid — в пределах базы.
+
+    Для set подписка даёт TypeError: вызывающий flush_chunk проверяет членство
+    сам, здесь для set остаётся только предел длины реестра.
+    """
+    allowed = True
+    try:
+        container[iid]
+    except (KeyError, TypeError):
+        allowed = len(container) < limit
+    if iid[256:]:
+        allowed = False
+    return allowed
 
 
 def choose_text(answers: dict[str, list[str]], phases: dict[str, str]) -> str:
@@ -48,21 +70,34 @@ def choose_text(answers: dict[str, list[str]], phases: dict[str, str]) -> str:
 
 
 def route_for(state: PhaseState, raw: dict[str, Any]) -> tuple[str, str]:
-    """Маршрут события; фиксирует главный ход и фазу agentMessage в состоянии."""
+    """Маршрут события; главный ход якорится только на userMessage с turnId.
+
+    До якоря agentMessage с фазой считается чужим (fail-closed); безфазовый
+    поток без turnId остаётся главным ради fallback choose_text. После якоря
+    пустой turnId по-прежнему главный (дельты и снапшоты без turnId).
+    """
     iid = raw.get("itemId")
     iid = iid if isinstance(iid, str) else ""
     turn = raw.get("turnId")
     turn = turn if isinstance(turn, str) else ""
-    if not state.main_turn:
-        state.main_turn = turn
+    if raw.get("kind") == "userMessage":
+        if turn:
+            if not state.anchored:
+                state.anchored = True
+                state.main_turn = turn
     route = state.routes.get(iid, "")
     if raw.get("kind") == "agentMessage":
         phase = raw.get("messagePhase")
         phase = phase if isinstance(phase, str) else ""
-        scope = "main" if turn in (state.main_turn, "") else "foreign"
+        scope = {
+            (True, state.main_turn, phase): "main",
+            (True, "", phase): "main",
+            (False, "", ""): "main",
+        }.get((state.anchored, turn, phase), "foreign")
         route = classify_route(scope, phase)
-        state.routes[iid] = route
-        state.phases[iid] = phase
+        if trackable(state.routes, iid, state.limit):
+            state.routes[iid] = route
+            state.phases[iid] = phase
     return iid, route
 
 
@@ -85,7 +120,8 @@ def mirror_index_for(state: PhaseState, iid: str) -> int:
     index = state.mirror_indices.get(iid)
     if index is None:
         index = len(state.mirror_indices)
-        state.mirror_indices[iid] = index
+        if trackable(state.mirror_indices, iid, state.limit):
+            state.mirror_indices[iid] = index
     return index
 
 
@@ -99,24 +135,39 @@ def sub_payload(method: str, raw: dict[str, Any]) -> tuple[str | None, bool]:
 
 def store_sub(state: PhaseState, iid: str, text: str, snapshot: bool) -> None:
     """Накопить текст финала подагента с запасным бюджетом под однострочную обрезку."""
-    pieces = state.sub_texts.setdefault(iid, [])
-    if snapshot:
-        pieces.clear()
-    cap = subagent_final_limit() * 8
-    stored = sum(len(piece) for piece in pieces)
-    if stored < cap:
-        pieces.append(text[: cap - stored])
+    if trackable(state.sub_texts, iid, state.limit):
+        pieces = state.sub_texts.setdefault(iid, [])
+        if snapshot:
+            pieces.clear()
+        cap = subagent_final_limit() * 8
+        stored = sum(len(piece) for piece in pieces)
+        if stored < cap:
+            pieces.append(text[: cap - stored])
 
 
 def flush_chunk(state: PhaseState, iid: str, reasoning: str) -> str:
-    """Однострочный финал подагента для append в reasoning; повторно не выдаётся."""
+    """Однострочный финал подагента для append в reasoning; повторно не выдаётся.
+
+    После выдачи накопленный текст освобождается; реестр flushed ограничен
+    тем же пределом, при его исчерпании идемпотентность держит освобождение.
+    """
     line = one_line("".join(state.sub_texts.get(iid, [])))
     chunk = ""
     if line:
         if iid not in state.flushed:
-            state.flushed.add(iid)
+            if trackable(state.flushed, iid, state.limit):
+                state.flushed.add(iid)
+            state.sub_texts.pop(iid, None)
             chunk = sep_for(reasoning) + line + "\n"
     return chunk
+
+
+def merge_tool_display(fresh: str, stored: str) -> str:
+    """Отображение инструмента для базы: вариант с подсказкой выигрывает у голого."""
+    merged = stored
+    if " — " in fresh:
+        merged = fresh
+    return merged
 
 
 def tool_failure_line(method: str, raw: dict[str, Any], display: str) -> str:

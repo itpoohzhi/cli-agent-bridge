@@ -225,12 +225,25 @@ class MspEvents(_MspCore):
 
     def __init__(self, *, reasoning_cap: int, answer_cap: int) -> None:
         super().__init__(reasoning_cap=reasoning_cap, answer_cap=answer_cap)
-        self._phase = _final.PhaseState()
+        self._phase = _final.PhaseState(limit=MAX_TRACKED_ITEMS)
         self._mirror_items: dict[str, _Item] = {}
 
     @property
     def text(self) -> str:
         return _final.choose_text(self._answers, self._phase.phases)
+
+    @property
+    def tracked_count(self) -> int:
+        phase = self._phase
+        return max(
+            super().tracked_count,
+            len(phase.routes),
+            len(phase.phases),
+            len(phase.mirror_indices),
+            len(phase.sub_texts),
+            len(phase.flushed),
+            len(self._mirror_items),
+        )
 
     def feed(self, method: str, params: dict[str, Any]) -> str:
         """Принять уведомление MSP: чужие agentMessage отрезать, остальные — в базу."""
@@ -242,12 +255,20 @@ class MspEvents(_MspCore):
             return ""
         if route == "sub_final":
             return self._sub_event(method, raw, iid)
+        tool_item = self._items.get(iid)
+        was_completed = tool_item.completed if tool_item else False
+        if tool_item:
+            if isinstance(raw, dict):
+                tool_item.tool_name = _final.merge_tool_display(
+                    _extract_tool_name(raw), tool_item.tool_name
+                )
         out = super().feed(method, params)
         if isinstance(raw, dict):
             out += self._mirror(method, raw, iid, route)
-            out += self._append(
-                _final.tool_failure_line(method, raw, _extract_tool_name(raw))
-            )
+            done_item = self._items.get(iid)
+            display = done_item.tool_name if done_item else ""
+            display = "" if was_completed else display
+            out += self._append(_final.tool_failure_line(method, raw, display))
         if method == "turn/completed":
             out += "".join(self._flush(i) for i in list(self._phase.sub_texts))
         return out
@@ -257,10 +278,13 @@ class MspEvents(_MspCore):
         if payload is None:
             return ""
         text, snapshot = payload
-        item = self._mirror_items.setdefault(iid, _Item(kind="reasoning"))
-        return self._summary(
-            item, _final.mirror_index_for(self._phase, iid), text, snapshot
-        )
+        mirrored = ""
+        if _final.trackable(self._mirror_items, iid, MAX_TRACKED_ITEMS):
+            item = self._mirror_items.setdefault(iid, _Item(kind="reasoning"))
+            mirrored = self._summary(
+                item, _final.mirror_index_for(self._phase, iid), text, snapshot
+            )
+        return mirrored
 
     def _sub_event(self, method: str, raw: dict[str, Any], iid: str) -> str:
         text, snapshot = _final.sub_payload(method, raw)
