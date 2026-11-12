@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import PureWindowsPath
 from typing import Any, Mapping
 
@@ -14,6 +15,7 @@ _FAILED_STATUSES = frozenset(
 )
 _ROUTES = {"main:commentary": "commentary", "foreign:finalAnswer": "sub_final"}
 _SCOPE_DEFAULTS = {"main": "answer", "foreign": "ignore"}
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -103,3 +105,40 @@ def sep_for(reasoning: str) -> str:
     elif reasoning.endswith("\n"):
         sep = "\n"
     return sep
+
+
+def _suppress_unknown_tool() -> bool:
+    return os.environ.get(
+        "BRIDGE_MUSE_SUPPRESS_UNKNOWN_TOOL", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _plain_tool_name(raw: Mapping[str, Any]) -> str:
+    vals = [
+        str(raw[k]).strip()
+        for k in ("toolName", "tool", "name")
+        if raw.get(k) is not None and str(raw[k]).strip()
+    ]
+    valid = next((v for v in vals if _TOOL_NAME.fullmatch(v)), "")
+    return valid or ("unknown_tool" if (vals or not _suppress_unknown_tool()) else "")
+
+
+def extract_tool_name(raw: Mapping[str, Any]) -> str:
+    """Отображаемое имя инструмента; с подсказкой из allowlist args — «имя — подсказка»."""
+    display = _plain_tool_name(raw)
+    if display:
+        hint = tool_hint(raw)
+        if hint:
+            display = f"{display} — {hint}"
+    return display
+
+
+def format_tool_started(name: str) -> str:
+    return f"[Вызов инструмента: {name}]\n" if name else ""
+
+
+def format_tool_completed(name: str) -> str:
+    out = f"[Инструмент {name} завершён]\n" if name else ""
+    if " — " in name:
+        out = ""
+    return out
