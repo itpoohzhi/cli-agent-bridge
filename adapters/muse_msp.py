@@ -250,13 +250,14 @@ class MspEvents(_MspCore):
             if isinstance(raw, dict)
             else ("", "")
         )
-        if route == "ignore":
-            return ""
-        if route == "sub_final":
-            return self._sub_event(method, raw, iid)
-        if route == "pending":
-            return super().feed(method, params) if method == "item/started" else ""
-        return self._routed(method, params, iid, route)
+        base_feed = super().feed
+        forwarded = {"item/started": method}.get(method, "")
+        handlers = {
+            "ignore": lambda: "",
+            "sub_final": lambda: self._sub_event(method, raw, iid),
+            "pending": lambda: base_feed(forwarded, params),
+        }
+        return handlers.get(route, lambda: self._routed(method, params, iid, route))()
 
     def _routed(self, method: str, params: dict[str, Any], iid: str, route: str) -> str:
         raw = params.get("item", params)

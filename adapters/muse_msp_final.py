@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from operator import ne
 from typing import Any
 
 from adapters.muse_msp_hints import (
@@ -13,6 +14,8 @@ from adapters.muse_msp_hints import (
     sep_for,
     subagent_final_limit,
 )
+
+_ITEM_KINDS = ("userMessage", "agentMessage", "toolCall", "reasoning")
 
 
 @dataclass
@@ -139,13 +142,11 @@ def _agent_route(
 def _ignore_untyped(state: PhaseState, iid: str, kind: object, turn: object) -> bool:
     if not iid:
         return False
-    if kind in ("userMessage", "agentMessage"):
-        return False
-    if kind is not None:
-        return kind not in ("toolCall", "reasoning")
-    if isinstance(turn, str) and turn and state.anchored and turn != state.main_turn:
-        return True
-    return False
+    untyped = kind is None
+    foreign_turn = all((isinstance(turn, str), bool(turn), ne(turn, state.main_turn)))
+    foreign = all((untyped, state.anchored, foreign_turn))
+    invalid_kind = all((not untyped, not _ITEM_KINDS.__contains__(kind)))
+    return any((foreign, invalid_kind))
 
 
 def _anchor_user_turn(state: PhaseState, iid: str, kind: object, turn: object) -> None:
