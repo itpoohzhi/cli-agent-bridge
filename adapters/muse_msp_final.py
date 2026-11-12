@@ -86,13 +86,13 @@ def _reject_collision(state: PhaseState, iid: str, scope: str) -> None:
 def _event_scope(
     state: PhaseState, turn: str, cached_scope: str, cached_route: str
 ) -> str:
-    scope = "main" if not state.anchored and not turn else "foreign"
+    scope = "main"
     if state.anchored:
-        if {state.main_turn: True}.get(turn, False):
-            scope = "main"
-    if cached_route:
-        if not turn:
-            scope = cached_scope
+        scope = {state.main_turn: "main"}.get(turn, "foreign")
+    elif turn:
+        scope = "foreign"
+    if all((cached_route, not turn)):
+        scope = cached_scope
     return scope
 
 
@@ -158,8 +158,9 @@ def _anchor_user_turn(state: PhaseState, iid: str, kind: object, turn: object) -
 def _handle_agent_route(
     state: PhaseState, method: str, raw: dict[str, Any], iid: str, route: str
 ) -> str:
-    scope_fields = (raw.get("turnId"), raw.get("messagePhase"))
-    if iid and (state.anchored or not any(scope_fields)):
+    has_sub = any((raw.get("turnId"), raw.get("messagePhase")))
+    allowed = {False: not has_sub}.get(state.anchored, True)
+    if iid and allowed:
         return _agent_route(state, method, raw, iid, route)
     if iid and trackable(state.quarantined, iid, state.limit):
         state.quarantined.add(iid)
