@@ -158,6 +158,32 @@ def test_commentary_snapshot_reconciles_without_duplication() -> None:
     assert events.reasoning.count("Hello!") == 1
 
 
+def test_commentary_completed_without_string_text_is_ignored() -> None:
+    events = parser()
+    user_message(events)
+    items: list[dict[str, object]] = [
+        {
+            "itemId": "c1",
+            "kind": "agentMessage",
+            "turnId": MAIN,
+            "messagePhase": "commentary",
+        },
+        {
+            "itemId": "c2",
+            "kind": "agentMessage",
+            "turnId": MAIN,
+            "messagePhase": "commentary",
+            "text": 123,
+        },
+    ]
+    for item in items:
+        reasoning_before = events.reasoning
+        text_before = events.text
+        assert events.feed("item/completed", {"item": item}) == ""
+        assert events.reasoning == reasoning_before
+        assert events.text == text_before
+
+
 def test_subagent_commentary_is_hidden_everywhere() -> None:
     events = parser()
     user_message(events)
