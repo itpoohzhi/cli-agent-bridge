@@ -129,7 +129,7 @@ def test_muse_without_key_keeps_empty_session(muse, live, monkeypatch):
     assert status == 403 and seen == [""]
 
 
-@pytest.mark.parametrize("bad", ["", "   ", BODY_LONG_KEY, 7, "a\x00b"])
+@pytest.mark.parametrize("bad", ["", 7, None, ["k"]])
 def test_muse_invalid_key_is_treated_as_no_key(muse, live, monkeypatch, bad):
     seen: list[str] = []
 
@@ -140,6 +140,27 @@ def test_muse_invalid_key_is_treated_as_no_key(muse, live, monkeypatch, bad):
     monkeypatch.setattr(muse.TURN_MANAGER, "create_or_attach_turn", fake_create)
     status, _ = live(muse).post(_muse_body(prompt_cache_key=bad))
     assert status == 403 and seen == [""]
+
+
+@pytest.mark.parametrize(
+    "legacy_key",
+    [BODY_LONG_KEY, "k" * 5000, "  " + KEY + "  ", "   ", "a\tb"],
+    ids=["len513", "len5000", "edge-spaces", "only-spaces", "control-char"],
+)
+def test_muse_lenient_keeps_baseline_session_identity(
+    muse, live, monkeypatch, legacy_key
+):
+    """RW-020: как в базе cccea5a2 — любая непустая строка идёт в session_id как есть
+    (без strip и без предела 512), а не сбрасывается в nokey."""
+    seen: list[str] = []
+
+    def fake_create(**kwargs: Any) -> Any:
+        seen.append(kwargs["session_id"])
+        raise PermissionError("stop after identity")
+
+    monkeypatch.setattr(muse.TURN_MANAGER, "create_or_attach_turn", fake_create)
+    status, _ = live(muse).post(_muse_body(prompt_cache_key=legacy_key))
+    assert status == 403 and seen == [legacy_key]
 
 
 def test_muse_reads_only_prompt_cache_key_documented_exception(muse, live, monkeypatch):
@@ -254,6 +275,24 @@ def test_claude_cache_read_goes_to_prompt_tokens_details(claude, live):
         "total_tokens": 45,
         "prompt_tokens_details": {"cached_tokens": 40},
     }
+
+
+@pytest.mark.parametrize("junk", [-1, "x", True, 1.5])
+def test_claude_junk_cache_read_does_not_reach_wire(claude, junk):
+    """RW-022: мусорный cache_read фильтруется в build_wire_usage, лог достижим."""
+    wire = claude._wire_usage(
+        {"input_tokens": 3, "output_tokens": 2, "cache_read_input_tokens": junk}
+    )
+    assert wire == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    assert any("usage_cache_inconsistent" in line for line in claude.captured_logs)
+
+
+def test_claude_valid_cache_read_has_no_inconsistent_log(claude):
+    wire = claude._wire_usage(
+        {"input_tokens": 3, "output_tokens": 2, "cache_read_input_tokens": 40}
+    )
+    assert wire["prompt_tokens_details"] == {"cached_tokens": 40}
+    assert not claude.captured_logs
 
 
 def test_claude_cache_creation_counts_in_prompt_tokens(claude, live):

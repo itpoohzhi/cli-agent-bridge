@@ -86,7 +86,7 @@ def extract_cache_creation_tokens(usage: Mapping | None) -> int | None:
 def build_wire_usage(
     input_tokens: object,
     output_tokens: object,
-    cache_read_tokens: int | None,
+    cache_read_tokens: object,
     cache_creation_tokens: int | None = None,
     *,
     input_includes_cache: bool,

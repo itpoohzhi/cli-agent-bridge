@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import chat_key  # noqa: E402
 from core.chat_key import (  # noqa: E402
+    NO_MAX_LEN,
     SOURCES_CACHE_KEY_ONLY,
     SOURCES_DEFAULT,
     SOURCES_SESSION_ID,
@@ -88,7 +89,9 @@ def test_source_priority_and_no_fallback_after_invalid():
 
 def test_session_id_sources_exclude_prompt_cache_key():
     req = {"prompt_cache_key": "shared-prefix-cache"}
-    assert SOURCES_SESSION_ID == tuple(s for s in SOURCES_DEFAULT if s != "prompt_cache_key")
+    assert SOURCES_SESSION_ID == tuple(
+        s for s in SOURCES_DEFAULT if s != "prompt_cache_key"
+    )
     res = resolve_chat_key(req, sources=SOURCES_SESSION_ID)
     assert (res.keyed, res.invalid, res.route) == (False, False, "nokey")
     # Битый prompt_cache_key для набора сессий вообще не источник.
@@ -120,6 +123,32 @@ def test_lenient_mode_is_legacy_facade_compat():
             {"prompt_cache_key": raw}, sources=SOURCES_CACHE_KEY_ONLY, lenient=True
         )
         assert res.invalid and not res.keyed and res.route == "nokey"
+
+
+def test_lenient_without_length_cap_is_muse_profile():
+    """Профиль muse: lenient + NO_MAX_LEN — любая непустая строка как есть, без предела."""
+    for raw in ("k" * 513, "k" * 5000, " k ", "   "):
+        res = resolve_chat_key(
+            {"prompt_cache_key": raw},
+            sources=SOURCES_CACHE_KEY_ONLY,
+            lenient=True,
+            max_len=NO_MAX_LEN,
+        )
+        assert res.keyed and res.value == raw and not res.invalid
+    for raw in ("", 5, "a\ud800b"):
+        res = resolve_chat_key(
+            {"prompt_cache_key": raw},
+            sources=SOURCES_CACHE_KEY_ONLY,
+            lenient=True,
+            max_len=NO_MAX_LEN,
+        )
+        assert res.invalid and res.route == "nokey"
+
+
+def test_explicit_max_len_overrides_env(monkeypatch):
+    monkeypatch.setenv(chat_key.ENV_KEY_MAX_LEN, "4")
+    assert resolve_chat_key({"prompt_cache_key": "abcde"}).invalid
+    assert resolve_chat_key({"prompt_cache_key": "abcde"}, max_len=10).keyed
 
 
 def test_headers_case_insensitive_plain_dict():

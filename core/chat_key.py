@@ -4,10 +4,14 @@
 путь процесса — наружу для хранения и корреляции отдаётся только `digest`
 (sha256).
 
-Единый контракт на невалидный ключ (передан, но не подходит): он помечается
-`invalid=True`, маршрут `nokey`, а во ВСЕХ мостах запрос обслуживается как без
-ключа — никакого `400`. Ключ — вспомогательный сигнал (кэш/корреляция), его
-порча не должна создавать новый режим отказа доступности.
+Контракт: один контракт маршрута (invalid → nokey, без 400) и два профиля
+валидности (strict/lenient); lenient применяется только к muse и фасаду как
+обратная совместимость.
+
+Невалидный ключ (передан, но не подходит) помечается `invalid=True`, маршрут
+`nokey`, а во ВСЕХ мостах запрос обслуживается как без ключа — никакого `400`.
+Ключ — вспомогательный сигнал (кэш/корреляция), его порча не должна создавать
+новый режим отказа доступности.
 
 `prompt_cache_key` по OpenAI-семантике — аффинность кэша префикса, его штатно
 шарят между разными чатами. Поэтому он НЕ идентичность чата: там, где ключ
@@ -24,15 +28,18 @@
 приоритетный источник не даёт fallback на другой чат.
 
 Нормализация: в строгом режиме значение и `digest` считаются от `strip()`-значения
-(`"k"` и `" k "` — один ключ во всех мостах). Режим `lenient=True` — исключение для
-фасада DSH (обратная совместимость): значение берётся как есть, невалиден только
-не-`str`, пустой, длиннее предела или с суррогатами.
+(`"k"` и `" k "` — один ключ во всех мостах). Режим `lenient=True` — профиль
+обратной совместимости для фасада DSH и muse (только они): значение берётся как
+есть, невалиден только не-`str`, пустой, длиннее предела или с суррогатами.
+Muse до унификации принимал любую непустую строку без предела длины, поэтому
+передаёт `max_len=NO_MAX_LEN` (иначе длинный ключ сменил бы идентичность сессии).
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -56,6 +63,9 @@ SOURCES_DEFAULT: tuple[str, ...] = SOURCES_SESSION_ID + (SRC_PROMPT_CACHE_KEY,)
 SOURCES_CACHE_KEY_ONLY: tuple[str, ...] = (SRC_PROMPT_CACHE_KEY,)
 DEFAULT_SOURCES = SOURCES_DEFAULT
 
+# Снятие предела длины ключа (muse: прежнее поведение без предела).
+NO_MAX_LEN = sys.maxsize
+
 ROUTE_KEYED = "keyed"
 ROUTE_NOKEY = "nokey"
 
@@ -70,7 +80,6 @@ def key_max_len() -> int:
     except ValueError:
         return DEFAULT_KEY_MAX_LEN
     return value if value > 0 else DEFAULT_KEY_MAX_LEN
-
 
 
 @dataclass(frozen=True)
@@ -140,15 +149,17 @@ def resolve_chat_key(
     namespace: str = "",
     sources: Sequence[str] = SOURCES_DEFAULT,
     lenient: bool = False,
+    max_len: int | None = None,
 ) -> ChatKey:
     """Ключ чата запроса: первый переданный источник из `sources`.
 
     `sources` — один из именованных наборов (`SOURCES_*`); `namespace` входит
     в `digest` (фасад сохраняет прежний `sha256(ns\\0key)`); `lenient` — режим
-    совместимости фасада (см. docstring модуля).
+    совместимости (фасад, muse; см. docstring модуля); `max_len` — явный предел
+    длины вместо `BRIDGE_CHAT_KEY_MAX_LEN` (`NO_MAX_LEN` — без предела).
     """
     body: Mapping = req if isinstance(req, Mapping) else {}
-    limit = key_max_len()
+    limit = key_max_len() if max_len is None else max_len
     for source in sources:
         raw = _pick(source, body, headers, extra)
         if raw is None:

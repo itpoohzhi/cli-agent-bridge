@@ -64,9 +64,9 @@ from core.chat_key import resolve_chat_key  # noqa: E402
 from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.usage_wire import (  # noqa: E402
+    CACHE_READ_KEYS,
     build_wire_usage,
     extract_cache_creation_tokens,
-    extract_cache_read_tokens,
 )
 
 try:
@@ -100,18 +100,27 @@ except ImportError as exc:
     raise SystemExit(1) from exc
 
 
+def _raw_cache_read(usage: dict) -> object:
+    """Первое заданное (не `None`) сырое значение cache-read без фильтрации."""
+    for key in CACHE_READ_KEYS:
+        if usage.get(key) is not None:
+            return usage[key]
+    return None
+
+
 def _wire_usage(usage: dict) -> dict:
     """OpenAI-`usage` из result-события `claude -p` (арифметика кэша — core.usage_wire).
 
     `input_tokens` Claude исключает cache-read и cache-creation (подтверждено живым
     result-событием, tests/fixtures/claude_result_usage.json), поэтому они
     прибавляются к `prompt_tokens` в общем модуле; несогласованность — только
-    мусорные значения кэша.
+    мусорные значения кэша. Cache-read передаётся СЫРЫМ: фильтр один — внутри
+    `build_wire_usage`, он же выставляет `inconsistent` (мусор не попадает на wire).
     """
     wire, inconsistent = build_wire_usage(
         usage.get("input_tokens", 0),
         usage.get("output_tokens", 0),
-        extract_cache_read_tokens(usage),
+        _raw_cache_read(usage),
         extract_cache_creation_tokens(usage),
         input_includes_cache=False,
     )

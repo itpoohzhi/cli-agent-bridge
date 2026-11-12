@@ -146,7 +146,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from core.backend_adapter import ToolCall, ToolFunction, TurnResult, Usage  # noqa: E402
-from core.chat_key import SOURCES_CACHE_KEY_ONLY, resolve_chat_key  # noqa: E402
+from core.chat_key import (  # noqa: E402
+    NO_MAX_LEN,
+    SOURCES_CACHE_KEY_ONLY,
+    resolve_chat_key,
+)
 from core.usage_wire import (  # noqa: E402
     extract_cache_read_tokens,
     normalize_prompt_cache_details,
@@ -2911,8 +2915,11 @@ class Handler(BaseHTTPRequestHandler):
         # Ключ чата — единый разбор core.chat_key. Осознанное исключение из набора
         # источников: muse и до унификации читал только prompt_cache_key как идентичность
         # сессии; расширение заголовками сменило бы её у существующих клиентов.
-        # Невалидный ключ — как без ключа (nokey), без 400.
-        chat = resolve_chat_key(req, sources=SOURCES_CACHE_KEY_ONLY)
+        # Профиль lenient без предела длины: прежняя идентичность сессии (любая непустая
+        # строка как есть, без strip и без предела). Невалидный ключ — nokey, без 400.
+        chat = resolve_chat_key(
+            req, sources=SOURCES_CACHE_KEY_ONLY, lenient=True, max_len=NO_MAX_LEN
+        )
 
         raw_tools = req.get("tools")
         tool_schemas = build_tool_schemas(raw_tools)
