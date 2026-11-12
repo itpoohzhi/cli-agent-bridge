@@ -30,6 +30,10 @@ def hint_max_chars() -> int:
     return _env_int("BRIDGE_MUSE_TOOL_HINT_MAX_CHARS", 80)
 
 
+def args_max_chars() -> int:
+    return _env_int("BRIDGE_MUSE_TOOL_ARGS_MAX_CHARS", 1_048_576)
+
+
 def subagent_final_limit() -> int:
     return _env_int("BRIDGE_MUSE_SUBAGENT_FINAL_MAX_CHARS", 300)
 
@@ -48,12 +52,13 @@ def _parse_args(raw: Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         parsed_args = value
     if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except ValueError:
-            parsed = {}
-        if isinstance(parsed, Mapping):
-            parsed_args = parsed
+        if len(value) <= args_max_chars():
+            try:
+                parsed = json.loads(value)
+            except (RecursionError, ValueError):
+                parsed = {}
+            if isinstance(parsed, Mapping):
+                parsed_args = parsed
     return parsed_args
 
 

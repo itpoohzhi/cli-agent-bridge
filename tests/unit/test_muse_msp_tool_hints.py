@@ -53,6 +53,25 @@ def test_tool_hint_invalid_json_args_falls_back_to_legacy() -> None:
     assert first == "[Вызов инструмента: bash]\n"
 
 
+def test_tool_hint_deep_valid_json_args_falls_back_without_exception() -> None:
+    args = '{"nested":' * 50_000 + '{"description":"Hidden"}' + "}" * 50_000
+    events = parser()
+    first = tool_started(events, "t1", "bash", args)
+    assert first == "[Вызов инструмента: bash]\n"
+
+
+def test_tool_hint_json_args_limit_is_enforced_before_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = '{"description":"Visible"}'
+    monkeypatch.setenv("BRIDGE_MUSE_TOOL_ARGS_MAX_CHARS", str(len(args)))
+    accepted = tool_started(parser(), "t1", "bash", args)
+    monkeypatch.setenv("BRIDGE_MUSE_TOOL_ARGS_MAX_CHARS", str(len(args) - 1))
+    rejected = tool_started(parser(), "t1", "bash", args)
+    assert accepted == "[Вызов инструмента: bash — Visible]\n"
+    assert rejected == "[Вызов инструмента: bash]\n"
+
+
 def test_tool_hint_first_allowlisted_field_wins() -> None:
     events = parser()
     args = {"path": "/tmp/data.txt", "description": "Read data"}
@@ -116,7 +135,7 @@ def test_failed_hinted_tool_still_gets_completed_line() -> None:
     args = {"description": "List files"}
     tool_started(events, "t1", "bash", args)
     tail = tool_completed(events, "t1", "bash", args, status="failed")
-    assert tail == "[Инструмент bash — List files завершён]\n"
+    assert tail == "[Ошибка инструмента: bash — List files]\n"
 
 
 def test_failed_plain_tool_keeps_legacy_completed_line() -> None:

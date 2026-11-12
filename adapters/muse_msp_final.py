@@ -75,7 +75,7 @@ def route_for(state: PhaseState, raw: dict[str, Any]) -> tuple[str, str]:
 
     До якоря agentMessage с фазой считается чужим (fail-closed); безфазовый
     поток без turnId остаётся главным ради fallback choose_text. После якоря
-    пустой turnId по-прежнему главный (дельты и снапшоты без turnId).
+    пустые метаданные безопасны только для уже классифицированного itemId.
     """
     iid = raw.get("itemId")
     iid = iid if isinstance(iid, str) else ""
@@ -87,12 +87,13 @@ def route_for(state: PhaseState, raw: dict[str, Any]) -> tuple[str, str]:
                 state.anchored = True
                 state.main_turn = turn
     route = state.routes.get(iid, "")
+    if route:
+        return iid, route
     if raw.get("kind") == "agentMessage":
         phase = raw.get("messagePhase")
         phase = phase if isinstance(phase, str) else ""
         scope = {
             (True, state.main_turn, phase): "main",
-            (True, "", phase): "main",
             (False, "", ""): "main",
         }.get((state.anchored, turn, phase), "foreign")
         route = classify_route(scope, phase)
@@ -185,10 +186,10 @@ def merge_tool_display(fresh: str, stored: str) -> str:
 
 
 def tool_failure_line(method: str, raw: dict[str, Any], display: str) -> str:
-    """Строка завершения для упавшего инструмента с подсказкой; иначе пусто."""
+    """Строка ошибки для упавшего инструмента с подсказкой; иначе пусто."""
     line = ""
     if (method, raw.get("kind")) == ("item/completed", "toolCall"):
         if " — " in display:
             if is_failed_status(raw.get("status")):
-                line = f"[Инструмент {display} завершён]\n"
+                line = f"[Ошибка инструмента: {display}]\n"
     return line

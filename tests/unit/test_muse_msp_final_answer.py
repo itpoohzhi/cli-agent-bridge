@@ -85,14 +85,16 @@ def test_empty_final_does_not_hide_fallback() -> None:
     assert events.text == "Содержимое."
 
 
-def test_message_without_turn_id_after_main_known_stays_main() -> None:
+def test_unknown_message_without_turn_id_after_anchor_is_ignored() -> None:
     events = parser()
     user_message(events)
     events.feed(
         "item/completed",
         {"item": {"itemId": "a", "kind": "agentMessage", "text": "Без turnId."}},
     )
-    assert events.text == "Без turnId."
+    assert events.text == ""
+    assert events.reasoning == ""
+    assert events._phase.routes["a"] == "ignore"
 
 
 def test_answer_cap_still_enforced() -> None:
