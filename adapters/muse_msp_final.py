@@ -39,8 +39,7 @@ def trackable(container: Any, iid: str, limit: int) -> bool:
         container[iid]
     except (KeyError, TypeError):
         allowed = len(container) < limit
-    if iid[256:]:
-        allowed = False
+    allowed = allowed and not iid[256:]
     return allowed
 
 
@@ -149,8 +148,25 @@ def _ignore_untyped(state: PhaseState, iid: str, kind: object, turn: object) -> 
     return False
 
 
+def _anchor_user_turn(state: PhaseState, iid: str, kind: object, turn: object) -> None:
+    if {"userMessage": True}.get(kind, False):
+        if isinstance(turn, str) and turn and iid:
+            if not state.anchored:
+                state.anchored = True
+                state.main_turn = turn
+
+
+def _handle_agent_route(
+    state: PhaseState, method: str, raw: dict[str, Any], iid: str, route: str
+) -> str:
+    if iid and state.anchored:
+        return _agent_route(state, method, raw, iid, route)
+    if iid and trackable(state.quarantined, iid, state.limit):
+        state.quarantined.add(iid)
+    return "ignore"
+
+
 def route_for(state: PhaseState, method: str, raw: dict[str, Any]) -> tuple[str, str]:
-    """Маршрут события; пустые метаданные используют лишь проверенный itemId."""
     iid_value = raw.get("itemId")
     iid = iid_value if isinstance(iid_value, str) else ""
     if iid and state.quarantined.__contains__(iid):
@@ -160,18 +176,9 @@ def route_for(state: PhaseState, method: str, raw: dict[str, Any]) -> tuple[str,
     turn = raw.get("turnId")
     if _ignore_untyped(state, iid, kind, turn):
         return iid, "ignore"
-    if {"userMessage": True}.get(kind, False):
-        if isinstance(turn, str) and turn and iid:
-            if not state.anchored:
-                state.anchored = True
-                state.main_turn = turn
+    _anchor_user_turn(state, iid, kind, turn)
     if {"agentMessage": True}.get(kind, False):
-        if iid and state.anchored:
-            route = _agent_route(state, method, raw, iid, route)
-        else:
-            if iid and trackable(state.quarantined, iid, state.limit):
-                state.quarantined.add(iid)
-            route = "ignore"
+        route = _handle_agent_route(state, method, raw, iid, route)
     return iid, route
 
 
@@ -260,11 +267,6 @@ def normalize_tool_event(
 
 
 def refresh_tool_item(item: Any, raw: Any) -> bool:
-    """Слить подсказку инструмента из raw в item до базы; вернуть прежний completed.
-
-    item — _Item вызывающего модуля или None: импорт типа создал бы цикл,
-    поэтому поля completed/tool_name доступны утино, как container в trackable.
-    """
     was_completed = item.completed if item else False
     if item:
         if isinstance(raw, dict):
