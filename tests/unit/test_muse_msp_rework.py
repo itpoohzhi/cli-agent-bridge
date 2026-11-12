@@ -193,3 +193,11 @@ def test_repeated_tool_completed_emits_completed_line_once() -> None:
     tail = tool_completed(events, "t1", "bash", args, status="failed")
     assert tail == ""
     assert events.reasoning.count("[Инструмент bash — List files завершён]\n") == 1
+
+
+def test_failed_hinted_tool_completed_without_started_gets_line() -> None:
+    events = parser()
+    tail = tool_completed(
+        events, "t1", "bash", {"description": "List files"}, status="failed"
+    )
+    assert tail == "[Инструмент bash — List files завершён]\n"

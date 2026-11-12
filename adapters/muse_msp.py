@@ -255,13 +255,7 @@ class MspEvents(_MspCore):
             return ""
         if route == "sub_final":
             return self._sub_event(method, raw, iid)
-        tool_item = self._items.get(iid)
-        was_completed = tool_item.completed if tool_item else False
-        if tool_item:
-            if isinstance(raw, dict):
-                tool_item.tool_name = _final.merge_tool_display(
-                    _extract_tool_name(raw), tool_item.tool_name
-                )
+        was_completed = _final.refresh_tool_item(self._items.get(iid), raw)
         out = super().feed(method, params)
         if isinstance(raw, dict):
             out += self._mirror(method, raw, iid, route)

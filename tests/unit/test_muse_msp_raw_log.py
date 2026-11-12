@@ -8,6 +8,7 @@ hookRun с turnId=null до userMessage, дельты без kind/turnId, фин
 
 from __future__ import annotations
 
+from adapters.muse_msp import MspEvents
 from tests.unit.msp_testlib import parser
 
 _MAIN_TURN = "01a1cd20-85b9-79b3-87e0-e20b6d9e8abb"
@@ -34,9 +35,8 @@ def _delta(iid: str, text: str) -> dict[str, object]:
     return {"itemId": iid, "field": "text", "delta": text}
 
 
-def test_verbatim_raw_log_stream() -> None:
-    events = parser()
-    stream: list[tuple[str, dict[str, object]]] = [
+def _opening_events() -> list[tuple[str, dict[str, object]]]:
+    return [
         (
             "item/started",
             _item("01a1cd20-85f5-7622-846f-ed5c5c7045fa", "hookRun", None),
@@ -61,6 +61,11 @@ def test_verbatim_raw_log_stream() -> None:
                 messagePhase="commentary",
             ),
         ),
+    ]
+
+
+def _commentary_and_sub_events() -> list[tuple[str, dict[str, object]]]:
+    return [
         (
             "item/delta",
             _delta(_COMMENTARY_ID, "Запускаю подагента для подсчёта файлов."),
@@ -90,6 +95,11 @@ def test_verbatim_raw_log_stream() -> None:
         ("item/delta", _delta(_SUB_FINAL_ID, "К")),
         ("item/delta", _delta(_SUB_FINAL_ID, "аталог")),
         ("item/delta", _delta(_SUB_FINAL_ID, " пуст")),
+    ]
+
+
+def _main_final_events() -> list[tuple[str, dict[str, object]]]:
+    return [
         (
             "item/started",
             _item(
@@ -115,8 +125,18 @@ def test_verbatim_raw_log_stream() -> None:
         ),
         ("turn/completed", {"turnId": _MAIN_TURN, "terminal": "completed"}),
     ]
+
+
+def _run_raw_log() -> MspEvents:
+    events = parser()
+    stream = _opening_events() + _commentary_and_sub_events() + _main_final_events()
     for method, params in stream:
         events.feed(method, params)
+    return events
+
+
+def test_verbatim_raw_log_stream() -> None:
+    events = _run_raw_log()
     assert events.text == _FINAL_TEXT
     assert "Запускаю подагента для подсчёта файлов." in events.reasoning
     assert "Каталог пуст" in events.reasoning

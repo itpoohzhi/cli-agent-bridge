@@ -15,6 +15,7 @@ from typing import Any
 
 from adapters.muse_msp_hints import (
     classify_route,
+    extract_tool_name,
     is_failed_status,
     one_line,
     sep_for,
@@ -160,6 +161,19 @@ def flush_chunk(state: PhaseState, iid: str, reasoning: str) -> str:
             state.sub_texts.pop(iid, None)
             chunk = sep_for(reasoning) + line + "\n"
     return chunk
+
+
+def refresh_tool_item(item: Any, raw: Any) -> bool:
+    """Слить подсказку инструмента из raw в item до базы; вернуть прежний completed.
+
+    item — _Item вызывающего модуля или None: импорт типа создал бы цикл,
+    поэтому поля completed/tool_name доступны утино, как container в trackable.
+    """
+    was_completed = item.completed if item else False
+    if item:
+        if isinstance(raw, dict):
+            item.tool_name = merge_tool_display(extract_tool_name(raw), item.tool_name)
+    return was_completed
 
 
 def merge_tool_display(fresh: str, stored: str) -> str:
