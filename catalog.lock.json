@@ -1,7 +1,7 @@
 {
-  "compiled_at": "2026-11-11T13:58:32+0300",
+  "compiled_at": "2026-11-12T12:27:58+0300",
   "compiler_version": 1,
-  "fleet_sha256": "4cac50b63b3d0858cee7fcbe11a4da8cc1cb579c748ea7a4a694139962643457",
+  "fleet_sha256": "7a14a442532b0e701aa1cfc675e35d4962aae3357826654feb4923ad4098dd0e",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
@@ -11,11 +11,11 @@
       "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
       "droid.yaml": "340ec402a8c4c091fbddb3a77438c56c2263dea8b3d76457ebecd820565c1c53",
       "muse.yaml": "bbe6d2d3b2d967a6f7a1c794411d07a74e7f1040a1bb4641b5a68385e34af79e",
-      "opencode-go-claude.yaml": "11c66e81cd053cc874d086faafbe248d5599447254f162f2d93d3b4360654cd3",
+      "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
       "opencode-go.yaml": "110b75eb68bba08715fc55dfc7fe41d8eda826bef0b5248f81ee3dccfb4810c4",
       "opencode-zen.yaml": "269c0fa76c1220c6173f371e10c2f246b1575abd6cb3e7f91f8472f6ef72f4fc"
     },
-    "manifests_sha256": "92cce5ab5c0629939a76b53822667c7956bd2b892a98dd043c32ad2a847f6f4d"
+    "manifests_sha256": "7418ece413bd79133270ee443543890db8588487dfff7e5ebcee937d58acbb57"
   },
   "models": {
     "beam-free": {
@@ -45,7 +45,7 @@
     "claude-haiku-5-5": {
       "alternates": [
         {
-          "provider": "claude-p"
+          "provider": "opencode-go-claude"
         }
       ],
       "efforts_proven": [],
@@ -53,9 +53,9 @@
       "family_source": "owned_by",
       "history": [],
       "in_fleet": true,
-      "provider": "opencode-go-claude",
+      "provider": "claude-p",
       "quorum_eligible": false,
-      "quota_group": "opencode-go-claude",
+      "quota_group": "anthropic-claude",
       "status": "quarantine"
     },
     "claude-opus-5-5": {
