@@ -1077,9 +1077,13 @@ class ToolCallParser:
             self._deferred_parts.clear()
             self._deferred_chars = 0
         if self._active is not None:
-            if self.strict_live:
-                raise LiveParserError("unclosed tool_call block")
-            self._emit(self._active[0] + "".join(self._parts) + self._close_tail)
+            # Пустой открывающий тег в конце хода (без тела) — не ошибка: отбрасываем,
+            # иначе strict_live роняет ход и теряет уже распознанные вызовы.
+            inner_so_far = "".join(self._parts)
+            if inner_so_far.strip():
+                if self.strict_live:
+                    raise LiveParserError("unclosed tool_call block")
+                self._emit(self._active[0] + inner_so_far + self._close_tail)
             self._active = None
             self._parts.clear()
             self._close_tail = ""
