@@ -8697,14 +8697,17 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     + "\n\n"
                 )
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
-            emit(
-                stream_error_frame(
-                    str(err["message"]),
-                    code=str(err.get("code") or err.get("type") or "stream_error"),
-                    error_type=str(err.get("type") or "server_error"),
-                    finish_reason=None,
+            if err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid":
+                emit(stream_error_frame(str(err["message"]), finish_reason=None))
+            else:
+                emit(
+                    stream_error_frame(
+                        str(err["message"]),
+                        code=str(err.get("code") or err.get("type") or "stream_error"),
+                        error_type=str(err.get("type") or "server_error"),
+                        finish_reason=None,
+                    )
                 )
-            )
         else:
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")

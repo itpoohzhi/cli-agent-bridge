@@ -85,7 +85,7 @@ def test_native_provider_affinity_invariant():
         if model_id.endswith("-droid"):
             assert provider == "droid", f"{model_id} should be droid, got {provider}"
         elif family in EXPECTED_FAMILY_PROVIDER:
-            expected = "opencode-go-claude" if model_id == "claude-haiku-5-5" else EXPECTED_FAMILY_PROVIDER[family]
+            expected = EXPECTED_FAMILY_PROVIDER[family]
             assert provider == expected, f"{model_id} (family={family}) should be {expected}, got {provider}"
             assert provider not in aggregators, f"Canonical model {model_id} cannot have aggregator as primary, got {provider}"
 

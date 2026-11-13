@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TypeGuard
 
 # Ключи cache-read токенов в usage апстримов (порядок = приоритет).
 CACHE_READ_KEYS: tuple[str, ...] = (
@@ -24,7 +25,7 @@ CACHE_CREATION_KEYS: tuple[str, ...] = (
 )
 
 
-def _is_count(value: object) -> bool:
+def _is_count(value: object) -> TypeGuard[int]:
     """Целое счётное значение; `bool` допустимым числом не является."""
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -115,18 +116,20 @@ def build_wire_usage(
     """
     prompt = input_tokens if _is_count(input_tokens) and input_tokens >= 0 else 0
     completion = output_tokens if _is_count(output_tokens) and output_tokens >= 0 else 0
-    read_valid = _is_count(cache_read_tokens) and cache_read_tokens >= 0
-    inconsistent = cache_read_tokens is not None and not read_valid
+    read_value: int | None = (
+        cache_read_tokens if _is_count(cache_read_tokens) and cache_read_tokens >= 0 else None
+    )
+    inconsistent = cache_read_tokens is not None and read_value is None
     details: dict[str, int] | None = None
     if input_includes_cache:
-        details, mismatch = normalize_prompt_cache_details(prompt, cache_read_tokens)
+        details, mismatch = normalize_prompt_cache_details(prompt, read_value)
         inconsistent = inconsistent or mismatch
     else:
         for extra in (cache_read_tokens, cache_creation_tokens):
             if _is_count(extra) and extra >= 0:
                 prompt += extra
-        if read_valid:
-            details = {"cached_tokens": cache_read_tokens}
+        if read_value is not None:
+            details = {"cached_tokens": read_value}
     wire: dict = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
