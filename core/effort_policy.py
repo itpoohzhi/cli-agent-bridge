@@ -5,6 +5,8 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import cast
 
+from core.route_health_policy import normalize_model_route
+
 FLAG_EFFORT_CATALOG = "BRIDGE_EFFORT_CATALOG_ENABLED"
 EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
 EFFORT_ORDER: tuple[str, ...] = ("off", *EFFORT_LEVELS, "ultra")
@@ -12,7 +14,9 @@ _RANK = {name: rank for rank, name in enumerate(EFFORT_ORDER)}
 DEFAULT_LOG_EFFORT_MAX_CHARS = 32
 
 
-def clamp_effort_downward(candidate: str, allowed: Sequence[str], default: str) -> tuple[str, bool]:
+def clamp_effort_downward(
+    candidate: str, allowed: Sequence[str], default: str
+) -> tuple[str, bool]:
     """Кламп вниз к allowed; True — был кламп."""
     key = candidate.lower()
     named = {item.lower(): item for item in reversed(allowed)}
@@ -73,23 +77,60 @@ class EffortResolution:
     clamped_from: str | None = None
 
 
-def resolve_model_effort_fields(model_id: str, specs: Mapping[str, ModelEffortSpec]) -> ModelEffortCardFields | None:
+def resolve_model_effort_fields(
+    model_id: str, specs: Mapping[str, ModelEffortSpec]
+) -> ModelEffortCardFields | None:
     """Поля карточки; `None` — efforts не объявлены."""
     spec = specs.get(model_id, ModelEffortSpec())
     return ModelEffortCardFields(spec.default, spec.efforts) if spec.efforts else None
 
 
-def resolve_alias_effort(raw_id: str, catalogue: Mapping[str, object], suffixes: Collection[str], enabled: bool) -> tuple[str, str] | None:
+def _lookup_catalog_id(target: str, catalogue: Mapping[str, object]) -> str | None:
+    title = "-".join(part.capitalize() for part in target.split("-"))
+    for candidate in dict.fromkeys((target, target.lower(), target.upper(), title)):
+        if candidate in catalogue:
+            return candidate
+    return None
+
+
+def resolve_alias_effort(
+    raw_id: str,
+    catalogue: Mapping[str, object],
+    suffixes: Collection[str],
+    enabled: bool,
+) -> tuple[str, str] | None:
     """`<id>-<effort>` -> `(id, effort)`; точная запись приоритетнее."""
-    base, _, suffix = raw_id.rpartition("-")
-    known = enabled and raw_id not in catalogue and base in catalogue and suffix in suffixes
-    return (base, suffix) if known else None
+    if not enabled:
+        return None
+    trimmed = raw_id.strip()
+    if len(trimmed.split()) != 1 or _lookup_catalog_id(trimmed, catalogue) is not None:
+        return None
+    try:
+        route = normalize_model_route(trimmed, allowed_suffixes=suffixes)
+    except ValueError:
+        return None
+    if not route.alias_applied or route.reasoning_effort is None:
+        return None
+    canonical_model = _lookup_catalog_id(route.canonical_model, catalogue)
+    return (
+        (canonical_model, route.reasoning_effort)
+        if canonical_model is not None
+        else None
+    )
 
 
-def catalog_effort_specs(models: object, aliases: Mapping[str, tuple[str, str]]) -> dict[str, ModelEffortSpec]:
+def catalog_effort_specs(
+    models: object, aliases: Mapping[str, tuple[str, str]]
+) -> dict[str, ModelEffortSpec]:
     """Спеки моделей и алиасов `alias -> (base, effort)`."""
-    entries = cast(Mapping[object, object], models if isinstance(models, Mapping) else {})
-    specs = {str(k): s for k, v in entries.items() if (s := ModelEffortSpec.from_catalog_entry(v)).efforts}
+    entries = cast(
+        Mapping[object, object], models if isinstance(models, Mapping) else {}
+    )
+    specs = {
+        str(k): s
+        for k, v in entries.items()
+        if (s := ModelEffortSpec.from_catalog_entry(v)).efforts
+    }
     without_efforts = entries.keys() - specs.keys()
     pins = {
         alias: specs.get(base, ModelEffortSpec()).pinned_to(effort)
@@ -99,31 +140,51 @@ def catalog_effort_specs(models: object, aliases: Mapping[str, tuple[str, str]])
     return {**specs, **pins}
 
 
-def _clamped_resolution(requested: object, alias: str, spec: ModelEffortSpec) -> EffortResolution:
+def _clamped_resolution(
+    requested: object, alias: str, spec: ModelEffortSpec
+) -> EffortResolution:
     """Кламп явного effort либо алиаса."""
     asked = requested.strip() if isinstance(requested, str) else ""
     text = asked or (alias if requested is None else str(requested))
     fallback = next(filter(None, (spec.default, *spec.efforts)))
     value, clamped = clamp_effort_downward(text, spec.efforts, fallback)
     verbatim = requested == value and not clamped
-    return EffortResolution() if verbatim else EffortResolution(value, True, text if clamped else None)
+    return (
+        EffortResolution()
+        if verbatim
+        else EffortResolution(value, True, text if clamped else None)
+    )
 
 
-def resolve_passthrough_effort(requested: object, alias_effort: str | None, spec: ModelEffortSpec, *, enabled: bool) -> EffortResolution:
+def resolve_passthrough_effort(
+    requested: object, alias_effort: str | None, spec: ModelEffortSpec, *, enabled: bool
+) -> EffortResolution:
     """Passthrough `reasoning_effort`: кламп за флагом."""
     alias = alias_effort.strip() if isinstance(alias_effort, str) else ""
     if enabled and spec.efforts and (requested is not None or alias):
-        return _clamped_resolution(requested, alias, spec.pinned_to(alias) if alias else spec)
+        return _clamped_resolution(
+            requested, alias, spec.pinned_to(alias) if alias else spec
+        )
     legacy = alias and requested is None
     return EffortResolution(alias, True) if legacy else EffortResolution()
 
 
-def sanitize_effort_for_log(raw: object, limit: int = DEFAULT_LOG_EFFORT_MAX_CHARS) -> str:
+def sanitize_effort_for_log(
+    raw: object, limit: int = DEFAULT_LOG_EFFORT_MAX_CHARS
+) -> str:
     """Printable-срез effort до `limit` для журнала."""
     return "".join(filter(str.isprintable, str(raw)[: limit * 2]))[:limit]
 
 
-def describe_clamp(label: str, requested: object, applied: object, model_id: str, limit: int = DEFAULT_LOG_EFFORT_MAX_CHARS) -> str:
+def describe_clamp(
+    label: str,
+    requested: object,
+    applied: object,
+    model_id: str,
+    limit: int = DEFAULT_LOG_EFFORT_MAX_CHARS,
+) -> str:
     """Строка журнала о клампе effort."""
-    asked, used, model = (sanitize_effort_for_log(v, limit) for v in (requested, applied, model_id))
+    asked, used, model = (
+        sanitize_effort_for_log(v, limit) for v in (requested, applied, model_id)
+    )
     return f"clamp {label} '{asked}' -> '{used}' for model {model}"
