@@ -111,10 +111,6 @@ def _backend_aliases(model, backend, efforts):
     return {f"{model}-{effort}": {"backend_id": model, "backend": backend, "effort": effort} for effort in efforts}
 
 
-def _target_aliases(model, efforts):
-    return {f"{model}-{effort}": {"target": model, "default_effort": effort} for effort in efforts}
-
-
 def test_explicit_effort_alias_contract():
     """Все 35 effort-алиасов проверяются по точной форме с учётом Hydrogen, Carbon и Argon."""
     expected = {
@@ -126,10 +122,9 @@ def test_explicit_effort_alias_contract():
         **_backend_aliases("claude-sonnet-5-5", "claude-p", ("low", "medium", "high", "max")),
         **_backend_aliases("claude-opus-5-5", "claude-p", ("medium", "high")),
         **_backend_aliases("claude-haiku-5-5", "opencode-go-claude", ("low",)),
-        **_target_aliases("gemini-4-argon", ("low", "medium")),
-        **_backend_aliases("gemini-4-argon", "agy", ("high",)),
-        **_target_aliases("gemini-4-carbon", ("low", "medium", "high")),
-        **_target_aliases("gemini-4-hydrogen", ("low", "medium", "high", "xhigh")),
+        **_backend_aliases("gemini-4-argon", "agy", ("low", "medium", "high")),
+        **_backend_aliases("gemini-4-carbon", "agy", ("low", "medium", "high")),
+        **_backend_aliases("gemini-4-hydrogen", "agy", ("low", "medium", "high", "xhigh")),
     }
     assert _load_fleet().get("aliases", {}) == expected
 

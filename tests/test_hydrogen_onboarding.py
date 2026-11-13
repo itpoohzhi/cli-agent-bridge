@@ -63,7 +63,7 @@ def test_root_fleet_registers_hydrogen_under_agy() -> None:
     assert entry["max_tokens"] == 65536
     for effort in EFFORTS:
         alias = fleet["aliases"][f"{MODEL}-{effort}"]
-        assert alias == {"target": MODEL, "default_effort": effort}
+        assert alias == {"backend_id": MODEL, "backend": "agy", "effort": effort}
 
 
 def test_root_catalog_lock_registers_hydrogen_under_agy() -> None:
@@ -107,7 +107,69 @@ def test_model_modalities_helper_contract() -> None:
         "text",
         "image",
     ]
-    assert server._model_modalities({"input": ["text"]}, "gemini-4-carbon") == ["text"]
+    assert server._model_modalities({"input": ["text"]}, "x-text-only") == ["text"]
+    # union: id из MULTIMODAL_MODELS добавляет image, даже если `input` записи его не содержит.
+    assert server._model_modalities({"input": ["text"]}, "gemini-4-carbon") == ["text", "image"]
+
+
+GOOGLE_MODELS = (MODEL, *SIBLINGS)
+FLAG = "BRIDGE_EFFORT_CATALOG_ENABLED"
+LEGACY_EFFORTS = ["low", "medium", "high"]
+
+
+def test_hub_modalities_image_for_all_four_google_models_in_sync_with_bridge() -> None:
+    """Ядро `:9882` ↔ мост AGY: modalities == ["text", "image"] == `input` fleet.json моста."""
+    cards = {card["id"]: card for card in server._build_models_list()}
+    bridge_fleet = _load_json(ROOT / "bridges" / "agy-bridge" / "fleet.json")
+    for model_id in GOOGLE_MODELS:
+        assert model_id in server.MULTIMODAL_MODELS, model_id
+        assert model_id in cards, model_id
+        assert cards[model_id]["modalities"] == ["text", "image"], model_id
+        assert cards[model_id]["modalities"] == _model(bridge_fleet, model_id)["input"], model_id
+
+
+def test_bridge_fleet_image_proof_formats_are_verified_only() -> None:
+    fleet = _load_json(ROOT / "bridges" / "agy-bridge" / "fleet.json")
+    for model_id in GOOGLE_MODELS:
+        images = _model(fleet, model_id)["images"]
+        assert images["verified_at"] == "2026-11-13", model_id
+        assert images["proof"]["formats"] == [
+            "image/png", "image/jpeg", "image/gif", "image/webp",
+        ], model_id
+
+
+@pytest.fixture
+def effort_flag_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(server, "ADVERTISED_EFFORT_ALIASES", ())
+    monkeypatch.setattr(server, "_EFFORT_SPECS_CACHE", (None, {}))
+    return monkeypatch
+
+
+def test_effort_catalog_flag_off_hides_xhigh_and_passes_effort_through(
+    effort_flag_env: pytest.MonkeyPatch,
+) -> None:
+    from core.effort_policy import EffortResolution, ModelEffortSpec, resolve_passthrough_effort
+
+    effort_flag_env.setenv(FLAG, "false")
+    cards = {card["id"]: card for card in server._build_models_list()}
+    card = cards[MODEL]
+    assert card["supported_reasoning_efforts"] == LEGACY_EFFORTS
+    assert "xhigh" not in card["supported_reasoning_efforts"]
+    # `reasoning_effort` при выключенном флаге пропускается как есть (без клампа/подмены).
+    spec = ModelEffortSpec(tuple(EFFORTS), "high")
+    assert resolve_passthrough_effort("xhigh", None, spec, enabled=False) == EffortResolution()
+
+
+def test_effort_catalog_flag_on_advertises_xhigh_for_hydrogen_only(
+    effort_flag_env: pytest.MonkeyPatch,
+) -> None:
+    effort_flag_env.setenv(FLAG, "true")
+    cards = {card["id"]: card for card in server._build_models_list()}
+    assert cards[MODEL]["supported_reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
+    assert cards[MODEL]["default_reasoning_effort"] == "high"
+    for model_id in SIBLINGS:
+        assert "xhigh" not in cards[model_id]["supported_reasoning_efforts"], model_id
 
 
 # ---- мост AGY: fleet.json и effort-лестница --------------------------------------
@@ -208,3 +270,33 @@ def test_per_model_effort_check_rejects_xhigh_on_siblings_only(
         assert payload["error"]["type"] == "unsupported_reasoning_effort"
     finally:
         http_bridge.close()
+
+
+@pytest.mark.parametrize("model_id", SIBLINGS)
+def test_xhigh_rejected_with_400_on_each_three_level_sibling(
+    bridge_module: Any, model_id: str
+) -> None:
+    http_bridge = _Http(bridge_module)
+    try:
+        code, payload = http_bridge.post(_body(model_id, "xhigh"))
+        assert code == 400
+        assert payload["error"]["type"] == "unsupported_reasoning_effort"
+    finally:
+        http_bridge.close()
+
+
+def test_max_rejected_with_400_on_hydrogen(bridge_module: Any) -> None:
+    http_bridge = _Http(bridge_module)
+    try:
+        code, payload = http_bridge.post(_body(MODEL, "max"))
+        assert code == 400
+        assert payload["error"]["type"] == "unsupported_reasoning_effort"
+    finally:
+        http_bridge.close()
+
+
+def test_cli_effort_levels_are_derived_from_fleet_catalog(bridge_module: Any) -> None:
+    declared = {e for m in bridge_module.FLEET["models"].values() for e in m["efforts"]}
+    assert set(bridge_module.CLI_EFFORT_LEVELS) == declared
+    order = [e for e in bridge_module.EFFORT_LEVELS if e in declared]
+    assert list(bridge_module.CLI_EFFORT_LEVELS) == order

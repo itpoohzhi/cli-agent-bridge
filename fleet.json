@@ -78,40 +78,49 @@
       "effort": "max"
     },
     "gemini-4-carbon-low": {
-      "target": "gemini-4-carbon",
-      "default_effort": "low"
+      "backend_id": "gemini-4-carbon",
+      "backend": "agy",
+      "effort": "low"
     },
     "gemini-4-carbon-medium": {
-      "target": "gemini-4-carbon",
-      "default_effort": "medium"
+      "backend_id": "gemini-4-carbon",
+      "backend": "agy",
+      "effort": "medium"
     },
     "gemini-4-carbon-high": {
-      "target": "gemini-4-carbon",
-      "default_effort": "high"
+      "backend_id": "gemini-4-carbon",
+      "backend": "agy",
+      "effort": "high"
     },
     "gemini-4-hydrogen-low": {
-      "target": "gemini-4-hydrogen",
-      "default_effort": "low"
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "low"
     },
     "gemini-4-hydrogen-medium": {
-      "target": "gemini-4-hydrogen",
-      "default_effort": "medium"
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "medium"
     },
     "gemini-4-hydrogen-high": {
-      "target": "gemini-4-hydrogen",
-      "default_effort": "high"
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "high"
     },
     "gemini-4-hydrogen-xhigh": {
-      "target": "gemini-4-hydrogen",
-      "default_effort": "xhigh"
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "xhigh"
     },
     "gemini-4-argon-low": {
-      "target": "gemini-4-argon",
-      "default_effort": "low"
+      "backend_id": "gemini-4-argon",
+      "backend": "agy",
+      "effort": "low"
     },
     "gemini-4-argon-medium": {
-      "target": "gemini-4-argon",
-      "default_effort": "medium"
+      "backend_id": "gemini-4-argon",
+      "backend": "agy",
+      "effort": "medium"
     },
     "gemini-4-argon-high": {
       "backend_id": "gemini-4-argon",

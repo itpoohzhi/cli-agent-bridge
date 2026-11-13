@@ -17,6 +17,8 @@ except ModuleNotFoundError:
     import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:  # изолированный прогон файла: conftest импортирует `core`
+    sys.path.insert(0, str(ROOT))
 GOOGLE_MODELS = (
     "gemini-4-hydrogen",
     "gemini-4-carbon",
@@ -283,6 +285,75 @@ def test_dsh_profile_parser_fixture() -> None:
     allowed.append(dict(allowed[0]))
     with pytest.raises(AssertionError):
         _assert_deduplicated_profile(entries)
+
+
+def _contract_profile_entries() -> dict:
+    """Профиль провайдеров, выведенный из контракта репозитория (без чтения `~/.dsh`)."""
+    bridge_fleet = json.loads(
+        (ROOT / "bridges" / "agy-bridge" / "fleet.json").read_text(encoding="utf-8")
+    )
+    catalog = {item["id"]: item for item in bridge_fleet["models"]}
+    models = []
+    for model_id in GOOGLE_MODELS:
+        item = catalog[model_id]
+        top = item["efforts"][-1]
+        ladder = {"off": None, **{e: e for e in item["efforts"]}}
+        ladder.update({e: top for e in ("xhigh", "max") if e not in ladder})
+        models.append(
+            {
+                "id": model_id,
+                "contextWindow": item["context_window"],
+                "maxTokens": item["max_tokens"],
+                "input": list(item["input"]),
+                "reasoningEfforts": ladder,
+            }
+        )
+    providers = {
+        name: {
+            "baseURL": base_url,
+            "apiKeyEnv": api_key_env,
+            "models": [dict(m, reasoningEfforts=dict(m["reasoningEfforts"])) for m in models],
+        }
+        for name, (base_url, api_key_env) in GOOGLE_BRIDGES.items()
+    }
+    allowed = [
+        {"provider": name, "model": model_id}
+        for name in GOOGLE_BRIDGES
+        for model_id in GOOGLE_MODELS
+    ]
+    return {
+        "llm-pi-ai": {"providers": providers},
+        "subagent-model-selection-settings": {"allowedModels": allowed},
+    }
+
+
+def test_dsh_provider_contract_is_host_independent() -> None:
+    """Структура провайдеров cli-agent-bridge/agy-bridge выводится из fleet.json репозитория."""
+    entries = _contract_profile_entries()
+    _assert_google_models(entries, check_allowed=True)
+    providers = entries["llm-pi-ai"]["providers"]
+    assert set(providers) == set(GOOGLE_BRIDGES)
+    for provider in providers.values():
+        by_id = {m["id"]: m for m in provider["models"]}
+        assert by_id["gemini-4-hydrogen"]["reasoningEfforts"]["xhigh"] == "xhigh"
+        assert by_id["gemini-4-hydrogen"]["reasoningEfforts"]["max"] == "xhigh"
+        for sibling in ("gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash"):
+            assert by_id[sibling]["reasoningEfforts"]["xhigh"] == "high", sibling
+            assert by_id[sibling]["reasoningEfforts"]["max"] == "high", sibling
+
+
+def test_dsh_provider_contract_detects_drift() -> None:
+    for bridge in GOOGLE_BRIDGES:
+        entries = _contract_profile_entries()
+        entries["llm-pi-ai"]["providers"][bridge]["models"][0]["input"] = ["text"]
+        with pytest.raises(AssertionError):
+            _assert_google_models(entries, check_allowed=True)
+
+        entries = _contract_profile_entries()
+        allowed = entries["subagent-model-selection-settings"]["allowedModels"]
+        allowed[:] = [a for a in allowed if (a["provider"], a["model"]) != (bridge, "gemini-4-carbon")]
+        with pytest.raises(AssertionError):
+            _assert_google_models(entries, check_allowed=True)
 
 
 def test_root_fleet_agy_models_efforts() -> None:

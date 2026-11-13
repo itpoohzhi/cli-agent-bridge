@@ -893,7 +893,9 @@ _SAFE_MCP_TOOL_RE = re.compile(r"mcp_[a-z0-9_-]{1,32}_[a-z0-9_]{1,32}\Z")
 # gemini-4-hydrogen); id модели — база без уровня,
 # уровень всегда уходит отдельным флагом (см. модуль-docstring).
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
-CLI_EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
+# Уровни, реально объявленные каталогом: вычисляются из `efforts` моделей FLEET сразу после
+# загрузки (см. `_cli_effort_levels`); до загрузки — полный набор EFFORT_LEVELS.
+CLI_EFFORT_LEVELS: tuple[str, ...] = EFFORT_LEVELS
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 # Доставка изображений агенту: проверенные файлы в WORKSPACE/img-<uuid>, каталог отдаётся
 # через `--add-dir`, модель читает их нативным view_file. Прямой image_url в NDJSON
@@ -1191,6 +1193,20 @@ except FleetViolation as _violation:
 
 MODEL_ID = ENV_MODEL or FLEET["default_model"]
 FLEET_MODELS = cast("dict[str, dict[str, object]]", cast(object, FLEET["models"]))
+
+
+def _cli_effort_levels(models: dict[str, dict[str, object]]) -> tuple[str, ...]:
+    """Объединение `efforts` всех моделей каталога в каноническом порядке EFFORT_LEVELS."""
+    declared: set[str] = set()
+    for entry in models.values():
+        efforts = entry.get("efforts")
+        if isinstance(efforts, list):
+            declared.update(e for e in efforts if isinstance(e, str))
+    ordered = tuple(level for level in EFFORT_LEVELS if level in declared)
+    return ordered or EFFORT_LEVELS
+
+
+CLI_EFFORT_LEVELS = _cli_effort_levels(FLEET_MODELS)
 IMAGE_LIMITS = cast("dict[str, object]", cast(object, FLEET["image_limits"]))
 
 

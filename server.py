@@ -600,14 +600,22 @@ INTERNAL_MODEL_IDS = ("deepseek-v4.1-flash", "deepseek-v4.1-flash-free")
 _INTERNAL_KEY_HEADER = "X-Internal-Service-Key"
 _INTERNAL_SERVICE_KEY = os.environ.get("INTERNAL_SERVICE_KEY", "")
 MAX_OUTPUT_TOKENS = int(os.environ.get("BRIDGE_MAX_OUTPUT_TOKENS", "64000"))
-MULTIMODAL_MODELS = ("gpt-6.1-sol", "gemini-4-argon", "gemini-4-hydrogen")  # объединяется с `input` каталога
+MULTIMODAL_MODELS = (
+    "gpt-6.1-sol",
+    "gemini-4-argon",
+    "gemini-4-carbon",
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+)  # объединяется (union) с `input` каталога
 
 
 def _model_modalities(model_entry: Any, model_id: str) -> list[str]:
-    """Модальности модели: `image`, если его заявляет каталожное поле `input` или legacy-список.
+    """Модальности модели: `["text", "image"]`, если `image` есть в `input` ИЛИ id входит в MULTIMODAL_MODELS.
 
-    `input` берётся из самой записи (dict/объект) либо из каталога FLEET по id; legacy
-    MULTIMODAL_MODELS сохраняет прежнее поведение там, где каталог `input` не обновлён.
+    `input` берётся из самой записи (dict/объект) либо из каталога FLEET по id. Результат —
+    объединение (union) каталожного `input` и списка MULTIMODAL_MODELS: наличие id в
+    MULTIMODAL_MODELS добавляет `image`, даже если `input` записи его не содержит;
+    отсутствие id в списке `image` не отнимает. Иначе — `["text"]`.
     """
     if isinstance(model_entry, dict):
         raw = model_entry.get("input")

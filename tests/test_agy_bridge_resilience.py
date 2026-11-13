@@ -8584,7 +8584,10 @@ class AcceptanceOracleTests(unittest.TestCase):
             self.assertEqual(_bval("METHOD_IMPL_VERSION"), 1)
             catalog = _dict(_bval("FLEET"))
             ref = _dict(catalog["technical_ref"])
-            self.assertEqual(ref["agy_version"], "1.5.7")
+            # Не пиним точную версию (автообновление agy.real): semver + согласованность
+            # с `models_source`; жёсткая привязка к бинарю остаётся через agy_binary_sha256.
+            self.assertRegex(_str(ref["agy_version"]), r"^\d+\.\d+\.\d+$")
+            self.assertIn(_str(ref["agy_version"]), _str(ref["models_source"]))
             sha = _str(ref["agy_binary_sha256"])
             limits = _dict(catalog["image_limits"])
             self.assertEqual(
