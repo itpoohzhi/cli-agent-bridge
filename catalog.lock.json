@@ -1,12 +1,12 @@
 {
-  "compiled_at": "2026-11-12T12:27:58+0300",
+  "compiled_at": "2026-11-13T03:30:00+0300",
   "compiler_version": 1,
-  "fleet_sha256": "7a14a442532b0e701aa1cfc675e35d4962aae3357826654feb4923ad4098dd0e",
+  "fleet_sha256": "dd9625f7ce610007f07808f08356ff9851609c4a9b50ffbcab795a7299d042e8",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "6dd3a5f996c76e68986bb09b04f5115e8e8f554c46850665a26fde644186c6a6",
-      "agy.yaml": "cbbb84a91ee76aaecfad67de8d702eb750ce8668dfbea493e3319c159f2bde83",
+      "_fleet.yaml": "28acff2b938bcbbf668ef712775cd3dd8523d90b51e90deb77704ad6de655cf4",
+      "agy.yaml": "ab7e301bcd6abbfe0ed05333277852ba6b4583a3bbb3653e807e0f4d73b1de3a",
       "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
       "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
       "droid.yaml": "340ec402a8c4c091fbddb3a77438c56c2263dea8b3d76457ebecd820565c1c53",
@@ -15,7 +15,7 @@
       "opencode-go.yaml": "110b75eb68bba08715fc55dfc7fe41d8eda826bef0b5248f81ee3dccfb4810c4",
       "opencode-zen.yaml": "269c0fa76c1220c6173f371e10c2f246b1575abd6cb3e7f91f8472f6ef72f4fc"
     },
-    "manifests_sha256": "7418ece413bd79133270ee443543890db8588487dfff7e5ebcee937d58acbb57"
+    "manifests_sha256": "e469f3fa9f1c4b9e5be99cbecb2e605c27c63cbd195f3b704214f0a30ecc5a0d"
   },
   "models": {
     "beam-free": {
@@ -175,6 +175,18 @@
       "status": "quarantine"
     },
     "gemini-4-carbon": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gemini-4-hydrogen": {
       "alternates": [],
       "efforts_proven": [],
       "family": "Google",

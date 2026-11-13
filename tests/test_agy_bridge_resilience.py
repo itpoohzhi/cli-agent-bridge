@@ -6445,7 +6445,7 @@ def _dict_or_empty(value: object) -> dict[str, object]:
 
 # ---- Image input (workspace-read): AD-001..AD-006, F-001..F-010 ---------------------
 
-_IMG_TARGETS = ("gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash")
+_IMG_TARGETS = ("gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash")
 _IMG_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 _IMG_MAGIC: dict[str, bytes] = {
     "image/png": b"\x89PNG\r\n\x1a\n",
@@ -7994,6 +7994,7 @@ class ImageResourceTests(unittest.TestCase):
                 )
                 before = len(env.records())
                 with (
+                    mock.patch.dict(_proof_of("gemini-4-hydrogen"), {"agy_binary_sha256": "f" * 64}),
                     mock.patch.dict(_proof_of("gemini-4-carbon"), {"agy_binary_sha256": "f" * 64}),
                     mock.patch.dict(_proof_of("gemini-4-argon"), {"agy_binary_sha256": "f" * 64}),
                     mock.patch.dict(_proof_of("gemini-3.8-flash"), {"agy_binary_sha256": "f" * 64}),
@@ -8583,7 +8584,10 @@ class AcceptanceOracleTests(unittest.TestCase):
             self.assertEqual(_bval("METHOD_IMPL_VERSION"), 1)
             catalog = _dict(_bval("FLEET"))
             ref = _dict(catalog["technical_ref"])
-            self.assertEqual(ref["agy_version"], "1.5.5")
+            # Не пиним точную версию (автообновление agy.real): semver + согласованность
+            # с `models_source`; жёсткая привязка к бинарю остаётся через agy_binary_sha256.
+            self.assertRegex(_str(ref["agy_version"]), r"^\d+\.\d+\.\d+$")
+            self.assertIn(_str(ref["agy_version"]), _str(ref["models_source"]))
             sha = _str(ref["agy_binary_sha256"])
             limits = _dict(catalog["image_limits"])
             self.assertEqual(

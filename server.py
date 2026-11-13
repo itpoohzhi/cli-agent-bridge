@@ -600,7 +600,37 @@ INTERNAL_MODEL_IDS = ("deepseek-v4.1-flash", "deepseek-v4.1-flash-free")
 _INTERNAL_KEY_HEADER = "X-Internal-Service-Key"
 _INTERNAL_SERVICE_KEY = os.environ.get("INTERNAL_SERVICE_KEY", "")
 MAX_OUTPUT_TOKENS = int(os.environ.get("BRIDGE_MAX_OUTPUT_TOKENS", "64000"))
-MULTIMODAL_MODELS = ("gpt-6.1-sol", "gemini-4-argon")
+MULTIMODAL_MODELS = (
+    "gpt-6.1-sol",
+    "gemini-4-argon",
+    "gemini-4-carbon",
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+)  # объединяется (union) с `input` каталога
+
+
+def _model_modalities(model_entry: Any, model_id: str) -> list[str]:
+    """Модальности модели: `["text", "image"]`, если `image` есть в `input` ИЛИ id входит в MULTIMODAL_MODELS.
+
+    `input` берётся из самой записи (dict/объект) либо из каталога FLEET по id. Результат —
+    объединение (union) каталожного `input` и списка MULTIMODAL_MODELS: наличие id в
+    MULTIMODAL_MODELS добавляет `image`, даже если `input` записи его не содержит;
+    отсутствие id в списке `image` не отнимает. Иначе — `["text"]`.
+    """
+    if isinstance(model_entry, dict):
+        raw = model_entry.get("input")
+    else:
+        raw = getattr(model_entry, "input", None)
+    if not raw and isinstance(FLEET, dict):
+        catalog_models = FLEET.get("models", {})
+        entry = catalog_models.get(model_id) if isinstance(catalog_models, dict) else None
+        raw = entry.get("input") if isinstance(entry, dict) else None
+    has_image = (
+        isinstance(raw, (list, tuple, set, frozenset))
+        and any(str(item).strip().lower() == "image" for item in raw)
+    )
+    return ["text", "image"] if has_image or model_id in MULTIMODAL_MODELS else ["text"]
+
 
 _PROVIDER_MODELS_RE = re.compile(r"^/v1/providers/([^/]+)/v1/models$")
 _PROVIDER_CHAT_RE = re.compile(r"^/v1/providers/([^/]+)/v1/chat/completions$")
@@ -744,7 +774,7 @@ def _build_models_list(
             "context_window": context_window,
             "context_length": context_window,
             "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "modalities": ["text", "image"] if mid in MULTIMODAL_MODELS else ["text"],
+            "modalities": _model_modalities(m, mid),
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",
@@ -795,9 +825,7 @@ def _build_models_list(
             "context_window": context_window,
             "context_length": context_window,
             "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "modalities": ["text", "image"]
-            if base_id in MULTIMODAL_MODELS
-            else ["text"],
+            "modalities": _model_modalities(m, base_id),
             "supports_thinking": True,
             "supported_reasoning_efforts": ["low", "medium", "high"],
             "default_reasoning_effort": "high",

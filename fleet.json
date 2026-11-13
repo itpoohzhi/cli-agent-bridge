@@ -78,24 +78,49 @@
       "effort": "max"
     },
     "gemini-4-carbon-low": {
-      "target": "gemini-4-carbon",
-      "default_effort": "low"
+      "backend_id": "gemini-4-carbon",
+      "backend": "agy",
+      "effort": "low"
     },
     "gemini-4-carbon-medium": {
-      "target": "gemini-4-carbon",
-      "default_effort": "medium"
+      "backend_id": "gemini-4-carbon",
+      "backend": "agy",
+      "effort": "medium"
     },
     "gemini-4-carbon-high": {
-      "target": "gemini-4-carbon",
-      "default_effort": "high"
+      "backend_id": "gemini-4-carbon",
+      "backend": "agy",
+      "effort": "high"
+    },
+    "gemini-4-hydrogen-low": {
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "low"
+    },
+    "gemini-4-hydrogen-medium": {
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "medium"
+    },
+    "gemini-4-hydrogen-high": {
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "high"
+    },
+    "gemini-4-hydrogen-xhigh": {
+      "backend_id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "effort": "xhigh"
     },
     "gemini-4-argon-low": {
-      "target": "gemini-4-argon",
-      "default_effort": "low"
+      "backend_id": "gemini-4-argon",
+      "backend": "agy",
+      "effort": "low"
     },
     "gemini-4-argon-medium": {
-      "target": "gemini-4-argon",
-      "default_effort": "medium"
+      "backend_id": "gemini-4-argon",
+      "backend": "agy",
+      "effort": "medium"
     },
     "gemini-4-argon-high": {
       "backend_id": "gemini-4-argon",
@@ -401,6 +426,29 @@
         "low",
         "medium",
         "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      }
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "backend": "agy",
+      "name": "Gemini 4 Hydrogen (AGY)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
       ],
       "default_effort": "high",
       "context_window": 1048576,
