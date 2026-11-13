@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from core.backend_adapter import AllowEntry, FleetViolation, build_catalog
+from core.passthrough_autonomy import (
+    FLAG_STRIP_PASSTHROUGH_AUTONOMY as FLAG_STRIP_PASSTHROUGH_AUTONOMY,
+    strip_passthrough_autonomy_enabled as strip_passthrough_autonomy_enabled,
+)
 from core.quarantine_gate import SidecarView
 from core.runtime_env import DynamicFlagSource, flag_enabled
 

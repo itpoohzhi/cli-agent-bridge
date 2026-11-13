@@ -715,3 +715,79 @@ def test_no_tmp_leak_after_success(http_bridge):
         os.environ.get("CLAUDE_P_BRIDGE_KEY", "") != "test-key"
     )  # env тестов не трогаем
 
+
+
+# ---- RW-008: usage в финальном SSE-чанке только по include_usage; арифметика кэша ----
+
+CLAUDE_RESULT_USAGE = json.loads(
+    (
+        Path(__file__).resolve().parent / "fixtures" / "claude_result_usage.json"
+    ).read_text()
+)
+
+
+def _sse_usage_frames(body: str) -> list:
+    return [p for p in _sse_payloads(body) if "usage" in p]
+
+
+@pytest.mark.parametrize(
+    ("stream_options", "expect_usage"),
+    [
+        ({"include_usage": True}, True),
+        ({"include_usage": False}, False),
+        ({}, False),
+        (None, False),
+        ("garbage", False),
+    ],
+)
+def test_sse_usage_only_with_include_usage(http_bridge, stream_options, expect_usage):
+    _bridge, port = http_bridge
+    FakeRun.script = [
+        ("text", "ok"),
+        ("result", {"usage": CLAUDE_RESULT_USAGE}),
+        ("done", 0),
+    ]
+    payload = {
+        "model": "claude-sonnet-5-5",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    if stream_options is not None:
+        payload["stream_options"] = stream_options
+    status, body = _post(port, payload)
+    assert status == 200, body
+    frames = _sse_usage_frames(body)
+    if not expect_usage:
+        assert frames == []
+        assert body.endswith("data: [DONE]\n\n")
+        return
+    assert len(frames) == 1
+    usage = frames[0]["usage"]
+    assert usage["prompt_tokens"] == 48892
+    assert usage["completion_tokens"] == 4
+    assert usage["total_tokens"] == 48896
+    assert usage["prompt_tokens_details"] == {"cached_tokens": 12609}
+    assert "cache_creation" not in json.dumps(usage)
+
+
+def test_json_usage_real_fixture_no_double_count(http_bridge):
+    _bridge, port = http_bridge
+    FakeRun.script = [
+        ("text", "ok"),
+        ("result", {"usage": CLAUDE_RESULT_USAGE}),
+        ("done", 0),
+    ]
+    status, body = _post(
+        port,
+        {
+            "model": "claude-sonnet-5-5",
+            "stream": False,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert status == 200, body
+    usage = json.loads(body)["usage"]
+    assert usage["prompt_tokens"] == 48892
+    assert usage["total_tokens"] == 48896
+    assert usage["prompt_tokens_details"] == {"cached_tokens": 12609}
+    assert "cache_creation" not in json.dumps(usage)

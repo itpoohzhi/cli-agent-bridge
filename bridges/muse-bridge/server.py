@@ -107,7 +107,7 @@ __all__ = [
 from muse_runtime.tool_parser import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
     ToolCallParser,
     _loads_tolerant,
-    _parse_tool_call_block,
+    _parse_tool_call_block, _parse_tool_call_blocks,
     _recover_trailing_braces,
     _split_tool_call_inner,
     _split_tool_calls as _split_tool_calls_impl,
@@ -146,6 +146,15 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from core.backend_adapter import ToolCall, ToolFunction, TurnResult, Usage  # noqa: E402
+from core.chat_key import (  # noqa: E402
+    NO_MAX_LEN,
+    SOURCES_CACHE_KEY_ONLY,
+    resolve_chat_key,
+)
+from core.usage_wire import (  # noqa: E402
+    extract_cache_read_tokens,
+    normalize_prompt_cache_details,
+)
 from core.lifecycle import HubLifecycleManager  # noqa: E402
 from core.tool_emulation import (  # noqa: E402
     DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH, build_tool_schemas, sanitize_tool_calls_list,
@@ -209,7 +218,7 @@ COMPACTION_MARKER = (
 )
 _COMPACTION_MARKER_ROLE = "__compaction_marker__"
 
-# OpenAI/DSH effort -> `--reasoning-effort` Muse CLI. Нет/неизвестно -> max (канон слота).
+# OpenAI/DSH effort -> `--reasoning-effort` Muse CLI. Нет/неизвестно -> high (решение владельца 2026-11-11).
 EFFORT_MAP: dict[str, str] = {
     "low": "low",
     "medium": "medium",
@@ -223,7 +232,7 @@ EFFORT_MAP: dict[str, str] = {
     "minimal": "minimal",
     "ultra": "xhigh",  # runtime-гейт ultra откатывается в xhigh
 }
-DEFAULT_EFFORT = "max"
+DEFAULT_EFFORT = "high"
 
 # Однократный ретрай exec — ТОЛЬКО на этот маркер (exec идемпотентен).
 # Остальные ошибки (rc=42 прокси DOWN, timeout, terminal_*) не ретраятся.
@@ -2484,6 +2493,7 @@ class Handler(BaseHTTPRequestHandler):
         completion_tokens: int,
         reasoning_tokens: int,
         summaries: list[str] | None = None,
+        cache_details: dict[str, int] | None = None,
     ) -> None:
         """Выдача готового хода в поток SSE (см. модуль-docstring).
 
@@ -2562,6 +2572,8 @@ class Handler(BaseHTTPRequestHandler):
             "total_tokens": prompt_tokens + completion_tokens,
             "reasoning_tokens": reasoning_tokens,
         }
+        if cache_details is not None:
+            final["usage"]["prompt_tokens_details"] = cache_details
         if self._sse_emit(final):
             self._sse_write("data: [DONE]\n\n")
 
@@ -2900,6 +2912,15 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+        # Ключ чата — единый разбор core.chat_key. Осознанное исключение из набора
+        # источников: muse и до унификации читал только prompt_cache_key как идентичность
+        # сессии; расширение заголовками сменило бы её у существующих клиентов.
+        # Профиль lenient без предела длины: прежняя идентичность сессии (любая непустая
+        # строка как есть, без strip и без предела). Невалидный ключ — nokey, без 400.
+        chat = resolve_chat_key(
+            req, sources=SOURCES_CACHE_KEY_ONLY, lenient=True, max_len=NO_MAX_LEN
+        )
+
         raw_tools = req.get("tools")
         tool_schemas = build_tool_schemas(raw_tools)
         tools = (
@@ -2975,8 +2996,7 @@ class Handler(BaseHTTPRequestHandler):
         reflected_prompts: list[str] = [prompt]
 
         effort = _map_effort(req)
-        raw_key = req.get("prompt_cache_key")
-        session_id = str(raw_key) if isinstance(raw_key, str) else ""
+        session_id = chat.value
         self._detach_on_disconnect = _is_detached_enabled() and bool(
             req_turn_id or resume_turn_id or session_id
         )
@@ -3581,6 +3601,17 @@ class Handler(BaseHTTPRequestHandler):
             prompt_tokens = ru_prompt
         if ru_output > 0:
             completion_tokens = ru_output
+        # Кэш-метрика — только при реальных prompt-токенах апстрима (не оценке).
+        cache_details, cache_inconsistent = (
+            normalize_prompt_cache_details(prompt_tokens, extract_cache_read_tokens(ru))
+            if ru_prompt > 0
+            else (None, False)
+        )
+        if cache_inconsistent:
+            _log(
+                "usage_cache_inconsistent prompt_tokens=%r cache_read_tokens=%r"
+                % (prompt_tokens, extract_cache_read_tokens(ru))
+            )
         ru_reasoning = ru.get("reasoningTokens") or ru.get("reasoning_tokens") or 0
         try:
             reasoning_tokens = int(ru_reasoning)
@@ -3620,8 +3651,17 @@ class Handler(BaseHTTPRequestHandler):
                 completion_tokens,
                 reasoning_tokens,
                 summaries,
+                cache_details,
             )
             return
+        usage_wire: dict[str, Any] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
+        }
+        if cache_details is not None:
+            usage_wire["prompt_tokens_details"] = cache_details
         self._send(
             200,
             {
@@ -3630,12 +3670,7 @@ class Handler(BaseHTTPRequestHandler):
                 "created": int(time.time()),
                 "model": model,
                 "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                    "reasoning_tokens": reasoning_tokens,
-                },
+                "usage": usage_wire,
                 "reasoning_summaries": summaries,
             },
         )
@@ -3644,6 +3679,7 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 64
 
 
 def main() -> int:

@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from core.stream_framing import build_stream_error_chunk, format_sse_event  # noqa: E402
 from core.resilience import (  # noqa: E402
     BulkheadCapacityExceeded,
     CircuitBreaker,
@@ -552,7 +553,9 @@ def test_disabled_flags_give_noop_lease():
 @pytest.fixture
 def facade(monkeypatch, tmp_path):
     """Настоящий Handler + управляемый upstream; RESILIENCE подменяется тестом."""
-    state = SimpleNamespace(status=200, hits=0)
+    state = SimpleNamespace(
+        status=200, hits=0, body=None, content_type="application/json"
+    )
     lock = threading.Lock()
 
     class Upstream(BaseHTTPRequestHandler):
@@ -563,9 +566,13 @@ def facade(monkeypatch, tmp_path):
             self.rfile.read(int(self.headers["Content-Length"]))
             with lock:
                 state.hits += 1
-            body = json.dumps({"id": "x", "choices": []}).encode()
+            body = (
+                state.body
+                if state.body is not None
+                else json.dumps({"id": "x", "choices": []}).encode()
+            )
             self.send_response(state.status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", state.content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -752,6 +759,239 @@ def test_facade_resilience_endpoint_requires_auth_and_health_contract_is_frozen(
             "uptime_s",
         ]
     )
+
+
+# --------------------------------------------------------------------------- passthrough: исход lease
+
+
+def _json_error_body(error_type: str, status: int) -> bytes:
+    return json.dumps(
+        {"error": {"message": error_type, "type": error_type, "code": status}}
+    ).encode()
+
+
+def _spy_breaker_outcomes(facade, manager) -> list[str]:
+    """Обёртка брейкера `agy`: журнал фактических исходов lease (discard/failure)."""
+    breaker = manager._breaker_for("agy", manager.settings())
+    outcomes: list[str] = []
+    original_discard, original_failure = breaker.record_discard, breaker.record_failure
+
+    def record_discard(generation, reason=""):
+        outcomes.append("discard")
+        return original_discard(generation, reason)
+
+    def record_failure(generation, exc=None):
+        outcomes.append("failure")
+        return original_failure(generation, exc)
+
+    facade.monkeypatch.setattr(breaker, "record_discard", record_discard)
+    facade.monkeypatch.setattr(breaker, "record_failure", record_failure)
+    return outcomes
+
+
+def test_facade_turn_timeout_does_not_trip_breaker(facade):
+    """504 шага модели: брейкер не штрафуется — таймаут хода не отказ апстрима."""
+    manager, _ = make_manager()
+    facade.monkeypatch.setattr(server, "RESILIENCE", manager)
+    outcomes = _spy_breaker_outcomes(facade, manager)
+    facade.state.status = 504
+    facade.state.body = _json_error_body("upstream_timeout", 504)
+    for _ in range(4):
+        status, _, body = facade.call()
+        assert status == 504
+        assert body["error"]["type"] == "upstream_timeout"
+    assert _wait_until(lambda: len(outcomes) == 4)
+    assert outcomes == ["discard"] * 4
+    assert facade.state.hits == 4
+    snapshot = manager.snapshot()["backends"]["agy"]
+    assert snapshot["state"] == "CLOSED"
+    assert snapshot["failures"] == 0
+
+
+def test_facade_incomplete_stream_does_not_trip_breaker(facade):
+    """Оборванный стрим (502 upstream_incomplete_stream агрегатора) нейтрален для брейкера."""
+    manager, _ = make_manager()
+    facade.monkeypatch.setattr(server, "RESILIENCE", manager)
+    outcomes = _spy_breaker_outcomes(facade, manager)
+    facade.monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "true")
+    facade.monkeypatch.setenv("BRIDGE_NONSTREAM_TELEMETRY_ENABLED", "true")
+    facade.state.status = 200
+    facade.state.content_type = "text/event-stream"
+    facade.state.body = (
+        b'data: {"id":"x","choices":[{"index":0,"delta":{"content":"hi"},'
+        b'"finish_reason":null}]}\n\n'
+    )
+    for _ in range(4):
+        status, _, body = facade.call()
+        assert status == 502
+        assert body["error"]["type"] == "upstream_incomplete_stream"
+    assert _wait_until(lambda: len(outcomes) == 4)
+    assert outcomes == ["discard"] * 4
+    snapshot = manager.snapshot()["backends"]["agy"]
+    assert snapshot["state"] == "CLOSED"
+    assert snapshot["failures"] == 0
+
+
+def test_facade_upstream_unavailable_trips_breaker(facade):
+    """Реальная недоступность апстрима по-прежнему открывает брейкер после порога."""
+    manager, _ = make_manager()
+    facade.monkeypatch.setattr(server, "RESILIENCE", manager)
+    outcomes = _spy_breaker_outcomes(facade, manager)
+    facade.state.status = 502
+    facade.state.body = _json_error_body("upstream_unavailable", 502)
+    for _ in range(3):
+        assert facade.call()[0] == 502
+    assert _wait_until(lambda: len(outcomes) == 3)
+    assert outcomes == ["failure"] * 3
+    snapshot = manager.snapshot()
+    assert snapshot["backends"]["agy"]["state"] == "OPEN", snapshot
+    status, headers, body = facade.call()
+    assert status == 503
+    assert headers["retry-after"] == "30"
+    assert body["error"]["code"] == "CIRCUIT_BREAKER_OPEN"
+    assert facade.state.hits == 3
+
+
+class _SinkHandler:
+    """Минимальный HTTP-обработчик для проверки захвата типа ошибки в _HandlerSink."""
+
+    _headers_already_sent = False
+    connection = None
+
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self.wfile = SimpleNamespace(write=self.chunks.append, flush=lambda: None)
+        self.status = 0
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, key: str, value: str) -> None:
+        return
+
+    def end_headers(self) -> None:
+        return
+
+
+def test_handler_sink_extracts_error_type_from_json_and_sse_frame():
+    sink = server._HandlerSink(_SinkHandler())
+    sink.start(502, [("Content-Type", "application/json")])
+    sink.write(_json_error_body("upstream_unavailable", 502))
+    assert sink.error_type() == "upstream_unavailable"
+
+    stream_sink = server._HandlerSink(_SinkHandler())
+    stream_sink.start(200, [("Content-Type", "text/event-stream")])
+    stream_sink.write(
+        format_sse_event(
+            build_stream_error_chunk(
+                message="upstream stream ended before finish_reason",
+                code="upstream_incomplete_stream",
+            )
+        ).encode()
+    )
+    assert stream_sink.error_type() == "upstream_incomplete_stream"
+    assert server._passthrough_discard_reason(200, stream_sink.error_type()) == (
+        "turn_timeout_or_stream_incomplete"
+    )
+    assert server._passthrough_discard_reason(502, "upstream_unavailable") == ""
+
+
+def test_handler_sink_keeps_split_terminal_sse_error_in_bounded_tail(
+    monkeypatch,
+):
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_ERROR_CAPTURE_BYTES", "8192")
+    sink = server._HandlerSink(_SinkHandler())
+    sink.start(200, [("Content-Type", "text/event-stream")])
+    sink.write(b'ordinary text containing "error" ' + b"x" * 9000 + b"\n\n")
+    sink.write(b'data: {"err')
+    sink.write(
+        b'or":{"message":"failed","type":"upstream_unavailable",'
+        b'"code":"upstream_unavailable"}}\n\n'
+    )
+
+    assert sink.error_type() == "upstream_unavailable"
+    assert len(sink._error_body) <= 8192
+
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_ERROR_CAPTURE_BYTES", "999999")
+    assert server._HandlerSink(_SinkHandler())._error_limit == 65536
+
+
+def test_backend_error_response_and_log_do_not_expose_sensitive_stderr(monkeypatch):
+    raw_err = "SECRET_STDERR_LEAK_TOKEN /private/internal/path"
+    log_lines: list[str] = []
+    monkeypatch.setattr(server, "_log", log_lines.append)
+
+    err = server.Handler._error_body(
+        {
+            "state": "backend_error",
+            "backend_kind": "codex",
+            "rc": 1,
+            "err": raw_err,
+        }
+    )
+
+    assert err["message"] == "codex exec failed rc=1: *** ***"
+    assert err["detail"] == "*** ***"
+    assert log_lines == [
+        f"backend_error rc=1 stderr_bytes={len(raw_err.encode('utf-8'))}"
+    ]
+    for rendered in (*err.values(), *log_lines):
+        assert "SECRET_STDERR_LEAK_TOKEN" not in str(rendered)
+        assert "/private/internal/path" not in str(rendered)
+
+
+def test_started_stream_terminal_error_has_null_finish_reason():
+    written: list[str] = []
+
+    class DummyLease:
+        def record_discard(self, _reason: str) -> None:
+            return
+
+        def record_failure(self, _exc=None) -> None:
+            return
+
+    class DummyConnection:
+        def gettimeout(self) -> float:
+            return 30.0
+
+        def settimeout(self, _timeout) -> None:
+            return
+
+    handler = object.__new__(server.Handler)
+    handler._headers_already_sent = True
+    handler._trace = None
+    handler._context_pruned = ""
+    handler._active_managed_turn = None
+    handler.connection = DummyConnection()
+    handler._current_lease = lambda: DummyLease()
+    handler._emit = lambda frame: written.append(frame) or True
+    handler._telemetry_note = lambda **_kwargs: None
+    handler._telemetry_error = lambda _err: None
+    handler._record_turn_outcome = lambda *_args, **_kwargs: None
+    handler._dispatch = lambda _ctx, _keepalive, writer: (
+        writer("content", "partial")
+        and {
+            "state": "backend_error",
+            "rc": 1,
+            "err": "backend failed",
+            "backend_kind": "codex",
+        }
+    )
+
+    handler._serve_sse_body({"model": "test-model"})
+
+    frames = [
+        json.loads(line[6:])
+        for frame in written
+        for line in frame.splitlines()
+        if line.startswith("data: {")
+    ]
+    terminal = next(frame for frame in frames if "error" in frame)
+    assert terminal["choices"][0]["finish_reason"] is None
+    assert terminal["error"]["code"] == "502"
+    assert terminal["error"]["type"] == "proxy_error"
+
+
 # --------------------------------------------------------------------------- Волна 3: QoSSlotManager
 
 from core import lifecycle  # noqa: E402
@@ -994,6 +1234,9 @@ def test_bounded_queue_timeout_and_sse_keepalive(facade):
 
 def test_graceful_drain_headers_and_rejection(facade):
     # Unit-уровень: drain_event менеджера отклоняет ожидание как "draining".
+    # Контракт: grace=0 — немедленный отказ (BRIDGE_DRAIN_QOS_GRACE_S); при grace>0
+    # интерактивный ожидающий доживает до слота (test_stream_drain_finish_reason.py).
+    facade.monkeypatch.setenv("BRIDGE_DRAIN_QOS_GRACE_S", "0")
     drain = threading.Event()
     mgr = QoSSlotManager(max_concurrent=1, drain_event=drain)
     assert mgr.acquire_slot(is_interactive=True) == (True, "")
@@ -1019,6 +1262,68 @@ def test_graceful_drain_headers_and_rejection(facade):
     assert headers["retry-after"] == "3"
     assert headers["x-bridge-draining"] in ("1", "true")
     assert facade.state.hits == 0
+
+
+def test_unauthorized_request_is_rejected_before_drain_hold(facade):
+    wait_calls: list[bool] = []
+    facade.monkeypatch.setattr(server, "_is_drain_enabled", lambda: True)
+    facade.monkeypatch.setattr(server.LIFECYCLE, "is_draining", lambda: True)
+    facade.monkeypatch.setattr(
+        server.LIFECYCLE,
+        "wait_for_drain_hold",
+        lambda *, is_subagent: wait_calls.append(is_subagent) or False,
+    )
+
+    status, _, body = facade.call(auth=False)
+
+    assert status == 401
+    assert body["error"]["type"] == "auth_error"
+    assert wait_calls == []
+
+
+def test_stream_drain_after_keepalive_frames_sse_error(facade):
+    """F-002 (BLOCKER): отказ QoS при уже отправленных заголовках пишет SSE-ошибку.
+
+    Ветка `headers_sent[0]` в `server.py` вызывает `format_stream_error_sse`;
+    до фикса импорта это был runtime `NameError` (ruff F821) и клиент получал
+    оборванный поток без терминального чанка.
+    """
+    facade.monkeypatch.setenv("BRIDGE_DRAIN_QOS_GRACE_S", "0")
+    drain = threading.Event()
+    mgr = QoSSlotManager(
+        max_concurrent=1,
+        reserved_interactive=0,
+        queue_timeout_s=2.0,
+        keepalive_interval_s=0.1,
+        drain_event=drain,
+    )
+    set_qos_manager(mgr)
+    assert mgr.acquire_slot(is_interactive=False) == (True, "")
+    conn = http.client.HTTPConnection("127.0.0.1", facade.port, timeout=5)
+    try:
+        conn.request(
+            "POST",
+            "/v1/chat/completions",
+            body=json.dumps({"model": "gemini-4-argon", "stream": True}),
+            headers={
+                "Authorization": "Bearer hub-test-key",
+                "Content-Type": "application/json",
+            },
+        )
+        resp = conn.getresponse()
+        assert resp.status == 200  # 200 ушёл в keepalive, повторных заголовков нет
+        assert resp.read(len(b": keepalive\n\n")) == b": keepalive\n\n"
+        assert _wait_until(lambda: mgr.snapshot()["waiting_interactive"] == 1)
+        drain.set()
+        mgr.release_slot(is_interactive=False)  # пробуждение ожидающего -> "draining"
+        rest = resp.read().decode("utf-8")
+        assert "HTTP/1.1" not in rest
+        assert '"overloaded_error"' in rest
+        assert rest.endswith("data: [DONE]\n\n")
+    finally:
+        conn.close()
+        drain.set()
+        reset_qos_manager()
 
 def test_malformed_env_resilience(facade):
     """Защита от некорректных env: нечисло/отрицательные значения откатываются к дефолтам (RW-014)."""

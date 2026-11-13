@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- **`prompt_cache_key` во всех мостах (единый `core/chat_key.py`) и cache-usage:** честная матрица уровней поддержки (`keyed-session` — фасад и muse; `log-only` — claude-p и opencode-zen; `ignored` — agy) — `docs/prompt-cache-key-support.md`. Один контракт маршрута (invalid → nokey, без 400), два профиля валидности (strict/lenient); lenient — только muse и фасад (обратная совместимость).
 - **Zero-Friction Model Onboarding (Волны 1–4, спека `ARCH-SPEC-ZF-ONBOARDING`):** манифесты провайдеров `providers.d/*.yaml` + закрытая JSON Schema, `core/provider_manifest.py`, компилятор `fleet.json` (`core/fleet_compiler.py`, `tools/fleet_compile.py --check|--write`), `build_catalog(mode="isolate")` и `KindConstraints` адаптеров, узкий адаптер параметров `core/param_adapter.py`, жизненный цикл модели `core/model_lifecycle.py`, discovery `core/discovery.py`, пробник `scripts/capability_probe.py` (`smoke_models.py --probe-model`), Quarantine Role Gate `core/quarantine_gate.py`, резолвер пулов `scripts/resolve_pool.py`. Всё за флагами (дефолт `false` = прежнее поведение): `BRIDGE_FLEET_SAFE_CATALOG_ENABLED`, `BRIDGE_PROVIDER_CONSTRAINTS_ENABLED`, `BRIDGE_COMPILED_FLEET_ENABLED`.
 - **ADR-0015:** non-stream через внутренний SSE, живость S/P/T, `BRIDGE_CLI_*` (fallback `DROID_*`) за флагами GigaRC; неверный конфиг — `ConfigError`, `start.sh` exit 78.
 - **Проброс `extra_body.env` и CLI `agent-browser` (ADR-0016):** за флагом GigaRC
@@ -80,6 +81,15 @@
   `0cecaf0` — 13, без вывода «0 новых» из одинаковых totals (RW-011 Cycle 2).
 
 ### Fixed
+- Muse MSP (`adapters/muse_msp.py`, обёртка `adapters/muse_msp_final.py`): в `content` хода
+  попадает только `finalAnswer` главного хода (turnId первого `userMessage`); `commentary`
+  главного хода идёт в `reasoning` отдельными абзацами, сообщения подагентов в `content`
+  не попадают (финал подагента — одна строка в `reasoning`, обрезка
+  `BRIDGE_MUSE_SUBAGENT_FINAL_MAX_CHARS`, дефолт 300). Маркеры инструментов различимы:
+  подсказка из allowlist полей args (`BRIDGE_MUSE_TOOL_HINT_FIELDS`, дефолт
+  `description,path,file_path,pattern`; длина `BRIDGE_MUSE_TOOL_HINT_MAX_CHARS`, дефолт 80;
+  пути — basename), без подсказки формат маркеров прежний. Восстановлен re-export
+  `_parse_tool_call_blocks` в `bridges/muse-bridge/server.py`.
 - Cycle 2 хаба: полный структурный `build_catalog` используется загрузчиком и `fleet_check.py`;
   неподдерживаемые `transport`/`tool_policy` отвергаются. Muse допускает только cap=1,
   общий семафор сериализует все Muse-адаптеры одного хаба; канонический pin перепроверяется

@@ -60,8 +60,14 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from core.chat_key import resolve_chat_key  # noqa: E402
 from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
+from core.usage_wire import (  # noqa: E402
+    CACHE_READ_KEYS,
+    build_wire_usage,
+    extract_cache_creation_tokens,
+)
 
 try:
     from core.watchdog import AdaptiveTimeoutController
@@ -92,6 +98,35 @@ except ImportError as exc:
         f"(repo root {_REPO_ROOT}): {exc}\n"
     )
     raise SystemExit(1) from exc
+
+
+def _raw_cache_read(usage: dict) -> object:
+    """Первое заданное (не `None`) сырое значение cache-read без фильтрации."""
+    for key in CACHE_READ_KEYS:
+        if usage.get(key) is not None:
+            return usage[key]
+    return None
+
+
+def _wire_usage(usage: dict) -> dict:
+    """OpenAI-`usage` из result-события `claude -p` (арифметика кэша — core.usage_wire).
+
+    `input_tokens` Claude исключает cache-read и cache-creation (подтверждено живым
+    result-событием, tests/fixtures/claude_result_usage.json), поэтому они
+    прибавляются к `prompt_tokens` в общем модуле; несогласованность — только
+    мусорные значения кэша. Cache-read передаётся СЫРЫМ: фильтр один — внутри
+    `build_wire_usage`, он же выставляет `inconsistent` (мусор не попадает на wire).
+    """
+    wire, inconsistent = build_wire_usage(
+        usage.get("input_tokens", 0),
+        usage.get("output_tokens", 0),
+        _raw_cache_read(usage),
+        extract_cache_creation_tokens(usage),
+        input_includes_cache=False,
+    )
+    if inconsistent:
+        _log("usage_cache_inconsistent in claude result usage")
+    return wire
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -902,6 +937,15 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/chat/completions"):
             self._send(404, {"error": {"message": f"not found: {path}"}})
             return
+        # Идентичность чата (x-dsh-chat-id / prompt_cache_key) — только для лога и
+        # корреляции; генерация от неё не зависит. Невалидный ключ — как без ключа (без 400).
+        body = req if isinstance(req, dict) else {}
+        extra_body = body.get("extra_body")
+        chat = resolve_chat_key(
+            body, self.headers, extra_body if isinstance(extra_body, dict) else None
+        )
+        if chat.keyed:
+            _log(f"chat key={chat.digest[:16]} source={chat.source}")
         # Невалидную модель отсекаем до SSE-заголовков, иначе 400 уже не отправить.
         _model, model_err = _resolve_model(req)
         if model_err is not None:
@@ -929,6 +973,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err["code"], {"error": err})
             return
         usage = out.get("usage") or {}
+        wire_usage = _wire_usage(usage)
         message = {"role": "assistant", "content": out["text"]}
         if out.get("reasoning"):
             message["reasoning_content"] = out["reasoning"]
@@ -940,11 +985,7 @@ class Handler(BaseHTTPRequestHandler):
             "id": f"chatcmpl-claudep-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
             "created": int(time.time()), "model": req.get("model") or MODEL_ID,
             "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-            "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-            },
+            "usage": wire_usage,
         })
 
     def _serve_sse(self, req: dict) -> None:
@@ -962,12 +1003,15 @@ class Handler(BaseHTTPRequestHandler):
             _log("client gone before headers")
             return
 
-        def chunk(delta: dict, finish=None) -> str:
-            return "data: " + json.dumps({
+        def chunk(delta: dict, finish=None, usage: dict | None = None) -> str:
+            payload = {
                 "id": completion_id, "object": "chat.completion.chunk", "created": created,
                 "model": shown_model,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-            }, ensure_ascii=False) + "\n\n"
+            }
+            if usage is not None:
+                payload["usage"] = usage
+            return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
         def on_text(value: str) -> bool:
             return self._emit(chunk({"content": value}))
@@ -990,7 +1034,11 @@ class Handler(BaseHTTPRequestHandler):
         err = self._error_body(out)
         if err is None:
             finish = "tool_calls" if out.get("tool_calls") else "stop"
-            self._emit(chunk({}, finish))
+            # Как в OpenAI API: usage в финальном чанке — только по include_usage.
+            opts = req.get("stream_options")
+            wants_usage = isinstance(opts, dict) and opts.get("include_usage") is True
+            final_usage = _wire_usage(out.get("usage") or {}) if wants_usage else None
+            self._emit(chunk({}, finish, final_usage))
         else:
             error_msg = str(err.get("message") or "") if isinstance(err, dict) else str(err)
             error_chunk = format_stream_error_sse(str(error_msg), finish_reason="stop")

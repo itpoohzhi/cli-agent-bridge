@@ -106,7 +106,7 @@ LIVE_QUEUE_MAX_BYTES = 1 << 20
 LIVE_WRITE_TIMEOUT_S = 3.0
 SINK_JOIN_TIMEOUT_S = 5.0
 STDERR_BUFFER_BYTES = 64 << 10
-from core.defaults import BRIDGE_MUSE_STARTUP_TIMEOUT_S
+from core.defaults import BRIDGE_MUSE_STARTUP_TIMEOUT_S  # noqa: E402
 
 MSP_SETUP_TIMEOUT_S = float(os.environ.get("BRIDGE_MUSE_STARTUP_TIMEOUT_S", str(BRIDGE_MUSE_STARTUP_TIMEOUT_S)))
 # Свидетель группы создаётся ДО exec и подписывается/пишется в реестр ДО открытия gate.
@@ -1018,7 +1018,8 @@ class MuseAdapter(BackendAdapter):
                     KeyError,
                 ) as exc:
                     # Только наши причины/класс парсера, без stderr и RPC error payload.
-                    error = f"MSP {type(exc).__name__}: {str(exc)[:160]}"
+                    if not error:
+                        error = f"MSP {type(exc).__name__}: {str(exc)[:160]}"
                     flags["protocol"] = True
                 finally:
                     reader_done.set()
@@ -1049,8 +1050,12 @@ class MuseAdapter(BackendAdapter):
                     if now - leader_exited_at >= STDERR_DRAIN_GRACE_S:
                         flags["protocol"] = True
                 stop, why, _ = controller.check(proc.pid)
-                if stop and why in ("idle_timeout", "absolute_cap"):
+                if stop and why == "idle_timeout":
+                    flags["idle_timeout"] = True
+                    error = error or "MSP idle timeout"
+                elif stop and why == "absolute_cap":
                     flags["timeout"] = True
+                    error = error or "MSP deadline exceeded"
                 gone = sink.client_write_dead.is_set() or (
                     callable(ctx.client_gone) and ctx.client_gone()
                 )
@@ -1073,8 +1078,15 @@ class MuseAdapter(BackendAdapter):
                         flags["client_gone"] = True
                 if flags:
                     break
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            subprocess.SubprocessError,
+        ) as exc:
             flags["protocol"] = True
+            if not error:
+                error = f"MSP {type(exc).__name__}: {str(exc)[:160]}"
         finally:
             controller.close()
             done.set()
@@ -1127,18 +1139,21 @@ class MuseAdapter(BackendAdapter):
             state, rc, error = "cancelled", 1, "turn cancelled by user"
         elif flags.get("client_gone"):
             state, rc = "client_gone", 1
+        elif flags.get("idle_timeout"):
+            state, rc, error = "idle_timeout", 124, error or "MSP idle timeout"
         elif flags.get("timeout"):
-            state, rc, error = "timeout", 124, "MSP turn timeout"
+            state, rc, error = "timeout", 124, error or "MSP turn timeout"
         elif flags.get("protocol") or events.terminal != "completed" or not turn_id:
             state, rc, error = (
                 "backend_error",
                 1,
-                error or "MSP protocol or terminal failure",
+                error or (f"MSP terminal {events.terminal}" if events.terminal else "MSP protocol or terminal failure"),
             )
         else:
             state, rc = "done", 0
         fallback = bool(
-            set(flags) == {"protocol"}
+            set(flags) <= {"protocol", "timeout", "idle_timeout"}
+            and bool(flags)
             and not action_possible
             and not events.has_executed_tool
             and group_gone

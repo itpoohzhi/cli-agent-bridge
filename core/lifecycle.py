@@ -36,6 +36,28 @@ from core.turn_session_manager import (
 
 DRAIN_TIMEOUT_S: float = 110.0
 DEFAULT_DRAIN_SECONDS: float = DRAIN_TIMEOUT_S
+DEFAULT_DRAIN_QOS_GRACE_S: float = 15.0
+
+
+def _drain_grace_from_env() -> float:
+    """Возвращает окно grace для ожидающих интерактивных запросов при drain.
+
+    Значение `0`/`0.0` — валидная настройка (немедленный отказ), поэтому проверка
+    идёт на `None`, а не через `or`: иначе `0.0 or 15.0` даёт дефолт. Нечисло и
+    отрицательное значение откатываются к `DEFAULT_DRAIN_QOS_GRACE_S`.
+    """
+    raw = os.environ.get("BRIDGE_DRAIN_QOS_GRACE_S")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_DRAIN_QOS_GRACE_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DRAIN_QOS_GRACE_S
+    if value < 0:
+        return DEFAULT_DRAIN_QOS_GRACE_S
+    return value
+
+
 RETRY_AFTER_S: int = int(os.environ.get("BRIDGE_RETRY_AFTER_S", "5"))
 ORPHAN_SIGTERM_GRACE_S: float = float(os.environ.get("BRIDGE_ORPHAN_SIGTERM_GRACE_S", "1.0"))
 MAX_KEEPALIVE_INTERVAL_S: float = 10.0
@@ -246,13 +268,24 @@ class QoSSlotManager:
             self.queue_timeout_s if timeout is None else max(0.0, float(timeout))
         )
         deadline = time.monotonic() + wait_timeout
+        drain_grace_s = _drain_grace_from_env()
+        drain_seen_at: float | None = None
         last_ka = time.monotonic()
         counted_waiting = False
         with self._cv:
             try:
                 while True:
                     if self.drain_event.is_set():
-                        return (False, "draining")
+                        # grace=0 — немедленный отказ; grace>0 — уже принятый
+                        # интерактивный запрос доживает окно до переключения.
+                        if not (
+                            counted_waiting and is_interactive and drain_grace_s > 0
+                        ):
+                            return (False, "draining")
+                        if drain_seen_at is None:
+                            drain_seen_at = time.monotonic()
+                        elif (time.monotonic() - drain_seen_at) >= drain_grace_s:
+                            return (False, "draining")
                     if client_gone_fn is not None:
                         try:
                             if client_gone_fn():
@@ -394,11 +427,7 @@ class HubLifecycleManager:
     ) -> None:
         ws_source = workspace if workspace is not None else (state_dir or ".")
         self._explicit_state_dir = state_dir
-        self._workspace_fn: Callable[[], Path] = (
-            (lambda: Path(ws_source))
-            if isinstance(ws_source, (str, Path))
-            else ws_source
-        )
+        self._workspace_fn: Callable[[], Path] = (lambda: Path(ws_source)) if isinstance(ws_source, (str, Path)) else ws_source
         self.turn_manager = turn_manager
         self._active_turns_fn = active_turns_fn
         self._last_active_count: int = 0
@@ -407,21 +436,12 @@ class HubLifecycleManager:
                 configured = float(os.environ.get("BRIDGE_DRAIN_TIMEOUT_S", "").strip())
             except ValueError:
                 configured = DEFAULT_DRAIN_SECONDS
-            drain_timeout_s = (
-                configured
-                if math.isfinite(configured) and configured > 0
-                else DEFAULT_DRAIN_SECONDS
-            )
+            drain_timeout_s = configured if math.isfinite(configured) and configured > 0 else DEFAULT_DRAIN_SECONDS
         self.drain_timeout_s = float(drain_timeout_s)
         self.retry_after_s = int(retry_after_s)
         self.orphan_grace_s = float(orphan_grace_s)
         self._drain_enabled_fn = drain_enabled_fn or (
-            lambda: os.environ.get(
-                "BRIDGE_DRAIN_ON_SHUTDOWN",
-                os.environ.get("DSH_BRIDGE_DRAIN_ENABLED", "true"),
-            )
-            .strip()
-            .lower()
+            lambda: os.environ.get("BRIDGE_DRAIN_ON_SHUTDOWN", os.environ.get("DSH_BRIDGE_DRAIN_ENABLED", "true")).strip().lower()
             in ("1", "true", "yes", "on")
         )
         self._log_fn = log_fn
@@ -638,6 +658,16 @@ class HubLifecycleManager:
             "active_turns_before": active_before,
             "state": self.state,
         }
+
+    def wait_for_drain_hold(self, *, is_subagent: bool = False) -> bool:
+        """Удерживает интерактивный запрос при DRAINING на BRIDGE_DRAIN_HOLD_TIMEOUT_S."""
+        try:
+            hold_s = float(os.environ.get("BRIDGE_DRAIN_HOLD_TIMEOUT_S", "0.0") or 0.0)
+        except ValueError:
+            hold_s = 0.0
+        if not is_subagent and self.is_draining() and hold_s > 0:
+            self.drain_completed.wait(timeout=min(hold_s, 30.0))
+        return not self.is_draining()
 
     def draining_response(
         self,
