@@ -31,19 +31,18 @@ MAX_DIAGNOSTIC_CHARS: Final[int] = 256
 _EFFORTS: Final[frozenset[str]] = frozenset(item.value for item in EffortLevel)
 _CAPACITY_STATUSES: Final[frozenset[int]] = frozenset((429, 502, 503, 504))
 def _spaced(value: str) -> str:
-    glue = r"(?:[\s\\]|\\[bfnrtv])*"
-    return glue.join(value).replace(f"{glue}_{glue}", r"(?:[\s\\_-]|\\[bfnrtv])*")
-def _bounded_spaced(value: str) -> str:
     glue = r"(?:[\s\\]|\\[bfnrtv]){0,8}"; return glue.join(value).replace(f"{glue}_{glue}", r"(?:[\s\\_-]|\\[bfnrtv]){0,8}")
-_LEAD: Final[str] = r"(?:\\[bfnrtv]|\\)*"
-_BOUND: Final[str] = r"(?:(?<=\\[bfnrtv])|\b|\\+)"
+_bounded_spaced = _spaced
+_LEAD: Final[str] = r"(?:\\[bfnrtv]|\\){0,8}"
+_BOUND: Final[str] = r"(?:(?<=\\[bfnrtv])|\b|\\{1,8})"
 _WORDS: Final[tuple[str, ...]] = tuple("private_key secret_key access_key signing_key master_key encryption_key session_key ssh_key passphrase refresh_token access_token id_token client_secret x_api_key api_key password passwd pwd secret token pass pw credentials credential auth sessionid session_id key connection_string dsn".split())
-_K_SPACED: Final[str] = "|".join(map(_spaced, _WORDS)); _K_PLAIN: Final[str] = _K_SPACED
-_K_XML: Final[str] = "|".join(map(_bounded_spaced, _WORDS))
+_K_SPACED: Final[str] = rf"(?=[{''.join(sorted({w[0] for w in _WORDS}))}])(?:{'|'.join(map(_spaced, _WORDS))})"; _K_PLAIN: Final[str] = _K_SPACED; _K_XML: Final[str] = _K_SPACED
 _STOP_TOK: Final[str] = rf"{_spaced('basic')}\b|{_spaced('bearer')}\b|ya29\.|1//|sk-|AIza|[a-z0-9_.\[\]-]+\s*[:=]|[^\s@]+@[^\s@]+\.[^\W\d_]{{2,}}"  # noqa: E501
-_SECRET_PATTERNS: Final[dict[str, str]] = {"authorization": rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}{_LEAD}{_spaced('authorization')}(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", "bearer": rf"(?i){_BOUND}(?:{_spaced('bearer')}|{_spaced('basic')})\s+\S+(?:\s+(?!{_STOP_TOK})\S+)*", "cookie": rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}{_LEAD}{_spaced('cookie')}(?:\\*[\"'\[\]0-9a-z_.-])*\s*[:=]\s*[^\r\n]+", "keyvalue": rf"(?i)(?:\\*[\"'])?[a-z0-9_.-]{{0,32}}{_LEAD}(?:{_K_SPACED})(?:\\*[\"'\[\]0-9a-z_.-])*\s*%*\s*[:=]\s*[^\r\n]+", "invalid": rf"(?i){_BOUND}(?:{_spaced('invalid')}|{_spaced('expired')}|{_spaced('bad')}|{_spaced('revoked')}|{_spaced('leaked')})\s+{_LEAD}(?:{_K_SPACED})\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+\S+", "cliflag": rf"(?i)(?:^|(?<=[\s\"'\[\(,;]))(?:--?[a-z0-9_-]{{0,32}}{_LEAD}(?:{_K_PLAIN})[a-z0-9_-]{{0,32}}|-[pk](?=(?:\\*[\"']\s*,\s*|\s+)(?![0-9]+\b)))(?:\\*[\"']\s*,\s*|[\s=]+)\S+(?:\s+(?!--?[a-z0-9]|{_STOP_TOK})\S+)*", "xml": rf"(?i)<\s{{0,64}}(?:[a-z0-9_.-]{{1,32}}:)?[a-z0-9_.-]{{0,32}}(?:\\[bfnrtv]|\\){{0,8}}(?:{_K_XML}|{_bounded_spaced('cookie')}|{_bounded_spaced('authorization')})[a-z0-9_.-]{{0,32}}\b[^>]{{0,1048576}}>[^\r\n]{{0,1048576}}", "privkey": r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", "jwt": rf"{_BOUND}eyJ[A-Za-z0-9_-]{{4,}}\.eyJ[A-Za-z0-9_-]{{4,}}\.[A-Za-z0-9._-]*", "token": rf"{_BOUND}(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{{16}}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", "email": r"(?:\\+[bfnrtv]|(?<![\w.!#$%&'*+/=?^`{|}~-]))[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b"}
+_PFX: Final[str] = r"(?:\\{0,32}[\"']|(?<![a-z0-9_.-]))[a-z0-9_.-]{0,1024}"; _SFX: Final[str] = r"[\\\"'\[\]0-9a-z_.-]{0,64}+"
+_SECRET_PATTERNS: Final[dict[str, str]] = {"authorization": rf"(?i){_PFX}{_bounded_spaced('authorization')}{_SFX}\s*[:=]\s*[^\r\n]+", "bearer": rf"(?i){_BOUND}(?:{_spaced('bearer')}|{_spaced('basic')})\s+\S+(?:\s+(?!{_STOP_TOK})\S+)*", "cookie": rf"(?i){_PFX}{_bounded_spaced('cookie')}{_SFX}\s*[:=]\s*[^\r\n]+", "keyvalue": rf"(?i){_PFX}(?:{_K_XML}){_SFX}\s*%*\s*[:=]\s*[^\r\n]+", "invalid": rf"(?i){_BOUND}(?:{_spaced('invalid')}|{_spaced('expired')}|{_spaced('bad')}|{_spaced('revoked')}|{_spaced('leaked')})\s+{_LEAD}(?:{_K_SPACED})\b(?!\s+(?:count|limit|length|size|budget|number)\b)\s+\S+", "cliflag": rf"(?i)(?:^|(?<=[\s\"'\[\(,;]))(?:--?[a-z0-9_-]{{0,32}}{_LEAD}(?:{_K_PLAIN})[a-z0-9_-]{{0,32}}|-[pk](?=(?:\\*[\"']\s*,\s*|\s+)(?![0-9]+\b)))(?:\\*[\"']\s*,\s*|[\s=]+)\S+(?:\s+(?!--?[a-z0-9]|{_STOP_TOK})\S+)*", "xml": rf"(?i)<\s{{0,64}}(?:[a-z0-9_.-]{{1,32}}:)?[a-z0-9_.-]{{0,32}}(?:\\[bfnrtv]|\\){{0,8}}(?:{_K_XML}|{_bounded_spaced('cookie')}|{_bounded_spaced('authorization')})[a-z0-9_.-]{{0,32}}\b[^<>]{{0,4096}}>[^\r\n]{{0,1048576}}", "privkey": r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", "jwt": rf"{_BOUND}eyJ[A-Za-z0-9_-]{{4,}}\.eyJ[A-Za-z0-9_-]{{4,}}\.[A-Za-z0-9._-]*", "token": rf"{_BOUND}(?:ya29\.[A-Za-z0-9._-]+|1//[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|AIza[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[aboprs]-[A-Za-z0-9-]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|AKIA[0-9A-Z]{{16}}|glpat-[A-Za-z0-9._-]+|npm_[A-Za-z0-9]+|hf_[A-Za-z0-9]+|pypi-[A-Za-z0-9_-]+)", "email": r"(?:\\{1,8}[bfnrtv]|(?<![\w.!#$%&'*+/=?^`{|}~-]))[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[^\W\d_]{2,}\b"}
 _SECRET_REGEXES: Final[tuple[tuple[str, re.Pattern[str]], ...]] = tuple((name, re.compile(pattern)) for name, pattern in _SECRET_PATTERNS.items())
 _KV_RULES: Final[frozenset[str]] = frozenset(("authorization", "cookie", "keyvalue"))
+_GATES: Final[dict[str, tuple[frozenset[str], ...]]] = {name: tuple(frozenset(w.replace("_", "")) for w in words) for name, words in {"authorization": ("authorization",), "cookie": ("cookie",), "bearer": ("bearer", "basic"), "invalid": ("invalid", "expired", "bad", "revoked", "leaked"), "keyvalue": _WORDS}.items()}
 _INVISIBLE_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u00ad\u0300-\u036f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u1ab0-\u1aff\u1dc0-\u1dff\u200b-\u200f\u202a-\u202e\u2060-\u206f\u20d0-\u20ff\u3164\ud800-\udfff\ufe00-\ufe2f\ufeff\uffa0\ufff0-\ufffb]+")
 _WS_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x06\x08-\x1a\x1c-\x20\x7f\x85\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+")  # noqa: E501
 @dataclass(frozen=True)
@@ -87,8 +86,8 @@ def _has_residual_encoding(safe: str) -> bool:
     escapes = re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe)
     return any((html.unescape(safe) != safe, entities, escapes))
 def _decode_pct(match: re.Match[str]) -> str:
-    decoded = bytes.fromhex(match.group(0).replace("%", "")).replace(b"\x0b", b" ").replace(b"\x0c", b" ").replace(b"\x85", b" ").decode("utf-8", "replace")
-    return "".join(" " if ch in "\t\r\n\x0b\x0c\x85\u2028\u2029" else ch if ch in "\x07\x1b\x9b\x9c" else "" if ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F or _INVISIBLE_RE.fullmatch(ch) else ch for ch in decoded)
+    decoded = bytes.fromhex(match.group(0).replace("%", "")).decode("utf-8", "replace")
+    return "".join(" " if ch in "\t\r\n\x0b\x0c\x85\u2028\u2029\ufffd" else ch if ch in "\x07\x1b\x9b\x9c" else "" if ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F or _INVISIBLE_RE.fullmatch(ch) else ch for ch in decoded)
 def _decode_escape(match: re.Match[str]) -> str:
     hex_s, oct_s, dec_s = match.group(1) or match.group(2) or match.group(4), match.group(3), match.group(5)
     code = int(hex_s, 16) if hex_s else (int(oct_s, 8) if oct_s else int(dec_s, 10))
@@ -103,7 +102,7 @@ def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_close
     safe = f"{cleaned[:1048576]} {cleaned[-65536:]}" if not fail_closed and len(cleaned) > 1048576 else cleaned
     for _ in range(8):
         previous = safe; safe = _PCT_RUN_RE.sub(_decode_pct, safe); safe = _ESCAPE_TOKEN_RE.sub(_decode_escape, safe)
-        safe = html.unescape(_BS_STRIP_RE.sub("", _CTRL_ESC_RE.sub(lambda m: f"\\{m.group(1)}", safe)))
+        safe = html.unescape(_BS_STRIP_RE.sub("", _CTRL_ESC_RE.sub(r"\\\1", safe)))
         safe = _WS_RE.sub(" ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", safe).replace("\x0b", " ").replace("\x0c", " ").replace("\x85", " ")))
         if fail_closed and any(ch in safe for ch in "\x1b\x90\x98\x9b\x9c"): return REDACTED_TOKEN
         if previous == safe: break
@@ -118,7 +117,7 @@ def _redact_patterns(text: str) -> str:
     has_kv = ":" in probe or "=" in probe
     text = redact_url_secrets(text, REDACTED_TOKEN)
     for name, regex in _SECRET_REGEXES:
-        if (name == "email" and not has_at) or (name == "cliflag" and "-" not in text) or (name == "xml" and ("<" not in text or ">" not in text)) or (name in _KV_RULES and not has_kv): continue
+        if (name in _GATES and not any(gate <= chars for gate in _GATES[name])) or (name == "jwt" and "eyJ" not in probe) or (name == "email" and not has_at) or (name == "cliflag" and "-" not in text) or (name == "xml" and ("<" not in text or ">" not in text)) or (name in _KV_RULES and not has_kv): continue
         text = regex.sub(REDACTED_TOKEN, text)
     return text
 def redact_diagnostic_text(raw_text: str) -> str:

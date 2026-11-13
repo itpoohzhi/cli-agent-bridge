@@ -71,6 +71,23 @@ def test_redaction_adversarial_inputs_are_linear() -> None:
         started = time.perf_counter(); _ = x(text)
         assert time.perf_counter() - started < 0.05
 
+def test_redaction_userinfo_whitespace_and_chained_urls() -> None:
+    leaks = (f"https://%20alice:{Z}@10.0.0.1:8080", f"https://%20{Z}:pass@example.com", f"https://\t{Z}@10.0.0.1", f"https://{Z}%20@example.com", f"http://u:p,https://alice:{Z}", f"redirect=http://u:p&next=https://alice:{Z}", f"http://example.com:8080,https://alice:{Z}", rf"http://u:p\nhttps://alice:{Z}", rf"http://example.com:8080\nhttps://alice:{Z}")
+    assert all(Z not in x(text) for text in leaks) and all("<redacted>" in x(text) for text in leaks)
+    assert x(f"http://example.com:8080,https://alice:{Z}") == "http://example.com:8080,<redacted>"
+    assert all(x(text) == text for text in ("http://[::1]:8080/api", "https://api.example.com/v1", "https://example.com:8080/api"))
+    assert x("https://api.example.com/v1 ops@corp.com") == "https://api.example.com/v1 <redacted>" and Z not in x(f'https://api.example.com/v1, "{Z}@corp.com"')
+
+def test_redaction_keyword_overlap_is_linear() -> None:
+    for text in (":" + "key" * 100000 + "!", ": toke" + r"\n" * 100000 + "!", "<password" * 10000, "password " * 20000):
+        started = time.perf_counter(); _ = x(text)
+        assert time.perf_counter() - started < 0.2
+    assert all(Z not in x("a" * n + f"password={Z}") for n in (30, 129, 200))
+
+def test_percent_decoding_preserves_utf8() -> None:
+    from core.route_health_policy import _PCT_RUN_RE, _decode_pct  # pyright: ignore[reportPrivateUsage]
+    assert _decode_pct(_PCT_RUN_RE.match("%d2%85")) == "\u0485" and x("%d2%85") == "\u0485" and _decode_pct(_PCT_RUN_RE.match("%85")) == " " and _decode_pct(_PCT_RUN_RE.match("%c2%85")) == " "
+
 @pytest.mark.parametrize("case", (
     (401, "anything", *AF), (403, "OAuth rejected", *AF),
     (503, "token refresh failed", *AF), (503, "token \x1b[31mrefresh\x1b[0m failed", *AF), (503, r"token \033[31mrefresh\033[0m failed", *AF), (503, r"token\u0020refresh\u0020failed", *AF), (503, "token ref\x00resh\nfailed", *AF), (429, "quota exceeded", *LB),
