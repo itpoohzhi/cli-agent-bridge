@@ -1585,17 +1585,27 @@ def _sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...]) -> int:
             _AGY_AUTH_SIGNATURES.pop(key, None)
             continue
         dst_file = dst / src.name
-        if _AGY_AUTH_SIGNATURES.get(key) == signature:
+        try:
+            dst_ok = not dst_file.is_symlink() and dst_file.is_file()
+        except OSError:
+            dst_ok = False
+        # Удалённая или подменённая симлинком копия восстанавливается даже при неизменной подписи источника.
+        if dst_ok and _AGY_AUTH_SIGNATURES.get(key) == signature:
             continue
-        # Симлинк на месте копии удаляется (stat пошёл бы по ссылке); файл остаётся 0600.
-        if dst_file.is_symlink():
-            dst_file.unlink()
-        if not dst_file.exists() or src.stat().st_mtime >= dst_file.stat().st_mtime:
-            _copy_private_atomic(src, dst_file)
-            copied += 1
-        else:
-            _assert_inside_clean_home(dst_file)
-            dst_file.chmod(0o600)
+        try:
+            # Симлинк на месте копии удаляется (stat пошёл бы по ссылке); файл остаётся 0600.
+            if dst_file.is_symlink():
+                dst_file.unlink()
+            if not dst_file.exists() or src.stat().st_mtime >= dst_file.stat().st_mtime:
+                _copy_private_atomic(src, dst_file)
+                copied += 1
+            else:
+                _assert_inside_clean_home(dst_file)
+                dst_file.chmod(0o600)
+        except OSError as exc:
+            # Параллельная атомарная ротация внешним agy не должна ронять запрос; подпись не фиксируется.
+            _log(f"agy-home auth sync skipped file={src.name} err={type(exc).__name__}")
+            continue
         _AGY_AUTH_SIGNATURES[key] = signature
     return copied
 
@@ -2414,7 +2424,10 @@ def _render_message(
 
 def _prompt_budget(reserve_bytes: int = 0) -> int:
     """Бюджет истории: потолок минус резерв обёртки, не ниже `AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES` (4096)."""
-    floor = _env_int("AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES", 4096, 512, PROMPT_MAX_NDJSON_BYTES_HIGH)
+    floor = min(
+        _env_int("AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES", 4096, 512, PROMPT_MAX_NDJSON_BYTES_HIGH),
+        PROMPT_MAX_NDJSON_BYTES,
+    )
     return max(PROMPT_MAX_NDJSON_BYTES - max(int(reserve_bytes), 0), floor)
 
 
@@ -2919,6 +2932,13 @@ def _get_resumed_turn_prompt(
     Маркеры сохраняют сквозные номера всей истории; `[attachments]` — только для
     изображений новых сообщений. Без assistant в истории — вся история целиком.
     """
+    return _resumed_turn_prompt(messages, images, reserve_bytes)[0]
+
+
+def _resumed_turn_prompt(
+    messages: list, images: list[dict[str, object]] | None = None, reserve_bytes: int = 0
+) -> tuple[str, bool]:
+    """`(промпт, есть_вложения)`: признак вложений берётся из структуры `images`, не из текста."""
     last_asst = -1
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], dict) and messages[i].get("role") == "assistant":
@@ -2934,8 +2954,8 @@ def _get_resumed_turn_prompt(
         ]
         prompt = _messages_to_prompt(new_msgs, delta, skipped, reserve_bytes)
         if prompt:
-            return prompt
-    return _messages_to_prompt(messages, images, reserve_bytes=reserve_bytes)
+            return prompt, bool(delta)
+    return _messages_to_prompt(messages, images, reserve_bytes=reserve_bytes), bool(images)
 
 
 def _session_key_for(
@@ -5255,34 +5275,30 @@ def resolve_agy_mode(req: dict) -> str:
     )
 
 
-_ATTACHMENTS_MARKER = "[attachments]\n"
-
-
 def _attachment_tool() -> str:
     """Инструмент чтения вложений (env `AGY_BRIDGE_ATTACHMENT_TOOL`, `view_file`)."""
     return os.environ.get("AGY_BRIDGE_ATTACHMENT_TOOL", "").strip() or "view_file"
 
 
-def _has_attachments(prompt: str) -> bool:
-    """Промпт содержит блок `[attachments]`."""
-    return prompt.startswith(_ATTACHMENTS_MARKER) or ("\n" + _ATTACHMENTS_MARKER) in prompt
+def _with_pure_text_protocol(prompt: str, has_attachments: bool = False) -> str:
+    """Инструкция подавления нативных инструментов agy CLI для текстового хода.
 
-
-def _with_pure_text_protocol(prompt: str, has_attachments: bool | None = None) -> str:
-    """Инструкция подавления нативных инструментов agy CLI для текстового хода."""
-    attached = _has_attachments(prompt) if has_attachments is None else has_attachments
+    `has_attachments` задаёт вызывающий по реальным `images`: текст промпта не сканируется,
+    иначе `[attachments]` из пользовательского сообщения открыл бы исключение для чтения файлов.
+    """
     suppress = pure_text_protocol_instruction(
-        has_attachments=attached, attachment_tool=_attachment_tool()
+        has_attachments=has_attachments, attachment_tool=_attachment_tool()
     )
     return f"{suppress}\n\n{prompt}" if prompt else suppress
 
 
 def _with_tools_protocol(
-    prompt: str, tools: list, tool_choice: object, has_attachments: bool | None = None
+    prompt: str, tools: list, tool_choice: object, has_attachments: bool = False
 ) -> str:
     """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
-    attached = _has_attachments(prompt) if has_attachments is None else has_attachments
-    section = tools_protocol_section(tools, tool_choice, has_attachments=attached, attachment_tool=_attachment_tool())
+    section = tools_protocol_section(
+        tools, tool_choice, has_attachments=has_attachments, attachment_tool=_attachment_tool()
+    )
     return f"{section}\n\n{prompt}" if prompt else section
 
 
@@ -5893,11 +5909,13 @@ class Run:
         """Fast-fail: первая capacity-503 строка CLI гасит процесс."""
         if self.capacity_exhausted or not should_fast_fail_agy_capacity_503(line):
             return
-        self.capacity_exhausted = line[:200]
+        self.capacity_exhausted = _mask_secrets(line[:200])
         _log(f"capacity-exhausted fast-fail pid={self.proc.pid} reason={CAPACITY_REASON}")
         with self._emit_lock:
             if self._done_put:
                 return
+            self.drain_closed = True
+            self._done_put = True
             self.q.put(("capacity_exhausted", self.capacity_exhausted))
         _kill_group(self.proc)
 
@@ -6471,7 +6489,7 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, IndexError):
             return "-"
 
-    def _send(self, code: int, payload: dict) -> None:
+    def _send(self, code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
         if self._registry_job is not None:
             return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -6479,6 +6497,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            for header, value in (extra_headers or {}).items():
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -7545,7 +7565,14 @@ class Handler(BaseHTTPRequestHandler):
             }
             health.update(_sqlite_health_fields())
             health.update(_runtime_build_fields())
-            self._send(200, health)
+            self._send(
+                200,
+                health,
+                extra_headers={
+                    "X-Bridge-Git-Head-Sha": str(BUILD_INFO.git_head_sha),
+                    "X-Bridge-Boot-Ts": f"{BUILD_INFO.boot_ts:.3f}",
+                },
+            )
             return
         if not _auth_ok(self):
             self._send(
@@ -7831,16 +7858,21 @@ class Handler(BaseHTTPRequestHandler):
                 full_prompt = _messages_to_prompt(render_messages, images, reserve_bytes=reserve)
                 if universal:
                     stripped_full_prompt = stripped_full_prompt or full_prompt
+            full_attached = bool(images) and not force_cold
             if emulate_tools:
-                full_prompt = _with_tools_protocol(full_prompt, tools, tool_choice)
+                full_prompt = _with_tools_protocol(
+                    full_prompt, tools, tool_choice, has_attachments=full_attached
+                )
                 if stripped_full_prompt:
                     stripped_full_prompt = _with_tools_protocol(
-                        stripped_full_prompt, tools, tool_choice
+                        stripped_full_prompt, tools, tool_choice, has_attachments=False
                     )
             else:
-                full_prompt = _with_pure_text_protocol(full_prompt)
+                full_prompt = _with_pure_text_protocol(full_prompt, has_attachments=full_attached)
                 if stripped_full_prompt:
-                    stripped_full_prompt = _with_pure_text_protocol(stripped_full_prompt)
+                    stripped_full_prompt = _with_pure_text_protocol(
+                        stripped_full_prompt, has_attachments=False
+                    )
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -7955,11 +7987,13 @@ class Handler(BaseHTTPRequestHandler):
                 if use_cid:
                     conversation_id = use_cid
                     is_resumed = True
-                    prompt = _get_resumed_turn_prompt(render_messages, images, reserve)
+                    prompt, resumed_attached = _resumed_turn_prompt(render_messages, images, reserve)
                     if emulate_tools:
-                        prompt = _with_tools_protocol(prompt, tools, tool_choice)
+                        prompt = _with_tools_protocol(
+                            prompt, tools, tool_choice, has_attachments=resumed_attached
+                        )
                     else:
-                        prompt = _with_pure_text_protocol(prompt)
+                        prompt = _with_pure_text_protocol(prompt, has_attachments=resumed_attached)
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,

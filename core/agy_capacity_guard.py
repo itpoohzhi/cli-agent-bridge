@@ -8,8 +8,11 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from typing import Final
+
+from core.log_redaction import mask_credential_context, mask_long_tokens, safe_log_tokens
 
 CAPACITY_REASON: Final[str] = "model_capacity_exhausted"
 CAPACITY_HTTP_STATUS: Final[int] = 503
@@ -18,10 +21,12 @@ MARKERS_ENV: Final[str] = "AGY_CAPACITY_MARKERS"
 MAX_LINE_CHARS_ENV: Final[str] = "AGY_CAPACITY_MAX_LINE_CHARS"
 DEFAULT_MAX_LINE_CHARS: Final[int] = 8192
 _FALSE: Final[frozenset[str]] = frozenset(("0", "false", "no", "off"))
-_STANDALONE_MARKERS: Final[tuple[str, ...]] = ("model_capacity_exhausted",)
-# Фраза ёмкости требует признак 503/UNAVAILABLE, чтобы не ловить прозу.
+# Встроенные маркеры ёмкости требуют признак статуса/ошибки: голая проза с кодом причины
+# в stdout не должна убивать процесс. Явный `AGY_CAPACITY_MARKERS` признак не требует.
+_CAPACITY_CODE: Final[str] = "model_capacity_exhausted"
 _CAPACITY_PHRASE: Final[str] = "no capacity available"
-_STATUS_HINTS: Final[tuple[str, ...]] = ("503", "unavailable")
+# `error`/`status`/`code` считаются признаком только как ключ или префикс (`error:`, `"code":`), не как слово прозы.
+_STATUS_HINT_RE: Final[re.Pattern[str]] = re.compile(r"\b503\b|unavailable|resource_exhausted|\b(?:error|status|code)\b[\"']?\s*[:=]")
 
 
 def fast_fail_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -51,9 +56,9 @@ def is_capacity_exhausted_text(text: object, env: Mapping[str, str] | None = Non
     custom = _custom_markers(source)
     if custom:
         return any(marker in haystack for marker in custom)
-    if any(marker in haystack for marker in _STANDALONE_MARKERS):
-        return True
-    return _CAPACITY_PHRASE in haystack and any(h in haystack for h in _STATUS_HINTS)
+    if _CAPACITY_CODE not in haystack and _CAPACITY_PHRASE not in haystack:
+        return False
+    return _STATUS_HINT_RE.search(haystack) is not None
 
 
 def should_fast_fail_agy_capacity_503(text: object, env: Mapping[str, str] | None = None) -> bool:
@@ -63,6 +68,8 @@ def should_fast_fail_agy_capacity_503(text: object, env: Mapping[str, str] | Non
 
 def capacity_error_body(detail: object = "") -> dict[str, object]:
     """Тело ошибки: HTTP 503, `type` — код причины."""
-    summary = " ".join(str(detail or "").split())[:200]
+    # Маскирование до усечения: обрезанный посередине токен уже не распознать.
+    redacted = mask_long_tokens(mask_credential_context(" ".join(str(detail or "").split())), safe_tokens=safe_log_tokens())
+    summary = redacted[:200]
     message = "upstream model has no capacity available"
     return {"message": f"{message}: {summary}" if summary else message, "type": CAPACITY_REASON, "code": CAPACITY_HTTP_STATUS}

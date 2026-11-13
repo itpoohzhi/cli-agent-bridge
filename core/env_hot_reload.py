@@ -1,7 +1,9 @@
 """Горячая перезагрузка `.env`: сверка `(mtime_ns, size)` не чаще раза за TTL.
 
-Env: `BRIDGE_ENV_FILE_PATH` (`~/.dsh/.env`), `BRIDGE_ENV_CACHE_TTL_S` (2.0, `0` — всегда).
-Приоритет: файл, `os.environ`, default; сбой чтения или пустой разбор сохраняют прошлый снимок.
+Env: `BRIDGE_ENV_FILE_PATH` (`~/.dsh/.env`), `BRIDGE_ENV_CACHE_TTL_S` (2.0, `0` — всегда),
+`BRIDGE_ENV_CACHE_MAX_INSTANCES` (32, предел числа общих кэшей процесса).
+Приоритет: файл (в т.ч. явное пустое значение `KEY=""`), `os.environ`, default; сбой чтения,
+пустой разбор и усечение файла до нуля байт сохраняют прошлый снимок.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final
@@ -20,6 +23,8 @@ ENV_FILE_PATH_ENV: Final[str] = "BRIDGE_ENV_FILE_PATH"
 ENV_CACHE_TTL_ENV: Final[str] = "BRIDGE_ENV_CACHE_TTL_S"
 DEFAULT_ENV_FILE_PATH: Final[str] = "~/.dsh/.env"
 DEFAULT_ENV_CACHE_TTL_S: Final[float] = 2.0
+ENV_CACHE_MAX_INSTANCES_ENV: Final[str] = "BRIDGE_ENV_CACHE_MAX_INSTANCES"
+DEFAULT_ENV_CACHE_MAX_INSTANCES: Final[int] = 32
 
 _LOGGER = logging.getLogger(__name__)
 _INLINE_COMMENT_RE: Final[re.Pattern[str]] = re.compile(r"\s+#")
@@ -41,12 +46,38 @@ def resolve_env_cache_ttl_s(environ: Mapping[str, str] | None = None) -> float:
     return value if math.isfinite(value) and value >= 0 else DEFAULT_ENV_CACHE_TTL_S
 
 
+def resolve_env_cache_max_instances(environ: Mapping[str, str] | None = None) -> int:
+    """Предел общих кэшей из `BRIDGE_ENV_CACHE_MAX_INSTANCES`; невалидное или `<1` — дефолт."""
+    src = os.environ if environ is None else environ
+    try:
+        value = int(str(src.get(ENV_CACHE_MAX_INSTANCES_ENV, "")).strip())
+    except ValueError:
+        return DEFAULT_ENV_CACHE_MAX_INSTANCES
+    return value if value >= 1 else DEFAULT_ENV_CACHE_MAX_INSTANCES
+
+
+def _parse_quoted(value: str) -> str | None:
+    """Значение в кавычках; экраны: обратная косая перед кавычкой или перед самой собой. Без закрывающей кавычки или с мусором после — `None`."""
+    quote, i = value[0], 1
+    chars: list[str] = []
+    while i < len(value):
+        char = value[i]
+        if char == "\\" and i + 1 < len(value) and value[i + 1] in ("'", '"', "\\"):
+            chars.append(value[i + 1])
+            i += 2
+            continue
+        if char == quote:
+            tail = value[i + 1 :].strip()
+            return None if tail and not tail.startswith("#") else "".join(chars)
+        chars.append(char)
+        i += 1
+    return None
+
+
 def _parse_value(raw: str) -> str | None:
     value = raw.strip()
     if value.startswith(("'", '"')):
-        end = value.find(value[0], 1)
-        tail = value[end + 1 :].strip() if end > 0 else "x"
-        return None if end < 0 or (tail and not tail.startswith("#")) else value[1:end]
+        return _parse_quoted(value)
     return _INLINE_COMMENT_RE.split(value, maxsplit=1)[0].rstrip()
 
 
@@ -117,6 +148,10 @@ class EnvHotReloadCache:
         signature = (st.st_mtime_ns, st.st_size)
         if signature == self._signature:
             return
+        if st.st_size == 0 and self._values:
+            # Неатомарное усечение (`>` перед записью): подпись не фиксируется, файл перечитается после TTL.
+            self._warn_transition("file_truncated", "keeping last valid snapshot")
+            return
         try:
             text = self._path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
@@ -135,11 +170,12 @@ class EnvHotReloadCache:
             return dict(self._values)
 
     def get(self, name: str, default: str = "") -> str:
-        """Значение: файл, затем окружение процесса, затем `default`."""
+        """Значение: файл (явное пустое значение отзывает окружение), затем окружение, затем `default`."""
         with self._lock:
             self._refresh_locked()
-            from_file = self._values.get(name, "")
-        return from_file or str(self._environ.get(name, "")) or default
+            if name in self._values:
+                return self._values[name]
+        return str(self._environ.get(name, "")) or default
 
     def invalidate(self) -> None:
         """Следующее обращение перечитает файл."""
@@ -147,17 +183,22 @@ class EnvHotReloadCache:
             self._signature, self._next_check = None, 0.0
 
 
-_CACHES: dict[tuple[str, float], EnvHotReloadCache] = {}
+_CACHES: OrderedDict[tuple[str, float], EnvHotReloadCache] = OrderedDict()
 _CACHES_LOCK = threading.Lock()
 
 
 def get_env_cache() -> EnvHotReloadCache:
-    """Общий кэш процесса; env-конфигурация учитывается на каждом обращении."""
+    """Общий кэш процесса (LRU, предел — `BRIDGE_ENV_CACHE_MAX_INSTANCES`); env учитывается на каждом обращении."""
     key = (str(resolve_env_file_path()), resolve_env_cache_ttl_s())
     with _CACHES_LOCK:
-        if key not in _CACHES:
-            _CACHES[key] = EnvHotReloadCache(*key)
-        return _CACHES[key]
+        cache = _CACHES.get(key)
+        if cache is None:
+            cache = _CACHES[key] = EnvHotReloadCache(*key)
+        _CACHES.move_to_end(key)
+        limit = resolve_env_cache_max_instances()
+        while len(_CACHES) > limit:
+            _CACHES.popitem(last=False)
+        return cache
 
 
 def get_hot_env_value(name: str, default: str = "") -> str:

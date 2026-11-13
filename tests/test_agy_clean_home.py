@@ -338,10 +338,15 @@ class PrepareAgyHomeTests(CleanHomeFixture):
         _ = self.srv._prepare_agy_home()
         marker = self.gemini / "projects.json"
         marker.unlink()
-        _ = self.srv._prepare_agy_home()
+        # Горячая синхронизация auth-файлов восстанавливает удалённую копию; без неё
+        # повторный вызов ничего не переинициализирует.
+        with mock.patch.dict(os.environ, {"AGY_AUTH_HOT_RELOAD_ENABLED": "0"}):
+            _ = self.srv._prepare_agy_home()
         self.assertFalse(
             marker.exists(), "повторный вызов не должен переинициализировать"
         )
+        _ = self.srv._prepare_agy_home()
+        self.assertTrue(marker.is_file(), "hot-reload восстанавливает удалённую auth-копию")
 
     def test_threadsafe_concurrent_calls(self) -> None:
         workers = 16

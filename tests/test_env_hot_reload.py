@@ -10,6 +10,7 @@ import pytest
 from core.env_hot_reload import (
     DEFAULT_ENV_CACHE_TTL_S,
     EnvHotReloadCache,
+    get_env_cache,
     get_hot_env_value,
     parse_env_text,
     resolve_env_cache_ttl_s,
@@ -151,3 +152,48 @@ def test_passthrough_adapter_static_api_key_fallback(monkeypatch: pytest.MonkeyP
         lambda: {"models": []},
     )
     assert adapter._upstream_key == "static"
+
+
+def test_explicit_empty_value_revokes_stale_environment(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text('KEY=""\nOTHER=x\n', encoding="utf-8")
+    cache = EnvHotReloadCache(env_file, 0, environ={"KEY": "stale", "ABSENT": "from-env"})
+    assert cache.get("KEY", "dflt") == ""
+    assert cache.get("ABSENT", "dflt") == "from-env"
+    assert cache.get("NOPE", "dflt") == "dflt"
+
+
+def test_truncated_to_zero_bytes_keeps_last_valid_snapshot(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("KEY=good-value\n", encoding="utf-8")
+    cache = EnvHotReloadCache(env_file, 0, environ={})
+    assert cache.get("KEY") == "good-value"
+    env_file.write_text("", encoding="utf-8")  # `>`-усечение перед записью нового содержимого
+    with caplog.at_level("WARNING", logger="core.env_hot_reload"):
+        assert cache.get("KEY") == "good-value"
+        assert cache.get("KEY") == "good-value"
+    assert len([r for r in caplog.records if "file_truncated" in r.getMessage()]) == 1
+    _bump(env_file, "KEY=rewritten\n")
+    assert cache.get("KEY") == "rewritten"
+
+
+def test_escaped_quotes_in_quoted_values() -> None:
+    parsed = parse_env_text(
+        'A="foo\\"bar"\nB=\'it\\\'s\'\nC="back\\\\slash" # c\nD="x\\"\nE="a" junk\n'
+    )
+    # D (нет закрывающей кавычки) и E (мусор после значения) отбрасываются.
+    assert parsed == {"A": 'foo"bar', "B": "it's", "C": "back\\slash"}
+
+
+def test_shared_cache_registry_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import env_hot_reload as mod
+
+    monkeypatch.setenv("BRIDGE_ENV_CACHE_MAX_INSTANCES", "3")
+    monkeypatch.setattr(mod, "_CACHES", mod.OrderedDict())
+    for i in range(10):
+        monkeypatch.setenv("BRIDGE_ENV_FILE_PATH", str(tmp_path / f"{i}.env"))
+        get_env_cache()
+    assert len(mod._CACHES) == 3
+    monkeypatch.setenv("BRIDGE_ENV_CACHE_MAX_INSTANCES", "garbage")
+    assert mod.resolve_env_cache_max_instances() == 32
+    assert mod.resolve_env_cache_max_instances({"BRIDGE_ENV_CACHE_MAX_INSTANCES": "0"}) == 32

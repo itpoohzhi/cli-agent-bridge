@@ -30,6 +30,18 @@ def test_detects_capacity_markers(line: str) -> None:
     assert should_fast_fail_agy_capacity_503(line, {})
 
 
+def test_bare_prose_with_reason_code_does_not_fast_fail() -> None:
+    for prose in (
+        "the reason code model_capacity_exhausted is documented in the runbook",
+        "Note: model_capacity_exhausted means the upstream is full",
+    ):
+        assert not is_capacity_exhausted_text(prose, {})
+        assert not should_fast_fail_agy_capacity_503(prose, {})
+    assert is_capacity_exhausted_text("reason=model_capacity_exhausted", {"AGY_CAPACITY_MARKERS": "model_capacity_exhausted"})
+    assert is_capacity_exhausted_text('{"code": 503, "reason": "MODEL_CAPACITY_EXHAUSTED"}', {})
+    assert is_capacity_exhausted_text("RESOURCE_EXHAUSTED model_capacity_exhausted", {})
+
+
 @pytest.mark.parametrize(
     "line",
     ["", "No capacity available in my calendar", "503 Service Unavailable", "all fine", None, 7],

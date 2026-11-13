@@ -11,16 +11,28 @@ import re
 from collections.abc import Iterable
 from typing import Final
 
-from core.agy_capacity_guard import CAPACITY_REASON
-from core.stream_interruption_recovery import TURN_REASON_CODES
-
 SAFE_TOKENS_ENV: Final[str] = "BRIDGE_LOG_SAFE_TOKENS"
 MASK: Final[str] = "***"
 
+# Литералы вместо импорта `core.agy_capacity_guard`/`core.stream_interruption_recovery`:
+# редактор логов — листовой модуль и не зависит от доменных модулей. Синхронность с
+# `TURN_REASON_CODES` и `CAPACITY_REASON` закреплена тестом.
 SYSTEM_REASON_CODES: Final[frozenset[str]] = frozenset(
     (
-        *TURN_REASON_CODES,
-        CAPACITY_REASON,
+        "clean_done",
+        "self_healed_after_transient_interruption",
+        "self_healed_after_malformed_function_call",
+        "self_heal_disabled",
+        "non_transient_result_error",
+        "unclassified_nonzero_rc",
+        "drain_incomplete",
+        "unclosed_tool_call",
+        "not_recovered",
+        "transient_pre_delivery_retry",
+        "retry_blocked",
+        "graceful_partial_close",
+        "graceful_blocked",
+        "model_capacity_exhausted",
         "upstream_incomplete_stream",
         "upstream_repetition_loop",
         "upstream_response_too_large",
@@ -31,13 +43,18 @@ SYSTEM_REASON_CODES: Final[frozenset[str]] = frozenset(
 )
 
 LONG_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_\-]{24,}")
+_CREDENTIAL_KEYS: Final[str] = (
+    r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|passwd)"
+)
+# Значение — в кавычках (в т.ч. экранированных в JSON-строке) любой длины либо «голое» до разделителя.
 _CREDENTIAL_CONTEXT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?i)\b(?:bearer|basic)\s+[^\s,;\"']+"
-    r"|\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|passwd)"
-    r"\b\s*[=:]\s*[^\s,;&\"']+"
+    r"|\\*[\"']?\b" + _CREDENTIAL_KEYS + r"\b\\*[\"']?\s*[=:]\s*"
+    r"(?:\\*\"[^\"\\]*\\*\"|\\*'[^'\\]*\\*'|\\*[\"']?[^\s,;&\"']+)"
 )
 _PREFIXED_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
-    r"\b(?:sk|fk|rk|pk)-[A-Za-z0-9_\-]{6,}|\bgh[pousr]_[A-Za-z0-9]{8,}|\bAIza[A-Za-z0-9_\-]{8,}|\bya29\.[A-Za-z0-9._\-]{8,}"
+    r"\b(?:sk|fk|rk|pk)-[A-Za-z0-9_\-]{6,}|\bgh[pousr]_[A-Za-z0-9]{8,}|\bAIza[A-Za-z0-9_\-]{8,}"
+    r"|\bya29\.[A-Za-z0-9._\-]{8,}|\beyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]+){1,2}"
 )
 
 

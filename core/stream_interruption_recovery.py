@@ -16,7 +16,7 @@ TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
 )
 
 # Upstream отвергает пустой/битый functionCall; CLI самоисцеляется, но текст ошибки доходит до `result`.
-_FUNCTION_CALL_ERROR_PHRASES: tuple[str, ...] = ("malformed function call", "function call is empty", "improperly formatted function call", "failed to parse function call")  # fmt: skip
+_FUNCTION_CALL_ERROR_PHRASES: tuple[str, ...] = ("malformed function call", "malformed_function_call", "pt_at_error", "function call is empty", "improperly formatted function call", "failed to parse function call")  # fmt: skip
 FUNCTION_CALL_ERROR_RE = re.compile("|".join(re.escape(p) for p in _FUNCTION_CALL_ERROR_PHRASES), re.IGNORECASE)  # fmt: skip
 CLASSIFY_MAX_CHARS_ENV = "BRIDGE_ERROR_CLASSIFY_MAX_CHARS"
 DEFAULT_CLASSIFY_MAX_CHARS = 4096
@@ -39,9 +39,9 @@ def _classify_max_chars() -> int:
 
 def is_recoverable_function_call_error(text: str | None, *, source: str = "cli_error") -> bool:
     """Ошибка пустого/битого functionCall; решение о самоисцелении — в `resolve_done_turn_outcome`."""
-    if not isinstance(text, str) or source != "cli_error" or len(text) > _classify_max_chars():
+    if not isinstance(text, str) or source != "cli_error":
         return False
-    return bool(FUNCTION_CALL_ERROR_RE.search(text))
+    return bool(FUNCTION_CALL_ERROR_RE.search(text[: _classify_max_chars()]))
 
 
 def is_self_healable_error(text: str | None, *, source: str = "cli_error") -> bool:
@@ -177,10 +177,11 @@ def resolve_done_turn_outcome(**kw: Any) -> TurnOutcomeResolution:
     """
     f = _TurnFacts(**kw)
     fc_error = is_recoverable_function_call_error(f.result_error)
-    transient = fc_error or is_transient_stream_interruption(f.result_error)
+    transient = is_transient_stream_interruption(f.result_error)
     clean = all((f.rc == 0, not f.result_error, f.result_status != "ERROR"))
-    blocker = _heal_blocker(f, transient)
+    blocker = _heal_blocker(f, fc_error or transient)
     heal_reason = FUNCTION_CALL_HEAL_REASON if fc_error else "self_healed_after_transient_interruption"  # fmt: skip
+    # Ошибка functionCall не транзиентный обрыв: без доказанного финального planner ход остаётся `agy_error`.
     reasons = (
         ("clean_done", clean),
         (blocker, bool(blocker)),

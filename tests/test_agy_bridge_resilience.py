@@ -2718,7 +2718,7 @@ class ExitLogAndHealthTests(unittest.TestCase):
         with _Fixture() as fx:
             sent: list[tuple[int, dict[str, object]]] = []
 
-            def send(code: int, payload: dict[str, object]) -> None:
+            def send(code: int, payload: dict[str, object], extra_headers: object = None) -> None:
                 sent.append((code, payload))
 
             def fetch() -> dict[str, object]:
@@ -3751,7 +3751,7 @@ class L2HarnessTests(unittest.TestCase):
             self.assertLessEqual(rss_end, 160 * 1024 * 1024)
             health: list[dict[str, object]] = []
 
-            def send(_code: int, payload: dict[str, object]) -> None:
+            def send(_code: int, payload: dict[str, object], extra_headers: object = None) -> None:
                 health.append(payload)
 
             with _Sock() as sock:

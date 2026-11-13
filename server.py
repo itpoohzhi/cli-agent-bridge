@@ -121,7 +121,7 @@ from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежн�
     has_live_parent,
 )
 from core.prompt_prefix_stability import compute_tools_budget_overhead  # noqa: E402
-from core.log_redaction import mask_long_tokens  # noqa: E402
+from core.log_redaction import mask_credential_context, mask_long_tokens, safe_log_tokens  # noqa: E402
 from core.runtime_build_info import RuntimeBuildInfo  # noqa: E402
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
@@ -987,7 +987,8 @@ def _mask_secrets(text: str) -> str:
     """Длинные токены, WebSocket URL и абсолютные пути -> ***."""
     masked = _WS_URL.sub("ws://***", text)
     masked = _FILESYSTEM_PATH.sub("***", masked)
-    return mask_long_tokens(masked, _SECRET)
+    masked = mask_credential_context(masked)
+    return mask_long_tokens(masked, _SECRET, safe_tokens=safe_log_tokens())
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:

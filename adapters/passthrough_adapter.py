@@ -648,6 +648,7 @@ class StreamOutcome:
     tool_calls_published: int = 0
     committed: bool = False
     repetition_loop: bool = False
+    error_emitted: bool = False
     last_chunk: Optional[dict[str, Any]] = None
     last_usage: Optional[dict[str, Any]] = None
     unfinished_choices: Optional[set[int]] = None
@@ -1002,11 +1003,10 @@ def relay_sse(
                     acc.pop_choice(index), tool_schemas, limits
                 )
                 outcome.tool_calls_published += len(calls)
-                if not calls:  # безымянные вызовы отброшены: tool_calls без вызовов — сбой протокола
-                    for c in choices:
-                        if isinstance(c, dict) and choice_index(c.get("index")) == index and c.get("finish_reason") == "tool_calls":
-                            c["finish_reason"], modified = "stop", True
-                    continue
+                if not calls:  # безымянные вызовы отброшены: fail-closed; дельты tool_calls уже сняты, чанк не ретранслируется
+                    outcome.error_emitted = True
+                    write(_error_frame(last_chunk, "tool_call_parse_error", "Upstream emitted tool_calls with empty function name", outcome.last_usage))
+                    return outcome
                 base_c = {
                     k: chunk[k] for k in chunk if k not in ("choices", "usage", "error")
                 }
@@ -1833,5 +1833,5 @@ class PassthroughAdapter(BackendAdapter):
             not outcome.reader_stopped
             or outcome.incomplete
             or outcome.overflow
-            or outcome.repetition_loop
+            or outcome.repetition_loop or outcome.error_emitted
         )

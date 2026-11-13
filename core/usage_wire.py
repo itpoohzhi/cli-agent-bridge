@@ -145,4 +145,6 @@ def positive_wire_usage(usage: object) -> dict | None:
     if not isinstance(usage, Mapping):
         return None
     keys = ("prompt_tokens", "completion_tokens", "total_tokens")
-    return dict(usage) if any(_is_count(usage.get(k)) and usage[k] > 0 for k in keys) else None
+    values: list[object] = [usage.get(k) for k in keys]  # pyright: ignore[reportUnknownMemberType]
+    positive = any(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in values)
+    return dict(usage) if positive else None  # pyright: ignore[reportUnknownArgumentType]

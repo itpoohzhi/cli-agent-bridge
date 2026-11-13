@@ -64,6 +64,31 @@ class AuthHotReloadTests(CleanHomeFixture):
             _ = self.srv._prepare_agy_home()
         self.assertEqual((self.gemini / "jetski-standalone-oauth-token").read_text(encoding="utf-8"), "oauth-secret")
 
+    def test_deleted_or_symlinked_clean_copy_is_restored_with_unchanged_source(self) -> None:
+        _ = self.srv._prepare_agy_home()
+        token = self.gemini / "jetski-standalone-oauth-token"
+        token.unlink()
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "oauth-secret")
+        decoy = self.clean_home / "decoy"
+        decoy.write_text("decoy", encoding="utf-8")
+        token.unlink()
+        token.symlink_to(decoy)
+        _ = self.srv._prepare_agy_home()
+        self.assertFalse(token.is_symlink())
+        self.assertEqual(token.read_text(encoding="utf-8"), "oauth-secret")
+
+    def test_oserror_mid_sync_is_graceful_and_retried(self) -> None:
+        _ = self.srv._prepare_agy_home()
+        src = self.real_home / ".gemini" / "jetski-standalone-oauth-token"
+        token = self.gemini / "jetski-standalone-oauth-token"
+        _bump(src, "rotated-after-failure")
+        with mock.patch.object(self.srv, "_copy_private_atomic", side_effect=OSError("rotation race")):
+            _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "oauth-secret")
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "rotated-after-failure")
+
 
 class BridgeUnitTests(unittest.TestCase):
     srv: Any
@@ -88,16 +113,16 @@ class BridgeUnitTests(unittest.TestCase):
     def test_protocols_respect_attachments(self) -> None:
         tools = [{"type": "function", "function": {"name": "t", "description": "d", "parameters": {"type": "object"}}}]
         attached = "### 1. user\nhi\n\n[attachments]\n- [image 1] /x/img-1.png\nRead every attached image"
-        with_att = self.srv._with_tools_protocol(attached, tools, None)
+        with_att = self.srv._with_tools_protocol(attached, tools, None, has_attachments=True)
         plain = self.srv._with_tools_protocol("### 1. user\nhi", tools, None)
         self.assertIn("except view_file on the attachment files", with_att)
         self.assertNotIn("except", plain.split("Available tools:")[0])
-        text_att = self.srv._with_pure_text_protocol(attached)
+        text_att = self.srv._with_pure_text_protocol(attached, has_attachments=True)
         self.assertIn("DO NOT USE ANY TOOLS", text_att)
         self.assertIn("except view_file", text_att)
         self.assertNotIn("except", self.srv._with_pure_text_protocol("hi"))
         with mock.patch.dict(os.environ, {"AGY_BRIDGE_ATTACHMENT_TOOL": "read_media"}):
-            self.assertIn("except read_media", self.srv._with_pure_text_protocol(attached))
+            self.assertIn("except read_media", self.srv._with_pure_text_protocol(attached, has_attachments=True))
 
     def test_single_pass_pruning_with_protocol_wrapper(self) -> None:
         srv = self.srv
@@ -130,11 +155,50 @@ class BridgeUnitTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES": "8192"}):
             self.assertEqual(srv._prompt_budget(10**9), 8192)
 
+    def test_prompt_budget_floor_never_exceeds_ceiling(self) -> None:
+        srv = self.srv
+        with (
+            mock.patch.object(srv, "PROMPT_MAX_NDJSON_BYTES", 6000),
+            mock.patch.dict(os.environ, {"AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES": "8192"}),
+        ):
+            self.assertEqual(srv._prompt_budget(10**9), 6000)
+
+    def test_agy_binary_hash_is_cached_between_health_polls(self) -> None:
+        srv = self.srv
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "agy"
+            binary.write_bytes(b"binary-v1")
+            first = srv._file_sha256(binary)
+            with mock.patch.object(srv.hashlib, "sha256", side_effect=AssertionError("re-hashed")):
+                self.assertEqual(srv._file_sha256(binary), first)
+
     def test_runtime_build_fields(self) -> None:
         fields = self.srv._runtime_build_fields()
         for key in ("git_head_sha", "boot_ts", "agy_binary_sha256", "agy_home"):
             self.assertIn(key, fields)
         self.assertIsInstance(fields["boot_ts"], float)
+
+    def test_health_sets_provenance_headers(self) -> None:
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), self.srv.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=10)
+            conn.request("GET", "/health")
+            resp = conn.getresponse()
+            _ = resp.read()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.getheader("X-Bridge-Git-Head-Sha"), str(self.srv.BUILD_INFO.git_head_sha))
+            self.assertRegex(resp.getheader("X-Bridge-Boot-Ts") or "", r"^\d+\.\d{3}$")
+            conn.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
 
     def test_tilde_paths_are_expanded(self) -> None:
         env = {"AGY_BRIDGE_CLEAN_HOME": "~/agy-wave3-home-probe", "AGY_BRIDGE_AGY_BIN": "~/bin/agy.real"}
@@ -253,6 +317,33 @@ class FastFailProcessTests(unittest.TestCase):
                         if kind in ("done", "pump_error"):
                             break
                     self.assertNotIn("capacity_exhausted", kinds)
+                finally:
+                    run.close()
+
+
+    def test_capacity_line_is_masked_and_closes_terminal_slot(self) -> None:
+        srv = _load_bridge("agy_bridge_server_wave3_run_mask")
+        line = '503 UNAVAILABLE: No capacity available Bearer shorttok api_key="sec123"'
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = Path(tmp) / "launcher.sh"
+            launcher.write_text(f"#!/bin/sh\ncat >/dev/null &\necho '{line}' >&2\nsleep 30\n", encoding="utf-8")
+            launcher.chmod(0o755)
+            env = {"PATH": os.environ["PATH"], "HOME": tmp}
+            with (
+                mock.patch.object(srv, "LAUNCHER", str(launcher)),
+                mock.patch.object(srv, "_launch_env", lambda: env),
+                mock.patch.object(srv, "WORKSPACE", Path(tmp) / "ws"),
+            ):
+                run = srv.Run("hi", "gemini-3.8-flash", "high", "default", "", "t", mode="ask")
+                try:
+                    kind, payload = run.q.get(timeout=10)
+                    self.assertEqual(kind, "capacity_exhausted")
+                    self.assertNotIn("shorttok", payload)
+                    self.assertNotIn("sec123", payload)
+                    self.assertNotIn("shorttok", run.capacity_exhausted)
+                    self.assertTrue(run._done_put)
+                    run._close_and_put_done("done", {})
+                    self.assertTrue(run.q.empty())
                 finally:
                     run.close()
 
