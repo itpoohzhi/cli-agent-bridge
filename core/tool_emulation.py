@@ -160,6 +160,24 @@ def _tools_section(
     return _render_tools_section(tools, tool_choice, has_attachments)
 
 
+def tools_protocol_section(
+    tools: list, tool_choice: Any = None, *, has_attachments: bool = False, attachment_tool: str = "Read"
+) -> str:
+    """Секция протокола `<tool_call>`; при `has_attachments` запрет исключает чтение вложений `attachment_tool`."""
+    if not tools or _tool_choice_none(tool_choice):
+        return ""
+    return _render_tools_section(tools, tool_choice, has_attachments, attachment_tool)
+
+
+def pure_text_protocol_instruction(*, has_attachments: bool = False, attachment_tool: str = "Read") -> str:
+    """Инструкция текстового хода: нативные инструменты запрещены (кроме чтения вложений)."""
+    exception = f", except {attachment_tool} on the attachment files listed under [attachments]" if has_attachments else ""
+    return (
+        "[CRITICAL: DO NOT USE ANY TOOLS (no read_file, no grep, no bash, no agent tools)"
+        f"{exception}. Provide your analysis and answer directly as pure text.]"
+    )
+
+
 def _render_message(msg: Any, counter: list | None = None) -> str:
     """Одно сообщение истории -> текстовый блок (с рендером tool-вызовов/результатов)."""
     cfg = PrefixStabilityConfig.from_env()
@@ -1712,6 +1730,8 @@ class StreamNormalizer:
             self._on_reasoning(text)
 
     def _emit_call(self, call: dict) -> None:
+        if not str(call.get("name") or "").strip():
+            return  # вызов без имени не tool_call
         self._calls.append(call)
         self._on_tool_call(call)
 

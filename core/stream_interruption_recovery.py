@@ -2,6 +2,7 @@
 # ruff: noqa: I001
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, replace
 from typing import Any, Final
@@ -13,6 +14,13 @@ _TRANSIENT_PHRASES: tuple[str, ...] = ("stream was interrupted", "please continu
 TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
 )
+
+# Upstream отвергает пустой/битый functionCall; CLI самоисцеляется, но текст ошибки доходит до `result`.
+_FUNCTION_CALL_ERROR_PHRASES: tuple[str, ...] = ("malformed function call", "function call is empty", "improperly formatted function call", "failed to parse function call")  # fmt: skip
+FUNCTION_CALL_ERROR_RE = re.compile("|".join(re.escape(p) for p in _FUNCTION_CALL_ERROR_PHRASES), re.IGNORECASE)  # fmt: skip
+CLASSIFY_MAX_CHARS_ENV = "BRIDGE_ERROR_CLASSIFY_MAX_CHARS"
+DEFAULT_CLASSIFY_MAX_CHARS = 4096
+FUNCTION_CALL_HEAL_REASON = "self_healed_after_malformed_function_call"
 _FATAL_STATUS_RE = re.compile(
     r"(?i)(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s*(?!429\b)4\d\d\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*(?!429\b)4\d\d\b|\b(?:bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b)"  # noqa: E501
 )
@@ -20,11 +28,32 @@ _FATAL_STATUS_RE = re.compile(
 DEFAULT_INTERRUPTION_NOTICE = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"  # fmt: skip  # noqa: E501
 
 
+def _classify_max_chars() -> int:
+    """Предел длины текста ошибки (env `BRIDGE_ERROR_CLASSIFY_MAX_CHARS`)."""
+    try:
+        value = int(os.environ.get(CLASSIFY_MAX_CHARS_ENV, "").strip())
+    except ValueError:
+        return DEFAULT_CLASSIFY_MAX_CHARS
+    return value if value > 0 else DEFAULT_CLASSIFY_MAX_CHARS
+
+
+def is_recoverable_function_call_error(text: str | None, *, source: str = "cli_error") -> bool:
+    """Ошибка пустого/битого functionCall; решение о самоисцелении — в `resolve_done_turn_outcome`."""
+    if not isinstance(text, str) or source != "cli_error" or len(text) > _classify_max_chars():
+        return False
+    return bool(FUNCTION_CALL_ERROR_RE.search(text))
+
+
+def is_self_healable_error(text: str | None, *, source: str = "cli_error") -> bool:
+    """Транзиентный обрыв либо исправимая ошибка functionCall."""
+    return is_transient_stream_interruption(text, source=source) or is_recoverable_function_call_error(text, source=source)  # fmt: skip
+
+
 def is_transient_stream_interruption(
     text: str | None, *, source: str = "cli_error"
 ) -> bool:
     """Распознать транзиентный транспортный обрыв."""
-    if not isinstance(text, str) or source != "cli_error" or len(text) > 4096:
+    if not isinstance(text, str) or source != "cli_error" or len(text) > _classify_max_chars():
         return False
     haystack = _normalize_diagnostic_text(text, fail_closed=False)
     if re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+", haystack) or re.search(r"(?:%25)+[0-9a-fA-F]{2}", text, re.IGNORECASE): return False  # fmt: skip  # noqa: E501,E701
@@ -58,9 +87,7 @@ class InterruptionTailState:
             texts = (rec.get(key) for key in ("content", "message", "error"))
             self.final_planner, self.final_planner_content = False, ""
             self.last_error_step_index = max(self.last_error_step_index, idx or 0)
-            self.had_transient_error |= is_transient_stream_interruption(
-                str(next(filter(None, texts), ""))
-            )
+            self.had_transient_error |= is_self_healable_error(str(next(filter(None, texts), "")))
 
     def note_planner_record(self, rec: dict[str, object], idx: int) -> None:
         """Зафиксировать финальный planner без tool calls."""
@@ -117,9 +144,10 @@ class _TurnFacts:
     has_unclosed_tool_call: bool = False; self_heal_enabled: bool = True  # fmt: skip  # noqa: E702
 
 
-_DONE_REASONS: Final[frozenset[str]] = frozenset(
-    ("clean_done", "self_healed_after_transient_interruption")
-)
+_DONE_REASONS: Final[frozenset[str]] = frozenset(("clean_done", "self_healed_after_transient_interruption", FUNCTION_CALL_HEAL_REASON))  # fmt: skip
+
+# Машиночитаемые причины (`turn-resolved reason=…`): не секреты, маскировщик логов их не трогает.
+TURN_REASON_CODES: Final[frozenset[str]] = frozenset((*_DONE_REASONS, "self_heal_disabled", "non_transient_result_error", "unclassified_nonzero_rc", "drain_incomplete", "unclosed_tool_call", "not_recovered", "transient_pre_delivery_retry", "retry_blocked", "graceful_partial_close", "graceful_blocked"))  # fmt: skip
 
 
 def _heal_blocker(f: _TurnFacts, transient_error: bool) -> str:
@@ -148,18 +176,20 @@ def resolve_done_turn_outcome(**kw: Any) -> TurnOutcomeResolution:
     `final_text`, `emitted_text`); неизвестный аргумент — `TypeError`.
     """
     f = _TurnFacts(**kw)
-    transient = is_transient_stream_interruption(f.result_error)
+    fc_error = is_recoverable_function_call_error(f.result_error)
+    transient = fc_error or is_transient_stream_interruption(f.result_error)
     clean = all((f.rc == 0, not f.result_error, f.result_status != "ERROR"))
     blocker = _heal_blocker(f, transient)
+    heal_reason = FUNCTION_CALL_HEAL_REASON if fc_error else "self_healed_after_transient_interruption"  # fmt: skip
     reasons = (
         ("clean_done", clean),
         (blocker, bool(blocker)),
-        ("self_healed_after_transient_interruption", _is_recovered(f)),
+        (heal_reason, _is_recovered(f)),
         ("not_recovered", True),
     )
     reason = next(name for name, hit in reasons if hit)
     error = f.result_error if f.result_error else f"rc={f.rc}"
-    healed = reason == "self_healed_after_transient_interruption"
+    healed = reason in _DONE_REASONS and reason != "clean_done"
     ok_out, fail_out = ("done", 0, ""), ("agy_error", f.rc if f.rc else 1, error)
     state, rc, err = ok_out if reason in _DONE_REASONS else fail_out
     return TurnOutcomeResolution(

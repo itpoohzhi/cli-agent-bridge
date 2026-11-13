@@ -60,6 +60,7 @@ from core.tool_emulation import (
     sanitize_tool_call,
 )
 from core.cli_runtime_config import NonstreamConfig
+from core.env_hot_reload import get_hot_env_value
 from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress
 from core.liveness_signals import passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index
@@ -76,6 +77,7 @@ from core.presend_retry_policy import resolve_presend_response
 from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int
 from core.runtime_env import env_bool, positive_int as _positive_int
 from core.stream_framing import build_stream_error_chunk, format_sse_event
+from core.usage_wire import positive_wire_usage
 from core.stream_framing import (
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
@@ -590,8 +592,8 @@ def _data_frame(payload: Mapping[str, Any]) -> bytes:
     return b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
 
 
-def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
-    """Терминальный error-chunk в форме `chat.completion.chunk` (как fail-close кадр фасада)."""
+def _error_frame(chunk: Mapping[str, Any], code: str, message: str, usage: Optional[Mapping[str, Any]] = None) -> bytes:
+    """Терминальный error-chunk `chat.completion.chunk`; `usage` потока не обнуляется ошибкой."""
     return (
         format_sse_event(
             build_stream_error_chunk(
@@ -601,6 +603,7 @@ def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
                 finish_reason="stop" if is_graceful_error_framing_enabled() else None,
                 completion_id=str(chunk.get("id") or "chatcmpl-passthrough"),
                 created=chunk.get("created"),
+                usage=usage,
             )
         ).encode("utf-8")
         + b"data: [DONE]\n\n"
@@ -646,6 +649,7 @@ class StreamOutcome:
     committed: bool = False
     repetition_loop: bool = False
     last_chunk: Optional[dict[str, Any]] = None
+    last_usage: Optional[dict[str, Any]] = None
     unfinished_choices: Optional[set[int]] = None
     reader_stopped: bool = False
 
@@ -792,7 +796,7 @@ def relay_sse(
         acc.close()
         outcome.repetition_loop = True
         msg = "upstream repetition loop detected"
-        write(_error_frame(last_chunk, "upstream_repetition_loop", msg))
+        write(_error_frame(last_chunk, "upstream_repetition_loop", msg, outcome.last_usage))
         return outcome
 
     def check_repetition(index: int, text: str) -> bool:
@@ -866,6 +870,8 @@ def relay_sse(
             if data is None:
                 write(raw)  # комментарий/keepalive/event без data — дословно
                 continue
+            if isinstance(chunk, dict):
+                outcome.last_usage = positive_wire_usage(chunk.get("usage")) or outcome.last_usage
             if data.strip() == "[DONE]":
                 for pending_index in sorted(list(parsers)):
                     flushed_outcome = flush_parser(pending_index, last_chunk)
@@ -875,7 +881,7 @@ def relay_sse(
                     acc.close()
                     outcome.incomplete = True
                     msg = "upstream stream ended before finish_reason"
-                    write(_error_frame(last_chunk, "upstream_incomplete_stream", msg))
+                    write(_error_frame(last_chunk, "upstream_incomplete_stream", msg, outcome.last_usage))
                     return outcome
                 outcome.done = True
                 write(raw)
@@ -902,7 +908,7 @@ def relay_sse(
                         err_code = str(
                             em.get("code") or em.get("type") or "upstream_stream_error"
                         )
-                        write(_error_frame(last_chunk or chunk, err_code, err_msg))
+                        write(_error_frame(last_chunk or chunk, err_code, err_msg, outcome.last_usage))
                         return outcome
                 write(raw)
                 continue
@@ -996,6 +1002,11 @@ def relay_sse(
                     acc.pop_choice(index), tool_schemas, limits
                 )
                 outcome.tool_calls_published += len(calls)
+                if not calls:  # безымянные вызовы отброшены: tool_calls без вызовов — сбой протокола
+                    for c in choices:
+                        if isinstance(c, dict) and choice_index(c.get("index")) == index and c.get("finish_reason") == "tool_calls":
+                            c["finish_reason"], modified = "stop", True
+                    continue
                 base_c = {
                     k: chunk[k] for k in chunk if k not in ("choices", "usage", "error")
                 }
@@ -1027,7 +1038,7 @@ def relay_sse(
             acc.close()
             outcome.incomplete = True
             msg = "upstream stream ended before finish_reason"
-            write(_error_frame(last_chunk, "upstream_incomplete_stream", msg))
+            write(_error_frame(last_chunk, "upstream_incomplete_stream", msg, outcome.last_usage))
         return outcome
     except (AccumulatorOverflow, UpstreamBodyTooLarge) as exc:
         acc.close()
@@ -1038,7 +1049,7 @@ def relay_sse(
             else "event exceeds"
         )
         msg = f"upstream {what} the bridge limit"
-        write(_error_frame(last_chunk, "upstream_response_too_large", msg))
+        write(_error_frame(last_chunk, "upstream_response_too_large", msg, outcome.last_usage))
         return outcome
     finally:
         acc.close()
@@ -1099,11 +1110,8 @@ class PassthroughAdapter(BackendAdapter):
     ) -> None:
         super().__init__(backend_id, config, catalog_source, host)
         self._is_hub_key = is_hub_key
-        api_key_env = self.config.get("api_key_env")
         api_key = self.config.get("api_key")
-        self._upstream_key = (
-            os.environ.get(api_key_env) if isinstance(api_key_env, str) else ""
-        ) or (api_key if isinstance(api_key, str) else "")
+        self._static_upstream_key = api_key if isinstance(api_key, str) else ""
         self._limits = limits
         initial_limits = self.limits
         self._pool: PassthroughConnectionPool = PassthroughConnectionPool(
@@ -1127,6 +1135,17 @@ class PassthroughAdapter(BackendAdapter):
         self._host = parts.hostname
         self._port = parts.port
         self._base_path = parts.path.rstrip("/")
+
+    @property
+    def _upstream_key(self) -> str:
+        """Актуальный ключ upstream (`api_key_env` из горячего `.env`)."""
+        env, override = self.config.get("api_key_env"), getattr(self, "_upstream_key_override", None)
+        live = get_hot_env_value(env) if isinstance(env, str) and env else ""
+        return override if override is not None else live or self._static_upstream_key
+
+    @_upstream_key.setter
+    def _upstream_key(self, value: Optional[str]) -> None:
+        self._upstream_key_override = value
 
     @property
     def limits(self) -> PassthroughLimits:

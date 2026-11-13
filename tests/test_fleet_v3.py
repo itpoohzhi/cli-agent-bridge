@@ -111,10 +111,11 @@ class TestLiveFleetV3(unittest.TestCase):
         data = raw_v3()
         catalog = server._build_catalog(data)
         self.assertEqual(len(catalog["order"]), len(data["models"]))
-        self.assertEqual(len(catalog["order"]), 29)
+        self.assertEqual(len(catalog["order"]), 30)
         self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
         self.assertEqual(catalog["models"]["claude-haiku-5-5"]["backend"], "claude-p")
-        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
+        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "droid")
+        self.assertEqual(catalog["models"]["gemini-3.8-flash-agy"]["backend"], "agy")
         self.assertEqual(catalog["models"]["gemini-4-hydrogen"]["backend"], "agy")
         self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
         for model_id in ("claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"):
@@ -136,7 +137,7 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_subscription_droid_models_are_published(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(
-            sum(m["backend"] == "droid" for m in catalog["models"].values()), 3
+            sum(m["backend"] == "droid" for m in catalog["models"].values()), 4
         )
         self.assertTrue(raw_v3()["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
@@ -153,7 +154,7 @@ class TestLiveFleetV3(unittest.TestCase):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
         self.assertEqual(len(catalog["order"]), len(raw_v3()["models"]))
-        self.assertEqual(len(catalog["order"]), 29)
+        self.assertEqual(len(catalog["order"]), 30)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -572,7 +573,7 @@ class TestFleetCheckParity(unittest.TestCase):
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
         self.assertEqual(len(catalog["order"]), len(data["models"]))
-        self.assertEqual(len(catalog["order"]), 29)
+        self.assertEqual(len(catalog["order"]), 30)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):

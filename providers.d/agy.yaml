@@ -23,14 +23,15 @@ limits: {max_concurrent: 128, quota_group: google-agy, timeout_s: 600}
 fingerprint: {binary_path: ~/.local/bin/agy.real}
 discovery:
   method: static
-  static: [gemini-3.8-flash, gemini-4-argon, gemini-4-carbon, gemini-4-hydrogen]
+  static: [gemini-3.8-flash-agy, gemini-4-argon, gemini-4-carbon, gemini-4-hydrogen]
 family_rule:
   type: prefix
   prefix:
     verified: true
     map: {gemini-: Google}
 models_overrides:
-  gemini-3.8-flash:
+  gemini-3.8-flash-agy:
+    upstream_model: gemini-3.8-flash
     name: Gemini 3.8 Flash (AGY bridge)
     efforts: [low, medium, high]
     default_effort: high

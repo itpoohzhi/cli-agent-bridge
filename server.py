@@ -121,6 +121,8 @@ from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежн�
     has_live_parent,
 )
 from core.prompt_prefix_stability import compute_tools_budget_overhead  # noqa: E402
+from core.log_redaction import mask_long_tokens  # noqa: E402
+from core.runtime_build_info import RuntimeBuildInfo  # noqa: E402
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
@@ -567,6 +569,7 @@ _qos_lock = threading.Condition()
 _active = {}
 _active_lock = threading.Lock()
 _started = time.time()
+BUILD_INFO = RuntimeBuildInfo(Path(__file__).resolve().parent)
 # Монотонная метка последнего успешного хода (0.0 = не было / последний провалился).
 _last_ok = [0.0]
 # Байтовый бюджет admission; включается в main() (в тестах/импорте — None).
@@ -984,7 +987,7 @@ def _mask_secrets(text: str) -> str:
     """Длинные токены, WebSocket URL и абсолютные пути -> ***."""
     masked = _WS_URL.sub("ws://***", text)
     masked = _FILESYSTEM_PATH.sub("***", masked)
-    return _SECRET.sub("***", masked)
+    return mask_long_tokens(masked, _SECRET)
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
@@ -6797,7 +6800,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     "tool_emulation": True,
                     "uptime_s": int(time.time() - _started),
                 },
-                extra_headers={"X-Bridge-Draining": "true"} if draining else None,
+                extra_headers={
+                    # Провенанс — заголовками: семиключевой JSON-контракт /health не расширяется.
+                    "X-Bridge-Git-Head-Sha": str(BUILD_INFO.git_head_sha),
+                    "X-Bridge-Boot-Ts": f"{BUILD_INFO.boot_ts:.3f}",
+                    **({"X-Bridge-Draining": "true"} if draining else {}),
+                },
             )
             return
         if self._handle_models_get():
@@ -8507,6 +8515,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             code: str = "live_prefix_invalidated",
             error_type: str = "stream_error",
             finish_reason: str | None = None,
+            usage: dict | None = None,
         ) -> str:
             err_chunk = build_stream_error_chunk(
                 message=message,
@@ -8516,6 +8525,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 finish_reason=finish_reason,
                 completion_id=completion_id,
                 created=created,
+                usage=usage,
             )
             err_chunk["choices"][0]["delta"] = {}
             return "data: " + json.dumps(err_chunk, ensure_ascii=False) + "\n\n"
@@ -8697,8 +8707,19 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     + "\n\n"
                 )
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
+            # Накопленные токены закоммиченного потока переживают терминальную ошибку (не 0/0/0).
+            err_usage = out.get("usage") or {}
+            kept_usage = (
+                _wire_usage(
+                    err_usage.get("input_tokens", 0),
+                    err_usage.get("output_tokens", 0),
+                    err_usage.get("cache_read_tokens"),
+                )
+                if err_usage.get("input_tokens") or err_usage.get("output_tokens")
+                else None
+            )
             if err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid":
-                emit(stream_error_frame(str(err["message"]), finish_reason=None))
+                emit(stream_error_frame(str(err["message"]), finish_reason=None, usage=kept_usage))
             else:
                 emit(
                     stream_error_frame(
@@ -8706,6 +8727,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                         code=str(err.get("code") or err.get("type") or "stream_error"),
                         error_type=str(err.get("type") or "server_error"),
                         finish_reason=None,
+                        usage=kept_usage,
                     )
                 )
         else:

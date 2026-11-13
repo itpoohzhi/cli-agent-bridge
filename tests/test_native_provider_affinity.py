@@ -16,7 +16,8 @@ def _load_fleet():
         return json.load(f)
 
 @pytest.mark.parametrize("model_id,expected_provider", [
-    ("gemini-3.8-flash", "agy"),
+    ("gemini-3.8-flash-agy", "agy"),
+    ("gemini-3.8-flash", "droid"),
     ("claude-sonnet-5-5", "claude-p"),
     ("deepseek-v4.1-flash", "opencode-go"),
     ("gpt-6.1-sol", "codex"),
@@ -39,7 +40,6 @@ def test_explicit_droid_models(model_id):
     assert models[model_id].get("provider") == "droid"
 
 @pytest.mark.parametrize("model_id", [
-    "gemini-3.8-flash",
     "claude-sonnet-5-5",
     "gpt-6.1-sol",
 ])
@@ -71,6 +71,10 @@ EXPECTED_FAMILY_PROVIDER = {
     "Meta": "muse",
 }
 
+# gemini-3.8-flash маршрутизируется в droid намеренно (agy отвечает 503 No capacity); явный AGY — `-agy`.
+DROID_ROUTED_CANONICAL = frozenset({"gemini-3.8-flash"})
+
+
 def test_native_provider_affinity_invariant():
     """Инвариант: родной провайдер всегда побеждает агрегаторы (droid, opencode-zen)."""
     cat = _load_catalog()
@@ -82,7 +86,9 @@ def test_native_provider_affinity_invariant():
         family = info.get("family")
         alternates = [a.get("provider") if isinstance(a, dict) else a for a in info.get("alternates", [])]
 
-        if model_id.endswith("-droid"):
+        if model_id in DROID_ROUTED_CANONICAL:
+            assert provider == "droid", f"{model_id} should be droid, got {provider}"
+        elif model_id.endswith("-droid"):
             assert provider == "droid", f"{model_id} should be droid, got {provider}"
         elif family in EXPECTED_FAMILY_PROVIDER:
             expected = EXPECTED_FAMILY_PROVIDER[family]
@@ -112,13 +118,14 @@ def _backend_aliases(model, backend, efforts):
 
 
 def test_explicit_effort_alias_contract():
-    """Все 35 effort-алиасов проверяются по точной форме с учётом Hydrogen, Carbon и Argon."""
+    """Все 38 effort-алиасов проверяются по точной форме с учётом Hydrogen, Carbon и Argon."""
     expected = {
         **_backend_aliases("gemini-3.8-flash-droid", "droid", ("low", "medium", "high")),
         **_backend_aliases("gpt-6.1-sol-droid", "droid", ("low", "medium", "high", "max")),
         **_backend_aliases("claude-sonnet-5-5-droid", "droid", ("low", "medium", "high", "max")),
         **_backend_aliases("gpt-6.1-sol", "codex", ("low", "medium", "high", "max")),
-        **_backend_aliases("gemini-3.8-flash", "agy", ("low", "medium", "high")),
+        **_backend_aliases("gemini-3.8-flash", "droid", ("low", "medium", "high")),
+        **_backend_aliases("gemini-3.8-flash-agy", "agy", ("low", "medium", "high")),
         **_backend_aliases("claude-sonnet-5-5", "claude-p", ("low", "medium", "high", "max")),
         **_backend_aliases("claude-opus-5-5", "claude-p", ("medium", "high")),
         **_backend_aliases("claude-haiku-5-5", "opencode-go-claude", ("low",)),
@@ -193,15 +200,15 @@ def test_passthrough_target_model_rewriting():
 
 
 def test_exact_effort_alias_count():
-    """Проверяет ровно 35 effort-алиасов, включая три Gemini 4 Carbon и четыре Gemini 4 Hydrogen."""
+    """Проверяет ровно 38 effort-алиасов, включая три Gemini 4 Carbon и четыре Gemini 4 Hydrogen."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
-    assert len(aliases) == 35, f"Expected 35 total aliases in fleet, got {len(aliases)}"
+    assert len(aliases) == 38, f"Expected 38 total aliases in fleet, got {len(aliases)}"
     target_aliases = [
         k for k in aliases
         if any(m in k for m in ("gemini-3.8-flash", "gemini-4-carbon", "gemini-4-hydrogen", "gpt-6.1-sol", "claude-sonnet-5-5"))
     ]
-    assert len(target_aliases) == 29, f"Expected 29 target aliases including Carbon and Hydrogen, got {len(target_aliases)}"
+    assert len(target_aliases) == 32, f"Expected 32 target aliases including Carbon and Hydrogen, got {len(target_aliases)}"
 
 
 def test_manifest_priority_values():
@@ -223,14 +230,14 @@ def test_fallback_candidate_ranking_to_droid_when_native_fails():
     from adapters import ADAPTER_KINDS
     cat = _load_catalog()
     manifests = load_manifests(ROOT / "providers.d", ADAPTER_KINDS).manifests
-    entry = explain_model(cat, manifests, "gemini-3.8-flash")
+    entry = explain_model(cat, manifests, "claude-sonnet-5-5")
     assert entry is not None
-    assert entry.primary == "agy"
+    assert entry.primary == "claude-p"
     assert "droid" in entry.alternates
     p_map = {pid: p for p, pid in entry.candidates}
-    assert p_map["agy"] == 10
+    assert p_map["claude-p"] == 10
     assert p_map["droid"] == 30
-    assert p_map["agy"] < p_map["droid"]
+    assert p_map["claude-p"] < p_map["droid"]
 
 
 class TestNativeProviderE2ERouting(BridgeCase):

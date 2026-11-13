@@ -129,16 +129,31 @@
     },
     "gemini-3.8-flash-low": {
       "backend_id": "gemini-3.8-flash",
+      "backend": "droid",
+      "effort": "low"
+    },
+    "gemini-3.8-flash-agy-low": {
+      "backend_id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "effort": "low"
     },
     "gemini-3.8-flash-medium": {
       "backend_id": "gemini-3.8-flash",
+      "backend": "droid",
+      "effort": "medium"
+    },
+    "gemini-3.8-flash-agy-medium": {
+      "backend_id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "effort": "medium"
     },
     "gemini-3.8-flash-high": {
       "backend_id": "gemini-3.8-flash",
+      "backend": "droid",
+      "effort": "high"
+    },
+    "gemini-3.8-flash-agy-high": {
+      "backend_id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "effort": "high"
     },
@@ -375,7 +390,7 @@
   },
   "models": [
     {
-      "id": "gemini-3.8-flash",
+      "id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "name": "Gemini 3.8 Flash (AGY bridge)",
       "efforts": [
@@ -394,7 +409,8 @@
         "status": "unverified",
         "method": null,
         "proof": null
-      }
+      },
+      "upstream_model": "gemini-3.8-flash"
     },
     {
       "id": "gemini-4-argon",
@@ -761,6 +777,35 @@
         435
       ],
       "upstream_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "backend": "droid",
+      "name": "Gemini 3.8 Flash (Droid bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "input": [
+        "text"
+      ],
+      "images": {
+        "cli_registry": "implicit_supported",
+        "status": "unverified",
+        "method": null,
+        "proof": null
+      },
+      "policy_lines": [
+        100,
+        142,
+        174,
+        431
+      ],
+      "upstream_model": "gemini-3.8-flash"
     },
     {
       "id": "gemini-3.8-flash-droid",

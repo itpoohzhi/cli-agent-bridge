@@ -203,7 +203,8 @@ class TestRealAdapters(unittest.TestCase):
         reg = server.BACKENDS
         expected = {
             "claude-sonnet-5-5": "claude-p",
-            "gemini-3.8-flash": "agy",
+            "gemini-3.8-flash": "droid",
+            "gemini-3.8-flash-agy": "agy",
             "gpt-6.1-sol": "codex",
             "claude-sonnet-5-5-droid": "droid",
             "gemini-3.8-flash-droid": "droid",

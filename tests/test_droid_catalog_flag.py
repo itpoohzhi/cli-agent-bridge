@@ -172,8 +172,8 @@ class DroidCatalogFlagTest(unittest.TestCase):
         gated: Any = apply_droid_catalog_gate(raw, enabled=True)
         self.assertEqual(gated, raw)
         self.assertTrue(gated["backends"]["droid"]["enabled"])
-        self.assertEqual(list(routes(gated).values()).count("droid"), 3)
-        self.assertEqual(len(gated["aliases"]), 35)
+        self.assertEqual(list(routes(gated).values()).count("droid"), 4)
+        self.assertEqual(len(gated["aliases"]), 38)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -293,7 +293,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
                 self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("codex", "droid"))
                 self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 35)
+                self.assertEqual(len(catalog["aliases"]), 38)
 
 
 if __name__ == "__main__":

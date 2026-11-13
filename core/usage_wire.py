@@ -138,3 +138,11 @@ def build_wire_usage(
     if details is not None:
         wire["prompt_tokens_details"] = details
     return wire, inconsistent
+
+
+def positive_wire_usage(usage: object) -> dict | None:
+    """Копия wire-`usage` с положительными счётчиками, иначе `None` (ошибка не обнуляет токены)."""
+    if not isinstance(usage, Mapping):
+        return None
+    keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+    return dict(usage) if any(_is_count(usage.get(k)) and usage[k] > 0 for k in keys) else None
