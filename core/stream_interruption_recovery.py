@@ -1,49 +1,48 @@
-"""Универсальное восстановление после транзиентных обрывов стрима (agent-agnostic).
-
-Чистые функции без побочных эффектов (только `re`, `dataclasses`, `typing`):
-классификация транзиентных обрывов, самоисцеление исхода хода, допустимость
-повтора и мягкое закрытие стрима с частичным ответом.
-"""
-
+# pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
+# ruff: noqa: I001
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Final
 
-_TRANSIENT_PHRASES: tuple[str, ...] = (
-    "stream was interrupted",
-    "please continue the task you were working on",
-    "rst_stream",
-    "http/2 stream",
-    "connection reset",
-    "eof occurred in violation of protocol",
-    "broken pipe",
-    "incomplete chunked read",
-    "peer closed connection",
-    "server disconnected",
-    "currently unavailable",
-)
+from core.route_health_policy import FailureCategory, RetryBudgetConfig, _normalize_diagnostic_text, classify_provider_failure, compute_attempt_decision, validate_retry_config  # fmt: skip  # noqa: E501,I001
+
+_TRANSIENT_PHRASES: tuple[str, ...] = ("stream was interrupted", "please continue the task you were working on", "rst_stream", "http/2 stream", "connection reset", "eof occurred in violation of protocol", "broken pipe", "incomplete chunked read", "peer closed connection", "server disconnected", "currently unavailable")  # fmt: skip  # noqa: E501
 
 TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
 )
-
-DEFAULT_INTERRUPTION_NOTICE = (
-    "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"
+_FATAL_STATUS_RE = re.compile(
+    r"(?i)(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s*(?!429\b)4\d\d\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*(?!429\b)4\d\d\b|\b(?:bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b)"  # noqa: E501
 )
+
+DEFAULT_INTERRUPTION_NOTICE = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"  # fmt: skip  # noqa: E501
 
 
 def is_transient_stream_interruption(
     text: str | None, *, source: str = "cli_error"
 ) -> bool:
-    """Транзиентный ли обрыв; текст модели (`model_content`) никогда не классифицируется."""
-    haystack = "" if source == "model_content" else text or ""
-    return bool(TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack))
+    """Распознать транзиентный транспортный обрыв."""
+    if not isinstance(text, str) or source != "cli_error" or len(text) > 4096:
+        return False
+    haystack = _normalize_diagnostic_text(text, fail_closed=False)
+    if re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+", haystack) or re.search(r"(?:%25)+[0-9a-fA-F]{2}", text, re.IGNORECASE): return False  # fmt: skip  # noqa: E501,E701
+    if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
+        return False
+    if _FATAL_STATUS_RE.search(haystack):
+        return False
+    category = classify_provider_failure(0, haystack).category
+    blocked = (
+        FailureCategory.AUTH_REFRESH_EXHAUSTED,
+        FailureCategory.LIMIT_BLOCKED,
+        FailureCategory.UPSTREAM_TLS_STALL,
+    )
+    return category not in blocked
 
 
 class InterruptionTailState:
-    """Миксин транскрипт-хвоста: факты о финальном planner-шаге и транзиентных обрывах."""
+    """Факты о финальном planner-шаге и транзиентных обрывах."""
 
     final_planner: bool = False
     final_planner_content: str = ""
@@ -64,7 +63,7 @@ class InterruptionTailState:
             )
 
     def note_planner_record(self, rec: dict[str, object], idx: int) -> None:
-        """Финальный planner: непустой DONE-текст без tool_calls; шаг с tool_calls сбрасывает."""
+        """Зафиксировать финальный planner без tool calls."""
         content = rec.get("content")
         has_tools = bool(rec.get("tool_calls"))
         text = content if isinstance(content, str) else ""
@@ -77,7 +76,7 @@ class InterruptionTailState:
 
 
 def settle_error(error: str, cleared: str, status: str) -> str:
-    """Ошибка хода на done: погашенный активностью сбой возвращается при `status=ERROR`."""
+    """Вернуть ошибку хода на done."""
     return error or (cleared if status == "ERROR" else "")
 
 
@@ -90,7 +89,7 @@ def trusted_final_text(final_text: str, error: str, tail: object) -> str:
 
 
 def tail_turn_facts(tail: object, cleared_error: str = "") -> dict[str, Any]:
-    """Факты хода из транскрипт-хвоста для `resolve_done_turn_outcome` (без хвоста — нейтральны)."""
+    """Собрать факты хода из транскрипт-хвоста."""
     seen = getattr(tail, "had_transient_error", False)
     return {
         "completion_done_without_tools": bool(getattr(tail, "final_planner", False)),
@@ -103,33 +102,24 @@ def tail_turn_facts(tail: object, cleared_error: str = "") -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class TurnOutcomeResolution:
-    """Итог разбора done: `state` — `done` | `agy_error`; `final` — решение окончательно."""
+    """Итог разбора done."""
 
-    state: str
-    rc: int
-    error: str
-    self_healed: bool
-    reason: str
-    final: bool
+    state: str; rc: int; error: str  # fmt: skip  # noqa: E702
+    self_healed: bool; reason: str; final: bool  # fmt: skip  # noqa: E702
 
 
 @dataclass(frozen=True)
 class _TurnFacts:
-    rc: int
-    result_error: str
-    result_status: str
-    final_text: str
-    emitted_text: str
-    completion_done_without_tools: bool = False
-    last_completion_seq: int = -1
-    last_error_seq: int = -1
-    drain_complete: bool = False
-    had_transient_error: bool = False
-    has_unclosed_tool_call: bool = False
-    self_heal_enabled: bool = True
+    rc: int; result_error: str; result_status: str  # fmt: skip  # noqa: E702
+    final_text: str; emitted_text: str  # fmt: skip  # noqa: E702
+    completion_done_without_tools: bool = False; last_completion_seq: int = -1; last_error_seq: int = -1  # fmt: skip  # noqa: E501,E702
+    drain_complete: bool = False; had_transient_error: bool = False  # fmt: skip  # noqa: E702
+    has_unclosed_tool_call: bool = False; self_heal_enabled: bool = True  # fmt: skip  # noqa: E702
 
 
-_DONE_REASONS = {"clean_done": False, "self_healed_after_transient_interruption": True}
+_DONE_REASONS: Final[frozenset[str]] = frozenset(
+    ("clean_done", "self_healed_after_transient_interruption")
+)
 
 
 def _heal_blocker(f: _TurnFacts, transient_error: bool) -> str:
@@ -169,65 +159,84 @@ def resolve_done_turn_outcome(**kw: Any) -> TurnOutcomeResolution:
     )
     reason = next(name for name, hit in reasons if hit)
     error = f.result_error if f.result_error else f"rc={f.rc}"
-    healed = _DONE_REASONS.get(reason, False)
+    healed = reason == "self_healed_after_transient_interruption"
     ok_out, fail_out = ("done", 0, ""), ("agy_error", f.rc if f.rc else 1, error)
     state, rc, err = ok_out if reason in _DONE_REASONS else fail_out
-    return TurnOutcomeResolution(state, rc, err, healed, reason, any((healed, f.result_error)))
+    return TurnOutcomeResolution(
+        state, rc, err, healed, reason, any((healed, f.result_error))
+    )
 
 
 @dataclass(frozen=True)
 class RetryDecision:
     """Решение о повторе запроса после обрыва стрима."""
 
-    can_retry: bool
-    keep_hot_session: bool
-    reason: str
+    can_retry: bool; keep_hot_session: bool; reason: str  # fmt: skip  # noqa: E702
+    attempt_budget_s: float = 0.0
 
 
 @dataclass(frozen=True)
 class _RetryFacts:
-    error_text: str
-    delivered: bool
-    had_tool_side_effects: bool = False
-    attempt: int = 1
-    max_attempts: int = 2
-    source: str = "cli_error"
+    error_text: str; delivered: bool; had_tool_side_effects: bool = False  # fmt: skip  # noqa: E702
+    attempt: int = 1; max_attempts: int = 2; source: str = "cli_error"  # fmt: skip  # noqa: E702
+    elapsed_s: float = 0.0
+    budget_config: RetryBudgetConfig | None = None
+
+
+def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
+    """Проверить и ограничить конфигурацию повтора без исключений наружу."""
+    base = f.budget_config or RetryBudgetConfig(max_attempts=f.max_attempts)
+    try:
+        valid = validate_retry_config(base)
+    except ValueError:
+        return None
+    return replace(valid, max_attempts=min(f.max_attempts, valid.max_attempts))
 
 
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:
-    """Повтор допустим только для транзиентного обрыва до выдачи данных и без побочных эффектов."""
-    f = _RetryFacts(**kw)
+    """Оценить допустимость повтора стрима."""
+    try:
+        f = _RetryFacts(**kw)
+    except TypeError:
+        return RetryDecision(False, False, "retry_blocked", 0.0)
+    valid_types = all((isinstance(f.error_text, str), isinstance(f.source, str), type(f.delivered) is bool, type(f.had_tool_side_effects) is bool, type(f.attempt) is int, type(f.max_attempts) is int, type(f.elapsed_s) in (int, float), f.budget_config is None or isinstance(f.budget_config, RetryBudgetConfig)))  # pyright: ignore[reportUnnecessaryIsInstance]  # fmt: skip  # noqa: E501
+    if not valid_types:
+        return RetryDecision(False, False, "retry_blocked", 0.0)
+    valid = all((0.0 <= f.elapsed_s <= 1e308, 0 <= f.attempt, f.max_attempts > 0))  # fmt: skip  # noqa: E501
+    if not valid:
+        return RetryDecision(False, False, "retry_blocked", 0.0)
+    cfg = _resolve_retry_cfg(f)
+    if cfg is None:
+        return RetryDecision(False, False, "retry_blocked", 0.0)
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
-    quiet = trans and not f.had_tool_side_effects
-    can = all((quiet, not f.delivered, f.attempt < f.max_attempts))
-    return RetryDecision(can, quiet, "transient_pre_delivery_retry" if can else "retry_blocked")
+    quiet = all((trans, not f.had_tool_side_effects))
+    if not quiet or f.delivered:
+        return RetryDecision(False, quiet, "retry_blocked", 0.0)
+    adm = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s))
+    if not all((f.attempt < cfg.max_attempts, adm.allow_retry)):
+        return RetryDecision(False, quiet, "retry_blocked", 0.0)
+    return RetryDecision(True, quiet, "transient_pre_delivery_retry", adm.attempt_budget_s)  # fmt: skip  # noqa: E501
 
 
 @dataclass(frozen=True)
 class GracefulInterruptionDecision:
     """Решение о мягком закрытии стрима с частичным ответом."""
 
-    should_gracefully_close: bool
-    notice_text: str
-    target_channel: str
-    finish_reason: str
-    reason: str
+    should_gracefully_close: bool; notice_text: str; target_channel: str  # fmt: skip  # noqa: E702
+    finish_reason: str; reason: str  # fmt: skip  # noqa: E702
 
 
 @dataclass(frozen=True)
 class _GracefulFacts:
-    error_text: str | None
-    delivered_content: bool = False
-    delivered_reasoning: bool = False
-    delivered_tool_calls: bool = False
-    has_unclosed_tool_call: bool = False
-    graceful_enabled: bool = True
+    error_text: str | None; delivered_content: bool = False  # fmt: skip  # noqa: E702
+    delivered_reasoning: bool = False; delivered_tool_calls: bool = False  # fmt: skip  # noqa: E702
+    has_unclosed_tool_call: bool = False; graceful_enabled: bool = True  # fmt: skip  # noqa: E702
     source: str = "cli_error"
     notice_text: str = DEFAULT_INTERRUPTION_NOTICE
 
 
 def evaluate_graceful_interruption(**kw: Any) -> GracefulInterruptionDecision:
-    """Мягко закрывает стрим с `finish_reason=stop`, если выдан частичный ответ без tool_calls."""
+    """Оценить мягкое закрытие частичного стрима."""
     f = _GracefulFacts(**kw)
     transient = is_transient_stream_interruption(f.error_text, source=f.source)
     partial = any((f.delivered_content, f.delivered_reasoning))
