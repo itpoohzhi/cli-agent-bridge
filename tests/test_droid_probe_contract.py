@@ -95,7 +95,7 @@ def test_configured_probe_efforts_are_retained(
 def test_invalid_configured_probe_effort_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", "gpt-6.1-sol:off")
+    monkeypatch.setenv("DROID_EXTRA_PROBE_MODELS", "gpt-6.1-sol-droid:off")
     with pytest.raises(droid_image.ProbeError, match="недопустимый effort"):
         droid_image._probe_models()
 

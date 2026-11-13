@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 import threading
 import time
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 from adapters.muse_msp import MspEvents
 from adapters.passthrough_adapter import PassthroughLimits, StreamOutcome, relay_sse
-from core.lifecycle import HubLifecycleManager, QoSSlotManager
+from core.lifecycle import (
+    DEFAULT_DRAIN_QOS_GRACE_S,
+    HubLifecycleManager,
+    QoSSlotManager,
+    _drain_grace_from_env,
+)
 from core.tool_emulation import sanitize_tool_call
 from core.turn_session_manager import BufferedTurnEvent, EmitToolCall, TurnBuffer
 
@@ -126,6 +131,40 @@ class StreamDrainFinishReasonTests(unittest.TestCase):
         self.assertEqual(result_holder, [(True, "")])
         mgr.release_slot(is_interactive=True)
 
+    def test_drain_qos_grace_env_parsing_honours_zero(self) -> None:
+        """F-001: "0"/0.0 — валидная настройка grace, а не повод вернуть дефолт 15.0."""
+        with patch.dict(os.environ, {"BRIDGE_DRAIN_QOS_GRACE_S": "0"}, clear=False):
+            self.assertEqual(_drain_grace_from_env(), 0.0)
+        with patch.dict(os.environ, {"BRIDGE_DRAIN_QOS_GRACE_S": "0.0"}, clear=False):
+            self.assertEqual(_drain_grace_from_env(), 0.0)
+        with patch.dict(os.environ, {"BRIDGE_DRAIN_QOS_GRACE_S": "2.5"}, clear=False):
+            self.assertEqual(_drain_grace_from_env(), 2.5)
+        with patch.dict(os.environ, {"BRIDGE_DRAIN_QOS_GRACE_S": "bogus"}, clear=False):
+            self.assertEqual(_drain_grace_from_env(), DEFAULT_DRAIN_QOS_GRACE_S)
+        with patch.dict(os.environ, {"BRIDGE_DRAIN_QOS_GRACE_S": "-1"}, clear=False):
+            self.assertEqual(_drain_grace_from_env(), DEFAULT_DRAIN_QOS_GRACE_S)
+
+    def test_drain_qos_grace_zero_rejects_interactive_waiter_immediately(self) -> None:
+        """F-001: при BRIDGE_DRAIN_QOS_GRACE_S="0" ожидающий получает немедленный отказ."""
+        drain_ev = threading.Event()
+        mgr = QoSSlotManager(max_concurrent=1, reserved_interactive=0, queue_timeout_s=5.0, drain_event=drain_ev)
+        self.assertTrue(mgr.acquire_slot(is_interactive=True)[0])
+        result_holder: list[tuple[bool, str]] = []
+
+        def waiter() -> None:
+            with patch.dict(os.environ, {"BRIDGE_DRAIN_QOS_GRACE_S": "0"}, clear=False):
+                result_holder.append(mgr.acquire_slot(is_interactive=True, timeout=2.0))
+
+        t = threading.Thread(target=waiter, daemon=True)
+        t.start()
+        deadline = time.monotonic() + 1.0
+        while mgr.waiting_interactive == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        drain_ev.set()
+        mgr.release_slot(is_interactive=True)
+        t.join(timeout=2.0)
+        self.assertEqual(result_holder, [(False, "draining")])
+
     def test_lifecycle_wait_for_drain_hold_respects_timeout(self) -> None:
         lc = HubLifecycleManager(drain_timeout_s=1.0)
         lc.shutdown_requested.set()
@@ -167,7 +206,7 @@ class StreamDrainFinishReasonTests(unittest.TestCase):
         self.assertEqual(len(evs), 1)
         self.assertNotIn("name", evs[0].payload["function"])
 
-    def test_server_sse_body_skips_duplicate_headers_and_frames_errors_with_stop(self) -> None:
+    def test_server_sse_body_skips_duplicate_headers_and_frames_errors_with_null_finish(self) -> None:
         import server as hub_server
 
         written: list[bytes] = []
@@ -210,7 +249,7 @@ class StreamDrainFinishReasonTests(unittest.TestCase):
 
         self.assertEqual(send_response_calls, [])
         joined = b"".join(written).decode("utf-8")
-        self.assertIn('"finish_reason": "stop"', joined)
+        self.assertIn('"finish_reason": null', joined)
         self.assertIn("backend failed", joined)
         self.assertTrue(joined.endswith("data: [DONE]\n\n"))
 

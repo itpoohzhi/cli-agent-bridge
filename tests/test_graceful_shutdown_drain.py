@@ -534,6 +534,7 @@ from core.lifecycle import HubLifecycleManager
 active = threading.Event()
 lifecycle = HubLifecycleManager(active_turns_fn=lambda: int(active.is_set()), drain_timeout_s=2, drain_enabled_fn=lambda: True)
 server.LIFECYCLE = lifecycle
+server._auth_ok = lambda _handler: True
 class Handler(server.Handler):
     def do_GET(self):
         if self.path != '/stream':

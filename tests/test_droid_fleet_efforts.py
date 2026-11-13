@@ -48,9 +48,9 @@ class _DroidManifest(TypedDict):
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
-        ("claude-sonnet-5-5", ["low", "medium", "high", "max"]),
-        ("gemini-3.8-flash", ["low", "medium", "high"]),
-        ("gpt-6.1-sol", ["low", "medium", "high"]),
+        ("claude-sonnet-5-5-droid", ["low", "medium", "high", "max"]),
+        ("gemini-3.8-flash-droid", ["low", "medium", "high"]),
+        ("gpt-6.1-sol-droid", ["low", "medium", "high", "max"]),
     ],
 )
 def test_published_efforts_match_factory_capabilities(

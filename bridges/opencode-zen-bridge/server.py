@@ -80,6 +80,7 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
     sys.path.insert(0, _p)
 
 import zen_catalog as zc  # noqa: E402
+from core.chat_key import resolve_chat_key  # noqa: E402
 from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.tool_emulation import (  # noqa: E402
@@ -8324,6 +8325,16 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        # Идентичность чата (x-dsh-chat-id / prompt_cache_key): единый core.chat_key.
+        # Опенкод-сессия создаётся на запрос; ключ — корреляция в логе, не влияет на генерацию.
+        # Невалидный ключ — как без ключа (без 400).
+        extra_body = req.get("extra_body")
+        chat = resolve_chat_key(
+            req, self.headers, extra_body if isinstance(extra_body, dict) else None
+        )
+        if chat.keyed:
+            _log(f"chat key={chat.digest[:16]} source={chat.source}")
+
         raw_tools = req.get("tools")
         tools = (
             [t for t in raw_tools if isinstance(t, dict)]
@@ -8397,6 +8408,7 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 64
 
     def __init__(
         self,

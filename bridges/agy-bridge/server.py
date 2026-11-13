@@ -151,6 +151,7 @@ from core.watchdog import (  # noqa: E402
     WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
     AdaptiveTimeoutController,
 )
+from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 from core.proc_groups import spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
@@ -809,7 +810,7 @@ MAX_REASONING_BYTES_PER_TURN = get_bridge_config().max_reasoning_bytes_per_turn
 MAX_STEP_BLOB_BYTES = get_bridge_config().max_step_blob_bytes
 MAX_STEPS_TRACKED = get_bridge_config().max_steps_tracked
 SQLITE_ROW_LIMIT = get_bridge_config().sqlite_row_limit
-# Константы схемы привязаны к agy 1.4.9 и подтверждаются canary.
+# Константы схемы привязаны к agy 1.5.5 и подтверждаются canary.
 STEP_TYPE_PLANNER = 15
 STEP_STATUS_GENERATING = 8
 STEP_STATUS_DONE = 3
@@ -888,10 +889,13 @@ TOOL_NAME_ALLOWLIST = frozenset(
 )
 _SAFE_MCP_TOOL_RE = re.compile(r"mcp_[a-z0-9_-]{1,32}_[a-z0-9_]{1,32}\Z")
 
-# Effort-оси. `--effort` у agy принимает low|medium|high; id модели — база без уровня,
+# Effort-оси. `--effort` у agy принимает уровни модели из fleet.json (включая xhigh для
+# gemini-4-hydrogen); id модели — база без уровня,
 # уровень всегда уходит отдельным флагом (см. модуль-docstring).
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
-CLI_EFFORT_LEVELS = ("low", "medium", "high")
+# Уровни, реально объявленные каталогом: вычисляются из `efforts` моделей FLEET сразу после
+# загрузки (см. `_cli_effort_levels`); до загрузки — полный набор EFFORT_LEVELS.
+CLI_EFFORT_LEVELS: tuple[str, ...] = EFFORT_LEVELS
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 # Доставка изображений агенту: проверенные файлы в WORKSPACE/img-<uuid>, каталог отдаётся
 # через `--add-dir`, модель читает их нативным view_file. Прямой image_url в NDJSON
@@ -1189,6 +1193,20 @@ except FleetViolation as _violation:
 
 MODEL_ID = ENV_MODEL or FLEET["default_model"]
 FLEET_MODELS = cast("dict[str, dict[str, object]]", cast(object, FLEET["models"]))
+
+
+def _cli_effort_levels(models: dict[str, dict[str, object]]) -> tuple[str, ...]:
+    """Объединение `efforts` всех моделей каталога в каноническом порядке EFFORT_LEVELS."""
+    declared: set[str] = set()
+    for entry in models.values():
+        efforts = entry.get("efforts")
+        if isinstance(efforts, list):
+            declared.update(e for e in efforts if isinstance(e, str))
+    ordered = tuple(level for level in EFFORT_LEVELS if level in declared)
+    return ordered or EFFORT_LEVELS
+
+
+CLI_EFFORT_LEVELS = _cli_effort_levels(FLEET_MODELS)
 IMAGE_LIMITS = cast("dict[str, object]", cast(object, FLEET["image_limits"]))
 
 
@@ -2852,7 +2870,8 @@ def _session_key_for(
             return ()
 
     if chat:
-        chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()[:16]
+        # Полный sha256: токен — идентичность сессии, усечённый дайджест допускал бы коллизии.
+        chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()
         return (chat_token, model, cwd_norm, effort)
     if cwd_norm:
         return (model, cwd_norm, effort)
@@ -2862,23 +2881,18 @@ def _session_key_for(
 def _request_chat_id(
     headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
 ) -> tuple[str, bool]:
-    """Первый переданный chat ID и признак невалидного идентификатора."""
-    for value in (
-        headers.get("x-dsh-chat-id"),
-        headers.get("x-session-id"),
-        extra.get("chat_id"),
-        (req or {}).get("chat_id"),
-    ):
-        if value is None:
-            continue
-        if not isinstance(value, str) or len(value) > 256 or any(
-            ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
-            for c in value
-        ):
-            return "", True
-        val = value.strip()
-        return val, not bool(val)
-    return "", False
+    """Первый переданный chat ID и признак невалидного идентификатора.
+
+    Источники и валидация — единый `core.chat_key`, набор SOURCES_SESSION_ID
+    (только явные chat-id). `prompt_cache_key` намеренно НЕ источник: по
+    OpenAI-семантике это аффинность кэша префикса, его шарят разные чаты, и
+    как идентичность сессии он склеил бы чужие диалоги. Предел длины — из
+    BRIDGE_CHAT_KEY_MAX_LEN (по умолчанию 512).
+    """
+    chat = resolve_chat_key(req, headers, extra, sources=SOURCES_SESSION_ID)
+    if chat.invalid:
+        return "", True
+    return chat.value, False
 
 
 def _session_key_valid(sess_key: tuple[str, ...]) -> bool:

@@ -253,6 +253,34 @@ class TestToolCallParser(unittest.TestCase):
         )
         self.assertEqual("".join(c.content), "Pre ")
 
+    def test_strict_live_empty_unclosed_tool_call_tail_keeps_previous_calls(self):
+        """strict_live=True: пустой незакрытый <tool_call> в конце хода не роняет парсер.
+
+        Регрессия PI_AI_ERROR (502 proxy_error): модель после валидного вызова выдаёт
+        голый открывающий тег без тела — ранее finish() поднимал LiveParserError и
+        терял уже распознанные вызовы.
+        """
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed(
+            '<invoke name="bash"><parameter name="command">ls</parameter></invoke>'
+            "\n" + TOOL_CALL_OPEN
+        )
+        p.finish()
+        self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0]["name"], "bash")
+        self.assertEqual(c.calls[0]["arguments"], {"command": "ls"})
+        self.assertNotIn(TOOL_CALL_OPEN, "".join(c.content))
+
+    def test_strict_live_unclosed_tool_call_with_partial_json_still_raises(self):
+        """strict_live=True: незакрытый <tool_call> с телом (обрезанный JSON) — по-прежнему ошибка."""
+        c = Collector()
+        p = ToolCallParser(c.on_content, c.on_call, strict_live=True)
+        p.feed(TOOL_CALL_OPEN + '{"name": "x"')
+        with self.assertRaises(LiveParserError):
+            p.finish()
+        self.assertEqual(c.calls, [])
+
 
 CALL_A = '{"name": "read", "arguments": {"file_path": "/a"}}'
 CALL_B = '{"name": "read", "arguments": {"file_path": "/b"}}'

@@ -49,41 +49,38 @@ from core.backend_adapter import (
     TurnResult,
 )
 
-try:
-    from core.tool_emulation import (
-        DEFAULT_MAX_PARALLEL_CALLS,
-        DEFAULT_MAX_PARALLEL_DEPTH,
-        DEFAULT_MAX_REPETITION_REPEATS,
-        DEFAULT_MAX_REPETITION_TOKEN_LEN,
-        RepetitionGuard,
-        ToolCallParser,
-        build_tool_schemas,
-        sanitize_tool_call,
-    )
-except ImportError:
-    from core.tool_emulation import (  # type: ignore[no-redef]
-        DEFAULT_MAX_PARALLEL_CALLS,
-        DEFAULT_MAX_PARALLEL_DEPTH,
-        ToolCallParser,
-        build_tool_schemas,
-        sanitize_tool_call,
-    )
-
-    DEFAULT_MAX_REPETITION_REPEATS = 20
-    DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
-    RepetitionGuard = None  # type: ignore[assignment,misc]
+from core.tool_emulation import (
+    DEFAULT_MAX_PARALLEL_CALLS,
+    DEFAULT_MAX_PARALLEL_DEPTH,
+    DEFAULT_MAX_REPETITION_REPEATS,
+    DEFAULT_MAX_REPETITION_TOKEN_LEN,
+    RepetitionGuard,
+    ToolCallParser,
+    build_tool_schemas,
+    sanitize_tool_call,
+)
 from core.cli_runtime_config import NonstreamConfig
-from core.liveness_signals import LivenessWindow, SseProgress, passthrough_window
-from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
-from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, SlidingDeadline, open_sliding_deadline
+from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress
+from core.liveness_signals import passthrough_window
+from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index
+from core.nonstream_aggregator import internal_stream_body, request_deadlines
+from core.nonstream_resilience import NonstreamRetryBulkhead, NonstreamRetryPolicy
+from core.nonstream_resilience import should_retry_incomplete_nonstream
+from core.nonstream_retry_runtime import RetryRuntime, retry_incomplete_once
+from core.passthrough_sliding_window import (
+    FLAG_PASSTHROUGH_SLIDING_WINDOW,
+    SlidingDeadline,
+    open_sliding_deadline,
+)
 from core.presend_retry_policy import resolve_presend_response
-from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
+from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int
+from core.runtime_env import env_bool, positive_int as _positive_int
+from core.stream_framing import build_stream_error_chunk, format_sse_event
 from core.stream_framing import (
-    build_stream_error_chunk,
-    format_sse_event,
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
 )
+
 _SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
 
 # Имена env (таблица AD-005) и значения по умолчанию: defaults — не потолки, переопределяются.
@@ -109,9 +106,7 @@ DEFAULT_CONNECT_TIMEOUT_S = 10.0
 DEFAULT_READ_TIMEOUT_S = 1800.0
 DEFAULT_IDLE_TIMEOUT_S = 300.0
 DEFAULT_TOTAL_TIMEOUT_S = 420.0
-DEFAULT_QUEUE_TIMEOUT_S = (
-    900.0  # ожидание слота `max_concurrent`, если хост своего не задал
-)
+DEFAULT_QUEUE_TIMEOUT_S = 900.0
 
 KIND = "passthrough"
 
@@ -123,28 +118,14 @@ _NO_EFFORT_VALUES = frozenset({"", "off", "none"})
 
 # Заголовки соединения (RFC 9110 §7.6.1) не пробрасываются; Host/Content-Length ставит шов.
 _HOP_BY_HOP = frozenset(
-    {
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "proxy-connection",
-        "te",
-        "trailer",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
-    }
+    "connection keep-alive proxy-authenticate proxy-authorization "
+    "proxy-connection te trailer trailers transfer-encoding upgrade".split()
 )
 _TOOL_SANITIZED_HEADER = "x-bridge-tool-sanitized"
-_REQUEST_DROP = _HOP_BY_HOP | {
-    "host",
-    "content-length",
-    "accept-encoding",
-    "x-turn-owner-token",
-    _TOOL_SANITIZED_HEADER,
-}
+_DROP_EXTRA = {"host", "content-length", "accept-encoding", "x-turn-owner-token"}
+_REQUEST_DROP = _HOP_BY_HOP | _DROP_EXTRA | {_TOOL_SANITIZED_HEADER}
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
+
 
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
     try:
@@ -168,7 +149,7 @@ class PassthroughLimits:
     read_timeout_s: float = DEFAULT_READ_TIMEOUT_S  # совместимость старого конструктора
     idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S
     total_timeout_s: float = DEFAULT_TOTAL_TIMEOUT_S
-    stream_safety_cap_s: float = 3600.0  # потолок активного stream=True при скользящем окне
+    stream_safety_cap_s: float = 3600.0
     heartbeat_interval_s: float = 12.0
     poll_interval_s: float = 0.1
     reader_join_timeout_s: float = 0.2
@@ -188,66 +169,41 @@ class PassthroughLimits:
         """Лимиты из окружения; нечисловое и неположительное значение -> default."""
         env = os.environ if environ is None else environ
         ns = NonstreamConfig.from_env(env)
+        pi, pf, bi = _positive_int, _positive_float, _bounded_int
+        c_def = pf(env, ENV_CONNECT_TIMEOUT_S, DEFAULT_CONNECT_TIMEOUT_S)
+        d_pc, d_pd = DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH
+        d_ap = DEFAULT_ACC_MAX_PROCESS_BYTES
+        d_rr, d_rt = DEFAULT_MAX_REPETITION_REPEATS, DEFAULT_MAX_REPETITION_TOKEN_LEN
+        r_join = "BRIDGE_PASSTHROUGH_READER_JOIN_TIMEOUT_S"
+        r_q = "BRIDGE_PASSTHROUGH_READ_QUEUE_MAX_ENTRIES"
+        e_rg, e_in = (
+            (ENV_REPETITION_GUARD_ENABLED,),
+            (ENV_INVOKE_NORMALIZATION_ENABLED,),
+        )
         return cls(
-            max_keepalive_connections=_positive_int(
-                env, "BRIDGE_MAX_KEEPALIVE_CONNECTIONS", 32
-            ),
-            keepalive_expiry_s=_positive_float(env, "BRIDGE_KEEPALIVE_EXPIRY_S", 30.0),
-            max_parallel_calls=_positive_int(
-                env, ENV_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_CALLS
-            ),
-            max_parallel_depth=_positive_int(
-                env, ENV_MAX_PARALLEL_DEPTH, DEFAULT_MAX_PARALLEL_DEPTH
-            ),
-            max_body_bytes=_positive_int(
-                env, ENV_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES
-            ),
-            accumulator_max_bytes=_positive_int(
-                env, ENV_ACC_MAX_BYTES, DEFAULT_ACC_MAX_BYTES
-            ),
-            accumulator_max_keys=_positive_int(
-                env, ENV_ACC_MAX_KEYS, DEFAULT_ACC_MAX_KEYS
-            ),
-            accumulator_max_process_bytes=_positive_int(
-                env, ENV_ACC_MAX_PROCESS_BYTES, DEFAULT_ACC_MAX_PROCESS_BYTES
-            ),
-            connect_timeout_s=_positive_float(
-                env,
-                "BRIDGE_CONNECT_TIMEOUT_S",
-                _positive_float(env, ENV_CONNECT_TIMEOUT_S, DEFAULT_CONNECT_TIMEOUT_S),
-            ),
-            read_timeout_s=_positive_float(
-                env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S
-            ),
-            idle_timeout_s=_positive_float(
-                env, "BRIDGE_IDLE_TIMEOUT_S", DEFAULT_IDLE_TIMEOUT_S
-            ),
-            total_timeout_s=_positive_float(
-                env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S
-            ),
-            stream_safety_cap_s=_positive_float(env, "BRIDGE_STREAM_SAFETY_CAP_S", 3600.0),
-            heartbeat_interval_s=_positive_float(
-                env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0
-            ),
+            max_keepalive_connections=pi(env, "BRIDGE_MAX_KEEPALIVE_CONNECTIONS", 32),
+            keepalive_expiry_s=pf(env, "BRIDGE_KEEPALIVE_EXPIRY_S", 30.0),
+            max_parallel_calls=pi(env, ENV_MAX_PARALLEL_CALLS, d_pc),
+            max_parallel_depth=pi(env, ENV_MAX_PARALLEL_DEPTH, d_pd),
+            max_body_bytes=pi(env, ENV_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES),
+            accumulator_max_bytes=pi(env, ENV_ACC_MAX_BYTES, DEFAULT_ACC_MAX_BYTES),
+            accumulator_max_keys=pi(env, ENV_ACC_MAX_KEYS, DEFAULT_ACC_MAX_KEYS),
+            accumulator_max_process_bytes=pi(env, ENV_ACC_MAX_PROCESS_BYTES, d_ap),
+            connect_timeout_s=pf(env, "BRIDGE_CONNECT_TIMEOUT_S", c_def),
+            read_timeout_s=pf(env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S),
+            idle_timeout_s=pf(env, "BRIDGE_IDLE_TIMEOUT_S", DEFAULT_IDLE_TIMEOUT_S),
+            total_timeout_s=pf(env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S),
+            stream_safety_cap_s=pf(env, "BRIDGE_STREAM_SAFETY_CAP_S", 3600.0),
+            heartbeat_interval_s=pf(env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0),
             poll_interval_s=ns.poll_interval_s,
-            reader_join_timeout_s=_positive_float(
-                env, "BRIDGE_PASSTHROUGH_READER_JOIN_TIMEOUT_S", 0.2
+            reader_join_timeout_s=pf(env, r_join, 0.2),
+            read_queue_max_entries=pi(env, r_q, 1),
+            repetition_max_repeats=bi(env, ENV_REPETITION_MAX_REPEATS, d_rr, 3, 1000),
+            repetition_max_token_len=bi(
+                env, ENV_REPETITION_MAX_TOKEN_LEN, d_rt, 8, 512
             ),
-            read_queue_max_entries=_positive_int(
-                env, "BRIDGE_PASSTHROUGH_READ_QUEUE_MAX_ENTRIES", 1
-            ),
-            repetition_max_repeats=_bounded_int(
-                env, ENV_REPETITION_MAX_REPEATS, DEFAULT_MAX_REPETITION_REPEATS, 3, 1000
-            ),
-            repetition_max_token_len=_bounded_int(
-                env,
-                ENV_REPETITION_MAX_TOKEN_LEN,
-                DEFAULT_MAX_REPETITION_TOKEN_LEN,
-                8,
-                512,
-            ),
-            repetition_guard_enabled=env_bool(env, (ENV_REPETITION_GUARD_ENABLED,), False),
-            invoke_normalization_enabled=env_bool(env, (ENV_INVOKE_NORMALIZATION_ENABLED,), False),
+            repetition_guard_enabled=env_bool(env, e_rg, False),
+            invoke_normalization_enabled=env_bool(env, e_in, False),
             nonstream=ns,
         )
 
@@ -260,9 +216,7 @@ class PassthroughConnectionPool:
     ) -> None:
         self._max_keepalive: int = max_keepalive
         self._keepalive_expiry_s: float = keepalive_expiry_s
-        self._idle: dict[
-            tuple[str, int], list[tuple[http.client.HTTPConnection, float]]
-        ] = {}
+        self._idle: dict[tuple[str, int], list[tuple[Any, float]]] = {}
         self._lock: threading.Lock = threading.Lock()
         self._closed: bool = False
 
@@ -281,10 +235,8 @@ class PassthroughConnectionPool:
             conn, last_used = entry
             sock = conn.sock
             try:
-                if (
-                    sock is not None
-                    and time.monotonic() - last_used <= self._keepalive_expiry_s
-                ):
+                age = time.monotonic() - last_used
+                if sock is not None and age <= self._keepalive_expiry_s:
                     readable, _, _ = select.select([sock], [], [], 0)
                     if not readable:
                         conn.timeout = timeout
@@ -511,16 +463,10 @@ class ToolCallAccumulator:
         for key in keys:
             entry = self._entries.pop(key)
             self._release(entry)
+            fn = {"name": entry.name, "arguments": "".join(entry.arguments)}
+            cid = entry.id or new_call_id()
             calls.append(
-                {
-                    "index": key[1],
-                    "id": entry.id or new_call_id(),
-                    "type": entry.type,
-                    "function": {
-                        "name": entry.name,
-                        "arguments": "".join(entry.arguments),
-                    },
-                }
+                {"index": key[1], "id": cid, "type": entry.type, "function": fn}
             )
         self._last_index.pop(choice, None)
         for remap_key in [k for k in self._remap if k[0] == choice]:
@@ -541,14 +487,12 @@ def sanitize_choice_calls(
     limits: PassthroughLimits,
 ) -> list[dict[str, Any]]:
     """Санитизация вызовов одной choice; `index` меняется только если `parallel` изменил число вызовов."""
+    mpc, mpd = limits.max_parallel_calls, limits.max_parallel_depth
     groups = [
         sanitize_tool_call(
-            call,
-            tool_schemas,
-            max_parallel_calls=limits.max_parallel_calls,
-            max_parallel_depth=limits.max_parallel_depth,
+            c, tool_schemas, max_parallel_calls=mpc, max_parallel_depth=mpd
         )
-        for call in calls
+        for c in calls
     ]
     flat = [item for group in groups for item in group]
     unpacked = any(
@@ -597,11 +541,12 @@ def sanitize_completion_body(
             if isinstance(content, str) and content:
                 content_parts: list[str] = []
                 parsed_calls: list[dict[str, Any]] = []
+                p_kw = {
+                    "invoke_normalization_enabled": True,
+                    "repetition_guard_enabled": False,
+                }
                 parser = ToolCallParser(
-                    content_parts.append,
-                    parsed_calls.append,
-                    invoke_normalization_enabled=True,
-                    repetition_guard_enabled=False,
+                    content_parts.append, parsed_calls.append, **p_kw
                 )
                 parser.feed(content)
                 parser.finish()
@@ -610,29 +555,21 @@ def sanitize_completion_body(
                     message["content"] = new_content
                     changed = True
                 has_index = any("index" in c for c in merged_calls)
-                next_idx = (
-                    max(
-                        (
-                            c["index"]
-                            for c in merged_calls
-                            if isinstance(c.get("index"), int)
-                            and not isinstance(c.get("index"), bool)
-                        ),
-                        default=len(merged_calls) - 1,
-                    )
-                    + 1
-                )
+                idxs = [c["index"] for c in merged_calls if type(c.get("index")) is int]
+                next_idx = max(idxs, default=len(merged_calls) - 1) + 1
                 for call in parsed_calls:
-                    arguments = call.get("arguments")
+                    raw_a = call.get("arguments")
+                    args = (
+                        raw_a
+                        if isinstance(raw_a, str)
+                        else json.dumps(raw_a or {}, ensure_ascii=False)
+                    )
+                    fn = {"name": str(call.get("name") or ""), "arguments": args}
+                    cid = str(call.get("id") or new_call_id())
                     entry: dict[str, Any] = {
-                        "id": str(call.get("id") or new_call_id()),
+                        "id": cid,
                         "type": "function",
-                        "function": {
-                            "name": str(call.get("name") or ""),
-                            "arguments": arguments
-                            if isinstance(arguments, str)
-                            else json.dumps(arguments or {}, ensure_ascii=False),
-                        },
+                        "function": fn,
                     }
                     if has_index:
                         entry["index"] = next_idx
@@ -772,7 +709,8 @@ class _TimedSseReader:
             remaining = self.progress.remaining(self.cell.deadline_s - now)
             if self.progress.last_progress is not None:
                 remaining = min(
-                    remaining, self.progress.last_progress + self.limits.idle_timeout_s - now
+                    remaining,
+                    self.progress.last_progress + self.limits.idle_timeout_s - now,
                 )
             if remaining <= 0:
                 raise TimeoutError("upstream stream deadline exceeded")
@@ -819,13 +757,10 @@ def relay_sse(
     Исходный порядок событий сохраняется; единственное изменение — вызовы choice выходят
     одним кадром прямо перед терминальным чанком своей choice, после санитизации.
     """
-    reader = _TimedSseReader(
-        readline,
-        write,
-        limits,
-        deadline if deadline is not None else time.monotonic() + limits.total_timeout_s,
-        window,
+    eff_dl = (
+        deadline if deadline is not None else time.monotonic() + limits.total_timeout_s
     )
+    reader = _TimedSseReader(readline, write, limits, eff_dl, window)
     outcome = state if state is not None else StreamOutcome()
     client_write = write
 
@@ -845,9 +780,10 @@ def relay_sse(
 
     def guard_for(index: int) -> RepetitionGuard:
         if index not in guards:
+            mr, mt = limits.repetition_max_repeats, limits.repetition_max_token_len
             guards[index] = RepetitionGuard(
-                max_repeats=limits.repetition_max_repeats,
-                max_token_len=limits.repetition_max_token_len,
+                max_repeats=mr,
+                max_token_len=mt,
                 enabled=limits.repetition_guard_enabled,
             )
         return guards[index]
@@ -855,13 +791,8 @@ def relay_sse(
     def repetition_error() -> StreamOutcome:
         acc.close()
         outcome.repetition_loop = True
-        write(
-            _error_frame(
-                last_chunk,
-                "upstream_repetition_loop",
-                "upstream repetition loop detected",
-            )
-        )
+        msg = "upstream repetition loop detected"
+        write(_error_frame(last_chunk, "upstream_repetition_loop", msg))
         return outcome
 
     def check_repetition(index: int, text: str) -> bool:
@@ -873,33 +804,29 @@ def relay_sse(
         if index not in parsers:
             parser_content[index] = []
             parser_calls[index] = []
+            p_kw = {"tool_schemas": tool_schemas, "repetition_guard_enabled": False}
             parsers[index] = ToolCallParser(
-                parser_content[index].append,
-                parser_calls[index].append,
-                tool_schemas=tool_schemas,
-                repetition_guard_enabled=False,
+                parser_content[index].append, parser_calls[index].append, **p_kw
             )
         return parsers[index]
 
     def add_invoke_calls(index: int) -> None:
         for call in parser_calls.get(index, ()):
-            arguments = call.get("arguments")
-            acc.add(
-                index,
-                [
-                    {
-                        "index": acc.next_tool_index(index),
-                        "id": str(call.get("id") or new_call_id()),
-                        "type": "function",
-                        "function": {
-                            "name": str(call.get("name") or ""),
-                            "arguments": arguments
-                            if isinstance(arguments, str)
-                            else json.dumps(arguments or {}, ensure_ascii=False),
-                        },
-                    }
-                ],
+            raw_a = call.get("arguments")
+            args = (
+                raw_a
+                if isinstance(raw_a, str)
+                else json.dumps(raw_a or {}, ensure_ascii=False)
             )
+            fn = {"name": str(call.get("name") or ""), "arguments": args}
+            cid = str(call.get("id") or new_call_id())
+            item = {
+                "index": acc.next_tool_index(index),
+                "id": cid,
+                "type": "function",
+                "function": fn,
+            }
+            acc.add(index, [item])
         if index in parser_calls:
             parser_calls[index].clear()
 
@@ -947,7 +874,8 @@ def relay_sse(
                 if acc.pending_choices() or (seen - finished):
                     acc.close()
                     outcome.incomplete = True
-                    write(_error_frame(last_chunk, "upstream_incomplete_stream", "upstream stream ended before finish_reason"))
+                    msg = "upstream stream ended before finish_reason"
+                    write(_error_frame(last_chunk, "upstream_incomplete_stream", msg))
                     return outcome
                 outcome.done = True
                 write(raw)
@@ -958,16 +886,22 @@ def relay_sse(
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
             if not isinstance(choices, list):
                 if isinstance(chunk, dict):
-                    meta = {k: chunk.get(k) for k in ("id", "created", "model") if chunk.get(k) is not None}
+                    keys = ("id", "created", "model")
+                    meta = {k: chunk[k] for k in keys if chunk.get(k) is not None}
                     if meta:
                         last_chunk = {**last_chunk, **meta}
                         outcome.last_chunk = {**(outcome.last_chunk or {}), **meta}
                     err_val = chunk.get("error")
-                    if err_val is not None and (seen - finished or acc.pending_choices()):
+                    if err_val is not None and (
+                        seen - finished or acc.pending_choices()
+                    ):
                         acc.close()
                         outcome.incomplete = True
-                        err_msg = str(err_val.get("message") or err_val) if isinstance(err_val, dict) else str(err_val)
-                        err_code = str(err_val.get("code") or err_val.get("type") or "upstream_stream_error") if isinstance(err_val, dict) else "upstream_stream_error"
+                        em = err_val if isinstance(err_val, dict) else {}
+                        err_msg = str(em.get("message") or err_val)
+                        err_code = str(
+                            em.get("code") or em.get("type") or "upstream_stream_error"
+                        )
                         write(_error_frame(last_chunk or chunk, err_code, err_msg))
                         return outcome
                 write(raw)
@@ -982,17 +916,14 @@ def relay_sse(
                         seen.add(idx)
                         if choice.get("finish_reason"):
                             finished.add(idx)
-                        if limits.repetition_guard_enabled:
-                            delta = choice.get("delta")
-                            text_value = (
-                                delta.get("content")
-                                if isinstance(delta, dict)
-                                else None
-                            )
-                            if isinstance(text_value, str) and check_repetition(
-                                idx, text_value
-                            ):
-                                return repetition_error()
+                        d_obj = (
+                            choice.get("delta")
+                            if limits.repetition_guard_enabled
+                            else None
+                        )
+                        txt = d_obj.get("content") if isinstance(d_obj, dict) else None
+                        if isinstance(txt, str) and check_repetition(idx, txt):
+                            return repetition_error()
                 outcome.unfinished_choices = set(seen - finished)
                 write(raw)
                 continue
@@ -1011,10 +942,10 @@ def relay_sse(
                     if trusted_tools:
                         calls = delta["tool_calls"]
                         if isinstance(calls, list):
-                            outcome.tool_calls_published += sum(
-                                isinstance(call, dict) and bool(call.get("id"))
-                                for call in calls
+                            n_pub = sum(
+                                isinstance(c, dict) and bool(c.get("id")) for c in calls
                             )
+                            outcome.tool_calls_published += n_pub
                     else:
                         acc.add(index, delta["tool_calls"])
                         delta = {k: v for k, v in delta.items() if k != "tool_calls"}
@@ -1046,12 +977,9 @@ def relay_sse(
                 if choice.get("finish_reason"):
                     finished.add(index)
                     terminal.append(index)
-                    if (
-                        isinstance(delta, dict)
-                        and isinstance(delta.get("content"), str)
-                        and delta["content"]
-                    ):
-                        terminal_content[index] = delta["content"]
+                    c_txt = delta.get("content") if isinstance(delta, dict) else None
+                    if isinstance(c_txt, str) and c_txt:
+                        terminal_content[index] = c_txt
                         delta = {k: v for k, v in delta.items() if k != "content"}
                         choice["delta"] = delta
                         modified = True
@@ -1068,24 +996,15 @@ def relay_sse(
                     acc.pop_choice(index), tool_schemas, limits
                 )
                 outcome.tool_calls_published += len(calls)
-                write(
-                    _data_frame(
-                        {
-                            **{
-                                k: chunk[k]
-                                for k in chunk
-                                if k not in ("choices", "usage", "error")
-                            },
-                            "choices": [
-                                {
-                                    "index": index,
-                                    "delta": {"tool_calls": calls},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                    )
-                )
+                base_c = {
+                    k: chunk[k] for k in chunk if k not in ("choices", "usage", "error")
+                }
+                c_item = {
+                    "index": index,
+                    "delta": {"tool_calls": calls},
+                    "finish_reason": None,
+                }
+                write(_data_frame({**base_c, "choices": [c_item]}))
             if not modified:
                 write(raw)
                 continue
@@ -1107,29 +1026,19 @@ def relay_sse(
         if acc.pending_choices() or unfinished:
             acc.close()
             outcome.incomplete = True
-            write(_error_frame(last_chunk, "upstream_incomplete_stream", "upstream stream ended before finish_reason"))
+            msg = "upstream stream ended before finish_reason"
+            write(_error_frame(last_chunk, "upstream_incomplete_stream", msg))
         return outcome
-    except AccumulatorOverflow:
+    except (AccumulatorOverflow, UpstreamBodyTooLarge) as exc:
         acc.close()
         outcome.overflow = True
-        write(
-            _error_frame(
-                last_chunk,
-                "upstream_response_too_large",
-                "upstream tool_calls exceed the bridge limit",
-            )
+        what = (
+            "tool_calls exceed"
+            if isinstance(exc, AccumulatorOverflow)
+            else "event exceeds"
         )
-        return outcome
-    except UpstreamBodyTooLarge:
-        acc.close()
-        outcome.overflow = True
-        write(
-            _error_frame(
-                last_chunk,
-                "upstream_response_too_large",
-                "upstream event exceeds the bridge limit",
-            )
-        )
+        msg = f"upstream {what} the bridge limit"
+        write(_error_frame(last_chunk, "upstream_response_too_large", msg))
         return outcome
     finally:
         acc.close()
@@ -1207,6 +1116,8 @@ class PassthroughAdapter(BackendAdapter):
         self._active = 0
         self._lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(self.max_concurrent)
+        self._retry_bulkhead = NonstreamRetryBulkhead.from_env()
+        self._retry_bulkhead_env = os.environ.get("BRIDGE_NONSTREAM_RETRY_MAX_INFLIGHT")
         base_url = self.config.get("base_url")
         if not isinstance(base_url, str) or not _LOOPBACK_V1_RE.fullmatch(base_url):
             raise ValueError("backend_base_url_invalid")
@@ -1357,14 +1268,16 @@ class PassthroughAdapter(BackendAdapter):
         """One request: body goes upstream unmodified (AD-001: internal stream=true), response goes to `sink`."""
         raw_body = self._with_body_defaults(raw_body)
         internal = internal_stream_body(path, request, raw_body)
+        is_int = internal is not None
         if internal is not None:
-            raw_body, window = internal, window or passthrough_window(self.limits, path, request)
-        deadline, open_deadline = request_deadlines(self.limits, internal is not None)
-        slide = open_sliding_deadline(deadline, self.limits, internal is not None, request, _SLIDING_WIN_FLAG.enabled)
-        queue_timeout = min(
-            float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)),
-            self.limits.total_timeout_s,
+            w_def = window or passthrough_window(self.limits, path, request)
+            raw_body, window = internal, w_def
+        deadline, open_deadline = request_deadlines(self.limits, is_int)
+        slide = open_sliding_deadline(
+            deadline, self.limits, is_int, request, _SLIDING_WIN_FLAG.enabled
         )
+        q_def = float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S))
+        queue_timeout = min(q_def, self.limits.total_timeout_s)
         if not self._slots.acquire(timeout=queue_timeout):
             self._fail(sink, 503, "overloaded", "passthrough backend is saturated")
             return
@@ -1391,7 +1304,10 @@ class PassthroughAdapter(BackendAdapter):
                         continue
 
         def watch() -> None:
-            while not stop.wait(min(self.limits.poll_interval_s, max(0.0, slide.deadline_s - time.monotonic()))):
+            p_int = self.limits.poll_interval_s
+            while not stop.wait(
+                min(p_int, max(0.0, slide.deadline_s - time.monotonic()))
+            ):
                 if time.monotonic() >= slide.deadline_s or sink.client_gone():
                     abort()
                     return
@@ -1407,8 +1323,19 @@ class PassthroughAdapter(BackendAdapter):
                     raise ClientGone() if sink.client_gone() else TimeoutError()
                 transport.append(sock)
 
-        def open_response() -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
-            new_conn = self._open(path, raw_body, headers, deadline=open_deadline, on_socket=on_socket, presend_deadline=getattr(sink, "presend_deadline", None), on_pooling=opened_pooling.append)
+        def open_response() -> tuple[
+            http.client.HTTPConnection, http.client.HTTPResponse
+        ]:
+            ps_dl = getattr(sink, "presend_deadline", None)
+            new_conn = self._open(
+                path,
+                raw_body,
+                headers,
+                deadline=open_deadline,
+                on_socket=on_socket,
+                presend_deadline=ps_dl,
+                on_pooling=opened_pooling.append,
+            )
             try:
                 if sink.client_gone():
                     raise ClientGone()
@@ -1416,8 +1343,19 @@ class PassthroughAdapter(BackendAdapter):
             except BaseException:
                 new_conn.close()
                 raise
-            slide.relax_socket(new_conn.sock, self.limits.read_timeout_s, internal is not None)
+            slide.relax_socket(
+                new_conn.sock, self.limits.read_timeout_s, internal is not None
+            )
             return new_conn, new_resp
+
+        def reopen_response() -> http.client.HTTPResponse:
+            nonlocal conn, resp
+            if resp is not None:
+                resp.close()
+            if conn is not None:
+                conn.close()
+            conn, resp = open_response()
+            return resp
 
         watcher = threading.Thread(
             target=watch, daemon=True, name="passthrough-deadline"
@@ -1434,49 +1372,40 @@ class PassthroughAdapter(BackendAdapter):
                     raise ClientGone()
                 if aborted.is_set() or time.monotonic() >= deadline:
                     raise TimeoutError()
-                conn, resp, handled = resolve_presend_response(self, conn, resp, sink, open_response)
+                conn, resp, handled = resolve_presend_response(
+                    self, conn, resp, sink, open_response
+                )
                 if handled:
                     successful = True
                     return
             except UpstreamBodyTooLarge:
-                self._fail(sink, 502, "upstream_response_too_large", "upstream response exceeds the bridge limit")
+                msg = "upstream response exceeds the bridge limit"
+                self._fail(sink, 502, "upstream_response_too_large", msg)
                 return
             except PreSendTransientError as exc:
                 if getattr(sink, "accepts_presend_errors", False):
                     raise
-                if exc.status_code == 504 or isinstance(exc.__cause__, TimeoutError):
-                    self._fail(
-                        sink,
-                        504,
-                        "upstream_timeout",
-                        "upstream did not respond in time",
-                    )
-                else:
-                    self._fail(
-                        sink, 502, "upstream_unavailable", "upstream is unavailable"
-                    )
-                return
-            except socket.timeout:
-                self._fail(
-                    sink, 504, "upstream_timeout", "upstream did not respond in time"
+                is_to = exc.status_code == 504 or isinstance(
+                    exc.__cause__, TimeoutError
                 )
+                self._fail_io(sink, is_to)
                 return
-            except (OSError, http.client.HTTPException):
-                if time.monotonic() >= deadline or (
-                    window is not None and window.expired()
-                ):
-                    self._fail(
-                        sink,
-                        504,
-                        "upstream_timeout",
-                        "upstream did not respond in time",
-                    )
-                else:
-                    self._fail(
-                        sink, 502, "upstream_unavailable", "upstream is unavailable"
-                    )
+            except (OSError, http.client.HTTPException) as exc:
+                is_to = (
+                    isinstance(exc, socket.timeout)
+                    or time.monotonic() >= deadline
+                    or (window is not None and window.expired())
+                )
+                self._fail_io(sink, is_to)
                 return
-            successful = self._respond(resp, request, sink, deadline, on_timeout=abort, window=window, slide=slide)
+            r_kw: dict[str, Any] = {
+                "on_timeout": abort,
+                "window": window,
+                "slide": slide,
+                "headers": headers,
+                "reopen": reopen_response,
+            }
+            successful = self._respond(resp, request, sink, deadline, **r_kw)
         except ClientGone:
             abort()
             self._log("passthrough client_gone")
@@ -1487,9 +1416,14 @@ class PassthroughAdapter(BackendAdapter):
                 transport.clear()
             watcher.join(timeout=self.limits.reader_join_timeout_s)
             if conn is not None:
+                pool_env = os.environ.get("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
+                pool_ok = pool_env.lower() not in ("0", "false", "no")
+                ct = (resp.getheader("Content-Type") or "").lower() if resp else ""
+                cl = resp.getheader("Content-Length") if resp else None
+                ch = (resp.getheader("Connection") or "") if resp else ""
+                toks = {t.strip().lower() for t in ch.split(",")}
                 can_reuse = (
-                    os.environ.get("BRIDGE_CONNECTION_POOLING_ENABLED", "1").lower()
-                    not in ("0", "false", "no")
+                    pool_ok
                     and bool(opened_pooling)
                     and opened_pooling[-1]
                     and successful
@@ -1497,16 +1431,8 @@ class PassthroughAdapter(BackendAdapter):
                     and resp is not None
                     and resp.isclosed()
                     and not resp.will_close
-                    and not (
-                        "text/event-stream"
-                        in (resp.getheader("Content-Type") or "").lower()
-                        and resp.getheader("Content-Length") is None
-                    )
-                    and "close"
-                    not in {
-                        token.strip().lower()
-                        for token in (resp.getheader("Connection") or "").split(",")
-                    }
+                    and not ("text/event-stream" in ct and cl is None)
+                    and "close" not in toks
                 )
                 self._pool.release_connection(
                     self._host, self._port, conn, can_reuse=can_reuse
@@ -1528,34 +1454,32 @@ class PassthroughAdapter(BackendAdapter):
         on_pooling: Callable[[bool], None] | None = None,
         fresh: bool = False,
     ) -> http.client.HTTPConnection:
-        remaining = (
+        rem = (
             self.limits.total_timeout_s
             if deadline is None
             else deadline - time.monotonic()
         )
-        if remaining <= 0:
+        if rem <= 0:
             raise TimeoutError("upstream total deadline exceeded")
-        connect_remaining = remaining
-        if presend_deadline is not None:
-            connect_remaining = min(remaining, presend_deadline - time.monotonic())
-            if connect_remaining <= 0:
-                raise PreSendTransientError(
-                    "upstream connect budget exhausted", status_code=504
-                )
-        is_pooling_enabled = os.environ.get(
-            "BRIDGE_CONNECTION_POOLING_ENABLED", "1"
-        ).strip().lower() in ("1", "true", "yes", "on")
+        conn_rem = (
+            rem
+            if presend_deadline is None
+            else min(rem, presend_deadline - time.monotonic())
+        )
+        if conn_rem <= 0:
+            raise PreSendTransientError(
+                "upstream connect budget exhausted", status_code=504
+            )
+        pool_raw = os.environ.get("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
+        is_pooling_enabled = pool_raw.strip().lower() in ("1", "true", "yes", "on")
         if not is_pooling_enabled:
             self._pool.close_all()
         try:
+            c_to = min(self.limits.connect_timeout_s, conn_rem)
             conn, reused = self._pool.get_connection(
-                self._host,
-                self._port,
-                min(self.limits.connect_timeout_s, connect_remaining),
-                fresh=fresh or not is_pooling_enabled,
+                self._host, self._port, c_to, fresh=fresh or not is_pooling_enabled
             )
         except (ConnectionError, socket.gaierror, TimeoutError) as exc:
-            # Запрос ещё не посылался: это транспортный отказ, безопасный для общего retry.
             raise PreSendTransientError("upstream connect failed") from exc
         try:
             if on_pooling is not None:
@@ -1565,24 +1489,20 @@ class PassthroughAdapter(BackendAdapter):
             if conn.sock is not None:
                 if on_socket is not None:
                     on_socket(conn.sock)
-                remaining = (
-                    self.limits.total_timeout_s
-                    if deadline is None
-                    else deadline - time.monotonic()
-                )
-                if remaining <= 0:
+                t_to = self.limits.total_timeout_s
+                rem = t_to if deadline is None else deadline - time.monotonic()
+                if rem <= 0:
                     conn.close()
                     raise TimeoutError("upstream total deadline exceeded")
-                conn.sock.settimeout(min(self.limits.read_timeout_s, remaining))
+                conn.sock.settimeout(min(self.limits.read_timeout_s, rem))
             forwarded = {
                 k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP
             }
             upstream_token = self._upstream_key or self._read_key_ref()
+            auth_keys = ("authorization", "x-api-key")
             if upstream_token:
                 forwarded = {
-                    k: v
-                    for k, v in forwarded.items()
-                    if k.lower() not in ("authorization", "x-api-key")
+                    k: v for k, v in forwarded.items() if k.lower() not in auth_keys
                 }
                 forwarded["Authorization"] = f"Bearer {upstream_token}"
             else:
@@ -1597,21 +1517,12 @@ class PassthroughAdapter(BackendAdapter):
                             client_toks.append(parts[0])
                     elif k.lower() == "x-api-key" and v.strip():
                         client_toks.append(v.strip())
-                is_hub_credential = False
-                if client_toks:
-                    is_hub_key_cb = getattr(self, "_is_hub_key", None)
-                    if is_hub_key_cb is None:
-                        is_hub_key_cb = getattr(self.host, "is_hub_key", None)
-                    if callable(is_hub_key_cb):
-                        is_hub_credential = any(
-                            is_hub_key_cb(client_tok) for client_tok in client_toks
-                        )
-                if is_hub_credential:
-                    # Мастер-ключ хаба на upstream не уходит.
+                cb = getattr(self, "_is_hub_key", None) or getattr(
+                    self.host, "is_hub_key", None
+                )
+                if client_toks and callable(cb) and any(cb(t) for t in client_toks):
                     forwarded = {
-                        k: v
-                        for k, v in forwarded.items()
-                        if k.lower() not in ("authorization", "x-api-key")
+                        k: v for k, v in forwarded.items() if k.lower() not in auth_keys
                     }
             upstream_headers = self._upstream_headers()
             if upstream_headers:
@@ -1622,9 +1533,7 @@ class PassthroughAdapter(BackendAdapter):
                 forwarded.update(upstream_headers)
             forwarded["Host"] = f"{self._host}:{self._port}"
             forwarded["Content-Length"] = str(len(raw_body))
-            forwarded["Accept-Encoding"] = (
-                "identity"  # тело нужно разобрать, а не передать сжатым
-            )
+            forwarded["Accept-Encoding"] = "identity"
             forwarded["Connection"] = "keep-alive" if is_pooling_enabled else "close"
             route, _, query = path.partition("?")
             suffix = route[len("/v1") :] if route.startswith("/v1/") else route
@@ -1635,7 +1544,6 @@ class PassthroughAdapter(BackendAdapter):
                 conn.close()
                 if not reused or fresh:
                     raise
-                # Повтор допустим только при CannotSendRequest: запрос ещё не отправлен. BrokenPipe/ConnectionReset пробрасываются в 502 — байты могли уже уйти.
                 return self._open(
                     path,
                     raw_body,
@@ -1660,7 +1568,18 @@ class PassthroughAdapter(BackendAdapter):
         sink.start(status, headers)
         sink.write(body)
 
-    def _response_headers(self, resp: http.client.HTTPResponse) -> list[tuple[str, str]]:
+    def _fail_io(self, sink: ResponseSink, is_timeout: bool) -> bool:
+        if is_timeout:
+            self._fail(
+                sink, 504, "upstream_timeout", "upstream did not respond in time"
+            )
+        else:
+            self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
+        return False
+
+    def _response_headers(
+        self, resp: http.client.HTTPResponse
+    ) -> list[tuple[str, str]]:
         return [(k, v) for k, v in resp.getheaders() if k.lower() not in _RESPONSE_DROP]
 
     def _read_presend_body(self, resp: http.client.HTTPResponse) -> bytes:
@@ -1675,24 +1594,38 @@ class PassthroughAdapter(BackendAdapter):
         request: Mapping[str, Any],
         sink: ResponseSink,
         deadline: float | None = None,
-        *,
-        on_timeout: Callable[[], None] | None = None,
-        window: LivenessWindow | None = None,
-        slide: SlidingDeadline | None = None,
+        **kw: Any,
     ) -> bool:
+        on_timeout, window, slide = (
+            kw.get("on_timeout"),
+            kw.get("window"),
+            kw.get("slide"),
+        )
+        headers, reopen = kw.get("headers"), kw.get("reopen")
         content_type = (resp.getheader("Content-Type") or "").lower()
-        encoded = (
-            resp.getheader("Content-Encoding") or "identity"
-        ).lower() != "identity"
+        ce = (resp.getheader("Content-Encoding") or "identity").lower()
+        encoded = ce != "identity"
         sanitize = self._sanitize_enabled()
         schemas = build_tool_schemas(request.get("tools")) if sanitize else None
         sse = resp.status == 200 and "text/event-stream" in content_type
         agg = window if sse and window and window.internal_stream else None
         if sse and agg is None:
-            return self._relay_stream(resp, schemas, sink, sanitize, slide or deadline, on_timeout, window)
+            return self._relay_stream(
+                resp, schemas, sink, sanitize, slide or deadline, on_timeout, window
+            )
+
+        def _reopen() -> http.client.HTTPResponse:
+            nonlocal resp
+            assert reopen is not None
+            resp = reopen()
+            return resp
+
         try:
             if agg is not None:
-                body = self._aggregate_sse(resp, agg)
+                ro_cb = _reopen if reopen is not None else None
+                body = self._aggregate_sse(
+                    resp, agg, headers=headers, reopen=ro_cb, deadline=deadline
+                )
                 content_type = "application/json"
             else:
                 body = _read_bounded(resp, self.limits.max_body_bytes)
@@ -1702,44 +1635,110 @@ class PassthroughAdapter(BackendAdapter):
             self._fail(sink, exc.status, exc.code, exc.message)
             return False
         except UpstreamBodyTooLarge:
-            self._fail(
-                sink,
-                502,
-                "upstream_response_too_large",
-                "upstream response exceeds the bridge limit",
+            msg = "upstream response exceeds the bridge limit"
+            self._fail(sink, 502, "upstream_response_too_large", msg)
+            return False
+        except (PreSendTransientError, OSError, http.client.HTTPException) as exc:
+            is_to = (
+                isinstance(exc, socket.timeout)
+                or getattr(exc, "status_code", 0) == 504
+                or isinstance(getattr(exc, "__cause__", None), TimeoutError)
+                or (deadline is not None and time.monotonic() >= deadline)
+                or (window is not None and window.expired())
             )
-            return False
-        except socket.timeout:
-            self._fail(
-                sink, 504, "upstream_timeout", "upstream did not respond in time"
-            )
-            return False
-        except (OSError, http.client.HTTPException):
-            if deadline is not None and time.monotonic() >= deadline:
-                self._fail(
-                    sink, 504, "upstream_timeout", "upstream did not respond in time"
-                )
-            else:
-                self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
-            return False
+            return self._fail_io(sink, is_to)
         if sanitize and resp.status == 200 and "json" in content_type and not encoded:
             body = sanitize_completion_body(body, schemas, self.limits)
-        headers = self._response_headers(resp) + [("Content-Length", str(len(body)))]
+        out_hdrs = self._response_headers(resp) + [("Content-Length", str(len(body)))]
         if agg is not None:
-            headers = [h for h in headers if h[0].lower() != "content-type"]
-            headers.append(("Content-Type", "application/json; charset=utf-8"))
-        sink.start(resp.status, headers)
+            out_hdrs = [h for h in out_hdrs if h[0].lower() != "content-type"]
+            out_hdrs.append(("Content-Type", "application/json; charset=utf-8"))
+        sink.start(resp.status, out_hdrs)
         sink.write(body)
         return True
 
-    def _aggregate_sse(self, resp: http.client.HTTPResponse, window: LivenessWindow) -> bytes:
+    def _get_retry_bulkhead(self) -> NonstreamRetryBulkhead:
+        raw = os.environ.get("BRIDGE_NONSTREAM_RETRY_MAX_INFLIGHT")
+        if raw != self._retry_bulkhead_env:
+            self._retry_bulkhead = NonstreamRetryBulkhead.from_env()
+            self._retry_bulkhead_env = raw
+        return self._retry_bulkhead
+
+    def _read_agg_once(
+        self,
+        resp: http.client.HTTPResponse,
+        window: LivenessWindow,
+        sig_box: list[int],
+    ) -> bytes:
         lim = self.limits
-        reader = _TimedSseReader(resp.readline, lambda _f: None, lim, math.inf, window, True)
+
+        def on_sig(kind: str, keys: tuple[str, ...] = ()) -> None:
+            if kind == SIGNAL_S:
+                sig_box[0] += 1
+            window.record_signal(kind, keys)
+
+        reader = _TimedSseReader(
+            resp.readline, lambda _f: None, lim, math.inf, window, True
+        )
         try:
             events = iter_sse_events(reader.readline, lim.max_body_bytes)
-            return aggregate_events(events, window.record_signal, lim.max_body_bytes, window.expired)
+            return aggregate_events(events, on_sig, lim.max_body_bytes, window.expired)
         finally:
             reader.close()
+
+    def _retry_runtime(
+        self,
+        error: NonstreamError,
+        window: LivenessWindow,
+        reopen: Any,
+        deadline: float | None,
+    ) -> RetryRuntime:
+        return RetryRuntime(
+            error=error,
+            window=window,
+            reopen=reopen if callable(reopen) else None,
+            deadline=deadline,
+            poll_interval_s=self.limits.poll_interval_s,
+            bulkhead=self._get_retry_bulkhead(),
+            read_once=lambda retry_resp: self._read_agg_once(retry_resp, window, [0]),
+        )
+
+    def _aggregate_sse(
+        self,
+        resp: http.client.HTTPResponse,
+        window: LivenessWindow,
+        **kw: Any,
+    ) -> bytes:
+        headers, reopen, deadline = (
+            kw.get("headers"),
+            kw.get("reopen"),
+            kw.get("deadline"),
+        )
+        st = getattr(window, "_state", None)
+        has_s0 = getattr(st, "first_s_at", None) is not None
+        win_s0 = int(getattr(window, "s_count", 0)) or (1 if has_s0 else 0)
+        sig_box = [0]
+        try:
+            return self._read_agg_once(resp, window, sig_box)
+        except NonstreamError as exc:
+            pol = NonstreamRetryPolicy.from_env()
+            sess = str(getattr(self.capabilities, "sessions", SESSIONS_NONE))
+            ok_guard = should_retry_incomplete_nonstream(
+                internal_stream=bool(window.internal_stream),
+                aggregate_signals=sig_box[0],
+                window_signals=win_s0 + sig_box[0],
+                sessions=sess,
+                headers=headers or {},
+            )
+            runtime = self._retry_runtime(exc, window, reopen, deadline)
+            result = retry_incomplete_once(
+                runtime,
+                policy_enabled=pol.max_retries >= 1,
+                request_eligible=ok_guard,
+            )
+            if result is None:
+                raise
+            return result
 
     def _relay_stream(
         self,
@@ -1751,8 +1750,6 @@ class PassthroughAdapter(BackendAdapter):
         on_timeout: Callable[[], None] | None = None,
         window: LivenessWindow | None = None,
     ) -> bool:
-        # Выбор доверия фиксируется до sink.start (первой записи клиенту).
-        # Маркер допустим только от настроенного аутентифицированного loopback peer.
         flag = getattr(self.host, "is_trusted_tool_streaming_enabled", None)
         trusted = (
             sanitize
@@ -1763,31 +1760,30 @@ class PassthroughAdapter(BackendAdapter):
             and flag() is True
             and resp.getheader("X-Bridge-Tool-Sanitized") == "1"
         )
-        headers = [
-            (k, v)
-            for k, v in self._response_headers(resp)
-            if k.lower() != "content-type"
-        ]
-        headers += [
+        sse_h = [
             ("Content-Type", "text/event-stream"),
             ("Cache-Control", "no-cache"),
             ("X-Accel-Buffering", "no"),
         ]
+        headers = [
+            (k, v)
+            for k, v in self._response_headers(resp)
+            if k.lower() != "content-type"
+        ] + sse_h
         outcome = StreamOutcome(committed=True)
-        sink.start(200, headers)  # Заголовки тоже фиксируют ответ; повтор уже запрещён.
+        sink.start(200, headers)
         try:
-            outcome = relay_sse(
-                resp.readline,
-                sink.write,
-                tool_schemas=schemas,
-                limits=self.limits,
-                process=self.process_budget,
-                sanitize=sanitize,
-                trusted_tools=trusted,
-                state=outcome,
-                deadline=deadline,
-                window=window,
-            )
+            r_kw: dict[str, Any] = {
+                "tool_schemas": schemas,
+                "limits": self.limits,
+                "process": self.process_budget,
+                "sanitize": sanitize,
+                "trusted_tools": trusted,
+                "state": outcome,
+                "deadline": deadline,
+                "window": window,
+            }
+            outcome = relay_sse(resp.readline, sink.write, **r_kw)
         except (socket.timeout, OSError, http.client.HTTPException) as exc:
             if (
                 isinstance(exc, (TimeoutError, socket.timeout))
@@ -1799,26 +1795,24 @@ class PassthroughAdapter(BackendAdapter):
             if unfinished_set is not None and len(unfinished_set) == 0:
                 sink.write(b"data: [DONE]\n\n")
                 return False
-
             unfinished = sorted(unfinished_set) if unfinished_set is not None else [0]
-            sink.write(
-                format_stream_error_sse(
-                    message="upstream stream failed",
-                    code="upstream_stream_error",
-                    model=str(last_chunk.get("model") or getattr(self, "id", "") or ""),
-                    completion_id=last_chunk.get("id"),
-                    created=last_chunk.get("created"),
-                    choice_indices=unfinished,
-                ).encode("utf-8")
-            )
+            mdl = str(last_chunk.get("model") or getattr(self, "id", "") or "")
+            e_kw: dict[str, Any] = {
+                "message": "upstream stream failed",
+                "code": "upstream_stream_error",
+                "model": mdl,
+                "completion_id": last_chunk.get("id"),
+                "created": last_chunk.get("created"),
+                "choice_indices": unfinished,
+            }
+            sink.write(format_stream_error_sse(**e_kw).encode("utf-8"))
             return False
         if outcome.incomplete or outcome.overflow:
-            self._log(
-                f"passthrough stream incomplete={outcome.incomplete} overflow={outcome.overflow}"
-            )
-        return (
-            outcome.reader_stopped
-            and not outcome.incomplete
-            and not outcome.overflow
-            and not outcome.repetition_loop
+            inc, ovf = outcome.incomplete, outcome.overflow
+            self._log(f"passthrough stream incomplete={inc} overflow={ovf}")
+        return not (
+            not outcome.reader_stopped
+            or outcome.incomplete
+            or outcome.overflow
+            or outcome.repetition_loop
         )

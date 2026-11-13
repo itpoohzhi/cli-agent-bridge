@@ -18,6 +18,14 @@ import uuid
 from dataclasses import replace
 from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
+from core.prompt_prefix_stability import (
+    PrefixStabilityConfig as PrefixStabilityConfig,
+    _render_message as _render_stable_message,
+    _render_tools_section,
+    assemble_prompt_blocks,
+    compute_tools_budget_overhead as compute_tools_budget_overhead,
+    escape_role_delimiters as escape_role_delimiters,
+)
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
 
 logger = logging.getLogger(__name__)
@@ -124,7 +132,12 @@ def _render_tool_call(item: Any) -> str:
 
 def _tool_choice_none(tool_choice: Any) -> bool:
     """tool_choice:"none" — инструменты не предлагаем вовсе."""
-    return isinstance(tool_choice, str) and tool_choice.strip().lower() == "none"
+    if isinstance(tool_choice, str):
+        return tool_choice.strip().lower() == "none"
+    return (
+        isinstance(tool_choice, dict)
+        and str(tool_choice.get("type") or "").lower() == "none"
+    )
 
 
 def _tool_choice_name(tool_choice: Any) -> str:
@@ -140,67 +153,22 @@ def _tool_choice_name(tool_choice: Any) -> str:
     return str(name) if name else ""
 
 
-def _tools_section(tools: list, tool_choice: Any, has_attachments: bool = False) -> str:
+def _tools_section(
+    tools: list, tool_choice: Any = None, has_attachments: bool = False
+) -> str:
     """Английская секция протокола и схем инструментов для промпта."""
-    lines = [
-        "[system]",
-        "# Tool calling protocol",
-        "You may call the external tools listed below.",
-        "When you need a tool, output ONLY blocks exactly in this form:",
-        f'{TOOL_CALL_OPEN}{{"name": "<tool_name>", "arguments": {{<json>}}}}{TOOL_CALL_CLOSE}',
-        "You may output several such blocks in a row. Do not narrate around them.",
-        "Tool results arrive later as lines like [tool result <id>] with the result text.",
-        "If no tool is needed, reply normally in plain text.",
-        "Never attempt to use built-in tools; the only tools available are the ones listed here.",
-    ]
-    if has_attachments:
-        lines[-1] += ", except Read on the attachment files listed under [attachments]."
-    if tool_choice == "required":
-        lines.append("You MUST call at least one tool now.")
-    else:
-        forced = _tool_choice_name(tool_choice)
-        if forced:
-            lines.append(f'You MUST call the tool "{forced}" now.')
-    lines.append("")
-    lines.append("Available tools:")
-    for item in tools:
-        fn = item.get("function") if isinstance(item.get("function"), dict) else item
-        if not isinstance(fn, dict):
-            continue
-        name = str(fn.get("name") or "")
-        desc = str(fn.get("description") or "")
-        params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
-        lines.append(f"- {name}: {desc}")
-        lines.append("  parameters: " + json.dumps(params, ensure_ascii=False))
-    return "\n".join(lines)
+    return _render_tools_section(tools, tool_choice, has_attachments)
 
 
-def _render_message(msg: Any, counter: list) -> str:
+def _render_message(msg: Any, counter: list | None = None) -> str:
     """Одно сообщение истории -> текстовый блок (с рендером tool-вызовов/результатов)."""
-    if not isinstance(msg, dict):
-        return ""
-    role = str(msg.get("role") or "user")
-    if role == "tool":
-        call_id = str(msg.get("tool_call_id") or msg.get("id") or "")
-        name = str(msg.get("name") or "")
-        text = _render_content(msg.get("content"), counter)
-        header = f"[tool result {call_id}]"
-        if name:
-            header += f" ({name})"
-        return f"{header}\n{text}" if text.strip() else header
-    text = _render_content(msg.get("content"), counter)
-    if role == "assistant":
-        parts = []
-        if text.strip():
-            parts.append(text)
-        calls = msg.get("tool_calls")
-        if isinstance(calls, list):
-            parts.extend(_render_tool_call(tc) for tc in calls)
-        body = "\n".join(p for p in parts if p)
-        return f"[assistant]\n{body}" if body.strip() else ""
-    if text.strip():
-        return f"[{role}]\n{text}"
-    return ""
+    cfg = PrefixStabilityConfig.from_env()
+    return _render_stable_message(
+        msg,
+        counter if counter is not None else [0],
+        escape_roles=cfg.enabled,
+        prune_marker=cfg.prune_marker,
+    )[1]
 
 
 def _attachments_section(images: list) -> str:
@@ -236,20 +204,21 @@ def _messages_to_prompt(
     При наличии изображений в конец добавляется секция [attachments], а строка
     протокола инструментов получает исключение для Read (C-09).
     """
-    tools = tools or []
-    counter = [0]
-    blocks = []
-    for msg in messages:
-        rendered = _render_message(msg, counter)
-        if rendered:
-            blocks.append(rendered)
-    head = []
-    if tools and not _tool_choice_none(tool_choice):
-        head.append(_tools_section(tools, tool_choice, bool(images)))
-    text = "\n\n".join(head + blocks).strip() or "Reply with exactly: PONG"
-    if images:
-        text = text + "\n\n" + _attachments_section(images)
-    return text
+    cfg = PrefixStabilityConfig.from_env()
+    t_sec = (
+        _tools_section(tools, tool_choice, bool(images))
+        if tools and not _tool_choice_none(tool_choice)
+        else ""
+    )
+    text = assemble_prompt_blocks(
+        messages,
+        tools=None,
+        tool_choice=tool_choice,
+        images=None,
+        config=cfg,
+        tools_section=t_sec,
+    )
+    return f"{text}\n\n{_attachments_section(images)}" if images else text
 
 
 def _strip_code_fence(text: str) -> str:
@@ -267,7 +236,10 @@ _MAX_EXTRA_BRACES = 16  # предел лишних `}` после полног�
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 _EXEC_SYNONYMS = frozenset({"execute", "run_command", "shell", "terminal"})
 
-def _canonical_tool_invocation(name: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+
+def _canonical_tool_invocation(
+    name: str, arguments: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
     """Приводит вызов инструмента к каноническому имени и схеме аргументов.
 
     Единая точка нормализации для JSON (_parse_tool_call_block) и XML (_parse_execute_block, _drain_invoke).
@@ -292,7 +264,6 @@ def _canonical_tool_invocation(name: str, arguments: dict[str, Any]) -> tuple[st
         for meta in ("summary", "toolSummary", "description"):
             args.pop(meta, None)
     return clean_name, args
-
 
 
 def _recover_trailing_braces(text: str) -> dict | None:
@@ -834,15 +805,23 @@ def _nested_invoke_name(inner: str) -> str:
     return _invoke_tag_name(match.group(0))
 
 
-_COMMAND_TAG_RE = re.compile(r"<\s*command(?:\s+[^>]*)?\s*>(.*?)</\s*command\s*>", re.DOTALL | re.IGNORECASE)
+_COMMAND_TAG_RE = re.compile(
+    r"<\s*command(?:\s+[^>]*)?\s*>(.*?)</\s*command\s*>", re.DOTALL | re.IGNORECASE
+)
 _COMMAND_OPEN_RE = re.compile(r"<\s*command(?=[\s>])", re.IGNORECASE)
 _COMMAND_CLOSE_RE = re.compile(r"</\s*command\s*>", re.IGNORECASE)
-_SUMMARY_TAG_RE = re.compile(r"<\s*summary(?:\s+[^>]*)?\s*>(.*?)</\s*summary\s*>", re.DOTALL | re.IGNORECASE)
-_EXECUTE_OPEN_RE = re.compile(r"<execute(?::([A-Za-z0-9_.\-]+)|(\s[^>]*))?>", re.IGNORECASE)
+_SUMMARY_TAG_RE = re.compile(
+    r"<\s*summary(?:\s+[^>]*)?\s*>(.*?)</\s*summary\s*>", re.DOTALL | re.IGNORECASE
+)
+_EXECUTE_OPEN_RE = re.compile(
+    r"<execute(?::([A-Za-z0-9_.\-]+)|(\s[^>]*))?>", re.IGNORECASE
+)
 _EXECUTE_CLOSE_RE = re.compile(r"</execute\s*>", re.IGNORECASE)
 
 
-_SUMMARY_TAG_BOUNDARY_RE = re.compile(r"<\s*(/)?\s*summary(?:\s+[^>]*)?\s*>", re.IGNORECASE)
+_SUMMARY_TAG_BOUNDARY_RE = re.compile(
+    r"<\s*(/)?\s*summary(?:\s+[^>]*)?\s*>", re.IGNORECASE
+)
 
 
 def _strip_summary_blocks(text: str) -> str:
@@ -852,7 +831,7 @@ def _strip_summary_blocks(text: str) -> str:
     pos = 0
     for m in _SUMMARY_TAG_BOUNDARY_RE.finditer(text):
         if depth == 0:
-            res.append(text[pos:m.start()])
+            res.append(text[pos : m.start()])
         is_close = bool(m.group(1))
         if is_close:
             if depth > 0:
@@ -1098,9 +1077,13 @@ class ToolCallParser:
             self._deferred_parts.clear()
             self._deferred_chars = 0
         if self._active is not None:
-            if self.strict_live:
-                raise LiveParserError("unclosed tool_call block")
-            self._emit(self._active[0] + "".join(self._parts) + self._close_tail)
+            # Пустой открывающий тег в конце хода (без тела) — не ошибка: отбрасываем,
+            # иначе strict_live роняет ход и теряет уже распознанные вызовы.
+            inner_so_far = "".join(self._parts)
+            if inner_so_far.strip():
+                if self.strict_live:
+                    raise LiveParserError("unclosed tool_call block")
+                self._emit(self._active[0] + inner_so_far + self._close_tail)
             self._active = None
             self._parts.clear()
             self._close_tail = ""
