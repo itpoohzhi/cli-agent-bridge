@@ -71,7 +71,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         # Профиль OFF скрывает базовый gpt-6.1-sol; при ON он маршрутизируется в codex.
         self.assertEqual("gpt-6.1-sol" in published, on)
         self.assertEqual(("droid" in [a.id for a in registry.adapters()]), on)
-        self.assertEqual(len(catalog["aliases"]), 31 if on else 0)
+        self.assertEqual(len(catalog["aliases"]), 35 if on else 0)
         backend = catalog["models"]["claude-sonnet-5-5"]["backend"]
         self.assertEqual(backend, "claude-p")
         self.assertEqual("gpt-6.1-sol" in catalog["models"], on)

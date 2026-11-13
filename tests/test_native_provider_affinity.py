@@ -116,7 +116,7 @@ def _target_aliases(model, efforts):
 
 
 def test_explicit_effort_alias_contract():
-    """Все 31 effort-алиаса проверяются по точной форме с учётом Carbon и Argon."""
+    """Все 35 effort-алиасов проверяются по точной форме с учётом Hydrogen, Carbon и Argon."""
     expected = {
         **_backend_aliases("gemini-3.8-flash-droid", "droid", ("low", "medium", "high")),
         **_backend_aliases("gpt-6.1-sol-droid", "droid", ("low", "medium", "high", "max")),
@@ -129,6 +129,7 @@ def test_explicit_effort_alias_contract():
         **_target_aliases("gemini-4-argon", ("low", "medium")),
         **_backend_aliases("gemini-4-argon", "agy", ("high",)),
         **_target_aliases("gemini-4-carbon", ("low", "medium", "high")),
+        **_target_aliases("gemini-4-hydrogen", ("low", "medium", "high", "xhigh")),
     }
     assert _load_fleet().get("aliases", {}) == expected
 
@@ -197,15 +198,15 @@ def test_passthrough_target_model_rewriting():
 
 
 def test_exact_effort_alias_count():
-    """Проверяет ровно 31 effort-алиас, включая три Gemini 4 Carbon."""
+    """Проверяет ровно 35 effort-алиасов, включая три Gemini 4 Carbon и четыре Gemini 4 Hydrogen."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
-    assert len(aliases) == 31, f"Expected 31 total aliases in fleet, got {len(aliases)}"
+    assert len(aliases) == 35, f"Expected 35 total aliases in fleet, got {len(aliases)}"
     target_aliases = [
         k for k in aliases
-        if any(m in k for m in ("gemini-3.8-flash", "gemini-4-carbon", "gpt-6.1-sol", "claude-sonnet-5-5"))
+        if any(m in k for m in ("gemini-3.8-flash", "gemini-4-carbon", "gemini-4-hydrogen", "gpt-6.1-sol", "claude-sonnet-5-5"))
     ]
-    assert len(target_aliases) == 25, f"Expected 25 target aliases including Carbon, got {len(target_aliases)}"
+    assert len(target_aliases) == 29, f"Expected 29 target aliases including Carbon and Hydrogen, got {len(target_aliases)}"
 
 
 def test_manifest_priority_values():

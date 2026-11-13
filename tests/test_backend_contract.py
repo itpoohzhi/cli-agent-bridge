@@ -218,6 +218,7 @@ class TestRealAdapters(unittest.TestCase):
             "claude-haiku-5-5": "opencode-go-claude",
             "gemini-4-argon": "agy",
             "gemini-4-carbon": "agy",
+            "gemini-4-hydrogen": "agy",
             "deepseek-v4.1-flash-free": "opencode-zen",
             "flint-40b-free": "opencode-zen",
             "mimo-v2.6-flash-free": "opencode-zen",

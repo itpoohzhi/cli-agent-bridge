@@ -889,10 +889,11 @@ TOOL_NAME_ALLOWLIST = frozenset(
 )
 _SAFE_MCP_TOOL_RE = re.compile(r"mcp_[a-z0-9_-]{1,32}_[a-z0-9_]{1,32}\Z")
 
-# Effort-оси. `--effort` у agy принимает low|medium|high; id модели — база без уровня,
+# Effort-оси. `--effort` у agy принимает уровни модели из fleet.json (включая xhigh для
+# gemini-4-hydrogen); id модели — база без уровня,
 # уровень всегда уходит отдельным флагом (см. модуль-docstring).
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
-CLI_EFFORT_LEVELS = ("low", "medium", "high")
+CLI_EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
 # Доставка изображений агенту: проверенные файлы в WORKSPACE/img-<uuid>, каталог отдаётся
 # через `--add-dir`, модель читает их нативным view_file. Прямой image_url в NDJSON
