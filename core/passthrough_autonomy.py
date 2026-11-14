@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from core.effort_policy import ModelEffortSpec, resolve_passthrough_effort
+from core.effortless_policy import is_effortless, strip_effortless_effort
 from core.runtime_env import DynamicFlagSource
 
 FLAG_STRIP_PASSTHROUGH_AUTONOMY = "BRIDGE_STRIP_PASSTHROUGH_AUTONOMY_ENABLED"
@@ -49,17 +50,21 @@ def prepare_passthrough_request(
     alias_effort = positional[1] if len(positional) > 1 else options.get("alias_effort")
     effort_on = bool(positional[2] if len(positional) > 2 else options.get("effort_on", False))
     has_upstream = bool(resolve_target_model(model, ""))
+    declared = model.get("efforts") if isinstance(model, dict) else None
+    # При выключенном флаге спека нужна только модели без оси effort.
+    build_spec = effort_on or is_effortless(declared)
+    catalog_spec = ModelEffortSpec.from_catalog_entry(model) if build_spec else ModelEffortSpec()
     pt_effort = resolve_passthrough_effort(
         req.get("reasoning_effort"),
         alias_effort if isinstance(alias_effort, str) else None,
-        ModelEffortSpec.from_catalog_entry(model) if effort_on else ModelEffortSpec(),
+        catalog_spec if effort_on else ModelEffortSpec(),
         enabled=effort_on,
     )
     if has_upstream or alias or pt_effort.apply:
         req = {**req, "model": resolve_target_model(model, model_id)}
         if pt_effort.apply:
             req["reasoning_effort"] = pt_effort.value
-    return req, pt_effort
+    return strip_effortless_effort(req, catalog_spec, pt_effort)
 
 
 def strip_passthrough_request(raw: bytes, req: dict) -> tuple[bytes, dict]:

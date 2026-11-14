@@ -217,6 +217,7 @@ from core.effort_policy import (  # noqa: E402
     catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields,
 )
+from core.effortless_policy import card_effort_fields, effortless_specs  # noqa: E402
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
@@ -717,15 +718,14 @@ def _effort_specs() -> dict[str, ModelEffortSpec]:
 
 def _advertise_efforts(card: dict[str, Any], mid: str, specs: dict[str, ModelEffortSpec]) -> None:
     if fields := resolve_model_effort_fields(mid, specs):
-        card["supported_reasoning_efforts"] = list(fields.supported_efforts)
-        card["default_reasoning_effort"] = fields.default_effort
+        card.update(card_effort_fields(fields))
 
 
 def _build_models_list(
     owner_tuple: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     published = _get_published_models()
-    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else {}
+    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else effortless_specs(_effort_specs())
     order = []
     if MODEL_ID in published:
         order.append(MODEL_ID)
