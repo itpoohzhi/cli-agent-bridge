@@ -21,7 +21,8 @@ import server  # noqa: E402
 MODEL = "gemini-4-hydrogen"
 EFFORTS = ["low", "medium", "high", "xhigh"]
 ALIASES = tuple(f"{MODEL}-{effort}" for effort in EFFORTS)
-SIBLINGS = ("gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash")
+CARBON = "gemini-4-carbon"
+SIBLINGS = ("gemini-4-argon", "gemini-3.8-flash")
 SIBLING_EFFORTS = ["low", "medium", "high"]
 AGY_BINARY_SHA256 = "e872cc54b5381f401c798fc947937a0a930876b849bc3fee654996ba4ab236a8"
 _BRIDGE_PY = ROOT / "bridges" / "agy-bridge" / "server.py"
@@ -109,12 +110,12 @@ def test_model_modalities_helper_contract() -> None:
     ]
     assert server._model_modalities({"input": ["text"]}, "x-text-only") == ["text"]
     # union: id из MULTIMODAL_MODELS добавляет image, даже если `input` записи его не содержит.
-    assert server._model_modalities({"input": ["text"]}, "gemini-4-carbon") == ["text", "image"]
+    assert server._model_modalities({"input": ["text"]}, CARBON) == ["text", "image"]
 
 
-GOOGLE_MODELS = (MODEL, *SIBLINGS)
+GOOGLE_MODELS = (MODEL, CARBON, *SIBLINGS)
 FLAG = "BRIDGE_EFFORT_CATALOG_ENABLED"
-LEGACY_EFFORTS = ["low", "medium", "high"]
+LEGACY_EFFORTS = SIBLING_EFFORTS
 
 
 def test_hub_modalities_image_for_all_four_google_models_in_sync_with_bridge() -> None:
@@ -168,6 +169,8 @@ def test_effort_catalog_flag_on_advertises_xhigh_for_hydrogen_only(
     cards = {card["id"]: card for card in server._build_models_list()}
     assert cards[MODEL]["supported_reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
     assert cards[MODEL]["default_reasoning_effort"] == "high"
+    assert cards[CARBON]["supported_reasoning_efforts"] == ["off"]
+    assert cards[CARBON]["default_reasoning_effort"] == "off"
     for model_id in SIBLINGS:
         assert "xhigh" not in cards[model_id]["supported_reasoning_efforts"], model_id
 
@@ -195,6 +198,8 @@ def test_agy_bridge_fleet_registers_hydrogen_with_confirmed_images() -> None:
 
 def test_agy_bridge_siblings_keep_three_level_ladder() -> None:
     fleet = _load_json(ROOT / "bridges" / "agy-bridge" / "fleet.json")
+    assert _model(fleet, CARBON)["efforts"] == ["off"]
+    assert _model(fleet, CARBON)["default_effort"] == "off"
     for model_id in SIBLINGS:
         assert _model(fleet, model_id)["efforts"] == SIBLING_EFFORTS, model_id
 
@@ -207,9 +212,10 @@ def bridge_module() -> Any:
 def test_agy_bridge_cli_effort_levels_include_xhigh(bridge_module: Any) -> None:
     assert "xhigh" in bridge_module.CLI_EFFORT_LEVELS
     assert set(SIBLING_EFFORTS) <= set(bridge_module.CLI_EFFORT_LEVELS)
-    for model_id in (MODEL, *SIBLINGS):
+    for model_id in GOOGLE_MODELS:
         assert model_id in bridge_module.FLEET["models"], model_id
     assert bridge_module.FLEET["models"][MODEL]["efforts"] == EFFORTS
+    assert bridge_module.FLEET["models"][CARBON]["efforts"] == ["off"]
     for model_id in SIBLINGS:
         assert bridge_module.FLEET["models"][model_id]["efforts"] == SIBLING_EFFORTS
 
@@ -253,21 +259,15 @@ def _body(model: str, effort: str) -> dict[str, Any]:
     }
 
 
-def test_per_model_effort_check_rejects_xhigh_on_siblings_only(
+def test_xhigh_is_accepted_by_effort_check_for_hydrogen_and_carbon(
     bridge_module: Any,
 ) -> None:
     http_bridge = _Http(bridge_module)
     try:
-        for model_id in SIBLINGS:
+        for model_id in (MODEL, CARBON):  # xhigh принят: у Hydrogen в лестнице, у Carbon клампится в off
             code, payload = http_bridge.post(_body(model_id, "xhigh"))
-            assert code == 400, model_id
-            assert payload["error"]["type"] == "unsupported_reasoning_effort", model_id
-        code, payload = http_bridge.post(_body(MODEL, "xhigh"))
-        assert code == 400
-        assert payload["error"]["type"] == "unsupported_parameter"
-        code, payload = http_bridge.post(_body(MODEL, "max"))
-        assert code == 400
-        assert payload["error"]["type"] == "unsupported_reasoning_effort"
+            assert code == 400
+            assert payload["error"]["type"] == "unsupported_parameter", model_id
     finally:
         http_bridge.close()
 

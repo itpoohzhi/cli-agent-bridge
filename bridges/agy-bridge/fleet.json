@@ -88,11 +88,9 @@
       "name": "Gemini 4 Carbon (AGY)",
       "enabled": true,
       "efforts": [
-        "low",
-        "medium",
-        "high"
+        "off"
       ],
-      "default_effort": "high",
+      "default_effort": "off",
       "context_window": 1048576,
       "max_tokens": 65536,
       "input": [
