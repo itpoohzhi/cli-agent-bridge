@@ -110,9 +110,10 @@ class BridgeUnitTests(unittest.TestCase):
         turn._call({"id": "x", "name": "  ", "arguments": {}})
         self.assertEqual((delivered, turn.calls), ([], []))
         self.assertEqual(turn.error_body()["type"], "tool_call_parse_error")
+        # состояние ошибки монотонно: валидный вызов после безымянного не публикуется
         turn._call({"id": "y", "name": "read", "arguments": {"p": 1}})
-        self.assertEqual(len(delivered), 1)
-        self.assertEqual(delivered[0][0]["function"]["name"], "read")
+        self.assertEqual((delivered, turn.calls, turn.ok), ([], [], False))
+        self.assertEqual(turn.error_body()["type"], "tool_call_parse_error")
 
     def test_protocols_respect_attachments(self) -> None:
         tools = [{"type": "function", "function": {"name": "t", "description": "d", "parameters": {"type": "object"}}}]

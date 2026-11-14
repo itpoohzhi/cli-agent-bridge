@@ -4,7 +4,13 @@
 `AGY_FAST_FAIL_ON_CAPACITY_503` (kill-switch, `1`), `AGY_CAPACITY_MARKERS` (маркеры через запятую
 вместо встроенных), `AGY_CAPACITY_MAX_LINE_CHARS` (анализируемая длина строки, 8192),
 `AGY_CAPACITY_REDACT_WINDOW_CHARS` (окно маскирования секретов до усечения, 4096),
+`AGY_CAPACITY_REDACT_MARGIN_CHARS` (минимальный запас окна поверх длины сводки, 512),
+`AGY_CAPACITY_RAW_MAX_CHARS` (потолок сырого входа до нормализации, 32768; не меньше окна * 4),
 `AGY_CAPACITY_SUMMARY_MAX_CHARS` (длина сводки в очереди и теле 503, 200).
+
+Сводка строится конвейером `bound -> normalize -> redact -> clamp` в `summarize_capacity_text`:
+сырой вход ограничивается потолком, пробелы схлопываются, берётся окно маскирования,
+секреты маскируются и только затем результат усекается до длины сводки.
 """
 
 from __future__ import annotations
@@ -24,6 +30,11 @@ MAX_LINE_CHARS_ENV: Final[str] = "AGY_CAPACITY_MAX_LINE_CHARS"
 DEFAULT_MAX_LINE_CHARS: Final[int] = 8192
 REDACT_WINDOW_CHARS_ENV: Final[str] = "AGY_CAPACITY_REDACT_WINDOW_CHARS"
 DEFAULT_REDACT_WINDOW_CHARS: Final[int] = 4096
+REDACT_MARGIN_CHARS_ENV: Final[str] = "AGY_CAPACITY_REDACT_MARGIN_CHARS"
+DEFAULT_REDACT_MARGIN_CHARS: Final[int] = 512
+RAW_MAX_CHARS_ENV: Final[str] = "AGY_CAPACITY_RAW_MAX_CHARS"
+DEFAULT_RAW_MAX_CHARS: Final[int] = 32768
+_RAW_WINDOW_FACTOR: Final[int] = 4
 SUMMARY_MAX_CHARS_ENV: Final[str] = "AGY_CAPACITY_SUMMARY_MAX_CHARS"
 DEFAULT_SUMMARY_MAX_CHARS: Final[int] = 200
 _FALSE: Final[frozenset[str]] = frozenset(("0", "false", "no", "off"))
@@ -85,24 +96,37 @@ def summary_max_chars(env: Mapping[str, str] | None = None) -> int:
     return _positive_int_env(os.environ if env is None else env, SUMMARY_MAX_CHARS_ENV, DEFAULT_SUMMARY_MAX_CHARS)
 
 
+def redact_margin_chars(env: Mapping[str, str] | None = None) -> int:
+    """Минимальный запас окна маскирования поверх предела сводки."""
+    return _positive_int_env(os.environ if env is None else env, REDACT_MARGIN_CHARS_ENV, DEFAULT_REDACT_MARGIN_CHARS)
+
+
 def redact_window_chars(env: Mapping[str, str] | None = None) -> int:
-    """Окно входной строки, в котором ищутся секреты до усечения (не меньше предела сводки)."""
+    """Окно входной строки, в котором ищутся секреты до усечения (предел сводки + запас)."""
     source = os.environ if env is None else env
     window = _positive_int_env(source, REDACT_WINDOW_CHARS_ENV, DEFAULT_REDACT_WINDOW_CHARS)
-    return max(window, summary_max_chars(source))
+    return max(window, summary_max_chars(source) + redact_margin_chars(source))
+
+
+def raw_max_chars(env: Mapping[str, str] | None = None) -> int:
+    """Потолок сырого входа до схлопывания пробелов (не меньше окна маскирования * 4)."""
+    source = os.environ if env is None else env
+    raw = _positive_int_env(source, RAW_MAX_CHARS_ENV, DEFAULT_RAW_MAX_CHARS)
+    return max(raw, redact_window_chars(source) * _RAW_WINDOW_FACTOR)
 
 
 def summarize_capacity_text(text: object, redact: Callable[[str], str], env: Mapping[str, str] | None = None) -> str:
-    """Конвейер bound -> redact -> clamp: секрет, пересекающий предел сводки, маскируется целиком."""
+    """Конвейер bound -> normalize -> redact -> clamp: секрет на границе окна или сводки маскируется целиком."""
     source = os.environ if env is None else env
-    return redact(str(text or "")[: redact_window_chars(source)])[: summary_max_chars(source)]
+    # Пробелы схлопываются ДО среза окна: длинный пробельный префикс не должен резать токен на границе.
+    normalized = " ".join(str(text or "")[: raw_max_chars(source)].split())
+    return redact(normalized[: redact_window_chars(source)])[: summary_max_chars(source)]
 
 
 def capacity_error_body(detail: object = "") -> dict[str, object]:
     """Тело ошибки: HTTP 503, `type` — код причины."""
-    # Маскирование до усечения: обрезанный посередине токен уже не распознать.
     summary = summarize_capacity_text(
-        " ".join(str(detail or "")[: redact_window_chars()].split()),
+        detail,
         lambda s: mask_long_tokens(mask_credential_context(s), safe_tokens=safe_log_tokens()),
     )
     message = "upstream model has no capacity available"

@@ -5415,6 +5415,9 @@ class _ToolTurn:
             self.ok = False
 
     def _call(self, call: dict[str, Any]) -> None:
+        # Ошибка монотонна: после неё вызовы того же прохода `feed_text` не накапливаются и не публикуются.
+        if self.error:
+            return
         if len(self.calls) >= self._max_calls:
             raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
         entry: dict[str, object] = {
@@ -5432,6 +5435,7 @@ class _ToolTurn:
             # Отброшенный безымянный вызов (в т.ч. внутри `parallel`) не даёт молчаливый `stop`:
             # ход завершается tool_call_parse_error, неполный пакет не публикуется.
             self.error = self.error or "tool call without function name dropped"
+            self.ok = False
             return
         published = [
             dict(cast("dict[str, object]", item), index=len(self.calls) + offset)

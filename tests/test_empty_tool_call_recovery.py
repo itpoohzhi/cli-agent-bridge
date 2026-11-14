@@ -644,3 +644,92 @@ def test_passthrough_unnamed_error_frame_keeps_chunk_identity() -> None:
     _outcome, out = run_stream(events)
     errors = [p for p in payloads(out) if "error" in p]
     assert errors and errors[-1].get("id")
+
+
+# ---- Cycle 3 RW-002: экранированные кавычки в ветке bearer|basic -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("scheme", "secret"),
+    [("Bearer", "mySecret123"), ("Basic", "abc"), ("bearer", "short1")],
+)
+def test_json_escaped_bearer_basic_are_masked_without_breaking_json(scheme: str, secret: str) -> None:
+    once = json.dumps({"error": f'Authorization: {scheme} "{secret}"', "next": "ok"})
+    twice = json.dumps(once)
+    for payload in (once, twice):
+        out = mask_credential_context(payload)
+        assert secret not in out, out
+        assert '"next\\": \\"ok' in out or '"next": "ok"' in out, out
+    assert json.loads(mask_credential_context(once))["next"] == "ok"
+    assert json.loads(json.loads(mask_credential_context(twice)))["next"] == "ok"
+
+
+def test_escaped_value_ending_with_backslash_does_not_swallow_neighbour_field() -> None:
+    payload = json.dumps(json.dumps({"secret": "abc\\", "next": "ok"}))
+    out = mask_credential_context(payload)
+    assert "abc" not in out
+    assert json.loads(json.loads(out.replace("{***", '{\\"x\\": 1')))  # внешняя строка не нарушена
+    assert out.endswith('"next\\": \\"ok\\"}"'), out
+
+
+def test_triple_json_nested_bearer_is_masked_with_neighbours_intact() -> None:
+    payload = json.dumps(json.dumps(json.dumps({"error": 'Authorization: Bearer "mySecret123"', "n": 1})))
+    out = mask_credential_context(payload)
+    assert "mySecret123" not in out
+    assert json.loads(json.loads(json.loads(out))) == {"error": "Authorization: ***", "n": 1}
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        '\\"' * 20000,
+        "\\" * 40000,
+        '"' * 40000,
+        "Bearer " + '\\"' * 20000,
+        "api_key=" + "\\" * 40000 + '"',
+        'api_key=\\"' + "\\" * 40000,
+        'Authorization: Bearer \\"' + "\\\\" * 20000 + "x",
+        'secret: \\\\\\"' + 'a\\"' * 20000,
+    ],
+)
+def test_credential_masking_is_linear_on_backslash_quote_input(hostile: str) -> None:
+    import time
+
+    started = time.monotonic()
+    mask_credential_context(hostile)
+    assert time.monotonic() - started < 1.0
+
+
+# ---- Cycle 3 RW-003: монотонное состояние ошибки в _ToolTurn ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        '<tool_call>{"arguments": {"x": 1}}</tool_call><tool_call>{"name": "read", "arguments": {}}</tool_call>',
+        '<tool_call>{"name": "", "arguments": {}}</tool_call><tool_call>{"name": "read", "arguments": {}}</tool_call>',
+        '<tool_call>{"name": "parallel", "arguments": {"calls": [{"arguments": {}}]}}</tool_call>'
+        '<tool_call>{"name": "read", "arguments": {}}</tool_call>',
+    ],
+)
+def test_tool_turn_valid_call_after_unnamed_is_not_published(block: str) -> None:
+    srv = _agy_server()
+    published: list[object] = []
+    turn = srv._ToolTurn([], lambda _c: True, lambda _r: True, lambda calls: published.extend(calls) or True)  # pyright: ignore[reportAttributeAccessIssue]
+    turn.feed(block)
+    turn.finish()
+    assert published == [] and turn.calls == []
+    assert turn.error and turn.turn_complete()
+    assert turn.error_body()["type"] == "tool_call_parse_error"
+
+
+def test_tool_turn_call_after_unnamed_is_dropped_and_turn_is_poisoned() -> None:
+    srv = _agy_server()
+    published: list[object] = []
+    turn = srv._ToolTurn([], lambda _c: True, lambda _r: True, lambda calls: published.extend(calls) or True)  # pyright: ignore[reportAttributeAccessIssue]
+    turn._call({"id": "a", "name": "", "arguments": {}})
+    assert turn.error and turn.ok is False
+    turn._call({"id": "b", "name": "read", "arguments": {}})
+    turn._call({"id": "c", "name": "parallel", "arguments": {"calls": [{"name": "x", "arguments": {}}]}})
+    assert published == [] and turn.calls == []
+    assert turn.error_body()["type"] == "tool_call_parse_error"
