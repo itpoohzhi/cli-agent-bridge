@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "base_revision": "6160a9c3e25c8dba3042f7710089a5c1820f041d",
+  "files": [
+    {
+      "path": "core/tool_emulation.py",
+      "lines": 2217,
+      "sha256": "4105ed6ea153e31d86ecfdc4105cbfc7ad3ebaf6e8fb37176aeb87faf0e74d29"
+    },
+    {
+      "path": "bridges/claude-p-bridge/server.py",
+      "lines": 1069,
+      "sha256": "a887977cf77d845d186a98d8d750911063472f85d4a87275aba87f01bcafcc87"
+    },
+    {
+      "path": "adapters/passthrough_adapter.py",
+      "lines": 1818,
+      "sha256": "6f2b872bfdafd54d35163ae3c54f6aa763dfbb7888a3b15fe394e3e16fe8db02"
+    },
+    {
+      "path": "core/backend_adapter.py",
+      "lines": 1085,
+      "sha256": "9c39b0e6ff3e3c956c92347b307e49eee902e5fd52095f5725c17fa83a41a677"
+    },
+    {
+      "path": "server.py",
+      "lines": 8932,
+      "sha256": "c62ffb92a23579b45d7a28e76f3469257dbc3c5c922713009e1db19cce5a3e6a"
+    }
+  ]
+}
