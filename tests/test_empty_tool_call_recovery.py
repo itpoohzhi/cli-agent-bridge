@@ -345,6 +345,55 @@ def test_short_and_quoted_credentials_are_masked(line: str, secret: str) -> None
     assert secret not in out
 
 
+@pytest.mark.parametrize(
+    ("line", "secret"),
+    [
+        ("OPENAI_API_KEY=short_secret_123", "short_secret_123"),
+        ("ZAI_API_KEY=short123", "short123"),
+        ("KIMI_API_KEY=short123", "short123"),
+        ("ANTHROPIC_AUTH_TOKEN=short_tok", "short_tok"),
+        ("WEBHOOK_SECRET=sec123", "sec123"),
+        ("DB_PASSWORD=pw12345", "pw12345"),
+        ('{"openaiApiKey": "short_secret"}', "short_secret"),
+        ("{'app_secret': 'short123'}", "short123"),
+        ("x-api-key: short123", "short123"),
+        ('password="sec\\"ret123"', "ret123"),
+        ("password='sec\\'ret123'", "ret123"),
+        ('{"password": "sec\\"ret123"}', "ret123"),
+        ('{\\"api_key\\": \\"sec\\\\\\"ret123\\"}', "ret123"),
+        ('{\\"api_key\\": \\"short1\\", \\"x\\": 1}', "short1"),
+        ('Authorization: Bearer "short tok"', "tok"),
+        ("Authorization: Bearer 'shorttok'", "shorttok"),
+    ],
+)
+def test_prefixed_camel_and_escaped_credentials_are_masked(line: str, secret: str) -> None:
+    out = mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens())
+    assert secret not in out, out
+    assert capacity_error_body(f"503 UNAVAILABLE No capacity available {line}")["message"].count(secret) == 0
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "prompt_tokens=123 completion_tokens=45 total_tokens=168",
+        '{"usage": {"input_tokens": 5, "output_tokens": 7, "reasoning_tokens": 1, "cached_tokens": 2}}',
+        "cache_read_tokens=9 max_output_tokens=4096",
+        "reason=model_capacity_exhausted code=tool_call_parse_error",
+    ],
+)
+def test_token_counters_and_reason_codes_are_not_masked(line: str) -> None:
+    assert mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens()) == line
+
+
+def test_credential_masking_is_linear_on_hostile_input() -> None:
+    import time
+
+    hostile = "a-" * 4096 + "x" * 4096
+    started = time.monotonic()
+    mask_credential_context(hostile)
+    assert time.monotonic() - started < 1.0
+
+
 def test_credential_masking_keeps_reason_codes() -> None:
     out = mask_credential_context("reason=model_capacity_exhausted status=503 code=tool_call_parse_error")
     assert out == "reason=model_capacity_exhausted status=503 code=tool_call_parse_error"
@@ -382,3 +431,216 @@ def test_unrecovered_malformed_function_call_code_stays_agy_error() -> None:
     assert res.state == "agy_error" and res.rc != 0 and not res.self_healed
     assert res.reason != "graceful_partial_close"
     assert "MALFORMED_FUNCTION_CALL" in res.error
+
+
+# ---- Slice 2 RW-001/FU-006: bound -> redact -> clamp для capacity-строки -------------------
+
+_CAPACITY_HEAD = "503 UNAVAILABLE No capacity available "
+
+
+def _capacity_run(srv: object) -> object:
+    import queue
+    import threading
+
+    run = srv.Run.__new__(srv.Run)  # pyright: ignore[reportAttributeAccessIssue]
+    run.capacity_exhausted = ""
+    run.drain_closed = False
+    run._done_put = False
+    run._emit_lock = threading.Lock()
+    run.q = queue.Queue()
+    run.proc = type("P", (), {"pid": 0})()
+    return run
+
+
+def _line_with_secret_at(position: int, secret: str, tail: str = "") -> str:
+    filler = " " * (position - len(_CAPACITY_HEAD))
+    return _CAPACITY_HEAD + filler + secret + tail
+
+
+def _swallow_kill(srv: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(srv, "_kill_group", lambda _proc: None)
+
+
+@pytest.mark.parametrize("position", [100, 177, 185, 190, 199])
+@pytest.mark.parametrize(
+    ("secret", "leaks"),
+    [
+        ("ya29." + "A1b2C3d4E5f6G7h8I9j0" * 2, ("ya29", "A1b2C3d4")),
+        ("bridgekey-QWERTY-12345", ("bridgekey", "QWERTY")),
+        ('{"api_key": "short_secret_value_that_is_cut"}', ("short_secret", "api_key\": \"sh")),
+        ("sk-abcdef123456789012345", ("sk-abc",)),
+        ("Bearer shorttoken", ("shorttoken",)),
+    ],
+)
+def test_capacity_line_secret_across_clamp_boundary_is_masked(
+    monkeypatch: pytest.MonkeyPatch, position: int, secret: str, leaks: tuple[str, ...]
+) -> None:
+    srv = _agy_server()
+    _swallow_kill(srv, monkeypatch)
+    monkeypatch.setattr(srv, "AUTH_KEY", "bridgekey-QWERTY-12345")  # pyright: ignore[reportAttributeAccessIssue]
+    run = _capacity_run(srv)
+    run._note_capacity_line(_line_with_secret_at(position, secret, " tail " * 50))  # pyright: ignore[reportAttributeAccessIssue]
+    event = run.q.get_nowait()  # pyright: ignore[reportAttributeAccessIssue]
+    assert event[0] == "capacity_exhausted"
+    body = capacity_error_body(detail=event[1])
+    for text in (run.capacity_exhausted, event[1], str(body["message"])):  # pyright: ignore[reportAttributeAccessIssue]
+        assert len(text) <= 200 + len("upstream model has no capacity available: ")
+        for leak in leaks:
+            assert leak not in text, (leak, text)
+    assert body["type"] == CAPACITY_REASON and body["code"] == 503
+
+
+def test_capacity_summary_limits_come_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    srv = _agy_server()
+    _swallow_kill(srv, monkeypatch)
+    monkeypatch.setenv("AGY_CAPACITY_SUMMARY_MAX_CHARS", "60")
+    run = _capacity_run(srv)
+    run._note_capacity_line(_CAPACITY_HEAD + "x " * 200)  # pyright: ignore[reportAttributeAccessIssue]
+    assert len(run.capacity_exhausted) == 60  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_capacity_line_after_done_put_does_not_touch_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    srv = _agy_server()
+    killed: list[object] = []
+    monkeypatch.setattr(srv, "_kill_group", killed.append)
+    run = _capacity_run(srv)
+    run._done_put = True  # pyright: ignore[reportAttributeAccessIssue]
+    run._note_capacity_line(_CAPACITY_HEAD + "late")  # pyright: ignore[reportAttributeAccessIssue]
+    assert run.capacity_exhausted == "" and run.q.empty() and not killed  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_capacity_line_concurrent_stdout_stderr_emits_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    srv = _agy_server()
+    killed: list[object] = []
+    monkeypatch.setattr(srv, "_kill_group", killed.append)
+    run = _capacity_run(srv)
+    barrier = threading.Barrier(8)
+
+    def work(i: int) -> None:
+        barrier.wait()
+        run._note_capacity_line(_CAPACITY_HEAD + f"stream-{i}")  # pyright: ignore[reportAttributeAccessIssue]
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    events = []
+    while not run.q.empty():  # pyright: ignore[reportAttributeAccessIssue]
+        events.append(run.q.get_nowait())  # pyright: ignore[reportAttributeAccessIssue]
+    assert len(events) == 1 and events[0][1] == run.capacity_exhausted  # pyright: ignore[reportAttributeAccessIssue]
+    assert len(killed) == 1
+
+
+# ---- Slice 2 RW-004: 503-тело из ветки capacity_exhausted ---------------------------------
+
+
+def test_error_body_capacity_branch_uses_masked_detail() -> None:
+    srv = _agy_server()
+    handler = srv.Handler.__new__(srv.Handler)  # pyright: ignore[reportAttributeAccessIssue]
+    out = {"state": "capacity_exhausted", "err": 'No capacity available api_key="sec123" OPENAI_API_KEY=short_secret_1'}
+    body = handler._error_body(out, True)  # pyright: ignore[reportAttributeAccessIssue]
+    assert body is not None
+    assert body["code"] == 503 and body["type"] == "model_capacity_exhausted"
+    assert "No capacity available" in str(body["message"])
+    assert "sec123" not in str(body["message"]) and "short_secret_1" not in str(body["message"])
+
+
+def test_capacity_error_body_keeps_backward_compatible_signature() -> None:
+    assert capacity_error_body("No capacity available")["message"].endswith("No capacity available")
+    assert capacity_error_body(detail="x")["code"] == 503
+    assert capacity_error_body()["message"] == "upstream model has no capacity available"
+
+
+# ---- Slice 2 RW-002: безымянный вызов не превращается в молчаливый stop --------------------
+
+
+def _tool_turn(srv: object) -> tuple[object, list[object]]:
+    published: list[object] = []
+    turn = srv._ToolTurn([], lambda _c: True, lambda _r: True, lambda calls: published.extend(calls) or True)  # pyright: ignore[reportAttributeAccessIssue]
+    return turn, published
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        'preamble <tool_call>{"arguments": {"a": 1}}</tool_call>',
+        'preamble <tool_call>{"name": "", "arguments": {}}</tool_call>',
+        '<tool_call>{"name": "read", "arguments": {}}</tool_call><tool_call>{"arguments": {"x": 1}}</tool_call>',
+        '<tool_call>{"name": "parallel", "arguments": {"calls": [{"name": "read", "arguments": {}}, {"arguments": {}}]}}</tool_call>',
+        '<tool_call>{"name": "parallel", "arguments": {"calls": [{"arguments": {}}]}}</tool_call>',
+    ],
+)
+def test_tool_turn_unnamed_call_fails_closed(block: str) -> None:
+    srv = _agy_server()
+    turn, _published = _tool_turn(srv)
+    turn.feed(block)  # pyright: ignore[reportAttributeAccessIssue]
+    turn.finish()  # pyright: ignore[reportAttributeAccessIssue]
+    assert turn.error  # pyright: ignore[reportAttributeAccessIssue]
+    assert turn.turn_complete()  # pyright: ignore[reportAttributeAccessIssue]
+    assert turn.error_body()["type"] == "tool_call_parse_error"  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_tool_turn_parallel_batch_with_unnamed_sibling_publishes_nothing() -> None:
+    srv = _agy_server()
+    turn, published = _tool_turn(srv)
+    turn.feed(  # pyright: ignore[reportAttributeAccessIssue]
+        '<tool_call>{"name": "parallel", "arguments": {"calls": [{"name": "read", "arguments": {}}, {"arguments": {}}]}}</tool_call>'
+    )
+    turn.finish()  # pyright: ignore[reportAttributeAccessIssue]
+    assert published == [] and turn.calls == []  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_tool_turn_named_parallel_batch_is_unaffected() -> None:
+    srv = _agy_server()
+    turn, published = _tool_turn(srv)
+    turn.feed(  # pyright: ignore[reportAttributeAccessIssue]
+        '<tool_call>{"name": "parallel", "arguments": {"calls": [{"name": "a", "arguments": {}}, {"name": "b", "arguments": {}}]}}</tool_call>'
+    )
+    turn.finish()  # pyright: ignore[reportAttributeAccessIssue]
+    assert not turn.error  # pyright: ignore[reportAttributeAccessIssue]
+    assert [c["function"]["name"] for c in published] == ["a", "b"]  # pyright: ignore[reportAttributeAccessIssue, reportCallIssue, reportArgumentType]
+
+
+def test_has_unnamed_call_core_helper() -> None:
+    from core.tool_emulation import has_unnamed_call
+
+    def call(name: str, args: object = "{}") -> dict:
+        return {"id": "c", "type": "function", "function": {"name": name, "arguments": args}}
+
+    assert has_unnamed_call(call(""))
+    assert has_unnamed_call(call("  "))
+    assert not has_unnamed_call(call("read"))
+    nested = json.dumps({"calls": [{"name": "read", "arguments": {}}, {"name": "", "arguments": {}}]})
+    assert has_unnamed_call(call("parallel", nested))
+    ok = json.dumps({"calls": [{"name": "read", "arguments": {}}]})
+    assert not has_unnamed_call(call("parallel", ok))
+    deep = json.dumps({"calls": [{"name": "parallel", "arguments": {"calls": [{"arguments": {}}]}}]})
+    assert has_unnamed_call(call("parallel", deep))
+
+
+def test_passthrough_valid_plus_unnamed_tool_call_fails_closed() -> None:
+    from tests.passthrough_stream_testlib import DONE, finish, payloads, published_calls, run_stream, tool_delta
+
+    events = (
+        tool_delta(0, 0, call_id="call_1", name="subagent", args='{"prompt": "p"}')
+        + tool_delta(0, 1, call_id="call_2", name="", args="{}")
+        + finish(0)
+        + DONE
+    )
+    outcome, out = run_stream(events)
+    assert published_calls(out) == []
+    assert outcome.error_emitted and not outcome.done
+    errors = [p["error"] for p in payloads(out) if "error" in p]
+    assert errors and errors[-1]["code"] == "tool_call_parse_error"
+
+
+def test_passthrough_unnamed_error_frame_keeps_chunk_identity() -> None:
+    from tests.passthrough_stream_testlib import DONE, finish, payloads, run_stream, tool_delta
+
+    events = tool_delta(0, 0, call_id="call_1", name="", args="{}") + finish(0) + DONE
+    _outcome, out = run_stream(events)
+    errors = [p for p in payloads(out) if "error" in p]
+    assert errors and errors[-1].get("id")

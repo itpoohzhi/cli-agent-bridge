@@ -2046,15 +2046,12 @@ def _sanitize_arguments(name: str, arguments: Any, tool_schemas: dict | None) ->
     )
 
 
-def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | None:
-    """Вложенные вызовы `parallel` как вызовы верхнего уровня; None — распаковать нечего.
-
-    Не более `limit` детей: превышение прекращает распаковку, накопленное сохраняется.
-    """
+def _parallel_items(arguments: Any) -> list[Any] | None:
+    """Список вложенных вызовов в `arguments` синтетического `parallel`; None — списка нет."""
     parsed = _normalize_arguments(arguments)
     if parsed is None:
         return None
-    items = next(
+    return next(
         (
             parsed[key]
             for key in _PARALLEL_LIST_KEYS
@@ -2062,14 +2059,58 @@ def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | 
         ),
         None,
     )
+
+
+def _subcall_name(item: dict) -> str:
+    """Имя вложенного вызова `parallel` без префикса `functions.`; пусто — имени нет."""
+    name = next((str(item[k]) for k in _SUBCALL_NAME_KEYS if item.get(k)), "")
+    return name.removeprefix("functions.").strip()
+
+
+def has_unnamed_call(
+    tool_call: ToolCall | dict,
+    *,
+    max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
+) -> bool:
+    """Вызов (или вложенный в `parallel`) без имени функции: `sanitize_tool_call` его отбросит.
+
+    Нужен вызывающим, чтобы отличить «отброшен безымянный» от «публиковать нечего» и завершить ход
+    fail-closed, а не молчаливым `stop`. Не-словарные элементы `parallel` тоже считаются безымянными.
+    """
+    name, arguments = _call_name_and_args(tool_call)
+    return _has_unnamed(name, arguments, 0, max_parallel_depth)
+
+
+def _has_unnamed(name: str, arguments: Any, depth: int, max_depth: int) -> bool:
+    if not name or not name.strip():
+        return True
+    if name.rsplit(".", 1)[-1] != _PARALLEL_NAME or depth >= max_depth:
+        return False
+    for item in _parallel_items(arguments) or ():
+        if not isinstance(item, dict):
+            return True
+        sub_name = _subcall_name(item)
+        sub_args = next((item[k] for k in _SUBCALL_ARGS_KEYS if k in item), None)
+        if _has_unnamed(sub_name, sub_args, depth + 1, max_depth):
+            return True
+    return False
+
+
+def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | None:
+    """Вложенные вызовы `parallel` как вызовы верхнего уровня; None — распаковать нечего.
+
+    Не более `limit` детей: превышение прекращает распаковку, накопленное сохраняется.
+    """
+    items = _parallel_items(arguments)
+    if items is None:
+        return None
     calls: list[Any] = []
-    for item in items or ():
+    for item in items:
         if len(calls) >= limit:
             break
         if not isinstance(item, dict):
             continue
-        name = next((str(item[k]) for k in _SUBCALL_NAME_KEYS if item.get(k)), "")
-        name = name.removeprefix("functions.").strip()
+        name = _subcall_name(item)
         if not name:
             continue
         sub_args = next((item[k] for k in _SUBCALL_ARGS_KEYS if k in item), None)

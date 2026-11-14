@@ -164,7 +164,7 @@ from core.chat_key import (  # noqa: E402
     digest_of,
     resolve_chat_key,
 )
-from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.usage_wire import normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_SAFETY_CAP_S,
@@ -3704,6 +3704,13 @@ def _map_usage(token_usage: Any) -> dict:
     }
 
 
+def _usage_counter(value: Any) -> int:
+    """Счётчик токенов из внутреннего `usage`: не-целые, bool и отрицательные значения -> 0."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 0
+
+
 def _wire_usage(
     prompt_tokens: Any, completion_tokens: Any, cache_read_tokens: Any
 ) -> dict:
@@ -7197,7 +7204,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     },
                 )
                 return
-            if __import__("core.fallback_http_hook", fromlist=["dispatch"]).dispatch(self, req, sys.modules[__name__], lambda a, r, s: a.handle(path=self.path, raw_body=json.dumps(r).encode("utf-8"), request=r, headers=dict(self.headers.items()), sink=s), provider_id): return
+            if __import__("core.fallback_http_hook", fromlist=["dispatch"]).dispatch(self, req, sys.modules[__name__], lambda a, r, s: a.handle(path=self.path, raw_body=json.dumps(r).encode("utf-8"), request=r, headers=dict(self.headers.items()), sink=s), provider_id):
+                return
             raw_model = req.get("model")
             model_len = len(raw_model) if isinstance(raw_model, str) else 0
             if raw_model is None:
@@ -8710,15 +8718,16 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
             # Накопленные токены закоммиченного потока переживают терминальную ошибку (не 0/0/0).
             err_usage = out.get("usage") or {}
-            kept_usage = (
-                _wire_usage(
-                    err_usage.get("input_tokens", 0),
-                    err_usage.get("output_tokens", 0),
-                    err_usage.get("cache_read_tokens"),
+            try:
+                kept_usage = positive_wire_usage(
+                    _wire_usage(
+                        _usage_counter(err_usage.get("input_tokens")),
+                        _usage_counter(err_usage.get("output_tokens")),
+                        err_usage.get("cache_read_tokens"),
+                    )
                 )
-                if err_usage.get("input_tokens") or err_usage.get("output_tokens")
-                else None
-            )
+            except (TypeError, ValueError, AttributeError):
+                kept_usage = None
             if err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid":
                 emit(stream_error_frame(str(err["message"]), finish_reason=None, usage=kept_usage))
             else:

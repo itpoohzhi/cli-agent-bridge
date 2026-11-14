@@ -45,16 +45,19 @@ class AuthHotReloadTests(CleanHomeFixture):
         _ = self.srv._prepare_agy_home()
         self.assertEqual(token.read_text(encoding="utf-8"), "agy-refreshed-inside-clean-home")
 
-    def test_fresher_clean_home_copy_survives_source_change(self) -> None:
-        _ = self.srv._prepare_agy_home()
+    def test_fresher_clean_home_copy_survives_initial_sync_only(self) -> None:
         token = self.gemini / "jetski-standalone-oauth-token"
         src = self.real_home / ".gemini" / "jetski-standalone-oauth-token"
-        _bump(src, "older-source-change", delta_ns=-3_000_000_000)
+        self.gemini.mkdir(parents=True)
         far = time.time() + 1000
         token.write_text("fresh-in-clean-home", encoding="utf-8")
         os.utime(token, (far, far))
         _ = self.srv._prepare_agy_home()
         self.assertEqual(token.read_text(encoding="utf-8"), "fresh-in-clean-home")
+        # Внешняя смена источника после старта моста (переключение аккаунта) mtime-guard не останавливает.
+        _bump(src, "older-source-change", delta_ns=-3_000_000_000)
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "older-source-change")
 
     def test_kill_switch_disables_refresh(self) -> None:
         _ = self.srv._prepare_agy_home()
@@ -106,6 +109,7 @@ class BridgeUnitTests(unittest.TestCase):
         turn = self.srv._ToolTurn([], lambda _t: True, lambda _t: True, lambda c: delivered.append(c) or True)
         turn._call({"id": "x", "name": "  ", "arguments": {}})
         self.assertEqual((delivered, turn.calls), ([], []))
+        self.assertEqual(turn.error_body()["type"], "tool_call_parse_error")
         turn._call({"id": "y", "name": "read", "arguments": {"p": 1}})
         self.assertEqual(len(delivered), 1)
         self.assertEqual(delivered[0][0]["function"]["name"], "read")

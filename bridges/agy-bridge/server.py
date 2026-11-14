@@ -161,6 +161,7 @@ from core.agy_capacity_guard import (  # noqa: E402
     CAPACITY_REASON,
     capacity_error_body,
     should_fast_fail_agy_capacity_503,
+    summarize_capacity_text,
 )
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
@@ -182,6 +183,7 @@ from core.tool_emulation import (  # noqa: E402
     StreamNormalizer,
     _tool_choice_none,
     build_tool_schemas,
+    has_unnamed_call,
     pure_text_protocol_instruction,
     sanitize_tool_call,
     tools_protocol_section,
@@ -1575,28 +1577,35 @@ def _file_signature(path: Path) -> tuple[int, int] | None:
 def _sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...]) -> int:
     """Копирует изменившиеся auth-файлы в <clean-home> (под _AGY_HOME_LOCK); возвращает их число.
 
-    mtime-guard: более свежая копия в <clean-home> (токен, обновлённый самим agy) не затирается.
+    mtime-guard действует только при первой синхронизации файла (`prev_sig is None`): более свежая
+    копия в <clean-home> (токен, обновлённый самим agy) не затирается, но подпись источника
+    запоминается. Смена подписи источника во время работы моста (переключение аккаунта) всегда
+    перезаписывает копию, а исчезновение источника (logout) удаляет ранее синхронизированную копию.
     """
     copied = 0
     for src, dst in pairs:
         key = str(src)
         signature = _file_signature(src)
-        if signature is None:
-            _AGY_AUTH_SIGNATURES.pop(key, None)
-            continue
+        prev_sig = _AGY_AUTH_SIGNATURES.get(key)
         dst_file = dst / src.name
+        if signature is None:
+            # Копия, которую мост не синхронизировал (состояние, созданное самим agy), не удаляется.
+            if prev_sig is not None and _remove_clean_home_copy(dst_file, src.name):
+                _AGY_AUTH_SIGNATURES.pop(key, None)
+            continue
         try:
             dst_ok = not dst_file.is_symlink() and dst_file.is_file()
         except OSError:
             dst_ok = False
         # Удалённая или подменённая симлинком копия восстанавливается даже при неизменной подписи источника.
-        if dst_ok and _AGY_AUTH_SIGNATURES.get(key) == signature:
+        if dst_ok and prev_sig == signature:
             continue
+        externally_changed = prev_sig is not None and prev_sig != signature
         try:
             # Симлинк на месте копии удаляется (stat пошёл бы по ссылке); файл остаётся 0600.
             if dst_file.is_symlink():
                 dst_file.unlink()
-            if not dst_file.exists() or src.stat().st_mtime >= dst_file.stat().st_mtime:
+            if externally_changed or not dst_file.exists() or src.stat().st_mtime >= dst_file.stat().st_mtime:
                 _copy_private_atomic(src, dst_file)
                 copied += 1
             else:
@@ -1608,6 +1617,22 @@ def _sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...]) -> int:
             continue
         _AGY_AUTH_SIGNATURES[key] = signature
     return copied
+
+
+def _remove_clean_home_copy(dst_file: Path, name: str) -> bool:
+    """Удалить копию auth-файла в <clean-home>; симлинк удаляется сам, без перехода по цели."""
+    try:
+        if dst_file.is_symlink():
+            _assert_inside_clean_home(dst_file.parent)
+            dst_file.unlink()
+        elif dst_file.exists():
+            _assert_inside_clean_home(dst_file)
+            dst_file.unlink()
+    except OSError as exc:
+        _log(f"agy-home auth removal skipped file={name} err={type(exc).__name__}")
+        return False
+    _log(f"agy-home auth removed file={name}")
+    return True
 
 
 def _prepare_agy_home() -> Path:
@@ -5403,6 +5428,11 @@ class _ToolTurn:
                 ),
             },
         }
+        if has_unnamed_call(entry):
+            # Отброшенный безымянный вызов (в т.ч. внутри `parallel`) не даёт молчаливый `stop`:
+            # ход завершается tool_call_parse_error, неполный пакет не публикуется.
+            self.error = self.error or "tool call without function name dropped"
+            return
         published = [
             dict(cast("dict[str, object]", item), index=len(self.calls) + offset)
             for offset, item in enumerate(sanitize_tool_call(entry, self._schemas))
@@ -5410,7 +5440,7 @@ class _ToolTurn:
         if len(self.calls) + len(published) > self._max_calls:
             raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
         if not published:
-            return  # вызов без имени отброшен: пустой tool_calls-delta не уходит
+            return
         self.calls.extend(published)
         if self.ok and not self._on_calls(published):
             self.ok = False
@@ -5907,16 +5937,18 @@ class Run:
 
     def _note_capacity_line(self, line: str) -> None:
         """Fast-fail: первая capacity-503 строка CLI гасит процесс."""
-        if self.capacity_exhausted or not should_fast_fail_agy_capacity_503(line):
+        if not should_fast_fail_agy_capacity_503(line):
             return
-        self.capacity_exhausted = _mask_secrets(line[:200])
-        _log(f"capacity-exhausted fast-fail pid={self.proc.pid} reason={CAPACITY_REASON}")
+        # Секрет, пересекающий предел сводки, маскируется до усечения; чужая строка читается ограниченным окном.
+        summary = summarize_capacity_text(line, _mask_secrets)
         with self._emit_lock:
-            if self._done_put:
+            if self.capacity_exhausted or self._done_put:
                 return
+            self.capacity_exhausted = summary
             self.drain_closed = True
             self._done_put = True
-            self.q.put(("capacity_exhausted", self.capacity_exhausted))
+            self.q.put(("capacity_exhausted", summary))
+        _log(f"capacity-exhausted fast-fail pid={self.proc.pid} reason={CAPACITY_REASON}")
         _kill_group(self.proc)
 
     def claim_preamble(self, step_idx: int | None, source: str = "transcript") -> bool:
@@ -7513,7 +7545,7 @@ class Handler(BaseHTTPRequestHandler):
                 "code": 502,
             }
         if st == "capacity_exhausted":
-            return capacity_error_body(out.get("err"))
+            return capacity_error_body(detail=out.get("err"))
         if st == "agy_error":
             return {
                 "message": str(out.get("err") or "agy reported an error")[:500],

@@ -57,6 +57,7 @@ from core.tool_emulation import (
     RepetitionGuard,
     ToolCallParser,
     build_tool_schemas,
+    has_unnamed_call,
     sanitize_tool_call,
 )
 from core.cli_runtime_config import NonstreamConfig
@@ -999,14 +1000,15 @@ def relay_sse(
                     return flushed_outcome
                 if not acc.has_choice(index):
                     continue
-                calls = sanitize_choice_calls(
-                    acc.pop_choice(index), tool_schemas, limits
-                )
-                outcome.tool_calls_published += len(calls)
-                if not calls:  # безымянные вызовы отброшены: fail-closed; дельты tool_calls уже сняты, чанк не ретранслируется
+                raw_calls = acc.pop_choice(index)
+                calls = sanitize_choice_calls(raw_calls, tool_schemas, limits)
+                # Безымянный вызов отброшен (в т.ч. рядом с валидным): fail-closed, неполный пакет не публикуется;
+                # дельты tool_calls уже сняты, чанк не ретранслируется.
+                if not calls or any(has_unnamed_call(c, max_parallel_depth=limits.max_parallel_depth) for c in raw_calls):
                     outcome.error_emitted = True
-                    write(_error_frame(last_chunk, "tool_call_parse_error", "Upstream emitted tool_calls with empty function name", outcome.last_usage))
+                    write(_error_frame(last_chunk or chunk, "tool_call_parse_error", "Upstream emitted tool_calls with empty function name", outcome.last_usage))
                     return outcome
+                outcome.tool_calls_published += len(calls)
                 base_c = {
                     k: chunk[k] for k in chunk if k not in ("choices", "usage", "error")
                 }

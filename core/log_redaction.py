@@ -46,11 +46,17 @@ LONG_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_\-]{24,}")
 _CREDENTIAL_KEYS: Final[str] = (
     r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|passwd)"
 )
-# Значение — в кавычках (в т.ч. экранированных в JSON-строке) любой длины либо «голое» до разделителя.
+# Значение в кавычках: символ, либо любая экранированная пара (`\"`, `\\`); JSON-строка внутри JSON
+# (`\"…\\\"…\"`) разбирается отдельной веткой, где `\\\"` и `\\` — часть значения, а `\"` закрывает его.
+_DQ_VALUE: Final[str] = r"\"(?:[^\"\\]|\\.)*\""
+_SQ_VALUE: Final[str] = r"'(?:[^'\\]|\\.)*'"
+_ESCAPED_DQ_VALUE: Final[str] = r"\\+\"(?:[^\"\\]|\\\\\\\"|\\\\|\\[^\"\\])*\\+\""
+# Ключ может иметь префикс (`OPENAI_API_KEY`, `app_secret`, `openaiApiKey`): `_` входит в `\w`,
+# поэтому `\b` перед именем ключа не подходит. Длина префикса ограничена: разбор линеен по входу.
 _CREDENTIAL_CONTEXT_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?i)\b(?:bearer|basic)\s+[^\s,;\"']+"
-    r"|\\*[\"']?\b" + _CREDENTIAL_KEYS + r"\b\\*[\"']?\s*[=:]\s*"
-    r"(?:\\*\"[^\"\\]*\\*\"|\\*'[^'\\]*\\*'|\\*[\"']?[^\s,;&\"']+)"
+    r"(?i)\b(?:bearer|basic)\s+(?:" + _DQ_VALUE + "|" + _SQ_VALUE + r"|[^\s,;\"']+)"
+    r"|\\*[\"']?[A-Za-z0-9_\-]{0,64}" + _CREDENTIAL_KEYS + r"\b\\*[\"']?\s*[=:]\s*"
+    r"(?:" + _DQ_VALUE + "|" + _SQ_VALUE + "|" + _ESCAPED_DQ_VALUE + r"|\\*[\"']?[^\s,;&\"']+)"
 )
 _PREFIXED_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(?:sk|fk|rk|pk)-[A-Za-z0-9_\-]{6,}|\bgh[pousr]_[A-Za-z0-9]{8,}|\bAIza[A-Za-z0-9_\-]{8,}"

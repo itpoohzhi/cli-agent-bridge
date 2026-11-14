@@ -2,14 +2,16 @@
 
 Классифицирует строки stdout/stderr CLI, не зная о процессах. Env (читаются при вызове):
 `AGY_FAST_FAIL_ON_CAPACITY_503` (kill-switch, `1`), `AGY_CAPACITY_MARKERS` (маркеры через запятую
-вместо встроенных), `AGY_CAPACITY_MAX_LINE_CHARS` (анализируемая длина строки, 8192).
+вместо встроенных), `AGY_CAPACITY_MAX_LINE_CHARS` (анализируемая длина строки, 8192),
+`AGY_CAPACITY_REDACT_WINDOW_CHARS` (окно маскирования секретов до усечения, 4096),
+`AGY_CAPACITY_SUMMARY_MAX_CHARS` (длина сводки в очереди и теле 503, 200).
 """
 
 from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Final
 
 from core.log_redaction import mask_credential_context, mask_long_tokens, safe_log_tokens
@@ -20,6 +22,10 @@ FAST_FAIL_ENV: Final[str] = "AGY_FAST_FAIL_ON_CAPACITY_503"
 MARKERS_ENV: Final[str] = "AGY_CAPACITY_MARKERS"
 MAX_LINE_CHARS_ENV: Final[str] = "AGY_CAPACITY_MAX_LINE_CHARS"
 DEFAULT_MAX_LINE_CHARS: Final[int] = 8192
+REDACT_WINDOW_CHARS_ENV: Final[str] = "AGY_CAPACITY_REDACT_WINDOW_CHARS"
+DEFAULT_REDACT_WINDOW_CHARS: Final[int] = 4096
+SUMMARY_MAX_CHARS_ENV: Final[str] = "AGY_CAPACITY_SUMMARY_MAX_CHARS"
+DEFAULT_SUMMARY_MAX_CHARS: Final[int] = 200
 _FALSE: Final[frozenset[str]] = frozenset(("0", "false", "no", "off"))
 # Встроенные маркеры ёмкости требуют признак статуса/ошибки: голая проза с кодом причины
 # в stdout не должна убивать процесс. Явный `AGY_CAPACITY_MARKERS` признак не требует.
@@ -66,10 +72,38 @@ def should_fast_fail_agy_capacity_503(text: object, env: Mapping[str, str] | Non
     return fast_fail_enabled(env) and is_capacity_exhausted_text(text, env)
 
 
+def _positive_int_env(source: Mapping[str, str], name: str, default: int) -> int:
+    try:
+        value = int(str(source.get(name, "")).strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def summary_max_chars(env: Mapping[str, str] | None = None) -> int:
+    """Предел длины сводки ошибки, уходящей в очередь и HTTP 503."""
+    return _positive_int_env(os.environ if env is None else env, SUMMARY_MAX_CHARS_ENV, DEFAULT_SUMMARY_MAX_CHARS)
+
+
+def redact_window_chars(env: Mapping[str, str] | None = None) -> int:
+    """Окно входной строки, в котором ищутся секреты до усечения (не меньше предела сводки)."""
+    source = os.environ if env is None else env
+    window = _positive_int_env(source, REDACT_WINDOW_CHARS_ENV, DEFAULT_REDACT_WINDOW_CHARS)
+    return max(window, summary_max_chars(source))
+
+
+def summarize_capacity_text(text: object, redact: Callable[[str], str], env: Mapping[str, str] | None = None) -> str:
+    """Конвейер bound -> redact -> clamp: секрет, пересекающий предел сводки, маскируется целиком."""
+    source = os.environ if env is None else env
+    return redact(str(text or "")[: redact_window_chars(source)])[: summary_max_chars(source)]
+
+
 def capacity_error_body(detail: object = "") -> dict[str, object]:
     """Тело ошибки: HTTP 503, `type` — код причины."""
     # Маскирование до усечения: обрезанный посередине токен уже не распознать.
-    redacted = mask_long_tokens(mask_credential_context(" ".join(str(detail or "").split())), safe_tokens=safe_log_tokens())
-    summary = redacted[:200]
+    summary = summarize_capacity_text(
+        " ".join(str(detail or "")[: redact_window_chars()].split()),
+        lambda s: mask_long_tokens(mask_credential_context(s), safe_tokens=safe_log_tokens()),
+    )
     message = "upstream model has no capacity available"
     return {"message": f"{message}: {summary}" if summary else message, "type": CAPACITY_REASON, "code": CAPACITY_HTTP_STATUS}
