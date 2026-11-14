@@ -2,15 +2,22 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, fields, replace
+import json
+import os
+import stat
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from core import stream_interruption_recovery as facade
+from core import turn_finalization as done
 from core.turn_outcome_policy import (
     CausalCompletionFacts, CausalDrainFacts, CausalErrorFacts, CausalErrorIdentity, CausalOutcomeDecision, CausalOutcomeInput, CausalProcessFacts, CausalRecoveryConfig,
     CausalTerminalFacts, error_identity_digest, evaluate_causal_turn_recovery, normalize_error_identity,
 )
 _LONG_ERROR = "PT_AT_ERROR " + "x" * 600
+_FLAG = "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"
 def _facts(error_seq: int = 321, completion_seq: int = 370, returncode: int | None = 1, text: str = _LONG_ERROR) -> CausalOutcomeInput:
     normalized, digest = normalize_error_identity(text), error_identity_digest(text)
     return CausalOutcomeInput(CausalRecoveryConfig(True, True, 0),
@@ -71,8 +78,7 @@ def test_same_500_character_prefix_is_not_identity() -> None:
     assert evaluate_causal_turn_recovery(facts).reason == "error_identity_mismatch"
     assert not evaluate_causal_turn_recovery(facts).recovered
 @pytest.mark.parametrize("text,expected", (
-    (None, ""), ("", ""), (" \t\r\n ", ""), (" \tError\r\nNext\rEnd \n", "Error\nNext\nEnd"),
-    ("Error  Next", "Error  Next"), ("ERROR", "ERROR"),
+    (None, ""), ("", ""), (" \t\r\n ", ""), (" \tError\r\nNext\rEnd \n", "Error\nNext\nEnd"), ("Error  Next", "Error  Next"), ("ERROR", "ERROR"),
 ))
 def test_exact_normalization(text: str | None, expected: str) -> None:
     assert normalize_error_identity(text) == expected
@@ -103,9 +109,6 @@ def test_decision_flags_are_derived_and_immutable() -> None:
     assert decision.allow_reconcile and decision.clear_error
     with pytest.raises(FrozenInstanceError):
         setattr(decision, "clear_error", False)
-def test_zero_error_seq_is_valid_identity_before_completion() -> None:
-    assert evaluate_causal_turn_recovery(_facts(error_seq=0, completion_seq=1)).recovered
-    assert evaluate_causal_turn_recovery(_facts(error_seq=0, completion_seq=0)).reason == "completion_not_after_error"
 @pytest.mark.parametrize("case", ("exact", "suffix", "attempt", "unstructured", "missing", "open", "tools", "late_error"))
 def test_tail_causal_facade_agrees_on_text_and_error(case: str) -> None:
     tail = facade.InterruptionTailState()
@@ -126,6 +129,7 @@ def test_tail_causal_facade_agrees_on_text_and_error(case: str) -> None:
         final_text="Финал", emitted_text="", causal_input=facts, **facade.tail_turn_facts(tail))
     trusted = facade.trusted_final_text("Финал", error, tail, causal_input=facts)
     assert result.self_healed is (case == "exact")
+    assert result.rc == (0 if case == "exact" else 1)
     assert bool(trusted) is result.self_healed
     assert (result.error == "") is result.self_healed
     assert snapshot.error.sha256 == error_identity_digest("" if case == "missing" else _LONG_ERROR)
@@ -147,6 +151,9 @@ def test_tail_legacy_calls_and_unproven_text() -> None:
     assert not facade.evaluate_done_causal_recovery(_facts(text="")).recovered
     tail.note_error_record(rtype="ERROR_MESSAGE", rec={"message": _LONG_ERROR}, idx=3, attempt=4)
     assert facade.tail_causal_facts(tail).error.attempt == 4
+    tail.note_error_record(4, text="e", attempt=True)
+    assert facade.tail_causal_facts(tail).error.attempt == -1
+    assert facade.tail_causal_facts(object()).has_late_error_or_open_step is False
     assert facade.settle_error("", _LONG_ERROR, "ERROR") == _LONG_ERROR
 def _tail_facts(tail: facade.InterruptionTailState) -> CausalOutcomeInput:
     snapshot, facts = facade.tail_causal_facts(tail), _facts()
@@ -170,56 +177,124 @@ def test_zero_indices_strict_order_and_drain() -> None:
     for outcome in ("ok", "timeout"):
         setattr(tail, "drain_outcome", outcome)
         assert facade.tail_turn_facts(tail)["drain_complete"] is (outcome == "ok")
-def _resolve(**changes: object) -> facade.TurnOutcomeResolution:
-    args: dict[str, object] = dict(rc=1, result_error=_LONG_ERROR, result_status="ERROR", final_text="Финал", emitted_text="", causal_input=_facts())
-    return facade.resolve_done_turn_outcome(**{**args, **changes})
-def test_causal_resolution_reason_and_rc_precedence() -> None:
-    assert _resolve().self_healed
-    inconsistent = _resolve(rc=2)
-    assert (inconsistent.self_healed, inconsistent.reason, inconsistent.rc) == (False, "inconsistent_causal_facts", 2)
-    suffix = _LONG_ERROR + " suffix"
-    unrecovered = _resolve(result_error=suffix, has_unclosed_tool_call=True)
-    assert (unrecovered.reason, unrecovered.rc, unrecovered.error) == ("error_identity_mismatch", 1, suffix)
-    assert _resolve(rc=0, result_error=suffix).rc == 1
-@pytest.mark.parametrize("rc,error,status,clean", ((0, "", "DONE", True), (1, "", "DONE", False), (0, "", "ERROR", False), (0, "boom", "DONE", False)))
-def test_clean_done_requires_zero_rc_no_error_and_non_error_status(rc: int, error: str, status: str, clean: bool) -> None:
-    result = facade.resolve_done_turn_outcome(rc=rc, result_error=error, result_status=status, final_text="Финал", emitted_text="")
-    assert (result.reason == "clean_done") is clean
-    assert (result.state == "done") is clean
-def test_transient_recovery_requires_completion_strictly_after_error() -> None:
-    facts: dict[str, object] = dict(rc=1, result_error="stream was interrupted", result_status="ERROR", final_text="Финал", emitted_text="",
-        completion_done_without_tools=True, drain_complete=True, had_transient_error=True, last_error_seq=4)
-    assert facade.resolve_done_turn_outcome(**{**facts, "last_completion_seq": 5}).self_healed
-    for seq in (4, 3):
-        assert not facade.resolve_done_turn_outcome(**{**facts, "last_completion_seq": seq}).self_healed
-def test_error_record_with_same_or_newer_seq_replaces_identity() -> None:
+@pytest.mark.parametrize("env_value,json_value,expected", (
+    ("", None, True), ("true", True, True), ("false", True, False), ("true", False, False), ("0", True, False), ("NO", True, False), (" off ", True, False), ("invalid", True, False),))
+def test_recovery_switch_veto(tmp_path: Path, env_value: str, json_value: bool | None, expected: bool) -> None:
+    path = tmp_path / "local.json"
+    if json_value is not None:
+        _ = path.write_text(json.dumps({_FLAG: json_value}))
+    assert done.read_recovery_switch(path, 256, {_FLAG: env_value}, tmp_path / "absent") is expected
+    assert done.read_recovery_switch(path, 256, {"AGY_SELF_HEAL_INTERRUPTED_TURN": "false"}) is False
+    for limit in (0, True):
+        assert done.read_recovery_switch(path, limit, {}, tmp_path / "absent") is False
+@pytest.mark.parametrize("body", (b"{", b"[]", b"[true]", b"\xff", b" " * 257, b'{"BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED":1}', b'{"BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED":"true"}', b'{"causal_turn_recovery_enabled":null}'))
+def test_recovery_switch_bad_config(tmp_path: Path, body: bytes) -> None:
+    path = tmp_path / "bad.json"
+    _ = path.write_bytes(body)
+    assert done.read_recovery_switch(path, 256, {}, tmp_path / "absent") is False
+    assert done._read_config_flag(path, 256) is False  # pyright: ignore[reportPrivateUsage]
+def test_recovery_switch_paths_freshness_and_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path, other, link = (tmp_path / name for name in ("local", "global", "link"))
+    _ = path.write_text("{}")
+    _ = other.write_text(json.dumps({_FLAG: False}))
+    assert not done.read_recovery_switch(path, 256, {}, other)
+    assert done.read_recovery_switch(other, 256, {"BRIDGE_DYNAMIC_CONFIG_PATH": str(path)})
+    _ = path.write_text(json.dumps({"causal_turn_recovery_enabled": False}))
+    assert not done.read_recovery_switch(path, 256, {}, tmp_path / "absent")
+    _ = path.write_text("{}")
+    assert done.read_recovery_switch(path, 2, {}, tmp_path / "absent") is True
+    assert done.read_recovery_switch(path, 1, {}, tmp_path / "absent") is False
+    assert done._read_config_flag(path, 1) is False  # pyright: ignore[reportPrivateUsage]
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", lambda _fd=0: os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+        assert done.read_recovery_switch(path, 2, {}, tmp_path / "absent") is False
+        assert done._read_config_flag(path, 2) is False  # pyright: ignore[reportPrivateUsage]
+    assert done.read_recovery_switch(None, 256, {}, tmp_path / "absent")
+    read = os.read
+    def swap(fd: int, size: int) -> bytes:
+        _ = path.rename(tmp_path / "old")
+        _ = path.write_text(json.dumps({_FLAG: False}))
+        return read(fd, size)
+    monkeypatch.setattr(os, "read", swap)
+    assert done.read_recovery_switch(path, 256, {}, tmp_path / "absent")
+    monkeypatch.setattr(os, "read", read)
+    link.symlink_to(path)
+    assert not done.read_recovery_switch(link, 256, {}, tmp_path / "absent")
+    os.mkfifo(tmp_path / "fifo")
+    assert not done.read_recovery_switch(tmp_path / "fifo", 256, {}, tmp_path / "absent")
+    assert not done.read_recovery_switch(tmp_path, 256, {}, tmp_path / "absent")
+    assert done.read_recovery_switch(path / "missing", 256, {}, path / "other")
+    def denied(*_args: object) -> int:
+        raise PermissionError
+    monkeypatch.setattr(os, "open", denied)
+    assert not done.read_recovery_switch(path, 256, {}, tmp_path / "absent")
+@pytest.mark.parametrize("case", ("exact", "suffix", "timeout", "window_complete", "live", "tools", "disabled", "tail_only", "cleared", "zero_rc", "process_live", "fatal", "rc2", "unknown", "usage", "non_stream"))
+def test_finalize_done_orders_and_redacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    events: list[object] = []
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(path := tmp_path / "config"))
+    monkeypatch.delenv(_FLAG, raising=False)
+    monkeypatch.delenv("AGY_SELF_HEAL_INTERRUPTED_TURN", raising=False)
     tail = facade.InterruptionTailState()
-    tail.note_error_record(5, text="first")
-    tail.note_error_record(5, text="second")
-    assert tail.last_error_sha256 == error_identity_digest("second")
-    tail.note_error_record(4, text="older")
-    assert (tail.last_error_step_index, tail.last_error_sha256) == (5, error_identity_digest("second"))
-def test_trusted_final_text_prefers_model_text_over_tail_planner() -> None:
+    error = _LONG_ERROR + (" suffix" if case == "suffix" else "")
+    def drain() -> list[object]:
+        events.append("drain")
+        tail.note_error_record(321, text=_LONG_ERROR)
+        tail.note_planner_record({"content": "Финал"}, 370)
+        _ = path.write_text(json.dumps({_FLAG: case != "disabled"}))
+        return ["tail-event"]
+    def reconcile(text: str) -> str:
+        assert events[:2] == ["drain", ["tail-event"]]
+        events.append("reconcile")
+        return text
+    def snapshot() -> done.DoneSnapshot:
+        assert events[:2] == ["drain", ["tail-event"]]
+        return done.DoneSnapshot(done.DoneTextFacts("" if case == "tail_only" else "Финал", "", "" if case == "cleared" else error, error if case == "cleared" else ""),
+            done.DoneResultFacts("ERROR", {"zero_rc": 0, "rc2": 2}.get(case, 1), case != "process_live", 0, case == "fatal"),
+            done.DoneDeliveryFacts(case not in ("usage", "non_stream"), True, reconcile, False),
+            done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(case if case in ("timeout", "window_complete") else "complete", case != "live"),
+                {"tools": "open", "unknown": "unknown"}.get(case, "closed")))
+    ports = done.DonePorts(lambda *args: args, events.append, events.append, lambda: False)
+    result = done.finalize_done(done.DoneRequest((1, "Финал", None), {}, (error[:500], "")), ports,
+        done.DoneRuntimePorts(snapshot, drain), done.DoneConfig(path, 256, case != "usage", case == "usage"), events.append)
+    recovered = case in ("exact", "tail_only", "cleared", "zero_rc", "usage", "non_stream")
+    assert result == (("done", 0, "") if recovered else ("agy_error", 2 if case == "rc2" else 1, error))
+    assert ("reconcile" in events) is (recovered and case not in ("usage", "non_stream"))
+    if recovered:
+        assert "Финал" in events
+        diagnostic = cast(object, json.loads(str(events[-1])))
+        assert diagnostic == dict(reason="causal_echo_recovered", last_error_seq=321, last_completion_seq=370, rc=0 if case == "zero_rc" else 1)
+        assert _LONG_ERROR not in str(events)
+@pytest.mark.parametrize("case", ("clean", "gone", "error", "nonzero", "fallback", "empty_final", "payload_rc", "result_rc"))
+def test_finalize_done_legacy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent"))
+    content: list[str] = []
+    rc = None if case == "payload_rc" else 2 if case == "result_rc" else int(case in ("error", "nonzero"))
+    emitted = "Первое." if case in ("nonzero", "fallback") else ""
     tail = facade.InterruptionTailState()
-    tail.note_planner_record({"content": "Хвост", "status": "DONE"}, 2)
-    assert facade.trusted_final_text("", "stream was interrupted", tail) == "Хвост"
-    assert facade.trusted_final_text("Ответ", "stream was interrupted", tail) == "Ответ"
-@pytest.mark.parametrize("attempt,expected", ((3, 3), (0, 0), (True, -1), ("1", -1), (None, -1), (1.0, -1)))
-def test_error_attempt_keeps_only_exact_int(attempt: object, expected: int) -> None:
-    tail = facade.InterruptionTailState()
-    tail.note_error_record(1, text="first")
-    assert tail.last_error_attempt == 0
-    tail.note_error_record(1, text="second", attempt=attempt)
-    assert tail.last_error_attempt == expected
-def test_open_step_flag_is_exact_bool_and_defaults_closed() -> None:
-    assert facade.tail_causal_facts(object()).has_late_error_or_open_step is False
-    tail = facade.InterruptionTailState()
-    tail.note_planner_record({"content": "Финал", "status": "DONE"}, 1)
-    assert facade.tail_causal_facts(tail).has_late_error_or_open_step is False
-    tail.note_planner_record({"content": "Шаг", "status": "RUNNING"}, 2)
-    assert facade.tail_causal_facts(tail).has_late_error_or_open_step is True
-def test_healed_causal_resolution_is_clean_done() -> None:
-    healed = _resolve()
-    assert (healed.state, healed.rc, healed.error, healed.self_healed, healed.final) == ("done", 0, "", True, True)
-    failed = _resolve(rc=2)
-    assert (failed.state, failed.rc, failed.error, failed.final) == ("agy_error", 2, _LONG_ERROR, True)
+    tail.note_planner_record({"content": "Старый финал"}, 1)
+    final = "" if case == "empty_final" else "Финал"
+    snapshot = done.DoneSnapshot(done.DoneTextFacts(final, emitted, "", ""), done.DoneResultFacts("ERROR" if case == "error" else "DONE", rc, True, 0),
+        done.DoneDeliveryFacts(case == "fallback", not emitted, lambda _text: "", lambda: True),
+        done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(), "closed"))
+    ports = done.DonePorts(lambda *args: args, content.append, lambda _events: None, lambda: case == "gone")
+    result = done.finalize_done(done.DoneRequest((7 if case in ("payload_rc", "result_rc") else int(rc or 0), final, {"error": _LONG_ERROR}), {}, ("", "")),
+        ports, done.DoneRuntimePorts(lambda: snapshot, stderr=lambda: " stderr "),
+        done.DoneConfig(None, 256), lambda _line: pytest.fail("unexpected recovery"))
+    expected = {"gone": ("client_gone", 1), "error": ("agy_error", 1, _LONG_ERROR[:500]),
+        "payload_rc": ("agy_error", 7, _LONG_ERROR[:500]), "result_rc": ("agy_error", 2, _LONG_ERROR[:500])}
+    assert result == expected.get(case, ("done", rc, "stderr"))
+    assert content == ([] if case in ("error", "nonzero", "empty_final", "payload_rc", "result_rc") else ["\n\nФинал" if case == "fallback" else "Финал"])
+@pytest.mark.parametrize("outcome", ("timeout", "ok"))
+def test_finalize_transient_drain_veto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent"))
+    monkeypatch.setenv(_FLAG, "false")
+    monkeypatch.delenv("AGY_SELF_HEAL_INTERRUPTED_TURN", raising=False)
+    error, tail = "connection reset by peer", facade.InterruptionTailState()
+    tail.note_error_record(1, text=error)
+    tail.note_planner_record({"content": "Финал", "status": "DONE"}, 2)
+    snapshot = done.DoneSnapshot(done.DoneTextFacts("Финал", "", error, ""), done.DoneResultFacts("ERROR", 1, True, 0),
+        done.DoneDeliveryFacts(False, True, lambda text: text, False),
+        done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(outcome, True), "closed"))
+    ports = done.DonePorts(lambda *args: args, lambda _text: None, lambda _events: None, lambda: False)
+    result = done.finalize_done(done.DoneRequest((1, "Финал", None), {}, ("", "")), ports, done.DoneRuntimePorts(lambda: snapshot), done.DoneConfig(None, 256), lambda _line: None)
+    assert result == (("agy_error", 1, error) if outcome == "timeout" else ("done", 0, ""))
