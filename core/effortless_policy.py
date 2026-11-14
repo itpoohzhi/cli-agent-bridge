@@ -48,7 +48,8 @@ def strip_effortless_effort(
     raw = req["reasoning_effort"]
     asked = isinstance(raw, str) and raw.strip().lower() != OFF
     clean = {key: value for key, value in req.items() if key != "reasoning_effort"}
-    return clean, EffortResolution(OFF, True, raw if asked else None)
+    clamped_from = res.clamped_from if res.clamped_from is not None else (raw if asked else None)
+    return clean, EffortResolution(OFF, True, clamped_from)
 
 
 def effort_cli_args(effort: str | None) -> list[str]:

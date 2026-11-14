@@ -82,7 +82,7 @@ def test_passthrough_strips_reasoning_effort_for_effortless_model(effort_on: boo
     clean, resolution = prepare_passthrough_request(req, OFF_MODEL, CARBON, effort_on=effort_on)
     assert "reasoning_effort" not in clean and clean["messages"] == []
     assert (resolution.value, resolution.apply) == ("off", True)
-    assert resolution.clamped_from == (None if effort_on else "high")
+    assert resolution.clamped_from == "high"
     assert req["reasoning_effort"] == "high"  # исходный запрос не мутируется
 
 
