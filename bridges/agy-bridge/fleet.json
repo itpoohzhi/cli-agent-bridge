@@ -112,9 +112,7 @@
             "image/webp"
           ],
           "efforts_proven": [
-            "low",
-            "medium",
-            "high"
+            "off"
           ],
           "command": "agy.real -p 'Read img-1.png' --add-dir <img_dir> --model <model> --effort <effort>"
         }
