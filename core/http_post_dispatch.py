@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from functools import partial
+from pathlib import Path
 from typing import Any
 
+from core.http_post_context import PostRequestContext
+from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import (
     PostRoute, PreparedPostBody, log_route, native_autonomy, native_effort,
-    prepare_post_body, prepare_route_request,
+    prepare_post_body, prepare_route_request, resolve_post_route, selected_route_allowed,
 )
 
 _NATIVE_SCRATCH = frozenset({"requested_turn_id", "resume_turn_id", "messages", "raw_key", "keyed"})
@@ -164,4 +167,133 @@ def _render_native(route: PostRoute, ctx: dict[str, Any], adapter: Any) -> bool:
     ctx["instr"] = instr if ctx["route"] in ("keyed", "nokey") else (0, "-", 0)
     return True
 
-__all__ = ('_passthrough', '_native_parameters', '_native_backend', '_turn_ids', '_native_inputs', '_native_tools', '_render_native')
+
+def _legacy_muse_sleep(route: PostRoute, ctx: dict[str, Any], adapter: Any) -> bool:
+    # Существующее транспортное исключение; новая общая политика здесь не вводится.
+    if route.model["backend"] != "muse" or any((
+        ctx["requested_turn_id"], ctx["resume_turn_id"], ctx["keyed"],
+    )):
+        return False
+    mode = Path(getattr(adapter, "wrapper", "")).parent / "mode"
+    return mode.is_file() and mode.read_text(encoding="utf-8", errors="ignore").strip() == "sleep"
+
+
+def _detach_native(route: PostRoute, ctx: dict[str, Any], adapter: Any) -> bool:
+    host = route.host
+    return (
+        host._is_detached_enabled()
+        and (host._client_gone is host._DEFAULT_CLIENT_GONE
+             or bool(ctx["requested_turn_id"] or ctx["resume_turn_id"]))
+        and not _legacy_muse_sleep(route, ctx, adapter)
+    )
+
+
+def _create_turn(route: PostRoute, ctx: dict[str, Any]) -> tuple[Any, bool]:
+    handler = route.handler
+    return route.host.TURN_MANAGER.create_or_attach_turn(
+        model=route.model_id, backend=route.model["backend"], cwd=ctx["cwd"],
+        messages=ctx["messages"], session_id=ctx["raw_key"] if ctx["keyed"] else "",
+        owner_token_hash=route.host._owner_token_hash(handler),
+        requested_turn_id=ctx["requested_turn_id"] or None,
+        resume_turn_id=ctx["resume_turn_id"] or None, stream=bool(route.request.get("stream")),
+        emulate_tools=ctx["emulate_tools"], idle_timeout_s=handler._effective_idle_timeout_s(),
+        safety_cap_s=handler._effective_safety_cap_s(),
+    )
+
+
+def _attach_native(route: PostRoute, ctx: dict[str, Any], adapter: Any) -> bool:
+    host, handler = route.host, route.handler
+    ctx["detach_on_disconnect"] = _detach_native(route, ctx, adapter)
+    ctx["managed_turn"], ctx["attached_existing"] = None, False
+    if host._is_detached_enabled():
+        try:
+            ctx["managed_turn"], ctx["attached_existing"] = _create_turn(route, ctx)
+        except PermissionError:
+            return route.reject(403, "forbidden", "turn belongs to another token")
+        except ValueError as error:
+            return route.reject(400, "invalid_request", str(error))
+    managed = ctx["managed_turn"]
+    handler._active_managed_turn = managed
+    if managed is not None:
+        managed.is_subagent = handler._is_subagent_request()
+        managed.subagent_id = handler._subagent_id()
+    ctx["turn_id"] = managed.turn_id if managed is not None else ""
+    return True
+
+
+def _serve_native(route: PostRoute, ctx: dict[str, Any]) -> None:
+    handler, host = route.handler, route.host
+    ctx["request_id"] = handler._trace.request_id if handler._trace else None
+    ctx["subagent_id"] = handler._trace.subagent_id if handler._trace else None
+    ctx["key_hash"] = host._key_hash(ctx["raw_key"]) if (
+        ctx["route"] == "keyed" and isinstance(ctx["raw_key"], str)
+    ) else ""
+    ctx["tag"] = f"client={handler._client_tag()} ua={(handler.headers.get('User-Agent') or '-')[:60]}"
+    ctx["stream"] = bool(route.request.get("stream"))
+    log_route(route, "cli")
+    turn_ctx = {k: v for k, v in ctx.items() if k not in _NATIVE_SCRATCH}
+    serve = partial(handler._serve_sse if ctx["stream"] else handler._serve_json, turn_ctx)
+    if ctx["attached_existing"]:
+        # Уже идущий ход не создаёт новой попытки и не требует нового допуска.
+        serve()
+    else:
+        handler._serve_resilient(route.model["backend"], serve)
+
+
+def dispatch_route(route: PostRoute, body: PreparedPostBody | None = None) -> None:
+    """Разделяет raw passthrough и CLI, не повторяя исполненный POST."""
+    if not selected_route_allowed(route):
+        return
+    adapter = route.host.BACKENDS.get(route.model["backend"])
+    if isinstance(adapter, route.host.PassthroughAdapter):
+        _passthrough(route, adapter, body)
+        return
+    ctx = _native_parameters(route)
+    if ctx is None:
+        return
+    adapter = _native_inputs(route, ctx)
+    if adapter is None or not _render_native(route, ctx, adapter):
+        return
+    try:
+        if _attach_native(route, ctx, adapter):
+            _serve_native(route, ctx)
+    finally:
+        managed = ctx.get("managed_turn")
+        if managed is not None and not ctx["attached_existing"] and managed.is_active:
+            route.host.TURN_MANAGER.finalize_abandoned_turn(managed)
+
+
+def _cleanup_post(context: PostRequestContext) -> None:
+    handler: Any = context.handler
+    host: Any = context.host
+    handler._active_managed_turn = None
+    try:
+        context.release_body()
+    finally:
+        host._DELIVERY_BUDGET.release(handler._delivery_reserved)
+        handler._delivery_reserved = 0
+
+
+def dispatch_post(context: PostRequestContext) -> None:
+    """Владеет общим cleanup принятого тела, в том числе при раннем отказе."""
+    try:
+        route = resolve_post_route(context)
+        if route is not None:
+            dispatch_route(route)
+    finally:
+        _cleanup_post(context)
+
+
+def handle_post(handler: Any, host: Any) -> None:
+    """Точка композиции для короткого do_POST, без обратного импорта server."""
+    context = begin_post(handler, host)
+    if context is None:
+        return
+    accepted = False
+    try:
+        accepted = read_post_request(context)
+        if accepted:
+            dispatch_post(context)
+    finally:
+        if not accepted:
+            _cleanup_post(context)
