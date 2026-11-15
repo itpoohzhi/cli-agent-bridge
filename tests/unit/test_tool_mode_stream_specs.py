@@ -206,3 +206,21 @@ def test_reasoning_open_is_never_rejected_by_reject_tools() -> None:
     capture.normalizer.finish()
     assert "".join(capture.reasoning) == "why"
     assert capture.text == "done"
+
+def test_non_strict_forbid_allows_orphan_reasoning_close_as_content() -> None:
+    """F-008.1: `</think>` без strict_live — текст, как в OFF+TEXT и EMULATE."""
+    capture = make(FORBID, strict_live=False)
+    capture.feed_chars("</think>")
+    capture.normalizer.finish()
+    assert capture.text == "</think>"
+    assert capture.calls == []
+
+
+@pytest.mark.parametrize("text", ('<invoke name="x">s</invoke>', "<execute>ls</execute>"))
+def test_non_strict_forbid_still_rejects_envelopes(text: str) -> None:
+    """F-001.3: отказ по tool-конвертам не зависит от strict_live."""
+    capture = make(FORBID, strict_live=False)
+    with pytest.raises(emulation.LiveParserError):
+        capture.feed_chars(text)
+    assert capture.text == "" and capture.calls == []
+

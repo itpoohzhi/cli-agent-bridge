@@ -25,7 +25,7 @@ from core.prompt_prefix_stability import (
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
 from core.tool_mode import (
     DEFAULT_EMULATE_SPEC, NormalizerModeSpec, NormalizerSinks,
-    ToollessTagPolicy, ToolMode,
+    ToollessTagPolicy, ToolMode, find_rejected_envelope, rejected_envelope_prefix_len,
     _tool_choice_none as _tool_choice_none,
 )
 
@@ -1449,17 +1449,7 @@ DEFAULT_MAX_IMAGES = 10
 DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024
 # Служебные теги протокола <tool_call>, не имеющие смысла вне настоящего блока.
-_ORPHAN_SERVICE_TAGS = (
-    TOOL_CALL_CLOSE,
-    "<arg_key>",
-    "</arg_key>",
-    "<arg_value>",
-    "</arg_value>",
-)
-# Внешние tool/service-конверты: их открытие и закрытие не утекают текстом ни в одном отказе.
-_REJECTED_TOOL_ENVELOPE_TAGS = (
-    "<invoke>", "<invoke ", "<invoke:", "</invoke", "<execute>", "<execute ", "</execute",
-)
+_ORPHAN_SERVICE_TAGS = (TOOL_CALL_CLOSE, "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>")
 # (MIME, магический префикс, расширение файла) — принимаемые форматы вложений.
 # Для GIF/WebP префикс — только ориентир таблицы расширений: точную сигнатуру
 # (GIF87a/GIF89a; RIFF+WEBP в [8:12]) проверяет `_sniff_image_mime`.
@@ -1625,6 +1615,7 @@ class StreamNormalizer:
         self._parser: ToolCallParser | None = None
         self._buf, self._tag, self._doc = "", "", ""
         self._state = "text"  # text | reasoning | tool
+        self._reject_envelopes = False
         self._depth = 0
         self._content_pieces: list[str] = []
         self._reasoning_pieces: list[str] = []
@@ -1633,6 +1624,8 @@ class StreamNormalizer:
     def _apply_mode_spec(self, mode_spec: NormalizerModeSpec) -> None:
         active = mode_spec.mode is not ToolMode.OFF or mode_spec.policy is ToollessTagPolicy.ERROR
         self._reject_tools = active and mode_spec.mode is not ToolMode.EMULATE
+        # EMULATE+strict_live тоже fail-closed: голый конверт вне <tool_call> — утечка.
+        self._reject_envelopes = self._reject_tools or (active and self.strict_live)
         if mode_spec.mode is ToolMode.EMULATE:
             self._parser = ToolCallParser(
                 self._emit_content, self._emit_call, strict_live=self.strict_live
@@ -1644,8 +1637,6 @@ class StreamNormalizer:
         if active:
             candidates.append((TOOL_CALL_OPEN, "tool_open", ""))
             candidates.extend((lit, "orphan", "") for lit in _ORPHAN_SERVICE_TAGS)
-        if self._reject_tools:
-            candidates.extend((lit, "orphan", "") for lit in _REJECTED_TOOL_ENVELOPE_TAGS)
         self._candidates = candidates
 
     @property
@@ -1666,6 +1657,7 @@ class StreamNormalizer:
             self._state in ("tool", "reasoning")
             or (self._parser is not None and self._parser.has_open_tool_call())
             or bool(self._partial_prefix_len([lit for lit, _k, _t in self._candidates]))
+            or (self._reject_envelopes and rejected_envelope_prefix_len(self._buf) > 0)
         )
 
     def feed(self, text: str) -> None:
@@ -1746,11 +1738,16 @@ class StreamNormalizer:
         """S_PREFIX_HOLD не считается открытым блоком S_TOOL_GATE."""
         found = ((self._buf.find(item[0]), item) for item in self._candidates)
         found = min((item for item in found if item[0] >= 0), key=lambda item: item[0], default=None)
+        envelope = find_rejected_envelope(self._buf) if self._reject_envelopes else None
+        if envelope is not None and (found is None or envelope[0] <= found[0]):
+            found = (envelope[0], (envelope[1], "orphan", ""))
         if found is None:
             if final:
                 self._finish_prefix_hold()
             else:
                 keep = self._partial_prefix_len([lit for lit, _k, _t in self._candidates])
+                if self._reject_envelopes:
+                    keep = max(keep, rejected_envelope_prefix_len(self._buf))
                 end = len(self._buf) - keep
                 self._feed_parser(self._buf[:end])
                 self._buf = self._buf[end:]
@@ -1763,9 +1760,12 @@ class StreamNormalizer:
         return self._handle_candidate(candidate, final)
 
     def _has_tool_prefix_candidate(self, text: str) -> bool:
-        return len(text) > 1 and any(
-            literal.startswith(text) for literal, _kind, tag in self._candidates if not tag
-        )
+        """True — удержанный хвост оборван на префиксе тега; голый `</` — не префикс."""
+        if len(text) < 2 or text == "</":
+            return False
+        if any(literal.startswith(text) for literal, _kind, tag in self._candidates if not tag):
+            return True
+        return self._reject_envelopes and rejected_envelope_prefix_len(text) == len(text)
 
     def _finish_prefix_hold(self) -> None:
         if self._reject_tools and self._has_tool_prefix_candidate(self._buf):
@@ -1787,7 +1787,7 @@ class StreamNormalizer:
                 self._state, self._tag, self._depth = "reasoning", tag, 1
                 self._buf = self._buf[len(literal) :]
                 return True
-            if self._reject_tools or (self.strict_live and kind == "orphan"):
+            if (self._reject_tools and not tag) or (self.strict_live and kind == "orphan"):
                 raise LiveParserError(f"unexpected service tag: {literal.strip('<>/')}")
             if kind == "tool_open":
                 self._state = "tool"
@@ -1876,9 +1876,7 @@ def _call_name_and_args(tool_call: Any) -> tuple[str, Any]:
 def _with_arguments(tool_call: Any, arguments: Any) -> Any:
     """Копия вызова с новыми arguments (тип и остальные поля вызова сохраняются)."""
     if isinstance(tool_call, ToolCall):
-        return replace(
-            tool_call, function=replace(tool_call.function, arguments=arguments)
-        )
+        return replace(tool_call, function=replace(tool_call.function, arguments=arguments))
     if isinstance(tool_call.get("function"), dict):
         return dict(
             tool_call, function=dict(tool_call["function"], arguments=arguments)
@@ -2212,6 +2210,4 @@ def finalize_turn(
         parser.finish()
     else:
         add_content(text)
-    return replace(
-        raw, text="".join(pieces), tool_calls=tuple(tool_calls), events=tuple(events)
-    )
+    return replace(raw, text="".join(pieces), tool_calls=tuple(tool_calls), events=tuple(events))

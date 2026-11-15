@@ -254,3 +254,112 @@ def test_tool_envelopes_rejected_in_strict_modes(
         _feed_chars(norm, text)
     assert norm._state == "text"
     assert not content and not calls
+
+
+ENVELOPES = (
+    '<invoke\nname="bash">secret</invoke>',
+    '<invoke\tname="bash">secret</invoke>',
+    "<invoke/>",
+    '<INVOKE name="x">secret</INVOKE>',
+    '<antml:invoke name="x">secret</antml:invoke>',
+    "<execute\n>cmd</execute>",
+)
+STRICT_REJECT_MODES = (
+    ("FORBID", "TEXT"),
+    ("FORBID", "ERROR"),
+    ("OFF", "ERROR"),
+)
+FENCED_ENVELOPE = '```xml\n<invoke\nname="x"/>\n```\n'
+
+
+@pytest.mark.parametrize("mode,policy", STRICT_REJECT_MODES)
+@pytest.mark.parametrize("text", ENVELOPES)
+@pytest.mark.parametrize("width", (1, 7, 1000))
+def test_rejected_envelopes_fail_closed_with_zero_leak(
+    mode: str, policy: str, text: str, width: int
+) -> None:
+    """F-001.1/F-001.3: перенос, таб, `/>`, регистр и antml-форма — один и тот же отказ."""
+    norm, content, _, calls = _normalizer(mode, policy)
+    with pytest.raises(emulation.LiveParserError):
+        for index in range(0, len(text), width):
+            norm.feed_text(text[index : index + width])
+        norm.finish()
+    assert norm._state == "text"
+    assert not content and norm.content == "" and not calls
+
+
+@pytest.mark.parametrize("mode,policy", STRICT_REJECT_MODES)
+@pytest.mark.parametrize("width", (1, 1000))
+def test_tag_names_outside_envelope_boundary_stay_text(
+    mode: str, policy: str, width: int
+) -> None:
+    """`<invoker>`: после стема идёт `r`, а не разделитель — обычный текст."""
+    text = "<invoker>ok</invoker>"
+    norm, content, _, calls = _normalizer(mode, policy)
+    for index in range(0, len(text), width):
+        norm.feed_text(text[index : index + width])
+    norm.finish()
+    assert "".join(content) == text
+    assert not calls
+
+
+@pytest.mark.parametrize("mode,policy", MODE_CASES)
+@pytest.mark.parametrize("width", (1, 1000))
+def test_fenced_envelope_literal_is_lossless_in_every_mode(
+    mode: str, policy: str, width: int
+) -> None:
+    """Markdown-код литерален: конверт в блоке ```xml не отклоняется и не теряется."""
+    norm, content, _, calls = _normalizer(mode, policy)
+    for index in range(0, len(FENCED_ENVELOPE), width):
+        norm.feed_text(FENCED_ENVELOPE[index : index + width])
+    norm.finish()
+    assert "".join(content) == FENCED_ENVELOPE
+    assert norm.content == FENCED_ENVELOPE
+    assert not calls
+
+
+@pytest.mark.parametrize("text", ('<invoke name="x">secret</invoke>', "<antml:invoke/>"))
+def test_emulate_strict_rejects_bare_envelope_outside_tool_call(text: str) -> None:
+    norm, content, _, calls = _normalizer("EMULATE", strict_live=True)
+    with pytest.raises(emulation.LiveParserError):
+        _feed_chars(norm, text)
+        norm.finish()
+    assert norm.content == "" and not content and not calls
+
+
+def test_emulate_strict_still_extracts_call_inside_tool_call_block() -> None:
+    norm, content, _, calls = _normalizer("EMULATE", strict_live=True)
+    _feed_chars(norm, VALID_CALL)
+    norm.finish()
+    assert norm.content == "" and not content
+    assert [call["name"] for call in calls] == ["noop"]
+
+
+def test_off_text_keeps_envelope_literal_without_strict_live() -> None:
+    text = '<invoke name="x">secret</invoke>'
+    norm, content, _, calls = _normalizer("OFF", "TEXT", strict_live=False)
+    _feed_chars(norm, text)
+    norm.finish()
+    assert "".join(content) == text
+    assert not calls
+
+
+@pytest.mark.parametrize("mode,policy", (("FORBID", "TEXT"), ("OFF", "ERROR")))
+def test_truncated_html_close_flushes_as_content_at_eof(mode: str, policy: str) -> None:
+    """Обрезанный `</` (например, по max_tokens) — текст, а не оборванный тег."""
+    norm, content, _, calls = _normalizer(mode, policy)
+    _feed_chars(norm, "<div>hi</")
+    norm.finish()
+    assert "".join(content) == "<div>hi</"
+    assert norm.content == "<div>hi</" and not calls
+
+
+@pytest.mark.parametrize("mode,policy", (("FORBID", "TEXT"), ("OFF", "ERROR")))
+@pytest.mark.parametrize("tail", ("<t", "<i", "<e", "</t", "<IN", "</antml:in", "<invoke"))
+def test_held_tag_prefixes_still_raise_at_eof(mode: str, policy: str, tail: str) -> None:
+    norm, content, _, calls = _normalizer(mode, policy)
+    _feed_chars(norm, tail)
+    assert norm._state == "text" and not content
+    with pytest.raises(emulation.LiveParserError):
+        norm.finish()
+    assert not content and not calls
