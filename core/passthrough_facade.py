@@ -10,11 +10,19 @@ from copy import copy
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
+from core.backend_adapter import PreSendTransientError as AdapterPreSendError
+from core.http_post_dispatch import _cleanup_post, _passthrough, dispatch_route
+from core.http_post_ingress import begin_post, read_post_request
+from core.http_post_routing import prepare_post_body, resolve_post_route, selected_route_allowed
 from core.passthrough_exchange import _validate_endpoint, internal_trace_scope
-from core.route_attempts import AttemptPhase, RouteRefusal
-from core.route_eligibility import EligibilityFacts, route_eligible
+from core.route_attempts import AttemptPhase, RouteAttempt, RouteRefusal, decide_attempt
+from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
 from core.route_health_policy import RetryBudgetConfig
+from core.routing_contract import ROUTING_ALGORITHM, PreSendTransientError, parse_routes
+from core.runtime_env import NumSpec, parse_number
 from core.transport_credentials import credential_ready
+from core.transport_routing import route_order
+from core.transport_settings import ROUTING_FLAG, resolve_transport_seed
 
 
 @dataclass(frozen=True)
@@ -169,4 +177,124 @@ class _RetryBucket:
 
 _RETRY_BUCKET = _RetryBucket()
 
-__all__ = ('PassthroughCall', '_headers', '_canonical_model', '_outcome', 'serve_passthrough', '_plain_params', '_selected', '_eligible', '_budget', '_RetryBucket')
+
+def _retry_token(config: RetryBudgetConfig) -> bool:
+    """Общий неблокирующий bucket с настраиваемыми burst и скоростью refill."""
+    now = time.monotonic()
+    prefix, env = "BRIDGE_TRANSPORT_RETRY_BUCKET_", os.environ
+    capacity = parse_number(env, NumSpec((prefix + "CAPACITY",), 100, 1, float("inf")))
+    rate = parse_number(env, NumSpec((prefix + "RATE_S",), config.max_attempts, 0, float("inf")))
+    with _RETRY_BUCKET.lock:
+        tokens, previous = _RETRY_BUCKET.tokens, _RETRY_BUCKET.updated_at
+        tokens = capacity if not previous else min(capacity, tokens + (now - previous) * rate)
+        allowed = tokens >= 1
+        _RETRY_BUCKET.tokens, _RETRY_BUCKET.updated_at = tokens - int(allowed), now
+        return allowed
+
+
+def _attempt(route: Any, spec: Any, body: Any, attempt: RouteAttempt) -> None:
+    selected, adapter = _selected(route, spec)
+    handler = route.handler
+    handler._transport_attempt = attempt
+    try:
+        if isinstance(adapter, route.host.PassthroughAdapter) and spec.credential_ref is not None:
+            # Только credential overlay требует локального adapter; реестр не меняется.
+            if not selected_route_allowed(selected):
+                return
+            _passthrough(selected, adapter, body)
+        else:
+            dispatch_route(selected, body)
+    finally:
+        handler._transport_attempt = None
+
+
+def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
+    config, started, last_error, state = _budget(), time.monotonic(), None, None
+    routing = {"enabled": True, "algorithm": ROUTING_ALGORITHM, **route.model["routing"]}
+    model = {**route.model, "routing": routing}
+    by_backend = {spec.backend: spec for spec in routes}
+    order = route_order(route.model_id, model, seed,
+                        getattr(route.handler._trace, "subagent_id", None), routes)
+    body, count = prepare_post_body(route), 0
+    for backend in order:
+        if route.host._client_gone(route.handler.connection):
+            return
+        decision = decide_attempt(config, count, time.monotonic() - started, state)
+        if not decision.allow_retry:
+            break
+        spec = by_backend[backend]
+        if not _eligible(route, spec, policy):
+            continue
+        if count and not _retry_token(config):
+            break
+        count += 1
+        attempt = RouteAttempt(decision.attempt_budget_s, time.monotonic() + decision.attempt_budget_s, time.monotonic)
+        attempt.advance(AttemptPhase.CONNECTING)
+        try:
+            _attempt(route, spec, body, attempt)
+            return
+        except (RouteRefusal, PreSendTransientError, AdapterPreSendError) as error:
+            last_error, state = error, attempt.state
+    if isinstance(last_error, RouteRefusal):
+        sink = route.host._HandlerSink(route.handler, extra_headers=route.host._trace_headers(route.handler._trace))
+        sink.start(last_error.status_code, list(last_error.response_headers))
+        sink.write(last_error.response_body)
+    else:
+        route.reject(503, "route_unavailable", "no eligible transport is available")
+
+
+def _request_policy(route: Any) -> Any:
+    """Объединяет все источники ролей: header не может скрыть роль в body."""
+    request = {**route.request, "canonical_model_id": route.model_id}
+    if request.get("reasoning_effort") is None and route.alias_effort is not None:
+        request["reasoning_effort"] = route.alias_effort
+    policy = request_snapshot(request)
+    trace_role = getattr(getattr(route.handler, "_trace", None), "subagent_id", None)
+    header_policy = request_snapshot({"model": route.model_id, "headers": dict(route.handler.headers.items()),
+                                      "trace_subagent_id": trace_role if isinstance(trace_role, str) else None})
+    return replace(policy, role_ids=policy.role_ids + header_policy.role_ids, excluded=policy.excluded | header_policy.excluded)
+
+
+def _model_routing(model: dict[str, Any]) -> dict[str, Any]:
+    routing = model.get("routing")
+    if isinstance(routing, dict) and routing.get("legacy_backend") in (None, model["backend"]):
+        return routing
+    backend = model["backend"]
+    spec = dict(route_id=backend, backend=backend, weight=100, priority=0)
+    spec["params"] = model.get("params", {})
+    return {"catalog_hash": "singleton:" + backend, "routes": [spec]}
+
+
+def _dispatch(route: Any) -> None:
+    routing = _model_routing(route.model)
+    if not (route.host.flag_enabled(ROUTING_FLAG) and routing and routing.get("enabled", True)):
+        route.model["backend"] = routing.get("disabled_backend", route.model["backend"])
+        dispatch_route(route)
+        return
+    route = replace(route, model={**route.model, "routing": routing})
+    if route.model_id.endswith("-" + route.model["backend"]) and not selected_route_allowed(route):
+        return
+    policy = _request_policy(route)
+    routes = tuple(spec for spec in parse_routes(route.model) if _eligible(route, spec, policy))
+    if not routes:
+        route.reject(503, "route_unavailable", "no eligible transport is available")
+        return
+    seed = resolve_transport_seed(dict(route.handler.headers.items()),
+                                  {**route.request, **route.ingress.transport_controls})
+    _run_routes(route, routes, seed, policy)
+
+
+def handle_post(handler: Any, host: Any) -> None:
+    """Общие auth/admission/alias и routing для всех API/CLI-входов."""
+    context = begin_post(handler, host)
+    if context is None:
+        return
+    try:
+        if read_post_request(context):
+            route = resolve_post_route(context)
+            if route is not None:
+                _dispatch(route)
+    except ValueError:
+        handler._reject(400, "invalid_request", "invalid transport controls")
+    finally:
+        _cleanup_post(context)
