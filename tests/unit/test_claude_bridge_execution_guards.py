@@ -59,7 +59,7 @@ def test_add_call_rejects_non_emulation_mode(bridge: Any, mode: ToolMode) -> Non
 def test_add_call_after_client_departure_does_not_publish(bridge: Any) -> None:
     execution = _execution(bridge)
     execution.gone = True
-    execution.add_call({"name": "noop", "arguments": {}})
+    assert execution.add_call({"name": "noop", "arguments": {}}) is None
     execution.callbacks.on_tool_call.assert_not_called()
     assert execution.tool_calls == []
 
@@ -67,13 +67,13 @@ def test_add_call_after_client_departure_does_not_publish(bridge: Any) -> None:
 def test_parallel_expansion_stops_after_first_rejected_callback(bridge: Any) -> None:
     execution = _execution(bridge)
     execution.callbacks.on_tool_call.return_value = False
-    execution.add_call({
+    assert execution.add_call({
         "name": "parallel",
         "arguments": {"tool_uses": [
             {"recipient_name": "first", "parameters": {}},
             {"recipient_name": "second", "parameters": {}},
         ]},
-    })
+    }) is None
     assert execution.gone is True
     assert len(execution.tool_calls) == 1
     assert execution.tool_calls[0]["function"]["name"] == "first"

@@ -108,14 +108,14 @@ def test_delta_frame_excludes_usage_error_and_old_choices():
 
 def test_disabled_repetition_guard_does_not_allocate_or_raise(limits):
     relay, written = _relay(replace(limits, repetition_guard_enabled=False))
-    relay._check_repetition(0, "repeat " * 100)
+    assert relay._check_repetition(0, "repeat " * 100) is None
     assert relay.guards == {}
     assert written == []
 
 
 def test_empty_text_does_not_allocate_an_enabled_repetition_guard(limits):
     relay, written = _relay(replace(limits, repetition_guard_enabled=True))
-    relay._check_repetition(7, "")
+    assert relay._check_repetition(7, "") is None
     assert relay.guards == {}
     assert written == []
 
@@ -166,7 +166,7 @@ def test_native_tools_are_published_only_when_trusted_and_counted(limits, truste
 
 def test_flush_text_for_unknown_choice_is_a_noop(limits):
     relay, written = _relay(limits)
-    relay._flush_text(99, {"id": "c"})
+    assert relay._flush_text(99, {"id": "c"}) is None
     assert written == []
     assert relay.texts == {}
 
@@ -197,13 +197,20 @@ def test_unmodified_chunk_preserves_original_whitespace_and_is_not_duplicated(li
     assert outcome.done is True
 
 
+def test_unmodified_chunk_returns_none_and_commits_original_bytes(limits):
+    relay, written = _relay(limits)
+    assert relay._write_chunk(b"data: {}\n\n", {}, False) is None
+    assert written == [b"data: {}\n\n"]
+    assert relay.outcome.committed is True
+
+
 def test_modified_empty_delta_is_dropped_instead_of_publishing_empty_choice(limits):
     relay, written = _relay(limits)
     chunk = delta_chunk(0, {"content": '<tool_call>{"name":"noop"'})
     modified = relay._consume_chunk(chunk, chunk["choices"])
     assert modified is True
     assert chunk["choices"][0]["delta"] == {}
-    relay._write_chunk(b"original", chunk, modified)
+    assert relay._write_chunk(b"original", chunk, modified) is None
     assert written == []
     relay.acc.close()
 

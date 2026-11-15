@@ -63,7 +63,11 @@ def test_checked_events_emulate_passes_raw_calls_once_without_a_parser(limits):
     events = [_event(delta_chunk(0, {"content": '<tool_call>{"name":"noop"'}))]
     source = Mock()
     source.__iter__ = Mock(side_effect=[iter(events), AssertionError("iterated twice")])
-    assert list(passthrough._checked_events(source, EMULATE_SPEC, limits)) == events
+    gen = passthrough._checked_events(source, EMULATE_SPEC, limits)
+    assert next(gen) == events[0]
+    with pytest.raises(StopIteration) as stopped:
+        next(gen)
+    assert stopped.value.value is None
     source.__iter__.assert_called_once_with()
 
 
