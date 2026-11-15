@@ -24,6 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Mapping, Optional
 
+from core import passthrough_precommit
 from core.backend_adapter import (
     SESSIONS_NONE, STREAMING_NATIVE, BackendAdapter, BackendModel,
     BackendNotSupported, Capabilities, KindConstraints, Qualification,
@@ -1223,10 +1224,11 @@ class PassthroughAdapter(BackendAdapter):
         raw_body: bytes,
         request: Mapping[str, Any],
         headers: Mapping[str, str],
-        sink: ResponseSink,
+        sink: ResponseSink | passthrough_precommit.PrecommitSink,
         window: LivenessWindow | None = None,
     ) -> None:
         """One request: body goes upstream unmodified (AD-001: internal stream=true), response goes to `sink`."""
+        sink = passthrough_precommit.wrap_sink(sink, request, format_stream_error_sse, ClientGone)
         raw_body = self._with_body_defaults(raw_body)
         internal = internal_stream_body(path, request, raw_body)
         is_int = internal is not None
@@ -1237,12 +1239,9 @@ class PassthroughAdapter(BackendAdapter):
         slide = open_sliding_deadline(
             deadline, self.limits, is_int, request, _SLIDING_WIN_FLAG.enabled
         )
-        q_host = getattr(self.host, "QUEUE_TIMEOUT_S", None)
-        if q_host is not None:
-            q_val = float(q_host)
-        else:
-            q_val = float(os.environ.get("BRIDGE_QUEUE_TIMEOUT_S", 60.0))
-        queue_timeout = min(q_val, self.limits.total_timeout_s)
+        window, slide = passthrough_precommit.request_window(window, slide)
+        q_def = float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S))
+        queue_timeout = min(q_def, self.limits.total_timeout_s)
         if not self._slots.acquire(timeout=queue_timeout):
             self._fail(sink, 503, "overloaded", "passthrough backend is saturated")
             return
@@ -1282,26 +1281,15 @@ class PassthroughAdapter(BackendAdapter):
                     sock.close()
                     raise ClientGone() if sink.client_gone() else TimeoutError()
                 transport.append(sock)
-        def open_response() -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
-            ps_dl = getattr(sink, "presend_deadline", None)
-            new_conn = self._open(
-                path,
-                raw_body,
-                headers,
-                deadline=open_deadline,
-                on_socket=on_socket,
-                presend_deadline=ps_dl,
-                on_pooling=opened_pooling.append,
+
+        def open_response() -> tuple[
+            http.client.HTTPConnection, http.client.HTTPResponse
+        ]:
+            return passthrough_precommit.open_response(
+                self, sink, slide, (path, raw_body, headers),
+                (open_deadline, on_socket, opened_pooling.append, is_int),
             )
-            try:
-                if sink.client_gone():
-                    raise ClientGone()
-                new_resp = new_conn.getresponse()
-            except BaseException:
-                new_conn.close()
-                raise
-            slide.relax_socket(new_conn.sock, self.limits.read_timeout_s, internal is not None)
-            return new_conn, new_resp
+
         def reopen_response() -> http.client.HTTPResponse:
             nonlocal conn, resp
             if resp is not None:
