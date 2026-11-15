@@ -5447,7 +5447,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             owner = PROVIDER_SCOPES[provider_id]
             owner_tuple = (owner,) if isinstance(owner, str) else owner
 
-        payload = {"object": "list", "data": _build_models_list(owner_tuple)}
+        payload = {"object": "list", "data": __import__("core.fallback_http_hook", fromlist=["append_models"]).append_models(_build_models_list(owner_tuple), owner_tuple)}
         etag = _etag(payload)
         if _etag_matches(self.headers.get("If-None-Match"), etag):
             self.send_response(304)
@@ -7188,7 +7188,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     },
                 )
                 return
-            # (8) модель.
+            if __import__("core.fallback_http_hook", fromlist=["dispatch"]).dispatch(self, req, sys.modules[__name__], lambda a, r, s: a.handle(path=self.path, raw_body=json.dumps(r).encode("utf-8"), request=r, headers=dict(self.headers.items()), sink=s), provider_id): return
             raw_model = req.get("model")
             model_len = len(raw_model) if isinstance(raw_model, str) else 0
             if raw_model is None:

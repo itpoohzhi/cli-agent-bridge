@@ -1,0 +1,33 @@
+# ID и окна сверены с GET /v1/models моста 2026-11-13.
+quota_rules:
+  body_patterns:
+    - 'quota|usage[_ ]?limit|insufficient_quota|billing'
+    - 'GoUsageLimitError'
+  error_codes:
+    - insufficient_quota
+    - GoUsageLimitError
+  reset_body_patterns:
+    - '\bresets?\s+in\s+(?P<duration>(?:\d+(?:\.\d+)?\s*[dhms]\s*)+)'
+chains:
+  compaction-resilient:
+    declared_context_window: 272000
+    disabled_target: "gemini-4-argon"
+    preserve_alias_in_response: true
+    exhausted_status_code: 429
+    candidates:
+      - model: "gemini-4-argon"
+        quota_scope: "agy"
+        cost_class: "subscription"
+        context_window: 1048576
+      - model: "claude-haiku-5-5"
+        quota_scope: "claude"
+        cost_class: "subscription"
+        context_window: 1000000
+      - model: "gpt-6.1-sol"
+        quota_scope: "codex"
+        cost_class: "subscription"
+        context_window: 272000
+      - model: "deepseek-v4.1-flash"
+        quota_scope: "opencode-go"
+        cost_class: "subscription"
+        context_window: 1000000
