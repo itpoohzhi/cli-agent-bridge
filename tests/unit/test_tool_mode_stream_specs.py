@@ -57,13 +57,41 @@ def test_strict_modes_reject_invoke_family_but_off_text_keeps_it(
 
 
 @pytest.mark.parametrize("mode,policy", STRICT_MODES)
-def test_non_strict_live_never_raises_and_keeps_literals(
+def test_non_strict_live_still_rejects_tool_blocks_fail_closed(
     mode: ToolMode, policy: ToollessTagPolicy
 ) -> None:
     capture = make(mode, policy, strict_live=False)
-    capture.feed_chars(VALID_CALL + " <tool_c")
+    with pytest.raises(
+        emulation.LiveParserError, match="unexpected service tag: tool_call"
+    ):
+        capture.feed_chars(VALID_CALL)
+    assert capture.normalizer._state == "text"
+    assert capture.text == "" and capture.calls == []
+
+
+@pytest.mark.parametrize("mode,policy", STRICT_MODES)
+def test_non_strict_live_prefix_hold_at_eof_fails_closed(
+    mode: ToolMode, policy: ToollessTagPolicy
+) -> None:
+    capture = make(mode, policy, strict_live=False)
+    capture.feed_chars("answer <tool_c")
+    assert capture.text == "answer "
+    with pytest.raises(emulation.LiveParserError, match="unresolved tool/service tag"):
+        capture.normalizer.finish()
+    assert capture.normalizer._state == "text"
+    assert capture.text == "answer "
+
+
+@pytest.mark.parametrize(
+    "mode,policy", ((EMULATE, TEXT), (EMULATE, ERROR), (OFF, TEXT))
+)
+def test_non_strict_live_keeps_literals_outside_strict_modes(
+    mode: ToolMode, policy: ToollessTagPolicy
+) -> None:
+    capture = make(mode, policy, strict_live=False)
+    capture.feed_chars("see </tool_call> and <tool_c")
     capture.normalizer.finish()
-    assert capture.text == VALID_CALL + " <tool_c"
+    assert capture.text == "see </tool_call> and <tool_c"
     assert capture.calls == []
 
 
@@ -110,11 +138,12 @@ def test_prefix_hold_that_is_not_a_tag_prefix_is_flushed_in_forbid() -> None:
     assert capture.text == "<tool_cat"
 
 
-def test_prefix_hold_in_non_strict_forbid_is_flushed_as_text() -> None:
+def test_prefix_hold_in_non_strict_forbid_raises_fail_closed() -> None:
     capture = make(FORBID, strict_live=False)
     capture.feed_chars("<tool_c")
-    capture.normalizer.finish()
-    assert capture.text == "<tool_c"
+    with pytest.raises(emulation.LiveParserError, match="unresolved tool/service tag"):
+        capture.normalizer.finish()
+    assert capture.text == ""
 
 
 @pytest.mark.parametrize("mode", (FORBID, OFF))

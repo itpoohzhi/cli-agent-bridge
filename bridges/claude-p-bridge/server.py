@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
@@ -560,7 +560,7 @@ class Run:
         self.proc.wait(timeout=PROCESS_WAIT_S)
         with _active_lock:
             _active.pop(self.proc.pid, None)
-        spawn_registered.unregister(self.proc)
+        cast(Any, spawn_registered).unregister(self.proc)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:

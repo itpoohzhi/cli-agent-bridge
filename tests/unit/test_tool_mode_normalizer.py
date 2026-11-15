@@ -11,7 +11,9 @@ import core.tool_emulation as emulation
 from tests.unit.test_tool_mode import MODE_CASES, VALID_CALL, _api
 
 
-def _normalizer(mode: str, policy: str = "TEXT") -> tuple[Any, list, list, list]:
+def _normalizer(
+    mode: str, policy: str = "TEXT", *, strict_live: bool = True
+) -> tuple[Any, list, list, list]:
     api = _api()
     content: list[str] = []
     reasoning: list[str] = []
@@ -24,7 +26,7 @@ def _normalizer(mode: str, policy: str = "TEXT") -> tuple[Any, list, list, list]
     spec = api.build_mode_spec(
         getattr(api.ToolMode, mode), getattr(api.ToollessTagPolicy, policy)
     )
-    normalizer = emulation.StreamNormalizer.for_mode(spec, sinks, strict_live=True)
+    normalizer = emulation.StreamNormalizer.for_mode(spec, sinks, strict_live=strict_live)
     return normalizer, content, reasoning, calls
 
 
@@ -212,3 +214,43 @@ def test_emulate_still_extracts_valid_tool_call(policy: str) -> None:
     assert len(calls) == 1
     assert calls[0]["name"] == "noop" and calls[0]["arguments"] == {}
     assert norm.tool_calls == calls
+
+
+@pytest.mark.parametrize("mode", ("FORBID", "OFF"))
+def test_html_and_gfm_tags_pass_strict_modes(mode: str) -> None:
+    """RW-004: дочерние payload-теги и GFM-HTML — обычный текст, не вызов инструмента."""
+    text = "git <command> <parameter>\n\n<details><summary>Overview</summary></details>"
+    norm, content, _, calls = _normalizer(mode, "ERROR" if mode == "OFF" else "TEXT")
+    _feed_chars(norm, text)
+    norm.finish()
+    assert "".join(content) == text
+    assert not calls
+
+
+@pytest.mark.parametrize("mode", ("FORBID", "OFF"))
+def test_single_trailing_lt_is_content_at_eof(mode: str) -> None:
+    """RW-004: одиночный `<` в конце потока — текст, а не оборванный префикс тега."""
+    norm, content, _, calls = _normalizer(mode, "ERROR" if mode == "OFF" else "TEXT")
+    _feed_chars(norm, "1 <")
+    norm.finish()
+    assert "".join(content) == "1 <"
+    assert not calls
+
+
+@pytest.mark.parametrize("mode", ("FORBID", "OFF"))
+@pytest.mark.parametrize(
+    "text",
+    ('<invoke name="bash">{"cmd":"ls"}</invoke>', "<execute>ls -la</execute>"),
+)
+@pytest.mark.parametrize("strict_live", (True, False))
+def test_tool_envelopes_rejected_in_strict_modes(
+    mode: str, text: str, strict_live: bool
+) -> None:
+    """RW-003/RW-004: внешние tool-конверты отклоняются fail-closed при любой нарезке."""
+    norm, content, _, calls = _normalizer(
+        mode, "ERROR" if mode == "OFF" else "TEXT", strict_live=strict_live
+    )
+    with pytest.raises(emulation.LiveParserError):
+        _feed_chars(norm, text)
+    assert norm._state == "text"
+    assert not content and not calls

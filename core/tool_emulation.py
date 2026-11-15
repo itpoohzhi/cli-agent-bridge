@@ -1456,6 +1456,10 @@ _ORPHAN_SERVICE_TAGS = (
     "<arg_value>",
     "</arg_value>",
 )
+# Внешние tool/service-конверты: их открытие и закрытие не утекают текстом ни в одном отказе.
+_REJECTED_TOOL_ENVELOPE_TAGS = (
+    "<invoke>", "<invoke ", "<invoke:", "</invoke", "<execute>", "<execute ", "</execute",
+)
 # (MIME, магический префикс, расширение файла) — принимаемые форматы вложений.
 # Для GIF/WebP префикс — только ориентир таблицы расширений: точную сигнатуру
 # (GIF87a/GIF89a; RIFF+WEBP в [8:12]) проверяет `_sniff_image_mime`.
@@ -1641,11 +1645,7 @@ class StreamNormalizer:
             candidates.append((TOOL_CALL_OPEN, "tool_open", ""))
             candidates.extend((lit, "orphan", "") for lit in _ORPHAN_SERVICE_TAGS)
         if self._reject_tools:
-            candidates.extend((lit, "orphan", "") for lit in (
-                "<invoke", "</invoke", "<execute", "</execute",
-                "<parameter", "</parameter>", "<command", "</command>",
-                "<summary", "</summary>",
-            ))
+            candidates.extend((lit, "orphan", "") for lit in _REJECTED_TOOL_ENVELOPE_TAGS)
         self._candidates = candidates
 
     @property
@@ -1763,12 +1763,12 @@ class StreamNormalizer:
         return self._handle_candidate(candidate, final)
 
     def _has_tool_prefix_candidate(self, text: str) -> bool:
-        return bool(text) and any(
+        return len(text) > 1 and any(
             literal.startswith(text) for literal, _kind, tag in self._candidates if not tag
         )
 
     def _finish_prefix_hold(self) -> None:
-        if self.strict_live and self._reject_tools and self._has_tool_prefix_candidate(self._buf):
+        if self._reject_tools and self._has_tool_prefix_candidate(self._buf):
             if _code_context(self._doc + self._buf, len(self._doc), True) != "code":
                 raise LiveParserError("unresolved tool/service tag prefix at finish")
         if self._parser is not None:
@@ -1787,7 +1787,7 @@ class StreamNormalizer:
                 self._state, self._tag, self._depth = "reasoning", tag, 1
                 self._buf = self._buf[len(literal) :]
                 return True
-            if self.strict_live and (self._reject_tools or kind == "orphan"):
+            if self._reject_tools or (self.strict_live and kind == "orphan"):
                 raise LiveParserError(f"unexpected service tag: {literal.strip('<>/')}")
             if kind == "tool_open":
                 self._state = "tool"
