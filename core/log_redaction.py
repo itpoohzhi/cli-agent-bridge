@@ -210,18 +210,36 @@ def _quote_run(text: str, pos: int) -> tuple[int, str]:
     return end, text[end : end + 1]
 
 
-def _closing_run(stack: list[_QuoteFrame], quote: str, slashes: int) -> int | None:
-    """Длина закрывающей серии слэшей, если кавычка закрывает верхнюю объемлющую строку, иначе None.
+def _closes_frame(level: int, slashes: int) -> bool:
+    """Серия из `slashes` слэшей перед `"` закрывает строку уровня `level`.
 
-    Кавычка уровня `L` закрывается серией из `L` слэшей, когда длина серии кратна `2L+2`
+    Кавычка уровня `L` закрывается серией, у которой остаток от деления на `2L+2` равен `L`
     (буквальная кавычка внутри — остаток `2L+1`, буквальный слэш — остаток `2L+2`).
     """
-    if not stack:
+    return slashes % (2 * level + 2) == level
+
+
+def _closing_index(stack: list[_QuoteFrame], quote: str, slashes: int) -> int | None:
+    """Индекс кадра стека, который закрывает кавычка с серией `slashes`, иначе None.
+
+    Кавычка ищет закрываемый кадр во всём стеке, а не только на вершине: серия может закрыть нижнюю строку
+    поверх непарной вложенной (`\\"` внутри `"`), а непарная `"` внутри `'…'` не блокирует закрытие `'`.
+    """
+    if quote not in ('"', "'") or (quote == "'" and slashes % 2 != 0):
         return None
-    top_quote, level = stack[-1]
-    if quote != top_quote or slashes % (2 * level + 2) != level:
-        return None
-    return level
+    for index in range(len(stack) - 1, -1, -1):
+        frame_quote, level = stack[index]
+        if frame_quote != quote:
+            continue
+        if quote == "'" or _closes_frame(level, slashes):
+            return index
+    return None
+
+
+def _closing_run(stack: list[_QuoteFrame], quote: str, slashes: int) -> int | None:
+    """Длина закрывающей серии слэшей, если кавычка закрывает объемлющую строку, иначе None."""
+    index = _closing_index(stack, quote, slashes)
+    return None if index is None else stack[index][1]
 
 
 def _closing_quote(
@@ -235,14 +253,13 @@ def _closing_quote(
 
 def _apply_double_quote(stack: list[_QuoteFrame], slashes: int) -> None:
     """`"` с серией `slashes`: закрывает объемлющую строку, открывает вложенную либо остаётся содержимым."""
-    while stack and stack[-1][0] == '"':
-        level = stack[-1][1]
-        if slashes % (2 * level + 2) == level:
-            stack.pop()
-            return
-        if slashes > level:
-            break
-        # Серия мельче уровня кадра закрыть его не может: кадр остался от несбалансированной кавычки.
+    index = _closing_index(stack, '"', slashes)
+    if index is not None:
+        # Вместе с закрытой строкой уходят незакрытые вложенные кадры (`'…` или непарная `\"`).
+        del stack[index:]
+        return
+    # Серия мельче уровня кадра закрыть его не может: кадр остался от несбалансированной кавычки.
+    while stack and stack[-1][0] == '"' and stack[-1][1] >= slashes:
         stack.pop()
     if not stack:
         # Вне строки известны два уровня лога: обычная кавычка и однократно экранированная (`\"`).
@@ -254,9 +271,11 @@ def _apply_double_quote(stack: list[_QuoteFrame], slashes: int) -> None:
 
 def _apply_single_quote(stack: list[_QuoteFrame], prev: str) -> None:
     """`'` закрывает открытую одиночную строку; вне слова открывает новую (апострофы `don't` — не кавычки)."""
-    if stack and stack[-1] == ("'", 0):
-        stack.pop()
-    elif not stack and not (prev.isalnum() or prev == "_"):
+    index = _closing_index(stack, "'", 0)
+    if index is not None:
+        del stack[index:]
+    elif not (prev.isalnum() or prev == "_") and (not stack or prev != "\\"):
+        # Одиночная строка открывается и внутри двойной (`"msg='api_key=' password='x'"`).
         stack.append(("'", 0))
 
 
@@ -299,28 +318,48 @@ def _open_quote_end(text: str, pos: int) -> int:
     return 0
 
 
-def _enclosing_close(text: str, start: int, frame: _QuoteFrame | None) -> int:
-    """Граница консервативной маски незакрытого значения: объемлющая кавычка (не включая) либо конец текста."""
-    if frame is None:
-        return len(text)
+def _find_enclosing_close(
+    text: str, start: int, frame: _QuoteFrame, limit: int
+) -> int | None:
+    """Граница объемлющей строки `frame` (кавычка не включена) в `text[start:limit]`; None — закрытия нет.
+
+    Неэкранированная `"` закрывает только строку уровня 0: в строке уровня `L` она — не закрытие.
+    """
     quote, level = frame
     stop = _QUOTED_STOP_RE[quote]
     i = start
-    while (match := stop.search(text, i)) is not None:
+    while (match := stop.search(text, i, limit)) is not None:
         j = match.start()
         if text[j] != "\\":
-            if text[j] == quote:
+            if text[j] == quote and level == 0:
                 return j
             i = j + 1
             continue
         end = _skip(_BACKSLASHES_RE, text, j)
-        if text[end : end + 1] != quote:
+        if end >= limit:
+            return None
+        if text[end] != quote:
             i = end
             continue
-        if (end - j) % (2 * level + 2) == level:
+        if _closes_frame(level, end - j):
             return end - level
         i = end + 1
-    return len(text)
+    return None
+
+
+def _enclosing_close(text: str, start: int, frame: _QuoteFrame | None) -> int:
+    """Граница консервативной маски незакрытого значения: объемлющая кавычка (не включая) либо конец текста."""
+    if frame is None:
+        return len(text)
+    close = _find_enclosing_close(text, start, frame, len(text))
+    return len(text) if close is None else close
+
+
+def _enclosing_frame(stack: list[_QuoteFrame]) -> _QuoteFrame | None:
+    """Строка, границей которой ограничено значение: одиночная строка внутри двойной не заменяет её."""
+    if len(stack) > 1 and stack[-1] == ("'", 0):
+        return stack[-2]
+    return stack[-1] if stack else None
 
 
 def _scan_credential_value(
@@ -343,13 +382,39 @@ def _scan_credential_value(
         # Вне объемлющей строки серия из двух и более `\` не даёт достоверной пары кавычек: парная кавычка
         # нашлась бы у следующего ключа (`password=\"..."` в логе уровня 2), поэтому маскируется весь остаток.
         return len(text)
+    frame = _enclosing_frame(stack)
     end = _scan_quoted_value(text, pos, failed_until)
-    if end is not None:
-        return end
     open_quote_end = _open_quote_end(text, pos)
-    if 0 < open_quote_end < len(text):
-        return _enclosing_close(text, open_quote_end, stack[-1] if stack else None)
-    return _scan_unquoted(text, pos, is_scheme)
+    if end is None and 0 < open_quote_end < len(text):
+        return _enclosing_close(text, open_quote_end, frame)
+    if end is None:
+        end = _scan_unquoted(text, pos, is_scheme)
+    if frame is not None:
+        # Значение не выходит за объемлющую строку: пара кавычек соседнего поля не поглощает его префикс.
+        # Поиск ограничен `end`, поэтому суммарно читается не больше значения, которое уже разобрано.
+        # Без префикса в поглощённой части границу не сужаем: хвост пары не разберёт никто, и он утёк бы.
+        close = _find_enclosing_close(text, open_quote_end or pos, frame, end)
+        if close is not None and _CREDENTIAL_PREFIX_RE.search(text, close, end):
+            return close
+    return end
+
+
+def _is_plain_value_pair(text: str, pos: int, failed_until: _FailedUntil) -> bool:
+    """Кавычка в `pos` вместе с парной образует значение, внутри которого нет чужих префиксов секретов.
+
+    Такая кавычка не закрывает объемлющую строку: её несбалансированный предшественник (`'tis`) не должен
+    оставлять значение открытым. Если внутри пары есть префикс (`msg='api_key=' password='x'`), кавычка — закрытие.
+    """
+    paired = _scan_quoted_value(text, pos, failed_until)
+    if paired is None:
+        # Закрытие не бывает слитно с текстом: `password='hunter2` без парной кавычки — значение, а не конец строки.
+        after = _open_quote_end(text, pos)
+        return text[after : after + 1].isalnum()
+    return (
+        paired is not None
+        and _CREDENTIAL_PREFIX_RE.search(text, _open_quote_end(text, pos), paired)
+        is None
+    )
 
 
 def _opens_enclosing_string(m: re.Match[str]) -> bool:
@@ -386,6 +451,8 @@ def mask_credential_context(text: str) -> str:
         _track_quotes(text, scanned, pos, stack)
         scanned = pos
         closing = _closing_quote(text, pos, stack)
+        if closing is not None and _is_plain_value_pair(text, pos, failed_until):
+            closing = None
         if closing is None:
             end = _scan_credential_value(
                 text, pos, value_is_scheme, failed_until, stack

@@ -948,3 +948,102 @@ def test_unclosed_quote_masking_is_linear_on_hostile_input(head: str) -> None:
 def test_unclosed_quote_masks_the_whole_tail() -> None:
     out = mask_credential_context('api_key="' + "hunter2 " * 20000)
     assert "hunter2" not in out and out == "***", out[:80]
+
+
+# ---- Cycle 7 (council-r14): пара кавычек соседнего поля и вложенные строки не раскрывают второй секрет -----
+
+_R14_LINES = {
+    "F001-dq": '{"detail": "password=\\" truncated", "auth": "api_key=\\"hunter2\\""}',
+    "F001-sq": '{"detail": "password=\' truncated", "auth": "api_key=\'hunter2\'"}',
+    "F002-json": "{\"log\": \"msg='api_key=' password='hunter2'\"}",
+    "F002-plain": "note='unclosed \" quote' msg='api_key=' password='hunter2'",
+    "F005-plain": "msg='say \" api_key=' password='hunter2'",
+    "F005-json": json.dumps({"log": "msg='say \" api_key=' password='hunter2'"}),
+    "F006": '{"log": "hdr=\\" api_key=\\\\"} password="hunter2"',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_R14_LINES))
+def test_council_r14_second_secret_is_masked_through_every_entry_point(
+    name: str,
+) -> None:
+    from core.log_redaction import redact_log_text
+
+    line = _R14_LINES[name]
+    outputs = (
+        mask_credential_context(line),
+        redact_log_text(line),
+        str(capacity_error_body(line)["message"]),
+    )
+    for out in outputs:
+        assert _SECOND_SECRET not in out, (name, out)
+        assert "***" in out, (name, out)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("F001-dq", '{"detail": "***", "auth": "***"}'),
+        ("F001-sq", '{"detail": "***", "auth": "***"}'),
+        ("F002-json", '{"log": "msg=\'api_key=\' ***"}'),
+        ("F005-json", '{"log": "msg=\'say \\" api_key=\' ***"}'),
+        ("F006", '{"log": "hdr=\\" ***"} ***'),
+    ],
+)
+def test_council_r14_masking_keeps_json_frame_and_neighbour_fields(
+    name: str, expected: str
+) -> None:
+    # F-001/F-002/F-005/F-006: закрывающие кавычки и `}` остаются снаружи маски, соседнее поле не поглощено
+    assert mask_credential_context(_R14_LINES[name]) == expected
+
+
+def test_council_r14_masked_json_stays_parseable() -> None:
+    for name in ("F001-dq", "F001-sq", "F002-json", "F005-json"):
+        assert isinstance(
+            json.loads(mask_credential_context(_R14_LINES[name])), dict
+        ), name
+
+
+def test_council_r14_single_quote_inside_double_string_is_tracked_and_unwound() -> None:
+    # `'` внутри `"…"` открывает строку, закрытие внешней `"` снимает незакрытый вложенный кадр
+    line = '{"a": "it \'tis", "b": "password=\\"hunter2\\""}'
+    out = mask_credential_context(line)
+    assert _SECOND_SECRET not in out and json.loads(out)["a"] == "it 'tis", out
+
+
+def test_council_r14_unclosed_apostrophe_does_not_hide_following_quoted_secret() -> (
+    None
+):
+    for line in (
+        "'tis password='hunter2'",
+        '{"log": "\'tis password=\'hunter2\'", "n": 1}',
+        "x='hunter2",
+    ):
+        assert _SECOND_SECRET not in mask_credential_context(
+            line.replace("x=", "password=")
+        ), line
+
+
+@pytest.mark.parametrize("level", [1, 3, 7, 15])
+def test_json_log_second_secret_keeps_structure_at_json_escape_levels(
+    level: int,
+) -> None:
+    # FU-001: валидные уровни JSON-экранирования (2^k-1) не закрывают внешнюю строку и не съедают `"}`
+    out = mask_credential_context(_escaped_log_line(level))
+    assert _SECOND_SECRET not in out and "***" in out, out
+    assert out.endswith('"}'), out
+    assert out.count("{") == out.count("}"), out
+
+
+@pytest.mark.parametrize("times", [20000, 80000])
+@pytest.mark.parametrize(
+    "unit", ["msg='api_key=' ", "password='", 'a=\\" ', 'k="x \'y" ']
+)
+def test_council_r14_quote_tracking_is_linear_on_hostile_input(
+    unit: str, times: int
+) -> None:
+    import time
+
+    started = time.monotonic()
+    mask_credential_context('{"x": "' + unit * times)
+    assert time.monotonic() - started < 2.0
