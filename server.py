@@ -205,6 +205,7 @@ from core.catalog_flags import (  # noqa: E402
     sidecar_allowlist,
 )
 from core.passthrough_autonomy import (  # noqa: E402
+    PassthroughOptions,
     passthrough_autonomy_validation_enabled,
     prepare_passthrough_request,
     resolve_target_model,
@@ -217,7 +218,11 @@ from core.effort_policy import (  # noqa: E402
     catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields,
 )
-from core.effortless_policy import card_effort_fields, effortless_specs  # noqa: E402
+from core.effortless_policy import (  # noqa: E402
+    EffortValidationError,
+    card_effort_fields,
+    effortless_specs,
+)
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
@@ -7404,9 +7409,26 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     )
                     return
                 effort_on = flag_enabled(FLAG_EFFORT_CATALOG)
-                req, pt_effort = prepare_passthrough_request(
-                    req, model, model_id, alias, alias_effort, effort_on
-                )
+                try:
+                    req, pt_effort = prepare_passthrough_request(
+                        req,
+                        model,
+                        model_id,
+                        PassthroughOptions(
+                            alias=alias,
+                            alias_effort=alias_effort,
+                            effort_on=effort_on,
+                        ),
+                    )
+                except EffortValidationError as exc:
+                    self._reject(
+                        400,
+                        "unsupported_reasoning_effort",
+                        str(exc),
+                        model_id,
+                        model_len,
+                    )
+                    return
                 target_model = resolve_target_model(model, model_id)
                 if pt_effort.apply or target_model != model_id or alias:
                     if pt_effort.clamped_from is not None:

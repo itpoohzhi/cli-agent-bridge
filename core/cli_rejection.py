@@ -7,11 +7,17 @@ import os
 import re
 from collections.abc import Mapping
 from functools import lru_cache
+from typing import Final
 
-ENV_DETERMINISTIC_RE = "BRIDGE_CLI_DETERMINISTIC_ERROR_RE"
-DEFAULT_DETERMINISTIC_RE = (
+from core.runtime_env import positive_int
+
+ENV_DETERMINISTIC_RE: Final[str] = "BRIDGE_CLI_DETERMINISTIC_ERROR_RE"
+ENV_DETERMINISTIC_ERR_MAX_LEN: Final[str] = "BRIDGE_CLI_DETERMINISTIC_ERR_MAX_LEN"
+DEFAULT_DETERMINISTIC_RE: Final[str] = (
     r"invalid model selection|is not supported for model|requires --effort"
 )
+DEFAULT_ERR_SCAN_LEN: Final[int] = 2048
+_DISABLE_TOKENS: Final[frozenset[str]] = frozenset({"", "0", "false", "off", "no"})
 _LOG = logging.getLogger(__name__)
 
 
@@ -32,5 +38,13 @@ def is_deterministic_cli_rejection(
     if not isinstance(err, str) or not err:
         return False
     source = os.environ if env is None else env
-    pattern = (source.get(ENV_DETERMINISTIC_RE) or "").strip()
-    return _compiled(pattern or DEFAULT_DETERMINISTIC_RE).search(err) is not None
+    raw = source.get(ENV_DETERMINISTIC_RE)
+    if raw is None:
+        pattern = DEFAULT_DETERMINISTIC_RE
+    else:
+        stripped = raw.strip()
+        if stripped.lower() in _DISABLE_TOKENS:
+            return False
+        pattern = stripped
+    max_len = positive_int(source, ENV_DETERMINISTIC_ERR_MAX_LEN, DEFAULT_ERR_SCAN_LEN)
+    return _compiled(pattern).search(err[:max_len]) is not None

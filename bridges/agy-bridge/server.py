@@ -103,6 +103,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1287,6 +1288,16 @@ def _mask_secrets(text: str) -> str:
 def _err_summary(err: Any, limit: int = 200) -> str:
     text = " ".join(str(err or "").split())
     return text[:limit]
+
+
+def _is_cli_rejection_outcome(out: Mapping[str, object]) -> bool:
+    """Подавляет повтор только при отказе CLI (`agy_error`), не на транспортном `pump_error`."""
+    state = out.get("state")
+    if state == "pump_error":
+        return False
+    return state in ("agy_error", "done") and is_deterministic_cli_rejection(
+        out.get("err")
+    )
 
 
 # Порог неактивности хода (без протокольных событий и без прироста CPU/потомков группы).
@@ -7211,7 +7222,7 @@ class Handler(BaseHTTPRequestHandler):
                     if (
                         out["state"] == "agy_error"
                         and not delivered
-                        and not is_deterministic_cli_rejection(out.get("err"))
+                        and not _is_cli_rejection_outcome(out)
                     ):
                         if not _retry_take():
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
@@ -7225,7 +7236,7 @@ class Handler(BaseHTTPRequestHandler):
                 transient = (
                     out["state"] in ("agy_error", "pump_error", "done")
                     and not delivered
-                    and not is_deterministic_cli_rejection(out.get("err"))
+                    and not _is_cli_rejection_outcome(out)
                 )
                 if not transient or attempt == 2:
                     break

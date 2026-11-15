@@ -114,7 +114,7 @@
           "efforts_proven": [
             "off"
           ],
-          "command": "agy.real -p 'Read img-1.png' --add-dir <img_dir> --model <model> --effort <effort>"
+          "command": "agy.real -p 'Read img-1.png' --add-dir <img_dir> --model <model>"
         }
       }
     },

@@ -86,7 +86,7 @@ def hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[SimpleNames
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, fmt: str, *args: Any) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return
 
     with ExitStack() as stack:
@@ -155,6 +155,36 @@ def test_hub_four_turn_model_switch_isolates_effort(hub: SimpleNamespace) -> Non
         assert hub.seen[-1]["model"] == model
         assert hub.seen[-1].get("reasoning_effort") == upstream_effort, (model, effort)
     assert len(hub.seen) == len(TURNS)
+
+
+@pytest.mark.parametrize("bad_effort", ["ultra_turbo", 123, None])
+def test_hub_rejects_invalid_and_non_string_effort_for_carbon(
+    hub: SimpleNamespace, bad_effort: object
+) -> None:
+    body = {"model": CARBON, "reasoning_effort": bad_effort, "messages": [{"role": "user", "content": "hi"}]}
+    status, payload = _call(hub.port, "/v1/chat/completions", body, {"x-dsh-chat-id": "switch-chat"})
+    assert status == 400
+    assert payload["error"]["type"] == "unsupported_reasoning_effort"
+    assert not hub.seen
+
+
+def test_hub_rejects_effort_on_carbon_when_clamp_disabled(
+    hub: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRIDGE_EFFORTLESS_CLAMP_ENABLED", "false")
+    status, payload = _chat(hub, CARBON, "high")
+    assert status == 400
+    assert payload["error"]["type"] == "unsupported_reasoning_effort"
+    assert not hub.seen
+    ok_status, _ = _chat(hub, CARBON, "OFF")
+    assert ok_status == 200 and "reasoning_effort" not in hub.seen[-1]
+    bare_status, _ = _call(
+        hub.port,
+        "/v1/chat/completions",
+        {"model": CARBON, "messages": [{"role": "user", "content": "hi"}]},
+        {"x-dsh-chat-id": "switch-chat"},
+    )
+    assert bare_status == 200 and "reasoning_effort" not in hub.seen[-1]
 
 
 # ---- agy-bridge с фейковым CLI -------------------------------------------------
@@ -237,3 +267,28 @@ def test_agy_bridge_four_turn_switch_keeps_effort_isolated(agy: SimpleNamespace)
         assert _effort_tail(argv) == expected, model
     assert "--conversation" not in spawns[1]  # Carbon не наследует разговор Hydrogen
     assert "--conversation" not in spawns[3]  # Argon не наследует разговор Carbon
+
+
+def test_agy_bridge_pump_error_is_retried_even_if_err_matches_rejection_re(
+    agy: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge = res._bridge()
+    assert bridge._is_cli_rejection_outcome({"state": "pump_error", "err": REJECT}) is False
+    assert bridge._is_cli_rejection_outcome({"state": "agy_error", "err": REJECT}) is True
+    agy.fx.patch("_retry_pause_s", lambda _attempt, rng=None: 0.0)
+    orig_execute = bridge.Handler._execute
+    calls = 0
+
+    def execute_with_first_pump_error(self: Any, *args: Any, **kwargs: Any) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        result = orig_execute(self, *args, **kwargs)
+        if calls == 1:
+            return {**result, "state": "pump_error", "rc": 1, "text": "", "err": REJECT}
+        return result
+
+    monkeypatch.setattr(bridge.Handler, "_execute", execute_with_first_pump_error)
+    agy.fx.write_scenario([], spawns=[res._quick(CIDS[0]), res._quick(CIDS[1])])
+    status, payload = _turn(agy, CARBON, "high")
+    assert status == 200, payload
+    assert calls == 2 and len(agy.fx.spawns()) == 2
