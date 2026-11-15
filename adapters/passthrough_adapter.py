@@ -1237,8 +1237,12 @@ class PassthroughAdapter(BackendAdapter):
         slide = open_sliding_deadline(
             deadline, self.limits, is_int, request, _SLIDING_WIN_FLAG.enabled
         )
-        q_def = float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S))
-        queue_timeout = min(q_def, self.limits.total_timeout_s)
+        q_host = getattr(self.host, "QUEUE_TIMEOUT_S", None)
+        if q_host is not None:
+            q_val = float(q_host)
+        else:
+            q_val = float(os.environ.get("BRIDGE_QUEUE_TIMEOUT_S", 60.0))
+        queue_timeout = min(q_val, self.limits.total_timeout_s)
         if not self._slots.acquire(timeout=queue_timeout):
             self._fail(sink, 503, "overloaded", "passthrough backend is saturated")
             return
