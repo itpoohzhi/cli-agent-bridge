@@ -204,3 +204,16 @@ def test_deterministic_pattern_disable_tokens_and_scan_limit(token: str) -> None
     assert is_deterministic_cli_rejection(
         long_tail, {ENV_DETERMINISTIC_ERR_MAX_LEN: str(len(long_tail))}
     )
+
+
+def test_supported_effort_map_and_passthrough_model_guard() -> None:
+    assert resolve_request_effort("high", {"efforts": None, "default_effort": "low"}, LEVELS).error
+    assert resolve_request_effort("l", {"efforts": "low", "default_effort": "low"}, LEVELS).error
+    assert resolve_request_effort(
+        "low", {"efforts": ["  ", 7, "low"], "default_effort": "low"}, LEVELS
+    ) == EffortDecision("low", SOURCE_REQUEST, None)
+    clean, resolution = prepare_passthrough_request(
+        {"model": "raw-alias", "reasoning_effort": "high"}, OFF_MODEL, CARBON
+    )
+    assert clean["model"] == "raw-alias" and "reasoning_effort" not in clean
+    assert resolution.clamped_from == "high"
