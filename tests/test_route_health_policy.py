@@ -118,6 +118,59 @@ def test_retry_filter() -> None:
     stricter = r(error_text=P, delivered=False, attempt=1, max_attempts=3, budget_config=C(max_attempts=1))
     assert stricter.can_retry is False and stricter.keep_hot_session is True
 
+@pytest.mark.parametrize("kw,can,hot", (
+    ({"error_text": P, "delivered": False, "attempt": 0, "max_attempts": 1}, True, True),
+    ({"error_text": P, "delivered": False, "attempt": 1, "max_attempts": 1}, False, True),
+    ({"error_text": P, "delivered": False, "attempt": 1, "max_attempts": 5}, True, True),
+    ({"error_text": P, "delivered": False, "attempt": 2, "max_attempts": 5}, False, True),
+    ({"error_text": P, "delivered": False, "attempt": 0, "max_attempts": 0}, False, True),
+    ({"error_text": P, "delivered": False, "attempt": 0, "max_attempts": -1}, False, True),
+    ({"error_text": P, "delivered": False, "budget_config": C(max_attempts=0)}, False, True),
+    ({"error_text": P, "delivered": True, "budget_config": C(max_attempts=0)}, False, True),
+    ({"error_text": P, "delivered": False, "had_tool_side_effects": True, "budget_config": C(max_attempts=0)}, False, False),
+    ({"error_text": "ordinary message", "delivered": False, "max_attempts": 0}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "source": "MODEL_CONTENT"}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "elapsed_s": float("nan")}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "attempt": True}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "budget_config": "bad"}, False, False),
+))
+def test_retry_narrowing_and_hot_session(kw: dict[str, object], can: bool, hot: bool) -> None:
+    decision = r(**kw)
+    assert (decision.can_retry, decision.keep_hot_session, decision.reason) == (can, hot, "transient_pre_delivery_retry" if can else "retry_blocked")
+
+@pytest.mark.parametrize("text,expected", (
+    (P + "; HTTP 408 Request Timeout", True),
+    (P + "; HTTP 425 Too Early", True),
+    (P + "; HTTP 429 Too Many Requests", True),
+    (P + "; HTTP 503 Service Unavailable", True),
+    (P + "; HTTP 500 Internal Server Error", False),
+    (P + "; HTTP 502 Bad Gateway", True),
+    (P + "; HTTP 402 Payment Required", False),
+    (P + "; HTTP 410 Gone", False),
+    (P + "; HTTP 422 Unprocessable Entity", False),
+    (P + "; got status 401", False),
+    (P + "; Error code: 400", False),
+    (P + "; status 413 Payload Too Large", False),
+    ("402 Payment Required: server disconnected", False),
+    ("eof occurred in violation of protocol", True),
+    (P + " TLS handshake timeout", False),
+    ("no such route available", False),
+    (P + "; https://example.com/a%20b", True),
+    ("connection reset; C:\\work\\logs", True),
+    ("connection reset; %2541", False),
+    ("connection reset; %252541", False),
+    ("connection reset; \\x1b[31m", False),
+    ("connection reset; \\u0031", False),
+    ("connection reset\x00", False),
+))
+def test_transient_classification_matrix(text: str, expected: bool) -> None:
+    assert t(text) is expected
+
+def test_transient_source_and_length_contract() -> None:
+    assert t(P) is True and t(P, source="cli_error") is True and t(P, source="stderr") is True and t(P, source="transport_stderr") is True
+    assert t(P, source="model_content") is False and t(P, source="MODEL_CONTENT") is False and t(P, source=" ") is False
+    assert t(None) is False and t("") is False and t(P + "; " + " ".join(["trace line"] * 700)) is True
+
 @pytest.mark.parametrize("case", ((0.0, 0.0, (), True, H.READY), (5.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (-0.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (1.0, 5.0, ("Z", "A"), False, H.ENV_DRIFT_DETECTED)))
 def test_health_limits(case: tuple[float, float, tuple[str, ...], bool, H]) -> None:
     age, limit, changed, available, reason = case

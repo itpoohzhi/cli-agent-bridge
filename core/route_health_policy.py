@@ -84,7 +84,8 @@ def _reject_oversize(fail_closed: bool, text: str, limit: int) -> bool:
 def _has_residual_encoding(safe: str) -> bool:
     entities = re.search(rf"(?i)(?:{_K_PLAIN})&+=", safe)
     escapes = re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe)
-    return any((html.unescape(safe) != safe, entities, escapes))
+    residual = (html.unescape(safe) != safe, entities, escapes)
+    return any(residual)
 def _decode_pct(match: re.Match[str]) -> str:
     decoded = bytes.fromhex(match.group(0).replace("%", "")).decode("utf-8", "replace")
     return "".join(" " if ch in "\t\r\n\x0b\x0c\x85\u2028\u2029\ufffd" else ch if ch in "\x07\x1b\x9b\x9c" else "" if ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F or _INVISIBLE_RE.fullmatch(ch) else ch for ch in decoded)
@@ -95,7 +96,8 @@ def _decode_escape(match: re.Match[str]) -> str:
     if code in (0x07, 0x1B, 0x9B, 0x9C): return chr(code)
     if code <= 0x1F or 0x7F <= code <= 0x9F or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF or _INVISIBLE_RE.fullmatch(chr(code)): return ""
     return chr(code)
-def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_closed: bool = True) -> str:
+def normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_closed: bool = True) -> str:
+    """Единая нормализация диагностического текста: снятие кодировок, ANSI и невидимых символов."""
     if _reject_oversize(fail_closed, raw_text, 4194304): return REDACTED_TOKEN
     if raw_text.isascii() and raw_text.isprintable() and not any(ch in raw_text for ch in "\\%&"): return REDACTED_TOKEN if _reject_oversize(fail_closed, safe := _WS_RE.sub(" ", raw_text), max_len) else safe[:max_len]
     cleaned = _WS_RE.sub(" ", _INVISIBLE_RE.sub("", _ANSI_RE.sub("", raw_text[:4194304]).replace("\x0b", " ").replace("\x0c", " ").replace("\x85", " ")))
@@ -111,6 +113,7 @@ def _normalize_diagnostic_text(raw_text: str, *, max_len: int = 4096, fail_close
     if _reject_oversize(fail_closed, safe, max_len): return REDACTED_TOKEN
     if fail_closed and _has_residual_encoding(safe): return REDACTED_TOKEN
     return safe[:max_len]
+_normalize_diagnostic_text = normalize_diagnostic_text
 def _redact_patterns(text: str) -> str:
     probe = text.replace(REDACTED_TOKEN, ""); has_at, chars = "@" in probe, frozenset(probe.lower())
     if not ((has_at and "." in probe) or "-" in probe or ("<" in probe and ">" in probe) or "eyJ" in probe or any(marker in probe for marker in ("ya29.", "1//", "AIza", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "xoxa-", "xoxb-", "xoxo-", "xoxp-", "xoxr-", "xoxs-", "sk_", "rk_", "AKIA", "glpat-", "npm_", "hf_", "pypi-")) or any(frozenset(word.replace("_", "")) <= chars for word in ("authorization", "bearer", "basic", "cookie", "invalid", "expired", "bad", "revoked", "leaked", *_WORDS))): return redact_url_secrets(text, REDACTED_TOKEN)
@@ -122,7 +125,7 @@ def _redact_patterns(text: str) -> str:
     return text
 def redact_diagnostic_text(raw_text: str) -> str:
     if _reject_oversize(True, raw_text, 4194304): return REDACTED_TOKEN
-    normalized = _normalize_diagnostic_text(raw_text, max_len=1048576, fail_closed=True)
+    normalized = normalize_diagnostic_text(raw_text, max_len=1048576, fail_closed=True)
     unfolded = _CTRL_ESC_RE.sub(" ", _redact_patterns(normalized))
     safe = _redact_patterns(unfolded)
     return safe[:MAX_DIAGNOSTIC_CHARS] or (" " if raw_text else "")
@@ -136,7 +139,7 @@ def _is_auth_failure(status_code: int, reason: str) -> bool:
     code_403 = status_code == 403 or (status_code == 0 and bool(re.search(_HTTP_CODE_RE_TPL.format(403, 403, 403), reason)))
     return bool(re.search(auth_re, reason)) or code_401 or (code_403 and bool(re.search(r"oauth|refresh|unauthenticated", reason)))
 def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClassification:
-    normalized = _normalize_diagnostic_text(raw_reason, max_len=1114113, fail_closed=False)
+    normalized = normalize_diagnostic_text(raw_reason, max_len=1114113, fail_closed=False)
     reason = " ".join((_CTRL_ESC_RE.sub(" ", normalized), _CTRL_ESC_RE.sub(r"\1", normalized), raw_reason[:4194304])).lower()
     sanitized = redact_diagnostic_text(raw_reason)
     if _is_auth_failure(status_code, reason):
@@ -150,6 +153,29 @@ def classify_provider_failure(status_code: int, raw_reason: str) -> FailureClass
     else:
         values = (FailureCategory.FATAL_REQUEST_ERROR, False, False, sanitized)
     return FailureClassification(*values)
+MODEL_CONTENT_SOURCE: Final[str] = "model_content"
+TRANSIENT_STATUS_CODES: Final[frozenset[int]] = frozenset((408, 425, *_CAPACITY_STATUSES))
+RETRY_ELIGIBLE_CATEGORIES: Final[frozenset[FailureCategory]] = frozenset((FailureCategory.CAPACITY_EXHAUSTED, FailureCategory.FATAL_REQUEST_ERROR))
+TRANSIENT_INTERRUPTION_PHRASES: Final[tuple[str, ...]] = ("stream was interrupted", "please continue the task you were working on", "rst_stream", "http/2 stream", "connection reset", "eof occurred in violation of protocol", "broken pipe", "incomplete chunked read", "peer closed connection", "server disconnected", "currently unavailable")
+TRANSIENT_STREAM_INTERRUPTION_RE: Final[re.Pattern[str]] = re.compile("|".join(re.escape(phrase) for phrase in TRANSIENT_INTERRUPTION_PHRASES), re.IGNORECASE)
+FATAL_REQUEST_PHRASE_RE: Final[re.Pattern[str]] = re.compile(r"\b(?:bad\s+request|unauthorized|forbidden|method\s+not\s+allowed|unprocessable|payload\s+too\s+large)\b", re.IGNORECASE)
+OBFUSCATED_ENCODING_RE: Final[re.Pattern[str]] = re.compile(r"(?:%25)+[0-9a-f]{2}|(?:\\+|%)[uU][0-9a-f]{4,8}|\\+x[0-9a-f]{2}|&#(?:[xX][0-9a-f]{1,6}|[0-9]{1,7});|[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]", re.IGNORECASE)
+_HTTP_FAILURE_STATUS_RE: Final[re.Pattern[str]] = re.compile(r"http(?:/\d(?:\.\d)?)?[\s:]+([45]\d\d)\b|\b(?:http|response)[_ -]?status(?:[_ -]?code)?\D{0,4}?([45]\d\d)\b|\bstatus(?:[_ -]?code)?\D{0,4}?([45]\d\d)\b|\b(?:error[_ -]?)?code\D{0,4}?([45]\d\d)\b|\b([45]\d\d)\s+(?:bad request|unauthorized|payment required|forbidden|not found|method not allowed|conflict|payload too large|unprocessable|too many requests|internal server error|not implemented|bad gateway|service unavailable|gateway time-?out|request time-?out)\b", re.IGNORECASE)
+def extract_failure_statuses(text: str) -> frozenset[int]:
+    """Явные HTTP-статусы 4xx/5xx диагностического текста; остальные коды не провайдерские."""
+    return frozenset(int(code) for match in _HTTP_FAILURE_STATUS_RE.finditer(text) for code in match.groups() if code)
+def is_diagnostic_source(source: object) -> bool:
+    """Источник диагностики обязан быть непустой строкой и не текстом модели."""
+    return isinstance(source, str) and bool(source.strip()) and source.strip().lower() != MODEL_CONTENT_SOURCE
+def is_transient_stream_interruption(text: str | None, *, source: str = "cli_error") -> bool:
+    """Транзиентен ли транспортный обрыв: фатальный статус или категория закрывают повтор."""
+    if not (isinstance(text, str) and is_diagnostic_source(source) and not OBFUSCATED_ENCODING_RE.search(text)):
+        return False
+    normalized = normalize_diagnostic_text(text, max_len=1048576, fail_closed=False)
+    statuses = extract_failure_statuses(normalized)
+    if statuses - TRANSIENT_STATUS_CODES or FATAL_REQUEST_PHRASE_RE.search(normalized) or not TRANSIENT_STREAM_INTERRUPTION_RE.search(normalized):
+        return False
+    return RETRY_ELIGIBLE_CATEGORIES.issuperset((classify_provider_failure(max(statuses, default=0), normalized).category,))
 @dataclass(frozen=True)
 class RouteHealthStatus:
     model_id: str; available: bool

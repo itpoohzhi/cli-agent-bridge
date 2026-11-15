@@ -152,12 +152,12 @@ def test_legacy_turn_defaults_and_retry_guards() -> None:
     assert facade.resolve_done_turn_outcome(rc=1, result_error="", result_status="DONE", final_text="Финал", emitted_text="", completion_done_without_tools=True, last_completion_seq=0, drain_complete=True).self_healed is False
     ok_retry = facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=0, max_attempts=1)
     assert (ok_retry.can_retry, ok_retry.keep_hot_session, ok_retry.reason) == (True, True, "transient_pre_delivery_retry") and ok_retry.attempt_budget_s > 0
-    blocked = facade.RetryDecision(False, False, "retry_blocked", 0.0)
+    blocked, hot = facade.RetryDecision(False, False, "retry_blocked", 0.0), facade.RetryDecision(False, True, "retry_blocked", 0.0)
     assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, unknown=1) == blocked
     assert facade.evaluate_stream_retry_eligibility(error_text=123, delivered=False) == blocked
     assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=-1, max_attempts=1) == blocked
-    assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=0, max_attempts=0) == blocked
-    assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, budget_config=RetryBudgetConfig(max_attempts=0)) == blocked
+    assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=0, max_attempts=0) == hot
+    assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, budget_config=RetryBudgetConfig(max_attempts=0)) == hot
 @pytest.mark.parametrize("dto,legacy,limit", ((3, "absent", 3), (4, "absent", 4), (4, 2, 2), (2, 4, 2), (None, "absent", 2), (None, None, 2), (4, None, 4)))
 def test_retry_limit_sources(dto: int | None, legacy: int | str | None, limit: int) -> None:
     kw: dict[str, object] = {} if dto is None else {"budget_config": RetryBudgetConfig(max_attempts=dto)}

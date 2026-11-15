@@ -19,7 +19,7 @@ BRIDGE = "bridges/agy-bridge/server.py"
 CORE = ("core/turn_outcome_policy.py", "core/stream_interruption_recovery.py", "core/turn_finalization.py")
 STAGES = (("W0", ("tests/test_causal_turn_recovery_flow.py", "tests/test_causal_recovery_architecture.py")),
           ("W1-A", (CORE[0], "tests/test_causal_turn_recovery.py")), ("W1-B", (CORE[1],)), ("W1-C", (CORE[2],)),
-          ("W2", (BRIDGE,)), ("W3", ("tests/test_route_health_policy.py",)))
+          ("W2", (BRIDGE,)), ("W3", ("tests/test_route_health_policy.py", "core/route_health_policy.py")))
 NEW = frozenset((CORE[0], CORE[2], *STAGES[0][1], "tests/test_causal_turn_recovery.py"))
 RHP = "core/route_health_policy.py"
 OWNED = NEW | {CORE[1]}
