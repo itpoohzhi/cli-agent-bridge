@@ -28,28 +28,29 @@ def _passthrough(route: PostRoute, adapter: Any, body: PreparedPostBody | None) 
         handler._reject(400, "model_not_allowed", "passthrough requires an exact model id")
         return
     body = body if body is not None else prepare_post_body(route)
-    if host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"):
-        prepared = prepare_route_request(
-            dict(body.request), route.model, route.model_id, route.alias_effort,
-        )
-    else:
-        prepared, effort = host.prepare_passthrough_request(
-            dict(body.request), route.model, route.model_id, route.alias, route.alias_effort,
-            host.flag_enabled(host.FLAG_EFFORT_CATALOG),
-        )
-        if effort.clamped_from is not None:
-            host._log(host.describe_clamp(
-                "passthrough reasoning_effort", effort.clamped_from, effort.value,
-                route.model_id, host._LOG_EFFORT_MAX,
-            ))
-    raw = body.raw if prepared == body.request else host.json.dumps(
-        prepared, ensure_ascii=False,
-    ).encode("utf-8")
+    try:
+        if host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"):
+            prepared = prepare_route_request(
+                dict(body.request), route.model, route.model_id, route.alias_effort,
+            )
+        else:
+            prepared = _prepare_legacy_passthrough(route, body)
+    except host.EffortValidationError as exc:
+        route.reject(400, "unsupported_reasoning_effort", str(exc))
+        return
+    raw = body.raw if prepared == body.request else host.json.dumps(prepared, ensure_ascii=False).encode("utf-8")
     log_route(route, "passthrough")
     handler._serve_resilient(route.model["backend"], partial(
-        handler._serve_passthrough, adapter, raw, prepared, route.model_id,
-        _hub_auth_ok=route.ingress.hub_auth_ok,
-    ))
+        handler._serve_passthrough, adapter, raw, prepared, route.model_id, _hub_auth_ok=route.ingress.hub_auth_ok))
+
+
+def _prepare_legacy_passthrough(route: PostRoute, body: PreparedPostBody) -> dict[str, Any]:
+    host = route.host
+    opts = host.PassthroughOptions(alias=route.alias, alias_effort=route.alias_effort, effort_on=host.flag_enabled(host.FLAG_EFFORT_CATALOG))
+    prepared, effort = host.prepare_passthrough_request(dict(body.request), route.model, route.model_id, opts)
+    if effort.clamped_from is not None:
+        host._log(host.describe_clamp("passthrough reasoning_effort", effort.clamped_from, effort.value, route.model_id, host._LOG_EFFORT_MAX))
+    return prepared
 
 
 def _native_parameters(route: PostRoute) -> dict[str, Any] | None:

@@ -18,9 +18,6 @@ aliases:
   gpt-6.1-sol-medium: {backend_id: gpt-6.1-sol, backend: codex, effort: medium}
   gpt-6.1-sol-high: {backend_id: gpt-6.1-sol, backend: codex, effort: high}
   gpt-6.1-sol-max: {backend_id: gpt-6.1-sol, backend: codex, effort: max}
-  gemini-4-carbon-low: {backend_id: gemini-4-carbon, backend: agy, effort: low}
-  gemini-4-carbon-medium: {backend_id: gemini-4-carbon, backend: agy, effort: medium}
-  gemini-4-carbon-high: {backend_id: gemini-4-carbon, backend: agy, effort: high}
   gemini-4-hydrogen-low: {backend_id: gemini-4-hydrogen, backend: agy, effort: low}
   gemini-4-hydrogen-medium: {backend_id: gemini-4-hydrogen, backend: agy, effort: medium}
   gemini-4-hydrogen-high: {backend_id: gemini-4-hydrogen, backend: agy, effort: high}

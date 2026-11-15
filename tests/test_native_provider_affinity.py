@@ -112,7 +112,7 @@ def _backend_aliases(model, backend, efforts):
 
 
 def test_explicit_effort_alias_contract():
-    """Все 35 effort-алиасов проверяются по точной форме с учётом Hydrogen, Carbon и Argon."""
+    """Все 32 effort-алиаса проверяются по точной форме с учётом Hydrogen и Argon (Carbon без effort)."""
     expected = {
         **_backend_aliases("gemini-3.8-flash-droid", "droid", ("low", "medium", "high")),
         **_backend_aliases("gpt-6.1-sol-droid", "droid", ("low", "medium", "high", "max")),
@@ -123,7 +123,6 @@ def test_explicit_effort_alias_contract():
         **_backend_aliases("claude-opus-5-5", "claude-p", ("medium", "high")),
         **_backend_aliases("claude-haiku-5-5", "opencode-go-claude", ("low",)),
         **_backend_aliases("gemini-4-argon", "agy", ("low", "medium", "high")),
-        **_backend_aliases("gemini-4-carbon", "agy", ("low", "medium", "high")),
         **_backend_aliases("gemini-4-hydrogen", "agy", ("low", "medium", "high", "xhigh")),
     }
     assert _load_fleet().get("aliases", {}) == expected
@@ -193,15 +192,15 @@ def test_passthrough_target_model_rewriting():
 
 
 def test_exact_effort_alias_count():
-    """Проверяет ровно 35 effort-алиасов, включая три Gemini 4 Carbon и четыре Gemini 4 Hydrogen."""
+    """Проверяет ровно 32 effort-алиаса, включая четыре Gemini 4 Hydrogen; Carbon без алиасов."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
-    assert len(aliases) == 35, f"Expected 35 total aliases in fleet, got {len(aliases)}"
+    assert len(aliases) == 32, f"Expected 32 total aliases in fleet, got {len(aliases)}"
     target_aliases = [
         k for k in aliases
-        if any(m in k for m in ("gemini-3.8-flash", "gemini-4-carbon", "gemini-4-hydrogen", "gpt-6.1-sol", "claude-sonnet-5-5"))
+        if any(m in k for m in ("gemini-3.8-flash", "gemini-4-hydrogen", "gpt-6.1-sol", "claude-sonnet-5-5"))
     ]
-    assert len(target_aliases) == 29, f"Expected 29 target aliases including Carbon and Hydrogen, got {len(target_aliases)}"
+    assert len(target_aliases) == 26, f"Expected 26 target aliases including Hydrogen, got {len(target_aliases)}"
 
 
 def test_manifest_priority_values():

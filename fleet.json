@@ -77,21 +77,6 @@
       "backend": "codex",
       "effort": "max"
     },
-    "gemini-4-carbon-low": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "low"
-    },
-    "gemini-4-carbon-medium": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "medium"
-    },
-    "gemini-4-carbon-high": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "high"
-    },
     "gemini-4-hydrogen-low": {
       "backend_id": "gemini-4-hydrogen",
       "backend": "agy",
@@ -448,11 +433,9 @@
       "backend": "agy",
       "name": "Gemini 4 Carbon (AGY)",
       "efforts": [
-        "low",
-        "medium",
-        "high"
+        "off"
       ],
-      "default_effort": "high",
+      "default_effort": "off",
       "context_window": 1048576,
       "max_tokens": 65536,
       "images": {

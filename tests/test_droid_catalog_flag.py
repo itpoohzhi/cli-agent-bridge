@@ -28,7 +28,7 @@ _LMH = ("low", "medium", "high")
 # Sol скрыта профилем; DeepSeek принадлежит deepseek-direct независимо от флага droid.
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
-    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", _LMH, "high"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
+    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
     ("muse-spark-1.3", "muse", ("max",), "max"),
     ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
     ("muse-wonder-1.0", "muse", _ALL, "high"),
@@ -173,7 +173,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(gated, raw)
         self.assertTrue(gated["backends"]["droid"]["enabled"])
         self.assertEqual(list(routes(gated).values()).count("droid"), 3)
-        self.assertEqual(len(gated["aliases"]), 35)
+        self.assertEqual(len(gated["aliases"]), 32)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -293,7 +293,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
                 self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("openai-key-2", "droid"))
                 self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 35)
+                self.assertEqual(len(catalog["aliases"]), 32)
 
 
 if __name__ == "__main__":

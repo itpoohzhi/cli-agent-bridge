@@ -1,12 +1,12 @@
 {
-  "compiled_at": "2026-11-14T00:00:00+0300",
+  "compiled_at": "2026-11-15T00:19:20+0300",
   "compiler_version": 1,
-  "fleet_sha256": "8170e4d3420e2601f87f1b1a18cd106ffd480616831a4a3b820f572f44a032b6",
+  "fleet_sha256": "b9d7a8dd6776abad0690ce01566088bbde31500298133d97817b8bb7a82d2c7a",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "694d836b7be8d50c1407bfd0515d0bd919782b38dc555707130faecbaff02f4e",
-      "agy.yaml": "b3d9783efc7d0a6c37598df1520dee7a9c32a74cdb4b62734519ec1defe6c76a",
+      "_fleet.yaml": "889034a7bbbafdbf2ca8d86a2010834ee3aa19f64edd0175bae7712bd832b272",
+      "agy.yaml": "16d3044cfcda0fc59a785d701d1997535e5e299352f70fce6b481109a091ce15",
       "claude-p.yaml": "cd2b0208bdac758ca6d68186b6eb65790866b6f7e29bd0fcf24ce111529318a4",
       "codex.yaml": "e7f1a1fe67c877cea6b5d5577d38dd975ef4bb09d2429df3ff3eb61b38a57447",
       "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
@@ -18,7 +18,7 @@
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "5ac50a9832253d351d20230361b2c048c0a65f2ced08ddcca8cc64b7e457f996"
+    "manifests_sha256": "b7d5cabe8383f5d822743b70a009343fb58439e87bc603cdb5edcb86176ad91d"
   },
   "models": {
     "beam-free": {

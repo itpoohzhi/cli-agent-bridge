@@ -10,10 +10,9 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from core.effort_policy import ModelEffortSpec, resolve_passthrough_effort
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import clean_transport_request
-from core.passthrough_autonomy import resolve_target_model
+from core.passthrough_autonomy import PassthroughOptions, prepare_passthrough_request, resolve_target_model
 
 
 @dataclass(slots=True)
@@ -72,13 +71,11 @@ def prepare_route_request(
     prepared = {**(params if isinstance(params, dict) else {}), **request}
     prepared.pop("transport_seed", None)
     prepared["model"] = resolve_target_model(selected_model, canonical_id)
-    effort = resolve_passthrough_effort(
-        request.get("reasoning_effort"),
-        alias_effort if request.get("reasoning_effort") is None else None,
-        ModelEffortSpec.from_catalog_entry(selected_model), enabled=effort_on,
+    options = PassthroughOptions(
+        alias_effort=alias_effort if request.get("reasoning_effort") is None else None,
+        effort_on=effort_on,
     )
-    if effort.apply:
-        prepared["reasoning_effort"] = effort.value
+    prepared, _ = prepare_passthrough_request(prepared, selected_model, canonical_id, options)
     return prepared
 
 
@@ -96,16 +93,16 @@ def _notes_allow(route: PostRoute, model_id: str) -> bool:
 
 def _internal_allowed(route: PostRoute, requested_id: str) -> bool:
     host, handler = route.host, route.handler
-    key = getattr(host, "_INTERNAL_SERVICE_KEY", None) or os.environ.get(
-        "INTERNAL_SERVICE_KEY", "",
-    )
-    if not key or not any(
+    if not any(
         value in host.INTERNAL_MODEL_IDS
         for value in (route.raw_model, requested_id, route.model_id)
     ):
         return True
+    key = getattr(host, "_INTERNAL_SERVICE_KEY", None) or os.environ.get(
+        "INTERNAL_SERVICE_KEY", "",
+    )
     supplied = handler.headers.get("X-Internal-Service-Key", "")
-    if hmac.compare_digest(supplied.encode("utf-8"), key.encode("utf-8")):
+    if key and hmac.compare_digest(supplied.encode("utf-8"), key.encode("utf-8")):
         return True
     handler._reject(403, "internal_model_forbidden",
                     "Model reserved for internal review", "unknown", route.model_len)
@@ -207,12 +204,20 @@ def _resolve_alias(route: PostRoute, models: dict[str, Any]) -> None:
     route.alias_effort = alias[1] if isinstance(alias, (tuple, list)) and len(alias) > 1 else None
 
 
+def _effort_type_allowed(route: PostRoute) -> bool:
+    value = route.request.get("reasoning_effort")
+    if value is None or isinstance(value, str):
+        return True
+    return route.reject(400, "unsupported_reasoning_effort", "reasoning_effort must be a string")
+
+
 def _request_allowed(route: PostRoute, requested_id: str) -> bool:
     return all(check() for check in (
         lambda: _internal_allowed(route, requested_id),
         lambda: _penalty_allowed(route, requested_id),
         lambda: _provider_allowed(route),
         lambda: requested_id == route.model_id or _notes_allow(route, route.model_id),
+        lambda: _effort_type_allowed(route),
     ))
 
 

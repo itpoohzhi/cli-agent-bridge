@@ -103,6 +103,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -153,6 +154,8 @@ from core.watchdog import (  # noqa: E402
 )
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
+from core.effortless_policy import effort_cli_args, resolve_request_effort  # noqa: E402
 from core.proc_groups import spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.stream_interruption_recovery import (  # noqa: E402
@@ -891,8 +894,8 @@ _SAFE_MCP_TOOL_RE = re.compile(r"mcp_[a-z0-9_-]{1,32}_[a-z0-9_]{1,32}\Z")
 
 # Effort-оси. `--effort` у agy принимает уровни модели из fleet.json (включая xhigh для
 # gemini-4-hydrogen); id модели — база без уровня,
-# уровень всегда уходит отдельным флагом (см. модуль-docstring).
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# уровень всегда уходит отдельным флагом (см. модуль-docstring); `off` — без флага.
+EFFORT_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 # Уровни, реально объявленные каталогом: вычисляются из `efforts` моделей FLEET сразу после
 # загрузки (см. `_cli_effort_levels`); до загрузки — полный набор EFFORT_LEVELS.
 CLI_EFFORT_LEVELS: tuple[str, ...] = EFFORT_LEVELS
@@ -1285,6 +1288,16 @@ def _mask_secrets(text: str) -> str:
 def _err_summary(err: Any, limit: int = 200) -> str:
     text = " ".join(str(err or "").split())
     return text[:limit]
+
+
+def _is_cli_rejection_outcome(out: Mapping[str, object]) -> bool:
+    """Подавляет повтор только при отказе CLI (`agy_error`), не на транспортном `pump_error`."""
+    state = out.get("state")
+    if state == "pump_error":
+        return False
+    return state in ("agy_error", "done") and is_deterministic_cli_rejection(
+        out.get("err")
+    )
 
 
 # Порог неактивности хода (без протокольных событий и без прироста CPU/потомков группы).
@@ -5406,8 +5419,7 @@ class Run:
             cli_mode,
             "--model",
             model,
-            "--effort",
-            effort,
+            *effort_cli_args(effort),
             "--print-timeout=" + str(PRINT_TIMEOUT),
         ]
         # Изображения хода: каталог файлов отдельным аргументом, cwd не подменяется.
@@ -7207,7 +7219,11 @@ class Handler(BaseHTTPRequestHandler):
                     ctx["hot_resumed"] = False
                     ctx["conversation_id"] = ""
                     ctx["prompt"] = ctx["full_prompt"]
-                    if out["state"] == "agy_error" and not delivered:
+                    if (
+                        out["state"] == "agy_error"
+                        and not delivered
+                        and not _is_cli_rejection_outcome(out)
+                    ):
                         if not _retry_take():
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
                             break
@@ -7220,6 +7236,7 @@ class Handler(BaseHTTPRequestHandler):
                 transient = (
                     out["state"] in ("agy_error", "pump_error", "done")
                     and not delivered
+                    and not _is_cli_rejection_outcome(out)
                 )
                 if not transient or attempt == 2:
                     break
@@ -7544,36 +7561,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             model = FLEET["models"][model_id]
-            raw_effort = req.get("reasoning_effort")
-            if raw_effort is None:
-                effort = model["default_effort"]
-                effort_source = "default"
-            elif isinstance(raw_effort, str):
-                candidate = raw_effort.strip()
-                if not candidate:
-                    effort = model["default_effort"]
-                    effort_source = "default"
-                elif candidate in model["efforts"]:
-                    effort = candidate
-                    effort_source = "request"
-                else:
-                    self._reject(
-                        400,
-                        "unsupported_reasoning_effort",
-                        "reasoning_effort is not allowed for this model",
-                        model_id,
-                        model_len,
-                    )
-                    return
-            else:
-                self._reject(
-                    400,
-                    "unsupported_reasoning_effort",
-                    "reasoning_effort must be a string",
-                    model_id,
-                    model_len,
-                )
+            decision = resolve_request_effort(req.get("reasoning_effort"), model, EFFORT_LEVELS)
+            if decision.error:
+                self._reject(400, "unsupported_reasoning_effort", decision.error, model_id, model_len)
                 return
+            effort, effort_source = decision.effort, decision.source
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(
                     400,
