@@ -35,16 +35,16 @@ def is_deterministic_cli_rejection(
     err: object, env: Mapping[str, str] | None = None
 ) -> bool:
     """Текст ошибки CLI совпал с паттерном детерминированного отказа."""
-    if not isinstance(err, str) or not err:
-        return False
-    source = os.environ if env is None else env
-    raw = source.get(ENV_DETERMINISTIC_RE)
-    if raw is None:
+    rejected = False
+    if isinstance(err, str) and err:
+        source = os.environ if env is None else env
+        raw = source.get(ENV_DETERMINISTIC_RE)
         pattern = DEFAULT_DETERMINISTIC_RE
-    else:
-        stripped = raw.strip()
-        if stripped.lower() in _DISABLE_TOKENS:
-            return False
-        pattern = stripped
-    max_len = positive_int(source, ENV_DETERMINISTIC_ERR_MAX_LEN, DEFAULT_ERR_SCAN_LEN)
-    return _compiled(pattern).search(err[:max_len]) is not None
+        if raw is not None:
+            pattern = raw.strip()
+        if pattern.lower() not in _DISABLE_TOKENS:
+            max_len = positive_int(
+                source, ENV_DETERMINISTIC_ERR_MAX_LEN, DEFAULT_ERR_SCAN_LEN
+            )
+            rejected = bool(_compiled(pattern).search(err[:max_len]))
+    return rejected

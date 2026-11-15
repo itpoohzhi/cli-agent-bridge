@@ -22,7 +22,6 @@ FLAG_EFFORTLESS_CLAMP: Final[str] = "BRIDGE_EFFORTLESS_CLAMP_ENABLED"
 _EFFORTLESS_CLAMP_SOURCE: Final[DynamicFlagSource] = DynamicFlagSource(
     FLAG_EFFORTLESS_CLAMP, default=True
 )
-_KNOWN_EFFORT_LEVELS: Final[frozenset[str]] = frozenset(EFFORT_LEVELS)
 _MSG_NOT_STRING: Final[str] = "reasoning_effort must be a string"
 _MSG_NOT_ALLOWED: Final[str] = "reasoning_effort is not allowed for this model"
 
@@ -36,12 +35,22 @@ def effortless_clamp_enabled() -> bool:
     return _EFFORTLESS_CLAMP_SOURCE.enabled(fallback=True)
 
 
+def _effort_items(efforts: object) -> Iterable[object]:
+    """Элементы допустимой коллекции effort; прочие типы не задают шкалу."""
+    items = (
+        cast("Iterable[object]", efforts)
+        if isinstance(efforts, (list, tuple, set, frozenset))
+        else ()
+    )
+    return items
+
+
 def is_effortless(efforts: object) -> bool:
     """Модель принимает только `off`: у неё нет оси effort."""
-    if not isinstance(efforts, (list, tuple, set, frozenset)) or not efforts:
-        return False
-    items = cast("Iterable[object]", efforts)
-    return all(isinstance(item, str) and item.strip().lower() == OFF for item in items)
+    items = _effort_items(efforts)
+    return bool(items) and all(
+        isinstance(item, str) and item.strip().lower() == OFF for item in items
+    )
 
 
 def effortless_specs(
@@ -67,14 +76,12 @@ def _resolve_clamped_from(raw: object, clamp_enabled: bool | None) -> str | None
     if not isinstance(raw, str):
         raise EffortValidationError(_MSG_NOT_STRING)
     candidate = raw.strip().lower()
-    if not candidate or candidate == OFF:
-        return None
-    if candidate not in _KNOWN_EFFORT_LEVELS:
-        raise EffortValidationError(_MSG_NOT_ALLOWED)
-    enabled = effortless_clamp_enabled() if clamp_enabled is None else clamp_enabled
-    if not enabled:
-        raise EffortValidationError(_MSG_NOT_ALLOWED)
-    return candidate
+    clamped_from = None
+    if candidate and candidate != OFF:
+        if not _clamps_to_off(candidate, (OFF,), EFFORT_LEVELS, clamp_enabled):
+            raise EffortValidationError(_MSG_NOT_ALLOWED)
+        clamped_from = candidate
+    return clamped_from
 
 
 def strip_effortless_effort(
@@ -84,21 +91,24 @@ def strip_effortless_effort(
     clamp_enabled: bool | None = None,
 ) -> tuple[dict[str, object], EffortResolution]:
     """Проверить и убрать `reasoning_effort` из запроса модели без оси effort."""
-    if not is_effortless(spec.efforts):
-        return req, res
-    if "reasoning_effort" not in req:
-        return req, replace(res, apply=False) if res.apply else res
-    clamped_from = _resolve_clamped_from(req["reasoning_effort"], clamp_enabled)
-    clean = dict(req)
-    _ = clean.pop("reasoning_effort", None)
-    return clean, EffortResolution(OFF, True, clamped_from)
+    clean, resolution = req, res
+    if is_effortless(spec.efforts):
+        if "reasoning_effort" in req:
+            clamped_from = _resolve_clamped_from(req["reasoning_effort"], clamp_enabled)
+            clean = dict(req)
+            _ = clean.pop("reasoning_effort", None)
+            resolution = EffortResolution(OFF, True, clamped_from)
+        elif res.apply:
+            resolution = replace(res, apply=False)
+    return clean, resolution
 
 
 def effort_cli_args(effort: str | None) -> list[str]:
     """Аргументы CLI: для пустого и `off` флаг `--effort` не передаётся."""
-    if effort is None or effort.strip().lower() in ("", OFF):
-        return []
-    return ["--effort", effort]
+    args: list[str] = []
+    if effort is not None and effort.strip().lower() not in ("", OFF):
+        args = ["--effort", effort]
+    return args
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,19 +124,23 @@ def _model_effort_fields(
     model: Mapping[str, object] | ModelEffortSpec,
 ) -> tuple[object, str | None]:
     """Извлечь `efforts` и `default_effort` из записи каталога или `ModelEffortSpec`."""
+    fields: tuple[object, str | None]
     if isinstance(model, ModelEffortSpec):
-        return model.efforts, model.default
-    raw_default = model.get("default_effort")
-    return model.get("efforts"), raw_default if isinstance(raw_default, str) else None
+        fields = model.efforts, model.default
+    else:
+        raw_default = model.get("default_effort")
+        fields = (
+            model.get("efforts"),
+            raw_default if isinstance(raw_default, str) else None,
+        )
+    return fields
 
 
 def _supported_effort_map(efforts: object) -> dict[str, str]:
-    if not isinstance(efforts, (list, tuple, set, frozenset)):
-        return {}
-    items = cast("Iterable[object]", efforts)
+    """Непустые строковые уровни; последнее совпадение задаёт написание."""
     return {
         item.strip().lower(): item.strip()
-        for item in items
+        for item in _effort_items(efforts)
         if isinstance(item, str) and item.strip()
     }
 
@@ -138,12 +152,31 @@ def _clamps_to_off(
     clamp_enabled: bool | None,
 ) -> bool:
     """Известный шкале уровень для модели без оси effort клампится в `off`."""
-    if not is_effortless(efforts):
-        return False
-    known = {item.strip().lower() for item in levels if item.strip()}
-    if candidate_key not in known:
-        return False
-    return effortless_clamp_enabled() if clamp_enabled is None else clamp_enabled
+    enabled = False
+    if is_effortless(efforts):
+        known = {item.strip().lower() for item in levels if item.strip()}
+        if candidate_key in known:
+            enabled = (
+                effortless_clamp_enabled() if clamp_enabled is None else clamp_enabled
+            )
+    return enabled
+
+
+def _resolve_candidate_effort(
+    candidate: str,
+    efforts: object,
+    levels: Sequence[str],
+    clamp_enabled: bool | None,
+) -> EffortDecision:
+    """Разрешить непустой строковый effort по шкале модели и политике клампа."""
+    key = candidate.lower()
+    supported = _supported_effort_map(efforts)
+    decision = EffortDecision(None, None, _MSG_NOT_ALLOWED)
+    if key in supported:
+        decision = EffortDecision(supported[key], SOURCE_REQUEST, None)
+    elif _clamps_to_off(key, efforts, levels, clamp_enabled):
+        decision = EffortDecision(OFF, SOURCE_CLAMPED, None)
+    return decision
 
 
 def resolve_request_effort(
@@ -155,17 +188,12 @@ def resolve_request_effort(
 ) -> EffortDecision:
     """Effort запроса по записи каталога; ошибки — тексты 400 `unsupported_reasoning_effort`."""
     efforts, default_effort = _model_effort_fields(model)
-    if raw is None:
-        return EffortDecision(default_effort, SOURCE_DEFAULT, None)
-    if not isinstance(raw, str):
-        return EffortDecision(None, None, _MSG_NOT_STRING)
-    candidate = raw.strip()
-    if not candidate:
-        return EffortDecision(default_effort, SOURCE_DEFAULT, None)
-    key = candidate.lower()
-    supported = _supported_effort_map(efforts)
-    if key in supported:
-        return EffortDecision(supported[key], SOURCE_REQUEST, None)
-    if _clamps_to_off(key, efforts, levels, clamp_enabled):
-        return EffortDecision(OFF, SOURCE_CLAMPED, None)
-    return EffortDecision(None, None, _MSG_NOT_ALLOWED)
+    decision = EffortDecision(default_effort, SOURCE_DEFAULT, None)
+    if raw is not None:
+        if not isinstance(raw, str):
+            decision = EffortDecision(None, None, _MSG_NOT_STRING)
+        elif candidate := raw.strip():
+            decision = _resolve_candidate_effort(
+                candidate, efforts, levels, clamp_enabled
+            )
+    return decision
