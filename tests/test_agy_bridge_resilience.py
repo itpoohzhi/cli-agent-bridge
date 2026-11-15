@@ -10200,9 +10200,7 @@ class UniversalImageFallbackTests(unittest.TestCase):
         gate_spy = mock.patch.object(
             _bridge(), "_image_proof_reason", side_effect=AssertionError("proof")
         )
-        sha_spy = mock.patch.object(
-            _bridge(), "_file_sha256", side_effect=AssertionError("sha")
-        )
+        sha = mock.patch.object(_bridge(), "_file_sha256", side_effect=AssertionError)
         with _UniEnv() as env:
             bridge = _HttpBridge()
             argon = _proof_of("gemini-4-argon")
@@ -10210,7 +10208,7 @@ class UniversalImageFallbackTests(unittest.TestCase):
             try:
                 with (
                     gate_spy,
-                    sha_spy,
+                    sha,
                     mock.patch.dict(argon, broken),
                     mock.patch.dict(
                         _dict(_dict(models["gemini-4-argon"])["images"]),
@@ -10231,10 +10229,11 @@ class UniversalImageFallbackTests(unittest.TestCase):
                                 spawned += 1
                                 rec = env.records()[-1]
                                 self.assertEqual(len(env.records()), spawned)
-                                self.assertEqual(
-                                    _argv_of(rec)[_argv_of(rec).index("--effort") + 1],
-                                    effort,
-                                )
+                                a = _argv_of(rec)
+                                if effort == "off":
+                                    self.assertNotIn("--effort", a)
+                                else:
+                                    self.assertEqual(a[a.index("--effort") + 1], effort)
                                 _expect_files(
                                     self,
                                     rec,
