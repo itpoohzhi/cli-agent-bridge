@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias, TypedDict
 
@@ -159,4 +160,138 @@ def model_record(
             record[key] = override[key]
     return record
 
-__all__ = ('CompileError', 'CompileResult', 'CompileOptions', 'ModelProof', '_confirmed_receipt', 'model_proof', 'receipt_efforts', '_model_efforts', '_model_images', 'model_record')
+
+def _http_references(http: Mapping[str, Any]) -> dict[str, Any]:
+    """Копирует ссылки, не читая файлы с ключами и заголовками."""
+    out: dict[str, Any] = {}
+    ref = http.get("api_key_ref")
+    if isinstance(ref, str) and ref.startswith("file:"):
+        out["api_key_ref"] = ref
+    elif isinstance(ref, Mapping):
+        fallback = ref.get("fallback_file")
+        if isinstance(fallback, str) and fallback:
+            out["api_key_ref"] = "file:" + fallback
+    out.update(_header_reference(http.get("headers_from_json")))
+    per_request = http.get("per_request_headers")
+    if isinstance(per_request, Mapping) and per_request:
+        out["per_request_headers"] = {str(k): str(v) for k, v in per_request.items()}
+    return out
+
+
+def _header_reference(headers: object) -> dict[str, Any]:
+    if isinstance(headers, Mapping):
+        path, key = headers.get("path"), headers.get("key")
+        pick = headers.get("pick") or headers.get("required")
+        if isinstance(path, str) and isinstance(key, str) and isinstance(pick, list):
+            selected = {
+                "file": path,
+                "json_path": key.split("."),
+                "pick": [str(name) for name in pick],
+            }
+            return {"headers_from_json": selected}
+    return {}
+
+
+def upstream_params(manifest: ManifestLike) -> dict[str, Any]:
+    """Сохраняет raw-HTTP настройки без разрешения секретных ссылок."""
+    bridge, direct = manifest.transport.bridge, manifest.transport.direct
+    http = direct.http if direct else None
+    if bridge is None or bridge.base_url is None or not http:
+        return {}
+    out = _http_references(http)
+    default_off = manifest.params.effort_map.get("off")
+    rules = manifest.models_overrides
+    # Дефолт одной модели не должен выключать reasoning остальных моделей.
+    if isinstance(default_off, Mapping) and default_off and rules:
+        if all(rule.fields.get("default_effort") == "off" for rule in rules):
+            out["default_body_extra"] = deepcopy(default_off)
+    return out
+
+
+def _backend_fingerprint(manifest: ManifestLike) -> dict[str, Any]:
+    """Сохраняет полную техническую ссылку без чтения бинарного файла."""
+    fingerprint = manifest.fingerprint
+    if not fingerprint.binary_path or not fingerprint.binary_sha256:
+        return {}
+    ref = {
+        key: getattr(fingerprint, key)
+        for key in ("version", "binary_sha256", "binary_path")
+        if getattr(fingerprint, key) is not None
+    }
+    return {"technical_ref": ref}
+
+
+def backend_entry(manifest: ManifestLike) -> dict[str, Any]:
+    """Собирает backend, сохраняя отдельный слот учётных данных."""
+    bridge = manifest.transport.bridge
+    if bridge is None:
+        raise CompileError("provider_bridge_missing", manifest.provider_id)
+    entry: dict[str, Any] = {
+        "kind": manifest.kind,
+        "enabled": manifest.enabled,
+        "required": manifest.required,
+        "owned_by": manifest.owned_by,
+        "max_concurrent": manifest.limits.max_concurrent,
+    }
+    if manifest.required is False:
+        entry.pop("required")
+    for key in ("base_url", "api_key_env", "wrapper"):
+        value = getattr(bridge, key)
+        if value is not None:
+            entry[key] = value
+    entry.update(_backend_fingerprint(manifest))
+    for key in ("options", "proxy_port", "idle_timeout_s", "safety_cap_s"):
+        value = getattr(bridge, key)
+        if value is not None and value != {}:
+            entry[key] = deepcopy(value)
+    entry.update(upstream_params(manifest))
+    return entry
+
+
+def _resolve_family(manifest: ManifestLike, model_id: str) -> tuple[str | None, str]:
+    """Повторяет чистую семантику HOST без импорта загрузчика."""
+    rule = manifest.family_rule
+    if rule.type in ("exact_map", "owned_by"):
+        family = rule.exact_map.get(model_id) if rule.type == "exact_map" else rule.owned_by
+        return (family, rule.type) if family else (None, "unmapped")
+    if rule.type == "prefix" and rule.prefix_verified:
+        families = {fam for pre, fam in rule.prefix_map.items() if model_id.startswith(pre)}
+        if len(families) == 1:
+            return next(iter(families)), "prefix"
+        return None, "ambiguous" if families else "unmapped"
+    return None, "unmapped"
+
+
+def model_sidecar(
+    provider: ManifestLike,
+    model_id: str,
+    proof: ModelProof,
+    alternates: list[dict[str, str]],
+    history_max: int,
+) -> dict[str, Any]:
+    """Фиксирует независимые status, family, quorum и происхождение proof."""
+    family, source = _resolve_family(provider, model_id)
+    receipt, record = proof.receipt, proof.record
+    entry: dict[str, Any] = {
+        "provider": provider.provider_id,
+        "status": proof.status,
+        "family": family,
+        "family_source": source,
+        "quorum_eligible": bool(
+            proof.status == STATUS_CONFIRMED and family
+            and source in ("exact_map", "owned_by", "prefix")
+        ),
+        "quota_group": provider.limits.quota_group,
+        "in_fleet": False,
+        "efforts_proven": list(receipt.get("efforts_proven") or []) if receipt else [],
+        "alternates": alternates,
+        "history": [dict(h) for h in (record.history if record else ())][-history_max:],
+    }
+    if receipt is not None and record is not None:
+        entry["probe"] = {
+            "receipt_sha256": record.receipt_sha256,
+            "fingerprint_sha256": record.fingerprint_sha256,
+            "probe_version": receipt.get("probe_version"),
+            "at": receipt.get("finished_at"),
+        }
+    return entry
