@@ -32,7 +32,11 @@ import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional, TypedDict, Unpack
+
+from adapters.passthrough_pool import (
+    PassthroughConnectionPool as _PassthroughConnectionPool,
+)
 
 from core.backend_adapter import (
     SESSIONS_NONE,
@@ -61,18 +65,22 @@ from core.tool_emulation import (
 )
 from core.cli_runtime_config import NonstreamConfig
 from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress
-from core.liveness_signals import passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index
-from core.nonstream_aggregator import internal_stream_body, request_deadlines
+from core.nonstream_aggregator import request_deadlines as request_deadlines
 from core.nonstream_resilience import NonstreamRetryBulkhead, NonstreamRetryPolicy
 from core.nonstream_resilience import should_retry_incomplete_nonstream
 from core.nonstream_retry_runtime import RetryRuntime, retry_incomplete_once
+from core.passthrough_adapter_runtime import (
+    HandleRequestOptions,
+    PassthroughRequest,
+    RuntimeOptions,
+    handle_request,
+)
+from core.passthrough_exchange import OpenRequestOptions, open_request
 from core.passthrough_sliding_window import (
     FLAG_PASSTHROUGH_SLIDING_WINDOW,
     SlidingDeadline,
-    open_sliding_deadline,
 )
-from core.presend_retry_policy import resolve_presend_response
 from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int
 from core.runtime_env import env_bool, positive_int as _positive_int
 from core.stream_framing import build_stream_error_chunk, format_sse_event
@@ -110,11 +118,19 @@ DEFAULT_QUEUE_TIMEOUT_S = 900.0
 
 KIND = "passthrough"
 
-# Loopback-upstream с `/v1` в конце; допустимы вложенные префиксы (`http://127.0.0.1:10830/go/v1`).
+# Loopback-upstream с `/v1` в конце либо `/sg-*`; допустимы вложенные префиксы перед `/v1`.
 _LOOPBACK_V1_RE = re.compile(
-    r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}(?:/[a-z0-9._-]+)*/v1"
+    r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}(?:(?:/[a-z0-9._-]+)*/v1|/sg-[a-z0-9._-]+)"
 )
 _NO_EFFORT_VALUES = frozenset({"", "off", "none"})
+_BODY_CONTROLS = frozenset(
+    {
+        "transport_seed",
+        "exclude_transports",
+        "transport_controls",
+        "bridge_transport_controls",
+    }
+)
 
 # Заголовки соединения (RFC 9110 §7.6.1) не пробрасываются; Host/Content-Length ставит шов.
 _HOP_BY_HOP = frozenset(
@@ -133,6 +149,30 @@ def _positive_float(environ: Mapping[str, str], name: str, default: float) -> fl
     except ValueError:
         return default
     return value if math.isfinite(value) and value > 0 else default
+
+
+def _strip_body_controls(data: dict[str, Any]) -> bool:
+    """Удаляет управляющие поля и сообщает, нужна ли пересериализация."""
+    removed = _BODY_CONTROLS.intersection(data)
+    for key in removed:
+        del data[key]
+    return bool(removed)
+
+
+def _apply_body_defaults(data: dict[str, Any], extra: Mapping[str, Any]) -> bool:
+    """Сохраняет приоритет клиента и не возвращает transport-поля из конфига."""
+    effort = data.get("reasoning_effort")
+    if isinstance(effort, str) and effort.strip().lower() not in _NO_EFFORT_VALUES:
+        return (
+            False  # клиент явно запросил рассуждение: дефолт «выключено» не навязываем
+        )
+    missing = {
+        key: copy.deepcopy(value)
+        for key, value in extra.items()
+        if key not in data and key not in _BODY_CONTROLS
+    }
+    data.update(missing)
+    return bool(missing)
 
 
 @dataclass(frozen=True)
@@ -208,78 +248,18 @@ class PassthroughLimits:
         )
 
 
-class PassthroughConnectionPool:
-    """Потокобезопасный LIFO-пул свободных соединений без состояния запроса."""
+class PassthroughConnectionPool(_PassthroughConnectionPool):
+    """Сохраняет динамические hooks прежнего публичного пути импорта пула."""
 
     def __init__(
-        self, max_keepalive: int = 32, keepalive_expiry_s: float = 30.0
-    ) -> None:
-        self._max_keepalive: int = max_keepalive
-        self._keepalive_expiry_s: float = keepalive_expiry_s
-        self._idle: dict[tuple[str, int], list[tuple[Any, float]]] = {}
-        self._lock: threading.Lock = threading.Lock()
-        self._closed: bool = False
-
-    def get_connection(
-        self, host: str, port: int, timeout: float, *, fresh: bool = False
-    ) -> tuple[http.client.HTTPConnection, bool]:
-        """Выдать живое свободное соединение либо подключить новое."""
-        while not fresh:
-            with self._lock:
-                entries = self._idle.get((host, port))
-                entry = entries.pop() if entries else None
-                if not entries:
-                    _ = self._idle.pop((host, port), None)
-            if entry is None:
-                break
-            conn, last_used = entry
-            sock = conn.sock
-            try:
-                age = time.monotonic() - last_used
-                if sock is not None and age <= self._keepalive_expiry_s:
-                    readable, _, _ = select.select([sock], [], [], 0)
-                    if not readable:
-                        conn.timeout = timeout
-                        _ = sock.settimeout(timeout)
-                        return conn, True
-                    # EOF и незапрошенные данные одинаково запрещают переиспользование.
-                    _ = sock.recv(1, socket.MSG_PEEK)
-            except (OSError, ValueError):
-                pass
-            conn.close()
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
-        try:
-            conn.connect()
-        except BaseException:
-            conn.close()
-            raise
-        return conn, False
-
-    def release_connection(
         self,
-        host: str,
-        port: int,
-        conn: http.client.HTTPConnection,
-        can_reuse: bool = True,
+        max_keepalive: int = PassthroughLimits.max_keepalive_connections,
+        keepalive_expiry_s: float = PassthroughLimits.keepalive_expiry_s,
+        select_fn: Callable[..., Any] = lambda r, w, x, timeout=0: select.select(r, w, x, timeout),
+        monotonic_fn: Callable[[], float] = lambda: time.monotonic(),
+        connection_fn: Callable[..., Any] = lambda host, port, timeout: http.client.HTTPConnection(host, port, timeout=timeout),
     ) -> None:
-        """Вернуть полностью прочитанное соединение или закрыть его."""
-        if can_reuse and conn.sock is not None:
-            with self._lock:
-                if not self._closed:
-                    entries = self._idle.setdefault((host, port), [])
-                    if len(entries) < self._max_keepalive:
-                        entries.append((conn, time.monotonic()))
-                        return
-        conn.close()
-
-    def close_all(self) -> None:
-        """Закрыть пул; соединения в работе закроются при возврате."""
-        with self._lock:
-            self._closed = True
-            idle, self._idle = self._idle, {}
-        for entries in idle.values():
-            for conn, _ in entries:
-                conn.close()
+        super().__init__(max_keepalive, keepalive_expiry_s, select_fn, monotonic_fn, connection_fn)
 
 
 class ClientGone(Exception):
@@ -1076,6 +1056,15 @@ def _read_bounded(resp: http.client.HTTPResponse, limit: int) -> bytes:
         chunks.append(piece)
 
 
+class PassthroughInitOptions(TypedDict, total=False):
+    """Сохраняет прежние keyword-параметры конструктора."""
+
+    limits: PassthroughLimits | None
+    process_budget: ProcessBudget | None
+    sanitize: bool | None
+    is_hub_key: Callable[[str], bool] | None
+
+
 class PassthroughAdapter(BackendAdapter):
     """Бэкенд `kind=passthrough`: модели каталога, раw-шов исполнения вместо `execute_turn`."""
 
@@ -1085,19 +1074,20 @@ class PassthroughAdapter(BackendAdapter):
         sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact"
     )
 
-    def __init__(
-        self,
-        backend_id: str,
-        config: Mapping[str, Any],
-        catalog_source: Callable[[], Mapping[str, Any]],
-        host: Any = None,
-        *,
-        limits: Optional[PassthroughLimits] = None,
-        process_budget: Optional[ProcessBudget] = None,
-        sanitize: Optional[bool] = None,
-        is_hub_key: Optional[Callable[[str], bool]] = None,
-    ) -> None:
+    def __init__(self, backend_id: str, config: Mapping[str, Any],
+                 catalog_source: Callable[[], Mapping[str, Any]], host: Any = None, **kwargs: Unpack[PassthroughInitOptions]) -> None:
         super().__init__(backend_id, config, catalog_source, host)
+        self._initialize(**kwargs)
+
+    def _initialize(
+        self,
+        *,
+        limits: PassthroughLimits | None = None,
+        process_budget: ProcessBudget | None = None,
+        sanitize: bool | None = None,
+        is_hub_key: Callable[[str], bool] | None = None,
+    ) -> None:
+        """Инициализирует прежние ресурсы адаптера без дополнительного пула."""
         self._is_hub_key = is_hub_key
         api_key_env = self.config.get("api_key_env")
         api_key = self.config.get("api_key")
@@ -1107,7 +1097,10 @@ class PassthroughAdapter(BackendAdapter):
         self._limits = limits
         initial_limits = self.limits
         self._pool: PassthroughConnectionPool = PassthroughConnectionPool(
-            initial_limits.max_keepalive_connections, initial_limits.keepalive_expiry_s
+            initial_limits.max_keepalive_connections,
+            initial_limits.keepalive_expiry_s,
+            select_fn=lambda r, w, x, timeout=0: select.select(r, w, x, timeout),
+            monotonic_fn=lambda: time.monotonic(),
         )
         self.process_budget = process_budget or ProcessBudget(
             initial_limits.accumulator_max_process_bytes
@@ -1118,14 +1111,22 @@ class PassthroughAdapter(BackendAdapter):
         self._slots = threading.BoundedSemaphore(self.max_concurrent)
         self._retry_bulkhead = NonstreamRetryBulkhead.from_env()
         self._retry_bulkhead_env = os.environ.get("BRIDGE_NONSTREAM_RETRY_MAX_INFLIGHT")
+        self._configure_endpoint()
+
+    def _configure_endpoint(self) -> None:
+        """Проверяет loopback URL и нормализует ошибку диапазона порта."""
         base_url = self.config.get("base_url")
         if not isinstance(base_url, str) or not _LOOPBACK_V1_RE.fullmatch(base_url):
             raise ValueError("backend_base_url_invalid")
         parts = urllib.parse.urlsplit(base_url)
-        if parts.hostname is None or parts.port is None or not 1 <= parts.port <= 65535:
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError("backend_base_url_invalid") from exc
+        if parts.hostname is None or port is None or not 1 <= port <= 65535:
             raise ValueError("backend_base_url_invalid")
         self._host = parts.hostname
-        self._port = parts.port
+        self._port = port
         self._base_path = parts.path.rstrip("/")
 
     @property
@@ -1226,23 +1227,22 @@ class PassthroughAdapter(BackendAdapter):
         return extra
 
     def _with_body_defaults(self, raw_body: bytes) -> bytes:
-        """Подставляет `default_body_extra` в JSON-тело для ключей, которых клиент не задал."""
-        extra = self.config.get("default_body_extra")
-        if not isinstance(extra, Mapping) or not extra:
-            return raw_body
+        """Удаляет управляющие поля моста и подставляет отсутствующие дефолты."""
         try:
             data = json.loads(raw_body)
         except ValueError:
             return raw_body
         if not isinstance(data, dict):
             return raw_body
-        effort = data.get("reasoning_effort")
-        if isinstance(effort, str) and effort.strip().lower() not in _NO_EFFORT_VALUES:
-            return raw_body  # клиент явно запросил рассуждение: дефолт «выключено» не навязываем
-        missing = {k: copy.deepcopy(v) for k, v in extra.items() if k not in data}
-        if not missing:
-            return raw_body
-        return json.dumps({**data, **missing}, ensure_ascii=False).encode("utf-8")
+        changed = _strip_body_controls(data)
+        extra = self.config.get("default_body_extra")
+        if isinstance(extra, Mapping):
+            changed = _apply_body_defaults(data, extra) or changed
+        return (
+            json.dumps(data, ensure_ascii=False).encode("utf-8")
+            if changed
+            else raw_body
+        )
 
     # -- raw-шов -------------------------------------------------------------------------
     def _log(self, message: str) -> None:
@@ -1255,310 +1255,20 @@ class PassthroughAdapter(BackendAdapter):
             return self._sanitize
         return bool(getattr(self.host, "BRIDGE_SANITIZE_TOOL_CALLS", True))
 
-    def handle(
-        self,
-        *,
-        path: str,
-        raw_body: bytes,
-        request: Mapping[str, Any],
-        headers: Mapping[str, str],
-        sink: ResponseSink,
-        window: LivenessWindow | None = None,
-    ) -> None:
-        """One request: body goes upstream unmodified (AD-001: internal stream=true), response goes to `sink`."""
-        raw_body = self._with_body_defaults(raw_body)
-        internal = internal_stream_body(path, request, raw_body)
-        is_int = internal is not None
-        if internal is not None:
-            w_def = window or passthrough_window(self.limits, path, request)
-            raw_body, window = internal, w_def
-        deadline, open_deadline = request_deadlines(self.limits, is_int)
-        slide = open_sliding_deadline(
-            deadline, self.limits, is_int, request, _SLIDING_WIN_FLAG.enabled
+    def _runtime_options(self) -> RuntimeOptions:
+        """Передаёт настройки и динамический порт расчёта дедлайнов."""
+        return RuntimeOptions(
+            DEFAULT_QUEUE_TIMEOUT_S,
+            _SLIDING_WIN_FLAG.enabled,
+            lambda lim, intr: request_deadlines(lim, intr),
         )
-        q_def = float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S))
-        queue_timeout = min(q_def, self.limits.total_timeout_s)
-        if not self._slots.acquire(timeout=queue_timeout):
-            self._fail(sink, 503, "overloaded", "passthrough backend is saturated")
-            return
-        with self._lock:
-            self._active += 1
-        conn: Optional[http.client.HTTPConnection] = None
-        opened_pooling: list[bool] = []
-        transport: list[socket.socket] = []
-        stop = threading.Event()
-        aborted = threading.Event()
-        transport_lock = threading.Lock()
-        resp: http.client.HTTPResponse | None = None
-        successful = False
 
-        def abort() -> None:
-            with transport_lock:
-                if stop.is_set():
-                    return
-                aborted.set()
-                for sock in transport:
-                    try:
-                        sock.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        continue
+    def handle(self, **kwargs: Unpack[HandleRequestOptions]) -> None:
+        handle_request(self, PassthroughRequest(**kwargs), self._runtime_options())
 
-        def watch() -> None:
-            p_int = self.limits.poll_interval_s
-            while not stop.wait(
-                min(p_int, max(0.0, slide.deadline_s - time.monotonic()))
-            ):
-                if time.monotonic() >= slide.deadline_s or sink.client_gone():
-                    abort()
-                    return
-
-        def on_socket(sock: socket.socket) -> None:
-            with transport_lock:
-                if aborted.is_set():
-                    try:
-                        sock.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
-                    sock.close()
-                    raise ClientGone() if sink.client_gone() else TimeoutError()
-                transport.append(sock)
-
-        def open_response() -> tuple[
-            http.client.HTTPConnection, http.client.HTTPResponse
-        ]:
-            ps_dl = getattr(sink, "presend_deadline", None)
-            new_conn = self._open(
-                path,
-                raw_body,
-                headers,
-                deadline=open_deadline,
-                on_socket=on_socket,
-                presend_deadline=ps_dl,
-                on_pooling=opened_pooling.append,
-            )
-            try:
-                if sink.client_gone():
-                    raise ClientGone()
-                new_resp = new_conn.getresponse()
-            except BaseException:
-                new_conn.close()
-                raise
-            slide.relax_socket(
-                new_conn.sock, self.limits.read_timeout_s, internal is not None
-            )
-            return new_conn, new_resp
-
-        def reopen_response() -> http.client.HTTPResponse:
-            nonlocal conn, resp
-            if resp is not None:
-                resp.close()
-            if conn is not None:
-                conn.close()
-            conn, resp = open_response()
-            return resp
-
-        watcher = threading.Thread(
-            target=watch, daemon=True, name="passthrough-deadline"
-        )
-        watcher.start()
-        try:
-            try:
-                if sink.client_gone():
-                    raise ClientGone()
-                if aborted.is_set() or time.monotonic() >= deadline:
-                    raise TimeoutError()
-                conn, resp = open_response()
-                if sink.client_gone():
-                    raise ClientGone()
-                if aborted.is_set() or time.monotonic() >= deadline:
-                    raise TimeoutError()
-                conn, resp, handled = resolve_presend_response(
-                    self, conn, resp, sink, open_response
-                )
-                if handled:
-                    successful = True
-                    return
-            except UpstreamBodyTooLarge:
-                msg = "upstream response exceeds the bridge limit"
-                self._fail(sink, 502, "upstream_response_too_large", msg)
-                return
-            except PreSendTransientError as exc:
-                if getattr(sink, "accepts_presend_errors", False):
-                    raise
-                is_to = exc.status_code == 504 or isinstance(
-                    exc.__cause__, TimeoutError
-                )
-                self._fail_io(sink, is_to)
-                return
-            except (OSError, http.client.HTTPException) as exc:
-                is_to = (
-                    isinstance(exc, socket.timeout)
-                    or time.monotonic() >= deadline
-                    or (window is not None and window.expired())
-                )
-                self._fail_io(sink, is_to)
-                return
-            r_kw: dict[str, Any] = {
-                "on_timeout": abort,
-                "window": window,
-                "slide": slide,
-                "headers": headers,
-                "reopen": reopen_response,
-            }
-            successful = self._respond(resp, request, sink, deadline, **r_kw)
-        except ClientGone:
-            abort()
-            self._log("passthrough client_gone")
-        finally:
-            # Watcher не должен сбросить сокет, уже выданный следующему запросу.
-            with transport_lock:
-                stop.set()
-                transport.clear()
-            watcher.join(timeout=self.limits.reader_join_timeout_s)
-            if conn is not None:
-                pool_env = os.environ.get("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
-                pool_ok = pool_env.lower() not in ("0", "false", "no")
-                ct = (resp.getheader("Content-Type") or "").lower() if resp else ""
-                cl = resp.getheader("Content-Length") if resp else None
-                ch = (resp.getheader("Connection") or "") if resp else ""
-                toks = {t.strip().lower() for t in ch.split(",")}
-                can_reuse = (
-                    pool_ok
-                    and bool(opened_pooling)
-                    and opened_pooling[-1]
-                    and successful
-                    and not aborted.is_set()
-                    and resp is not None
-                    and resp.isclosed()
-                    and not resp.will_close
-                    and not ("text/event-stream" in ct and cl is None)
-                    and "close" not in toks
-                )
-                self._pool.release_connection(
-                    self._host, self._port, conn, can_reuse=can_reuse
-                )
-            with self._lock:
-                self._active -= 1
-            self._slots.release()
-
-    def _open(
-        self,
-        path: str,
-        raw_body: bytes,
-        headers: Mapping[str, str],
-        *,
-        deadline: float | None = None,
-        on_socket: Callable[[socket.socket], None] | None = None,
-        presend_deadline: float | None = None,
-        on_reuse: Callable[[bool], None] | None = None,
-        on_pooling: Callable[[bool], None] | None = None,
-        fresh: bool = False,
-    ) -> http.client.HTTPConnection:
-        rem = (
-            self.limits.total_timeout_s
-            if deadline is None
-            else deadline - time.monotonic()
-        )
-        if rem <= 0:
-            raise TimeoutError("upstream total deadline exceeded")
-        conn_rem = (
-            rem
-            if presend_deadline is None
-            else min(rem, presend_deadline - time.monotonic())
-        )
-        if conn_rem <= 0:
-            raise PreSendTransientError(
-                "upstream connect budget exhausted", status_code=504
-            )
-        pool_raw = os.environ.get("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
-        is_pooling_enabled = pool_raw.strip().lower() in ("1", "true", "yes", "on")
-        if not is_pooling_enabled:
-            self._pool.close_all()
-        try:
-            c_to = min(self.limits.connect_timeout_s, conn_rem)
-            conn, reused = self._pool.get_connection(
-                self._host, self._port, c_to, fresh=fresh or not is_pooling_enabled
-            )
-        except (ConnectionError, socket.gaierror, TimeoutError) as exc:
-            raise PreSendTransientError("upstream connect failed") from exc
-        try:
-            if on_pooling is not None:
-                on_pooling(is_pooling_enabled)
-            if on_reuse is not None:
-                on_reuse(reused)
-            if conn.sock is not None:
-                if on_socket is not None:
-                    on_socket(conn.sock)
-                t_to = self.limits.total_timeout_s
-                rem = t_to if deadline is None else deadline - time.monotonic()
-                if rem <= 0:
-                    conn.close()
-                    raise TimeoutError("upstream total deadline exceeded")
-                conn.sock.settimeout(min(self.limits.read_timeout_s, rem))
-            forwarded = {
-                k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP
-            }
-            upstream_token = self._upstream_key or self._read_key_ref()
-            auth_keys = ("authorization", "x-api-key")
-            if upstream_token:
-                forwarded = {
-                    k: v for k, v in forwarded.items() if k.lower() not in auth_keys
-                }
-                forwarded["Authorization"] = f"Bearer {upstream_token}"
-            else:
-                client_toks: list[str] = []
-                for k, v in headers.items():
-                    if k.lower() == "authorization" and v.strip():
-                        parts = v.strip().split(None, 1)
-                        if len(parts) == 2 and parts[0].lower() == "bearer":
-                            if parts[1].strip():
-                                client_toks.append(parts[1].strip())
-                        elif len(parts) == 1:
-                            client_toks.append(parts[0])
-                    elif k.lower() == "x-api-key" and v.strip():
-                        client_toks.append(v.strip())
-                cb = getattr(self, "_is_hub_key", None) or getattr(
-                    self.host, "is_hub_key", None
-                )
-                if client_toks and callable(cb) and any(cb(t) for t in client_toks):
-                    forwarded = {
-                        k: v for k, v in forwarded.items() if k.lower() not in auth_keys
-                    }
-            upstream_headers = self._upstream_headers()
-            if upstream_headers:
-                replaced = {name.lower() for name in upstream_headers}
-                forwarded = {
-                    k: v for k, v in forwarded.items() if k.lower() not in replaced
-                }
-                forwarded.update(upstream_headers)
-            forwarded["Host"] = f"{self._host}:{self._port}"
-            forwarded["Content-Length"] = str(len(raw_body))
-            forwarded["Accept-Encoding"] = "identity"
-            forwarded["Connection"] = "keep-alive" if is_pooling_enabled else "close"
-            route, _, query = path.partition("?")
-            suffix = route[len("/v1") :] if route.startswith("/v1/") else route
-            target = self._base_path + suffix + ("?" + query if query else "")
-            try:
-                conn.request("POST", target, body=raw_body, headers=forwarded)
-            except http.client.CannotSendRequest:
-                conn.close()
-                if not reused or fresh:
-                    raise
-                return self._open(
-                    path,
-                    raw_body,
-                    headers,
-                    deadline=deadline,
-                    on_socket=on_socket,
-                    presend_deadline=presend_deadline,
-                    on_reuse=on_reuse,
-                    on_pooling=on_pooling,
-                    fresh=True,
-                )
-        except BaseException:
-            conn.close()
-            raise
-        return conn
+    def _open(self, path: str, raw_body: bytes, headers: Mapping[str, str],
+              **kwargs: Unpack[OpenRequestOptions]) -> http.client.HTTPConnection:
+        return open_request(self, path, raw_body, headers, **kwargs)
 
     def _fail(
         self, sink: ResponseSink, status: int, error_type: str, message: str
