@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable, Mapping
+from functools import partial
 from typing import Final
 
 from core.log_redaction import redact_log_text
@@ -164,7 +165,10 @@ def summarize_capacity_text(text: object, redact: Callable[[str], str], env: Map
 
 
 def capacity_error_body(detail: object = "", env: Mapping[str, str] | None = None) -> dict[str, object]:
-    """Тело ошибки: HTTP 503, `type` — код причины; `env` задаёт пределы сводки (дефолт — окружение процесса)."""
-    summary = summarize_capacity_text(detail, redact_log_text, env)
+    """Тело ошибки: HTTP 503, `type` — код причины.
+
+    `env` задаёт пределы сводки и словарь безопасных токенов редактора (дефолт — окружение процесса).
+    """
+    summary = summarize_capacity_text(detail, partial(redact_log_text, env=env), env)
     message = "upstream model has no capacity available"
     return {"message": f"{message}: {summary}" if summary else message, "type": CAPACITY_REASON, "code": CAPACITY_HTTP_STATUS}

@@ -865,3 +865,86 @@ def test_quoted_value_after_prefix_is_linear_on_hostile_input() -> None:
     out = mask_credential_context('api_key="' * 20000 + "x")
     assert time.monotonic() - started < 0.5
     assert "api_key" not in out.replace("***", "")
+
+
+# ---- Cycle 6 RW-001: закрывающая кавычка объемлющей строки не открывает второй секрет --------------------
+
+_SECOND_SECRET = "hunter2"
+
+
+def _escaped_log_line(level: int) -> str:
+    """JSON-лог reproducer'а F-005: каждая внутренняя кавычка экранирована серией из `level` слэшей."""
+    quote = "\\" * level + '"'
+    return '{"log": "hdr=' + quote + "Bearer " + quote + " password=" + quote + _SECOND_SECRET + quote + '"}'
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        _escaped_log_line(1),
+        'msg="api_key=" password="hunter2"',
+        'url="https://host?token=" api_key="hunter2"',
+        "msg='api_key=' password='hunter2'",
+    ],
+)
+def test_closing_enclosing_quote_does_not_reopen_next_secret(line: str) -> None:
+    from core.log_redaction import redact_log_text
+
+    for out in (mask_credential_context(line), redact_log_text(line)):
+        assert _SECOND_SECRET not in out, out
+        assert out.count('"') % 2 == 0 and out.count("'") % 2 == 0, out
+        assert out.count("{") == out.count("}"), out
+        assert "***" in out, out
+
+
+def test_empty_quoted_value_in_json_log_masks_only_the_next_value() -> None:
+    assert mask_credential_context(_escaped_log_line(1)) == '{"log": "hdr=\\"Bearer \\" ***"}'
+
+
+@pytest.mark.parametrize("level", range(1, 17))
+def test_json_log_second_secret_is_masked_at_any_escape_level(level: int) -> None:
+    out = mask_credential_context(_escaped_log_line(level))
+    assert _SECOND_SECRET not in out, out
+    assert "***" in out, out
+
+
+def test_trailing_backslash_before_json_close_keeps_object_frame() -> None:
+    # F-001: закрывающая кавычка внешней строки и `}` остаются снаружи маски
+    out = mask_credential_context(r'{"msg": "api_key=\\"}')
+    assert out == '{"msg": "***"}', out
+    assert json.loads(out) == {"msg": "***"}
+
+
+def test_unclosed_quoted_value_is_masked_up_to_enclosing_string_end() -> None:
+    from core.log_redaction import redact_log_text
+
+    assert _SECOND_SECRET not in redact_log_text('{"detail": "password=\\" hunter2')
+    assert json.loads(mask_credential_context('{"detail": "password=\\" hunter2","next": "ok"}')) == {
+        "detail": "***",
+        "next": "ok",
+    }
+    # пустой обрывок на конце строки и закрытие внешней строки маски не запускают
+    assert mask_credential_context('api_key="') == 'api_key="'
+    empty_inner = json.dumps({"detail": 'env "api_key=" invalid'})
+    assert mask_credential_context(empty_inner) == empty_inner
+
+
+@pytest.mark.parametrize("head", ['{"x": "', "", '{"x": "api_key=\\"'])
+def test_unclosed_quote_masking_is_linear_on_hostile_input(head: str) -> None:
+    import time
+
+    def timed(times: int) -> float:
+        started = time.monotonic()
+        out = mask_credential_context(head + 'password="' * times)
+        assert "***" in out, out[:80]
+        return time.monotonic() - started
+
+    small, large = timed(10000), timed(40000)
+    assert large < 1.0
+    # четырёхкратный вход: линейный разбор даёт ~4x, квадратичный — ~16x
+    assert large < max(small, 0.002) * 8
+
+
+def test_unclosed_quote_masks_the_whole_tail() -> None:
+    out = mask_credential_context('api_key="' + "hunter2 " * 20000)
+    assert "hunter2" not in out and out == "***", out[:80]

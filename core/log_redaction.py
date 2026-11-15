@@ -2,13 +2,15 @@
 
 Маска длинных токенов с точным исключением известных кодов + маска по контексту
 (`Bearer …`, `api_key=…`, `sk-…`). Расширение словаря — env `BRIDGE_LOG_SAFE_TOKENS`.
+Объемлющая строка и уровень её экранирования слэшами отслеживаются монотонно: закрывающая
+кавычка не открывает значение следующего ключа, а незакрытое значение маскируется до её закрытия.
 """
 
 from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Final
 
 SAFE_TOKENS_ENV: Final[str] = "BRIDGE_LOG_SAFE_TOKENS"
@@ -77,10 +79,13 @@ _PREFIXED_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
-def safe_log_tokens(extra: Iterable[str] = ()) -> frozenset[str]:
-    """Коды причин + `BRIDGE_LOG_SAFE_TOKENS` + `extra`."""
+def safe_log_tokens(
+    extra: Iterable[str] = (), *, env: Mapping[str, str] | None = None
+) -> frozenset[str]:
+    """Коды причин + `BRIDGE_LOG_SAFE_TOKENS` + `extra`; `env` — источник настройки (дефолт — окружение процесса)."""
+    source = os.environ if env is None else env
     configured = frozenset(
-        i.strip() for i in os.environ.get(SAFE_TOKENS_ENV, "").split(",")
+        i.strip() for i in source.get(SAFE_TOKENS_ENV, "").split(",")
     ) - {""}
     return SYSTEM_REASON_CODES | configured | frozenset(extra)
 
@@ -195,16 +200,156 @@ def _scan_quoted_value(text: str, pos: int, failed_until: _FailedUntil) -> int |
     return _scan_escaped_dq(text, pos, failed_until)
 
 
+# Стек открытых объемлющих строк: (кавычка, уровень экранирования серией `\`).
+_QuoteFrame = tuple[str, int]
+
+
+def _quote_run(text: str, pos: int) -> tuple[int, str]:
+    """Конец серии `\\` от `pos` и символ сразу за ней (кавычка или пустая строка)."""
+    end = _skip(_BACKSLASHES_RE, text, pos)
+    return end, text[end : end + 1]
+
+
+def _closing_run(stack: list[_QuoteFrame], quote: str, slashes: int) -> int | None:
+    """Длина закрывающей серии слэшей, если кавычка закрывает верхнюю объемлющую строку, иначе None.
+
+    Кавычка уровня `L` закрывается серией из `L` слэшей, когда длина серии кратна `2L+2`
+    (буквальная кавычка внутри — остаток `2L+1`, буквальный слэш — остаток `2L+2`).
+    """
+    if not stack:
+        return None
+    top_quote, level = stack[-1]
+    if quote != top_quote or slashes % (2 * level + 2) != level:
+        return None
+    return level
+
+
+def _closing_quote(
+    text: str, pos: int, stack: list[_QuoteFrame]
+) -> tuple[int, int] | None:
+    """Кавычка в `pos` закрывает объемлющую строку: (конец серии слэшей, длина закрывающей серии)."""
+    slashes_end, quote = _quote_run(text, pos)
+    level = _closing_run(stack, quote, slashes_end - pos)
+    return None if level is None else (slashes_end, level)
+
+
+def _apply_double_quote(stack: list[_QuoteFrame], slashes: int) -> None:
+    """`"` с серией `slashes`: закрывает объемлющую строку, открывает вложенную либо остаётся содержимым."""
+    while stack and stack[-1][0] == '"':
+        level = stack[-1][1]
+        if slashes % (2 * level + 2) == level:
+            stack.pop()
+            return
+        if slashes > level:
+            break
+        # Серия мельче уровня кадра закрыть его не может: кадр остался от несбалансированной кавычки.
+        stack.pop()
+    if not stack:
+        # Вне строки известны два уровня лога: обычная кавычка и однократно экранированная (`\"`).
+        if slashes <= 1:
+            stack.append(('"', slashes))
+    elif slashes <= _MAX_ESCAPE_LEVEL:
+        stack.append(('"', slashes))
+
+
+def _apply_single_quote(stack: list[_QuoteFrame], prev: str) -> None:
+    """`'` закрывает открытую одиночную строку; вне слова открывает новую (апострофы `don't` — не кавычки)."""
+    if stack and stack[-1] == ("'", 0):
+        stack.pop()
+    elif not stack and not (prev.isalnum() or prev == "_"):
+        stack.append(("'", 0))
+
+
+def _track_quotes(text: str, start: int, end: int, stack: list[_QuoteFrame]) -> None:
+    """Монотонно (каждый символ читается один раз) отследить открытые объемлющие строки в `text[start:end]`."""
+    i = start
+    while i < end:
+        char = text[i]
+        if char == "\\":
+            j = i
+            while j < end and text[j] == "\\":
+                j += 1
+            if j >= end:
+                i = j
+            elif text[j] == '"':
+                _apply_double_quote(stack, j - i)
+                i = j + 1
+            elif text[j] == "'":
+                # Экранированный апостроф (`\'`) — содержимое строки, а не её граница.
+                if (j - i) % 2 == 0:
+                    _apply_single_quote(stack, text[j - 1 : j])
+                i = j + 1
+            else:
+                i = j
+            continue
+        if char == '"':
+            _apply_double_quote(stack, 0)
+        elif char == "'":
+            _apply_single_quote(stack, text[i - 1 : i])
+        i += 1
+
+
+def _open_quote_end(text: str, pos: int) -> int:
+    """Позиция сразу после открывающей кавычки значения в `pos`; 0 — открывающей кавычки нет."""
+    if text[pos : pos + 1] in ('"', "'"):
+        return pos + 1
+    slashes_end, quote = _quote_run(text, pos)
+    if quote == '"' and 1 <= slashes_end - pos <= _MAX_ESCAPE_LEVEL:
+        return slashes_end + 1
+    return 0
+
+
+def _enclosing_close(text: str, start: int, frame: _QuoteFrame | None) -> int:
+    """Граница консервативной маски незакрытого значения: объемлющая кавычка (не включая) либо конец текста."""
+    if frame is None:
+        return len(text)
+    quote, level = frame
+    stop = _QUOTED_STOP_RE[quote]
+    i = start
+    while (match := stop.search(text, i)) is not None:
+        j = match.start()
+        if text[j] != "\\":
+            if text[j] == quote:
+                return j
+            i = j + 1
+            continue
+        end = _skip(_BACKSLASHES_RE, text, j)
+        if text[end : end + 1] != quote:
+            i = end
+            continue
+        if (end - j) % (2 * level + 2) == level:
+            return end - level
+        i = end + 1
+    return len(text)
+
+
 def _scan_credential_value(
-    text: str, pos: int, is_scheme: bool, failed_until: _FailedUntil
+    text: str,
+    pos: int,
+    is_scheme: bool,
+    failed_until: _FailedUntil,
+    stack: list[_QuoteFrame],
 ) -> int:
     """Конец значения секрета, начинающегося в `pos`; `pos` — значения нет. Каждый символ читается O(1) раз.
 
     `failed_until` запоминает, до какой позиции разбор данного типа кавычек уже провалился: следующая
     кавычка того же типа внутри этой зоны не перечитывается, поэтому суммарно разбор линеен по входу.
+    Закрывающая кавычка значения может быть отсечена окном или потоком — тогда значение маскируется
+    консервативно до конца объемлющей строки: обрывок секрета не должен попасть в сводку.
     """
+    slashes_end, quote = _quote_run(text, pos)
+    slashes = slashes_end - pos
+    if quote == '"' and 1 < slashes <= _MAX_ESCAPE_LEVEL and not stack:
+        # Вне объемлющей строки серия из двух и более `\` не даёт достоверной пары кавычек: парная кавычка
+        # нашлась бы у следующего ключа (`password=\"..."` в логе уровня 2), поэтому маскируется весь остаток.
+        return len(text)
     end = _scan_quoted_value(text, pos, failed_until)
-    return end if end is not None else _scan_unquoted(text, pos, is_scheme)
+    if end is not None:
+        return end
+    open_quote_end = _open_quote_end(text, pos)
+    if 0 < open_quote_end < len(text):
+        return _enclosing_close(text, open_quote_end, stack[-1] if stack else None)
+    return _scan_unquoted(text, pos, is_scheme)
 
 
 def _opens_enclosing_string(m: re.Match[str]) -> bool:
@@ -217,6 +362,9 @@ def mask_credential_context(text: str) -> str:
     """Маска секретов по контексту (`Bearer x`, `api_key=x`, `sk-…`) любой длины; разбор линейный."""
     parts: list[str] = []
     cursor = 0
+    # Позиция, до которой стек объемлющих кавычек уже просмотрен: каждый символ входа читается один раз.
+    scanned = 0
+    stack: list[_QuoteFrame] = []
     failed_until: _FailedUntil = {}
     # Поиск идёт от `cursor`, как у `re.sub`: значение уже разобрано, и префиксы внутри него не ищутся.
     while (m := _CREDENTIAL_PREFIX_RE.search(text, cursor)) is not None:
@@ -225,13 +373,27 @@ def mask_credential_context(text: str) -> str:
         # а не имя ключа. Каждый шаг цепочки сдвигает позицию вперёд, поэтому разбор остаётся линейным.
         pos, value_is_scheme = m.end(), is_scheme
         while (nxt := _CREDENTIAL_PREFIX_RE.match(text, pos)) is not None:
+            _track_quotes(text, scanned, pos, stack)
+            scanned = pos
+            # Закрывающая кавычка объемлющей строки не открывает значение следующего звена цепочки.
+            if _closing_quote(text, pos, stack) is not None:
+                break
             # Префикс целиком внутри парных кавычек (`"password=a b"`) — часть значения: его не вскрываем.
             quoted_end = _scan_quoted_value(text, pos, failed_until)
             if quoted_end is not None and nxt.end() < quoted_end:
                 break
             pos, value_is_scheme = nxt.end(), nxt.group("scheme") is not None
+        _track_quotes(text, scanned, pos, stack)
+        scanned = pos
+        closing = _closing_quote(text, pos, stack)
+        if closing is None:
+            end = _scan_credential_value(
+                text, pos, value_is_scheme, failed_until, stack
+            )
+        else:
+            # Кавычка закрывает объемлющую строку: значением остаются только лишние слэши перед ней.
+            end = closing[0] - closing[1]
         # Цепочка без значения маскируется целиком: повторный разбор с каждого её звена был бы O(n^2).
-        end = max(_scan_credential_value(text, pos, value_is_scheme, failed_until), pos)
         if end <= m.end():
             parts.append(text[cursor : m.end()])
             cursor = m.end()
@@ -247,8 +409,11 @@ def mask_credential_context(text: str) -> str:
 
 
 def redact_log_text(
-    text: str, *, extra_safe_tokens: Iterable[str] | None = None
+    text: str,
+    *,
+    extra_safe_tokens: Iterable[str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> str:
     """Единый конвейер редактирования логов: секреты по контексту, затем длинные токены (кроме кодов причин)."""
-    safe = safe_log_tokens(extra_safe_tokens or ())
+    safe = safe_log_tokens(extra_safe_tokens or (), env=env)
     return mask_long_tokens(mask_credential_context(text), safe_tokens=safe)

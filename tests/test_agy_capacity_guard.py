@@ -233,3 +233,53 @@ def test_cut_is_linear_on_long_inputs() -> None:
     for text in ("\t" * 200000 + "x" * 200000, '{"a":"' * 60000, "k=" * 200000):
         summarize_capacity_text(text, lambda s: s, {})
     assert time.monotonic() - started < 1.0
+
+
+# ---- Cycle 6 RW-002/F-006: секрет с отсечённой закрывающей кавычкой не попадает в тело 503 ------------------
+
+_CAPACITY_PREFIX = "upstream model has no capacity available: "
+
+
+@pytest.mark.parametrize(
+    ("head", "secret"),
+    [
+        ('Error: password=" hunter2 ', "hunter2"),
+        ('Error: password="correct horse battery staple ', "horse battery staple"),
+        ('{"log": "Error: password=\\" hunter2 ', "hunter2"),
+    ],
+)
+def test_summary_masks_secret_whose_closing_quote_is_cut(head: str, secret: str) -> None:
+    from core.agy_capacity_guard import summarize_capacity_text, summary_max_chars
+
+    for repeats in (1100, 9000):  # срез окна маскирования 4096 и потолок сырого входа 32768
+        detail = head + "pad " * repeats + '"'
+        message = str(capacity_error_body(detail)["message"])
+        assert secret not in message, (len(detail), message)
+        assert message.startswith(_CAPACITY_PREFIX), message
+        summary = message.removeprefix(_CAPACITY_PREFIX)
+        assert len(summary) <= summary_max_chars(), summary
+        assert "pad pad" not in summary, summary
+        assert secret not in summarize_capacity_text(detail, _default_redact, {})
+
+
+def test_full_detail_redaction_still_masks_closed_quoted_value() -> None:
+    from core.log_redaction import redact_log_text
+
+    detail = 'Error: password=" hunter2 ' + "pad " * 1100 + '"'
+    assert "hunter2" not in redact_log_text(detail)
+
+
+def test_unclosed_inner_quote_does_not_swallow_neighbour_field() -> None:
+    import json
+
+    detail = '{"detail": "password=\\" hunter2","next": "ok"}'
+    message = str(capacity_error_body(detail)["message"])
+    assert "hunter2" not in message
+    assert json.loads(message.removeprefix(_CAPACITY_PREFIX)) == {"detail": "***", "next": "ok"}
+
+
+def test_capacity_error_body_passes_env_to_safe_tokens() -> None:
+    code = "custom_capacity_reason_code_xx"
+    line = f"503 UNAVAILABLE No capacity available {code}"
+    assert code in str(capacity_error_body(line, env={"BRIDGE_LOG_SAFE_TOKENS": code})["message"])
+    assert code not in str(capacity_error_body(line, env={})["message"])
